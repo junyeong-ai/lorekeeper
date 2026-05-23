@@ -79,35 +79,45 @@ Each line in a queue file is one task:
         `wiki/concepts/{slug}.md` entry (create if missing, merge if
         exists — increment mention_count, append source ref).
 
-   c. **Edit the target page** via Obsidian MCP:
+   c. **Edit the target page** via Obsidian MCP. All daily and synthesis
+      templates emit stable section anchors, so the section is always
+      present (with an empty body when queued by `wi ingest`):
 
-      - **`daily-summary`** target: open the page, find `## 핵심 요약`
-        / `## 요약` section (or insert near top after frontmatter).
-        Replace its body with the synthesized summary.
+      - **`daily-summary`** target: locate `## 요약` and replace its
+        body (everything between this heading and the next `## ` heading)
+        with the synthesized summary.
 
-      - **`daily-concepts`** target: locate `## 관련 개념` section.
-        Replace its body with `- [[Concept Name 1]]\n- [[Concept Name 2]]\n...`.
-        Create each concept page in `wiki/concepts/` if it doesn't exist
-        (use frontmatter id, name, first_seen, last_seen, mention_count,
-        sources fields — match the format from existing concept pages if
-        any).
+      - **`daily-concepts`** target: locate `## 관련 개념` and replace
+        its body with `- [[Concept Name 1]]\n- [[Concept Name 2]]\n...`.
+        Create each concept page in `wiki/concepts/` if it doesn't
+        exist (use frontmatter id, name, first_seen, last_seen,
+        mention_count, sources fields — match the format from existing
+        concept pages).
 
-      - **Synthesis narratives** (`weekly-*`, `monthly-*`, `quarterly-*`,
-        `annual-*`) target: replace the `{{ narrative }}` body of the
-        page. Preserve all frontmatter and section headings.
+      - **Synthesis narratives** (`weekly-synthesis`,
+        `weekly-personal`, `monthly`, `quarterly`, `annual`) target:
+        the narrative section heading is the first or only `## ` heading
+        after the `# ` title (e.g. `## 이번 주 핵심 주제`,
+        `## 요약`, `## 기간`). Replace its body with the generated
+        narrative. Preserve all frontmatter and other section headings.
 
-   d. **On success**, continue. **On failure** (page not found, MCP
-      error), log a warning but keep going — don't abort the run.
+   d. **On task failure** (page not found, MCP error, malformed task):
+      record the failed `task_id` and the reason. **Abort processing
+      of this queue file** — do not attempt the remaining tasks. The
+      queue file stays on disk so the next `/wi-process` run replays
+      every task from the top (all target edits are idempotent).
 
-4. **After all tasks in a file are processed**, move the file to the
-   archive:
+4. **Only when every task in the file succeeded**, move the file to the
+   archive. If any task failed, leave the file in place:
    ```bash
    mkdir -p "$VAULT/.wiki-ingest/queue/processed"
    mv "$file" "$VAULT/.wiki-ingest/queue/processed/"
    ```
 
-5. **Report** to the user: number of files processed, tasks completed,
-   tasks skipped (with reasons).
+5. **Report** to the user:
+   - On full success: number of files processed and tasks completed.
+   - On any failure: which file was left in place and the failed
+     `task_id`s with their error messages. Exit non-zero.
 
 ## Idempotency contract
 
