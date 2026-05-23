@@ -179,15 +179,18 @@ synthesis:
 
 # ─── LLM ──────────────────────────────────────────────────
 # provider:
-#   anthropic — direct Anthropic Messages API call (requires ANTHROPIC_API_KEY).
-#               Unattended-friendly; cron runs end-to-end without human/UI.
-#   queue     — emit JSONL tasks under <vault>/.wiki-ingest/queue/. A Claude Code
-#               skill (/wi-process) drains the queue using Claude Code's native
-#               LLM session (no API key, no separate billing). Best for daily
-#               Claude Code users.
+#   queue     — (default) emit JSONL tasks under <vault>/.wiki-ingest/queue/.
+#               A Claude Code skill (/wi-process) drains the queue using Claude
+#               Code's native LLM session — no API key, no separate billing.
+#               Workflow: `wi ingest` writes structural pages + queue; then run
+#               `/wi-process` in Claude Code to fill summaries and concepts.
 #   noop      — no LLM work; daily pages render without summary/concept content.
 #               Useful for development, CI, or vault-only sources.
+#   anthropic — direct Anthropic Messages API (requires ANTHROPIC_API_KEY).
+#               Unattended-friendly: cron runs end-to-end without human/UI.
+#               Choose this for headless servers or fully-autonomous overnight
+#               pipelines where opening Claude Code is not an option.
 llm:
-  provider: anthropic
+  provider: queue
   model: claude-sonnet-4-6
   max_tokens: 4096

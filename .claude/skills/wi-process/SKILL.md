@@ -109,15 +109,24 @@ Each line in a queue file is one task:
 5. **Report** to the user: number of files processed, tasks completed,
    tasks skipped (with reasons).
 
-## Idempotency
+## Idempotency contract
 
-- The queue file is only moved to `processed/` after every task in it has
-  been attempted. If a task fails, the queue file stays — re-running
-  reprocesses the whole file. Since edits are content-replacements
-  (idempotent), this is safe.
-- Concept page merging: when re-creating an existing concept page,
-  preserve the original `first_seen` and append-but-dedupe `sources`,
-  bump `mention_count` only if a genuinely new source reference is added.
+The queue file is moved to `processed/` ONLY when every task in it has
+succeeded. Failure rules:
+
+- **Any task fails** → leave the queue file in place, report the failed
+  `task_id` list to the user, exit non-zero. The next `/wi-process` run
+  reattempts the whole file from the start.
+- **Re-running on a partially-processed file is safe** because:
+  - Daily summary/concept edits replace the section body — repeating the
+    edit produces identical content. No drift.
+  - Concept page merging preserves original `first_seen` and dedupes the
+    `sources` array — re-adding the same source ref is a no-op.
+  - `mention_count` is only incremented when a genuinely new source ref
+    is appended.
+- **Never partially-commit progress** to the queue file itself
+  (no `processed.jsonl` sidecar): the source-of-truth is the vault edits,
+  which are themselves idempotent.
 
 ## When NOT to invoke
 

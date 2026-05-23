@@ -105,13 +105,17 @@ Calendar ──────┘          ├─ Concepts (LLM)          wiki/conc
 
 `llm.provider` in `config.yaml` selects how semantic work (summarize, concept extraction) is performed:
 
-| Mode | Behavior | Best for |
-|------|---------|---------|
-| `anthropic` | Direct Anthropic Messages API. Requires `ANTHROPIC_API_KEY`. Pipeline does end-to-end work in one process. | Unattended cron, headless servers, non–Claude Code users |
-| `queue` | Pipeline emits JSONL tasks to `<vault>/.wiki-ingest/queue/`. The `/wi-process` Claude Code skill drains them using its native LLM session — no separate API key or billing. | Daily Claude Code users who want the LLM cost included in their subscription |
-| `noop` | No LLM work. Daily pages render structure only (no summary/concepts). | Development, CI, vault-only sources where templates suffice |
+| Mode | Default | Best for |
+|------|:-------:|---------|
+| `queue` | ✓ | Daily Claude Code users. Pipeline emits JSONL tasks to `<vault>/.wiki-ingest/queue/`; the `/wi-process` skill drains them using Claude Code's native LLM session — no API key, no separate billing. |
+| `noop` |  | Development, CI, or vault-only sources where you only need Rust templating without semantic enrichment. |
+| `anthropic` |  | Unattended cron on headless servers (no Claude Code session available). Requires `ANTHROPIC_API_KEY`; pipeline does end-to-end work in one process. |
 
-In `queue` mode, run `wi ingest` (typically via cron) to fetch + dedup + write structural pages and queue entries; then run `/wi-process` in Claude Code to fill in summaries and concept pages. The skill processes oldest-first and is fully resumable.
+Workflow in `queue` mode:
+1. `wi ingest` (cron-scheduled) — fetches sources, dedups, writes structural pages, queues semantic tasks
+2. `/wi-process` (run in Claude Code) — drains the queue, fills summaries, creates/merges concept pages
+
+The skill is **fully idempotent**: re-running on a partially-processed queue file is safe because vault edits replace section content rather than append, and concept page merging preserves accumulated state.
 
 ## Workspace Structure
 
