@@ -81,7 +81,7 @@ pub fn render_daily_page(
     });
 
     let source_template = format!("{source_id}.md.jinja");
-    let type_template = default_template(source_type);
+    let type_template = source_type.default_template_name();
 
     let content = if engine.available(&source_template) {
         engine
@@ -96,17 +96,6 @@ pub fn render_daily_page(
     };
 
     Ok(RenderOutput { path, content })
-}
-
-fn default_template(source_type: SourceType) -> &'static str {
-    match source_type {
-        SourceType::Gmail => "gmail.md.jinja",
-        SourceType::GoogleDrive => "google-drive.md.jinja",
-        SourceType::GoogleCalendar => "google-calendar.md.jinja",
-        SourceType::SlackChannel => "slack-channel.md.jinja",
-        SourceType::SlackSearch => "slack-search.md.jinja",
-        SourceType::Jira => "jira.md.jinja",
-    }
 }
 
 fn filter_by_class(events: &[Event], class: &str) -> Vec<serde_json::Value> {

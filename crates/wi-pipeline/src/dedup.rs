@@ -141,17 +141,22 @@ impl DedupCache {
                         }
                     }
                     DedupStrategy::Title => {
+                        // Titles are keyed `{date}:{title}`; all of one date's titles form a
+                        // contiguous lexicographic run. Seek to the date prefix and stop at
+                        // the first key outside it, so this scans one date's titles rather
+                        // than the entire (up to 90-day) cache.
                         let prefix = format!("{}:", event.date);
-                        let iter = title_table
-                            .iter()
+                        let range = title_table
+                            .range(prefix.as_str()..)
                             .map_err(|e| PipelineError::Dedup(e.to_string()))?;
 
-                        for entry in iter {
+                        for entry in range {
                             let entry = entry.map_err(|e| PipelineError::Dedup(e.to_string()))?;
                             let key = entry.0.value();
-                            if let Some(existing) = key.strip_prefix(&prefix)
-                                && sorensen_dice(&event.title, existing) >= self.title_threshold
-                            {
+                            let Some(existing) = key.strip_prefix(&prefix) else {
+                                break;
+                            };
+                            if sorensen_dice(&event.title, existing) >= self.title_threshold {
                                 dup = true;
                                 break;
                             }
@@ -296,6 +301,33 @@ mod tests {
 
         let novel2 = cache.deduplicate(events, &cascade).unwrap();
         assert_eq!(novel2.len(), 0);
+    }
+
+    #[test]
+    fn title_dedup_matches_within_date_only() {
+        let dir = TempDir::new().unwrap();
+        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85).unwrap();
+
+        // Record a title under 2026-05-23.
+        cache
+            .record(&[ev("a", "Anthropic releases Opus 4.7", None)])
+            .unwrap();
+
+        let cascade = vec![DedupStrategy::Title];
+
+        // A near-identical title on the same date is a duplicate.
+        let same_day = vec![ev("b", "Anthropic releases Opus 4.7!", None)];
+        assert_eq!(cache.deduplicate(same_day, &cascade).unwrap().len(), 0);
+
+        // The same title on a DIFFERENT date is novel (date-partitioned scan).
+        let other_day = Event {
+            date: jiff::civil::date(2026, 6, 1),
+            ..ev("c", "Anthropic releases Opus 4.7", None)
+        };
+        assert_eq!(
+            cache.deduplicate(vec![other_day], &cascade).unwrap().len(),
+            1
+        );
     }
 
     #[test]

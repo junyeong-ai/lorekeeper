@@ -352,6 +352,23 @@ pub enum SourceType {
     GoogleCalendar,
 }
 
+impl SourceType {
+    /// Default Jinja template filename for this source type. User overrides
+    /// (`{source-id}.md.jinja`) take precedence at render time; this is the
+    /// type-level fallback. Co-located with the enum so adding a source type
+    /// is a single-site change the compiler enforces exhaustively.
+    pub fn default_template_name(self) -> &'static str {
+        match self {
+            SourceType::Gmail => "gmail.md.jinja",
+            SourceType::GoogleDrive => "google-drive.md.jinja",
+            SourceType::GoogleCalendar => "google-calendar.md.jinja",
+            SourceType::SlackChannel => "slack-channel.md.jinja",
+            SourceType::SlackSearch => "slack-search.md.jinja",
+            SourceType::Jira => "jira.md.jinja",
+        }
+    }
+}
+
 impl std::fmt::Display for SourceType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = serde_json::to_value(self)
