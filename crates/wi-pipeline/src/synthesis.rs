@@ -34,6 +34,53 @@ impl Synthesizer {
         }
     }
 
+    /// Run a summarize task, propagating only fatal (persistence) errors. A transient
+    /// LLM failure degrades to an empty narrative with a warning, so synthesis still
+    /// produces a page. Centralizes the fatal/non-fatal split every period shares.
+    async fn summarize_or_warn(
+        &self,
+        text: String,
+        max_sentences: usize,
+        vault_path: String,
+        kind: wi_llm::TargetKind,
+        what: &str,
+    ) -> Result<String, PipelineError> {
+        match self
+            .ctx
+            .llm
+            .summarize(wi_llm::SummarizeRequest {
+                text,
+                max_sentences,
+                target: wi_llm::TaskTarget { vault_path, kind },
+            })
+            .await
+        {
+            Ok(s) => Ok(s),
+            Err(e) if e.is_fatal() => Err(PipelineError::Llm(e)),
+            Err(e) => {
+                tracing::warn!(error = %e, what, "synthesis summarize failed");
+                Ok(String::new())
+            }
+        }
+    }
+
+    /// Render `template` if installed, else fall back to the embedded renderer.
+    fn render_or_fallback(
+        &self,
+        template: &str,
+        context: &serde_json::Value,
+        fallback: impl FnOnce() -> String,
+    ) -> Result<String, PipelineError> {
+        if self.ctx.engine.available(template) {
+            self.ctx
+                .engine
+                .render(template, context)
+                .map_err(|e| PipelineError::Render(e.to_string()))
+        } else {
+            Ok(fallback())
+        }
+    }
+
     pub async fn weekly_synthesis(
         &self,
         date: jiff::civil::Date,
@@ -76,33 +123,19 @@ impl Synthesizer {
             return Ok(None);
         }
 
-        let weekly_path = VaultPath::weekly_synthesis(&self.ctx.dirs, year, week);
-        let themes_text = match self
-            .ctx
-            .llm
-            .summarize(wi_llm::SummarizeRequest {
-                text: format!(
-                    "Identify the top 3-5 themes across all sources this week:\n\n{combined}"
-                ),
-                max_sentences: 8,
-                target: wi_llm::TaskTarget {
-                    vault_path: weekly_path.to_string(),
-                    kind: wi_llm::TargetKind::WeeklySynthesisNarrative,
-                },
-            })
-            .await
-        {
-            Ok(s) => s,
-            Err(e) if e.is_fatal() => return Err(PipelineError::Llm(e)),
-            Err(e) => {
-                tracing::warn!(error = %e, "weekly theme synthesis failed");
-                String::new()
-            }
-        };
+        let path = VaultPath::weekly_synthesis(&self.ctx.dirs, year, week);
+        let themes_text = self
+            .summarize_or_warn(
+                format!("Identify the top 3-5 themes across all sources this week:\n\n{combined}"),
+                8,
+                path.to_string(),
+                wi_llm::TargetKind::WeeklySynthesisNarrative,
+                "weekly synthesis",
+            )
+            .await?;
 
         // Weekly synthesis observes concepts already materialized during daily ingest;
         // it does not extract new ones here (which would not be persisted to wiki/concepts).
-        let path = VaultPath::weekly_synthesis(&self.ctx.dirs, year, week);
         let context = serde_json::json!({
             "year": year,
             "week": week,
@@ -115,14 +148,9 @@ impl Synthesizer {
             "narrative": themes_text,
         });
 
-        let content = if self.ctx.engine.available("weekly-synthesis.md.jinja") {
-            self.ctx
-                .engine
-                .render("weekly-synthesis.md.jinja", &context)
-                .map_err(|e| PipelineError::Render(e.to_string()))?
-        } else {
+        let content = self.render_or_fallback("weekly-synthesis.md.jinja", &context, || {
             fallback_weekly_synthesis(year, week, &context)
-        };
+        })?;
 
         Ok(Some(RenderOutput { path, content }))
     }
@@ -148,28 +176,17 @@ impl Synthesizer {
             .join("\n\n---\n\n");
 
         let path = VaultPath::weekly_personal(&self.ctx.dirs, year, week);
-        let narrative = match self
-            .ctx
-            .llm
-            .summarize(wi_llm::SummarizeRequest {
-                text: format!(
+        let narrative = self
+            .summarize_or_warn(
+                format!(
                     "Summarize this week's personal work into key accomplishments by category:\n\n{combined}"
                 ),
-                max_sentences: 10,
-                target: wi_llm::TaskTarget {
-                    vault_path: path.to_string(),
-                    kind: wi_llm::TargetKind::WeeklyPersonalNarrative,
-                },
-            })
-            .await
-        {
-            Ok(s) => s,
-            Err(e) if e.is_fatal() => return Err(PipelineError::Llm(e)),
-            Err(e) => {
-                tracing::warn!(error = %e, "weekly personal narrative failed");
-                String::new()
-            }
-        };
+                10,
+                path.to_string(),
+                wi_llm::TargetKind::WeeklyPersonalNarrative,
+                "weekly personal",
+            )
+            .await?;
         let context = serde_json::json!({
             "year": year,
             "week": week,
@@ -180,14 +197,9 @@ impl Synthesizer {
             "categories": self.ctx.perf.work_categories,
         });
 
-        let content = if self.ctx.engine.available("weekly-personal.md.jinja") {
-            self.ctx
-                .engine
-                .render("weekly-personal.md.jinja", &context)
-                .map_err(|e| PipelineError::Render(e.to_string()))?
-        } else {
+        let content = self.render_or_fallback("weekly-personal.md.jinja", &context, || {
             fallback_personal(year, week, &context)
-        };
+        })?;
 
         Ok(Some(RenderOutput { path, content }))
     }
@@ -212,28 +224,17 @@ impl Synthesizer {
             .join("\n\n---\n\n");
 
         let path = VaultPath::monthly_personal(&self.ctx.dirs, year, month);
-        let narrative = match self
-            .ctx
-            .llm
-            .summarize(wi_llm::SummarizeRequest {
-                text: format!(
+        let narrative = self
+            .summarize_or_warn(
+                format!(
                     "Generate a monthly work summary with key achievements and category distribution:\n\n{combined}"
                 ),
-                max_sentences: 15,
-                target: wi_llm::TaskTarget {
-                    vault_path: path.to_string(),
-                    kind: wi_llm::TargetKind::MonthlyNarrative,
-                },
-            })
-            .await
-        {
-            Ok(s) => s,
-            Err(e) if e.is_fatal() => return Err(PipelineError::Llm(e)),
-            Err(e) => {
-                tracing::warn!(error = %e, "monthly narrative failed");
-                String::new()
-            }
-        };
+                15,
+                path.to_string(),
+                wi_llm::TargetKind::MonthlyNarrative,
+                "monthly",
+            )
+            .await?;
         let context = serde_json::json!({
             "year": year,
             "month": month,
@@ -244,14 +245,9 @@ impl Synthesizer {
             "categories": self.ctx.perf.work_categories,
         });
 
-        let content = if self.ctx.engine.available("monthly-summary.md.jinja") {
-            self.ctx
-                .engine
-                .render("monthly-summary.md.jinja", &context)
-                .map_err(|e| PipelineError::Render(e.to_string()))?
-        } else {
+        let content = self.render_or_fallback("monthly-summary.md.jinja", &context, || {
             fallback_monthly(year, month, &context)
-        };
+        })?;
 
         Ok(Some(RenderOutput { path, content }))
     }
@@ -294,28 +290,17 @@ impl Synthesizer {
         }
 
         let path = VaultPath::quarterly_personal(&self.ctx.dirs, year, quarter);
-        let narrative = match self
-            .ctx
-            .llm
-            .summarize(wi_llm::SummarizeRequest {
-                text: format!(
+        let narrative = self
+            .summarize_or_warn(
+                format!(
                     "Generate a quarterly performance review: top 5 achievements, category breakdown, growth areas, next direction:\n\n{combined}"
                 ),
-                max_sentences: 20,
-                target: wi_llm::TaskTarget {
-                    vault_path: path.to_string(),
-                    kind: wi_llm::TargetKind::QuarterlyNarrative,
-                },
-            })
-            .await
-        {
-            Ok(s) => s,
-            Err(e) if e.is_fatal() => return Err(PipelineError::Llm(e)),
-            Err(e) => {
-                tracing::warn!(error = %e, "quarterly narrative failed");
-                String::new()
-            }
-        };
+                20,
+                path.to_string(),
+                wi_llm::TargetKind::QuarterlyNarrative,
+                "quarterly",
+            )
+            .await?;
 
         let category_stats = self.aggregate_category_stats(start, end).await?;
 
@@ -337,14 +322,9 @@ impl Synthesizer {
             "next_direction": "",
         });
 
-        let content = if self.ctx.engine.available("quarterly-review.md.jinja") {
-            self.ctx
-                .engine
-                .render("quarterly-review.md.jinja", &context)
-                .map_err(|e| PipelineError::Render(e.to_string()))?
-        } else {
+        let content = self.render_or_fallback("quarterly-review.md.jinja", &context, || {
             fallback_quarterly(year, quarter, &context)
-        };
+        })?;
 
         Ok(Some(RenderOutput { path, content }))
     }
@@ -372,28 +352,17 @@ impl Synthesizer {
         }
 
         let path = VaultPath::annual_personal(&self.ctx.dirs, year);
-        let narrative = match self
-            .ctx
-            .llm
-            .summarize(wi_llm::SummarizeRequest {
-                text: format!(
+        let narrative = self
+            .summarize_or_warn(
+                format!(
                     "Generate a comprehensive annual performance review based on quarterly summaries:\n\n{combined}"
                 ),
-                max_sentences: 25,
-                target: wi_llm::TaskTarget {
-                    vault_path: path.to_string(),
-                    kind: wi_llm::TargetKind::AnnualNarrative,
-                },
-            })
-            .await
-        {
-            Ok(s) => s,
-            Err(e) if e.is_fatal() => return Err(PipelineError::Llm(e)),
-            Err(e) => {
-                tracing::warn!(error = %e, "annual narrative failed");
-                String::new()
-            }
-        };
+                25,
+                path.to_string(),
+                wi_llm::TargetKind::AnnualNarrative,
+                "annual",
+            )
+            .await?;
 
         let context = serde_json::json!({
             "year": year,
@@ -402,14 +371,9 @@ impl Synthesizer {
             "categories": self.ctx.perf.work_categories,
         });
 
-        let content = if self.ctx.engine.available("annual-review.md.jinja") {
-            self.ctx
-                .engine
-                .render("annual-review.md.jinja", &context)
-                .map_err(|e| PipelineError::Render(e.to_string()))?
-        } else {
+        let content = self.render_or_fallback("annual-review.md.jinja", &context, || {
             fallback_annual(year, &context)
-        };
+        })?;
 
         Ok(Some(RenderOutput { path, content }))
     }
