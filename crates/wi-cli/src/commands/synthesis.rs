@@ -70,7 +70,7 @@ pub async fn run(opts: &super::GlobalOpts, period: Period) -> miette::Result<()>
         Period::Monthly { date, previous } => {
             let (year, month) = resolve_monthly_target(date.as_deref(), previous, today)?;
             match synth
-                .monthly(year, month)
+                .monthly_personal(year, month)
                 .await
                 .map_err(|e| miette::miette!("{e}"))?
             {
@@ -84,7 +84,7 @@ pub async fn run(opts: &super::GlobalOpts, period: Period) -> miette::Result<()>
         Period::Quarterly { date, previous } => {
             let (year, quarter) = resolve_quarterly_target(date.as_deref(), previous, today)?;
             match synth
-                .quarterly(year, quarter)
+                .quarterly_personal(year, quarter)
                 .await
                 .map_err(|e| miette::miette!("{e}"))?
             {
@@ -102,7 +102,7 @@ pub async fn run(opts: &super::GlobalOpts, period: Period) -> miette::Result<()>
                 year.map(|y| y as i16).unwrap_or_else(|| today.year())
             };
             match synth
-                .annual(target_year)
+                .annual_personal(target_year)
                 .await
                 .map_err(|e| miette::miette!("{e}"))?
             {

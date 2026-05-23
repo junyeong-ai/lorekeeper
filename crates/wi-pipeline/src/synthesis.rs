@@ -192,7 +192,7 @@ impl Synthesizer {
         Ok(Some(RenderOutput { path, content }))
     }
 
-    pub async fn monthly(
+    pub async fn monthly_personal(
         &self,
         year: i16,
         month: u8,
@@ -256,7 +256,7 @@ impl Synthesizer {
         Ok(Some(RenderOutput { path, content }))
     }
 
-    pub async fn quarterly(
+    pub async fn quarterly_personal(
         &self,
         year: i16,
         quarter: u8,
@@ -349,7 +349,7 @@ impl Synthesizer {
         Ok(Some(RenderOutput { path, content }))
     }
 
-    pub async fn annual(&self, year: i16) -> Result<Option<RenderOutput>, PipelineError> {
+    pub async fn annual_personal(&self, year: i16) -> Result<Option<RenderOutput>, PipelineError> {
         let quarterly_dir = PathBuf::from(&self.ctx.dirs.quarterly).join(&self.ctx.dirs.personal);
         let mut quarter_summaries: Vec<serde_json::Value> = Vec::new();
         let mut combined = String::new();

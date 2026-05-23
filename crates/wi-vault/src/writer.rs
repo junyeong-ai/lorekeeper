@@ -1,9 +1,12 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::io::AsyncWriteExt;
 
 use crate::VaultError;
 use crate::frontmatter::{self, FrontmatterPatch};
+
+static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 pub struct VaultWriter {
     root: PathBuf,
@@ -20,14 +23,28 @@ impl VaultWriter {
 
     pub async fn write_page(&self, rel_path: &Path, content: &str) -> Result<(), VaultError> {
         let full = self.root.join(rel_path);
-        let tmp = full.with_extension("md.tmp");
 
         if let Some(parent) = full.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        tokio::fs::write(&tmp, content).await?;
-        tokio::fs::rename(&tmp, &full).await?;
+        // Unique temp name (pid + process-global sequence) so two writers targeting the
+        // same page never share a temp file or rename each other's partial write. The
+        // rename onto the final path is the atomic publish step.
+        let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp = full.with_extension(format!("md.{}.{seq}.tmp", std::process::id()));
+
+        match tokio::fs::write(&tmp, content).await {
+            Ok(()) => {}
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&tmp).await;
+                return Err(e.into());
+            }
+        }
+        if let Err(e) = tokio::fs::rename(&tmp, &full).await {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(e.into());
+        }
         Ok(())
     }
 
