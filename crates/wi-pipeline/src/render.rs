@@ -148,19 +148,18 @@ fn render_fallback(
         events.len()
     );
 
-    if !summary.is_empty() {
-        out.push_str(&format!("## 요약\n\n{summary}\n\n"));
-    }
+    // Section anchors are always emitted (even with empty bodies) so the queue-mode
+    // consumer `/wi-process` has a stable insertion point regardless of when the LLM
+    // result arrives.
+    out.push_str(&format!("## 요약\n\n{summary}\n\n"));
 
     for event in events {
         out.push_str(&format!("## {}\n\n{}\n\n", event.title, event.body));
     }
 
-    if !concepts.is_empty() {
-        out.push_str("## 관련 개념\n\n");
-        for c in concepts {
-            out.push_str(&format!("- [[{c}]]\n"));
-        }
+    out.push_str("## 관련 개념\n\n");
+    for c in concepts {
+        out.push_str(&format!("- [[{c}]]\n"));
     }
 
     out

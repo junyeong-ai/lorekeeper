@@ -10,6 +10,10 @@ action_required: {{ action_count }}
 
 # 이메일 다이제스트 {{ date }}
 
+## 요약
+
+{{ summary }}
+
 {% if action_required_items %}
 ## ⚡ 조치 필요
 
@@ -55,3 +59,9 @@ action_required: {{ action_count }}
 - 전체 수신: {{ total }}건
 - 의미 있는 메일: {{ filtered }}건 (필터링률: {{ filter_rate }}%)
 - 조치 필요: {{ action_count }}건
+
+## 관련 개념
+
+{% for concept in concepts %}
+- [[{{ concept }}]]
+{% endfor %}

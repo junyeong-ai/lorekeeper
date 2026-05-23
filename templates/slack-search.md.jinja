@@ -25,3 +25,8 @@ clusters_count: {{ clusters | length }}
 {% endfor %}
 
 {% endfor %}
+## 관련 개념
+
+{% for concept in concepts %}
+- [[{{ concept }}]]
+{% endfor %}

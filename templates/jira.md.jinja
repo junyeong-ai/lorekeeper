@@ -9,15 +9,18 @@ events_count: {{ events | length }}
 
 # 내 Jira 업무 {{ date }}
 
-{% if summary %}
 ## 요약
 
 {{ summary }}
 
-{% endif %}
 {% for event in events %}
 ### {{ event.title }}
 
 {{ event.body }}
 
+{% endfor %}
+## 관련 개념
+
+{% for concept in concepts %}
+- [[{{ concept }}]]
 {% endfor %}
