@@ -50,8 +50,12 @@ pub async fn run(
     let extract_target = target_date.unwrap_or(today);
 
     let ctx = Arc::new(
-        wi_pipeline::PipelineContext::new(&resolve_template_dir(opts, &vault_root), llm, &config)
-            .map_err(|e| miette::miette!("{e}"))?,
+        wi_pipeline::PipelineContext::new(
+            &resolve_template_dir(opts, &vault_root),
+            llm.clone(),
+            &config,
+        )
+        .map_err(|e| miette::miette!("{e}"))?,
     );
     let pipeline = Arc::new(
         wi_pipeline::Pipeline::new(&vault_root, ctx, &config)
@@ -252,6 +256,16 @@ pub async fn run(
         })
         .await
         .ok();
+    }
+
+    // Phase 5: Persist queued LLM tasks atomically. Only reached when every page write
+    // succeeded — guarantees the queue file's invariant: every task targets a page that
+    // exists on disk. A flush failure here surfaces to the user but cannot leave a
+    // half-written JSONL (temp + fsync + rename inside the queue client).
+    if !any_write_failed {
+        llm.flush()
+            .await
+            .map_err(|e| miette::miette!("queue flush: {e}"))?;
     }
 
     eprintln!(
