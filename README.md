@@ -4,17 +4,41 @@ Config-driven knowledge ingestion pipeline for Obsidian wikis.
 
 Collects daily data from heterogeneous sources (Gmail, Google Drive, Slack, Jira, Google Calendar), deduplicates, classifies, extracts concepts via LLM, and writes structured markdown pages to an Obsidian vault. Also tracks personal work for performance reviews (weekly / monthly / quarterly / annual).
 
+## Install
+
+**macOS / Linux** (one-liner — downloads prebuilt binary, templates, and Claude Code skill):
+```bash
+curl -fsSL https://raw.githubusercontent.com/junyeong-ai/wiki-ingest/main/scripts/install.sh | bash
+```
+
+**Windows** (PowerShell):
+```powershell
+irm https://raw.githubusercontent.com/junyeong-ai/wiki-ingest/main/scripts/install.ps1 | iex
+```
+
+The installer:
+- Downloads the prebuilt `wi` binary to `~/.local/bin` (configurable)
+- Installs `templates/` to `$XDG_DATA_HOME/wi-ingest/templates/`
+- Installs the Claude Code skill to `~/.claude/skills/wiki-ingest/`
+- Verifies SHA256 checksums
+- Adds quarantine strip + ad-hoc codesign on macOS
+- Checks `PATH` and prints next steps
+
+Install flags: `--version`, `--install-dir`, `--data-dir`, `--skill {user,project,none}`,
+`--from-source`, `--force`, `--yes`, `--dry-run`. Env vars: `WI_INSTALL_*`.
+
+Uninstall: `./scripts/uninstall.sh [--yes] [--keep-data]`.
+
 ## Quick Start
 
 ```bash
-# 1. Build
-cargo build --release
+# 1. Install (see above)
 
 # 2. Create your config
 cp config.example.yaml config.yaml
 $EDITOR config.yaml
 
-# 3. Set credentials (env vars or .wiki-ingest/credentials.json in vault)
+# 3. Set credentials (env vars or <vault>/.wiki-ingest/credentials.json)
 export WI_GOOGLE_CLIENT_ID=...
 export WI_GOOGLE_CLIENT_SECRET=...
 export WI_GOOGLE_REFRESH_TOKEN=...
@@ -25,11 +49,23 @@ export WI_JIRA_TOKEN=...
 export ANTHROPIC_API_KEY=sk-ant-...    # optional
 
 # 4. Verify
-./target/release/wi validate
+wi validate
 
 # 5. Run
-./target/release/wi ingest
+wi ingest
+
+# 6. Register schedule
+wi schedule | crontab -
 ```
+
+## Build from source
+
+```bash
+cargo build --release
+./target/release/wi --help
+```
+
+Or via the installer with `--from-source` (requires Rust toolchain).
 
 ## Architecture
 
