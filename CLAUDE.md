@@ -1,68 +1,86 @@
 # wiki-ingest
 
 Config-driven knowledge ingestion pipeline for Obsidian wikis.
-Collects, deduplicates, clusters, labels, and wiki-fies daily data streams.
-
-## Identity
-
-wiki-ingest is a **knowledge pipeline orchestrator**. It bridges data sources
-(AI newsletters, team digests, Slack trends) and an Obsidian wiki, turning
-raw daily streams into structured, cross-referenced, long-term knowledge.
-
-It is NOT the wiki itself (that's the Obsidian vault + wiki skill),
-NOT the graph analyzer (that's wikigraph), and NOT the governance layer (that's nodex).
+Rust CLI that collects daily data from heterogeneous sources, deduplicates,
+classifies, extracts concepts, and writes structured markdown pages.
 
 ## Architecture
 
 ```
-Data Sources                    wiki-ingest                     Obsidian Vault
-─────────────                   ───────────                     ──────────────
-AI Newsletter ──┐               ┌─ Collect                     daily/ai-briefing/
-Team Digest ────┼── config ───► ├─ Deduplicate (event_id)      daily/team-digest/
-Slack Trends ───┤    .yaml      ├─ Cluster (topic similarity)  daily/slack-trends/
-Manual Add ─────┘               ├─ Label (auto-categorize)     wiki/concepts/
-                                ├─ Classify (personal work)    me/work-log/
-                                └─ Write (Obsidian MCP)        weekly/ quarterly/
+Data Sources              wi (Rust CLI)              Obsidian Vault
+────────────              ────────────               ──────────────
+Google Drive ──┐          ┌─ Extract (per-source)    daily/{source-id}/
+Gmail ─────────┤          ├─ Normalize → Event       me/work-log/
+Slack ─────────┼─ config ─┤  Deduplicate (cascade)   weekly/ monthly/
+Jira ──────────┤  .yaml   ├─ Classify (labels)       quarterly/ annually/
+Calendar ──────┘          ├─ Concepts (LLM)          wiki/concepts/
+                          └─ Render (templates)
 ```
 
-## Core Flow
-
-1. **Collect**: Fetch today's data from configured sources
-2. **Deduplicate**: Same event across sources → merge, not duplicate
-3. **Cluster**: Group related events by topic similarity
-4. **Label**: Auto-categorize (ai-industry, team-ops, personal, strategy)
-5. **Classify**: Flag personal work items for performance tracking
-6. **Compile**: Generate wiki pages (summaries, concepts, cross-refs)
-7. **Write**: Push to Obsidian vault via MCP tools
-
-## Config: config.yaml
-
-Defines sources, wiki mapping, personal settings. Each team member
-maintains their own config.yaml. The skills and templates are shared.
-
-## Scheduled Execution
-
-Runs as Claude Desktop scheduled tasks. Each source has its own schedule
-(daily, twice-daily, weekly). The skill reads config.yaml to determine
-what to collect and where to write.
-
-## Project Structure
+## Workspace
 
 ```
-wiki-ingest/
-├── CLAUDE.md                 # This file
-├── PLAN.md                   # Implementation plan
-├── config.yaml               # Source configuration (user-specific, gitignored)
-├── config.example.yaml       # Template for new users
-├── skills/
-│   └── wiki-ingest/
-│       └── SKILL.md          # The ingest orchestrator skill
-├── templates/                # Wiki page templates
-│   ├── daily-briefing.md
-│   ├── team-digest.md
-│   ├── slack-trends.md
-│   ├── weekly-summary.md
-│   └── quarterly-review.md
-└── scripts/
-    └── block-kit-to-md.sh    # Block Kit JSON → markdown converter
+crates/
+  wi-core/      Domain types, config (incl. timezone, source_category_map), validation
+  wi-vault/     Obsidian vault I/O: read, write (atomic), frontmatter (CRLF-aware), templates, log
+  wi-source/    Source adapters: Gmail, Drive, Slack, Jira, Calendar + Credentials
+  wi-pipeline/  PipelineContext, Pipeline (per-date grouping), Synthesizer, concept pages, worklog
+  wi-llm/       LlmClient trait (Claude + Noop + Mock)
+  wi-cli/       Binary `wi` — commands/ submodules per subcommand
 ```
+
+## Key Design Decisions
+
+- **Source ID = vault directory**: `sources.{id}` config key becomes `daily/{id}/` output path.
+- **Template lookup**: `{source-id}.md.jinja` (user override) → `{source-type}.md.jinja` (default) → embedded fallback.
+- **Date derivation**: `item.timestamp.to_zoned(config.vault.timezone()).date()` — never UTC by accident.
+- **Pipeline shares context**: `Arc<PipelineContext>` between `Pipeline` and `Synthesizer` (engine, llm, dirs, perf, identity, timezone) for DRY.
+- **Concept pages persist**: `wiki/concepts/{slug}.md` is written + merged (mention_count, sources accumulate across runs). Slugs are re-normalized via `slugify()` to prevent path-injection from LLM output.
+- **Multi-date events**: events spanning multiple dates produce one `daily/` page per date (not collapsed into first event's date). LLM summarize+extract runs per date.
+- **LLM graceful degradation**: `ANTHROPIC_API_KEY` missing → `NoopLlmClient`; LLM errors logged via `tracing::warn` and fall back to empty results.
+- **Dedup retention**: `wi maintenance` prunes both ingest log and dedup cache entries older than 90 days. Must not overlap a running `wi ingest`.
+- **Atomic 4-phase ingest** (`wi ingest`): (1) plan all sources, (2) write daily+concept pages, (3) write aggregated work-log, (4) commit dedup. Any failure aborts at the affected phase and dedup is NOT committed, so re-running is idempotent and lossless.
+- **Schedule subcommands honor `--previous`**: `wi synthesis weekly --previous` synthesizes the just-completed period instead of the current one. `wi schedule` emits `--previous` automatically in generated cron lines.
+- **Global CLI flags**: `--config <path>` / `WI_CONFIG` and `--template-dir <path>` / `WI_TEMPLATE_DIR` are global. `wi schedule` injects these into generated cron lines so scheduled tasks don't depend on CWD.
+- **Relative vault.root**: resolved against the config file's parent directory, not the process CWD.
+- **Per-source category mapping**: `performance.source_category_map` (by source ID) → `source_type_category_map` (by source type) → event `classification` → `uncategorized_label`.
+
+## Development
+
+```bash
+cargo check                    # type check
+cargo test                     # run tests
+cargo clippy                   # lint
+cargo run -- validate          # verify config.yaml
+cargo run -- ingest ai-news    # run single source
+cargo run -- status            # show ingest status
+```
+
+## Config
+
+User-specific settings live in `config.yaml` (gitignored).
+Copy `config.example.yaml` to get started.
+
+Key principle: **source ID = vault directory name**.
+The key under `sources:` determines both the adapter configuration
+and the output path (`daily/{source-id}/YYYY-MM-DD.md`).
+
+## Source Types
+
+| Type | Adapter | Use For |
+|------|---------|---------|
+| `google-drive` | Drive API | File-based sources (newsletters) |
+| `gmail` | Gmail API | Email digest |
+| `slack-channel` | Slack API | Channel message reader |
+| `slack-search` | Slack API | Keyword trend search |
+| `jira` | Jira REST API | Issue/ticket tracking |
+| `google-calendar` | Calendar API | Schedule/meeting tracking |
+
+## Output Model
+
+**Primary** (per-source): `daily/{source-id}/YYYY-MM-DD.md`
+**Derived** (cross-source):
+- `me/work-log/` — aggregated from sources with `track_personal: true`
+- `weekly/synthesis/` — cross-source weekly themes
+- `weekly/me/`, `monthly/me/`, `quarterly/me/`, `annually/me/` — performance tracking
+- `wiki/concepts/` — extracted concepts

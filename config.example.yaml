@@ -2,151 +2,183 @@
 # Copy to config.yaml and customize for your environment.
 # config.yaml is gitignored — safe for personal settings.
 
-# ─── Obsidian Vault ────────────────────────────────────────
+# ─── Vault 경로 ───────────────────────────────────────────
 vault:
-  path: ~/Documents/Obsidian Vault
-  wiki_dir: wiki                    # wiki skill's managed directory
-  daily_dir: daily                  # daily ingest output
-  weekly_dir: weekly                # weekly synthesis output
-  personal_dir: me                  # personal work tracking
+  root: ~/Documents/Obsidian Vault
+  timezone: system          # IANA name (e.g., "Asia/Seoul") or "system"
+  dirs:
+    daily: daily
+    weekly: weekly
+    monthly: monthly
+    quarterly: quarterly
+    annually: annually
+    personal: me
+    wiki: wiki
 
-# ─── Your Identity (for personal work classification) ──────
-me:
+# ─── 사용자 식별 ──────────────────────────────────────────
+identity:
   name: "홍길동"
-  slack_user_id: "U0123456789"
   email: "gildong.hong@company.com"
-  jira_username: "gildong.hong"
+  slack_id: "U0123456789"
+  jira_id: "gildong.hong"
 
-# ─── Sources ───────────────────────────────────────────────
+# ─── 소스 정의 ────────────────────────────────────────────
+# 키 = 소스 ID = daily/ 하위 디렉토리명
+# 같은 type으로 여러 소스를 정의할 수 있습니다.
 sources:
 
-  # AI Industry Newsletter (daily-ai-newsletter-briefing skill output)
-  ai-newsletter:
-    enabled: true
+  # ── Intelligence (외부 동향) ──
+  ai-news:
     type: google-drive
-    schedule: "0 7 * * 1-5"         # weekdays 07:00
-    drive_folder: "AI-Briefing/briefings"
-    file_pattern: "briefing-{date}.md"
-    wiki_target: daily/ai-briefing
+    enabled: true
+    schedule: "0 7 * * 1-5"
+    params:
+      folder: "AI-Briefing/briefings"
+      file_pattern: "briefing-{date}.md"
     labels: [ai-industry]
-    concept_extraction: true         # extract concepts to wiki/concepts/
+    extract_concepts: true
+    track_personal: false
 
-  # Team Digest (aix-team-digest-job output from Slack)
-  team-digest:
-    enabled: true
+  # ── Team (팀 관찰) ──
+  team-slack:
     type: slack-channel
-    schedule: "0 9 * * 1-5"         # weekdays 09:00
-    channel: "#aix-team-digest"
-    lookback_hours: 24
-    wiki_target: daily/team-digest
+    enabled: true
+    schedule: "0 9 * * 1-5"
+    params:
+      channel: "#aix-team-digest"
+      lookback_hours: 24
     labels: [team-ops]
-    personal_tracking: true          # flag items matching me.* identifiers
-    concept_extraction: true
+    extract_concepts: true
+    track_personal: false
 
-  # Slack Keyword Trends (specific channels for AI/AX trends)
-  slack-trends:
+  # ── Personal (내 활동 — 직접 수집) ──
+  my-tasks:
+    type: jira
     enabled: true
-    type: slack-search
-    schedule: "0 10 * * 1-5"        # weekdays 10:00
-    queries:
-      - channel: "#ai-general"
-        keywords: [AI, LLM, GenAI, Claude, GPT, Gemini, agent]
-      - channel: "#ax-strategy"
-        keywords: [AX, CX, UX, 자동화, 에이전트]
-      - channel: "#dev-talk"
-        keywords: [MCP, tool-use, RAG, vector, embedding]
-    lookback_hours: 24
-    wiki_target: daily/slack-trends
-    labels: [ai-internal, strategy]
-    concept_extraction: true
+    schedule: "0 9 * * 1-5"
+    params:
+      jql: >
+        assignee = currentUser()
+        AND updated >= -1d
+        ORDER BY updated DESC
+      fields: [summary, status, priority, labels, updated]
+      max_results: 50
+    labels: [personal]
+    extract_concepts: false
+    track_personal: true
 
-  # Gmail Daily Digest (business-relevant emails)
-  gmail:
+  my-schedule:
+    type: google-calendar
     enabled: true
+    schedule: "0 8 * * 1-5"
+    params:
+      calendar_id: primary
+      lookback_hours: 24
+      lookahead_hours: 24
+    labels: [personal]
+    extract_concepts: false
+    track_personal: true
+
+  email-digest:
     type: gmail
-    schedule: "30 8 * * 1-5"          # weekdays 08:30
-    lookback_hours: 24
-    wiki_target: daily/gmail-digest
-    labels: [team-ops, personal]
-    personal_tracking: true
-    concept_extraction: true
-
-    # Filter: what to INCLUDE (high-value signals)
-    include:
-      - query: "is:unread -category:promotions -category:social -category:updates"
-      - query: "from:@oliveyoung.co.kr is:unread"
-      - query: "from:@cj.net is:unread"
-
-    # Filter: what to EXCLUDE (noise)
-    exclude:
-      - subject_contains: ["[Automated]", "noreply", "no-reply", "unsubscribe"]
-      - from_contains: ["notifications@", "mailer-daemon@", "calendar-notification@"]
-
-    # Classification rules for extracted emails
-    classify:
-      action_required:                  # emails needing my response/action
-        signals: [to:me, "action required", "please review", "검토 요청", "확인 부탁"]
-      decisions:                        # emails containing decisions or approvals
-        signals: ["approved", "결재 완료", "승인", "decided", "합의"]
-      project_updates:                  # project status, progress reports
-        signals: ["진행 상황", "업데이트", "progress", "status report", "주간 보고"]
-      knowledge_sharing:                # articles, docs, learnings shared by colleagues
-        signals: ["공유드립니다", "참고", "FYI", "sharing", "관련 자료"]
-      meeting_followup:                 # meeting notes, action items from meetings
-        signals: ["회의록", "미팅 노트", "action items", "follow-up", "후속"]
-
-  # Manual ingest (ad-hoc documents, URLs, PDFs)
-  # Triggered by /wiki-ingest add <source>, not scheduled
-  manual:
     enabled: true
-    type: manual
-    wiki_target: wiki/sources
-    labels: []
-    concept_extraction: true
+    schedule: "30 8 * * 1-5"
+    params:
+      lookback_hours: 24
+      include_queries:
+        - "is:unread -category:promotions -category:social -category:updates"
+        - "from:@oliveyoung.co.kr is:unread"
+        - "from:@cj.net is:unread"
+      exclude:
+        subjects: ["[Automated]", "noreply", "no-reply"]
+        senders: ["notifications@", "mailer-daemon@", "calendar-notification@"]
+      classify:
+        action_required: ["action required", "please review", "검토 요청", "확인 부탁"]
+        decisions: ["approved", "결재 완료", "승인"]
+        project_updates: ["진행 상황", "업데이트", "progress"]
+        knowledge_sharing: ["공유드립니다", "FYI", "참고"]
+        meeting_followup: ["회의록", "action items", "후속"]
+    labels: [personal, team-ops]
+    extract_concepts: true
+    track_personal: true
 
-# ─── Deduplication ─────────────────────────────────────────
+  # ── Trends (트렌드 분석) ──
+  slack-trends:
+    type: slack-search
+    enabled: true
+    schedule: "0 10 * * 1-5"
+    params:
+      queries:
+        - channel: "#ai-general"
+          keywords: [AI, LLM, GenAI, Claude, GPT]
+        - channel: "#dev-talk"
+          keywords: [MCP, RAG, vector, embedding]
+      lookback_hours: 24
+    labels: [ai-internal, strategy]
+    extract_concepts: true
+    track_personal: false
+
+# ─── 중복 제거 ────────────────────────────────────────────
 dedup:
-  strategy: event-id                # event-id | url | title-similarity
-  similarity_threshold: 0.85        # for title-similarity strategy
-  cross_source: true                # deduplicate across different sources
+  cascade: [event-id, url, title]
+  title_threshold: 0.85
 
-# ─── Labeling ──────────────────────────────────────────────
+# ─── 라벨 ────────────────────────────────────────────────
 labels:
-  auto_label: true
   categories:
-    - ai-industry                   # external AI news, vendor updates
-    - ai-internal                   # internal AI/AX initiatives
-    - team-ops                      # team daily operations
-    - strategy                      # strategic direction, planning
-    - personal                      # my own work items
-    - learning                      # educational content
+    - ai-industry
+    - ai-internal
+    - team-ops
+    - strategy
+    - personal
+    - learning
 
-# ─── Personal Work Tracking ────────────────────────────────
+# ─── 성과 추적 ───────────────────────────────────────────
 performance:
   enabled: true
-  weekly_summary: true              # auto-generate weekly/me/YYYY-Www.md
-  monthly_summary: true             # auto-generate monthly/me/YYYY-MM.md
-  quarterly_review: true            # auto-generate quarterly/me/YYYY-Qq.md
-  annual_review: true               # auto-generate annually/me/YYYY.md
   work_categories:
-    - project-delivery              # 프로젝트 산출물
-    - technical-leadership          # 기술 리더십, 아키텍처 결정
-    - team-contribution             # 팀 기여, 멘토링
-    - innovation                    # 신기술 도입, PoC
-    - operational-excellence        # 운영 개선, 자동화
+    - project-delivery
+    - technical-leadership
+    - team-contribution
+    - innovation
+    - operational-excellence
+  uncategorized_label: "기타"
+  # Per-source-ID override (highest priority). Use when same-type sources need
+  # different categories (e.g., my-tasks → project-delivery, sre-tasks → operational-excellence).
+  source_category_map: {}
+  # Per-source-type fallback. Applied when source_category_map has no entry for this source.
+  source_type_category_map:
+    jira: project-delivery
+    google-calendar: team-contribution
+  summaries:
+    weekly: true
+    monthly: true
+    quarterly: true
+    annual: true
 
-# ─── Concept Extraction ────────────────────────────────────
+# ─── 개념 추출 ───────────────────────────────────────────
 concepts:
-  min_mentions: 2                   # extract concept after N mentions across sources
-  merge_similar: true               # merge concepts with similar names
-  similarity_threshold: 0.8
-  confidence_tagging: true          # tag as extracted/inferred/ambiguous
-  hub_threshold: 5                  # flag as hub concept after N incoming links
+  min_mentions: 2
+  merge_threshold: 0.8
 
-# ─── Weekly Synthesis ──────────────────────────────────────
-weekly:
-  enabled: true
-  schedule: "0 8 * * 1"            # Monday 08:00
-  sources: [ai-newsletter, team-digest, slack-trends]
-  output: weekly/synthesis/YYYY-Www.md
-  include_performance: true         # include personal work summary
+# ─── 종합 보고 ───────────────────────────────────────────
+synthesis:
+  weekly:
+    enabled: true
+    schedule: "0 8 * * 1"           # Monday 08:00
+    include_sources: [ai-news, team-slack, slack-trends]
+  monthly:
+    enabled: true
+    schedule: "0 8 1 * *"           # 1st of month 08:00
+  quarterly:
+    enabled: true
+    schedule: "0 8 1 1,4,7,10 *"    # Quarter starts (Jan/Apr/Jul/Oct)
+  annual:
+    enabled: true
+    schedule: "0 8 1 1 *"           # Jan 1st 08:00
+
+# ─── LLM ──────────────────────────────────────────────────
+llm:
+  provider: anthropic
+  model: claude-sonnet-4-6
+  max_tokens: 4096
