@@ -19,8 +19,11 @@ allowed-tools: |
 
 The Rust `wi ingest` pipeline, when configured with `llm.provider: queue`, defers
 all semantic work (summarization, concept extraction) by writing JSONL task
-files into `<vault>/.wiki-ingest/queue/{run-timestamp}.jsonl`. Each task points
-at a vault page that was written with an empty section awaiting LLM content.
+files into `<vault>/.wiki-ingest/queue/{run-timestamp}-pid{PID}.jsonl`. Each
+task points at a vault page that was written with an empty section awaiting LLM
+content. Files appear atomically (temp + fsync + rename) — once a `.jsonl`
+file is visible, every task in it is fully written and points at a page that
+already exists on disk.
 
 This skill consumes those tasks: read the queue, perform the LLM work using
 your own session, edit target pages via Obsidian MCP, then move the processed
@@ -140,19 +143,20 @@ succeeded. Failure rules:
 
 ## When NOT to invoke
 
-- Don't run while `wi ingest` is currently running — it might be
-  appending to a queue file you're trying to process. Wait until ingest
-  finishes (or run on a different queue file). Filenames are unique per
-  ingest run, so overlap is partial at worst.
-- Don't manually edit pages between ingest and process — your edits to
-  the target section will be overwritten.
+- `wi ingest` writes the queue file atomically (temp + rename) only at
+  the very end of a successful run, so a concurrent ingest cannot
+  produce a partial `.jsonl` you might consume mid-write. There is no
+  append-while-reading hazard. You may still want to wait so the user
+  sees the new pages before they get edited.
+- Don't manually edit the queue-targeted sections between ingest and
+  process — your edits will be overwritten.
 
 ## Example session
 
 ```bash
 # After cron runs `wi ingest` at 07:00, a queue file exists:
 $ ls ~/Documents/Obsidian\ Vault/.wiki-ingest/queue/
-2026-05-23T07-00-00Z.jsonl
+2026-05-23T07-00-00Z-pid12345.jsonl
 
 $ wc -l ~/Documents/Obsidian\ Vault/.wiki-ingest/queue/*.jsonl
 14 tasks pending
