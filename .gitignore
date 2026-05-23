@@ -1,8 +1,4 @@
-# User-specific config (contains personal identity, API settings)
 config.yaml
-
-# Cache
 .wiki-ingest/
-
-# OS
 .DS_Store
+target/
