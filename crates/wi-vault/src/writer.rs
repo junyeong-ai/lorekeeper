@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::AsyncWriteExt;
 
 use crate::VaultError;
-use crate::frontmatter::{self, FrontmatterPatch};
 
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -61,26 +60,6 @@ impl VaultWriter {
             .await?;
         file.write_all(content.as_bytes()).await?;
         Ok(())
-    }
-
-    pub async fn patch_frontmatter(
-        &self,
-        rel_path: &Path,
-        patch: &FrontmatterPatch,
-    ) -> Result<(), VaultError> {
-        let full = self.root.join(rel_path);
-        let content = tokio::fs::read_to_string(&full).await?;
-        let mut page = frontmatter::parse_page(&content).map_err(VaultError::Frontmatter)?;
-
-        for (key, value) in &patch.set {
-            page.frontmatter.set(key.clone(), value.clone());
-        }
-        for key in &patch.remove {
-            page.frontmatter.fields.remove(key);
-        }
-
-        let updated = frontmatter::serialize_page(&page.frontmatter, &page.body);
-        self.write_page(rel_path, &updated).await
     }
 }
 

@@ -4,7 +4,7 @@ mod reader;
 mod template;
 mod writer;
 
-pub use self::frontmatter::{Frontmatter, FrontmatterPatch, Page};
+pub use self::frontmatter::{Frontmatter, Page};
 pub use self::log::{IngestLog, LogEntry, LogStatus};
 pub use self::reader::VaultReader;
 pub use self::template::TemplateEngine;
