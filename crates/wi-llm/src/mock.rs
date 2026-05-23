@@ -1,0 +1,57 @@
+use async_trait::async_trait;
+
+use wi_core::concept::ExtractedConcept;
+
+use crate::{LlmClient, LlmError};
+
+#[derive(Default)]
+pub struct MockLlmClient {
+    pub summary: String,
+    pub labels: Vec<String>,
+    pub concepts: Vec<ExtractedConcept>,
+    pub fail: bool,
+}
+
+impl MockLlmClient {
+    pub fn with_concepts(concepts: Vec<ExtractedConcept>) -> Self {
+        Self {
+            concepts,
+            ..Default::default()
+        }
+    }
+
+    pub fn failing() -> Self {
+        Self {
+            fail: true,
+            ..Default::default()
+        }
+    }
+}
+
+#[async_trait]
+impl LlmClient for MockLlmClient {
+    async fn summarize(&self, _text: &str, _max: usize) -> Result<String, LlmError> {
+        if self.fail {
+            return Err(LlmError::Api("mock failure".into()));
+        }
+        Ok(self.summary.clone())
+    }
+
+    async fn classify_labels(
+        &self,
+        _text: &str,
+        _candidates: &[String],
+    ) -> Result<Vec<String>, LlmError> {
+        if self.fail {
+            return Err(LlmError::Api("mock failure".into()));
+        }
+        Ok(self.labels.clone())
+    }
+
+    async fn extract_concepts(&self, _text: &str) -> Result<Vec<ExtractedConcept>, LlmError> {
+        if self.fail {
+            return Err(LlmError::Api("mock failure".into()));
+        }
+        Ok(self.concepts.clone())
+    }
+}
