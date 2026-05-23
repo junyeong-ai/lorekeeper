@@ -160,15 +160,17 @@ impl LlmClient for QueueLlmClient {
             .map_err(|e| LlmError::QueueIo(format!("fsync: {e}")))?;
         drop(file);
 
-        tokio::fs::rename(&tmp_path, &final_path)
-            .await
-            .map_err(|e| {
-                LlmError::QueueIo(format!(
-                    "rename {} → {}: {e}",
-                    tmp_path.display(),
-                    final_path.display()
-                ))
-            })?;
+        if let Err(e) = tokio::fs::rename(&tmp_path, &final_path).await {
+            // Best-effort cleanup so a future run doesn't see a stale `.jsonl.tmp`
+            // accumulating in the queue dir. The rename error is the one the caller
+            // needs to see — we deliberately discard the unlink error.
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(LlmError::QueueIo(format!(
+                "rename {} → {}: {e}",
+                tmp_path.display(),
+                final_path.display()
+            )));
+        }
 
         buffer.clear();
         Ok(())
