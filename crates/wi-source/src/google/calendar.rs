@@ -87,20 +87,14 @@ impl Source for CalendarSource {
     async fn extract(
         &self,
         params: &serde_json::Value,
-        _ctx: &ExtractContext,
+        ctx: &ExtractContext,
     ) -> Result<Vec<RawItem>, SourceError> {
         let p: CalendarParams = serde_json::from_value(params.clone())
             .map_err(|e| SourceError::InvalidParams(e.to_string()))?;
 
         let token = self.auth.access_token().await?;
 
-        let now = jiff::Timestamp::now();
-        let time_min = now
-            .checked_sub(jiff::SignedDuration::from_hours(p.lookback_hours.into()))
-            .unwrap_or(now);
-        let time_max = now
-            .checked_add(jiff::SignedDuration::from_hours(p.lookahead_hours.into()))
-            .unwrap_or(now);
+        let (time_min, time_max) = ctx.day_window(p.lookback_hours, p.lookahead_hours)?;
 
         let resp = check_response(
             self.http

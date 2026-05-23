@@ -71,23 +71,33 @@ impl Source for SlackSearchSource {
     async fn extract(
         &self,
         params: &serde_json::Value,
-        _ctx: &ExtractContext,
+        ctx: &ExtractContext,
     ) -> Result<Vec<RawItem>, SourceError> {
         let p: SearchParams = serde_json::from_value(params.clone())
             .map_err(|e| SourceError::InvalidParams(e.to_string()))?;
 
-        let after = jiff::Zoned::now()
-            .date()
-            .checked_sub(jiff::Span::new().hours(i64::from(p.lookback_hours)))
+        // Slack search date operators are day-granular and exclusive. Bound the query
+        // to the target day (`after` the prior day, `before` the next) anchored to
+        // ctx.target_date — not "now" — so --date backfill searches the right day. The
+        // pipeline still date-filters precisely afterward.
+        let lookback_days = (i64::from(p.lookback_hours) / 24).max(1);
+        let after = ctx
+            .target_date
+            .checked_sub(jiff::Span::new().days(lookback_days))
+            .map_err(|e| SourceError::Parse(e.to_string()))?;
+        let before = ctx
+            .target_date
+            .tomorrow()
             .map_err(|e| SourceError::Parse(e.to_string()))?;
         let after_str = after.to_string();
+        let before_str = before.to_string();
 
         let mut all_items = Vec::new();
 
         for spec in &p.queries {
             let channel_name = spec.channel.strip_prefix('#').unwrap_or(&spec.channel);
             let kw = spec.keywords.join(" OR ");
-            let query = format!("in:#{channel_name} after:{after_str} {kw}");
+            let query = format!("in:#{channel_name} after:{after_str} before:{before_str} {kw}");
 
             let data: SearchData = slack_post(
                 &self.http,

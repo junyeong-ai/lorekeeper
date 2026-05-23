@@ -53,7 +53,7 @@ impl Source for SlackChannelSource {
     async fn extract(
         &self,
         params: &serde_json::Value,
-        _ctx: &ExtractContext,
+        ctx: &ExtractContext,
     ) -> Result<Vec<RawItem>, SourceError> {
         let p: ChannelParams = serde_json::from_value(params.clone())
             .map_err(|e| SourceError::InvalidParams(e.to_string()))?;
@@ -61,10 +61,9 @@ impl Source for SlackChannelSource {
         let channel_id = resolve_channel_id(&self.http, &self.token, &p.channel).await?;
         let channel_name = p.channel.strip_prefix('#').unwrap_or(&p.channel);
 
-        let oldest = jiff::Timestamp::now()
-            .checked_sub(jiff::SignedDuration::from_hours(p.lookback_hours.into()))
-            .unwrap_or_else(|_| jiff::Timestamp::now());
+        let (oldest, latest) = ctx.day_window(p.lookback_hours, 0)?;
         let oldest_ts = format!("{}.000000", oldest.as_second());
+        let latest_ts = format!("{}.000000", latest.as_second());
 
         let data: HistoryData = slack_post(
             &self.http,
@@ -73,6 +72,7 @@ impl Source for SlackChannelSource {
             &serde_json::json!({
                 "channel": channel_id,
                 "oldest": oldest_ts,
+                "latest": latest_ts,
                 "limit": 100,
             }),
         )

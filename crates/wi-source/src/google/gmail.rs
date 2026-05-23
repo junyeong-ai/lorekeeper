@@ -114,18 +114,34 @@ impl Source for GmailSource {
     async fn extract(
         &self,
         params: &serde_json::Value,
-        _ctx: &ExtractContext,
+        ctx: &ExtractContext,
     ) -> Result<Vec<RawItem>, SourceError> {
         let p: GmailParams = serde_json::from_value(params.clone())
             .map_err(|e| SourceError::InvalidParams(e.to_string()))?;
 
         let token = self.auth.access_token().await?;
 
-        let query = if p.include_queries.is_empty() {
-            format!("is:unread newer_than:{}h", p.lookback_hours)
+        // Constrain the query to the target day (Gmail date operators are day-granular,
+        // `before:` exclusive) anchored to ctx.target_date so --date backfill fetches the
+        // right day instead of "newer_than N hours from now". The OR group is parenthesized
+        // so the date bounds apply to every include_query, not just the last term.
+        let lookback_days = (i64::from(p.lookback_hours) / 24).max(1);
+        let after = ctx
+            .target_date
+            .checked_sub(jiff::Span::new().days(lookback_days))
+            .map_err(|e| SourceError::Parse(e.to_string()))?
+            .strftime("%Y/%m/%d");
+        let before = ctx
+            .target_date
+            .tomorrow()
+            .map_err(|e| SourceError::Parse(e.to_string()))?
+            .strftime("%Y/%m/%d");
+        let base = if p.include_queries.is_empty() {
+            "is:unread".to_string()
         } else {
-            p.include_queries.join(" OR ")
+            format!("({})", p.include_queries.join(" OR "))
         };
+        let query = format!("{base} after:{after} before:{before}");
 
         let resp = check_response(
             self.http

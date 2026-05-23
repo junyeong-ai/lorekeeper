@@ -38,6 +38,40 @@ pub struct ExtractContext {
     pub timezone: jiff::tz::TimeZone,
 }
 
+impl ExtractContext {
+    /// Time window an adapter should query so that everything landing on
+    /// `target_date` (the civil day the pipeline keeps) is covered, with optional
+    /// padding. Anchored to the target day's bounds in `timezone` — NOT to "now" —
+    /// so historical backfill (`wi ingest --date YYYY-MM-DD`) fetches the right day
+    /// instead of the last N hours from the wall clock.
+    ///
+    /// Returns `[day_start - lookback, day_end + lookahead]`.
+    pub fn day_window(
+        &self,
+        lookback_hours: u32,
+        lookahead_hours: u32,
+    ) -> Result<(jiff::Timestamp, jiff::Timestamp), SourceError> {
+        let day_start = self
+            .target_date
+            .to_zoned(self.timezone.clone())
+            .map_err(|e| SourceError::Parse(format!("day start: {e}")))?;
+        let day_end = self
+            .target_date
+            .tomorrow()
+            .and_then(|d| d.to_zoned(self.timezone.clone()))
+            .map_err(|e| SourceError::Parse(format!("day end: {e}")))?;
+        let min = day_start
+            .timestamp()
+            .checked_sub(jiff::SignedDuration::from_hours(lookback_hours.into()))
+            .map_err(|e| SourceError::Parse(format!("window min: {e}")))?;
+        let max = day_end
+            .timestamp()
+            .checked_add(jiff::SignedDuration::from_hours(lookahead_hours.into()))
+            .map_err(|e| SourceError::Parse(format!("window max: {e}")))?;
+        Ok((min, max))
+    }
+}
+
 #[async_trait]
 pub trait Source: Send + Sync {
     async fn extract(
@@ -121,5 +155,33 @@ pub fn create_source(
             })?;
             Ok(Box::new(jira::JiraSource::new(http, jc.clone())))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctx(date: &str, tz: &str) -> ExtractContext {
+        ExtractContext {
+            target_date: date.parse().unwrap(),
+            timezone: jiff::tz::TimeZone::get(tz).unwrap(),
+        }
+    }
+
+    #[test]
+    fn day_window_anchors_to_target_date_not_now() {
+        // 2026-05-01 in Asia/Seoul (UTC+9): day starts 2026-04-30T15:00:00Z.
+        let (min, max) = ctx("2026-05-01", "Asia/Seoul").day_window(0, 0).unwrap();
+        assert_eq!(min.to_string(), "2026-04-30T15:00:00Z");
+        assert_eq!(max.to_string(), "2026-05-01T15:00:00Z");
+    }
+
+    #[test]
+    fn day_window_applies_padding() {
+        let (min, max) = ctx("2026-05-01", "UTC").day_window(24, 12).unwrap();
+        // day [05-01T00:00, 05-02T00:00) padded by -24h / +12h.
+        assert_eq!(min.to_string(), "2026-04-30T00:00:00Z");
+        assert_eq!(max.to_string(), "2026-05-02T12:00:00Z");
     }
 }
