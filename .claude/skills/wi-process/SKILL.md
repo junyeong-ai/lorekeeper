@@ -29,6 +29,19 @@ This skill consumes those tasks: read the queue, perform the LLM work using
 your own session, edit target pages via Obsidian MCP, then move the processed
 queue file to `.wiki-ingest/queue/processed/`.
 
+### Queue file lifecycle
+
+```
+<run>.jsonl.tmp  ←  ingest is mid-flush (transient, sub-second; not for consumption)
+<run>.jsonl      ←  pending, ready to be drained by this skill
+processed/<run>.jsonl  ←  drained successfully, retained 90 days by `wi maintenance`
+```
+
+`wi ingest` sweeps `*.jsonl.tmp` files older than 1 hour at startup
+(crash debris from previous runs); `wi maintenance` does NOT touch tmp
+files to avoid racing an active flush. Only `.jsonl` files matter to
+this skill.
+
 ## Queue task schema
 
 Each line in a queue file is one task:
