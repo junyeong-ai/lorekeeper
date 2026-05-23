@@ -21,6 +21,13 @@ struct DriveParams {
     file_pattern: String,
 }
 
+/// Validate this source's params at config-load time, before any network work.
+pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
+    serde_json::from_value::<DriveParams>(params.clone())
+        .map(|_| ())
+        .map_err(|e| SourceError::InvalidParams(e.to_string()))
+}
+
 #[derive(Deserialize)]
 struct FileList {
     files: Option<Vec<FileMeta>>,

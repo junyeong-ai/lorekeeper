@@ -25,6 +25,13 @@ struct CalendarParams {
     lookahead_hours: u32,
 }
 
+/// Validate this source's params at config-load time, before any network work.
+pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
+    serde_json::from_value::<CalendarParams>(params.clone())
+        .map(|_| ())
+        .map_err(|e| SourceError::InvalidParams(e.to_string()))
+}
+
 fn default_calendar() -> String {
     "primary".into()
 }

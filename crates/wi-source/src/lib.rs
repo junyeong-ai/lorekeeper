@@ -47,6 +47,23 @@ pub trait Source: Send + Sync {
     ) -> Result<Vec<RawItem>, SourceError>;
 }
 
+/// Validate a source's `params` against its adapter's typed schema without any
+/// network access or credentials. Used by `wi validate` to surface config errors
+/// (missing required keys, wrong types, unknown/typo'd keys) before runtime.
+pub fn validate_params(
+    source_type: SourceType,
+    params: &serde_json::Value,
+) -> Result<(), SourceError> {
+    match source_type {
+        SourceType::Gmail => google::gmail::validate_params(params),
+        SourceType::GoogleDrive => google::drive::validate_params(params),
+        SourceType::GoogleCalendar => google::calendar::validate_params(params),
+        SourceType::SlackChannel => slack::channel::validate_params(params),
+        SourceType::SlackSearch => slack::search::validate_params(params),
+        SourceType::Jira => jira::validate_params(params),
+    }
+}
+
 pub fn create_source(
     source_type: SourceType,
     http: reqwest::Client,

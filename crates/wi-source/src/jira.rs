@@ -20,6 +20,13 @@ struct JiraParams {
     max_results: u32,
 }
 
+/// Validate this source's params at config-load time, before any network work.
+pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
+    serde_json::from_value::<JiraParams>(params.clone())
+        .map(|_| ())
+        .map_err(|e| SourceError::InvalidParams(e.to_string()))
+}
+
 fn default_fields() -> Vec<String> {
     vec![
         "summary".into(),
@@ -159,5 +166,29 @@ impl Source for JiraSource {
             .collect();
 
         Ok(items)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valid_params_accepted() {
+        let params = serde_json::json!({ "jql": "assignee = currentUser()" });
+        assert!(validate_params(&params).is_ok());
+    }
+
+    #[test]
+    fn missing_required_field_rejected() {
+        // `jql` is required; omitting it must fail validation, not at runtime.
+        let params = serde_json::json!({ "max_results": 10 });
+        assert!(validate_params(&params).is_err());
+    }
+
+    #[test]
+    fn wrong_type_rejected() {
+        let params = serde_json::json!({ "jql": "x", "max_results": "fifty" });
+        assert!(validate_params(&params).is_err());
     }
 }
