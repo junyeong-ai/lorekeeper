@@ -127,8 +127,11 @@ Each line in a queue file is one task:
         concept pages).
 
       - **Synthesis narratives** — each `target.kind` maps to one
-        specific `##` heading (both the bundled Jinja template and the
-        fallback renderer guarantee the anchor exists):
+        specific anchor heading. Search the page for the EXACT heading
+        text from this table (not "the first `##`" — these pages also
+        contain `## 기간`, `## 업무 카테고리`, etc. that must be left
+        alone). Both the bundled Jinja template and the fallback
+        renderer guarantee the listed heading exists.
 
         | `target.kind` | Anchor heading |
         |---|---|
@@ -139,8 +142,9 @@ Each line in a queue file is one task:
         | `annual-narrative`           | `## 종합 요약` |
 
         Replace the body of the anchor (everything between this heading
-        and the next `## ` heading) with the generated narrative.
-        Preserve all frontmatter and other section headings.
+        and the next `## ` heading, or EOF) with the generated
+        narrative. Preserve frontmatter and every other section heading
+        unchanged.
 
    d. **On task failure** (page not found, MCP error, malformed task):
       record the failed `task_id` and the reason. **Abort processing
