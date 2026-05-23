@@ -15,7 +15,30 @@ pub async fn run(
     let creds = wi_source::credentials::Credentials::load(&vault_root)
         .map_err(|e| miette::miette!("{e}"))?;
 
-    let llm = build_llm_client(&config, &vault_root);
+    // Dry-run must NOT mutate filesystem. In queue mode the LLM client itself writes
+    // queue files at the start of pipeline.plan() — well before the CLI's write
+    // suppression logic kicks in — so we force NoopLlmClient for dry-run regardless
+    // of the configured provider.
+    let llm: std::sync::Arc<dyn wi_llm::LlmClient> = if dry_run {
+        std::sync::Arc::new(wi_llm::NoopLlmClient)
+    } else {
+        build_llm_client(&config, &vault_root)
+    };
+
+    // Guard against silent data loss when provider is switched away from `queue`
+    // while pending queue files exist. Without this check, the new run would dedup
+    // events whose previous queue tasks were never drained by `/wi-process`,
+    // permanently stranding them with empty semantic sections.
+    if matches!(config.llm.provider, wi_core::config::LlmProvider::Anthropic)
+        && pending_queue_exists(&vault_root)?
+    {
+        return Err(miette::miette!(
+            "{} pending queue file(s) under {}/.wiki-ingest/queue/. Drain via /wi-process \
+             (or switch back to provider: queue) before running with provider: anthropic.",
+            pending_queue_count(&vault_root)?,
+            vault_root.display(),
+        ));
+    }
 
     let tz = config.vault.timezone();
     let today = jiff::Timestamp::now().to_zoned(tz.clone()).date();
@@ -242,6 +265,27 @@ pub async fn run(
         }
     );
     Ok(())
+}
+
+fn pending_queue_exists(vault_root: &std::path::Path) -> miette::Result<bool> {
+    Ok(pending_queue_count(vault_root)? > 0)
+}
+
+fn pending_queue_count(vault_root: &std::path::Path) -> miette::Result<usize> {
+    let dir = vault_root.join(".wiki-ingest").join("queue");
+    if !dir.exists() {
+        return Ok(0);
+    }
+    let entries = std::fs::read_dir(&dir).map_err(|e| miette::miette!("read queue dir: {e}"))?;
+    let mut n = 0;
+    for entry in entries {
+        let entry = entry.map_err(|e| miette::miette!("queue entry: {e}"))?;
+        let path = entry.path();
+        if path.is_file() && path.extension().is_some_and(|ext| ext == "jsonl") {
+            n += 1;
+        }
+    }
+    Ok(n)
 }
 
 async fn record_failure(
