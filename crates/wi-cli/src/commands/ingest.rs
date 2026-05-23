@@ -29,15 +29,28 @@ pub async fn run(
     // while pending queue files exist. Without this check, the new run would dedup
     // events whose previous queue tasks were never drained by `/wi-process`,
     // permanently stranding them with empty semantic sections.
-    if matches!(config.llm.provider, wi_core::config::LlmProvider::Anthropic)
-        && pending_queue_exists(&vault_root)?
-    {
-        return Err(miette::miette!(
-            "{} pending queue file(s) under {}/.wiki-ingest/queue/. Drain via /wi-process \
-             (or switch back to provider: queue) before running with provider: anthropic.",
-            pending_queue_count(&vault_root)?,
-            vault_root.display(),
-        ));
+    let pending = pending_queue_count(&vault_root)?;
+    match config.llm.provider {
+        wi_core::config::LlmProvider::Anthropic if pending > 0 => {
+            return Err(miette::miette!(
+                "{pending} pending queue file(s) under {}/.wiki-ingest/queue/. Drain via \
+                 /wi-process (or switch back to provider: queue) before running with \
+                 provider: anthropic.",
+                vault_root.display(),
+            ));
+        }
+        wi_core::config::LlmProvider::Queue if pending > 0 => {
+            // Not an error in queue mode — re-running just emits a new file that
+            // /wi-process will drain alongside the existing ones. Warn so the user
+            // can run /wi-process first if they want to avoid duplicate LLM work,
+            // since each pending file already has a target page on disk.
+            eprintln!(
+                "! {pending} pending queue file(s) under {}/.wiki-ingest/queue/. Run \
+                 /wi-process first to avoid duplicate LLM work on the same target pages.",
+                vault_root.display(),
+            );
+        }
+        _ => {}
     }
 
     let tz = config.vault.timezone();
@@ -281,10 +294,6 @@ pub async fn run(
         }
     );
     Ok(())
-}
-
-fn pending_queue_exists(vault_root: &std::path::Path) -> miette::Result<bool> {
-    Ok(pending_queue_count(vault_root)? > 0)
 }
 
 fn pending_queue_count(vault_root: &std::path::Path) -> miette::Result<usize> {
