@@ -16,6 +16,7 @@ pub struct GmailSource {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GmailParams {
     #[serde(default = "default_lookback")]
     lookback_hours: u32,

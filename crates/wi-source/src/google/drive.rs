@@ -16,6 +16,7 @@ pub struct DriveSource {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DriveParams {
     folder: String,
     file_pattern: String,

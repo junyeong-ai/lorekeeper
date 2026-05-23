@@ -16,6 +16,7 @@ pub struct CalendarSource {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CalendarParams {
     #[serde(default = "default_calendar")]
     calendar_id: String,

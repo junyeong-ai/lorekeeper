@@ -25,6 +25,7 @@ fn base_config(vault_root: &std::path::Path) -> Config {
             enabled: true,
             schedule: None,
             params: serde_json::Value::Object(Default::default()),
+            classify: Default::default(),
             labels: vec!["test".into()],
             extract_concepts: true,
             track_personal: false,

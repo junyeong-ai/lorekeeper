@@ -311,6 +311,11 @@ pub struct SourceConfig {
     pub schedule: Option<String>,
     #[serde(default = "empty_object")]
     pub params: serde_json::Value,
+    /// Keyword → category map for deterministic classification. A source-level
+    /// concern (read by the pipeline), kept out of `params` so adapter params can
+    /// reject unknown keys without colliding with this cross-cutting field.
+    #[serde(default)]
+    pub classify: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub labels: Vec<String>,
     #[serde(default)]

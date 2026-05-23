@@ -12,6 +12,7 @@ pub struct SlackSearchSource {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SearchParams {
     queries: Vec<QuerySpec>,
     #[serde(default = "default_lookback")]

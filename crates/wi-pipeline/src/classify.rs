@@ -92,11 +92,13 @@ fn contains_bounded(haystack: &str, needle: &str) -> bool {
     false
 }
 
-pub fn classify_by_keywords(events: &mut [Event], params: &serde_json::Value) {
-    let map = match params.get("classify").and_then(|v| v.as_object()) {
-        Some(m) => m,
-        None => return,
-    };
+pub fn classify_by_keywords(
+    events: &mut [Event],
+    classify: &std::collections::BTreeMap<String, Vec<String>>,
+) {
+    if classify.is_empty() {
+        return;
+    }
 
     for event in events {
         if event.classification.is_some() {
@@ -105,12 +107,9 @@ pub fn classify_by_keywords(events: &mut [Event], params: &serde_json::Value) {
 
         let text = format!("{} {}", event.title, event.body).to_lowercase();
 
-        for (category, kw_val) in map {
-            let matched = kw_val
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|v| v.as_str())
+        for (category, keywords) in classify {
+            let matched = keywords
+                .iter()
                 .filter(|kw| !kw.is_empty())
                 .any(|kw| text.contains(&kw.to_lowercase()));
 
@@ -239,14 +238,14 @@ mod tests {
 
     #[test]
     fn keyword_classification() {
-        let params = serde_json::json!({
-            "classify": {
-                "action_required": ["please review", "검토 요청"],
-                "decisions": ["approved"]
-            }
-        });
+        let mut classify = std::collections::BTreeMap::new();
+        classify.insert(
+            "action_required".to_string(),
+            vec!["please review".to_string(), "검토 요청".to_string()],
+        );
+        classify.insert("decisions".to_string(), vec!["approved".to_string()]);
         let mut events = vec![make_event("Please review this PR", None)];
-        classify_by_keywords(&mut events, &params);
+        classify_by_keywords(&mut events, &classify);
         assert_eq!(events[0].classification.as_deref(), Some("action_required"));
     }
 }

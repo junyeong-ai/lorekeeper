@@ -143,7 +143,7 @@ impl Pipeline {
         if config.track_personal {
             classify::flag_personal(&mut events, &self.ctx.identity);
         }
-        classify::classify_by_keywords(&mut events, &config.params);
+        classify::classify_by_keywords(&mut events, &config.classify);
 
         let mut by_date: BTreeMap<jiff::civil::Date, Vec<Event>> = BTreeMap::new();
         for event in events.clone() {

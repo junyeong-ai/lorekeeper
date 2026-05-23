@@ -12,6 +12,7 @@ pub struct SlackChannelSource {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ChannelParams {
     channel: String,
     #[serde(default = "default_lookback")]

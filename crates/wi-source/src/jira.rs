@@ -12,6 +12,7 @@ pub struct JiraSource {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JiraParams {
     jql: String,
     #[serde(default = "default_fields")]
@@ -189,6 +190,13 @@ mod tests {
     #[test]
     fn wrong_type_rejected() {
         let params = serde_json::json!({ "jql": "x", "max_results": "fifty" });
+        assert!(validate_params(&params).is_err());
+    }
+
+    #[test]
+    fn typo_key_rejected() {
+        // `deny_unknown_fields` catches misspelled params (max_result vs max_results).
+        let params = serde_json::json!({ "jql": "x", "max_result": 10 });
         assert!(validate_params(&params).is_err());
     }
 }
