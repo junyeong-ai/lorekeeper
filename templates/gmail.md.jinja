@@ -3,6 +3,8 @@ id: {{ source_id }}-{{ date }}
 title: "이메일 다이제스트 {{ date }}"
 created: {{ date }}
 labels: {{ labels | tojson }}
+source: {{ source_id }}
+events_count: {{ events | length }}
 total_threads: {{ total }}
 filtered_threads: {{ filtered }}
 action_required: {{ action_count }}

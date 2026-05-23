@@ -92,15 +92,19 @@ without summarization or concept extraction.
 
 ## Atomic ingest flow
 
-`wi ingest` runs in four phases:
+`wi ingest` runs in five phases:
 
 1. **Plan** — fetch from all sources, normalize, dedup-check, classify
 2. **Write daily + concept pages** — atomic per-file (tmp + rename)
 3. **Write work-log** — aggregated personal events across sources
-4. **Commit dedup** — only if every write succeeded
+4. **Flush LLM queue** — atomic temp+rename of the JSONL task file (queue mode)
+5. **Commit dedup** — only if every write AND the flush succeeded
 
-If any write fails, dedup is NOT committed and the next run reprocesses
-those events. There is no partial-success state from the user's POV.
+The flush precedes the dedup commit so a crash between them re-extracts
+and re-queues on the next run rather than stranding semantic work. If any
+write or flush fails, dedup is NOT committed, the process exits non-zero,
+and the next run reprocesses those events. No partial-success state from
+the user's POV.
 
 ## When NOT to invoke
 
