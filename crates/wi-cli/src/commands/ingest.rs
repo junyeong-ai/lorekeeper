@@ -130,6 +130,9 @@ pub async fn run(
         started_at: std::time::Instant,
     }
     let mut planned: Vec<Planned> = Vec::new();
+    // Set on any source/extract/pipeline/write failure so the process exits non-zero —
+    // a cron or CI run must be able to detect a partial failure, not see exit 0.
+    let mut had_failure = false;
 
     for (id, sc) in &sources {
         let started_at = std::time::Instant::now();
@@ -140,6 +143,7 @@ pub async fn run(
             Err(e) => {
                 eprintln!("  ✗ {e}");
                 record_failure(&log, id, &started_at, &e.to_string()).await;
+                had_failure = true;
                 continue;
             }
         };
@@ -149,6 +153,7 @@ pub async fn run(
             Err(e) => {
                 eprintln!("  ✗ extract: {e}");
                 record_failure(&log, id, &started_at, &e.to_string()).await;
+                had_failure = true;
                 continue;
             }
         };
@@ -159,6 +164,7 @@ pub async fn run(
             Err(e) => {
                 eprintln!("  ✗ pipeline: {e}");
                 record_failure(&log, id, &started_at, &e.to_string()).await;
+                had_failure = true;
                 continue;
             }
         };
@@ -294,6 +300,8 @@ pub async fn run(
         .ok();
     }
 
+    had_failure |= any_write_failed;
+
     eprintln!(
         "\nDone. {} pages written, {} personal items tracked.{}",
         total_pages,
@@ -304,6 +312,13 @@ pub async fn run(
             ""
         }
     );
+
+    if had_failure {
+        return Err(miette::miette!(
+            "ingest completed with failures; see {}/.wiki-ingest/ingest.jsonl",
+            vault_root.display()
+        ));
+    }
     Ok(())
 }
 

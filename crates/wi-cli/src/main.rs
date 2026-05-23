@@ -65,28 +65,28 @@ enum Command {
 #[derive(clap::Subcommand)]
 enum SynthesisPeriod {
     Weekly {
-        #[arg(long)]
+        #[arg(long, conflicts_with = "previous")]
         date: Option<String>,
         /// Synthesize the just-completed period (last week)
         #[arg(long)]
         previous: bool,
     },
     Monthly {
-        #[arg(long)]
+        #[arg(long, conflicts_with = "previous")]
         date: Option<String>,
         /// Synthesize the just-completed period (last month)
         #[arg(long)]
         previous: bool,
     },
     Quarterly {
-        #[arg(long)]
+        #[arg(long, conflicts_with = "previous")]
         date: Option<String>,
         /// Synthesize the just-completed period (last quarter)
         #[arg(long)]
         previous: bool,
     },
     Annual {
-        #[arg(long)]
+        #[arg(long, conflicts_with = "previous")]
         year: Option<i32>,
         /// Synthesize the just-completed period (last year)
         #[arg(long)]
