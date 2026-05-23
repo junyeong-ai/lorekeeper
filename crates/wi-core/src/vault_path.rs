@@ -1,0 +1,161 @@
+use std::path::{Path, PathBuf};
+
+use crate::config::VaultDirs;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VaultPath(PathBuf);
+
+impl VaultPath {
+    pub fn daily(dirs: &VaultDirs, source_id: &str, date: jiff::civil::Date) -> Self {
+        Self(
+            PathBuf::from(&dirs.daily)
+                .join(source_id)
+                .join(format!("{date}.md")),
+        )
+    }
+
+    pub fn work_log(dirs: &VaultDirs, date: jiff::civil::Date) -> Self {
+        Self(
+            PathBuf::from(&dirs.personal)
+                .join("work-log")
+                .join(format!("{date}.md")),
+        )
+    }
+
+    pub fn weekly_synthesis(dirs: &VaultDirs, year: i16, week: u8) -> Self {
+        Self(
+            PathBuf::from(&dirs.weekly)
+                .join("synthesis")
+                .join(format!("{year}-W{week:02}.md")),
+        )
+    }
+
+    pub fn weekly_personal(dirs: &VaultDirs, year: i16, week: u8) -> Self {
+        Self(
+            PathBuf::from(&dirs.weekly)
+                .join(&dirs.personal)
+                .join(format!("{year}-W{week:02}.md")),
+        )
+    }
+
+    pub fn monthly_personal(dirs: &VaultDirs, year: i16, month: u8) -> Self {
+        Self(
+            PathBuf::from(&dirs.monthly)
+                .join(&dirs.personal)
+                .join(format!("{year}-{month:02}.md")),
+        )
+    }
+
+    pub fn quarterly_personal(dirs: &VaultDirs, year: i16, quarter: u8) -> Self {
+        Self(
+            PathBuf::from(&dirs.quarterly)
+                .join(&dirs.personal)
+                .join(format!("{year}-Q{quarter}.md")),
+        )
+    }
+
+    pub fn annual_personal(dirs: &VaultDirs, year: i16) -> Self {
+        Self(
+            PathBuf::from(&dirs.annually)
+                .join(&dirs.personal)
+                .join(format!("{year}.md")),
+        )
+    }
+
+    pub fn concept(dirs: &VaultDirs, slug: &str) -> Self {
+        Self(
+            PathBuf::from(&dirs.wiki)
+                .join("concepts")
+                .join(format!("{slug}.md")),
+        )
+    }
+
+    pub fn wiki_index(dirs: &VaultDirs) -> Self {
+        Self(PathBuf::from(&dirs.wiki).join("index.md"))
+    }
+
+    pub fn resolve(&self, vault_root: &Path) -> PathBuf {
+        vault_root.join(&self.0)
+    }
+}
+
+impl AsRef<Path> for VaultPath {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for VaultPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0.display())
+    }
+}
+
+pub fn quarter_of_month(month: u8) -> u8 {
+    (month - 1) / 3 + 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn daily_path() {
+        let dirs = VaultDirs::default();
+        let date = jiff::civil::date(2026, 5, 23);
+        let path = VaultPath::daily(&dirs, "ai-news", date);
+        assert_eq!(path.to_string(), "daily/ai-news/2026-05-23.md");
+    }
+
+    #[test]
+    fn work_log_path() {
+        let dirs = VaultDirs::default();
+        let date = jiff::civil::date(2026, 5, 23);
+        let path = VaultPath::work_log(&dirs, date);
+        assert_eq!(path.to_string(), "me/work-log/2026-05-23.md");
+    }
+
+    #[test]
+    fn weekly_synthesis_path() {
+        let dirs = VaultDirs::default();
+        let path = VaultPath::weekly_synthesis(&dirs, 2026, 21);
+        assert_eq!(path.to_string(), "weekly/synthesis/2026-W21.md");
+    }
+
+    #[test]
+    fn quarterly_personal_path() {
+        let dirs = VaultDirs::default();
+        let path = VaultPath::quarterly_personal(&dirs, 2026, 2);
+        assert_eq!(path.to_string(), "quarterly/me/2026-Q2.md");
+    }
+
+    #[test]
+    fn concept_path() {
+        let dirs = VaultDirs::default();
+        let path = VaultPath::concept(&dirs, "claude-code");
+        assert_eq!(path.to_string(), "wiki/concepts/claude-code.md");
+    }
+
+    #[test]
+    fn custom_dirs() {
+        let dirs = VaultDirs {
+            personal: "my-stuff".into(),
+            ..Default::default()
+        };
+        let date = jiff::civil::date(2026, 5, 23);
+        let path = VaultPath::work_log(&dirs, date);
+        assert_eq!(path.to_string(), "my-stuff/work-log/2026-05-23.md");
+    }
+
+    #[test]
+    fn quarter_calculation() {
+        assert_eq!(quarter_of_month(1), 1);
+        assert_eq!(quarter_of_month(3), 1);
+        assert_eq!(quarter_of_month(4), 2);
+        assert_eq!(quarter_of_month(6), 2);
+        assert_eq!(quarter_of_month(7), 3);
+        assert_eq!(quarter_of_month(9), 3);
+        assert_eq!(quarter_of_month(10), 4);
+        assert_eq!(quarter_of_month(12), 4);
+    }
+}
