@@ -26,6 +26,21 @@ pub enum LlmError {
     QueueIo(String),
 }
 
+impl LlmError {
+    /// True for errors that must abort the pipeline run rather than fall back to an
+    /// empty result. Persistence failures (queue write, dedup commit, etc.) are fatal
+    /// because silently swallowing them would lose work — the daily page would render
+    /// without semantic content AND the events would be marked seen in dedup, so re-runs
+    /// would skip them and no queue task would exist for `/wi-process` to repair.
+    ///
+    /// Transient LLM failures (network, rate limit, API errors) are NOT fatal: the run
+    /// continues with an empty result, the page renders without summary, but a future
+    /// `wi ingest --force` can retry.
+    pub fn is_fatal(&self) -> bool {
+        matches!(self, LlmError::QueueIo(_))
+    }
+}
+
 /// What kind of vault content a semantic task produces. The Claude Code skill uses
 /// this to decide how to integrate the LLM result into the target page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

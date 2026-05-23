@@ -58,36 +58,14 @@ impl Synthesizer {
                 .collect::<Vec<_>>()
                 .join("\n\n---\n\n");
 
-            let weekly_path = VaultPath::weekly_synthesis(&self.ctx.dirs, year, week).to_string();
-            let summary = match self
-                .ctx
-                .llm
-                .summarize(wi_llm::SummarizeRequest {
-                    text: combined_source.clone(),
-                    max_sentences: 5,
-                    target: wi_llm::TaskTarget {
-                        vault_path: weekly_path.clone(),
-                        kind: wi_llm::TargetKind::WeeklySynthesisNarrative,
-                    },
-                })
-                .await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(error = %e, source = %source_id, "synthesis summarize failed");
-                    String::new()
-                }
-            };
-
-            let fallback = if summary.is_empty() {
-                format!("{} pages this week", pages.len())
-            } else {
-                summary.clone()
-            };
-
+            // Per-source summaries reuse the same target as the cross-source theme
+            // summary below; queuing both would emit two tasks pointing at the same
+            // narrative section. Skip the per-source LLM call — the page count serves
+            // as a deterministic placeholder. The cross-source themes call below is
+            // the one that drives the actual narrative content.
             source_summaries.push(serde_json::json!({
                 "source_id": source_id,
-                "summary": fallback,
+                "summary": format!("{} pages this week", pages.len()),
             }));
 
             combined.push_str(&format!("=== {source_id} ===\n{combined_source}\n\n"));
@@ -115,6 +93,7 @@ impl Synthesizer {
             .await
         {
             Ok(s) => s,
+            Err(e) if e.is_fatal() => return Err(PipelineError::Llm(e)),
             Err(e) => {
                 tracing::warn!(error = %e, "weekly theme synthesis failed");
                 String::new()
@@ -185,6 +164,7 @@ impl Synthesizer {
             .await
         {
             Ok(s) => s,
+            Err(e) if e.is_fatal() => return Err(PipelineError::Llm(e)),
             Err(e) => {
                 tracing::warn!(error = %e, "weekly personal narrative failed");
                 String::new()
@@ -248,6 +228,7 @@ impl Synthesizer {
             .await
         {
             Ok(s) => s,
+            Err(e) if e.is_fatal() => return Err(PipelineError::Llm(e)),
             Err(e) => {
                 tracing::warn!(error = %e, "monthly narrative failed");
                 String::new()
@@ -329,6 +310,7 @@ impl Synthesizer {
             .await
         {
             Ok(s) => s,
+            Err(e) if e.is_fatal() => return Err(PipelineError::Llm(e)),
             Err(e) => {
                 tracing::warn!(error = %e, "quarterly narrative failed");
                 String::new()
@@ -406,6 +388,7 @@ impl Synthesizer {
             .await
         {
             Ok(s) => s,
+            Err(e) if e.is_fatal() => return Err(PipelineError::Llm(e)),
             Err(e) => {
                 tracing::warn!(error = %e, "annual narrative failed");
                 String::new()

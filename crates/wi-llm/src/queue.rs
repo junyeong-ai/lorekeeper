@@ -40,9 +40,14 @@ pub enum TaskKind {
 
 impl QueueLlmClient {
     pub fn new(queue_dir: PathBuf) -> Self {
-        let run_id = jiff::Zoned::now()
-            .strftime("%Y-%m-%dT%H-%M-%SZ")
-            .to_string();
+        // Combine second-resolution wall time + process id so two CLI invocations that
+        // start in the same second land in different queue files. Each Rust process is
+        // the sole writer of its file — no inter-process append locking required.
+        let run_id = format!(
+            "{}-pid{}",
+            jiff::Zoned::now().strftime("%Y-%m-%dT%H-%M-%SZ"),
+            std::process::id()
+        );
         Self {
             queue_dir,
             run_id,

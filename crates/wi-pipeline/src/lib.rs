@@ -178,6 +178,7 @@ impl Pipeline {
                 .await
             {
                 Ok(s) => s,
+                Err(e) if e.is_fatal() => return Err(PipelineError::Llm(e)),
                 Err(e) => {
                     tracing::warn!(
                         error = %e,
@@ -205,6 +206,7 @@ impl Pipeline {
                     .await
                 {
                     Ok(c) => c.into_iter().filter(concepts::is_valid).collect(),
+                    Err(e) if e.is_fatal() => return Err(PipelineError::Llm(e)),
                     Err(e) => {
                         tracing::warn!(
                             error = %e,
