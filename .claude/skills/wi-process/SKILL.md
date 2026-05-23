@@ -10,6 +10,8 @@ allowed-tools: |
   Bash(ls *)
   Bash(cat *)
   Bash(jq *)
+  Bash(wc *)
+  Bash(head *)
   Bash(mv *)
   Bash(mkdir *)
   mcp__obsidian__*

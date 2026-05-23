@@ -1,7 +1,7 @@
 ---
 id: proposal-0001-llm-queue
 title: "LLM Work-Queue Architecture: Decouple Deterministic Rust Pipeline from Semantic Claude Code Skill"
-status: proposed
+status: accepted
 created: 2026-05-23
 author: junyeong
 ---
@@ -10,41 +10,39 @@ author: junyeong
 
 ## Summary
 
-Remove the `wi-llm` crate's direct Anthropic API integration. Replace it with a
-**work-queue handoff**: the Rust pipeline emits structured JSONL queue files into
-the vault, and a Claude Code skill (`/wiki-process`) consumes those queues and
-performs all semantic work using Claude's native LLM (no API key, no separate
-billing).
+Keep semantic work (summarization, concept extraction, synthesis narratives)
+behind a single `LlmClient` trait with three interchangeable providers, selected
+by `llm.provider` in config:
 
-This restores the original design intent — **Claude Code is the LLM**, the Rust
-binary is the deterministic data plane — while preserving every operational
-benefit gained from the Rust rewrite (atomic writes, dedup state, async batching,
-cron scheduling).
+- **`queue`** (default) — the Rust pipeline emits structured JSONL task files into
+  the vault, and a Claude Code skill (`/wi-process`) drains them using Claude's
+  native LLM session (no API key, no separate billing).
+- **`anthropic`** — direct Anthropic Messages API for unattended cron where no
+  Claude Code session is available (requires `ANTHROPIC_API_KEY`).
+- **`noop`** — no semantic work; pages render with empty summary/concept sections.
+
+This keeps **Claude Code as the LLM** for the common interactive case while
+preserving an unattended path, and keeps every operational benefit of the Rust
+data plane (atomic writes, dedup state, async batching, cron scheduling).
 
 ## Motivation
 
 ### The Problem
 
-The current implementation (`crates/wi-llm/src/claude.rs:27-29`) calls Anthropic's
-`/v1/messages` endpoint directly using an `ANTHROPIC_API_KEY`:
+A queue-only design forces every semantic operation through the Claude Code
+skill. That is ideal for daily Claude Code users but removes the ability to run
+fully unattended (e.g. an overnight cron on a headless server with no Claude Code
+session). A direct-API-only design has the opposite problem:
 
-```rust
-let api_key = std::env::var("ANTHROPIC_API_KEY")
-    .map_err(|_| LlmError::Api("ANTHROPIC_API_KEY not set".into()))?;
-```
-
-This creates four downstream problems:
-
-1. **Billing divergence** — Claude Code subscription already grants LLM access.
-   Direct API calls bypass that and bill separately on the Anthropic Console.
+1. **Billing divergence** — a Claude Code subscription already grants LLM access;
+   direct API calls bill separately on the Anthropic Console.
 2. **Authentication friction** — users must obtain, store, and rotate a separate
    API key alongside their existing Claude Code auth.
 3. **Capability regression** — direct API loses Claude Code's tool ecosystem
-   (Obsidian MCP, gws CLI, etc.) that the skill could otherwise compose with
-   semantic work.
-4. **Design drift** — this is exactly the pattern we explicitly rejected when
-   evaluating OpenKB. The Rust rewrite was supposed to fix MCP-async limits and
-   provide atomic writes — not to take over LLM orchestration.
+   (Obsidian MCP, gws CLI) that the skill composes with semantic work.
+
+The shipped design resolves the tension by making the provider a config choice
+behind one trait, so neither capability is sacrificed.
 
 ### Original Design Intent
 
@@ -54,11 +52,10 @@ From the project's earliest commits and the Karpathy LLM Wiki pattern:
 > extracts entities and concepts, updates cross-references.** The Rust binary
 > handles collection, deduplication, normalization, and atomic vault writes.
 
-The current architecture violates the "Claude is the LLM" boundary.
+Queue mode honors the "Claude is the LLM" boundary; anthropic mode is the
+explicit, opt-in exception for unattended runs.
 
-## Proposal: Queue-Based Handoff
-
-### Architecture
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -70,23 +67,22 @@ The current architecture violates the "Claude is the LLM" boundary.
 │              raw events + classification                     │
 │                       │                                      │
 │                       ▼                                      │
-│           wi-vault writes to TWO targets:                    │
-│           1. Final pages (rendering-only, no LLM needed)    │
-│           2. LLM work queue (.queue/YYYY-MM-DD-*.jsonl)     │
+│           wi-vault writes daily/concept pages, then          │
+│           the configured LlmClient handles semantics:        │
+│             queue     → buffer tasks, flush JSONL atomically  │
+│             anthropic → call Messages API inline             │
+│             noop      → return empty results                 │
 └──────────────────────────────┬──────────────────────────────┘
-                               │
-                               │ (cron tick completes)
+                               │ (queue mode only)
                                ▼
 ┌─────────────────────────────────────────────────────────────┐
-│            Claude Code skill: /wiki-process                  │
+│            Claude Code skill: /wi-process                    │
 │                                                              │
-│  1. Read .queue/*.jsonl (oldest first)                      │
-│  2. For each queued task:                                   │
-│     - summarize   → write summary to vault                   │
-│     - extract     → create/update concept page              │
-│     - synthesize  → write weekly/monthly/quarterly summary  │
-│  3. Move queue file to .queue/processed/                    │
-│  4. Update wiki/index.md and wiki/log.md                    │
+│  1. Read .wiki-ingest/queue/*.jsonl (oldest first)          │
+│  2. For each task:                                          │
+│     - summarize        → replace target page section         │
+│     - extract-concepts → create/update concept pages         │
+│  3. On full success, move file to queue/processed/           │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -99,151 +95,91 @@ The current architecture violates the "Claude is the LLM" boundary.
 | Deduplication state (redb cache, 90-day window) | Rust (wi-pipeline) | persistent KV, MCP has no equivalent |
 | Frontmatter parsing / template rendering | Rust (wi-vault, wi-pipeline) | deterministic, no LLM judgment needed |
 | Cron scheduling | Rust (wi-cli) | native, deterministic |
-| **Summarization** | Claude Code skill | semantic, LLM-required |
-| **Concept extraction** | Claude Code skill | semantic, requires reasoning |
-| **Concept merging across sources** | Claude Code skill | semantic similarity judgment |
-| **Weekly/Monthly/Quarterly synthesis** | Claude Code skill | semantic narrative generation |
-| **Personal work classification** | Claude Code skill | semantic — distinguishing my work from team |
+| **Summarization** | LlmClient (queue skill / anthropic API) | semantic, LLM-required |
+| **Concept extraction** | LlmClient (queue skill / anthropic API) | semantic, requires reasoning |
+| **Weekly/Monthly/Quarterly synthesis** | LlmClient (queue skill / anthropic API) | semantic narrative generation |
 
 ### Queue Format
 
-Queue files live in `<vault>/.queue/` and use JSONL for append-only semantics
-and incremental processing. Filename encodes the work date and queue type:
+Queue files live in `<vault>/.wiki-ingest/queue/` and use JSONL. Each ingest run
+writes one file named `{run-timestamp}-pid{PID}.jsonl`, published atomically
+(temp file + fsync + rename) only after every target page has been written — so
+once a `.jsonl` file is visible, every task in it points at a page that exists.
 
 ```
-.queue/
-├── 2026-05-23-summarize.jsonl       # one task per ingested event
-├── 2026-05-23-extract.jsonl         # concept extraction tasks
-├── 2026-05-23-synthesize-weekly.jsonl  # weekly synthesis trigger
+.wiki-ingest/queue/
+├── 2026-05-23T07-00-00Z-pid12345.jsonl   # pending, one ingest run
 └── processed/
-    └── 2026-05-22-summarize.jsonl   # moved here after skill completes
+    └── 2026-05-22T07-00-00Z-pid11122.jsonl  # moved here after the skill drains it
 ```
 
 Each line is one queue task:
 
 ```json
 {
-  "task_id": "sum-2026-05-23-001",
-  "task_type": "summarize",
-  "source_event_id": "ai-newsletter:claude-opus-47-release",
-  "source_file": "raw/ai-newsletter/2026-05-23-anthropic-blog.md",
-  "target_file": "daily/ai-briefing/2026-05-23.md",
-  "target_section": "Anthropic",
-  "instructions": "Extract 2-3 sentence summary in Korean. Tag concepts mentioned.",
-  "context": {
-    "labels": ["ai-industry"],
-    "source_type": "blog",
-    "language": "en"
-  }
+  "task_id": "sum-2026-05-23T07-00-00Z-pid12345-000",
+  "kind": "summarize",
+  "created_at": "2026-05-23T07:00:00Z",
+  "input": { "text": "<events concatenated>", "max_sentences": 5 },
+  "target": { "vault_path": "daily/ai-news/2026-05-23.md", "kind": "daily-summary" }
 }
 ```
 
-The skill consumes one task at a time, completes it, and appends to a
-companion `processed.jsonl` so resumption is possible if the skill is
-interrupted mid-batch.
+`kind`: `summarize` | `extract-concepts`. `target.kind` maps each task to the
+exact section heading the skill must replace (e.g. `daily-summary` → `## 요약`).
 
-### Skill Responsibility (`/wiki-process`)
+There is **no `processed.jsonl` sidecar**. The vault edits are the source of
+truth, and every edit is idempotent (section-body replacement, dedupe-aware
+concept merging), so re-running on a partially-drained file is safe.
 
-A new Claude Code skill (`~/.claude/skills/wiki-process/SKILL.md`) reads queue
-files and performs LLM work. Pseudocode of the skill's instructions:
+### Skill Responsibility (`/wi-process`)
+
+`~/.claude/skills/wi-process/SKILL.md` reads queue files and performs LLM work:
 
 ```
-1. Find oldest .queue/*.jsonl file in vault
-2. For each task in the file:
-   a. Read context (source files, related concepts)
-   b. Perform semantic work according to task_type:
-      - summarize: read source, write summary section via Obsidian MCP
-      - extract: scan summary, find candidate concepts, create/update
-                 concept pages, add wikilinks
-      - synthesize: read past 7/30/90 days, write synthesis page
-   c. Update wiki/index.md if new pages were created
-   d. Append result to processed.jsonl
-3. Move completed queue file to .queue/processed/
-4. Report task counts to user
+1. List .wiki-ingest/queue/*.jsonl (oldest filename first).
+2. For each file, for each task in order:
+   a. summarize        → replace the target section body via Obsidian MCP.
+   b. extract-concepts → write concept wikilinks; create/merge concept pages.
+   c. On task failure → record the task_id, abort this file, leave it in place.
+3. Only when every task succeeded, move the file to queue/processed/.
+4. Report processed/failed counts; exit non-zero on any failure.
 ```
 
-The skill uses Obsidian MCP for vault writes (the original I/O path), since
-queue tasks are small (<100 per day) and MCP's per-call latency is acceptable
-when not in a tight loop.
-
-## Migration Plan
-
-### Phase 1: Remove wi-llm
-
-- Delete `crates/wi-llm/` entirely
-- Remove `ANTHROPIC_API_KEY` requirement from README and config
-- Update `Cargo.toml` workspace members
-
-### Phase 2: Add wi-pipeline queue emitter
-
-- New module: `wi-pipeline/src/queue.rs`
-- Existing classify/normalize/dedup logic stays unchanged
-- At pipeline end: instead of calling `LlmClient`, emit JSONL queue entries
-- `wi-vault` gains a `write_queue_entry()` helper
-
-### Phase 3: Drop LLM call sites
-
-- `wi-pipeline/src/synthesis.rs:61` (`self.ctx.llm.summarize`) → emit queue task
-- `wi-pipeline/src/concepts.rs` LLM merge calls → emit queue task
-- All `LlmClient` trait method calls removed from pipeline
-
-### Phase 4: Create /wiki-process skill
-
-- `~/.claude/skills/wiki-process/SKILL.md` with queue-processing instructions
-- Reuses Obsidian MCP tools that the existing `wiki` skill already declares
-- Idempotent: re-running on a partially-processed queue file skips done tasks
-
-### Phase 5: Update orchestration
-
-- Cron entry sequence (typical day):
-  ```
-  07:00  wi ingest ai-news        # Rust: collect + queue summarize tasks
-  07:05  /wiki-process            # Claude Code: drain ai-news queue
-  08:30  wi ingest gmail
-  08:35  /wiki-process
-  09:00  wi ingest team-digest
-  09:05  /wiki-process
-  ```
-- Or batched: `wi ingest --all` followed by a single `/wiki-process` drain
+The skill uses Obsidian MCP for vault writes. Queue tasks are small (<100/day),
+so per-call MCP latency is acceptable.
 
 ## Trade-offs
 
 ### Benefits
 
-- **Zero additional cost**: Claude Code subscription is the only LLM billing
-- **Single auth surface**: no separate Anthropic API key to rotate
-- **Composability**: skill can invoke other skills (`wiki`, `nodex`, `wikigraph`)
-  during processing — direct API can't
-- **Failure isolation**: a failed LLM task leaves the queue entry intact;
-  next `/wiki-process` run picks it up
-- **Inspectable queue**: humans can read `.queue/*.jsonl` and verify what the
-  Rust pipeline asks the skill to do
-- **Codebase shrinks**: removing wi-llm removes ~254 lines of LLM HTTP plumbing
-  and the reqwest dependency
+- **Zero additional cost** in queue mode: the Claude Code subscription is the
+  only LLM billing.
+- **Single auth surface** in queue mode: no separate Anthropic API key.
+- **Unattended capability retained**: anthropic mode covers headless cron.
+- **Composability**: the skill can invoke other skills during processing.
+- **Failure isolation**: a failed queue task leaves the file in place; the next
+  `/wi-process` run replays it. Every edit is idempotent.
+- **Inspectable queue**: humans can read `.wiki-ingest/queue/*.jsonl`.
 
 ### Costs
 
-- **Two-step daily flow**: cron must run `wi ingest` and then `/wiki-process`.
-  Mitigation: a wrapper script `wi-and-process.sh` chains them.
-- **Latency**: Rust pipeline finishes in seconds; LLM step takes longer when
-  Claude Code processes 10-50 tasks. Mitigation: skill processes in parallel
-  where MCP allows (read-many → analyze → write-once).
-- **State split**: dedup state in Rust (`redb`), processing state in queue
-  files. Mitigation: queue files are the source of truth; `redb` only tracks
-  what's already been *queued*, not what's been *processed*.
-- **MCP latency reappears for LLM-driven writes**: but only for the small
-  set of pages the skill produces, not for the bulk source ingestion
-  (which stays in Rust).
+- **Two-step daily flow** in queue mode: cron runs `wi ingest`, then the user (or
+  a scheduled session) runs `/wi-process`. Mitigation: a chained wrapper script.
+- **Latency**: the Rust pipeline finishes in seconds; the LLM step takes longer.
+- **State split**: dedup state in redb, pending semantic work in queue files.
+  Mitigation: the queue flush runs *before* the dedup commit, so a crash between
+  them re-queues on the next run rather than losing work.
 
-### Non-Risks (claims that sound scary but aren't)
+### Non-Risks
 
-- *"What if the skill never runs?"* — Queue files accumulate, but the Rust
-  side keeps working. User runs `/wiki-process` whenever convenient. No data
-  loss.
-- *"What if a queue task is malformed?"* — Skill skips it, logs a warning,
-  continues. Single bad task doesn't poison the queue.
-- *"What if two `/wiki-process` runs overlap?"* — File locking on queue
-  files prevents double-processing. Implementation detail.
+- *"What if the skill never runs?"* — Queue files accumulate; the Rust side keeps
+  working. No data loss.
+- *"What if a queue task is malformed?"* — The skill records it, leaves the file
+  in place, and exits non-zero; a re-run retries.
+- *"What if two `/wi-process` runs overlap?"* — Files are published atomically and
+  are filename-unique per run (timestamp + PID); a drain either sees a complete
+  file or not at all.
 
 ## Alternatives Considered
 
@@ -251,63 +187,31 @@ when not in a tight loop.
 
 Skip semantic synthesis; just collect and template-render.
 
-**Rejected**: loses the core value of the system. Karpathy's wiki *is* the
-LLM-synthesized concept layer. Without it we have a glorified RSS reader.
+**Rejected**: loses the core value. The wiki *is* the LLM-synthesized concept
+layer. (This survives as the `noop` provider for development/CI.)
 
-### Alt B: Spawn `claude` CLI from wi
+### Alt B: Spawn the `claude` CLI from wi
 
-`wi-llm` becomes a subprocess invoker of the `claude --print` command.
+`wi-llm` becomes a subprocess invoker of `claude --print`.
 
 **Rejected**: tight coupling to a specific Claude Code installation, hard to
-test, breaks if Claude Code isn't on PATH. Also feels like a workaround to
-avoid restructuring rather than a clean design.
+test, breaks if Claude Code isn't on PATH.
 
-### Alt C: Keep wi-llm as opt-in fallback
+### Alt C: Queue-only, delete the direct-API path
 
-Default to queue-based; allow direct API for users who want fully autonomous
-overnight runs without invoking the skill.
+Default to queue and remove anthropic entirely.
 
-**Maybe later**: legitimate use case, but adds a second code path to maintain.
-Defer until someone actually needs unattended LLM processing.
+**Rejected**: removes the only unattended path. Kept as the `anthropic` provider
+behind the same trait, with graceful degradation to `noop` when the API key is
+absent.
 
-## Verification
+## Decision
 
-After implementation:
+Accepted as the dual-mode (`queue` / `anthropic` / `noop`) architecture:
 
-```bash
-# Pipeline still works without API key
-unset ANTHROPIC_API_KEY
-wi ingest ai-news --root ~/Documents/Obsidian\ Vault
-# → expect: source pulled, raw written, .queue/2026-05-23-summarize.jsonl created
-ls ~/Documents/Obsidian\ Vault/.queue/
-
-# Skill drains the queue
-# (in Claude Code) /wiki-process
-# → expect: queue file moved to .queue/processed/, summary + concept pages created
-
-# Re-running on empty queue is a no-op
-/wiki-process
-# → expect: "no queued tasks"
-
-# Skill failure leaves queue intact
-# (force a failure mid-batch, e.g., revoke Obsidian REST API key)
-/wiki-process
-# → expect: partial progress saved, queue file remains in .queue/
-# (restore access)
-/wiki-process
-# → expect: resumes from where it left off
-```
-
-## Decision Required
-
-- [ ] Approve queue-based architecture as v0.4 target
-- [ ] Approve removal of `wi-llm` crate
-- [ ] Approve creation of `/wiki-process` skill in `~/.claude/skills/`
-- [ ] Approve cron-then-skill orchestration pattern
-
-If approved, implementation should land in a single PR that:
-1. Deletes `crates/wi-llm/`
-2. Adds `wi-pipeline/src/queue.rs`
-3. Updates `synthesis.rs` and `concepts.rs` to emit queue tasks
-4. Creates the `/wiki-process` skill
-5. Updates README, config.example.yaml, and CLAUDE.md
+- `LlmClient` trait in `wi-llm` with three implementations.
+- Queue provider emits `.wiki-ingest/queue/*.jsonl` and is the default.
+- `/wi-process` skill drains the queue with an abort-on-first-failure,
+  idempotent-replay contract.
+- Flush-before-dedup-commit ordering guarantees no semantic work is lost on
+  partial failure.
