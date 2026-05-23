@@ -53,7 +53,49 @@ pub async fn run(opts: &super::GlobalOpts) -> miette::Result<()> {
         eprintln!("log: no log file to maintain.");
     }
 
-    // 2. Prune dedup cache
+    // 2. Prune processed queue files (older than retention). Pending queue files
+    // (the top-level .wiki-ingest/queue/*.jsonl) are NEVER deleted by maintenance —
+    // they represent unfinished semantic work that `/wi-process` must drain.
+    let processed_dir = vault_root
+        .join(".wiki-ingest")
+        .join("queue")
+        .join("processed");
+    if processed_dir.exists() {
+        let mut entries = tokio::fs::read_dir(&processed_dir)
+            .await
+            .map_err(|e| miette::miette!("read queue/processed: {e}"))?;
+        let mut pruned = 0usize;
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| miette::miette!("queue entry: {e}"))?
+        {
+            let path = entry.path();
+            if path.extension().is_none_or(|ext| ext != "jsonl") {
+                continue;
+            }
+            let metadata = entry
+                .metadata()
+                .await
+                .map_err(|e| miette::miette!("metadata: {e}"))?;
+            let mtime_secs = metadata.modified().ok().and_then(|t| {
+                t.duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|d| d.as_secs() as i64)
+            });
+            if mtime_secs.is_some_and(|m| m < cutoff_secs) {
+                tokio::fs::remove_file(&path)
+                    .await
+                    .map_err(|e| miette::miette!("remove {}: {e}", path.display()))?;
+                pruned += 1;
+            }
+        }
+        eprintln!("queue: pruned {pruned} processed file(s) older than {RETENTION_DAYS}d.");
+    } else {
+        eprintln!("queue: no processed/ directory to maintain.");
+    }
+
+    // 3. Prune dedup cache
     let dedup_path = vault_root.join(".wiki-ingest").join("dedup.redb");
     if dedup_path.exists() {
         let cache = wi_pipeline::dedup_cache_for_maintenance(&dedup_path, &config)
