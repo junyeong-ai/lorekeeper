@@ -1,0 +1,25 @@
+---
+id: {{ slug }}
+title: "{{ name }}"
+created: {{ first_seen }}
+updated: {{ last_seen }}
+confidence: {{ confidence }}
+mention_count: {{ mention_count }}
+sources: {{ sources | tojson }}
+tags: {{ tags | tojson }}
+---
+
+# {{ name }}
+
+## 출처
+
+{% for source in sources %}
+- [[{{ source }}]]
+{% endfor %}
+
+## 메타
+
+- 처음 등장: {{ first_seen }}
+- 최근 등장: {{ last_seen }}
+- 언급 횟수: {{ mention_count }}
+- 추출 방식: {{ confidence }}

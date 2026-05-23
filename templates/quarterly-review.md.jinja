@@ -1,0 +1,48 @@
+---
+id: performance-{{ year }}-Q{{ quarter }}
+title: "{{ year }}년 {{ quarter }}분기 업무 성과 리뷰"
+created: {{ date }}
+labels: ["personal", "strategy"]
+period: "{{ year }}-Q{{ quarter }}"
+---
+
+# {{ year }}년 {{ quarter }}분기 업무 성과 리뷰
+
+## 기간
+
+{{ start_date }} ~ {{ end_date }}
+
+## 업무 카테고리 분포
+
+| 카테고리 | 건수 | 비중 |
+|---|---|---|
+{% for cat in category_stats %}
+| {{ cat.name }} | {{ cat.count }} | {{ cat.percent }}% |
+{% endfor %}
+
+## 주요 성과 Top 5
+
+{% for a in achievements %}
+{{ loop.index }}. {{ a }}
+{% endfor %}
+
+## 월별 요약
+
+{% for m in monthly_summaries %}
+### {{ m.month }}
+
+{{ m.summary }}
+
+{% endfor %}
+
+## 팀 내 기여도
+
+{{ team_contribution }}
+
+## 성장 영역
+
+{{ growth_areas }}
+
+## 다음 분기 방향
+
+{{ next_direction }}

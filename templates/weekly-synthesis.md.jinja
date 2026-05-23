@@ -1,0 +1,34 @@
+---
+id: synthesis-{{ year }}-W{{ "%02d" | format(week) }}
+title: "주간 종합 {{ year }}-W{{ "%02d" | format(week) }}"
+created: {{ date }}
+labels: {{ labels | tojson }}
+period: "{{ year }}-W{{ "%02d" | format(week) }}"
+sources_covered: {{ sources | tojson }}
+---
+
+# 주간 종합 {{ year }}-W{{ "%02d" | format(week) }}
+
+## 이번 주 핵심 주제
+
+{% for theme in themes %}
+### {{ loop.index }}. {{ theme.title }}
+
+{{ theme.description }}
+
+{% endfor %}
+
+## 소스별 요약
+
+{% for source in source_summaries %}
+### {{ source.source_id }}
+
+{{ source.summary }}
+
+{% endfor %}
+
+## 새로 등장한 개념
+
+{% for concept in new_concepts %}
+- [[{{ concept }}]]
+{% endfor %}

@@ -1,0 +1,27 @@
+---
+id: {{ source_id }}-{{ date }}
+title: "슬랙 키워드 트렌드 {{ date }}"
+created: {{ date }}
+labels: {{ labels | tojson }}
+source: {{ source_id }}
+clusters_count: {{ clusters | length }}
+---
+
+# 슬랙 키워드 트렌드 {{ date }}
+
+## 요약
+
+{{ summary }}
+
+{% for cluster in clusters %}
+## {{ cluster.topic }}
+
+- 키워드: {{ cluster.keywords | join(", ") }}
+- 메시지 수: {{ cluster.message_count }}
+- 참여자: {{ cluster.participants | join(", ") }}
+
+{% for msg in cluster.representative_messages %}
+> {{ msg }}
+{% endfor %}
+
+{% endfor %}

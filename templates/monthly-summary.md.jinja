@@ -1,0 +1,24 @@
+---
+id: me-{{ year }}-{{ "%02d" | format(month) }}
+title: "{{ year }}년 {{ month }}월 업무 요약"
+created: {{ end_date }}
+labels: ["personal"]
+period: "{{ year }}-{{ "%02d" | format(month) }}"
+days_logged: {{ days_logged }}
+---
+
+# {{ year }}년 {{ month }}월 업무 요약
+
+## 기간
+
+{{ start_date }} ~ {{ end_date }}
+
+## 핵심 요약
+
+{{ narrative }}
+
+## 카테고리
+
+{% for c in categories %}
+- {{ c }}
+{% endfor %}

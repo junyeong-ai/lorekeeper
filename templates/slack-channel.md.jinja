@@ -1,0 +1,28 @@
+---
+id: {{ source_id }}-{{ date }}
+title: "팀 활동 {{ date }}"
+created: {{ date }}
+labels: {{ labels | tojson }}
+source: {{ source_id }}
+members_count: {{ members | length }}
+---
+
+# 팀 활동 {{ date }}
+
+## 요약
+
+{{ summary }}
+
+{% for member in members %}
+## {{ member.name }}
+
+{% for item in member.items %}
+- {{ item }}
+{% endfor %}
+
+{% endfor %}
+## 관련 개념
+
+{% for concept in concepts %}
+- [[{{ concept }}]]
+{% endfor %}

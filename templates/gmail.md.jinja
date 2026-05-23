@@ -1,0 +1,57 @@
+---
+id: {{ source_id }}-{{ date }}
+title: "이메일 다이제스트 {{ date }}"
+created: {{ date }}
+labels: {{ labels | tojson }}
+total_threads: {{ total }}
+filtered_threads: {{ filtered }}
+action_required: {{ action_count }}
+---
+
+# 이메일 다이제스트 {{ date }}
+
+{% if action_required_items %}
+## ⚡ 조치 필요
+
+{% for item in action_required_items %}
+- **{{ item.subject }}** from {{ item.sender }} — {{ item.summary }}
+{% endfor %}
+
+{% endif %}
+{% if decision_items %}
+## 📋 의사결정
+
+{% for item in decision_items %}
+- **{{ item.subject }}** — {{ item.summary }}
+{% endfor %}
+
+{% endif %}
+{% if project_items %}
+## 📊 프로젝트 업데이트
+
+{% for item in project_items %}
+- **{{ item.subject }}** — {{ item.summary }}
+{% endfor %}
+
+{% endif %}
+{% if knowledge_items %}
+## 📚 지식 공유
+
+{% for item in knowledge_items %}
+- **{{ item.subject }}** — {{ item.summary }}
+{% endfor %}
+
+{% endif %}
+{% if meeting_items %}
+## 🤝 미팅 후속
+
+{% for item in meeting_items %}
+- **{{ item.subject }}** — {{ item.summary }}
+{% endfor %}
+
+{% endif %}
+## 📈 통계
+
+- 전체 수신: {{ total }}건
+- 의미 있는 메일: {{ filtered }}건 (필터링률: {{ filter_rate }}%)
+- 조치 필요: {{ action_count }}건

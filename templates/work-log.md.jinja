@@ -1,0 +1,19 @@
+---
+id: work-log-{{ date }}
+title: "업무 기록 {{ date }}"
+created: {{ date }}
+labels: ["personal"]
+categories: {{ categories | tojson }}
+sources: {{ sources | tojson }}
+---
+
+# 업무 기록 {{ date }}
+
+{% for group in groups %}
+## {{ group.category }}
+
+{% for item in group.items %}
+- {{ item.summary }} *({{ item.source_id }})*
+{% endfor %}
+
+{% endfor %}

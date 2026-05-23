@@ -1,0 +1,28 @@
+---
+id: {{ source_id }}-{{ date }}
+title: "AI 뉴스 {{ date }}"
+created: {{ date }}
+labels: {{ labels | tojson }}
+source: {{ source_id }}
+events_count: {{ events | length }}
+---
+
+# AI 뉴스 {{ date }}
+
+## 핵심 요약
+
+{{ summary }}
+
+## 주요 이벤트
+
+{% for event in events %}
+### {{ event.title }}
+
+{{ event.body }}
+
+{% endfor %}
+## 관련 개념
+
+{% for concept in concepts %}
+- [[{{ concept }}]]
+{% endfor %}
