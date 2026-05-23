@@ -161,7 +161,22 @@ impl Pipeline {
                 .collect::<Vec<_>>()
                 .join("\n---\n");
 
-            let summary = match self.ctx.llm.summarize(&combined, 5).await {
+            let daily_path =
+                wi_core::vault_path::VaultPath::daily(&self.ctx.dirs, source_id, *date).to_string();
+
+            let summary = match self
+                .ctx
+                .llm
+                .summarize(wi_llm::SummarizeRequest {
+                    text: combined.clone(),
+                    max_sentences: 5,
+                    target: wi_llm::TaskTarget {
+                        vault_path: daily_path.clone(),
+                        kind: wi_llm::TargetKind::DailySummary,
+                    },
+                })
+                .await
+            {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::warn!(
@@ -175,7 +190,20 @@ impl Pipeline {
             };
 
             let day_concepts: Vec<ExtractedConcept> = if config.extract_concepts {
-                match self.ctx.llm.extract_concepts(&combined).await {
+                match self
+                    .ctx
+                    .llm
+                    .extract_concepts(wi_llm::ExtractConceptsRequest {
+                        text: combined.clone(),
+                        source_id: source_id.to_string(),
+                        date: *date,
+                        target: wi_llm::TaskTarget {
+                            vault_path: daily_path,
+                            kind: wi_llm::TargetKind::DailyConcepts,
+                        },
+                    })
+                    .await
+                {
                     Ok(c) => c.into_iter().filter(concepts::is_valid).collect(),
                     Err(e) => {
                         tracing::warn!(

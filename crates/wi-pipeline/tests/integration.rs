@@ -426,6 +426,75 @@ async fn plan_does_not_commit_dedup_until_commit_called() {
 }
 
 #[tokio::test]
+async fn queue_mode_emits_jsonl_tasks_with_targets() {
+    use wi_llm::QueueLlmClient;
+
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let mut config = base_config(vault);
+    config
+        .sources
+        .get_mut("test-source")
+        .unwrap()
+        .extract_concepts = true;
+
+    let queue_dir = vault.join(".wiki-ingest").join("queue");
+    let llm: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
+    let ctx = make_ctx(&config, llm);
+    let pipeline = Pipeline::new(vault, ctx, &config).unwrap();
+    let sc = config.sources.get("test-source").unwrap();
+
+    let ts: jiff::Timestamp = "2026-05-23T10:00:00Z".parse().unwrap();
+    let items = vec![raw_item("Test event", "Body", "M1", ts)];
+
+    let result = pipeline
+        .plan(
+            "test-source",
+            sc,
+            items,
+            &IngestOptions {
+                dry_run: false,
+                force: false,
+                target_date: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    // Queue mode: daily page exists but summary section is empty
+    assert_eq!(result.daily_pages.len(), 1);
+    assert!(result.concepts.is_empty(), "concepts deferred to skill");
+
+    // Queue file should contain summarize + extract_concepts tasks
+    let mut entries = tokio::fs::read_dir(&queue_dir).await.unwrap();
+    let entry = entries
+        .next_entry()
+        .await
+        .unwrap()
+        .expect("queue file should exist");
+    let content = tokio::fs::read_to_string(entry.path()).await.unwrap();
+    let tasks: Vec<serde_json::Value> = content
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert!(
+        tasks.iter().any(|t| t["kind"] == "summarize"),
+        "should have a summarize task"
+    );
+    assert!(
+        tasks.iter().any(|t| t["kind"] == "extract-concepts"),
+        "should have an extract-concepts task"
+    );
+    for task in &tasks {
+        let path = task["target"]["vault_path"].as_str().unwrap();
+        assert!(
+            path.contains("daily/test-source/2026-05-23"),
+            "target should point at daily page: {path}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn synthesis_defaults_to_enabled_sources_when_include_empty() {
     let dir = TempDir::new().unwrap();
     let vault = dir.path();

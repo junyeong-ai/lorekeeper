@@ -58,7 +58,20 @@ impl Synthesizer {
                 .collect::<Vec<_>>()
                 .join("\n\n---\n\n");
 
-            let summary = match self.ctx.llm.summarize(&combined_source, 5).await {
+            let weekly_path = VaultPath::weekly_synthesis(&self.ctx.dirs, year, week).to_string();
+            let summary = match self
+                .ctx
+                .llm
+                .summarize(wi_llm::SummarizeRequest {
+                    text: combined_source.clone(),
+                    max_sentences: 5,
+                    target: wi_llm::TaskTarget {
+                        vault_path: weekly_path.clone(),
+                        kind: wi_llm::TargetKind::WeeklySynthesisNarrative,
+                    },
+                })
+                .await
+            {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::warn!(error = %e, source = %source_id, "synthesis summarize failed");
@@ -85,13 +98,20 @@ impl Synthesizer {
             return Ok(None);
         }
 
+        let weekly_path = VaultPath::weekly_synthesis(&self.ctx.dirs, year, week);
         let themes_text = match self
             .ctx
             .llm
-            .summarize(
-                &format!("Identify the top 3-5 themes across all sources this week:\n\n{combined}"),
-                8,
-            )
+            .summarize(wi_llm::SummarizeRequest {
+                text: format!(
+                    "Identify the top 3-5 themes across all sources this week:\n\n{combined}"
+                ),
+                max_sentences: 8,
+                target: wi_llm::TaskTarget {
+                    vault_path: weekly_path.to_string(),
+                    kind: wi_llm::TargetKind::WeeklySynthesisNarrative,
+                },
+            })
             .await
         {
             Ok(s) => s,
@@ -148,15 +168,20 @@ impl Synthesizer {
             .collect::<Vec<_>>()
             .join("\n\n---\n\n");
 
+        let path = VaultPath::weekly_personal(&self.ctx.dirs, year, week);
         let narrative = match self
             .ctx
             .llm
-            .summarize(
-                &format!(
+            .summarize(wi_llm::SummarizeRequest {
+                text: format!(
                     "Summarize this week's personal work into key accomplishments by category:\n\n{combined}"
                 ),
-                10,
-            )
+                max_sentences: 10,
+                target: wi_llm::TaskTarget {
+                    vault_path: path.to_string(),
+                    kind: wi_llm::TargetKind::WeeklyPersonalNarrative,
+                },
+            })
             .await
         {
             Ok(s) => s,
@@ -165,8 +190,6 @@ impl Synthesizer {
                 String::new()
             }
         };
-
-        let path = VaultPath::weekly_personal(&self.ctx.dirs, year, week);
         let context = serde_json::json!({
             "year": year,
             "week": week,
@@ -208,15 +231,20 @@ impl Synthesizer {
             .collect::<Vec<_>>()
             .join("\n\n---\n\n");
 
+        let path = VaultPath::monthly_personal(&self.ctx.dirs, year, month);
         let narrative = match self
             .ctx
             .llm
-            .summarize(
-                &format!(
+            .summarize(wi_llm::SummarizeRequest {
+                text: format!(
                     "Generate a monthly work summary with key achievements and category distribution:\n\n{combined}"
                 ),
-                15,
-            )
+                max_sentences: 15,
+                target: wi_llm::TaskTarget {
+                    vault_path: path.to_string(),
+                    kind: wi_llm::TargetKind::MonthlyNarrative,
+                },
+            })
             .await
         {
             Ok(s) => s,
@@ -225,8 +253,6 @@ impl Synthesizer {
                 String::new()
             }
         };
-
-        let path = VaultPath::monthly_personal(&self.ctx.dirs, year, month);
         let context = serde_json::json!({
             "year": year,
             "month": month,
@@ -286,15 +312,20 @@ impl Synthesizer {
             }
         }
 
+        let path = VaultPath::quarterly_personal(&self.ctx.dirs, year, quarter);
         let narrative = match self
             .ctx
             .llm
-            .summarize(
-                &format!(
+            .summarize(wi_llm::SummarizeRequest {
+                text: format!(
                     "Generate a quarterly performance review: top 5 achievements, category breakdown, growth areas, next direction:\n\n{combined}"
                 ),
-                20,
-            )
+                max_sentences: 20,
+                target: wi_llm::TaskTarget {
+                    vault_path: path.to_string(),
+                    kind: wi_llm::TargetKind::QuarterlyNarrative,
+                },
+            })
             .await
         {
             Ok(s) => s,
@@ -306,7 +337,6 @@ impl Synthesizer {
 
         let category_stats = self.aggregate_category_stats(start, end).await?;
 
-        let path = VaultPath::quarterly_personal(&self.ctx.dirs, year, quarter);
         let context = serde_json::json!({
             "year": year,
             "quarter": quarter,
@@ -359,15 +389,20 @@ impl Synthesizer {
             return Ok(None);
         }
 
+        let path = VaultPath::annual_personal(&self.ctx.dirs, year);
         let narrative = match self
             .ctx
             .llm
-            .summarize(
-                &format!(
+            .summarize(wi_llm::SummarizeRequest {
+                text: format!(
                     "Generate a comprehensive annual performance review based on quarterly summaries:\n\n{combined}"
                 ),
-                25,
-            )
+                max_sentences: 25,
+                target: wi_llm::TaskTarget {
+                    vault_path: path.to_string(),
+                    kind: wi_llm::TargetKind::AnnualNarrative,
+                },
+            })
             .await
         {
             Ok(s) => s,
@@ -377,7 +412,6 @@ impl Synthesizer {
             }
         };
 
-        let path = VaultPath::annual_personal(&self.ctx.dirs, year);
         let context = serde_json::json!({
             "year": year,
             "narrative": narrative,
