@@ -62,6 +62,32 @@ Obsidian Vault/
 └── nodex.toml                       # governance for non-wiki notes
 ```
 
+## Phase 0: Gmail Daily Digest (quick win, immediate value)
+
+Gmail은 가장 즉각적인 가치를 제공하는 소스 — 별도 인프라 없이 Gmail MCP로 바로 수집 가능.
+
+### 0.1 Gmail Source Handler
+
+- [ ] Gmail MCP 도구 연동 (search_threads, get_thread)
+- [ ] Include 쿼리 구성: `is:unread -category:promotions -category:social -category:updates`
+- [ ] Exclude 필터: automated/noreply/notification 패턴
+- [ ] 5가지 분류: action_required / decisions / project_updates / knowledge_sharing / meeting_followup
+- [ ] 노이즈 필터링: 가치 없는 메일 자동 제외
+
+### 0.2 Gmail → Wiki 페이지 생성
+
+- [ ] `daily/gmail-digest/YYYY-MM-DD.md` 생성 (templates/gmail-digest.md 기반)
+- [ ] 섹션별 분류: ⚡조치필요 / 📋의사결정 / 📊프로젝트 / 📚지식공유 / 🤝미팅후속
+- [ ] 각 메일: 발신자 + 핵심 요약 2-3문장 + 필요 액션
+- [ ] 통계 섹션: 전체/필터링/조치필요 건수
+
+### 0.3 Personal Work Tracking Integration
+
+- [ ] action_required → me/work-log/ 에 pending task로 기록
+- [ ] decisions → me/work-log/ 에 completed decision으로 기록
+- [ ] 내가 보낸 project_updates → 내 프로젝트 기여로 기록
+- [ ] 개념 추출: 반복되는 메일 주제 → wiki/concepts/
+
 ## Phase 1: Core Skill + AI Newsletter Ingest
 
 ### 1.1 Skill Creation
@@ -127,7 +153,7 @@ Obsidian Vault/
 
 ### 3.1 Personal Work Log
 
-- [ ] Daily: extract my work items from team digest → `me/work-log/YYYY-MM-DD.md`
+- [ ] Daily: extract my work items from team digest + gmail → `me/work-log/YYYY-MM-DD.md`
 - [ ] Categorize each item into `performance.work_categories`
 - [ ] Frontmatter: `categories: [project-delivery, innovation]`
 
@@ -175,6 +201,9 @@ Register these as Claude Desktop scheduled tasks:
 ```
 # Daily AI briefing (weekdays 07:00)
 /wiki-ingest ai-news
+
+# Gmail daily digest (weekdays 08:30)
+/wiki-ingest gmail
 
 # Team digest (weekdays 09:00)
 /wiki-ingest team-digest

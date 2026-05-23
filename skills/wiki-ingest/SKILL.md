@@ -15,6 +15,8 @@ allowed-tools:
   - "mcp__claude_ai_Google_Drive__search_files"
   - "mcp__claude_ai_Google_Drive__read_file_content"
   - "mcp__claude_ai_Gmail__search_threads"
+  - "mcp__claude_ai_Gmail__get_thread"
+  - "mcp__claude_ai_Gmail__list_labels"
   - "Bash(wikigraph *)"
 ---
 
@@ -45,6 +47,7 @@ Run the full pipeline for one or all sources.
 - `ai-news`: AI newsletter only
 - `team-digest`: team digest only
 - `slack-trends`: Slack keyword trends only
+- `gmail`: Gmail daily digest only
 - `weekly`: weekly synthesis across all sources
 - `monthly`: monthly personal work summary
 - `quarterly`: quarterly performance review
@@ -102,6 +105,65 @@ events_count: 12
    - Sections by cluster
    - Each cluster: representative message, keyword frequency, participants
 6. Track keyword frequency trends in concept pages
+
+### Source: gmail
+
+1. Read `sources.gmail` from config
+2. For each `include` query, search Gmail via `mcp__claude_ai_Gmail__search_threads`:
+   - Use `newer_than:1d` to limit to last 24 hours
+   - Combine with configured query filters
+3. For each thread found, fetch full content via `mcp__claude_ai_Gmail__get_thread`
+4. **Filter out noise**: skip threads matching any `exclude` pattern:
+   - `subject_contains` patterns (automated alerts, no-reply)
+   - `from_contains` patterns (notification systems, mailer daemons)
+   - Promotional/social/update category emails (already filtered by Gmail query)
+5. **Classify** each remaining thread using `classify` rules from config:
+   - Check subject + body for signal keywords
+   - Assign one primary classification: action_required | decisions | project_updates | knowledge_sharing | meeting_followup | other
+6. **Extract value**: for each classified thread, generate a concise summary:
+   - Who: sender and key participants
+   - What: core content/decision/request in 2-3 sentences
+   - Action: any action items for me (if applicable)
+   - Relevance: why this matters for my work
+7. **Write** daily digest to `{vault}/{daily_dir}/gmail-digest/YYYY-MM-DD.md`:
+
+```yaml
+---
+id: gmail-digest-2026-05-23
+title: "Gmail 다이제스트 2026-05-23"
+created: 2026-05-23
+labels: [personal, team-ops]
+total_threads: 15
+filtered_threads: 8
+action_required: 2
+---
+```
+
+Page structure:
+```markdown
+# Gmail 다이제스트 YYYY-MM-DD
+
+## ⚡ 조치 필요 (Action Required)
+- **[Subject]** from Sender — 요약 + 필요 조치
+
+## 📋 의사결정/승인 (Decisions)
+- **[Subject]** — 결정 내용 요약
+
+## 📊 프로젝트 업데이트
+- **[Subject]** — 진행 상황 요약
+
+## 📚 지식 공유
+- **[Subject]** — 핵심 내용 + 참고 링크
+
+## 🤝 미팅 후속
+- **[Subject]** — 회의 결과 + action items
+```
+
+8. **Personal tracking**: all gmail items are personal work signals:
+   - `action_required` items → copy to `me/work-log/YYYY-MM-DD.md` as pending tasks
+   - `decisions` items → copy as completed decisions
+   - `project_updates` I sent → copy as my project contributions
+9. Extract concepts from significant email topics (recurring themes across days)
 
 ### Weekly Synthesis
 
