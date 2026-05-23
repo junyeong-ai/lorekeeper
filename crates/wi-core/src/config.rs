@@ -57,6 +57,8 @@ impl Config {
             }
         }
 
+        self.vault.dirs.validate()?;
+
         if let Some(tz_name) = self.vault.timezone.as_deref()
             && tz_name != "system"
         {
@@ -256,6 +258,51 @@ impl Default for VaultDirs {
             wiki: "wiki".into(),
         }
     }
+}
+
+impl VaultDirs {
+    /// Every vault directory is joined onto the vault root to build output paths. A value
+    /// containing `..`, an absolute prefix, or an empty segment could escape the vault root
+    /// and write arbitrary files, so reject those before any path is constructed.
+    fn validate(&self) -> Result<(), ConfigError> {
+        let fields = [
+            ("daily", &self.daily),
+            ("weekly", &self.weekly),
+            ("monthly", &self.monthly),
+            ("quarterly", &self.quarterly),
+            ("annually", &self.annually),
+            ("personal", &self.personal),
+            ("wiki", &self.wiki),
+        ];
+        for (name, value) in fields {
+            validate_vault_dir(name, value)?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_vault_dir(field: &str, value: &str) -> Result<(), ConfigError> {
+    use std::path::{Component, Path};
+
+    if value.is_empty() {
+        return Err(ConfigError::Validation(format!(
+            "vault.dirs.{field} must not be empty"
+        )));
+    }
+    let path = Path::new(value);
+    for component in path.components() {
+        match component {
+            Component::Normal(_) => {}
+            Component::CurDir => {}
+            _ => {
+                return Err(ConfigError::Validation(format!(
+                    "vault.dirs.{field} ('{value}') must be a relative path inside the vault \
+                     (no '..', absolute, or drive-prefixed segments)"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -527,7 +574,7 @@ pub struct LlmConfig {
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
-            provider: LlmProvider::Anthropic,
+            provider: LlmProvider::Queue,
             model: "claude-sonnet-4-6".into(),
             max_tokens: 4096,
         }
@@ -599,6 +646,68 @@ sources:
     fn expand_tilde_works() {
         let expanded = expand_tilde("~/Documents");
         assert!(!expanded.to_string_lossy().contains('~'));
+    }
+
+    #[test]
+    fn validate_rejects_vault_dir_traversal() {
+        let yaml = r#"
+vault:
+  root: /tmp/vault
+  dirs:
+    daily: "../../etc"
+identity:
+  name: test
+  email: test@test.com
+sources:
+  s1:
+    type: gmail
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(config.validate().is_err(), "'..' segment must be rejected");
+    }
+
+    #[test]
+    fn validate_rejects_absolute_vault_dir() {
+        let yaml = r#"
+vault:
+  root: /tmp/vault
+  dirs:
+    wiki: "/etc/passwd"
+identity:
+  name: test
+  email: test@test.com
+sources:
+  s1:
+    type: gmail
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(config.validate().is_err(), "absolute path must be rejected");
+    }
+
+    #[test]
+    fn validate_accepts_nested_vault_dir() {
+        let yaml = r#"
+vault:
+  root: /tmp/vault
+  dirs:
+    daily: "sources/daily"
+identity:
+  name: test
+  email: test@test.com
+sources:
+  s1:
+    type: gmail
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(
+            config.validate().is_ok(),
+            "a normal nested relative path must be allowed"
+        );
+    }
+
+    #[test]
+    fn default_llm_provider_is_queue() {
+        assert_eq!(LlmConfig::default().provider, LlmProvider::Queue);
     }
 
     #[test]
