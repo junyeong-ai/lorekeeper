@@ -46,9 +46,17 @@ Only `.jsonl` files matter to this skill.
 **Known limitation:** the tmp sweep is mtime-based, not PID-aware.
 If an ingest process is paused (SIGSTOP) for more than 1 hour, a
 later-starting ingest could delete its tmp; the paused ingest's flush
-will then fail with ENOENT and that run's LLM tasks are lost (pages
-and dedup are preserved). In practice, cron-scheduled ingests never
-hit this case.
+will then fail with ENOENT and that run's LLM tasks are lost. Pages
+written before the failure remain on disk and the affected events
+are NOT marked seen in dedup (the flush failure aborts before the
+dedup commit), so the recovery path is simply:
+
+```bash
+wi ingest --force        # re-extracts the same events, re-queues their tasks
+/wi-process              # drains the new queue file
+```
+
+In practice, cron-scheduled ingests never hit this case.
 
 ## Queue task schema
 
@@ -118,12 +126,21 @@ Each line in a queue file is one task:
         mention_count, sources fields — match the format from existing
         concept pages).
 
-      - **Synthesis narratives** (`weekly-synthesis`,
-        `weekly-personal`, `monthly`, `quarterly`, `annual`) target:
-        the narrative section heading is the first or only `## ` heading
-        after the `# ` title (e.g. `## 이번 주 핵심 주제`,
-        `## 요약`, `## 기간`). Replace its body with the generated
-        narrative. Preserve all frontmatter and other section headings.
+      - **Synthesis narratives** — each `target.kind` maps to one
+        specific `##` heading (both the bundled Jinja template and the
+        fallback renderer guarantee the anchor exists):
+
+        | `target.kind` | Anchor heading |
+        |---|---|
+        | `weekly-synthesis-narrative` | `## 이번 주 핵심 주제` |
+        | `weekly-personal-narrative`  | `## 핵심 요약` |
+        | `monthly-narrative`          | `## 핵심 요약` |
+        | `quarterly-narrative`        | `## 주요 성과 Top 5` |
+        | `annual-narrative`           | `## 종합 요약` |
+
+        Replace the body of the anchor (everything between this heading
+        and the next `## ` heading) with the generated narrative.
+        Preserve all frontmatter and other section headings.
 
    d. **On task failure** (page not found, MCP error, malformed task):
       record the failed `task_id` and the reason. **Abort processing

@@ -573,42 +573,47 @@ fn split_into_lines(text: &str) -> Vec<String> {
         .collect()
 }
 
+// Fallback renderers used when the user has not installed Jinja templates.
+// Each emits a stable `##` section anchor that holds the narrative body, so
+// `/wi-process` can locate and replace it in queue mode even when no template
+// is available. The anchor names match the corresponding Jinja templates.
+
 fn fallback_weekly_synthesis(year: i16, week: u8, ctx: &serde_json::Value) -> String {
     format!(
-        "---\nid: synthesis-{year}-W{week:02}\ntitle: \"주간 종합 {year}-W{week:02}\"\ncreated: {}\nlabels: [\"synthesis\"]\n---\n\n# 주간 종합 {year}-W{week:02}\n\n{}\n",
+        "---\nid: synthesis-{year}-W{week:02}\ntitle: \"주간 종합 {year}-W{week:02}\"\ncreated: {}\nlabels: [\"synthesis\"]\n---\n\n# 주간 종합 {year}-W{week:02}\n\n## 이번 주 핵심 주제\n\n{}\n",
         ctx["date"].as_str().unwrap_or(""),
-        ctx["narrative"].as_str().unwrap_or("(no narrative)"),
+        ctx["narrative"].as_str().unwrap_or(""),
     )
 }
 
 fn fallback_personal(year: i16, week: u8, ctx: &serde_json::Value) -> String {
     format!(
-        "---\nid: me-{year}-W{week:02}\ntitle: \"내 주간 업무 {year}-W{week:02}\"\ncreated: {}\nlabels: [\"personal\"]\n---\n\n# 내 주간 업무 {year}-W{week:02}\n\n{}\n",
+        "---\nid: me-{year}-W{week:02}\ntitle: \"내 주간 업무 {year}-W{week:02}\"\ncreated: {}\nlabels: [\"personal\"]\n---\n\n# 내 주간 업무 {year}-W{week:02}\n\n## 핵심 요약\n\n{}\n",
         ctx["end_date"].as_str().unwrap_or(""),
-        ctx["narrative"].as_str().unwrap_or("(no narrative)"),
+        ctx["narrative"].as_str().unwrap_or(""),
     )
 }
 
 fn fallback_monthly(year: i16, month: u8, ctx: &serde_json::Value) -> String {
     format!(
-        "---\nid: me-{year}-{month:02}\ntitle: \"{year}년 {month}월 업무 요약\"\ncreated: {}\nlabels: [\"personal\"]\n---\n\n# {year}년 {month}월 업무 요약\n\n{}\n",
+        "---\nid: me-{year}-{month:02}\ntitle: \"{year}년 {month}월 업무 요약\"\ncreated: {}\nlabels: [\"personal\"]\n---\n\n# {year}년 {month}월 업무 요약\n\n## 핵심 요약\n\n{}\n",
         ctx["end_date"].as_str().unwrap_or(""),
-        ctx["narrative"].as_str().unwrap_or("(no narrative)"),
+        ctx["narrative"].as_str().unwrap_or(""),
     )
 }
 
 fn fallback_quarterly(year: i16, quarter: u8, ctx: &serde_json::Value) -> String {
     format!(
-        "---\nid: performance-{year}-Q{quarter}\ntitle: \"{year}년 {quarter}분기 성과 리뷰\"\ncreated: {}\nlabels: [\"personal\", \"strategy\"]\n---\n\n# {year}년 {quarter}분기 성과 리뷰\n\n{}\n",
+        "---\nid: performance-{year}-Q{quarter}\ntitle: \"{year}년 {quarter}분기 성과 리뷰\"\ncreated: {}\nlabels: [\"personal\", \"strategy\"]\n---\n\n# {year}년 {quarter}분기 성과 리뷰\n\n## 주요 성과 Top 5\n\n{}\n",
         ctx["date"].as_str().unwrap_or(""),
-        ctx["narrative"].as_str().unwrap_or("(no narrative)"),
+        ctx["narrative"].as_str().unwrap_or(""),
     )
 }
 
 fn fallback_annual(year: i16, ctx: &serde_json::Value) -> String {
     format!(
-        "---\nid: annual-{year}\ntitle: \"{year}년 연간 성과 리뷰\"\ncreated: {year}-12-31\nlabels: [\"personal\", \"strategy\"]\n---\n\n# {year}년 연간 성과 리뷰\n\n{}\n",
-        ctx["narrative"].as_str().unwrap_or("(no narrative)"),
+        "---\nid: annual-{year}\ntitle: \"{year}년 연간 성과 리뷰\"\ncreated: {year}-12-31\nlabels: [\"personal\", \"strategy\"]\n---\n\n# {year}년 연간 성과 리뷰\n\n## 종합 요약\n\n{}\n",
+        ctx["narrative"].as_str().unwrap_or(""),
     )
 }
 
