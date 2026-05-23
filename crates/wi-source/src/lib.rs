@@ -40,7 +40,6 @@ pub struct ExtractContext {
 
 #[async_trait]
 pub trait Source: Send + Sync {
-    fn source_type(&self) -> SourceType;
     async fn extract(
         &self,
         params: &serde_json::Value,

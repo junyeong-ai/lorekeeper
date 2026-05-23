@@ -78,12 +78,6 @@ pub struct SummarizeRequest {
 }
 
 #[derive(Debug, Clone)]
-pub struct ClassifyLabelsRequest {
-    pub text: String,
-    pub candidates: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
 pub struct ExtractConceptsRequest {
     pub text: String,
     pub source_id: String,
@@ -94,8 +88,6 @@ pub struct ExtractConceptsRequest {
 #[async_trait]
 pub trait LlmClient: Send + Sync {
     async fn summarize(&self, req: SummarizeRequest) -> Result<String, LlmError>;
-
-    async fn classify_labels(&self, req: ClassifyLabelsRequest) -> Result<Vec<String>, LlmError>;
 
     async fn extract_concepts(
         &self,

@@ -3,7 +3,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use wi_core::config::SourceType;
 use wi_core::event::RawItem;
 
 use super::{GoogleAuth, check_response};
@@ -77,10 +76,6 @@ impl DriveSource {
 
 #[async_trait]
 impl Source for DriveSource {
-    fn source_type(&self) -> SourceType {
-        SourceType::GoogleDrive
-    }
-
     async fn extract(
         &self,
         params: &serde_json::Value,

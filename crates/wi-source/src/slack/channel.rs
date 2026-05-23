@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use wi_core::config::SourceType;
 use wi_core::event::RawItem;
 
 use super::{resolve_channel_id, slack_post};
@@ -43,10 +42,6 @@ impl SlackChannelSource {
 
 #[async_trait]
 impl Source for SlackChannelSource {
-    fn source_type(&self) -> SourceType {
-        SourceType::SlackChannel
-    }
-
     async fn extract(
         &self,
         params: &serde_json::Value,

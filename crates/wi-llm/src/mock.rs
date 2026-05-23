@@ -2,12 +2,11 @@ use async_trait::async_trait;
 
 use wi_core::concept::ExtractedConcept;
 
-use crate::{ClassifyLabelsRequest, ExtractConceptsRequest, LlmClient, LlmError, SummarizeRequest};
+use crate::{ExtractConceptsRequest, LlmClient, LlmError, SummarizeRequest};
 
 #[derive(Default)]
 pub struct MockLlmClient {
     pub summary: String,
-    pub labels: Vec<String>,
     pub concepts: Vec<ExtractedConcept>,
     pub fail: bool,
 }
@@ -35,13 +34,6 @@ impl LlmClient for MockLlmClient {
             return Err(LlmError::Api("mock failure".into()));
         }
         Ok(self.summary.clone())
-    }
-
-    async fn classify_labels(&self, _req: ClassifyLabelsRequest) -> Result<Vec<String>, LlmError> {
-        if self.fail {
-            return Err(LlmError::Api("mock failure".into()));
-        }
-        Ok(self.labels.clone())
     }
 
     async fn extract_concepts(

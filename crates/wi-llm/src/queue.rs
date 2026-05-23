@@ -7,10 +7,7 @@ use tokio::io::AsyncWriteExt;
 
 use wi_core::concept::ExtractedConcept;
 
-use crate::{
-    ClassifyLabelsRequest, ExtractConceptsRequest, LlmClient, LlmError, SummarizeRequest,
-    TaskTarget,
-};
+use crate::{ExtractConceptsRequest, LlmClient, LlmError, SummarizeRequest, TaskTarget};
 
 /// LlmClient that defers semantic work to a Claude Code skill. Buffers task records
 /// in memory during `summarize`/`extract_concepts` calls; `flush` writes the entire
@@ -95,13 +92,6 @@ impl LlmClient for QueueLlmClient {
         };
         self.enqueue(task).await;
         Ok(String::new())
-    }
-
-    async fn classify_labels(&self, _req: ClassifyLabelsRequest) -> Result<Vec<String>, LlmError> {
-        // Classification feeds in-memory event labels, not a vault page. Queue mode
-        // currently delegates only page-producing tasks; classification is left to
-        // Rust's keyword-based `classify_by_keywords` stage.
-        Ok(vec![])
     }
 
     async fn extract_concepts(

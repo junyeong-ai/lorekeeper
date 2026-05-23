@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use wi_core::config::SourceType;
 use wi_core::event::RawItem;
 
 use crate::credentials::JiraCredentials;
@@ -80,10 +79,6 @@ impl JiraSource {
 
 #[async_trait]
 impl Source for JiraSource {
-    fn source_type(&self) -> SourceType {
-        SourceType::Jira
-    }
-
     async fn extract(
         &self,
         params: &serde_json::Value,

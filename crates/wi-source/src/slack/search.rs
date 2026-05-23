@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use wi_core::config::SourceType;
 use wi_core::event::RawItem;
 
 use super::slack_post;
@@ -61,10 +60,6 @@ impl SlackSearchSource {
 
 #[async_trait]
 impl Source for SlackSearchSource {
-    fn source_type(&self) -> SourceType {
-        SourceType::SlackSearch
-    }
-
     async fn extract(
         &self,
         params: &serde_json::Value,

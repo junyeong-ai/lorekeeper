@@ -2,7 +2,7 @@ use async_trait::async_trait;
 
 use wi_core::concept::ExtractedConcept;
 
-use crate::{ClassifyLabelsRequest, ExtractConceptsRequest, LlmClient, LlmError, SummarizeRequest};
+use crate::{ExtractConceptsRequest, LlmClient, LlmError, SummarizeRequest};
 
 pub struct NoopLlmClient;
 
@@ -10,10 +10,6 @@ pub struct NoopLlmClient;
 impl LlmClient for NoopLlmClient {
     async fn summarize(&self, _req: SummarizeRequest) -> Result<String, LlmError> {
         Ok(String::new())
-    }
-
-    async fn classify_labels(&self, _req: ClassifyLabelsRequest) -> Result<Vec<String>, LlmError> {
-        Ok(vec![])
     }
 
     async fn extract_concepts(

@@ -3,7 +3,7 @@ use serde::Deserialize;
 
 use wi_core::concept::ExtractedConcept;
 
-use crate::{ClassifyLabelsRequest, ExtractConceptsRequest, LlmClient, LlmError, SummarizeRequest};
+use crate::{ExtractConceptsRequest, LlmClient, LlmError, SummarizeRequest};
 
 pub struct ClaudeClient {
     http: reqwest::Client,
@@ -109,17 +109,6 @@ impl LlmClient for ClaudeClient {
             ),
         )
         .await
-    }
-
-    async fn classify_labels(&self, req: ClassifyLabelsRequest) -> Result<Vec<String>, LlmError> {
-        let resp = self
-            .call(
-                "You classify text. Given candidate labels, output a JSON array of matching labels. Output ONLY the JSON array.",
-                &format!("Labels: {}\n\nText:\n{}", req.candidates.join(", "), req.text),
-            )
-            .await?;
-        serde_json::from_str(strip_code_fences(&resp))
-            .map_err(|e| LlmError::Api(format!("label parse: {e}")))
     }
 
     async fn extract_concepts(
