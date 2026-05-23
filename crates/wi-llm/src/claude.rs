@@ -3,7 +3,7 @@ use serde::Deserialize;
 
 use wi_core::concept::ExtractedConcept;
 
-use crate::{LlmClient, LlmError};
+use crate::{ClassifyLabelsRequest, ExtractConceptsRequest, LlmClient, LlmError, SummarizeRequest};
 
 pub struct ClaudeClient {
     http: reqwest::Client,
@@ -100,34 +100,36 @@ fn strip_code_fences(text: &str) -> &str {
 
 #[async_trait]
 impl LlmClient for ClaudeClient {
-    async fn summarize(&self, text: &str, max_sentences: usize) -> Result<String, LlmError> {
+    async fn summarize(&self, req: SummarizeRequest) -> Result<String, LlmError> {
         self.call(
             "You are a concise summarizer. Output only the summary, no preamble.",
-            &format!("Summarize in at most {max_sentences} bullet points:\n\n{text}"),
+            &format!(
+                "Summarize in at most {} bullet points:\n\n{}",
+                req.max_sentences, req.text
+            ),
         )
         .await
     }
 
-    async fn classify_labels(
-        &self,
-        text: &str,
-        candidates: &[String],
-    ) -> Result<Vec<String>, LlmError> {
+    async fn classify_labels(&self, req: ClassifyLabelsRequest) -> Result<Vec<String>, LlmError> {
         let resp = self
             .call(
                 "You classify text. Given candidate labels, output a JSON array of matching labels. Output ONLY the JSON array.",
-                &format!("Labels: {}\n\nText:\n{text}", candidates.join(", ")),
+                &format!("Labels: {}\n\nText:\n{}", req.candidates.join(", "), req.text),
             )
             .await?;
         serde_json::from_str(strip_code_fences(&resp))
             .map_err(|e| LlmError::Api(format!("label parse: {e}")))
     }
 
-    async fn extract_concepts(&self, text: &str) -> Result<Vec<ExtractedConcept>, LlmError> {
+    async fn extract_concepts(
+        &self,
+        req: ExtractConceptsRequest,
+    ) -> Result<Vec<ExtractedConcept>, LlmError> {
         let resp = self
             .call(
                 r#"Extract named entities, technologies, key topics. Output JSON array: [{"name":"...","slug":"...","confidence":"extracted"|"inferred"}]. ONLY the JSON array."#,
-                text,
+                &req.text,
             )
             .await?;
         serde_json::from_str(strip_code_fences(&resp))

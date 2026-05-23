@@ -519,7 +519,7 @@ impl Default for PeriodSynthesisConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct LlmConfig {
-    pub provider: String,
+    pub provider: LlmProvider,
     pub model: String,
     pub max_tokens: u32,
 }
@@ -527,11 +527,25 @@ pub struct LlmConfig {
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
-            provider: "anthropic".into(),
+            provider: LlmProvider::Anthropic,
             model: "claude-sonnet-4-6".into(),
             max_tokens: 4096,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LlmProvider {
+    /// Direct Anthropic Messages API. Requires `ANTHROPIC_API_KEY`. Unattended-friendly.
+    Anthropic,
+    /// Emit JSONL queue tasks under `<vault>/.wiki-ingest/queue/`. A Claude Code skill
+    /// (`/wi-process`) consumes the queue and edits target pages via Obsidian MCP using
+    /// Claude Code's native LLM session (no API key, no separate billing).
+    Queue,
+    /// No LLM work. Daily pages render without summary/concepts sections. Useful for
+    /// development, CI, or vault-only sources where Rust templating is sufficient.
+    Noop,
 }
 
 fn expand_tilde(path: &str) -> PathBuf {

@@ -2018,9 +2018,11 @@ name = "wi-llm"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "jiff",
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",
