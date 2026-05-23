@@ -101,4 +101,14 @@ pub trait LlmClient: Send + Sync {
         &self,
         req: ExtractConceptsRequest,
     ) -> Result<Vec<ExtractedConcept>, LlmError>;
+
+    /// Commit any buffered side-effects. The CLI calls this once at the end of a
+    /// successful ingest run, AFTER all vault writes have succeeded. Clients that
+    /// perform synchronous remote calls (anthropic, noop) leave this as the default
+    /// no-op. The queue client buffers tasks in memory and writes the JSONL file
+    /// atomically here (temp + fsync + rename) so a mid-run abort drops orphan tasks
+    /// instead of persisting them ahead of their target pages.
+    async fn flush(&self) -> Result<(), LlmError> {
+        Ok(())
+    }
 }

@@ -440,7 +440,7 @@ async fn queue_mode_emits_jsonl_tasks_with_targets() {
 
     let queue_dir = vault.join(".wiki-ingest").join("queue");
     let llm: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
-    let ctx = make_ctx(&config, llm);
+    let ctx = make_ctx(&config, llm.clone());
     let pipeline = Pipeline::new(vault, ctx, &config).unwrap();
     let sc = config.sources.get("test-source").unwrap();
 
@@ -465,7 +465,16 @@ async fn queue_mode_emits_jsonl_tasks_with_targets() {
     assert_eq!(result.daily_pages.len(), 1);
     assert!(result.concepts.is_empty(), "concepts deferred to skill");
 
-    // Queue file should contain summarize + extract_concepts tasks
+    // Tasks buffer in memory until flush — the queue dir doesn't even exist yet.
+    assert!(
+        !queue_dir.exists(),
+        "queue dir must not be created before flush"
+    );
+
+    // Simulate the CLI's end-of-run commit.
+    llm.flush().await.expect("flush should succeed");
+
+    // After flush: a single JSONL file with both tasks.
     let mut entries = tokio::fs::read_dir(&queue_dir).await.unwrap();
     let entry = entries
         .next_entry()

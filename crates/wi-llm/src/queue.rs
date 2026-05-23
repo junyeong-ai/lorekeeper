@@ -12,17 +12,23 @@ use crate::{
     TaskTarget,
 };
 
-/// LlmClient that defers semantic work to a Claude Code skill by appending JSONL
-/// task records to `<queue_dir>/{run_id}.jsonl`. All semantic methods return empty
-/// results — Pipeline templates handle the empty case, and `/wi-process` later edits
-/// the target pages via Obsidian MCP.
+/// LlmClient that defers semantic work to a Claude Code skill. Buffers task records
+/// in memory during `summarize`/`extract_concepts` calls; `flush` writes the entire
+/// queue to `<queue_dir>/{run_id}.jsonl` atomically (temp + fsync + rename).
+///
+/// The buffer-then-rename design preserves an invariant `/wi-process` depends on:
+/// **a queue file exists only when every task in it points at a page the pipeline
+/// also wrote successfully**. A fatal mid-run error drops the in-memory buffer
+/// without leaving a half-written JSONL or orphan tasks targeting pages that never
+/// got written.
 pub struct QueueLlmClient {
     queue_dir: PathBuf,
     run_id: String,
     counter: AtomicU64,
+    buffer: tokio::sync::Mutex<Vec<QueueTask>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueueTask {
     pub task_id: String,
     pub kind: TaskKind,
@@ -52,6 +58,7 @@ impl QueueLlmClient {
             queue_dir,
             run_id,
             counter: AtomicU64::new(0),
+            buffer: tokio::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -68,24 +75,8 @@ impl QueueLlmClient {
         format!("{prefix}-{}-{:03}", self.run_id, n)
     }
 
-    async fn append(&self, task: &QueueTask) -> Result<(), LlmError> {
-        tokio::fs::create_dir_all(&self.queue_dir)
-            .await
-            .map_err(|e| LlmError::QueueIo(format!("create dir: {e}")))?;
-        let line = serde_json::to_string(task)
-            .map_err(|e| LlmError::QueueIo(format!("serialize: {e}")))?;
-
-        let path = self.queue_path();
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .await
-            .map_err(|e| LlmError::QueueIo(format!("open {}: {e}", path.display())))?;
-        file.write_all(format!("{line}\n").as_bytes())
-            .await
-            .map_err(|e| LlmError::QueueIo(format!("write: {e}")))?;
-        Ok(())
+    async fn enqueue(&self, task: QueueTask) {
+        self.buffer.lock().await.push(task);
     }
 }
 
@@ -102,7 +93,7 @@ impl LlmClient for QueueLlmClient {
             }),
             target: req.target,
         };
-        self.append(&task).await?;
+        self.enqueue(task).await;
         Ok(String::new())
     }
 
@@ -128,8 +119,59 @@ impl LlmClient for QueueLlmClient {
             }),
             target: req.target,
         };
-        self.append(&task).await?;
+        self.enqueue(task).await;
         Ok(vec![])
+    }
+
+    async fn flush(&self) -> Result<(), LlmError> {
+        let mut buffer = self.buffer.lock().await;
+        if buffer.is_empty() {
+            return Ok(());
+        }
+
+        tokio::fs::create_dir_all(&self.queue_dir)
+            .await
+            .map_err(|e| LlmError::QueueIo(format!("create dir: {e}")))?;
+
+        let final_path = self.queue_path();
+        let tmp_path = final_path.with_extension("jsonl.tmp");
+
+        // Open the temp file for write (truncate if a previous flush attempt left one).
+        let mut file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp_path)
+            .await
+            .map_err(|e| LlmError::QueueIo(format!("open {}: {e}", tmp_path.display())))?;
+
+        for task in buffer.iter() {
+            let line = serde_json::to_string(task)
+                .map_err(|e| LlmError::QueueIo(format!("serialize: {e}")))?;
+            file.write_all(format!("{line}\n").as_bytes())
+                .await
+                .map_err(|e| LlmError::QueueIo(format!("write: {e}")))?;
+        }
+        file.flush()
+            .await
+            .map_err(|e| LlmError::QueueIo(format!("flush: {e}")))?;
+        file.sync_all()
+            .await
+            .map_err(|e| LlmError::QueueIo(format!("fsync: {e}")))?;
+        drop(file);
+
+        tokio::fs::rename(&tmp_path, &final_path)
+            .await
+            .map_err(|e| {
+                LlmError::QueueIo(format!(
+                    "rename {} → {}: {e}",
+                    tmp_path.display(),
+                    final_path.display()
+                ))
+            })?;
+
+        buffer.clear();
+        Ok(())
     }
 }
 
@@ -140,7 +182,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[tokio::test]
-    async fn summarize_appends_jsonl_task() {
+    async fn summarize_buffers_until_flush() {
         let dir = TempDir::new().unwrap();
         let client = QueueLlmClient::new(dir.path().to_path_buf());
 
@@ -154,6 +196,14 @@ mod tests {
         };
         let result = client.summarize(req).await.unwrap();
         assert!(result.is_empty(), "queue mode returns empty result");
+
+        // Before flush: no file on disk.
+        assert!(
+            !client.queue_path().exists(),
+            "queue file must not exist before flush"
+        );
+
+        client.flush().await.unwrap();
 
         let content = tokio::fs::read_to_string(client.queue_path())
             .await
@@ -180,6 +230,7 @@ mod tests {
             };
             client.summarize(req).await.unwrap();
         }
+        client.flush().await.unwrap();
 
         let content = tokio::fs::read_to_string(client.queue_path())
             .await
@@ -203,11 +254,53 @@ mod tests {
         };
         let concepts = client.extract_concepts(req).await.unwrap();
         assert!(concepts.is_empty(), "queue mode emits task, returns empty");
+        client.flush().await.unwrap();
 
         let content = tokio::fs::read_to_string(client.queue_path())
             .await
             .unwrap();
         let task: QueueTask = serde_json::from_str(content.trim()).unwrap();
         assert!(matches!(task.kind, TaskKind::ExtractConcepts));
+    }
+
+    #[tokio::test]
+    async fn flush_without_tasks_writes_nothing() {
+        let dir = TempDir::new().unwrap();
+        let client = QueueLlmClient::new(dir.path().to_path_buf());
+
+        client.flush().await.unwrap();
+
+        assert!(
+            !client.queue_path().exists(),
+            "empty buffer must not produce a queue file"
+        );
+        let tmp = client.queue_path().with_extension("jsonl.tmp");
+        assert!(!tmp.exists(), "temp file must not linger");
+    }
+
+    #[tokio::test]
+    async fn abort_before_flush_persists_nothing() {
+        // Simulates the recovery invariant: a fatal mid-run error must not leave a
+        // queue file behind, since the corresponding pages were never written either.
+        let dir = TempDir::new().unwrap();
+        let client = QueueLlmClient::new(dir.path().to_path_buf());
+
+        let req = SummarizeRequest {
+            text: "x".into(),
+            max_sentences: 5,
+            target: TaskTarget {
+                vault_path: "p".into(),
+                kind: TargetKind::DailySummary,
+            },
+        };
+        client.summarize(req).await.unwrap();
+        // No flush call — drop here.
+        drop(client);
+
+        let dir_entries: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+        assert!(
+            dir_entries.is_empty(),
+            "buffered tasks must not touch the filesystem"
+        );
     }
 }
