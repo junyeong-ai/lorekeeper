@@ -12,18 +12,30 @@ pub fn assign_static_labels(events: &mut [Event], labels: &[String]) {
 }
 
 pub fn flag_personal(events: &mut [Event], identity: &Identity) {
-    let email = identity.email.to_lowercase();
-    let name = identity.name.to_lowercase();
-    let slack_id = identity.slack_id.as_deref().map(str::to_lowercase);
-    let jira_id = identity.jira_id.as_deref().map(str::to_lowercase);
+    // Empty identity tokens would make `str::contains` match every event (`"x".contains("")`
+    // is always true), flagging the whole vault as personal. Drop blanks up front.
+    let nonblank = |s: String| if s.is_empty() { None } else { Some(s) };
+    let email = nonblank(identity.email.to_lowercase());
+    let name = nonblank(identity.name.to_lowercase());
+    let slack_id = identity
+        .slack_id
+        .as_deref()
+        .map(str::to_lowercase)
+        .and_then(nonblank);
+    let jira_id = identity
+        .jira_id
+        .as_deref()
+        .map(str::to_lowercase)
+        .and_then(nonblank);
 
     for event in events {
         let author = event.author.as_deref().unwrap_or_default().to_lowercase();
         let meta = event.metadata.to_string().to_lowercase();
 
-        let matched = author.contains(&email)
-            || author.contains(&name)
-            || meta.contains(&email)
+        let matched = email
+            .as_deref()
+            .is_some_and(|e| author.contains(e) || meta.contains(e))
+            || name.as_deref().is_some_and(|n| author.contains(n))
             || slack_id
                 .as_deref()
                 .is_some_and(|sid| author.contains(sid) || meta.contains(sid))
@@ -57,6 +69,7 @@ pub fn classify_by_keywords(events: &mut [Event], params: &serde_json::Value) {
                 .into_iter()
                 .flatten()
                 .filter_map(|v| v.as_str())
+                .filter(|kw| !kw.is_empty())
                 .any(|kw| text.contains(&kw.to_lowercase()));
 
             if matched {
@@ -108,6 +121,22 @@ mod tests {
         let mut events = vec![make_event("Hello", Some("test@example.com"))];
         flag_personal(&mut events, &identity);
         assert!(events[0].is_personal);
+    }
+
+    #[test]
+    fn empty_identity_does_not_flag_everything() {
+        let identity = Identity {
+            name: String::new(),
+            email: String::new(),
+            slack_id: Some(String::new()),
+            jira_id: None,
+        };
+        let mut events = vec![make_event("Random news", Some("someone@else.com"))];
+        flag_personal(&mut events, &identity);
+        assert!(
+            !events[0].is_personal,
+            "blank identity tokens must not match every event"
+        );
     }
 
     #[test]

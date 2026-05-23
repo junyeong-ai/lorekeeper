@@ -84,11 +84,28 @@ impl ConceptDrafts {
                     .and_then(|v| v.as_str())
                     .and_then(|s| s.parse::<jiff::civil::Date>().ok())
                     .unwrap_or(date);
+                // Preserve the established page identity: keep the existing title rather than
+                // letting the newest extraction's casing/spelling overwrite it, and keep the
+                // strongest confidence ever seen (extracted outranks inferred).
+                let name = page
+                    .frontmatter
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+                    .unwrap_or_else(|| concept.name.clone());
+                let confidence = page
+                    .frontmatter
+                    .get("confidence")
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_confidence)
+                    .map_or(concept.confidence, |existing| {
+                        stronger_confidence(existing, concept.confidence)
+                    });
 
                 ConceptDraft {
                     slug: safe_slug.clone(),
-                    name: concept.name.clone(),
-                    confidence: concept.confidence,
+                    name,
+                    confidence,
                     first_seen,
                     last_seen,
                     mention_count,
@@ -181,6 +198,22 @@ impl ConceptDraft {
             sources_json,
             self.name,
         )
+    }
+}
+
+fn parse_confidence(s: &str) -> Option<Confidence> {
+    match s {
+        "extracted" => Some(Confidence::Extracted),
+        "inferred" => Some(Confidence::Inferred),
+        _ => None,
+    }
+}
+
+/// Extracted (LLM saw it explicitly) outranks inferred. Returns the stronger of two.
+fn stronger_confidence(a: Confidence, b: Confidence) -> Confidence {
+    match (a, b) {
+        (Confidence::Extracted, _) | (_, Confidence::Extracted) => Confidence::Extracted,
+        _ => Confidence::Inferred,
     }
 }
 

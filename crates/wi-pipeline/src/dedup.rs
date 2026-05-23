@@ -12,6 +12,19 @@ const EVENT_IDS: TableDefinition<&str, u64> = TableDefinition::new("event_ids");
 const URLS: TableDefinition<&str, u64> = TableDefinition::new("urls");
 const TITLES: TableDefinition<&str, u64> = TableDefinition::new("titles");
 
+/// True only for errors that mean the on-disk table layout no longer matches this build's
+/// schema. These are recoverable by recreating the cache. `Storage` errors (I/O, corruption)
+/// are NOT schema mismatches and must propagate.
+fn is_schema_mismatch(e: &redb::TableError) -> bool {
+    matches!(
+        e,
+        redb::TableError::TableTypeMismatch { .. }
+            | redb::TableError::TypeDefinitionChanged { .. }
+            | redb::TableError::TableIsMultimap(_)
+            | redb::TableError::TableIsNotMultimap(_)
+    )
+}
+
 pub struct DedupCache {
     db: Database,
     title_threshold: f64,
@@ -55,15 +68,20 @@ impl DedupCache {
                         .map_err(|e| PipelineError::Dedup(e.to_string()))?;
                     return Ok(db);
                 }
-                Err(e) if !wiped => {
+                // Only a deliberate schema change (table key/value types differ from what
+                // this build defines) is safe to recover by wiping. Storage-level errors
+                // (I/O failure, on-disk corruption) must fail closed — silently wiping
+                // would destroy recoverable dedup history and silently re-ingest everything.
+                Err(e) if is_schema_mismatch(&e) && !wiped => {
                     tracing::warn!(
                         error = %e,
                         path = %path.display(),
-                        "dedup schema mismatch detected; wiping cache and recreating"
+                        "dedup schema changed; recreating cache"
                     );
                     drop(txn);
                     drop(db);
-                    std::fs::remove_file(path).ok();
+                    std::fs::remove_file(path)
+                        .map_err(|e| PipelineError::Dedup(format!("remove stale cache: {e}")))?;
                     wiped = true;
                     continue;
                 }
@@ -208,13 +226,19 @@ impl DedupCache {
                     .open_table(table_def)
                     .map_err(|e| PipelineError::Dedup(e.to_string()))?;
 
-                let to_remove: Vec<String> = table
+                // Collect each row as a Result and propagate the first read failure rather
+                // than dropping it — a swallowed error would leave stale entries while
+                // reporting a successful prune.
+                let mut to_remove: Vec<String> = Vec::new();
+                for entry in table
                     .iter()
                     .map_err(|e| PipelineError::Dedup(e.to_string()))?
-                    .filter_map(|entry| entry.ok())
-                    .filter(|(_, v)| v.value() < cutoff_secs)
-                    .map(|(k, _)| k.value().to_string())
-                    .collect();
+                {
+                    let (k, v) = entry.map_err(|e| PipelineError::Dedup(e.to_string()))?;
+                    if v.value() < cutoff_secs {
+                        to_remove.push(k.value().to_string());
+                    }
+                }
 
                 for key in &to_remove {
                     table

@@ -13,11 +13,13 @@ pub fn normalize(
             let zoned = item.timestamp.to_zoned(timezone.clone());
             let date = zoned.date();
 
-            let hash_input = item
-                .external_id
-                .as_deref()
-                .map(String::from)
-                .unwrap_or_else(|| format!("{}{}", item.title, item.body));
+            // Without an external_id, identity is derived from title + body. Serialize
+            // them as a JSON array so the field boundary is unambiguous — a plain
+            // concatenation would collide (title "ab" + body "c" == title "a" + body "bc").
+            let hash_input = match &item.external_id {
+                Some(id) => id.clone(),
+                None => serde_json::json!([item.title, item.body]).to_string(),
+            };
 
             let id = EventId::new(source_id, date, &hash_input);
 
@@ -59,6 +61,25 @@ mod tests {
         let events = normalize("email-digest", SourceType::Gmail, items, &tz);
         assert_eq!(events.len(), 1);
         assert!(events[0].id.as_str().starts_with("email-digest:"));
+    }
+
+    #[test]
+    fn title_body_boundary_is_unambiguous() {
+        let tz = jiff::tz::TimeZone::UTC;
+        let ts = jiff::Timestamp::now();
+        let mk = |title: &str, body: &str| RawItem {
+            external_id: None,
+            title: title.into(),
+            body: body.into(),
+            url: None,
+            author: None,
+            timestamp: ts,
+            metadata: serde_json::Value::Null,
+        };
+        // "ab"+"c" must not hash to the same id as "a"+"bc".
+        let a = normalize("s", SourceType::Gmail, vec![mk("ab", "c")], &tz);
+        let b = normalize("s", SourceType::Gmail, vec![mk("a", "bc")], &tz);
+        assert_ne!(a[0].id, b[0].id);
     }
 
     #[test]
