@@ -17,8 +17,6 @@ pub struct Config {
     #[serde(default)]
     pub performance: PerformanceConfig,
     #[serde(default)]
-    pub concepts: ConceptConfig,
-    #[serde(default)]
     pub synthesis: SynthesisConfig,
     #[serde(default)]
     pub llm: LlmConfig,
@@ -72,18 +70,6 @@ impl Config {
                 self.dedup.title_threshold
             )));
         }
-        if !(0.0..=1.0).contains(&self.concepts.merge_threshold) {
-            return Err(ConfigError::Validation(format!(
-                "concepts.merge_threshold must be in [0.0, 1.0], got {}",
-                self.concepts.merge_threshold
-            )));
-        }
-        if self.concepts.min_mentions == 0 {
-            return Err(ConfigError::Validation(
-                "concepts.min_mentions must be > 0".into(),
-            ));
-        }
-
         for src_id in &self.synthesis.weekly.include_sources {
             if !self.sources.contains_key(src_id) {
                 return Err(ConfigError::Validation(format!(
@@ -505,22 +491,6 @@ impl Default for SummaryConfig {
             monthly: true,
             quarterly: true,
             annual: true,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
-pub struct ConceptConfig {
-    pub min_mentions: u32,
-    pub merge_threshold: f64,
-}
-
-impl Default for ConceptConfig {
-    fn default() -> Self {
-        Self {
-            min_mentions: 2,
-            merge_threshold: 0.8,
         }
     }
 }

@@ -111,7 +111,7 @@ Each line in a queue file is one task:
         technologies, and key topics. Output a list of concept names
         (in the source language). Each concept should also produce a
         `wiki/concepts/{slug}.md` entry (create if missing, merge if
-        exists — increment mention_count, append source ref).
+        exists — increment reference_count, append source ref).
 
    c. **Edit the target page** via Obsidian MCP. All daily and synthesis
       templates emit stable section anchors, so the section is always
@@ -125,7 +125,7 @@ Each line in a queue file is one task:
         its body with `- [[Concept Name 1]]\n- [[Concept Name 2]]\n...`.
         Create each concept page in `wiki/concepts/` if it doesn't
         exist (use frontmatter id, name, first_seen, last_seen,
-        mention_count, sources fields — match the format from existing
+        reference_count, sources fields — match the format from existing
         concept pages).
 
       - **Synthesis narratives** — each `target.kind` maps to one
@@ -179,8 +179,8 @@ succeeded. Failure rules:
     edit produces identical content. No drift.
   - Concept page merging preserves original `first_seen` and dedupes the
     `sources` array — re-adding the same source ref is a no-op.
-  - `mention_count` is only incremented when a genuinely new source ref
-    is appended.
+  - `reference_count` is only incremented when a genuinely new source
+    ref is appended.
 - **Never partially-commit progress** to the queue file itself
   (no `processed.jsonl` sidecar): the source-of-truth is the vault edits,
   which are themselves idempotent.

@@ -20,7 +20,7 @@ struct ConceptDraft {
     confidence: Confidence,
     first_seen: jiff::civil::Date,
     last_seen: jiff::civil::Date,
-    mention_count: u64,
+    reference_count: u64,
     sources: Vec<String>,
 }
 
@@ -48,7 +48,7 @@ impl ConceptDrafts {
         let source_ref = strip_md_extension(&VaultPath::daily(dirs, source_id, date).to_string());
 
         if let Some(draft) = self.drafts.get_mut(&safe_slug) {
-            draft.add_mention(source_ref, date);
+            draft.add_reference(source_ref, date);
             return Ok(());
         }
 
@@ -57,9 +57,9 @@ impl ConceptDrafts {
 
         let mut draft = match existing.as_ref() {
             Some(page) => {
-                let mention_count = page
+                let reference_count = page
                     .frontmatter
-                    .get("mention_count")
+                    .get("reference_count")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
                 let sources: Vec<String> = page
@@ -108,7 +108,7 @@ impl ConceptDrafts {
                     confidence,
                     first_seen,
                     last_seen,
-                    mention_count,
+                    reference_count,
                     sources,
                 }
             }
@@ -118,12 +118,12 @@ impl ConceptDrafts {
                 confidence: concept.confidence,
                 first_seen: date,
                 last_seen: date,
-                mention_count: 0,
+                reference_count: 0,
                 sources: vec![],
             },
         };
 
-        draft.add_mention(source_ref, date);
+        draft.add_reference(source_ref, date);
         self.drafts.insert(safe_slug, draft);
         Ok(())
     }
@@ -147,10 +147,10 @@ impl Default for ConceptDrafts {
 }
 
 impl ConceptDraft {
-    fn add_mention(&mut self, source_ref: String, date: jiff::civil::Date) {
+    fn add_reference(&mut self, source_ref: String, date: jiff::civil::Date) {
         if !self.sources.contains(&source_ref) {
             self.sources.push(source_ref);
-            self.mention_count += 1;
+            self.reference_count += 1;
         }
         self.first_seen = self.first_seen.min(date);
         self.last_seen = self.last_seen.max(date);
@@ -169,7 +169,7 @@ impl ConceptDraft {
             "confidence": self.confidence.to_string(),
             "first_seen": self.first_seen.to_string(),
             "last_seen": self.last_seen.to_string(),
-            "mention_count": self.mention_count,
+            "reference_count": self.reference_count,
             "sources": self.sources,
             "tags": ["concept"],
         });
@@ -188,13 +188,13 @@ impl ConceptDraft {
     fn fallback(&self, ctx: &serde_json::Value) -> String {
         let sources_json = serde_json::to_string(&ctx["sources"]).unwrap_or_else(|_| "[]".into());
         format!(
-            "---\nid: {}\ntitle: \"{}\"\ncreated: {}\nupdated: {}\nconfidence: {}\nmention_count: {}\nsources: {}\ntags: [\"concept\"]\n---\n\n# {}\n",
+            "---\nid: {}\ntitle: \"{}\"\ncreated: {}\nupdated: {}\nconfidence: {}\nreference_count: {}\nsources: {}\ntags: [\"concept\"]\n---\n\n# {}\n",
             self.slug,
             self.name,
             self.first_seen,
             self.last_seen,
             self.confidence,
-            self.mention_count,
+            self.reference_count,
             sources_json,
             self.name,
         )

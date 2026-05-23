@@ -47,7 +47,6 @@ fn base_config(vault_root: &std::path::Path) -> Config {
         dedup: DedupConfig::default(),
         labels: LabelConfig::default(),
         performance: PerformanceConfig::default(),
-        concepts: Default::default(),
         synthesis: SynthesisConfig::default(),
         llm: Default::default(),
     }
@@ -143,7 +142,7 @@ async fn concept_pages_written_with_merge() {
         .unwrap();
 
     assert!(
-        concept_output2.content.contains("mention_count: 2"),
+        concept_output2.content.contains("reference_count: 2"),
         "expected merged count 2, content was:\n{}",
         concept_output2.content
     );
