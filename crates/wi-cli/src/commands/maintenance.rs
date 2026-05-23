@@ -95,6 +95,50 @@ pub async fn run(opts: &super::GlobalOpts) -> miette::Result<()> {
         eprintln!("queue: no processed/ directory to maintain.");
     }
 
+    // 2b. Sweep stale `.jsonl.tmp` files. The queue flush writes a temp file then
+    // renames it atomically; a process killed between write and rename strands the
+    // temp file forever (the next run uses a different `run_id`). Remove any older
+    // than 1 day — anything younger could belong to a concurrent ingest.
+    let queue_dir = vault_root.join(".wiki-ingest").join("queue");
+    const TMP_STALE_SECS: i64 = 24 * 3600;
+    let tmp_cutoff = jiff::Timestamp::now().as_second() - TMP_STALE_SECS;
+    if queue_dir.exists() {
+        let mut entries = tokio::fs::read_dir(&queue_dir)
+            .await
+            .map_err(|e| miette::miette!("read queue dir: {e}"))?;
+        let mut pruned = 0usize;
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| miette::miette!("queue entry: {e}"))?
+        {
+            let path = entry.path();
+            if !path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|n| n.ends_with(".jsonl.tmp"))
+            {
+                continue;
+            }
+            let metadata = entry
+                .metadata()
+                .await
+                .map_err(|e| miette::miette!("metadata: {e}"))?;
+            let mtime_secs = metadata.modified().ok().and_then(|t| {
+                t.duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|d| d.as_secs() as i64)
+            });
+            if mtime_secs.is_some_and(|m| m < tmp_cutoff) {
+                tokio::fs::remove_file(&path)
+                    .await
+                    .map_err(|e| miette::miette!("remove {}: {e}", path.display()))?;
+                pruned += 1;
+            }
+        }
+        eprintln!("queue: pruned {pruned} stale .jsonl.tmp file(s) older than 24h.");
+    }
+
     // 3. Prune dedup cache
     let dedup_path = vault_root.join(".wiki-ingest").join("dedup.redb");
     if dedup_path.exists() {
