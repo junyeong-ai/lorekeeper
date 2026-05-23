@@ -1,0 +1,117 @@
+# wiki-ingest configuration
+# Copy to config.yaml and customize for your environment.
+# config.yaml is gitignored — safe for personal settings.
+
+# ─── Obsidian Vault ────────────────────────────────────────
+vault:
+  path: ~/Documents/Obsidian Vault
+  wiki_dir: wiki                    # wiki skill's managed directory
+  daily_dir: daily                  # daily ingest output
+  weekly_dir: weekly                # weekly synthesis output
+  personal_dir: me                  # personal work tracking
+
+# ─── Your Identity (for personal work classification) ──────
+me:
+  name: "홍길동"
+  slack_user_id: "U0123456789"
+  email: "gildong.hong@company.com"
+  jira_username: "gildong.hong"
+
+# ─── Sources ───────────────────────────────────────────────
+sources:
+
+  # AI Industry Newsletter (daily-ai-newsletter-briefing skill output)
+  ai-newsletter:
+    enabled: true
+    type: google-drive
+    schedule: "0 7 * * 1-5"         # weekdays 07:00
+    drive_folder: "AI-Briefing/briefings"
+    file_pattern: "briefing-{date}.md"
+    wiki_target: daily/ai-briefing
+    labels: [ai-industry]
+    concept_extraction: true         # extract concepts to wiki/concepts/
+
+  # Team Digest (aix-team-digest-job output from Slack)
+  team-digest:
+    enabled: true
+    type: slack-channel
+    schedule: "0 9 * * 1-5"         # weekdays 09:00
+    channel: "#aix-team-digest"
+    lookback_hours: 24
+    wiki_target: daily/team-digest
+    labels: [team-ops]
+    personal_tracking: true          # flag items matching me.* identifiers
+    concept_extraction: true
+
+  # Slack Keyword Trends (specific channels for AI/AX trends)
+  slack-trends:
+    enabled: true
+    type: slack-search
+    schedule: "0 10 * * 1-5"        # weekdays 10:00
+    queries:
+      - channel: "#ai-general"
+        keywords: [AI, LLM, GenAI, Claude, GPT, Gemini, agent]
+      - channel: "#ax-strategy"
+        keywords: [AX, CX, UX, 자동화, 에이전트]
+      - channel: "#dev-talk"
+        keywords: [MCP, tool-use, RAG, vector, embedding]
+    lookback_hours: 24
+    wiki_target: daily/slack-trends
+    labels: [ai-internal, strategy]
+    concept_extraction: true
+
+  # Manual ingest (ad-hoc documents, URLs, PDFs)
+  # Triggered by /wiki-ingest add <source>, not scheduled
+  manual:
+    enabled: true
+    type: manual
+    wiki_target: wiki/sources
+    labels: []
+    concept_extraction: true
+
+# ─── Deduplication ─────────────────────────────────────────
+dedup:
+  strategy: event-id                # event-id | url | title-similarity
+  similarity_threshold: 0.85        # for title-similarity strategy
+  cross_source: true                # deduplicate across different sources
+
+# ─── Labeling ──────────────────────────────────────────────
+labels:
+  auto_label: true
+  categories:
+    - ai-industry                   # external AI news, vendor updates
+    - ai-internal                   # internal AI/AX initiatives
+    - team-ops                      # team daily operations
+    - strategy                      # strategic direction, planning
+    - personal                      # my own work items
+    - learning                      # educational content
+
+# ─── Personal Work Tracking ────────────────────────────────
+performance:
+  enabled: true
+  weekly_summary: true              # auto-generate weekly/me/YYYY-Www.md
+  monthly_summary: true             # auto-generate monthly/me/YYYY-MM.md
+  quarterly_review: true            # auto-generate quarterly/me/YYYY-Qq.md
+  annual_review: true               # auto-generate annually/me/YYYY.md
+  work_categories:
+    - project-delivery              # 프로젝트 산출물
+    - technical-leadership          # 기술 리더십, 아키텍처 결정
+    - team-contribution             # 팀 기여, 멘토링
+    - innovation                    # 신기술 도입, PoC
+    - operational-excellence        # 운영 개선, 자동화
+
+# ─── Concept Extraction ────────────────────────────────────
+concepts:
+  min_mentions: 2                   # extract concept after N mentions across sources
+  merge_similar: true               # merge concepts with similar names
+  similarity_threshold: 0.8
+  confidence_tagging: true          # tag as extracted/inferred/ambiguous
+  hub_threshold: 5                  # flag as hub concept after N incoming links
+
+# ─── Weekly Synthesis ──────────────────────────────────────
+weekly:
+  enabled: true
+  schedule: "0 8 * * 1"            # Monday 08:00
+  sources: [ai-newsletter, team-digest, slack-trends]
+  output: weekly/synthesis/YYYY-Www.md
+  include_performance: true         # include personal work summary
