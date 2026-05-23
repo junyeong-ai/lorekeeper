@@ -129,22 +129,25 @@ jobs:
         run: |
           ref="${{ github.event.inputs.tag || github.ref_name }}"
           echo "version=${ref#v}" >> "$GITHUB_OUTPUT"
-      - name: Package skill tarball
-        id: package
+      - name: Package skill tarballs
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          archive="wi-skill-v${VERSION}.tar.gz"
-          tar -czf "$archive" -C .claude/skills wiki-ingest
-          sha256sum "$archive" > "${archive}.sha256"
-          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+          # One archive per skill, named `{skill}-skill-v{version}.tar.gz` to match
+          # what scripts/install.sh and install.ps1 download. Each contains the
+          # skill directory.
+          for skill in wiki-ingest wi-process; do
+            archive="${skill}-skill-v${VERSION}.tar.gz"
+            tar -czf "$archive" -C .claude/skills "$skill"
+            sha256sum "$archive" > "${archive}.sha256"
+          done
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.package.outputs.archive }}
+          name: skills
           path: |
-            ${{ steps.package.outputs.archive }}
-            ${{ steps.package.outputs.archive }}.sha256
+            *-skill-v*.tar.gz
+            *-skill-v*.tar.gz.sha256
           if-no-files-found: error
 
   release:

@@ -536,8 +536,12 @@ main() {
                 download_archive "$version" "$platform" "$archive"
                 verify_checksum "$archive"
                 extract_archive "$archive"
-                binary_src="${TMP_DIR}/${BINARY_NAME}"
-                templates_src="${TMP_DIR}/templates"
+                # The release archive contains a top-level `wi-v{ver}-{target}/` dir
+                # (see .github/workflows/release.yml), so the binary and templates live
+                # one level down from TMP_DIR.
+                local stage="${TMP_DIR}/${BINARY_NAME}-v${version}-${platform}"
+                binary_src="${stage}/${BINARY_NAME}"
+                templates_src="${stage}/templates"
                 ;;
             source)
                 [ -n "$repo_dir" ] || die "--from-source requires running from a cloned repo"

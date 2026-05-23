@@ -104,6 +104,28 @@ function Install-Templates($srcDir, $destBase) {
     Write-Ok 'Templates installed'
 }
 
+function Download-Skill($version, $skillName) {
+    # Mirrors scripts/install.sh download_skill_tarball: fetch and verify
+    # `{skill}-skill-v{version}.tar.gz`, extract, and return the skill dir path.
+    $archive = "$skillName-skill-v$version.tar.gz"
+    $url = "$ReleaseBase/v$version/$archive"
+    $tmp = New-TemporaryFile
+    Remove-Item $tmp
+    $tmpDir = New-Item -ItemType Directory -Path $tmp.FullName -Force
+    try {
+        Invoke-WebRequest -Uri $url -OutFile (Join-Path $tmpDir $archive)
+        Invoke-WebRequest -Uri "$url.sha256" -OutFile (Join-Path $tmpDir "$archive.sha256")
+    } catch {
+        Write-Warn "Skill archive unavailable for '$skillName'; skipping"
+        return $null
+    }
+    $expected = (Get-Content (Join-Path $tmpDir "$archive.sha256")).Split(' ')[0]
+    $actual = (Get-FileHash -Algorithm SHA256 (Join-Path $tmpDir $archive)).Hash.ToLower()
+    if ($expected -ne $actual) { Write-Warn "Skill checksum mismatch for '$skillName'; skipping"; return $null }
+    tar -xzf (Join-Path $tmpDir $archive) -C $tmpDir
+    return (Join-Path $tmpDir $skillName)
+}
+
 function Install-Skill($level, $src, $skillName) {
     if ($level -eq 'none') { Write-Host '  Skill install skipped' -ForegroundColor DarkGray; return }
     if (-not (Test-Path $src)) { Write-Warn "Skill source not found: $src (skipping)"; return }
@@ -193,10 +215,10 @@ if ($Skill -ne 'none') {
         $skillSrc = if ($repoDir -and (Test-Path (Join-Path $repoDir ".claude\skills\$skillName"))) {
             Join-Path $repoDir ".claude\skills\$skillName"
         } else {
-            $null
+            Download-Skill $version $skillName
         }
         if ($skillSrc) { Install-Skill $Skill $skillSrc $skillName }
-        else { Write-Warn "Skill '$skillName' source not packaged in release; skipping" }
+        else { Write-Warn "Skill '$skillName' unavailable; skipping" }
     }
 }
 
