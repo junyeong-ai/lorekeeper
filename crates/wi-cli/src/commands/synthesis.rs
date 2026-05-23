@@ -27,8 +27,12 @@ pub async fn run(opts: &super::GlobalOpts, period: Period) -> miette::Result<()>
     let llm = build_llm_client(&config, &vault_root);
 
     let ctx = Arc::new(
-        wi_pipeline::PipelineContext::new(&resolve_template_dir(opts, &vault_root), llm, &config)
-            .map_err(|e| miette::miette!("{e}"))?,
+        wi_pipeline::PipelineContext::new(
+            &resolve_template_dir(opts, &vault_root),
+            llm.clone(),
+            &config,
+        )
+        .map_err(|e| miette::miette!("{e}"))?,
     );
     let synth = wi_pipeline::Synthesizer::new(&vault_root, ctx, &config);
     let writer = wi_vault::VaultWriter::new(&vault_root);
@@ -127,6 +131,14 @@ pub async fn run(opts: &super::GlobalOpts, period: Period) -> miette::Result<()>
             }
         }
     }
+
+    // Persist any buffered queue tasks emitted by the synthesizer. Without this,
+    // queue-mode synthesis runs would write narrative pages with empty bodies and
+    // drop the corresponding LLM tasks at process exit. Same ordering as `wi ingest`:
+    // flush before exit so the queue file is durable.
+    llm.flush()
+        .await
+        .map_err(|e| miette::miette!("queue flush: {e}"))?;
 
     Ok(())
 }
