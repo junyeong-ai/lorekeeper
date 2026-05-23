@@ -34,12 +34,16 @@ pub fn flag_personal(events: &mut [Event], identity: &Identity) {
 
         let matched = email
             .as_deref()
-            .is_some_and(|e| author.contains(e) || meta.contains(e))
-            || name.as_deref().is_some_and(|n| author.contains(n))
+            .is_some_and(|e| contains_bounded(&author, e) || contains_bounded(&meta, e))
+            || name
+                .as_deref()
+                .is_some_and(|n| contains_bounded(&author, n))
             || slack_id
                 .as_deref()
-                .is_some_and(|sid| author.contains(sid) || meta.contains(sid))
-            || jira_id.as_deref().is_some_and(|jid| author.contains(jid));
+                .is_some_and(|sid| contains_bounded(&author, sid) || contains_bounded(&meta, sid))
+            || jira_id
+                .as_deref()
+                .is_some_and(|jid| contains_bounded(&author, jid));
 
         if matched {
             event.is_personal = true;
@@ -48,6 +52,36 @@ pub fn flag_personal(events: &mut [Event], identity: &Identity) {
             }
         }
     }
+}
+
+/// Substring match that requires the needle to NOT be flanked by alphanumeric
+/// characters on either side — a language-agnostic word boundary. Prevents the
+/// false positives a plain `contains` produces: name "kim" matching "kimberly",
+/// or "이준영" matching "이준영팀" (that person's *team*, not their own work).
+/// `char::is_alphanumeric` treats Hangul/CJK as alphanumeric, so the boundary
+/// holds for both Latin and CJK identifiers.
+fn contains_bounded(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let mut from = 0;
+    while let Some(rel) = haystack[from..].find(needle) {
+        let start = from + rel;
+        let end = start + needle.len();
+        let before_ok = haystack[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric());
+        let after_ok = haystack[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric());
+        if before_ok && after_ok {
+            return true;
+        }
+        from = start + needle.chars().next().map_or(1, char::len_utf8);
+    }
+    false
 }
 
 pub fn classify_by_keywords(events: &mut [Event], params: &serde_json::Value) {
@@ -121,6 +155,43 @@ mod tests {
         let mut events = vec![make_event("Hello", Some("test@example.com"))];
         flag_personal(&mut events, &identity);
         assert!(events[0].is_personal);
+    }
+
+    #[test]
+    fn name_substring_does_not_false_positive() {
+        let identity = Identity {
+            name: "Kim".into(),
+            email: "kim@example.com".into(),
+            slack_id: None,
+            jira_id: None,
+        };
+        // "Kimberly" must NOT be flagged as Kim's personal work.
+        let mut events = vec![make_event("Status", Some("Kimberly Park"))];
+        flag_personal(&mut events, &identity);
+        assert!(!events[0].is_personal);
+
+        // Standalone "Kim" as a whole token must still match.
+        let mut events2 = vec![make_event("Status", Some("Kim"))];
+        flag_personal(&mut events2, &identity);
+        assert!(events2[0].is_personal);
+    }
+
+    #[test]
+    fn cjk_name_does_not_match_team_suffix() {
+        let identity = Identity {
+            name: "이준영".into(),
+            email: "e@x.com".into(),
+            slack_id: None,
+            jira_id: None,
+        };
+        // "이준영팀" (Lee Junyeong's *team*) is not the person's own work.
+        let mut events = vec![make_event("회의", Some("이준영팀"))];
+        flag_personal(&mut events, &identity);
+        assert!(!events[0].is_personal);
+
+        let mut events2 = vec![make_event("회의", Some("이준영"))];
+        flag_personal(&mut events2, &identity);
+        assert!(events2[0].is_personal);
     }
 
     #[test]
