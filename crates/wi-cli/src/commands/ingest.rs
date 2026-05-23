@@ -231,8 +231,20 @@ pub async fn run(
         }
     }
 
-    // Phase 4: Commit dedup ONLY if every write succeeded. Each source committed independently
-    // so that future runs that re-extract these events know they're already persisted.
+    // Phase 4: Persist queued LLM tasks atomically. Runs BEFORE dedup commit so the
+    // queue file is the durability anchor for semantic work: if a crash strands the
+    // flush, dedup is not yet committed and a re-run will re-extract the events and
+    // re-queue the tasks. The temp + fsync + rename inside the queue client ensures
+    // we never observe a half-written JSONL on disk.
+    if !any_write_failed {
+        llm.flush()
+            .await
+            .map_err(|e| miette::miette!("queue flush: {e}"))?;
+    }
+
+    // Phase 5: Commit dedup ONLY if every write AND the queue flush succeeded. Each
+    // source committed independently so that future runs that re-extract these events
+    // know they're already persisted.
     for p in &planned {
         let status = if any_write_failed {
             wi_vault::LogStatus::Failed
@@ -256,16 +268,6 @@ pub async fn run(
         })
         .await
         .ok();
-    }
-
-    // Phase 5: Persist queued LLM tasks atomically. Only reached when every page write
-    // succeeded — guarantees the queue file's invariant: every task targets a page that
-    // exists on disk. A flush failure here surfaces to the user but cannot leave a
-    // half-written JSONL (temp + fsync + rename inside the queue client).
-    if !any_write_failed {
-        llm.flush()
-            .await
-            .map_err(|e| miette::miette!("queue flush: {e}"))?;
     }
 
     eprintln!(
