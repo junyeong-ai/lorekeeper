@@ -40,40 +40,32 @@ pub async fn run(opts: &super::GlobalOpts, period: Period) -> miette::Result<()>
     let tz = config.vault.timezone();
     let today = jiff::Timestamp::now().to_zoned(tz).date();
 
-    match period {
+    // Plan every period's page upfront so all queue-mode LLM tasks land in the
+    // buffer before ANY write happens. This decouples buffering from page writes:
+    // if a write fails partway, we abort BEFORE flushing, so the buffered tasks are
+    // dropped consistently — the same recovery story as `wi ingest`.
+    let outputs: Vec<wi_pipeline::RenderOutput> = match period {
         Period::Weekly { date, previous } => {
             let target = resolve_weekly_target(date.as_deref(), previous, today)?;
-            let mut wrote = 0u32;
-
+            let mut outs = Vec::new();
             if let Some(out) = synth
                 .weekly_synthesis(target)
                 .await
                 .map_err(|e| miette::miette!("{e}"))?
             {
-                writer
-                    .write_page(out.path.as_ref(), &out.content)
-                    .await
-                    .map_err(|e| miette::miette!("write: {e}"))?;
-                eprintln!("✓ wrote: {}", out.path);
-                wrote += 1;
+                outs.push(out);
             }
-
             if let Some(out) = synth
                 .weekly_personal(target)
                 .await
                 .map_err(|e| miette::miette!("{e}"))?
             {
-                writer
-                    .write_page(out.path.as_ref(), &out.content)
-                    .await
-                    .map_err(|e| miette::miette!("write: {e}"))?;
-                eprintln!("✓ wrote: {}", out.path);
-                wrote += 1;
+                outs.push(out);
             }
-
-            if wrote == 0 {
+            if outs.is_empty() {
                 eprintln!("No source data found for week of {target}.");
             }
+            outs
         }
         Period::Monthly { date, previous } => {
             let (year, month) = resolve_monthly_target(date.as_deref(), previous, today)?;
@@ -82,14 +74,11 @@ pub async fn run(opts: &super::GlobalOpts, period: Period) -> miette::Result<()>
                 .await
                 .map_err(|e| miette::miette!("{e}"))?
             {
-                Some(out) => {
-                    writer
-                        .write_page(out.path.as_ref(), &out.content)
-                        .await
-                        .map_err(|e| miette::miette!("write: {e}"))?;
-                    eprintln!("✓ wrote: {}", out.path);
+                Some(out) => vec![out],
+                None => {
+                    eprintln!("No work-log data found for {year}-{month:02}.");
+                    vec![]
                 }
-                None => eprintln!("No work-log data found for {year}-{month:02}."),
             }
         }
         Period::Quarterly { date, previous } => {
@@ -99,14 +88,11 @@ pub async fn run(opts: &super::GlobalOpts, period: Period) -> miette::Result<()>
                 .await
                 .map_err(|e| miette::miette!("{e}"))?
             {
-                Some(out) => {
-                    writer
-                        .write_page(out.path.as_ref(), &out.content)
-                        .await
-                        .map_err(|e| miette::miette!("write: {e}"))?;
-                    eprintln!("✓ wrote: {}", out.path);
+                Some(out) => vec![out],
+                None => {
+                    eprintln!("No data found for {year}-Q{quarter}.");
+                    vec![]
                 }
-                None => eprintln!("No data found for {year}-Q{quarter}."),
             }
         }
         Period::Annual { year, previous } => {
@@ -120,22 +106,25 @@ pub async fn run(opts: &super::GlobalOpts, period: Period) -> miette::Result<()>
                 .await
                 .map_err(|e| miette::miette!("{e}"))?
             {
-                Some(out) => {
-                    writer
-                        .write_page(out.path.as_ref(), &out.content)
-                        .await
-                        .map_err(|e| miette::miette!("write: {e}"))?;
-                    eprintln!("✓ wrote: {}", out.path);
+                Some(out) => vec![out],
+                None => {
+                    eprintln!("No quarterly data found for {target_year}.");
+                    vec![]
                 }
-                None => eprintln!("No quarterly data found for {target_year}."),
             }
         }
+    };
+
+    for out in &outputs {
+        writer
+            .write_page(out.path.as_ref(), &out.content)
+            .await
+            .map_err(|e| miette::miette!("write {}: {e}", out.path))?;
+        eprintln!("✓ wrote: {}", out.path);
     }
 
-    // Persist any buffered queue tasks emitted by the synthesizer. Without this,
-    // queue-mode synthesis runs would write narrative pages with empty bodies and
-    // drop the corresponding LLM tasks at process exit. Same ordering as `wi ingest`:
-    // flush before exit so the queue file is durable.
+    // Flush only after every page write succeeded. Same atomicity guarantee as
+    // `wi ingest`: the JSONL is only published if its target pages all exist.
     llm.flush()
         .await
         .map_err(|e| miette::miette!("queue flush: {e}"))?;
