@@ -32,15 +32,23 @@ queue file to `.wiki-ingest/queue/processed/`.
 ### Queue file lifecycle
 
 ```
-<run>.jsonl.tmp  ←  ingest is mid-flush (transient, sub-second; not for consumption)
-<run>.jsonl      ←  pending, ready to be drained by this skill
-processed/<run>.jsonl  ←  drained successfully, retained 90 days by `wi maintenance`
+<run>.jsonl.tmp        ←  ingest is mid-flush (transient, sub-second; not for consumption)
+<run>.jsonl            ←  pending, ready to be drained by this skill
+processed/<run>.jsonl  ←  drained successfully, retained 90 days
+(deleted)              ←  pruned by `wi maintenance` after retention expires
 ```
 
 `wi ingest` sweeps `*.jsonl.tmp` files older than 1 hour at startup
 (crash debris from previous runs); `wi maintenance` does NOT touch tmp
-files to avoid racing an active flush. Only `.jsonl` files matter to
-this skill.
+files, so a concurrent maintenance run cannot race an active flush.
+Only `.jsonl` files matter to this skill.
+
+**Known limitation:** the tmp sweep is mtime-based, not PID-aware.
+If an ingest process is paused (SIGSTOP) for more than 1 hour, a
+later-starting ingest could delete its tmp; the paused ingest's flush
+will then fail with ENOENT and that run's LLM tasks are lost (pages
+and dedup are preserved). In practice, cron-scheduled ingests never
+hit this case.
 
 ## Queue task schema
 
