@@ -37,13 +37,26 @@ pub fn load_config(path: &Path) -> miette::Result<wi_core::config::Config> {
     wi_core::config::Config::load(path).map_err(|e| miette::miette!("{e}"))
 }
 
-pub fn build_llm_client(config: &wi_core::config::LlmConfig) -> Arc<dyn wi_llm::LlmClient> {
-    match wi_llm::ClaudeClient::new(config) {
-        Ok(c) => Arc::new(c),
-        Err(_) => {
-            tracing::info!("LLM not configured — running with NoopLlmClient (no summary/concepts)");
-            Arc::new(wi_llm::NoopLlmClient)
+pub fn build_llm_client(
+    config: &wi_core::config::Config,
+    vault_root: &Path,
+) -> Arc<dyn wi_llm::LlmClient> {
+    match config.llm.provider {
+        wi_core::config::LlmProvider::Anthropic => match wi_llm::ClaudeClient::new(&config.llm) {
+            Ok(c) => Arc::new(c),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Anthropic provider selected but ANTHROPIC_API_KEY missing; falling back to NoopLlmClient"
+                );
+                Arc::new(wi_llm::NoopLlmClient)
+            }
+        },
+        wi_core::config::LlmProvider::Queue => {
+            let queue_dir = vault_root.join(".wiki-ingest").join("queue");
+            Arc::new(wi_llm::QueueLlmClient::new(queue_dir))
         }
+        wi_core::config::LlmProvider::Noop => Arc::new(wi_llm::NoopLlmClient),
     }
 }
 

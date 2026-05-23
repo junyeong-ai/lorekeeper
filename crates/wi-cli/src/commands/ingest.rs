@@ -15,7 +15,7 @@ pub async fn run(
     let creds = wi_source::credentials::Credentials::load(&vault_root)
         .map_err(|e| miette::miette!("{e}"))?;
 
-    let llm = build_llm_client(&config.llm);
+    let llm = build_llm_client(&config, &vault_root);
 
     let tz = config.vault.timezone();
     let today = jiff::Timestamp::now().to_zoned(tz.clone()).date();

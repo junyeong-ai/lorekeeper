@@ -24,7 +24,7 @@ pub enum Period {
 pub async fn run(opts: &super::GlobalOpts, period: Period) -> miette::Result<()> {
     let config = load_config(&find_config(opts)?)?;
     let vault_root = config.vault.root_path();
-    let llm = build_llm_client(&config.llm);
+    let llm = build_llm_client(&config, &vault_root);
 
     let ctx = Arc::new(
         wi_pipeline::PipelineContext::new(&resolve_template_dir(opts, &vault_root), llm, &config)
