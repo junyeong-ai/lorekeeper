@@ -184,4 +184,46 @@ mod tests {
         assert_eq!(min.to_string(), "2026-04-30T00:00:00Z");
         assert_eq!(max.to_string(), "2026-05-02T12:00:00Z");
     }
+
+    #[test]
+    fn validate_params_dispatch_accepts_valid_per_adapter() {
+        let cases = [
+            (
+                SourceType::GoogleDrive,
+                serde_json::json!({"folder": "f", "file_pattern": "p-{date}.md"}),
+            ),
+            (SourceType::GoogleCalendar, serde_json::json!({})),
+            (SourceType::Gmail, serde_json::json!({"lookback_hours": 24})),
+            (
+                SourceType::SlackChannel,
+                serde_json::json!({"channel": "#x"}),
+            ),
+            (
+                SourceType::SlackSearch,
+                serde_json::json!({"queries": [{"channel": "#x", "keywords": ["a"]}]}),
+            ),
+            (SourceType::Jira, serde_json::json!({"jql": "x"})),
+        ];
+        for (st, params) in cases {
+            assert!(validate_params(st, &params).is_ok(), "valid {st} params");
+        }
+    }
+
+    #[test]
+    fn validate_params_dispatch_rejects_bad_per_adapter() {
+        // Missing required field, wrong type, and unknown key respectively.
+        assert!(
+            validate_params(SourceType::GoogleDrive, &serde_json::json!({"folder": "f"})).is_err()
+        );
+        assert!(
+            validate_params(SourceType::SlackChannel, &serde_json::json!({"channel": 7})).is_err()
+        );
+        assert!(
+            validate_params(
+                SourceType::Jira,
+                &serde_json::json!({"jql": "x", "typo": 1})
+            )
+            .is_err()
+        );
+    }
 }

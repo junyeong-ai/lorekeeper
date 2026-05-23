@@ -426,6 +426,49 @@ async fn plan_does_not_commit_dedup_until_commit_called() {
 }
 
 #[tokio::test]
+async fn force_bypasses_dedup() {
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let config = base_config(vault);
+    let llm: Arc<dyn LlmClient> = Arc::new(NoopLlmClient);
+    let ctx = make_ctx(&config, llm);
+    let pipeline = Pipeline::new(vault, ctx, &config).unwrap();
+    let sc = config.sources.get("test-source").unwrap().clone();
+
+    let ts: jiff::Timestamp = "2026-05-23T10:00:00Z".parse().unwrap();
+    let items = || vec![raw_item("Subject", "Body", "M1", ts)];
+
+    // Commit the event so dedup would normally filter it.
+    let normal = IngestOptions {
+        dry_run: false,
+        force: false,
+        target_date: None,
+    };
+    let r1 = pipeline
+        .plan("test-source", &sc, items(), &normal)
+        .await
+        .unwrap();
+    pipeline.commit(&r1.events).unwrap();
+    let r2 = pipeline
+        .plan("test-source", &sc, items(), &normal)
+        .await
+        .unwrap();
+    assert!(r2.events.is_empty(), "already-seen event is deduped");
+
+    // With force, the same event is re-processed despite being in the dedup cache.
+    let forced = IngestOptions {
+        dry_run: false,
+        force: true,
+        target_date: None,
+    };
+    let r3 = pipeline
+        .plan("test-source", &sc, items(), &forced)
+        .await
+        .unwrap();
+    assert_eq!(r3.events.len(), 1, "force must bypass dedup");
+}
+
+#[tokio::test]
 async fn queue_mode_emits_jsonl_tasks_with_targets() {
     use wi_llm::QueueLlmClient;
 

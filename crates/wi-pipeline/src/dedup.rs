@@ -304,6 +304,25 @@ mod tests {
     }
 
     #[test]
+    fn url_dedup_filters_same_url_different_id() {
+        let dir = TempDir::new().unwrap();
+        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85).unwrap();
+        let cascade = vec![DedupStrategy::Url];
+
+        cache
+            .record(&[ev("a", "First", Some("https://example.com/post"))])
+            .unwrap();
+
+        // Same URL, different event-id and title → still a duplicate via the URL strategy.
+        let dup = vec![ev("b", "Reposted", Some("https://example.com/post"))];
+        assert_eq!(cache.deduplicate(dup, &cascade).unwrap().len(), 0);
+
+        // Different URL is novel.
+        let novel = vec![ev("c", "Other", Some("https://example.com/other"))];
+        assert_eq!(cache.deduplicate(novel, &cascade).unwrap().len(), 1);
+    }
+
+    #[test]
     fn title_dedup_matches_within_date_only() {
         let dir = TempDir::new().unwrap();
         let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85).unwrap();
