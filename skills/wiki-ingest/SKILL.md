@@ -12,12 +12,9 @@ allowed-tools:
   - "mcp__obsidian__search_simple"
   - "mcp__obsidian__search_query"
   - "mcp__obsidian__tag_list"
-  - "mcp__claude_ai_Google_Drive__search_files"
-  - "mcp__claude_ai_Google_Drive__read_file_content"
-  - "mcp__claude_ai_Gmail__search_threads"
-  - "mcp__claude_ai_Gmail__get_thread"
-  - "mcp__claude_ai_Gmail__list_labels"
+  - "Bash(gws *)"
   - "Bash(wikigraph *)"
+  - "Bash(jq *)"
 ---
 
 # wiki-ingest — Knowledge Ingestion Pipeline
@@ -58,8 +55,14 @@ Run the full pipeline for one or all sources.
 ### Source: ai-news
 
 1. Read `sources.ai-newsletter` from config
-2. Search Google Drive for today's briefing file matching `file_pattern`
-3. Read file content via Google Drive MCP
+2. Search Google Drive via gws CLI:
+   ```bash
+   gws drive files list --params '{"q":"name contains \"briefing-2026-05-23\" and \"AI-Briefing/briefings\" in parents","pageSize":1}' 2>/dev/null
+   ```
+3. Download file content:
+   ```bash
+   gws drive files get --params '{"fileId":"FILE_ID","alt":"media"}' --output /tmp/briefing.md 2>/dev/null
+   ```
 4. Parse: extract events, themes, key entities
 5. Deduplicate: check `wiki/log.md` for already-ingested dates
 6. Write to `{vault}/{daily_dir}/ai-briefing/YYYY-MM-DD.md`:
@@ -108,11 +111,22 @@ events_count: 12
 
 ### Source: gmail
 
+Uses `gws` CLI (Google Workspace CLI) for batch email fetching — faster than MCP,
+supports server-side filtering and pagination.
+
 1. Read `sources.gmail` from config
-2. For each `include` query, search Gmail via `mcp__claude_ai_Gmail__search_threads`:
-   - Use `newer_than:1d` to limit to last 24 hours
-   - Combine with configured query filters
-3. For each thread found, fetch full content via `mcp__claude_ai_Gmail__get_thread`
+2. **Batch list** via gws CLI:
+   ```bash
+   gws gmail users messages list --params '{"userId":"me","maxResults":50,"q":"is:unread newer_than:1d -category:promotions -category:social -category:updates"}' 2>/dev/null
+   ```
+3. **Batch fetch metadata** for each message ID:
+   ```bash
+   gws gmail users messages get --params '{"userId":"me","id":"MSG_ID","format":"metadata","metadataHeaders":["From","To","Subject","Date"]}' 2>/dev/null
+   ```
+4. For high-value messages (after filtering), fetch full body:
+   ```bash
+   gws gmail users messages get --params '{"userId":"me","id":"MSG_ID","format":"full"}' 2>/dev/null
+   ```
 4. **Filter out noise**: skip threads matching any `exclude` pattern:
    - `subject_contains` patterns (automated alerts, no-reply)
    - `from_contains` patterns (notification systems, mailer daemons)
