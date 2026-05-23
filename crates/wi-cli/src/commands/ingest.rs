@@ -44,6 +44,11 @@ pub async fn run(
             // /wi-process will drain alongside the existing ones. Warn so the user
             // can run /wi-process first if they want to avoid duplicate LLM work,
             // since each pending file already has a target page on disk.
+            tracing::warn!(
+                pending,
+                queue_dir = %vault_root.join(".wiki-ingest").join("queue").display(),
+                "pending queue files exist; run /wi-process first to avoid duplicate LLM work",
+            );
             eprintln!(
                 "! {pending} pending queue file(s) under {}/.wiki-ingest/queue/. Run \
                  /wi-process first to avoid duplicate LLM work on the same target pages.",
@@ -52,6 +57,12 @@ pub async fn run(
         }
         _ => {}
     }
+
+    // Sweep stranded `.jsonl.tmp` files from previous crashed runs. The queue
+    // flush is sub-second, so any tmp older than an hour is from a process that
+    // died mid-flush (or was killed). Each ingest writes its own PID-suffixed
+    // tmp, so a concurrent ingest's just-created tmp is too young to be swept.
+    sweep_stale_tmps(&vault_root).await?;
 
     let tz = config.vault.timezone();
     let today = jiff::Timestamp::now().to_zoned(tz.clone()).date();
@@ -293,6 +304,48 @@ pub async fn run(
             ""
         }
     );
+    Ok(())
+}
+
+async fn sweep_stale_tmps(vault_root: &std::path::Path) -> miette::Result<()> {
+    let dir = vault_root.join(".wiki-ingest").join("queue");
+    if !dir.exists() {
+        return Ok(());
+    }
+    const STALE_AFTER_SECS: i64 = 3600;
+    let cutoff = jiff::Timestamp::now().as_second() - STALE_AFTER_SECS;
+    let mut entries = tokio::fs::read_dir(&dir)
+        .await
+        .map_err(|e| miette::miette!("read queue dir: {e}"))?;
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| miette::miette!("queue entry: {e}"))?
+    {
+        let path = entry.path();
+        if !path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|n| n.ends_with(".jsonl.tmp"))
+        {
+            continue;
+        }
+        let metadata = entry
+            .metadata()
+            .await
+            .map_err(|e| miette::miette!("metadata: {e}"))?;
+        let mtime_secs = metadata.modified().ok().and_then(|t| {
+            t.duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_secs() as i64)
+        });
+        if mtime_secs.is_some_and(|m| m < cutoff) {
+            tokio::fs::remove_file(&path)
+                .await
+                .map_err(|e| miette::miette!("remove stale tmp {}: {e}", path.display()))?;
+            tracing::info!(path = %path.display(), "swept stale queue tmp");
+        }
+    }
     Ok(())
 }
 
