@@ -48,6 +48,9 @@ impl ConceptDrafts {
         let source_ref = strip_md_extension(&VaultPath::daily(dirs, source_id, date).to_string());
 
         if let Some(draft) = self.drafts.get_mut(&safe_slug) {
+            // A later mention in the same run may carry stronger confidence than the
+            // first; keep the strongest so the page isn't pinned to an early `inferred`.
+            draft.confidence = stronger_confidence(draft.confidence, concept.confidence);
             draft.add_reference(source_ref, date);
             return Ok(());
         }

@@ -54,12 +54,20 @@ pub fn flag_personal(events: &mut [Event], identity: &Identity) {
     }
 }
 
-/// Substring match that requires the needle to NOT be flanked by alphanumeric
-/// characters on either side — a language-agnostic word boundary. Prevents the
+/// A character that can be part of the same identifier token (name, email, Slack/
+/// Jira id) as a matched needle. Includes alphanumerics (Hangul/CJK included via
+/// `is_alphanumeric`) plus the punctuation that appears *inside* emails and
+/// usernames, so a match flanked by any of these is treated as a sub-token, not a
+/// whole-token hit.
+fn is_identifier_char(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '.' | '_' | '%' | '+' | '-' | '@')
+}
+
+/// Substring match that requires the needle to NOT be flanked by identifier
+/// characters on either side — a language-agnostic token boundary. Prevents the
 /// false positives a plain `contains` produces: name "kim" matching "kimberly",
-/// or "이준영" matching "이준영팀" (that person's *team*, not their own work).
-/// `char::is_alphanumeric` treats Hangul/CJK as alphanumeric, so the boundary
-/// holds for both Latin and CJK identifiers.
+/// "이준영" matching "이준영팀" (that person's *team*), or email
+/// "test@example.com" matching "test@example.com.au" (a different domain).
 fn contains_bounded(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return false;
@@ -71,11 +79,11 @@ fn contains_bounded(haystack: &str, needle: &str) -> bool {
         let before_ok = haystack[..start]
             .chars()
             .next_back()
-            .is_none_or(|c| !c.is_alphanumeric());
+            .is_none_or(|c| !is_identifier_char(c));
         let after_ok = haystack[end..]
             .chars()
             .next()
-            .is_none_or(|c| !c.is_alphanumeric());
+            .is_none_or(|c| !is_identifier_char(c));
         if before_ok && after_ok {
             return true;
         }
@@ -172,6 +180,25 @@ mod tests {
 
         // Standalone "Kim" as a whole token must still match.
         let mut events2 = vec![make_event("Status", Some("Kim"))];
+        flag_personal(&mut events2, &identity);
+        assert!(events2[0].is_personal);
+    }
+
+    #[test]
+    fn email_does_not_match_longer_domain() {
+        let identity = Identity {
+            name: "X".into(),
+            email: "test@example.com".into(),
+            slack_id: None,
+            jira_id: None,
+        };
+        // A different address that merely starts with the identity email.
+        let mut events = vec![make_event("Msg", Some("test@example.com.au"))];
+        flag_personal(&mut events, &identity);
+        assert!(!events[0].is_personal);
+
+        // The exact address (delimited by angle brackets) still matches.
+        let mut events2 = vec![make_event("Msg", Some("Foo <test@example.com>"))];
         flag_personal(&mut events2, &identity);
         assert!(events2[0].is_personal);
     }
