@@ -101,6 +101,18 @@ Calendar ──────┘          ├─ Concepts (LLM)          wiki/conc
 | `wi schedule --bin /full/path/wi` | Override bin path in cron lines |
 | `wi maintenance` | Prune ingest log and dedup cache entries older than 90 days |
 
+## LLM provider modes
+
+`llm.provider` in `config.yaml` selects how semantic work (summarize, concept extraction) is performed:
+
+| Mode | Behavior | Best for |
+|------|---------|---------|
+| `anthropic` | Direct Anthropic Messages API. Requires `ANTHROPIC_API_KEY`. Pipeline does end-to-end work in one process. | Unattended cron, headless servers, non–Claude Code users |
+| `queue` | Pipeline emits JSONL tasks to `<vault>/.wiki-ingest/queue/`. The `/wi-process` Claude Code skill drains them using its native LLM session — no separate API key or billing. | Daily Claude Code users who want the LLM cost included in their subscription |
+| `noop` | No LLM work. Daily pages render structure only (no summary/concepts). | Development, CI, vault-only sources where templates suffice |
+
+In `queue` mode, run `wi ingest` (typically via cron) to fetch + dedup + write structural pages and queue entries; then run `/wi-process` in Claude Code to fill in summaries and concept pages. The skill processes oldest-first and is fully resumable.
+
 ## Workspace Structure
 
 ```

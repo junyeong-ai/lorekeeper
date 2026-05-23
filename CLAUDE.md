@@ -37,7 +37,11 @@ crates/
 - **Pipeline shares context**: `Arc<PipelineContext>` between `Pipeline` and `Synthesizer` (engine, llm, dirs, perf, identity, timezone) for DRY.
 - **Concept pages persist**: `wiki/concepts/{slug}.md` is written + merged (mention_count, sources accumulate across runs). Slugs are re-normalized via `slugify()` to prevent path-injection from LLM output.
 - **Multi-date events**: events spanning multiple dates produce one `daily/` page per date (not collapsed into first event's date). LLM summarize+extract runs per date.
-- **LLM graceful degradation**: `ANTHROPIC_API_KEY` missing → `NoopLlmClient`; LLM errors logged via `tracing::warn` and fall back to empty results.
+- **LLM provider modes** (`llm.provider`):
+  - `anthropic` — direct Messages API (unattended cron, requires `ANTHROPIC_API_KEY`)
+  - `queue` — Pipeline emits JSONL tasks to `<vault>/.wiki-ingest/queue/`; a Claude Code skill (`/wi-process`) drains them using its native LLM session (no API key, no separate billing). Best for daily Claude Code users.
+  - `noop` — no LLM work; daily pages render without summary/concept content.
+- **LLM graceful degradation**: `anthropic` mode without `ANTHROPIC_API_KEY` falls back to `NoopLlmClient` with a warning. LLM errors are logged via `tracing::warn` and fall back to empty results so ingest never fails on semantic work alone.
 - **Dedup retention**: `wi maintenance` prunes both ingest log and dedup cache entries older than 90 days. Must not overlap a running `wi ingest`.
 - **Atomic 4-phase ingest** (`wi ingest`): (1) plan all sources, (2) write daily+concept pages, (3) write aggregated work-log, (4) commit dedup. Any failure aborts at the affected phase and dedup is NOT committed, so re-running is idempotent and lossless.
 - **Schedule subcommands honor `--previous`**: `wi synthesis weekly --previous` synthesizes the just-completed period instead of the current one. `wi schedule` emits `--previous` automatically in generated cron lines.
