@@ -270,9 +270,12 @@ backup_path() {
 }
 
 download_skill_tarball() {
-    local version="$1"
-    local archive="${BINARY_NAME}-skill-v${version}.tar.gz"
+    local version="$1" skill_name="$2"
+    local archive="${skill_name}-skill-v${version}.tar.gz"
     local url="${RELEASE_BASE}/v${version}/${archive}"
+    local extracted_dir="${TMP_DIR}/${skill_name}"
+
+    [ -d "$extracted_dir" ] && { echo "$extracted_dir"; return 0; }
 
     render_step "Downloading skill ${archive}"
     if ! curl -fsSL --retry 3 --retry-delay 2 -o "${TMP_DIR}/${archive}" "$url" 2>/dev/null; then
@@ -289,7 +292,7 @@ download_skill_tarball() {
         fi
     } ) || { log_warn "Skill checksum mismatch; skipping skill install"; echo ""; return 0; }
     tar -xzf "${TMP_DIR}/${archive}" -C "${TMP_DIR}"
-    echo "${TMP_DIR}/${SKILL_NAME}"
+    echo "$extracted_dir"
 }
 
 install_skill() {
@@ -547,13 +550,19 @@ main() {
     fi
 
     if [ "$skill_level" != "none" ]; then
-        local skill_src=""
-        if [ -n "$repo_dir" ] && [ -d "$repo_dir/.claude/skills/$SKILL_NAME" ]; then
-            skill_src="$repo_dir/.claude/skills/$SKILL_NAME"
-        else
-            skill_src="$(download_skill_tarball "$version")"
-        fi
-        [ -n "$skill_src" ] && install_skill "$skill_level" "$skill_src"
+        # Install all bundled skills. wiki-ingest = wi command invocation surface;
+        # wi-process = queue drainer used in queue-mode workflows.
+        for skill in "wiki-ingest" "wi-process"; do
+            local skill_src=""
+            if [ -n "$repo_dir" ] && [ -d "$repo_dir/.claude/skills/$skill" ]; then
+                skill_src="$repo_dir/.claude/skills/$skill"
+            else
+                skill_src="$(download_skill_tarball "$version" "$skill")"
+            fi
+            if [ -n "$skill_src" ]; then
+                SKILL_NAME="$skill" install_skill "$skill_level" "$skill_src"
+            fi
+        done
     fi
 
     printf '\n'
@@ -563,7 +572,8 @@ main() {
     printf '  %s%s validate%s              Verify config.yaml in current directory\n' "$C_BOLD" "$BINARY_NAME" "$C_RESET"
     printf '  %s%s ingest --dry-run%s      Preview ingest without writing\n' "$C_BOLD" "$BINARY_NAME" "$C_RESET"
     printf '  %s%s schedule%s              Generate crontab entries\n' "$C_BOLD" "$BINARY_NAME" "$C_RESET"
-    printf '  %s/wiki-ingest%s              Use as Claude Code skill\n' "$C_BOLD" "$C_RESET"
+    printf '  %s/wiki-ingest%s              Use wi commands via Claude Code\n' "$C_BOLD" "$C_RESET"
+    printf '  %s/wi-process%s               Drain the LLM work queue (queue-mode runs)\n' "$C_BOLD" "$C_RESET"
 }
 
 main "$@"

@@ -8,13 +8,11 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $BinaryName = 'wi'
-$SkillName = 'wiki-ingest'
+$SkillNames = @('wiki-ingest', 'wi-process')
 $InstallDir = if ($env:WI_INSTALL_DIR) { $env:WI_INSTALL_DIR }
               else { Join-Path $env:USERPROFILE '.local\bin' }
 $DataDir = if ($env:WI_INSTALL_DATA_DIR) { $env:WI_INSTALL_DATA_DIR }
            else { Join-Path $env:LOCALAPPDATA 'wi-ingest' }
-$SkillUser = Join-Path $env:USERPROFILE ".claude\skills\$SkillName"
-$SkillProject = Join-Path (Get-Location) ".claude\skills\$SkillName"
 
 function Write-Step($msg) { Write-Host "▸  $msg" -ForegroundColor Yellow }
 function Write-Ok($msg)   { Write-Host "✓  $msg" -ForegroundColor Green }
@@ -54,23 +52,27 @@ if ((-not $KeepData) -and (Test-Path $templates)) {
     }
 }
 
-# User skill
-if (Test-Path $SkillUser) {
-    if (Prompt-YesNo "Remove user-level skill $SkillUser?") {
-        Write-Step "Removing $SkillUser"
-        Remove-Item -Recurse -Force $SkillUser
-        Write-Ok 'User skill removed'
-        $removed++
-    }
-}
+# Skills (user-level and project-level for each installed skill name)
+foreach ($skillName in $SkillNames) {
+    $skillUser = Join-Path $env:USERPROFILE ".claude\skills\$skillName"
+    $skillProject = Join-Path (Get-Location) ".claude\skills\$skillName"
 
-# Project skill
-if ((Test-Path $SkillProject) -and ($SkillProject -ne $SkillUser)) {
-    if (Prompt-YesNo "Remove project-level skill $SkillProject?") {
-        Write-Step "Removing $SkillProject"
-        Remove-Item -Recurse -Force $SkillProject
-        Write-Ok 'Project skill removed'
-        $removed++
+    if (Test-Path $skillUser) {
+        if (Prompt-YesNo "Remove user-level skill $skillUser?") {
+            Write-Step "Removing $skillUser"
+            Remove-Item -Recurse -Force $skillUser
+            Write-Ok "User skill removed: $skillName"
+            $removed++
+        }
+    }
+
+    if ((Test-Path $skillProject) -and ($skillProject -ne $skillUser)) {
+        if (Prompt-YesNo "Remove project-level skill $skillProject?") {
+            Write-Step "Removing $skillProject"
+            Remove-Item -Recurse -Force $skillProject
+            Write-Ok "Project skill removed: $skillName"
+            $removed++
+        }
     }
 }
 

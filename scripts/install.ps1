@@ -17,7 +17,7 @@ Set-StrictMode -Version Latest
 
 $Repo = 'junyeong-ai/wiki-ingest'
 $BinaryName = 'wi'
-$SkillName = 'wiki-ingest'
+$SkillNames = @('wiki-ingest', 'wi-process')
 $ReleaseBase = "https://github.com/$Repo/releases/download"
 $LatestUrl = "https://github.com/$Repo/releases/latest"
 
@@ -104,12 +104,12 @@ function Install-Templates($srcDir, $destBase) {
     Write-Ok 'Templates installed'
 }
 
-function Install-Skill($level, $src) {
+function Install-Skill($level, $src, $skillName) {
     if ($level -eq 'none') { Write-Host '  Skill install skipped' -ForegroundColor DarkGray; return }
     if (-not (Test-Path $src)) { Write-Warn "Skill source not found: $src (skipping)"; return }
     $target = switch ($level) {
-        'user'    { Join-Path $env:USERPROFILE ".claude\skills\$SkillName" }
-        'project' { Join-Path (Get-Location) ".claude\skills\$SkillName" }
+        'user'    { Join-Path $env:USERPROFILE ".claude\skills\$skillName" }
+        'project' { Join-Path (Get-Location) ".claude\skills\$skillName" }
     }
     Write-Step "Installing skill -> $target"
     if (Test-Path $target) {
@@ -153,9 +153,9 @@ Write-Host 'Review' -ForegroundColor White
 Write-Host "  binary    $(Join-Path $InstallDir "$BinaryName.exe") (v$version, $method)"
 Write-Host "  templates $(Join-Path $DataDir 'templates')"
 switch ($Skill) {
-    'user'    { Write-Host "  skill     $env:USERPROFILE\.claude\skills\$SkillName" }
-    'project' { Write-Host "  skill     .\.claude\skills\$SkillName" }
-    'none'    { Write-Host '  skill     (skipped)' }
+    'user'    { Write-Host "  skills    $env:USERPROFILE\.claude\skills\{wiki-ingest,wi-process}" }
+    'project' { Write-Host "  skills    .\.claude\skills\{wiki-ingest,wi-process}" }
+    'none'    { Write-Host '  skills    (skipped)' }
 }
 
 if ($DryRun) { Write-Host ''; Write-Warn '(dry-run) Not executing'; exit 0 }
@@ -189,13 +189,15 @@ Install-Binary $binSrc $InstallDir
 Install-Templates $templatesSrc $DataDir
 
 if ($Skill -ne 'none') {
-    $skillSrc = if ($repoDir -and (Test-Path (Join-Path $repoDir ".claude\skills\$SkillName"))) {
-        Join-Path $repoDir ".claude\skills\$SkillName"
-    } else {
-        $null
+    foreach ($skillName in $SkillNames) {
+        $skillSrc = if ($repoDir -and (Test-Path (Join-Path $repoDir ".claude\skills\$skillName"))) {
+            Join-Path $repoDir ".claude\skills\$skillName"
+        } else {
+            $null
+        }
+        if ($skillSrc) { Install-Skill $Skill $skillSrc $skillName }
+        else { Write-Warn "Skill '$skillName' source not packaged in release; skipping" }
     }
-    if ($skillSrc) { Install-Skill $Skill $skillSrc }
-    else { Write-Warn 'Skill source not packaged in release; skipping' }
 }
 
 Write-Host ''

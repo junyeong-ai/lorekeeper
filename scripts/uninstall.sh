@@ -3,13 +3,11 @@
 set -euo pipefail
 
 BINARY_NAME="wi"
-SKILL_NAME="wiki-ingest"
+SKILL_NAMES=("wiki-ingest" "wi-process")
 
 INSTALL_DIR="${WI_INSTALL_DIR:-$HOME/.local/bin}"
 DATA_DIR="${WI_INSTALL_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/wi-ingest}"
 WI_UNINSTALL_YES="${WI_UNINSTALL_YES:-0}"
-SKILL_USER="$HOME/.claude/skills/${SKILL_NAME}"
-SKILL_PROJECT="$(pwd)/.claude/skills/${SKILL_NAME}"
 
 C_RESET=""; C_DIM=""; C_RED=""; C_GREEN=""; C_YELLOW=""; C_BOLD=""
 
@@ -92,25 +90,29 @@ if [ "$KEEP_DATA" != "1" ] && [ -d "${DATA_DIR}/templates" ]; then
     fi
 fi
 
-# User skill
-if [ -d "$SKILL_USER" ]; then
-    if prompt_yesno "Remove user-level skill $SKILL_USER?"; then
-        render_step "Removing $SKILL_USER"
-        rm -rf "$SKILL_USER"
-        log_ok "User skill removed"
-        removed=$((removed + 1))
-    fi
-fi
+# Skills (user-level and project-level for each installed skill name)
+for skill in "${SKILL_NAMES[@]}"; do
+    skill_user="$HOME/.claude/skills/${skill}"
+    skill_project="$(pwd)/.claude/skills/${skill}"
 
-# Project skill
-if [ -d "$SKILL_PROJECT" ] && [ "$SKILL_PROJECT" != "$SKILL_USER" ]; then
-    if prompt_yesno "Remove project-level skill $SKILL_PROJECT?"; then
-        render_step "Removing $SKILL_PROJECT"
-        rm -rf "$SKILL_PROJECT"
-        log_ok "Project skill removed"
-        removed=$((removed + 1))
+    if [ -d "$skill_user" ]; then
+        if prompt_yesno "Remove user-level skill $skill_user?"; then
+            render_step "Removing $skill_user"
+            rm -rf "$skill_user"
+            log_ok "User skill removed: $skill"
+            removed=$((removed + 1))
+        fi
     fi
-fi
+
+    if [ -d "$skill_project" ] && [ "$skill_project" != "$skill_user" ]; then
+        if prompt_yesno "Remove project-level skill $skill_project?"; then
+            render_step "Removing $skill_project"
+            rm -rf "$skill_project"
+            log_ok "Project skill removed: $skill"
+            removed=$((removed + 1))
+        fi
+    fi
+done
 
 if [ "$removed" -eq 0 ]; then
     printf '\n%sNothing to uninstall.%s\n' "$C_DIM" "$C_RESET"
