@@ -4,7 +4,7 @@ title: "슬랙 키워드 트렌드 {{ date }}"
 created: {{ date }}
 labels: {{ labels | tojson }}
 source: {{ source_id }}
-clusters_count: {{ clusters | length }}
+events_count: {{ events | length }}
 ---
 
 # 슬랙 키워드 트렌드 {{ date }}
@@ -13,16 +13,15 @@ clusters_count: {{ clusters | length }}
 
 {{ summary }}
 
-{% for cluster in clusters %}
-## {{ cluster.topic }}
+## 주요 메시지
 
-- 키워드: {{ cluster.keywords | join(", ") }}
-- 메시지 수: {{ cluster.message_count }}
-- 참여자: {{ cluster.participants | join(", ") }}
+{% for event in events %}
+### {{ event.title }}
 
-{% for msg in cluster.representative_messages %}
-> {{ msg }}
-{% endfor %}
+{{ event.body }}
+{% if event.url %}
+[원본 메시지]({{ event.url }})
+{% endif %}
 
 {% endfor %}
 ## 관련 개념

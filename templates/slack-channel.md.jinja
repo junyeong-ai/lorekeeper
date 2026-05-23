@@ -4,7 +4,7 @@ title: "팀 활동 {{ date }}"
 created: {{ date }}
 labels: {{ labels | tojson }}
 source: {{ source_id }}
-members_count: {{ members | length }}
+events_count: {{ events | length }}
 ---
 
 # 팀 활동 {{ date }}
@@ -13,12 +13,15 @@ members_count: {{ members | length }}
 
 {{ summary }}
 
-{% for member in members %}
-## {{ member.name }}
+## 주요 메시지
 
-{% for item in member.items %}
-- {{ item }}
-{% endfor %}
+{% for event in events %}
+### {{ event.title }}
+
+{{ event.body }}
+{% if event.author %}
+— {{ event.author }}
+{% endif %}
 
 {% endfor %}
 ## 관련 개념

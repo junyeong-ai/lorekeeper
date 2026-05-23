@@ -78,8 +78,6 @@ pub fn render_daily_page(
         "project_items": project_items,
         "knowledge_items": knowledge_items,
         "meeting_items": meeting_items,
-        "members": [],
-        "clusters": [],
     });
 
     let source_template = format!("{source_id}.md.jinja");
