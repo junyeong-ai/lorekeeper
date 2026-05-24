@@ -404,6 +404,9 @@ pub enum SourceType {
     SlackSearch,
     Jira,
     GoogleCalendar,
+    /// User-curated inbox: files dropped into `<vault>/inbox/` are picked up,
+    /// processed through the same pipeline as automated sources, and archived.
+    Manual,
 }
 
 impl SourceType {
@@ -419,6 +422,7 @@ impl SourceType {
             SourceType::SlackChannel => "slack-channel.md.jinja",
             SourceType::SlackSearch => "slack-search.md.jinja",
             SourceType::Jira => "jira.md.jinja",
+            SourceType::Manual => "document.md.jinja",
         }
     }
 }

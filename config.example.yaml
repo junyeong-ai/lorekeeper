@@ -133,6 +133,21 @@ sources:
     extract_concepts: true
     track_personal: false
 
+  # 수동 큐레이션 — <vault>/inbox/ 디렉토리에 .md/.txt/.json 파일을 떨어뜨리면
+  # 정규 파이프라인(dedup, classify, concept extract)을 통과해 처리된 후
+  # <vault>/inbox/archived/{date}/로 이동. content-hash dedup으로 같은 파일을
+  # 두 번 넣어도 중복 등록되지 않음.
+  manual-inbox:
+    type: manual
+    enabled: false      # 활성화하기 전에 inbox_dir이 실제 존재하는지 확인할 것
+    schedule: "0 11 * * *"
+    params:
+      inbox_dir: ~/Documents/Obsidian Vault/inbox
+      extensions: [md, txt, markdown, json]
+      archive_after_ingest: true
+    labels: [knowledge]
+    extract_concepts: true
+
 # ─── 중복 제거 ────────────────────────────────────────────
 dedup:
   cascade: [event-id, content-hash, url, title]
