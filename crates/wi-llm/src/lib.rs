@@ -52,14 +52,14 @@ pub enum TargetKind {
     DailyConcepts,
     /// Cross-source weekly synthesis narrative.
     WeeklySynthesisNarrative,
-    /// Personal weekly summary narrative.
+    /// Personal weekly review narrative.
     WeeklyPersonalNarrative,
-    /// Monthly summary narrative.
-    MonthlyNarrative,
-    /// Quarterly review narrative.
-    QuarterlyNarrative,
-    /// Annual review narrative.
-    AnnualNarrative,
+    /// Personal monthly review narrative.
+    MonthlyPersonalNarrative,
+    /// Personal quarterly review narrative.
+    QuarterlyPersonalNarrative,
+    /// Personal annual review narrative.
+    AnnualPersonalNarrative,
 }
 
 /// Where the result of a semantic task should land in the vault. Carried through the

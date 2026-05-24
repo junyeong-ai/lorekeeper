@@ -227,7 +227,7 @@ pub struct VaultDirs {
     pub weekly: String,
     pub monthly: String,
     pub quarterly: String,
-    pub annually: String,
+    pub annual: String,
     pub personal: String,
     pub wiki: String,
 }
@@ -239,7 +239,7 @@ impl Default for VaultDirs {
             weekly: "weekly".into(),
             monthly: "monthly".into(),
             quarterly: "quarterly".into(),
-            annually: "annually".into(),
+            annual: "annually".into(),
             personal: "me".into(),
             wiki: "wiki".into(),
         }
@@ -256,7 +256,7 @@ impl VaultDirs {
             ("weekly", &self.weekly),
             ("monthly", &self.monthly),
             ("quarterly", &self.quarterly),
-            ("annually", &self.annually),
+            ("annual", &self.annual),
             ("personal", &self.personal),
             ("wiki", &self.wiki),
         ];

@@ -11,7 +11,7 @@ vault:
     weekly: weekly
     monthly: monthly
     quarterly: quarterly
-    annually: annually
+    annual: annually
     personal: me
     wiki: wiki
 

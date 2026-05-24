@@ -236,7 +236,7 @@ impl Synthesizer {
                 ),
                 15,
                 path.to_string(),
-                wi_llm::TargetKind::MonthlyNarrative,
+                wi_llm::TargetKind::MonthlyPersonalNarrative,
                 "monthly",
             )
             .await?;
@@ -302,7 +302,7 @@ impl Synthesizer {
                 ),
                 20,
                 path.to_string(),
-                wi_llm::TargetKind::QuarterlyNarrative,
+                wi_llm::TargetKind::QuarterlyPersonalNarrative,
                 "quarterly",
             )
             .await?;
@@ -364,7 +364,7 @@ impl Synthesizer {
                 ),
                 25,
                 path.to_string(),
-                wi_llm::TargetKind::AnnualNarrative,
+                wi_llm::TargetKind::AnnualPersonalNarrative,
                 "annual",
             )
             .await?;

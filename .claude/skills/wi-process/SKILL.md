@@ -85,7 +85,8 @@ Each line in a queue file is one task:
 `kind` values: `summarize` | `extract-concepts`
 `target.kind` values: `daily-summary` | `daily-concepts` |
 `weekly-synthesis-narrative` | `weekly-personal-narrative` |
-`monthly-narrative` | `quarterly-narrative` | `annual-narrative`
+`monthly-personal-narrative` | `quarterly-personal-narrative` |
+`annual-personal-narrative`
 
 ## Processing protocol
 
@@ -142,11 +143,11 @@ Each line in a queue file is one task:
 
         | `target.kind` | Anchor heading |
         |---|---|
-        | `weekly-synthesis-narrative` | `## 이번 주 핵심 주제` |
-        | `weekly-personal-narrative`  | `## 핵심 요약` |
-        | `monthly-narrative`          | `## 핵심 요약` |
-        | `quarterly-narrative`        | `## 주요 성과 Top 5` |
-        | `annual-narrative`           | `## 종합 요약` |
+        | `weekly-synthesis-narrative`   | `## 이번 주 핵심 주제` |
+        | `weekly-personal-narrative`    | `## 핵심 요약` |
+        | `monthly-personal-narrative`   | `## 핵심 요약` |
+        | `quarterly-personal-narrative` | `## 주요 성과 Top 5` |
+        | `annual-personal-narrative`    | `## 종합 요약` |
 
         Replace the body of the anchor (everything between this heading
         and the next `## ` heading, or EOF) with the generated

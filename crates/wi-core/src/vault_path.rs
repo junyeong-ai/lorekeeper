@@ -56,7 +56,7 @@ impl VaultPath {
 
     pub fn annual_personal(dirs: &VaultDirs, year: i16) -> Self {
         Self(
-            PathBuf::from(&dirs.annually)
+            PathBuf::from(&dirs.annual)
                 .join(&dirs.personal)
                 .join(format!("{year}.md")),
         )

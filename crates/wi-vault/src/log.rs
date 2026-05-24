@@ -24,7 +24,6 @@ pub struct LogEntry {
 #[serde(rename_all = "lowercase")]
 pub enum LogStatus {
     Success,
-    Partial,
     Failed,
     Skipped,
 }

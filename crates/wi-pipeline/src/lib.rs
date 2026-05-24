@@ -56,10 +56,6 @@ impl IngestResult {
     pub fn is_empty(&self) -> bool {
         self.daily_pages.is_empty()
     }
-
-    pub fn page_count(&self) -> usize {
-        self.daily_pages.len()
-    }
 }
 
 pub struct IngestOptions {

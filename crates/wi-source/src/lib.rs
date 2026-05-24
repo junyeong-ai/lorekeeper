@@ -26,10 +26,6 @@ pub enum SourceError {
     Api { status: u16, message: String },
     #[error("parse: {0}")]
     Parse(String),
-    #[error("source '{0}' not found")]
-    NotFound(String),
-    #[error("source '{0}' is disabled")]
-    Disabled(String),
 }
 
 #[derive(Debug, Clone)]
