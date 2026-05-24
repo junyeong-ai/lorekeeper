@@ -6,7 +6,7 @@ Collects daily data from heterogeneous sources (Gmail, Google Drive, Slack, Jira
 
 ## Install
 
-**macOS / Linux** (one-liner — downloads prebuilt binary, templates, and Claude Code skill):
+**macOS / Linux** (one-liner — downloads prebuilt binary, templates, and Claude Code skills):
 ```bash
 curl -fsSL https://raw.githubusercontent.com/junyeong-ai/wiki-ingest/main/scripts/install.sh | bash
 ```
@@ -19,7 +19,7 @@ irm https://raw.githubusercontent.com/junyeong-ai/wiki-ingest/main/scripts/insta
 The installer:
 - Downloads the prebuilt `wi` binary to `~/.local/bin` (configurable)
 - Installs `templates/` to `$XDG_DATA_HOME/wi-ingest/templates/`
-- Installs the Claude Code skill to `~/.claude/skills/wiki-ingest/`
+- Installs the Claude Code skills (`wiki-ingest`, `wi-process`) to `~/.claude/skills/`
 - Verifies SHA256 checksums
 - Adds quarantine strip + ad-hoc codesign on macOS
 - Checks `PATH` and prints next steps
@@ -99,7 +99,7 @@ Calendar ──────┘          ├─ Concepts (LLM)          wiki/conc
 | `wi performance` | Show work category distribution |
 | `wi schedule` | Print crontab entries (uses plain `wi` for PATH lookup) |
 | `wi schedule --bin /full/path/wi` | Override bin path in cron lines |
-| `wi maintenance` | Prune ingest log and dedup cache entries older than 90 days |
+| `wi maintenance` | Prune ingest log, dedup cache, and drained queue files older than 90 days |
 
 ## LLM provider modes
 
@@ -125,7 +125,7 @@ crates/
   wi-vault/     Obsidian vault I/O: read, write, frontmatter, templates, log
   wi-source/    Source adapters: Gmail, Drive, Slack, Jira, Calendar
   wi-pipeline/  Transform stages: normalize, dedup, classify, render, synthesis
-  wi-llm/       LLM client abstraction (Claude API + Noop fallback)
+  wi-llm/       LlmClient trait + providers (anthropic, queue, noop) and a test mock
   wi-cli/       Binary entry point (wi)
 
 templates/      Jinja2 markdown templates (.md.jinja)
@@ -178,7 +178,7 @@ Two ways to provide credentials, env vars take precedence over file:
 - `WI_GOOGLE_CLIENT_ID`, `WI_GOOGLE_CLIENT_SECRET`, `WI_GOOGLE_REFRESH_TOKEN`
 - `WI_SLACK_TOKEN`
 - `WI_JIRA_URL`, `WI_JIRA_EMAIL`, `WI_JIRA_TOKEN`
-- `ANTHROPIC_API_KEY` (optional; falls back to no-op LLM)
+- `ANTHROPIC_API_KEY` (only for `llm.provider: anthropic`; if missing in that mode, the run degrades to the no-op LLM with a warning. Not needed for the default `queue` mode.)
 
 **Credentials file** at `{vault_root}/.wiki-ingest/credentials.json`:
 ```json
