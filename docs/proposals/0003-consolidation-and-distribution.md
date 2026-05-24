@@ -1,7 +1,7 @@
 ---
 id: proposal-0003-consolidation-and-distribution
 title: "Consolidation & Distribution: One Workspace, One Binary, One Skill, One Install"
-status: proposed
+status: accepted
 created: 2026-05-24
 author: junyeong
 ---

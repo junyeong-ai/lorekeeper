@@ -1,7 +1,7 @@
 ---
 id: proposal-0002-karpathy-alignment
 title: "Karpathy Alignment: Generated Schema, Compounding Query, Semantic Audit"
-status: proposed
+status: accepted
 created: 2026-05-24
 author: junyeong
 ---
@@ -27,7 +27,7 @@ requires but our skills lack.
    `wiki/explorations/`. This is the one behavior that separates a wiki from
    stateless RAG.
 4. **Semantic audit** — `/wiki audit` adds contradiction surfacing and
-   cluster-grounded missing-link suggestions on top of `wikigraph`'s
+   cluster-grounded missing-link suggestions on top of `lore graph`'s
    structural lint.
 
 ## Principle: one source of truth per concern
@@ -200,14 +200,14 @@ The judgment is per-answer and made by the model — there is no frequency rule
 and no file-everything default, so `explorations/` accumulates only durable
 analysis.
 
-### Change 5 — `/wiki audit` and `wikigraph suggest-links`
+### Change 5 — `/wiki audit` and `lore graph suggest-links`
 
 `/wiki audit` runs three checks, each **surfacing for human review, never
 auto-resolving**, each **grounded** rather than heuristic:
 
-1. **Structural** — delegates to `wikigraph lint` (orphans, broken links,
+1. **Structural** — delegates to `lore graph lint` (orphans, broken links,
    index drift). Deterministic.
-2. **Missing cross-references** — `wikigraph suggest-links` (new, read-only)
+2. **Missing cross-references** — `lore graph suggest-links` (new, read-only)
    emits pairs in the same Louvain community with no edge between them, ranked
    by shared-neighbor count; the LLM then confirms topical relatedness before
    proposing a link. Community grounding plus LLM confirmation is the
@@ -218,7 +218,7 @@ auto-resolving**, each **grounded** rather than heuristic:
    with `confidence: ambiguous` and a review note, and never chooses a side.
    One page at a time, so no cross-page combinatorial blow-up.
 
-`wikigraph suggest-links`:
+`lore graph suggest-links`:
 
 ```
 wikigraph --root <vault> suggest-links [--min-community-size N] [--json]
@@ -247,7 +247,7 @@ automated contradiction resolution.
    `wiki/AGENTS.md` for concept format.
 6. `/wiki` SKILL.md — rewrite to four commands binding to AGENTS.md and
    `config.yaml`; add compounding `query`; add `audit`.
-7. `wikigraph` — implement `suggest-links` in `cluster.rs` with `--json` and
+7. `lore graph` — implement `suggest-links` in `cluster.rs` with `--json` and
    tests.
 
 The vault holds only a handful of pages today, so existing concept pages are
@@ -289,7 +289,7 @@ cd ~/workspace/wikigraph && cargo test && cargo clippy --all-targets -- -D warni
 - [ ] `TaskTarget.anchor` resolved at queue time; `/lore-process` drops its heading table
 - [ ] `/wiki` four-command set, binding to AGENTS.md + config
 - [ ] Compounding `query` (LLM-judged file-back)
-- [ ] `/wiki audit` + `wikigraph suggest-links`, surface-only
+- [ ] `/wiki audit` + `lore graph suggest-links`, surface-only
 
 ## Non-Goals
 
