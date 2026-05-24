@@ -26,6 +26,8 @@ Deterministic transform stages between `lk-source` and `lk-vault`. Shares an
   and dedupes `sources`/`reference_count`.
 - **Synthesizer** methods are `weekly_synthesis` + `*_personal`; they share
   `summarize_or_warn` (propagates only fatal LLM errors) and `render_or_fallback`.
+  Every `TaskTarget` carries `anchor` — the exact `## …` heading resolved from i18n
+  at construction time — so the skill never needs a hardcoded kind→heading table.
 - Fallback renderers must emit the same `##` anchors the templates use (so `/lore-process`
   can find the section) and the same frontmatter keys synthesis reads (e.g. work-log
   `categories`).

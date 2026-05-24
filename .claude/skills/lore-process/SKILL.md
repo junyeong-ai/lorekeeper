@@ -77,7 +77,8 @@ Each line in a queue file is one task:
   },
   "target": {
     "vault_path": "daily/ai-news/2026-05-23.md",
-    "kind": "daily-summary"
+    "kind": "daily-summary",
+    "anchor": "## Summary"
   }
 }
 ```
@@ -87,6 +88,9 @@ Each line in a queue file is one task:
 `weekly-synthesis-narrative` | `weekly-personal-narrative` |
 `monthly-personal-narrative` | `quarterly-personal-narrative` |
 `annual-personal-narrative`
+`target.anchor`: the exact section heading (e.g. `"## Summary"` or `"## 요약"`)
+the pipeline wrote, resolved from i18n at queue time. Always use this as the
+locate key — never hardcode headings per `target.kind`.
 
 ## Processing protocol
 
@@ -117,16 +121,23 @@ Each line in a queue file is one task:
         `wiki/concepts/{slug}.md` entry (create if missing, merge if
         exists — increment reference_count, append source ref).
 
-   c. **Edit the target page** via Obsidian MCP. All daily and synthesis
-      templates emit stable section anchors, so the section is always
-      present (with an empty body when queued by `lore ingest`):
+   c. **Edit the target page** via Obsidian MCP. Every task carries
+      `target.anchor` — the exact `## …` heading the pipeline wrote,
+      resolved from i18n at queue time (e.g. `"## Summary"` for English
+      or `"## 요약"` for Korean). Use it as the locate key for all task
+      types — never hardcode headings per `target.kind`.
 
-      - **`daily-summary`** target: locate `## 요약` and replace its
-        body (everything between this heading and the next `## ` heading)
-        with the synthesized summary.
+      For each task:
+        1. Open the file at `target.vault_path`
+        2. Locate the section heading `target.anchor` (literal match)
+        3. Replace the body between this heading and the next `## `
+           heading (or EOF) with the generated content
+        4. Preserve frontmatter and every other section unchanged
 
-      - **`daily-concepts`** target: locate `## 관련 개념` and replace
-        its body with `- [[Concept Name 1]]\n- [[Concept Name 2]]\n...`.
+      Additional per-kind notes:
+
+      - **`daily-concepts`** target: replace the section body with
+        `- [[Concept Name 1]]\n- [[Concept Name 2]]\n...`.
         Create each concept page at `wiki/concepts/{slug}.md` if it
         doesn't exist (use frontmatter `id`, `title`, `created`,
         `updated`, `confidence`, `reference_count`, `sources`, `tags`,
@@ -134,25 +145,10 @@ Each line in a queue file is one task:
         Name]]` links above resolve to the slug-named file — match the
         format of existing concept pages).
 
-      - **Synthesis narratives** — each `target.kind` maps to one
-        specific anchor heading. Search the page for the EXACT heading
-        text from this table (not "the first `##`" — these pages also
-        contain `## 기간`, `## 업무 카테고리`, etc. that must be left
-        alone). Both the bundled Jinja template and the fallback
-        renderer guarantee the listed heading exists.
-
-        | `target.kind` | Anchor heading |
-        |---|---|
-        | `weekly-synthesis-narrative`   | `## 이번 주 핵심 주제` |
-        | `weekly-personal-narrative`    | `## 핵심 요약` |
-        | `monthly-personal-narrative`   | `## 핵심 요약` |
-        | `quarterly-personal-narrative` | `## 주요 성과 Top 5` |
-        | `annual-personal-narrative`    | `## 종합 요약` |
-
-        Replace the body of the anchor (everything between this heading
-        and the next `## ` heading, or EOF) with the generated
-        narrative. Preserve frontmatter and every other section heading
-        unchanged.
+      - **Synthesis narratives** (`weekly-*`, `monthly-*`, etc.): these
+        pages contain multiple `## ` sections (period, categories,
+        etc.) — only the one matching `target.anchor` is replaced.
+        Leave all other headings untouched.
 
    d. **On task failure** (page not found, MCP error, malformed task):
       record the failed `task_id` and the reason. **Abort processing

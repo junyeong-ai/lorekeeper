@@ -41,14 +41,14 @@ impl LlmError {
     }
 }
 
-/// What kind of vault content a semantic task produces. The Claude Code skill uses
-/// this to decide how to integrate the LLM result into the target page.
+/// What kind of vault content a semantic task produces. Used for classification/logging;
+/// the actual section heading is carried in `TaskTarget.anchor`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TargetKind {
-    /// Daily page `## 요약` body.
+    /// Daily page summary body.
     DailySummary,
-    /// Daily page `## 관련 개념` wiki-links + concept page creation/merge.
+    /// Daily page concept wiki-links + concept page creation/merge.
     DailyConcepts,
     /// Cross-source weekly synthesis narrative.
     WeeklySynthesisNarrative,
@@ -68,6 +68,11 @@ pub enum TargetKind {
 pub struct TaskTarget {
     pub vault_path: String,
     pub kind: TargetKind,
+    /// The exact section heading the pipeline wrote (e.g. `"## Summary"` or `"## 요약"`),
+    /// resolved from i18n at queue time. The `/lore-process` skill uses this as the
+    /// locate key instead of a hardcoded kind→heading table, so locale changes never
+    /// break the semantic plane.
+    pub anchor: String,
 }
 
 #[derive(Debug, Clone)]

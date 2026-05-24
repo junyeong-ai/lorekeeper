@@ -189,6 +189,7 @@ impl Pipeline {
                     target: lk_llm::TaskTarget {
                         vault_path: daily_path.clone(),
                         kind: lk_llm::TargetKind::DailySummary,
+                        anchor: format!("## {}", self.ctx.locale.strings().summary),
                     },
                 })
                 .await
@@ -217,6 +218,7 @@ impl Pipeline {
                         target: lk_llm::TaskTarget {
                             vault_path: daily_path,
                             kind: lk_llm::TargetKind::DailyConcepts,
+                            anchor: format!("## {}", self.ctx.locale.strings().related_concepts),
                         },
                     })
                     .await

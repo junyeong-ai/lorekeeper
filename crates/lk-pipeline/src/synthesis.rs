@@ -43,6 +43,7 @@ impl Synthesizer {
         max_sentences: usize,
         vault_path: String,
         kind: lk_llm::TargetKind,
+        anchor: String,
         what: &str,
     ) -> Result<String, PipelineError> {
         match self
@@ -51,7 +52,11 @@ impl Synthesizer {
             .summarize(lk_llm::SummarizeRequest {
                 text,
                 max_sentences,
-                target: lk_llm::TaskTarget { vault_path, kind },
+                target: lk_llm::TaskTarget {
+                    vault_path,
+                    kind,
+                    anchor,
+                },
             })
             .await
         {
@@ -129,6 +134,7 @@ impl Synthesizer {
                 8,
                 path.to_string(),
                 lk_llm::TargetKind::WeeklySynthesisNarrative,
+                format!("## {}", self.ctx.locale.strings().key_themes_this_week),
                 "weekly synthesis",
             )
             .await?;
@@ -181,6 +187,7 @@ impl Synthesizer {
                 10,
                 path.to_string(),
                 lk_llm::TargetKind::WeeklyPersonalNarrative,
+                format!("## {}", self.ctx.locale.strings().key_summary),
                 "weekly personal",
             )
             .await?;
@@ -227,6 +234,7 @@ impl Synthesizer {
                 15,
                 path.to_string(),
                 lk_llm::TargetKind::MonthlyPersonalNarrative,
+                format!("## {}", self.ctx.locale.strings().key_summary),
                 "monthly",
             )
             .await?;
@@ -292,6 +300,7 @@ impl Synthesizer {
                 20,
                 path.to_string(),
                 lk_llm::TargetKind::QuarterlyPersonalNarrative,
+                format!("## {}", self.ctx.locale.strings().top_achievements),
                 "quarterly",
             )
             .await?;
@@ -353,6 +362,7 @@ impl Synthesizer {
                 25,
                 path.to_string(),
                 lk_llm::TargetKind::AnnualPersonalNarrative,
+                format!("## {}", self.ctx.locale.strings().overall_summary),
                 "annual",
             )
             .await?;

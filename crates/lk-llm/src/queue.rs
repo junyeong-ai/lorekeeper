@@ -186,6 +186,7 @@ mod tests {
             target: TaskTarget {
                 vault_path: "daily/test/2026-05-23.md".into(),
                 kind: TargetKind::DailySummary,
+                anchor: "## Summary".into(),
             },
         };
         let result = client.summarize(req).await.unwrap();
@@ -220,6 +221,7 @@ mod tests {
                 target: TaskTarget {
                     vault_path: "p".into(),
                     kind: TargetKind::DailySummary,
+                    anchor: String::new(),
                 },
             };
             client.summarize(req).await.unwrap();
@@ -244,6 +246,7 @@ mod tests {
             target: TaskTarget {
                 vault_path: "daily/ai-news/2026-05-23.md".into(),
                 kind: TargetKind::DailyConcepts,
+                anchor: "## Related Concepts".into(),
             },
         };
         let concepts = client.extract_concepts(req).await.unwrap();
@@ -285,6 +288,7 @@ mod tests {
             target: TaskTarget {
                 vault_path: "p".into(),
                 kind: TargetKind::DailySummary,
+                anchor: String::new(),
             },
         };
         client.summarize(req).await.unwrap();
@@ -312,6 +316,7 @@ mod tests {
                 target: TaskTarget {
                     vault_path: "p".into(),
                     kind: TargetKind::DailySummary,
+                    anchor: String::new(),
                 },
             })
             .await

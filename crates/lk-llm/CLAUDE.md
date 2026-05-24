@@ -8,10 +8,12 @@ about; provider choice is config-driven (`build_llm_client` in lk-cli).
 - **`LlmError::is_fatal()`** is true only for `QueueIo` (a persistence failure that must
   abort the run). Transient errors (network, rate limit, API) are non-fatal: callers log
   and degrade to an empty result so a flaky LLM never fails the whole ingest.
-- **`TaskTarget { vault_path, kind: TargetKind }`** rides through the trait so queue mode
-  records where each result should land. `TargetKind` variants are uniform
-  (`*PersonalNarrative` for monthly/quarterly/annual, matching weekly); serde kebab-case
-  names are the contract `/lore-process` reads (keep the SKILL.md table in sync).
+- **`TaskTarget { vault_path, kind, anchor }`** rides through the trait so queue mode
+  records where each result should land. `anchor` is the exact `## …` heading the
+  pipeline wrote, resolved from i18n at construction time — the skill locates by
+  `target.anchor` instead of a hardcoded kind→heading table. `TargetKind` variants are
+  uniform (`*PersonalNarrative` for monthly/quarterly/annual, matching weekly); serde
+  kebab-case names stay for classification/logging.
 - **Providers**:
   - `AnthropicClient` — direct Messages API, with retry/backoff on 429.
   - `QueueLlmClient` — buffers tasks in memory; `flush` writes the whole run to
