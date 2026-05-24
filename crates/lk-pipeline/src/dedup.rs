@@ -149,19 +149,18 @@ impl DedupCache {
             ),
             None => None,
         };
-        let tables = match &read_txn {
-            Some(txn) => Some((
-                txn.open_table(EVENT_IDS)
-                    .map_err(|e| PipelineError::Dedup(e.to_string()))?,
-                txn.open_table(CONTENT_HASHES)
-                    .map_err(|e| PipelineError::Dedup(e.to_string()))?,
-                txn.open_table(URLS)
-                    .map_err(|e| PipelineError::Dedup(e.to_string()))?,
-                txn.open_table(TITLES)
-                    .map_err(|e| PipelineError::Dedup(e.to_string()))?,
-            )),
-            None => None,
-        };
+        // Open all persisted tables. If any table is missing (e.g. an older
+        // dedup.redb predates the content-hash column, or this is a read-only
+        // dry-run against a fresh DB), fall back to None — intra-batch dedup
+        // still runs via the in-memory seen_* sets.
+        let tables = read_txn.as_ref().and_then(|txn| {
+            Some((
+                txn.open_table(EVENT_IDS).ok()?,
+                txn.open_table(CONTENT_HASHES).ok()?,
+                txn.open_table(URLS).ok()?,
+                txn.open_table(TITLES).ok()?,
+            ))
+        });
 
         let mut novel: Vec<Event> = Vec::with_capacity(events.len());
         // Per-run sets so two identical events in the SAME input batch don't both pass
