@@ -3,7 +3,7 @@
 set -euo pipefail
 
 BINARY_NAME="lore"
-SKILL_NAMES=("lorekeeper" "lore-process" "lore-setup")
+SKILL_NAMES=("lorekeeper" "lore-process" "lore-setup" "lore-wiki")
 
 INSTALL_DIR="${LORE_INSTALL_DIR:-$HOME/.local/bin}"
 DATA_DIR="${LORE_INSTALL_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/lorekeeper}"
@@ -104,8 +104,12 @@ for skill in "${SKILL_NAMES[@]}"; do
         fi
     fi
 
+    # Only remove project-level skills if they are NOT inside a git repo's source tree.
+    # Deleting .claude/skills/ from within a cloned repo destroys source files.
     if [ -d "$skill_project" ] && [ "$skill_project" != "$skill_user" ]; then
-        if prompt_yesno "Remove project-level skill $skill_project?"; then
+        if git -C "$(dirname "$skill_project")" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            log_info "Skipping $skill_project (inside git repo — source file, not installed copy)"
+        elif prompt_yesno "Remove project-level skill $skill_project?"; then
             render_step "Removing $skill_project"
             rm -rf "$skill_project"
             log_ok "Project skill removed: $skill"

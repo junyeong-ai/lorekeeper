@@ -34,6 +34,10 @@ map to `RawItem`.
     true) drops bot posts from root + replies. Text → `markdown::slack_to_markdown`.
     `search.messages` (slack-search) is user-token-only per Slack. Tokens: `history_token`
     prefers bot (xoxb), `search_token` requires user (xoxp).
+  - **Error isolation**: individual item failures (thread fetch, file download) are caught
+    with `tracing::warn!` and skipped — one inaccessible thread or file does not abort the
+    entire source. All API list endpoints are cursor-paginated with per-adapter caps
+    (Slack history 500, replies 200, Gmail 200).
 - `Source` has no `source_type()` accessor — the factory selects by the input enum.
 - `markdown` module normalizes rich text to Markdown, loss-aversely (unmapped constructs
   degrade to their text): `adf_to_markdown`, `html_to_markdown` (via `htmd`),

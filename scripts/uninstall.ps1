@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $BinaryName = 'lore'
-$SkillNames = @('lorekeeper', 'lore-process', 'lore-setup')
+$SkillNames = @('lorekeeper', 'lore-process', 'lore-setup', 'lore-wiki')
 $InstallDir = if ($env:LORE_INSTALL_DIR) { $env:LORE_INSTALL_DIR }
               else { Join-Path $env:USERPROFILE '.local\bin' }
 $DataDir = if ($env:LORE_INSTALL_DATA_DIR) { $env:LORE_INSTALL_DATA_DIR }
@@ -67,7 +67,11 @@ foreach ($skillName in $SkillNames) {
     }
 
     if ((Test-Path $skillProject) -and ($skillProject -ne $skillUser)) {
-        if (Prompt-YesNo "Remove project-level skill $skillProject?") {
+        # Don't remove project-level skills inside a git repo — those are source files.
+        $gitCheck = git -C (Split-Path $skillProject) rev-parse --is-inside-work-tree 2>$null
+        if ($gitCheck -eq 'true') {
+            Write-Host "  Skipping $skillProject (inside git repo)" -ForegroundColor DarkGray
+        } elseif (Prompt-YesNo "Remove project-level skill $skillProject?") {
             Write-Step "Removing $skillProject"
             Remove-Item -Recurse -Force $skillProject
             Write-Ok "Project skill removed: $skillName"

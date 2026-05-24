@@ -592,10 +592,10 @@ main() {
     printf '  %s1.%s Create your config (auto-discovered, no repo needed):\n' "$C_BOLD" "$C_RESET"
     printf '       cp %s/config.example.yaml %s/config.yaml\n' "$CONFIG_DIR" "$CONFIG_DIR"
     printf '       $EDITOR %s/config.yaml\n' "$CONFIG_DIR"
-    printf '  %s2.%s %s init credentials%s     Enter API tokens interactively\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
-    printf '  %s3.%s %s validate%s             Verify config + credentials\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
-    printf '  %s4.%s %s ingest --dry-run%s     Preview ingest without writing\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
-    printf '  %s5.%s %s schedule%s | crontab -  Register the daily cron\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
+    printf '  %s2.%s %slore init credentials%s   Enter API tokens interactively\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
+    printf '  %s3.%s %slore validate%s           Verify config + credentials\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
+    printf '  %s4.%s %slore ingest --dry-run%s   Preview ingest without writing\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
+    printf '  %s5.%s %slore schedule%s | crontab -  Register the daily cron\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
     printf '  %s/lorekeeper%s · %s/lore-process%s   via Claude Code (queue-mode)\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
 }
 

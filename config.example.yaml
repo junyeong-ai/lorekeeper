@@ -187,6 +187,22 @@ synthesis:
     enabled: true
     schedule: "0 8 1 1 *"           # Jan 1st 08:00
 
+# ─── 그래프 분석 ─────────────────────────────────────────
+# Wikilink graph analysis (lore graph lint/cluster/suggest-links).
+# Fully optional — omit the entire block to use defaults.
+# graph:
+#   scope:
+#     dirs: [wiki]                   # vault-relative dirs to scan (default: [wiki])
+#     exclude: []                    # glob patterns to skip (e.g., ["wiki/log.md"])
+#     follow_links: false            # follow symlinks during walk
+#   graph:
+#     min_hub_degree: 5              # minimum total degree to flag as hub in lint
+#     orphan_exclude: []             # page ids excluded from orphan reports
+#   cluster:
+#     resolution: 1.0                # Louvain resolution (higher = more, smaller communities)
+#     max_iterations: 100            # max local-moving passes
+#     min_community_size: 1          # drop communities smaller than this
+
 # ─── LLM ──────────────────────────────────────────────────
 # provider:
 #   queue     — (default) emit JSONL tasks under <vault>/.lorekeeper/queue/.

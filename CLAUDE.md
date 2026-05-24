@@ -44,16 +44,18 @@ templates/      Jinja2 markdown templates (.md.jinja), compiled into the binary
   configured timezone, never UTC by accident.
 - **Multi-date batches**: events spanning several dates produce one `daily/` page per date.
 - **Atomic ingest** (`lore ingest`, 5 phases): plan → write daily/concept → work-log →
-  flush LLM queue (atomic temp+rename) → commit dedup. Any failure aborts before dedup
-  commit, so re-running is idempotent.
+  flush LLM queue (atomic temp+rename) → commit dedup. Source failures are isolated —
+  each source's dedup commits only after its own writes + flush succeed; a failed source
+  stays uncommitted so re-running is idempotent. The process exits non-zero if any source
+  failed.
 - **i18n**: `vault.locale` (ko/en) switches all labels/headings. Templates use
   `{{ i18n.* }}` from the Strings bundle; source content is never translated.
 - **Single source of truth**: `lore schema` generates `wiki/AGENTS.md` from the i18n
   bundle, defining page formats and section ownership (machine vs LLM). Templates,
   queue `target.anchor`, and skills all derive from `lk-core::i18n`.
 - **Domain logic is single-sourced in lk-core**: slugify (NFKC), frontmatter parsing,
-  wikilink extraction, vault paths. lk-vault and lk-graph both consume these — zero
-  duplicate implementations.
+  wikilink extraction, vault paths, text normalization (collapse_blank_lines). lk-vault,
+  lk-source, lk-pipeline, and lk-graph all consume these — zero duplicate implementations.
 - **LLM provider modes** (`llm.provider`, default `queue`):
   - `queue` — JSONL tasks to `.lorekeeper/queue/`; `/lore-process` drains with Claude Code.
   - `anthropic` — direct Messages API for unattended cron.

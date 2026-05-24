@@ -5,6 +5,15 @@ when_to_use: |
   설정 자동화, config 만들어줘, Lorekeeper 설정, 소스 추가, 채널 ID 찾아줘,
   프로젝트 찾아줘, 캘린더 설정, setup Lorekeeper, configure sources,
   find channel id, find jira project, build my config
+argument-hint: "[source-type]"
+allowed-tools: |
+  Bash(slack-cli *)
+  Bash(atlassian-cli *)
+  Bash(gws *)
+  Bash(lore validate)
+  Bash(lore ingest --dry-run *)
+  Bash(cat *)
+  Bash(ls *)
 ---
 
 # lore-setup — Lorekeeper 설정 자동화
