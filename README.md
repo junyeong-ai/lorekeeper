@@ -1,4 +1,4 @@
-# wiki-ingest
+# Lorekeeper
 
 Config-driven knowledge ingestion pipeline for Obsidian wikis.
 
@@ -8,24 +8,24 @@ Collects daily data from heterogeneous sources (Gmail, Google Drive, Slack, Jira
 
 **macOS / Linux** (one-liner — downloads prebuilt binary, templates, and Claude Code skills):
 ```bash
-curl -fsSL https://raw.githubusercontent.com/junyeong-ai/wiki-ingest/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/junyeong-ai/lorekeeper/main/scripts/install.sh | bash
 ```
 
 **Windows** (PowerShell):
 ```powershell
-irm https://raw.githubusercontent.com/junyeong-ai/wiki-ingest/main/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/junyeong-ai/lorekeeper/main/scripts/install.ps1 | iex
 ```
 
 The installer:
-- Downloads the prebuilt `wi` binary to `~/.local/bin` (configurable)
-- Installs `templates/` to `$XDG_DATA_HOME/wi-ingest/templates/`
-- Installs the Claude Code skills (`wiki-ingest`, `wi-process`) to `~/.claude/skills/`
+- Downloads the prebuilt `lore` binary to `~/.local/bin` (configurable)
+- Installs `templates/` to `$XDG_DATA_HOME/lorekeeper/templates/`
+- Installs the Claude Code skills (`lorekeeper`, `lore-process`) to `~/.claude/skills/`
 - Verifies SHA256 checksums
 - Adds quarantine strip + ad-hoc codesign on macOS
 - Checks `PATH` and prints next steps
 
 Install flags: `--version`, `--install-dir`, `--data-dir`, `--skill {user,project,none}`,
-`--from-source`, `--force`, `--yes`, `--dry-run`. Env vars: `WI_INSTALL_*`.
+`--from-source`, `--force`, `--yes`, `--dry-run`. Env vars: `LORE_INSTALL_*`.
 
 Uninstall: `./scripts/uninstall.sh [--yes] [--keep-data]`.
 
@@ -35,30 +35,30 @@ Uninstall: `./scripts/uninstall.sh [--yes] [--keep-data]`.
 # 1. Install (see above)
 
 # 2. Create your config — auto-discovered at ./config.yaml (repo) or
-#    ~/.config/wi-ingest/config.yaml (binary-only install). Override with --config/WI_CONFIG.
+#    ~/.config/lorekeeper/config.yaml (binary-only install). Override with --config/LORE_CONFIG.
 cp config.example.yaml config.yaml                                  # from a repo
-# cp ~/.config/wi-ingest/config.example.yaml ~/.config/wi-ingest/config.yaml   # binary install
+# cp ~/.config/lorekeeper/config.example.yaml ~/.config/lorekeeper/config.yaml   # binary install
 $EDITOR config.yaml
 
 # 3. Set credentials — easiest is the interactive wizard:
-wi init credentials
-#    (or env vars / <vault>/.wiki-ingest/credentials.json by hand)
+lore init credentials
+#    (or env vars / <vault>/.lorekeeper/credentials.json by hand)
 
 # 4. Verify
-wi validate
+lore validate
 
 # 5. Run
-wi ingest
+lore ingest
 
 # 6. Register schedule
-wi schedule | crontab -
+lore schedule | crontab -
 ```
 
 ## Build from source
 
 ```bash
 cargo build --release
-./target/release/wi --help
+./target/release/lore --help
 ```
 
 Or via the installer with `--from-source` (requires Rust toolchain).
@@ -66,8 +66,8 @@ Or via the installer with `--from-source` (requires Rust toolchain).
 ## Architecture
 
 ```
-Data Sources              wi (Rust CLI)              Obsidian Vault
-────────────              ────────────               ──────────────
+Data Sources              lore (Rust CLI)            Obsidian Vault
+────────────              ───────────────            ──────────────
 Google Drive ──┐          ┌─ Extract (per-source)    daily/{source-id}/
 Gmail ─────────┤          ├─ Normalize → Event       me/work-log/
 Slack ─────────┼─ config ─┤  Deduplicate (cascade)   weekly/ monthly/
@@ -80,23 +80,23 @@ Calendar ──────┘          ├─ Concepts (LLM)          wiki/conc
 
 | Command | Purpose |
 |---------|---------|
-| `wi init credentials` | Interactive wizard — writes `<vault>/.wiki-ingest/credentials.json` |
-| `wi validate` | Verify config.yaml |
-| `wi ingest [source]` | Run ingestion (all enabled sources or single ID) |
-| `wi ingest --dry-run` | Preview without writing to vault |
-| `wi ingest --force` | Skip dedup, re-ingest everything |
-| `wi synthesis weekly` | Generate weekly cross-source synthesis + personal summary |
-| `wi synthesis monthly` | Aggregate work-log into monthly summary |
-| `wi synthesis quarterly` | Generate quarterly performance review |
-| `wi synthesis annual` | Generate annual performance review |
-| `wi ingest --date YYYY-MM-DD` | Override target date (filters events) |
-| `wi status` | Show last ingest time per source |
-| `wi health` | Check staleness (warn if no ingest in 48h, exit 0 on first install) |
-| `wi health --strict` | Also exit 1 if any source has never been ingested |
-| `wi performance` | Show work category distribution |
-| `wi schedule` | Print crontab entries (uses plain `wi` for PATH lookup) |
-| `wi schedule --bin /full/path/wi` | Override bin path in cron lines |
-| `wi maintenance` | Prune ingest log, dedup cache, and drained queue files older than 90 days |
+| `lore init credentials` | Interactive wizard — writes `<vault>/.lorekeeper/credentials.json` |
+| `lore validate` | Verify config.yaml |
+| `lore ingest [source]` | Run ingestion (all enabled sources or single ID) |
+| `lore ingest --dry-run` | Preview without writing to vault |
+| `lore ingest --force` | Skip dedup, re-ingest everything |
+| `lore synthesis weekly` | Generate weekly cross-source synthesis + personal summary |
+| `lore synthesis monthly` | Aggregate work-log into monthly summary |
+| `lore synthesis quarterly` | Generate quarterly performance review |
+| `lore synthesis annual` | Generate annual performance review |
+| `lore ingest --date YYYY-MM-DD` | Override target date (filters events) |
+| `lore status` | Show last ingest time per source |
+| `lore health` | Check staleness (warn if no ingest in 48h, exit 0 on first install) |
+| `lore health --strict` | Also exit 1 if any source has never been ingested |
+| `lore performance` | Show work category distribution |
+| `lore schedule` | Print crontab entries (uses plain `lore` for PATH lookup) |
+| `lore schedule --bin /full/path/lore` | Override bin path in cron lines |
+| `lore maintenance` | Prune ingest log, dedup cache, and drained queue files older than 90 days |
 
 ## LLM provider modes
 
@@ -104,13 +104,13 @@ Calendar ──────┘          ├─ Concepts (LLM)          wiki/conc
 
 | Mode | Default | Best for |
 |------|:-------:|---------|
-| `queue` | ✓ | Daily Claude Code users. Pipeline emits JSONL tasks to `<vault>/.wiki-ingest/queue/`; the `/wi-process` skill drains them using Claude Code's native LLM session — no API key, no separate billing. |
+| `queue` | ✓ | Daily Claude Code users. Pipeline emits JSONL tasks to `<vault>/.lorekeeper/queue/`; the `/lore-process` skill drains them using Claude Code's native LLM session — no API key, no separate billing. |
 | `noop` |  | Development, CI, or vault-only sources where you only need Rust templating without semantic enrichment. |
 | `anthropic` |  | Unattended cron on headless servers (no Claude Code session available). Requires `ANTHROPIC_API_KEY`; pipeline does end-to-end work in one process. |
 
 Workflow in `queue` mode:
-1. `wi ingest` (cron-scheduled) — fetches sources, dedups, writes structural pages, queues semantic tasks
-2. `/wi-process` (run in Claude Code) — drains the queue, fills summaries, creates/merges concept pages
+1. `lore ingest` (cron-scheduled) — fetches sources, dedups, writes structural pages, queues semantic tasks
+2. `/lore-process` (run in Claude Code) — drains the queue, fills summaries, creates/merges concept pages
 
 The skill is **fully idempotent**: re-running on a partially-processed queue file is safe because vault edits replace section content rather than append, and concept page merging preserves accumulated state.
 
@@ -118,12 +118,12 @@ The skill is **fully idempotent**: re-running on a partially-processed queue fil
 
 ```
 crates/
-  wi-core/      Domain types, config, error, vault path builder
-  wi-vault/     Obsidian vault I/O: read, write, frontmatter, templates, log
-  wi-source/    Source adapters: Gmail, Drive, Slack, Jira, Calendar
-  wi-pipeline/  Transform stages: normalize, dedup, classify, render, synthesis
-  wi-llm/       LlmClient trait + providers (anthropic, queue, noop) and a test mock
-  wi-cli/       Binary entry point (wi)
+  lk-core/      Domain types, config, error, vault path builder
+  lk-vault/     Obsidian vault I/O: read, write, frontmatter, templates, log
+  lk-source/    Source adapters: Gmail, Drive, Slack, Jira, Calendar
+  lk-pipeline/  Transform stages: normalize, dedup, classify, render, synthesis
+  lk-llm/       LlmClient trait + providers (anthropic, queue, noop) and a test mock
+  lk-cli/       Binary entry point (lore)
 
 templates/      Jinja2 markdown templates (.md.jinja)
 ```
@@ -161,8 +161,8 @@ Periodic templates: `work-log`, `weekly-synthesis`, `weekly-personal`, `monthly-
 
 ```bash
 # Generate cron entries from config
-wi schedule > /tmp/wi-cron.txt
-crontab /tmp/wi-cron.txt
+lore schedule > /tmp/wi-cron.txt
+crontab /tmp/lore-cron.txt
 ```
 
 Each source's `schedule:` field in config.yaml uses standard cron syntax. The weekly synthesis runs on the schedule from `synthesis.weekly.schedule`.
@@ -172,14 +172,14 @@ Each source's `schedule:` field in config.yaml uses standard cron syntax. The we
 Two ways to provide credentials, env vars take precedence over file:
 
 **Environment variables** (recommended for development):
-- `WI_GOOGLE_CLIENT_ID`, `WI_GOOGLE_CLIENT_SECRET`, `WI_GOOGLE_REFRESH_TOKEN`
-- `WI_SLACK_TOKEN`
-- `WI_JIRA_URL`, `WI_JIRA_EMAIL`, `WI_JIRA_TOKEN`
+- `LORE_GOOGLE_CLIENT_ID`, `LORE_GOOGLE_CLIENT_SECRET`, `LORE_GOOGLE_REFRESH_TOKEN`
+- `LORE_SLACK_TOKEN`
+- `LORE_JIRA_URL`, `LORE_JIRA_EMAIL`, `LORE_JIRA_TOKEN`
 - `ANTHROPIC_API_KEY` (only for `llm.provider: anthropic`; if missing in that mode, the run degrades to the no-op LLM with a warning. Not needed for the default `queue` mode.)
 
-**Interactive wizard** (easiest): `wi init credentials` prompts for each provider
+**Interactive wizard** (easiest): `lore init credentials` prompts for each provider
 (skip the ones you don't use), masks secret entry, and writes
-`<vault>/.wiki-ingest/credentials.json` with `0600` permissions. Re-running edits in
+`<vault>/.lorekeeper/credentials.json` with `0600` permissions. Re-running edits in
 place — press enter to keep an existing secret.
 
 For Google it can **mint the refresh token for you**: it opens the consent page in your
@@ -191,9 +191,9 @@ Gmail / Drive / Calendar **read-only** scopes.
 **Credentials file by hand** (one file instead of seven env vars). Copy the template
 and fill in values:
 ```bash
-cp credentials.example.json "<vault_root>/.wiki-ingest/credentials.json"
-chmod 600 "<vault_root>/.wiki-ingest/credentials.json"
-$EDITOR "<vault_root>/.wiki-ingest/credentials.json"
+cp credentials.example.json "<vault_root>/.lorekeeper/credentials.json"
+chmod 600 "<vault_root>/.lorekeeper/credentials.json"
+$EDITOR "<vault_root>/.lorekeeper/credentials.json"
 ```
 ```json
 {
@@ -203,7 +203,7 @@ $EDITOR "<vault_root>/.wiki-ingest/credentials.json"
 }
 ```
 All three blocks are optional — keep only the sources you use. Matching env vars
-(`WI_GOOGLE_*`, `WI_SLACK_TOKEN` / `WI_SLACK_USER_TOKEN`, `WI_JIRA_*`) override the file
+(`LORE_GOOGLE_*`, `LORE_SLACK_TOKEN` / `LORE_SLACK_USER_TOKEN`, `LORE_JIRA_*`) override the file
 per service.
 
 **Slack tokens**: provide a bot token (`xoxb-`), a user token (`xoxp-`), or both. The
@@ -213,7 +213,7 @@ available to bot tokens.
 
 **Google `refresh_token`**: this is not shown in the Cloud Console alongside the
 client ID/secret — it's minted once by completing the OAuth consent flow with
-`access_type=offline`. Easiest: run `wi init credentials` and let it mint the token in
+`access_type=offline`. Easiest: run `lore init credentials` and let it mint the token in
 your browser (needs a "Desktop app" OAuth client). Manual alternative: the
 [OAuth 2.0 Playground](https://developers.google.com/oauthplayground) with your own
 client ID/secret and the Gmail/Drive/Calendar read-only scopes. The pipeline then uses

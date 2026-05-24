@@ -8,11 +8,11 @@ rust-version = "1.95"
 license = "MIT"
 
 [workspace.dependencies]
-wi-core = { path = "crates/wi-core" }
-wi-vault = { path = "crates/wi-vault" }
-wi-source = { path = "crates/wi-source" }
-wi-pipeline = { path = "crates/wi-pipeline" }
-wi-llm = { path = "crates/wi-llm" }
+lk-core = { path = "crates/lk-core" }
+lk-vault = { path = "crates/lk-vault" }
+lk-source = { path = "crates/lk-source" }
+lk-pipeline = { path = "crates/lk-pipeline" }
+lk-llm = { path = "crates/lk-llm" }
 
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"

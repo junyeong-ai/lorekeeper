@@ -1,5 +1,5 @@
 config.yaml
 credentials.json
-.wiki-ingest/
+.lorekeeper/
 .DS_Store
 target/

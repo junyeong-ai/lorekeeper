@@ -61,11 +61,11 @@ jobs:
 
       - name: Build (cross)
         if: matrix.cross
-        run: cross build --release --locked --target ${{ matrix.target }} -p wi
+        run: cross build --release --locked --target ${{ matrix.target }} -p lore
 
       - name: Build (native)
         if: '!matrix.cross'
-        run: cargo build --release --locked --target ${{ matrix.target }} -p wi
+        run: cargo build --release --locked --target ${{ matrix.target }} -p lore
 
       - name: Resolve version
         id: version
@@ -85,12 +85,12 @@ jobs:
           ARCHIVE_EXT: ${{ matrix.archive }}
         run: |
           set -euo pipefail
-          stage="wi-v${VERSION}-${TARGET}"
+          stage="lore-v${VERSION}-${TARGET}"
           mkdir -p "$stage/templates"
           if [ "$ARCHIVE_EXT" = "zip" ]; then
-            cp "target/${TARGET}/release/wi.exe" "$stage/"
+            cp "target/${TARGET}/release/lore.exe" "$stage/"
           else
-            cp "target/${TARGET}/release/wi" "$stage/"
+            cp "target/${TARGET}/release/lore" "$stage/"
           fi
           cp templates/*.md.jinja "$stage/templates/"
           cp config.example.yaml "$stage/"
@@ -138,7 +138,7 @@ jobs:
           # One archive per skill, named `{skill}-skill-v{version}.tar.gz` to match
           # what scripts/install.sh and install.ps1 download. Each contains the
           # skill directory.
-          for skill in wiki-ingest wi-process wi-setup; do
+          for skill in lorekeeper lore-process lore-setup; do
             archive="${skill}-skill-v${VERSION}.tar.gz"
             tar -czf "$archive" -C .claude/skills "$skill"
             sha256sum "$archive" > "${archive}.sha256"

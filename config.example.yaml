@@ -1,11 +1,11 @@
-# wiki-ingest configuration
+# Lorekeeper configuration
 # Copy to config.yaml and customize for your environment.
 # config.yaml is gitignored — safe for personal settings.
 #
 # Location (auto-discovered in this order):
-#   1. --config / WI_CONFIG
+#   1. --config / LORE_CONFIG
 #   2. ./config.yaml                       (running from a repo checkout)
-#   3. ~/.config/wi-ingest/config.yaml     (binary-only install)
+#   3. ~/.config/lorekeeper/config.yaml     (binary-only install)
 
 # ─── Vault 경로 ───────────────────────────────────────────
 vault:
@@ -189,11 +189,11 @@ synthesis:
 
 # ─── LLM ──────────────────────────────────────────────────
 # provider:
-#   queue     — (default) emit JSONL tasks under <vault>/.wiki-ingest/queue/.
-#               A Claude Code skill (/wi-process) drains the queue using Claude
+#   queue     — (default) emit JSONL tasks under <vault>/.lorekeeper/queue/.
+#               A Claude Code skill (/lore-process) drains the queue using Claude
 #               Code's native LLM session — no API key, no separate billing.
-#               Workflow: `wi ingest` writes structural pages + queue; then run
-#               `/wi-process` in Claude Code to fill summaries and concepts.
+#               Workflow: `lore ingest` writes structural pages + queue; then run
+#               `/lore-process` in Claude Code to fill summaries and concepts.
 #   noop      — no LLM work; daily pages render without summary/concept content.
 #               Useful for development, CI, or vault-only sources.
 #   anthropic — direct Anthropic Messages API (requires ANTHROPIC_API_KEY).

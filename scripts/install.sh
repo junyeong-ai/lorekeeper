@@ -1,27 +1,27 @@
 #!/usr/bin/env bash
-# wiki-ingest installer — see `./install.sh --help` for full usage.
+# Lorekeeper installer — see `./install.sh --help` for full usage.
 set -euo pipefail
 
-REPO="junyeong-ai/wiki-ingest"
-BINARY_NAME="wi"
-SKILL_NAME="wiki-ingest"
+REPO="junyeong-ai/lorekeeper"
+BINARY_NAME="lore"
+SKILL_NAME="lorekeeper"
 LATEST_URL="https://github.com/${REPO}/releases/latest"
 RELEASE_BASE="https://github.com/${REPO}/releases/download"
 
 # ── settings (env wins over built-in default; flags win over env) ─────────
-EXPLICIT_INSTALL_DIR=0;  [ -n "${WI_INSTALL_DIR:-}" ]         && EXPLICIT_INSTALL_DIR=1
-EXPLICIT_VERSION=0;      [ -n "${WI_INSTALL_VERSION:-}" ]     && EXPLICIT_VERSION=1
-EXPLICIT_SKILL_LEVEL=0;  [ -n "${WI_INSTALL_SKILL_LEVEL:-}" ] && EXPLICIT_SKILL_LEVEL=1
-EXPLICIT_FROM_SOURCE=0;  [ "${WI_INSTALL_FROM_SOURCE:-0}" = "1" ] && EXPLICIT_FROM_SOURCE=1
+EXPLICIT_INSTALL_DIR=0;  [ -n "${LORE_INSTALL_DIR:-}" ]         && EXPLICIT_INSTALL_DIR=1
+EXPLICIT_VERSION=0;      [ -n "${LORE_INSTALL_VERSION:-}" ]     && EXPLICIT_VERSION=1
+EXPLICIT_SKILL_LEVEL=0;  [ -n "${LORE_INSTALL_SKILL_LEVEL:-}" ] && EXPLICIT_SKILL_LEVEL=1
+EXPLICIT_FROM_SOURCE=0;  [ "${LORE_INSTALL_FROM_SOURCE:-0}" = "1" ] && EXPLICIT_FROM_SOURCE=1
 
-INSTALL_DIR="${WI_INSTALL_DIR:-$HOME/.local/bin}"
-DATA_DIR="${WI_INSTALL_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/wi-ingest}"
-WI_INSTALL_VERSION="${WI_INSTALL_VERSION:-}"
-WI_INSTALL_SKILL_LEVEL="${WI_INSTALL_SKILL_LEVEL:-}"
-WI_INSTALL_FROM_SOURCE="${WI_INSTALL_FROM_SOURCE:-0}"
-WI_INSTALL_FORCE="${WI_INSTALL_FORCE:-0}"
-WI_INSTALL_YES="${WI_INSTALL_YES:-0}"
-DRY_RUN="${WI_INSTALL_DRY_RUN:-0}"
+INSTALL_DIR="${LORE_INSTALL_DIR:-$HOME/.local/bin}"
+DATA_DIR="${LORE_INSTALL_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/lorekeeper}"
+LORE_INSTALL_VERSION="${LORE_INSTALL_VERSION:-}"
+LORE_INSTALL_SKILL_LEVEL="${LORE_INSTALL_SKILL_LEVEL:-}"
+LORE_INSTALL_FROM_SOURCE="${LORE_INSTALL_FROM_SOURCE:-0}"
+LORE_INSTALL_FORCE="${LORE_INSTALL_FORCE:-0}"
+LORE_INSTALL_YES="${LORE_INSTALL_YES:-0}"
+DRY_RUN="${LORE_INSTALL_DRY_RUN:-0}"
 
 INPUT_FD=""
 TMP_DIR=""
@@ -52,7 +52,7 @@ init_colors() {
 }
 
 detect_tty() {
-    if [ "$WI_INSTALL_YES" = "1" ]; then INPUT_FD=""; return 1; fi
+    if [ "$LORE_INSTALL_YES" = "1" ]; then INPUT_FD=""; return 1; fi
     if [ -t 0 ]; then INPUT_FD="0"; return 0; fi
     if [ -e /dev/tty ] && [ -r /dev/tty ]; then INPUT_FD="/dev/tty"; return 0; fi
     INPUT_FD=""; return 1
@@ -147,7 +147,7 @@ fetch_latest_version() {
 }
 
 resolve_version() {
-    if [ -n "$WI_INSTALL_VERSION" ]; then echo "$WI_INSTALL_VERSION"; return; fi
+    if [ -n "$LORE_INSTALL_VERSION" ]; then echo "$LORE_INSTALL_VERSION"; return; fi
     local v; v="$(fetch_latest_version || true)"
     [ -n "$v" ] || die "Cannot fetch latest version (network issue or no release exists yet)"
     echo "$v"
@@ -233,8 +233,8 @@ install_templates() {
 
 # Drop config.example.yaml into the XDG config dir so a binary-only install (no git
 # clone) has a template to copy to config.yaml. `wi` auto-discovers
-# ~/.config/wi-ingest/config.yaml, so this is where users should put their real config.
-CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/wi-ingest"
+# ~/.config/lorekeeper/config.yaml, so this is where users should put their real config.
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/lorekeeper"
 install_config_example() {
     local src="$1"
     [ -f "$src" ] || return 0
@@ -248,7 +248,7 @@ build_from_source() {
     local repo_dir="$1"
     render_step "Building from source (cargo build --release --locked)"
     command -v cargo >/dev/null 2>&1 || die "cargo not found — install Rust from https://rustup.rs"
-    ( cd "$repo_dir" && cargo build --release --locked --quiet -p wi ) || die "cargo build failed"
+    ( cd "$repo_dir" && cargo build --release --locked --quiet -p lore ) || die "cargo build failed"
     echo "${repo_dir}/target/release/${BINARY_NAME}"
 }
 
@@ -327,7 +327,7 @@ install_skill() {
         existing="$(skill_sha256 "$target/SKILL.md")"
         new="$(skill_sha256 "$src/SKILL.md")"
         if [ -n "$existing" ] && [ "$existing" = "$new" ]; then
-            if [ "$WI_INSTALL_FORCE" != "1" ] && ! prompt_yesno "Skill is already current. Reinstall?" "N"; then
+            if [ "$LORE_INSTALL_FORCE" != "1" ] && ! prompt_yesno "Skill is already current. Reinstall?" "N"; then
                 log_info "Skill kept"
                 return
             fi
@@ -344,17 +344,17 @@ install_skill() {
 
 print_usage() {
     cat <<'USAGE'
-wiki-ingest installer
+Lorekeeper installer
 
 Usage:
-  curl -fsSL https://raw.githubusercontent.com/junyeong-ai/wiki-ingest/main/scripts/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/junyeong-ai/lorekeeper/main/scripts/install.sh | bash
   ./scripts/install.sh [flags]
 
 Flags:
   --version VERSION          Install specific version (default: latest)
   --install-dir PATH         Install binary here (default: $HOME/.local/bin)
   --data-dir PATH            Install templates here
-                             (default: $XDG_DATA_HOME/wi-ingest or $HOME/.local/share/wi-ingest)
+                             (default: $XDG_DATA_HOME/lorekeeper or $HOME/.local/share/lorekeeper)
   --skill user|project|none  Skill install level (default: user)
   --from-source              Build from source instead of downloading prebuilt
   --force                    Overwrite existing install without prompting
@@ -363,22 +363,22 @@ Flags:
   --help, -h                 Show this message
 
 Environment variables (flags win over env, env wins over defaults):
-  WI_INSTALL_DIR, WI_INSTALL_DATA_DIR, WI_INSTALL_VERSION,
-  WI_INSTALL_SKILL_LEVEL, WI_INSTALL_FROM_SOURCE,
-  WI_INSTALL_FORCE, WI_INSTALL_YES, WI_INSTALL_DRY_RUN, NO_COLOR
+  LORE_INSTALL_DIR, LORE_INSTALL_DATA_DIR, LORE_INSTALL_VERSION,
+  LORE_INSTALL_SKILL_LEVEL, LORE_INSTALL_FROM_SOURCE,
+  LORE_INSTALL_FORCE, LORE_INSTALL_YES, LORE_INSTALL_DRY_RUN, NO_COLOR
 USAGE
 }
 
 parse_args() {
     while [ $# -gt 0 ]; do
         case "$1" in
-            --version)       WI_INSTALL_VERSION="$2"; EXPLICIT_VERSION=1; shift 2 ;;
+            --version)       LORE_INSTALL_VERSION="$2"; EXPLICIT_VERSION=1; shift 2 ;;
             --install-dir)   INSTALL_DIR="$2"; EXPLICIT_INSTALL_DIR=1; shift 2 ;;
             --data-dir)      DATA_DIR="$2"; shift 2 ;;
-            --skill)         WI_INSTALL_SKILL_LEVEL="$2"; EXPLICIT_SKILL_LEVEL=1; shift 2 ;;
-            --from-source)   WI_INSTALL_FROM_SOURCE=1; EXPLICIT_FROM_SOURCE=1; shift ;;
-            --force)         WI_INSTALL_FORCE=1; shift ;;
-            --yes|-y)        WI_INSTALL_YES=1; shift ;;
+            --skill)         LORE_INSTALL_SKILL_LEVEL="$2"; EXPLICIT_SKILL_LEVEL=1; shift 2 ;;
+            --from-source)   LORE_INSTALL_FROM_SOURCE=1; EXPLICIT_FROM_SOURCE=1; shift ;;
+            --force)         LORE_INSTALL_FORCE=1; shift ;;
+            --yes|-y)        LORE_INSTALL_YES=1; shift ;;
             --dry-run)       DRY_RUN=1; shift ;;
             --help|-h)       print_usage; exit 0 ;;
             *)               die "Unknown flag: $1 (use --help)" ;;
@@ -397,7 +397,7 @@ render_banner() {
         bot="+------------------------------------------+"
     fi
     printf '\n%s%s%s\n' "$C_BOLD" "$top" "$C_RESET"
-    printf '%s  wiki-ingest installer%s\n' "$C_BOLD" "$C_RESET"
+    printf '%s  Lorekeeper installer%s\n' "$C_BOLD" "$C_RESET"
     printf '%s  v%s • %s%s\n' "$C_DIM" "$version" "$platform" "$C_RESET"
     printf '%s%s%s\n' "$C_BOLD" "$bot" "$C_RESET"
 }
@@ -444,7 +444,7 @@ main() {
     init_colors
     parse_args "$@"
     trap cleanup EXIT INT TERM
-    TMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t wi-install)"
+    TMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t lore-install)"
 
     detect_tty || true
     local platform="" version method bin_dest skill_level binary_src templates_src config_example_src
@@ -455,7 +455,7 @@ main() {
     fi
 
     if [ "$EXPLICIT_FROM_SOURCE" = "1" ] || [ -z "$INPUT_FD" ]; then
-        method=$([ "$WI_INSTALL_FROM_SOURCE" = "1" ] && echo "source" || echo "prebuilt")
+        method=$([ "$LORE_INSTALL_FROM_SOURCE" = "1" ] && echo "source" || echo "prebuilt")
     else
         local pick
         pick="$(prompt_choice "Install method" 1 \
@@ -469,7 +469,7 @@ main() {
         version="$(resolve_version)"
     else
         platform="$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)"
-        version="$(grep -m1 '^version' "${repo_dir:-.}/crates/wi-cli/Cargo.toml" 2>/dev/null | cut -d'"' -f2 || echo "dev")"
+        version="$(grep -m1 '^version' "${repo_dir:-.}/crates/lk-cli/Cargo.toml" 2>/dev/null | cut -d'"' -f2 || echo "dev")"
     fi
 
     render_banner "$platform" "$version"
@@ -489,7 +489,7 @@ main() {
     bin_dest="${INSTALL_DIR}/${BINARY_NAME}"
 
     if [ "$EXPLICIT_SKILL_LEVEL" = "1" ]; then
-        skill_level="$WI_INSTALL_SKILL_LEVEL"
+        skill_level="$LORE_INSTALL_SKILL_LEVEL"
     elif [ -z "$INPUT_FD" ]; then
         skill_level="user"
     else
@@ -521,12 +521,12 @@ main() {
     fi
 
     local skip_binary=0
-    if [ -f "$bin_dest" ] && [ "$WI_INSTALL_FORCE" != "1" ]; then
+    if [ -f "$bin_dest" ] && [ "$LORE_INSTALL_FORCE" != "1" ]; then
         local existing; existing="$("$bin_dest" --version 2>/dev/null | awk '{print $2}' || echo "")"
         local cmp; cmp="$(compare_versions "$existing" "$version")"
         case "$cmp" in
             equal)
-                prompt_yesno "wi v$existing already installed. Reinstall?" "N" || { log_info "Kept existing install"; skip_binary=1; } ;;
+                prompt_yesno "lore v$existing already installed. Reinstall?" "N" || { log_info "Kept existing install"; skip_binary=1; } ;;
             newer)
                 prompt_yesno "Installed v$existing is newer than v$version. Downgrade?" "N" || { log_info "Kept existing install"; skip_binary=1; } ;;
             older|unknown) : ;;
@@ -549,7 +549,7 @@ main() {
                 download_archive "$version" "$platform" "$archive"
                 verify_checksum "$archive"
                 extract_archive "$archive"
-                # The release archive contains a top-level `wi-v{ver}-{target}/` dir
+                # The release archive contains a top-level `lore-v{ver}-{target}/` dir
                 # (see .github/workflows/release.yml), so the binary and templates live
                 # one level down from TMP_DIR.
                 local stage="${TMP_DIR}/${BINARY_NAME}-v${version}-${platform}"
@@ -570,9 +570,9 @@ main() {
     fi
 
     if [ "$skill_level" != "none" ]; then
-        # Install all bundled skills. wiki-ingest = wi command invocation surface;
-        # wi-process = queue drainer used in queue-mode workflows.
-        for skill in "wiki-ingest" "wi-process" "wi-setup"; do
+        # Install all bundled skills. lorekeeper = lore command invocation surface;
+        # lore-process = queue drainer used in queue-mode workflows.
+        for skill in "lorekeeper" "lore-process" "lore-setup"; do
             local skill_src=""
             if [ -n "$repo_dir" ] && [ -d "$repo_dir/.claude/skills/$skill" ]; then
                 skill_src="$repo_dir/.claude/skills/$skill"
@@ -596,7 +596,7 @@ main() {
     printf '  %s3.%s %s validate%s             Verify config + credentials\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
     printf '  %s4.%s %s ingest --dry-run%s     Preview ingest without writing\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
     printf '  %s5.%s %s schedule%s | crontab -  Register the daily cron\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
-    printf '  %s/wiki-ingest%s · %s/wi-process%s   via Claude Code (queue-mode)\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
+    printf '  %s/lorekeeper%s · %s/lore-process%s   via Claude Code (queue-mode)\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
 }
 
 main "$@"

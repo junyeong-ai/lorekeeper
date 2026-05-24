@@ -1,14 +1,14 @@
-# wiki-ingest
+# Lorekeeper
 
-Config-driven knowledge ingestion pipeline for Obsidian wikis. A Rust CLI (`wi`)
+Config-driven knowledge ingestion pipeline for Obsidian wikis. A Rust CLI (`lore`)
 collects daily data from heterogeneous sources, deduplicates, classifies, extracts
 concepts, and writes structured markdown pages.
 
 ## Architecture
 
 ```
-Data Sources              wi (Rust CLI)              Obsidian Vault
-────────────              ────────────               ──────────────
+Data Sources              lore (Rust CLI)            Obsidian Vault
+────────────              ───────────────            ──────────────
 Google Drive ──┐          ┌─ Extract (per-source)    daily/{source-id}/
 Gmail ─────────┤          ├─ Normalize → Event       me/work-log/
 Slack ─────────┼─ config ─┤  Deduplicate (cascade)   weekly/ monthly/
@@ -24,12 +24,12 @@ Each crate has its own `CLAUDE.md` with the invariants for working inside it
 
 ```
 crates/
-  wi-core/      Domain types, config + validation, vault path builder, slugify
-  wi-vault/     Obsidian vault I/O: atomic write, frontmatter, templates, ingest log
-  wi-source/    Source adapters + factory, per-adapter param validation
-  wi-pipeline/  Pipeline (per-source plan/commit), dedup, classify, concepts, synthesis
-  wi-llm/       LlmClient trait + providers: anthropic, queue, noop (+ mock for tests)
-  wi-cli/       Binary `wi` — one module per subcommand under commands/
+  lk-core/      Domain types, config + validation, vault path builder, slugify
+  lk-vault/     Obsidian vault I/O: atomic write, frontmatter, templates, ingest log
+  lk-source/    Source adapters + factory, per-adapter param validation
+  lk-pipeline/  Pipeline (per-source plan/commit), dedup, classify, concepts, synthesis
+  lk-llm/       LlmClient trait + providers: anthropic, queue, noop (+ mock for tests)
+  lk-cli/       Binary `lore` — one module per subcommand under commands/
 templates/      Jinja2 markdown templates (.md.jinja)
 ```
 
@@ -41,14 +41,14 @@ templates/      Jinja2 markdown templates (.md.jinja)
   — always via the configured timezone, never UTC by accident.
 - **Multi-date batches**: events spanning several dates produce one `daily/` page per
   date, not collapsed into the first event's date.
-- **Atomic ingest** (`wi ingest`, 5 phases): plan all sources → write daily/concept
+- **Atomic ingest** (`lore ingest`, 5 phases): plan all sources → write daily/concept
   pages → write work-log → flush LLM queue (atomic temp+rename) → commit dedup. The
   flush precedes the dedup commit, so a crash between them re-extracts and re-queues on
   the next run. Any failure aborts before dedup commit and exits non-zero, so re-running
   is idempotent and lossless.
 - **LLM provider modes** (`llm.provider`, default `queue`):
-  - `queue` — pipeline emits JSONL tasks to `<vault>/.wiki-ingest/queue/`; the
-    `/wi-process` Claude Code skill drains them with its native session (no API key).
+  - `queue` — pipeline emits JSONL tasks to `<vault>/.lorekeeper/queue/`; the
+    `/lore-process` Claude Code skill drains them with its native session (no API key).
   - `anthropic` — direct Messages API for unattended cron (needs `ANTHROPIC_API_KEY`;
     missing key degrades to noop with a warning).
   - `noop` — no semantic work; pages render with empty summary/concept sections.

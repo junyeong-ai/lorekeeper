@@ -15,7 +15,7 @@ behind a single `LlmClient` trait with three interchangeable providers, selected
 by `llm.provider` in config:
 
 - **`queue`** (default) — the Rust pipeline emits structured JSONL task files into
-  the vault, and a Claude Code skill (`/wi-process`) drains them using Claude's
+  the vault, and a Claude Code skill (`/lore-process`) drains them using Claude's
   native LLM session (no API key, no separate billing).
 - **`anthropic`** — direct Anthropic Messages API for unattended cron where no
   Claude Code session is available (requires `ANTHROPIC_API_KEY`).
@@ -59,15 +59,15 @@ explicit, opt-in exception for unattended runs.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                       wi (Rust binary)                       │
+│                      lore (Rust binary)                      │
 │                                                              │
-│  wi-source  ──→  wi-pipeline (normalize, dedup, classify)   │
+│  lk-source  ──→  lk-pipeline (normalize, dedup, classify)   │
 │                       │                                      │
 │                       ▼                                      │
 │              raw events + classification                     │
 │                       │                                      │
 │                       ▼                                      │
-│           wi-vault writes daily/concept pages, then          │
+│           lk-vault writes daily/concept pages, then          │
 │           the configured LlmClient handles semantics:        │
 │             queue     → buffer tasks, flush JSONL atomically  │
 │             anthropic → call Messages API inline             │
@@ -76,9 +76,9 @@ explicit, opt-in exception for unattended runs.
                                │ (queue mode only)
                                ▼
 ┌─────────────────────────────────────────────────────────────┐
-│            Claude Code skill: /wi-process                    │
+│            Claude Code skill: /lore-process                  │
 │                                                              │
-│  1. Read .wiki-ingest/queue/*.jsonl (oldest first)          │
+│  1. Read .lorekeeper/queue/*.jsonl (oldest first)            │
 │  2. For each task:                                          │
 │     - summarize        → replace target page section         │
 │     - extract-concepts → create/update concept pages         │
@@ -90,24 +90,24 @@ explicit, opt-in exception for unattended runs.
 
 | Concern | Owner | Why |
 |---|---|---|
-| HTTP fetching (Gmail/Drive/Slack/Jira/Calendar) | Rust (wi-source) | tokio async batching, rate limit handling |
-| Atomic file writes | Rust (wi-vault) | tmpfile + rename, no MCP partial-state risk |
-| Deduplication state (redb cache, 90-day window) | Rust (wi-pipeline) | persistent KV, MCP has no equivalent |
-| Frontmatter parsing / template rendering | Rust (wi-vault, wi-pipeline) | deterministic, no LLM judgment needed |
-| Cron scheduling | Rust (wi-cli) | native, deterministic |
+| HTTP fetching (Gmail/Drive/Slack/Jira/Calendar) | Rust (lk-source) | tokio async batching, rate limit handling |
+| Atomic file writes | Rust (lk-vault) | tmpfile + rename, no MCP partial-state risk |
+| Deduplication state (redb cache, 90-day window) | Rust (lk-pipeline) | persistent KV, MCP has no equivalent |
+| Frontmatter parsing / template rendering | Rust (lk-vault, lk-pipeline) | deterministic, no LLM judgment needed |
+| Cron scheduling | Rust (lk-cli) | native, deterministic |
 | **Summarization** | LlmClient (queue skill / anthropic API) | semantic, LLM-required |
 | **Concept extraction** | LlmClient (queue skill / anthropic API) | semantic, requires reasoning |
 | **Weekly/Monthly/Quarterly synthesis** | LlmClient (queue skill / anthropic API) | semantic narrative generation |
 
 ### Queue Format
 
-Queue files live in `<vault>/.wiki-ingest/queue/` and use JSONL. Each ingest run
+Queue files live in `<vault>/.lorekeeper/queue/` and use JSONL. Each ingest run
 writes one file named `{run-timestamp}-pid{PID}.jsonl`, published atomically
 (temp file + fsync + rename) only after every target page has been written — so
 once a `.jsonl` file is visible, every task in it points at a page that exists.
 
 ```
-.wiki-ingest/queue/
+.lorekeeper/queue/
 ├── 2026-05-23T07-00-00Z-pid12345.jsonl   # pending, one ingest run
 └── processed/
     └── 2026-05-22T07-00-00Z-pid11122.jsonl  # moved here after the skill drains it
@@ -132,12 +132,12 @@ There is **no `processed.jsonl` sidecar**. The vault edits are the source of
 truth, and every edit is idempotent (section-body replacement, dedupe-aware
 concept merging), so re-running on a partially-drained file is safe.
 
-### Skill Responsibility (`/wi-process`)
+### Skill Responsibility (`/lore-process`)
 
-`~/.claude/skills/wi-process/SKILL.md` reads queue files and performs LLM work:
+`~/.claude/skills/lore-process/SKILL.md` reads queue files and performs LLM work:
 
 ```
-1. List .wiki-ingest/queue/*.jsonl (oldest filename first).
+1. List .lorekeeper/queue/*.jsonl (oldest filename first).
 2. For each file, for each task in order:
    a. summarize        → replace the target section body via Obsidian MCP.
    b. extract-concepts → write concept wikilinks; create/merge concept pages.
@@ -159,13 +159,13 @@ so per-call MCP latency is acceptable.
 - **Unattended capability retained**: anthropic mode covers headless cron.
 - **Composability**: the skill can invoke other skills during processing.
 - **Failure isolation**: a failed queue task leaves the file in place; the next
-  `/wi-process` run replays it. Every edit is idempotent.
-- **Inspectable queue**: humans can read `.wiki-ingest/queue/*.jsonl`.
+  `/lore-process` run replays it. Every edit is idempotent.
+- **Inspectable queue**: humans can read `.lorekeeper/queue/*.jsonl`.
 
 ### Costs
 
-- **Two-step daily flow** in queue mode: cron runs `wi ingest`, then the user (or
-  a scheduled session) runs `/wi-process`. Mitigation: a chained wrapper script.
+- **Two-step daily flow** in queue mode: cron runs `lore ingest`, then the user (or
+  a scheduled session) runs `/lore-process`. Mitigation: a chained wrapper script.
 - **Latency**: the Rust pipeline finishes in seconds; the LLM step takes longer.
 - **State split**: dedup state in redb, pending semantic work in queue files.
   Mitigation: the queue flush runs *before* the dedup commit, so a crash between
@@ -177,7 +177,7 @@ so per-call MCP latency is acceptable.
   working. No data loss.
 - *"What if a queue task is malformed?"* — The skill records it, leaves the file
   in place, and exits non-zero; a re-run retries.
-- *"What if two `/wi-process` runs overlap?"* — Files are published atomically and
+- *"What if two `/lore-process` runs overlap?"* — Files are published atomically and
   are filename-unique per run (timestamp + PID); a drain either sees a complete
   file or not at all.
 
@@ -190,9 +190,9 @@ Skip semantic synthesis; just collect and template-render.
 **Rejected**: loses the core value. The wiki *is* the LLM-synthesized concept
 layer. (This survives as the `noop` provider for development/CI.)
 
-### Alt B: Spawn the `claude` CLI from wi
+### Alt B: Spawn the `claude` CLI from lore
 
-`wi-llm` becomes a subprocess invoker of `claude --print`.
+`lk-llm` becomes a subprocess invoker of `claude --print`.
 
 **Rejected**: tight coupling to a specific Claude Code installation, hard to
 test, breaks if Claude Code isn't on PATH.
@@ -209,9 +209,9 @@ absent.
 
 Accepted as the dual-mode (`queue` / `anthropic` / `noop`) architecture:
 
-- `LlmClient` trait in `wi-llm` with three implementations.
-- Queue provider emits `.wiki-ingest/queue/*.jsonl` and is the default.
-- `/wi-process` skill drains the queue with an abort-on-first-failure,
+- `LlmClient` trait in `lk-llm` with three implementations.
+- Queue provider emits `.lorekeeper/queue/*.jsonl` and is the default.
+- `/lore-process` skill drains the queue with an abort-on-first-failure,
   idempotent-replay contract.
 - Flush-before-dedup-commit ordering guarantees no semantic work is lost on
   partial failure.

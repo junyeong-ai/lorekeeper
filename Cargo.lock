@@ -970,6 +970,86 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
+name = "lk-core"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "jiff",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "thiserror",
+]
+
+[[package]]
+name = "lk-llm"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "jiff",
+ "lk-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "lk-pipeline"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "jiff",
+ "lk-core",
+ "lk-llm",
+ "lk-vault",
+ "redb",
+ "serde",
+ "serde_json",
+ "strsim",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "lk-source"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "htmd",
+ "jiff",
+ "lk-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "lk-vault"
+version = "0.1.0"
+dependencies = [
+ "jiff",
+ "lk-core",
+ "minijinja",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -983,6 +1063,26 @@ name = "log"
 version = "0.4.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
+
+[[package]]
+name = "lore"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "dialoguer",
+ "jiff",
+ "lk-core",
+ "lk-llm",
+ "lk-pipeline",
+ "lk-source",
+ "lk-vault",
+ "miette",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "lru-slab"
@@ -2446,106 +2546,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f31141ce3fc3e300ae89b78c0dd67f9708061d1d2eda54b8209346fd6be9a92c"
 dependencies = [
  "rustls-pki-types",
-]
-
-[[package]]
-name = "wi"
-version = "0.1.0"
-dependencies = [
- "clap",
- "dialoguer",
- "jiff",
- "miette",
- "reqwest",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "wi-core",
- "wi-llm",
- "wi-pipeline",
- "wi-source",
- "wi-vault",
-]
-
-[[package]]
-name = "wi-core"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "jiff",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "thiserror",
-]
-
-[[package]]
-name = "wi-llm"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "jiff",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
- "wi-core",
-]
-
-[[package]]
-name = "wi-pipeline"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "jiff",
- "redb",
- "serde",
- "serde_json",
- "strsim",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
- "wi-core",
- "wi-llm",
- "wi-vault",
-]
-
-[[package]]
-name = "wi-source"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "htmd",
- "jiff",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
- "wi-core",
-]
-
-[[package]]
-name = "wi-vault"
-version = "0.1.0"
-dependencies = [
- "jiff",
- "minijinja",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
- "wi-core",
 ]
 
 [[package]]

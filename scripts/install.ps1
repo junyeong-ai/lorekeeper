@@ -1,5 +1,5 @@
-# wiki-ingest installer for Windows (PowerShell 5.1+)
-# Usage: irm https://raw.githubusercontent.com/junyeong-ai/wiki-ingest/main/scripts/install.ps1 | iex
+# Lorekeeper installer for Windows (PowerShell 5.1+)
+# Usage: irm https://raw.githubusercontent.com/junyeong-ai/lorekeeper/main/scripts/install.ps1 | iex
 [CmdletBinding()]
 param(
     [string]$Version,
@@ -15,19 +15,19 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$Repo = 'junyeong-ai/wiki-ingest'
-$BinaryName = 'wi'
-$SkillNames = @('wiki-ingest', 'wi-process')
+$Repo = 'junyeong-ai/lorekeeper'
+$BinaryName = 'lore'
+$SkillNames = @('lorekeeper', 'lore-process', 'lore-setup')
 $ReleaseBase = "https://github.com/$Repo/releases/download"
 $LatestUrl = "https://github.com/$Repo/releases/latest"
 
 if (-not $InstallDir) {
-    $InstallDir = if ($env:WI_INSTALL_DIR) { $env:WI_INSTALL_DIR }
+    $InstallDir = if ($env:LORE_INSTALL_DIR) { $env:LORE_INSTALL_DIR }
                   else { Join-Path $env:USERPROFILE '.local\bin' }
 }
 if (-not $DataDir) {
-    $DataDir = if ($env:WI_INSTALL_DATA_DIR) { $env:WI_INSTALL_DATA_DIR }
-               else { Join-Path $env:LOCALAPPDATA 'wi-ingest' }
+    $DataDir = if ($env:LORE_INSTALL_DATA_DIR) { $env:LORE_INSTALL_DATA_DIR }
+               else { Join-Path $env:LOCALAPPDATA 'lorekeeper' }
 }
 
 function Write-Step($msg)  { Write-Host "▸  $msg" -ForegroundColor Blue }
@@ -49,7 +49,7 @@ function Get-LatestVersion {
 
 function Resolve-Version {
     if ($Version) { return $Version }
-    if ($env:WI_INSTALL_VERSION) { return $env:WI_INSTALL_VERSION }
+    if ($env:LORE_INSTALL_VERSION) { return $env:LORE_INSTALL_VERSION }
     $v = Get-LatestVersion
     if (-not $v) { Die 'Cannot fetch latest version (network issue or no release exists yet)' }
     return $v
@@ -155,11 +155,11 @@ if ($scriptParent -and (Test-Path (Join-Path $scriptParent '..\Cargo.toml'))) {
     $repoDir = (Resolve-Path (Join-Path $scriptParent '..')).Path
 }
 
-if ($FromSource -or $env:WI_INSTALL_FROM_SOURCE -eq '1') {
+if ($FromSource -or $env:LORE_INSTALL_FROM_SOURCE -eq '1') {
     $method = 'source'
     $target = 'windows-x86_64'
     $version = if ($repoDir) {
-        (Select-String -Path (Join-Path $repoDir 'crates\wi-cli\Cargo.toml') -Pattern '^version' | Select-Object -First 1).Line -replace '.*"(.+)".*', '$1'
+        (Select-String -Path (Join-Path $repoDir 'crates\lk-cli\Cargo.toml') -Pattern '^version' | Select-Object -First 1).Line -replace '.*"(.+)".*', '$1'
     } else { 'dev' }
 } else {
     $method = 'prebuilt'
@@ -169,7 +169,7 @@ if ($FromSource -or $env:WI_INSTALL_FROM_SOURCE -eq '1') {
 
 Write-Host ''
 Write-Host '╭──────────────────────────────────────────╮' -ForegroundColor Cyan
-Write-Host '  wiki-ingest installer' -ForegroundColor Cyan
+Write-Host '  Lorekeeper installer' -ForegroundColor Cyan
 Write-Host "  v$version • $target" -ForegroundColor DarkGray
 Write-Host '╰──────────────────────────────────────────╯' -ForegroundColor Cyan
 Write-Host ''
@@ -177,14 +177,14 @@ Write-Host 'Review' -ForegroundColor White
 Write-Host "  binary    $(Join-Path $InstallDir "$BinaryName.exe") (v$version, $method)"
 Write-Host "  templates $(Join-Path $DataDir 'templates')"
 switch ($Skill) {
-    'user'    { Write-Host "  skills    $env:USERPROFILE\.claude\skills\{wiki-ingest,wi-process}" }
-    'project' { Write-Host "  skills    .\.claude\skills\{wiki-ingest,wi-process}" }
+    'user'    { Write-Host "  skills    $env:USERPROFILE\.claude\skills\{lorekeeper,lore-process,lore-setup}" }
+    'project' { Write-Host "  skills    .\.claude\skills\{lorekeeper,lore-process,lore-setup}" }
     'none'    { Write-Host '  skills    (skipped)' }
 }
 
 if ($DryRun) { Write-Host ''; Write-Warn '(dry-run) Not executing'; exit 0 }
 
-if (-not $Yes -and $env:WI_INSTALL_YES -ne '1') {
+if (-not $Yes -and $env:LORE_INSTALL_YES -ne '1') {
     $resp = Read-Host -Prompt 'Proceed? [Y/n]'
     if ($resp -match '^[Nn]') { Write-Host '  Aborted by user' -ForegroundColor DarkGray; exit 0 }
 }
@@ -203,9 +203,9 @@ if ($method -eq 'prebuilt') {
     if (-not $repoDir) { Die '--from-source requires running from a cloned repo' }
     Write-Step 'Building from source (cargo build --release --locked)'
     Push-Location $repoDir
-    try { cargo build --release --locked --quiet -p wi }
+    try { cargo build --release --locked --quiet -p lore }
     finally { Pop-Location }
-    $binSrc = Join-Path $repoDir 'target\release\wi.exe'
+    $binSrc = Join-Path $repoDir 'target\release\lore.exe'
     $templatesSrc = Join-Path $repoDir 'templates'
 }
 
@@ -240,4 +240,4 @@ Write-Host 'Next steps:'
 Write-Host "  $BinaryName validate              Verify config.yaml in current directory"
 Write-Host "  $BinaryName ingest --dry-run      Preview ingest without writing"
 Write-Host "  $BinaryName schedule              Generate scheduled task entries"
-Write-Host "  /wiki-ingest                  Use as Claude Code skill"
+Write-Host "  /lorekeeper                  Use as Claude Code skill"

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# wiki-ingest uninstaller.
+# Lorekeeper uninstaller.
 set -euo pipefail
 
-BINARY_NAME="wi"
-SKILL_NAMES=("wiki-ingest" "wi-process")
+BINARY_NAME="lore"
+SKILL_NAMES=("lorekeeper" "lore-process" "lore-setup")
 
-INSTALL_DIR="${WI_INSTALL_DIR:-$HOME/.local/bin}"
-DATA_DIR="${WI_INSTALL_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/wi-ingest}"
-WI_UNINSTALL_YES="${WI_UNINSTALL_YES:-0}"
+INSTALL_DIR="${LORE_INSTALL_DIR:-$HOME/.local/bin}"
+DATA_DIR="${LORE_INSTALL_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/lorekeeper}"
+LORE_UNINSTALL_YES="${LORE_UNINSTALL_YES:-0}"
 
 C_RESET=""; C_DIM=""; C_RED=""; C_GREEN=""; C_YELLOW=""; C_BOLD=""
 
@@ -24,7 +24,7 @@ log_ok()   { printf '%s✓  %s%s\n' "$C_GREEN" "$*" "$C_RESET" >&2; }
 render_step() { printf '%s▸  %s%s\n' "$C_YELLOW" "$*" "$C_RESET" >&2; }
 
 prompt_yesno() {
-    [ "$WI_UNINSTALL_YES" = "1" ] && return 0
+    [ "$LORE_UNINSTALL_YES" = "1" ] && return 0
     local answer
     printf '%s%s%s [y/N] ' "$C_BOLD" "$1" "$C_RESET"
     IFS= read -r answer < /dev/tty || answer="N"
@@ -33,16 +33,16 @@ prompt_yesno() {
 
 print_usage() {
     cat <<'USAGE'
-wiki-ingest uninstaller
+Lorekeeper uninstaller
 
 Usage:
   ./scripts/uninstall.sh [--yes] [--keep-data]
 
 Removes:
-  - $WI_INSTALL_DIR/wi                            (binary)
-  - $WI_INSTALL_DATA_DIR/templates                (installed templates)
-  - ~/.claude/skills/wiki-ingest                  (user-level skill)
-  - ./.claude/skills/wiki-ingest                  (project-level skill, if present)
+  - $LORE_INSTALL_DIR/lore                        (binary)
+  - $LORE_INSTALL_DATA_DIR/templates              (installed templates)
+  - ~/.claude/skills/lorekeeper                   (user-level skill)
+  - ./.claude/skills/lorekeeper                   (project-level skill, if present)
 
 Flags:
   --yes, -y       Skip all confirmations
@@ -54,7 +54,7 @@ USAGE
 KEEP_DATA=0
 while [ $# -gt 0 ]; do
     case "$1" in
-        --yes|-y)    WI_UNINSTALL_YES=1; shift ;;
+        --yes|-y)    LORE_UNINSTALL_YES=1; shift ;;
         --keep-data) KEEP_DATA=1; shift ;;
         --help|-h)   print_usage; exit 0 ;;
         *)           die "Unknown flag: $1 (use --help)" ;;
@@ -63,7 +63,7 @@ done
 
 init_colors
 
-printf '\n%swiki-ingest uninstaller%s\n\n' "$C_BOLD" "$C_RESET"
+printf '\n%sLorekeeper uninstaller%s\n\n' "$C_BOLD" "$C_RESET"
 
 removed=0
 
@@ -118,5 +118,5 @@ if [ "$removed" -eq 0 ]; then
     printf '\n%sNothing to uninstall.%s\n' "$C_DIM" "$C_RESET"
 else
     printf '\n%s✅ Removed %d item(s)%s\n' "$C_GREEN$C_BOLD" "$removed" "$C_RESET"
-    printf '%sVault data (.wiki-ingest/) and config.yaml are untouched.%s\n' "$C_DIM" "$C_RESET"
+    printf '%sVault data (.lorekeeper/) and config.yaml are untouched.%s\n' "$C_DIM" "$C_RESET"
 fi
