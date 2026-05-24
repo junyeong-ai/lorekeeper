@@ -15,6 +15,10 @@ pub struct Event {
     pub labels: Vec<String>,
     pub classification: Option<String>,
     pub is_personal: bool,
+    /// Source-agnostic hash of title+body. Used by the `content-hash` dedup
+    /// strategy to catch the same content arriving via multiple sources or
+    /// re-pushed manually.
+    pub content_hash: String,
     #[serde(default)]
     pub metadata: serde_json::Value,
 }
@@ -33,6 +37,20 @@ impl EventId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// Stable hash of an event's title + body for content-equivalence dedup.
+/// Unlike `EventId` which scopes by source + date + external_id, this hash
+/// is source-agnostic — useful for catching the same article ingested via
+/// two different sources, or the same PDF re-pushed by the user.
+pub fn content_hash(title: &str, body: &str) -> String {
+    // Normalize whitespace so trivial reformatting doesn't break the match.
+    let normalized = format!(
+        "{}\n{}",
+        title.split_whitespace().collect::<Vec<_>>().join(" "),
+        body.split_whitespace().collect::<Vec<_>>().join(" ")
+    );
+    blake3::hash(normalized.as_bytes()).to_hex()[..16].to_string()
 }
 
 impl std::fmt::Display for EventId {

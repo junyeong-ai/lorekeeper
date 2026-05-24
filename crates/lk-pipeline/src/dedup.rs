@@ -9,6 +9,7 @@ use lk_core::event::Event;
 use crate::PipelineError;
 
 const EVENT_IDS: TableDefinition<&str, u64> = TableDefinition::new("event_ids");
+const CONTENT_HASHES: TableDefinition<&str, u64> = TableDefinition::new("content_hashes");
 const URLS: TableDefinition<&str, u64> = TableDefinition::new("urls");
 const TITLES: TableDefinition<&str, u64> = TableDefinition::new("titles");
 
@@ -91,6 +92,7 @@ impl DedupCache {
 
             let init = (|| -> Result<(), redb::TableError> {
                 txn.open_table(EVENT_IDS)?;
+                txn.open_table(CONTENT_HASHES)?;
                 txn.open_table(URLS)?;
                 txn.open_table(TITLES)?;
                 Ok(())
@@ -151,6 +153,8 @@ impl DedupCache {
             Some(txn) => Some((
                 txn.open_table(EVENT_IDS)
                     .map_err(|e| PipelineError::Dedup(e.to_string()))?,
+                txn.open_table(CONTENT_HASHES)
+                    .map_err(|e| PipelineError::Dedup(e.to_string()))?,
                 txn.open_table(URLS)
                     .map_err(|e| PipelineError::Dedup(e.to_string()))?,
                 txn.open_table(TITLES)
@@ -163,6 +167,7 @@ impl DedupCache {
         // Per-run sets so two identical events in the SAME input batch don't both pass
         // as novel — the persisted tables only reflect prior committed runs.
         let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut seen_hashes: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut seen_urls: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         for event in events {
@@ -172,7 +177,7 @@ impl DedupCache {
                 match strategy {
                     DedupStrategy::EventId => {
                         let in_cache = match &tables {
-                            Some((ids, _, _)) => ids
+                            Some((ids, _, _, _)) => ids
                                 .get(event.id.as_str())
                                 .map_err(|e| PipelineError::Dedup(e.to_string()))?
                                 .is_some(),
@@ -183,10 +188,24 @@ impl DedupCache {
                             break;
                         }
                     }
+                    DedupStrategy::ContentHash => {
+                        let hash = event.content_hash.as_str();
+                        let in_cache = match &tables {
+                            Some((_, hashes, _, _)) => hashes
+                                .get(hash)
+                                .map_err(|e| PipelineError::Dedup(e.to_string()))?
+                                .is_some(),
+                            None => false,
+                        };
+                        if seen_hashes.contains(hash) || in_cache {
+                            dup = true;
+                            break;
+                        }
+                    }
                     DedupStrategy::Url => {
                         if let Some(ref url) = event.url {
                             let in_cache = match &tables {
-                                Some((_, urls, _)) => urls
+                                Some((_, _, urls, _)) => urls
                                     .get(url.as_str())
                                     .map_err(|e| PipelineError::Dedup(e.to_string()))?
                                     .is_some(),
@@ -205,7 +224,7 @@ impl DedupCache {
                         // than the entire (up to 90-day) cache. Also compare against titles
                         // already accepted earlier in this same batch.
                         let prefix = format!("{}:", event.date);
-                        if let Some((_, _, title_table)) = &tables {
+                        if let Some((_, _, _, title_table)) = &tables {
                             let range = title_table
                                 .range(prefix.as_str()..)
                                 .map_err(|e| PipelineError::Dedup(e.to_string()))?;
@@ -237,6 +256,7 @@ impl DedupCache {
 
             if !dup {
                 seen_ids.insert(event.id.as_str().to_string());
+                seen_hashes.insert(event.content_hash.clone());
                 if let Some(ref url) = event.url {
                     seen_urls.insert(url.clone());
                 }
@@ -261,6 +281,9 @@ impl DedupCache {
             let mut ids = txn
                 .open_table(EVENT_IDS)
                 .map_err(|e| PipelineError::Dedup(e.to_string()))?;
+            let mut hashes = txn
+                .open_table(CONTENT_HASHES)
+                .map_err(|e| PipelineError::Dedup(e.to_string()))?;
             let mut urls = txn
                 .open_table(URLS)
                 .map_err(|e| PipelineError::Dedup(e.to_string()))?;
@@ -270,6 +293,9 @@ impl DedupCache {
 
             for event in events {
                 ids.insert(event.id.as_str(), now)
+                    .map_err(|e| PipelineError::Dedup(e.to_string()))?;
+                hashes
+                    .insert(event.content_hash.as_str(), now)
                     .map_err(|e| PipelineError::Dedup(e.to_string()))?;
 
                 if let Some(ref url) = event.url {
@@ -302,7 +328,7 @@ impl DedupCache {
         let mut total_removed = 0u64;
 
         {
-            for table_def in [EVENT_IDS, URLS, TITLES] {
+            for table_def in [EVENT_IDS, CONTENT_HASHES, URLS, TITLES] {
                 let mut table = txn
                     .open_table(table_def)
                     .map_err(|e| PipelineError::Dedup(e.to_string()))?;
@@ -358,6 +384,7 @@ mod tests {
             labels: vec![],
             classification: None,
             is_personal: false,
+            content_hash: lk_core::event::content_hash(title, ""),
             metadata: serde_json::Value::Null,
         }
     }
@@ -408,6 +435,19 @@ mod tests {
         // Matches nothing in the cascade → novel.
         let novel = vec![ev("fresh", "Brand New", Some("https://example.com/z"))];
         assert_eq!(cache.deduplicate(novel, &cascade).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn content_hash_dedup_catches_same_content_different_source() {
+        // The same article ingested via two sources (different event IDs and URLs)
+        // collapses to one event when content-hash is in the cascade.
+        let dir = TempDir::new().unwrap();
+        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85).unwrap();
+        let cascade = vec![DedupStrategy::ContentHash];
+        let a = ev("from-rss", "Anthropic releases Opus 4.7", None);
+        let b = ev("from-mail", "Anthropic releases Opus 4.7", None);
+        let novel = cache.deduplicate(vec![a, b], &cascade).unwrap();
+        assert_eq!(novel.len(), 1);
     }
 
     #[test]

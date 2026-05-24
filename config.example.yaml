@@ -135,7 +135,7 @@ sources:
 
 # ─── 중복 제거 ────────────────────────────────────────────
 dedup:
-  cascade: [event-id, url, title]
+  cascade: [event-id, content-hash, url, title]
   title_threshold: 0.85
 
 # ─── 라벨 ────────────────────────────────────────────────

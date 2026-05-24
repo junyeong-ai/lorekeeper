@@ -445,6 +445,7 @@ impl Default for DedupConfig {
         Self {
             cascade: vec![
                 DedupStrategy::EventId,
+                DedupStrategy::ContentHash,
                 DedupStrategy::Url,
                 DedupStrategy::Title,
             ],
@@ -457,6 +458,7 @@ impl Default for DedupConfig {
 #[serde(rename_all = "kebab-case")]
 pub enum DedupStrategy {
     EventId,
+    ContentHash,
     Url,
     Title,
 }

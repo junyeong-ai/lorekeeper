@@ -142,6 +142,7 @@ mod tests {
             labels: vec![],
             classification: None,
             is_personal: false,
+            content_hash: lk_core::event::content_hash(title, ""),
             metadata: serde_json::Value::Null,
         }
     }

@@ -1,5 +1,5 @@
 use lk_core::config::SourceType;
-use lk_core::event::{Event, EventId, RawItem};
+use lk_core::event::{Event, EventId, RawItem, content_hash};
 use lk_core::text::collapse_blank_lines;
 
 /// Strip Unicode emoji from text. Long-lived documents don't benefit from
@@ -49,19 +49,23 @@ pub fn normalize(
             };
 
             let id = EventId::new(source_id, date, &hash_input);
+            let title = strip_unicode_emoji(&item.title);
+            let body = strip_unicode_emoji(&collapse_blank_lines(&item.body));
+            let ch = content_hash(&title, &body);
 
             Event {
                 id,
                 source_id: source_id.to_string(),
                 source_type,
                 date,
-                title: strip_unicode_emoji(&item.title),
-                body: strip_unicode_emoji(&collapse_blank_lines(&item.body)),
+                title,
+                body,
                 url: item.url,
                 author: item.author,
                 labels: vec![],
                 classification: None,
                 is_personal: false,
+                content_hash: ch,
                 metadata: item.metadata,
             }
         })
