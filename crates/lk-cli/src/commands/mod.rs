@@ -12,6 +12,7 @@ pub mod schema;
 pub mod status;
 pub mod synthesis;
 pub mod validate;
+pub mod wiki;
 
 pub struct GlobalOpts {
     pub config: Option<PathBuf>,

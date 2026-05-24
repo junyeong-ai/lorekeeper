@@ -82,6 +82,11 @@ enum Command {
         #[command(subcommand)]
         command: commands::graph::GraphCmd,
     },
+    /// Wiki-level utilities (catalog generation, future maintenance ops)
+    Wiki {
+        #[command(subcommand)]
+        cmd: commands::wiki::WikiCmd,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -176,6 +181,7 @@ async fn main() -> miette::Result<()> {
         Command::Schedule { bin } => commands::schedule::run(&opts, &bin).await,
         Command::Maintenance => commands::maintenance::run(&opts).await,
         Command::Graph { .. } => unreachable!(),
+        Command::Wiki { cmd } => commands::wiki::run(&opts, cmd).await,
     }
 }
 
