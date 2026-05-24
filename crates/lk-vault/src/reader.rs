@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 
+use lk_core::frontmatter::{self, Page};
+
 use crate::VaultError;
-use crate::frontmatter::{self, Page};
 
 pub struct VaultReader {
     root: PathBuf,

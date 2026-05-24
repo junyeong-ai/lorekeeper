@@ -46,6 +46,7 @@ fn base_config(vault_root: &std::path::Path) -> Config {
         performance: PerformanceConfig::default(),
         synthesis: SynthesisConfig::default(),
         llm: Default::default(),
+        graph: Default::default(),
     }
 }
 

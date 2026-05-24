@@ -16,6 +16,7 @@ lk-vault = { workspace = true }
 lk-source = { workspace = true }
 lk-pipeline = { workspace = true }
 lk-llm = { workspace = true }
+lk-graph = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 reqwest = { workspace = true }

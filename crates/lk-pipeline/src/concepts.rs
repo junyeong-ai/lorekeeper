@@ -234,7 +234,7 @@ mod tests {
 
     #[test]
     fn slug_with_slashes_is_normalized() {
-        assert_eq!(canonical_slug("foo/bar", "Foo Bar"), "foobar");
+        assert_eq!(canonical_slug("foo/bar", "Foo Bar"), "foo-bar");
         assert_eq!(canonical_slug("..", "Up Up"), "up-up");
         assert_eq!(canonical_slug("", "Hello World"), "hello-world");
     }

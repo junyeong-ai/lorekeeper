@@ -13,6 +13,7 @@ lk-vault = { path = "crates/lk-vault" }
 lk-source = { path = "crates/lk-source" }
 lk-pipeline = { path = "crates/lk-pipeline" }
 lk-llm = { path = "crates/lk-llm" }
+lk-graph = { path = "crates/lk-graph" }
 
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
@@ -32,3 +33,10 @@ strsim = "0.11"
 blake3 = "1"
 htmd = "0.5"
 dialoguer = "0.12"
+unicode-normalization = "0.1"
+petgraph = "0.7"
+rayon = "1"
+walkdir = "2"
+globset = "0.4"
+regex = "1"
+tempfile = "3"

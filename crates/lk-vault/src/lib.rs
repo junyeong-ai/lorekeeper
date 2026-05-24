@@ -1,10 +1,12 @@
-mod frontmatter;
 mod log;
 mod reader;
 mod template;
 mod writer;
 
-pub use self::frontmatter::{Frontmatter, Page};
+// Frontmatter parsing is pure and lives in lk-core; re-exported here so existing
+// `lk_vault::{Frontmatter, Page}` call sites keep working.
+pub use lk_core::frontmatter::{Frontmatter, Page, parse_page};
+
 pub use self::log::{IngestLog, LogEntry, LogStatus};
 pub use self::reader::VaultReader;
 pub use self::template::TemplateEngine;

@@ -20,6 +20,10 @@ pub struct Config {
     pub synthesis: SynthesisConfig,
     #[serde(default)]
     pub llm: LlmConfig,
+    /// Wikilink graph analysis settings (consumed by `lore graph` / `lk-graph`).
+    /// Optional and fully defaulted; absent in config.yaml means "use defaults".
+    #[serde(default)]
+    pub graph: GraphConfig,
 }
 
 impl Config {
@@ -596,6 +600,76 @@ pub enum LlmProvider {
     Noop,
 }
 
+/// Wikilink graph analysis configuration. Mirrors the sections of the retired
+/// CJK-correct rule) and output format (the `--json` flag controls that).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GraphConfig {
+    pub scope: GraphScopeConfig,
+    pub graph: GraphMetricsConfig,
+    pub cluster: GraphClusterConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GraphScopeConfig {
+    /// Vault-relative directories to scan for markdown pages.
+    pub dirs: Vec<PathBuf>,
+    /// Glob patterns (matched against vault-relative paths) to exclude from the scan.
+    pub exclude: Vec<String>,
+    /// Whether the walker follows symlinks.
+    pub follow_links: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GraphMetricsConfig {
+    /// Minimum total degree for a page to count as a hub in `lint`.
+    pub min_hub_degree: usize,
+    /// Page ids never reported as orphans (e.g. index/MOC pages).
+    pub orphan_exclude: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GraphClusterConfig {
+    /// Louvain resolution parameter; higher favors more, smaller communities.
+    pub resolution: f64,
+    /// Maximum local-moving passes before the algorithm stops.
+    pub max_iterations: usize,
+    /// Communities smaller than this are dropped from results.
+    pub min_community_size: usize,
+}
+
+impl Default for GraphScopeConfig {
+    fn default() -> Self {
+        Self {
+            dirs: vec![PathBuf::from("wiki")],
+            exclude: Vec::new(),
+            follow_links: false,
+        }
+    }
+}
+
+impl Default for GraphMetricsConfig {
+    fn default() -> Self {
+        Self {
+            min_hub_degree: 5,
+            orphan_exclude: Vec::new(),
+        }
+    }
+}
+
+impl Default for GraphClusterConfig {
+    fn default() -> Self {
+        Self {
+            resolution: 1.0,
+            max_iterations: 100,
+            min_community_size: 1,
+        }
+    }
+}
+
 fn expand_tilde(path: &str) -> PathBuf {
     if let Some(rest) = path.strip_prefix("~/")
         && let Ok(home) = std::env::var("HOME")
@@ -944,5 +1018,77 @@ performance:
         let perf = PerformanceConfig::default();
         let cat = perf.resolve_category("e", SourceType::Gmail, Some("technical-leadership"));
         assert_eq!(cat.as_deref(), Some("technical-leadership"));
+    }
+
+    #[test]
+    fn graph_config_defaults_when_absent() {
+        let yaml = r#"
+vault:
+  root: /tmp/vault
+identity:
+  name: test
+  email: test@test.com
+sources:
+  s1:
+    type: gmail
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(config.graph.scope.dirs, vec![PathBuf::from("wiki")]);
+        assert_eq!(config.graph.graph.min_hub_degree, 5);
+        assert_eq!(config.graph.cluster.resolution, 1.0);
+        assert_eq!(config.graph.cluster.max_iterations, 100);
+        assert_eq!(config.graph.cluster.min_community_size, 1);
+    }
+
+    #[test]
+    fn graph_config_parses_overrides() {
+        let yaml = r#"
+vault:
+  root: /tmp/vault
+identity:
+  name: test
+  email: test@test.com
+sources:
+  s1:
+    type: gmail
+graph:
+  scope:
+    dirs: [wiki, docs]
+    exclude: ["wiki/log.md"]
+    follow_links: true
+  graph:
+    min_hub_degree: 3
+    orphan_exclude: ["wiki/index"]
+  cluster:
+    resolution: 1.5
+    max_iterations: 50
+    min_community_size: 2
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(config.graph.scope.dirs.len(), 2);
+        assert!(config.graph.scope.follow_links);
+        assert_eq!(config.graph.graph.min_hub_degree, 3);
+        assert_eq!(config.graph.graph.orphan_exclude, vec!["wiki/index"]);
+        assert_eq!(config.graph.cluster.resolution, 1.5);
+        assert_eq!(config.graph.cluster.min_community_size, 2);
+    }
+
+    #[test]
+    fn graph_config_rejects_unknown_field() {
+        let yaml = r#"
+vault:
+  root: /tmp/vault
+identity:
+  name: test
+  email: test@test.com
+sources:
+  s1:
+    type: gmail
+graph:
+  graph:
+    typo_field: 1
+"#;
+        let result: Result<Config, _> = serde_yaml_ng::from_str(yaml);
+        assert!(result.is_err());
     }
 }

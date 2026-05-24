@@ -65,6 +65,17 @@ enum Command {
     },
     /// Prune ingest log and dedup cache entries older than 90 days
     Maintenance,
+    /// Wikilink graph analysis for the vault
+    Graph {
+        /// Root directory of the vault (overrides config.yaml vault.root)
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Output in JSON format (envelope: {"ok": true, "data": …})
+        #[arg(long)]
+        json: bool,
+        #[command(subcommand)]
+        command: commands::graph::GraphCmd,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -121,6 +132,18 @@ async fn main() -> miette::Result<()> {
         template_dir: cli.template_dir,
     };
 
+    // `lore graph` has its own exit-code convention (0=ok, 1=findings, 2=error) so
+    // it returns ExitCode directly instead of going through miette.
+    if let Command::Graph {
+        root,
+        json,
+        command,
+    } = cli.command
+    {
+        let code = commands::graph::run(&opts, command, json, root);
+        std::process::exit(code);
+    }
+
     match cli.command {
         Command::Init { target } => match target {
             InitTarget::Credentials { vault } => commands::init::credentials(&opts, vault).await,
@@ -138,6 +161,7 @@ async fn main() -> miette::Result<()> {
         Command::Performance => commands::performance::run(&opts).await,
         Command::Schedule { bin } => commands::schedule::run(&opts, &bin).await,
         Command::Maintenance => commands::maintenance::run(&opts).await,
+        Command::Graph { .. } => unreachable!(),
     }
 }
 
