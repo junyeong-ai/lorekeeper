@@ -73,8 +73,18 @@ fn default_exclude_bots() -> bool {
 }
 
 #[derive(Deserialize)]
+struct ResponseMetadata {
+    #[serde(default)]
+    next_cursor: String,
+}
+
+#[derive(Deserialize)]
 struct HistoryData {
     messages: Option<Vec<SlackMessage>>,
+    #[serde(default)]
+    has_more: bool,
+    #[serde(default)]
+    response_metadata: Option<ResponseMetadata>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -121,20 +131,51 @@ impl SlackChannelSource {
     }
 
     /// Fetch the full thread for a root message (`conversations.replies` returns the root
-    /// plus every reply).
+    /// plus every reply). Paginates with `next_cursor` and caps at 200 replies to prevent
+    /// runaway on huge threads.
     async fn fetch_thread(
         &self,
         channel_id: &str,
         root_ts: &str,
     ) -> Result<Vec<SlackMessage>, SourceError> {
-        let data: HistoryData = slack_post(
-            &self.http,
-            &self.token,
-            "conversations.replies",
-            &[("channel", channel_id), ("ts", root_ts), ("limit", "100")],
-        )
-        .await?;
-        Ok(data.messages.unwrap_or_default())
+        const MAX_REPLIES: usize = 200;
+        let mut all_messages: Vec<SlackMessage> = Vec::new();
+        let mut cursor = String::new();
+
+        loop {
+            let mut params: Vec<(&str, &str)> =
+                vec![("channel", channel_id), ("ts", root_ts), ("limit", "100")];
+            if !cursor.is_empty() {
+                params.push(("cursor", cursor.as_str()));
+            }
+
+            let data: HistoryData = slack_post(
+                &self.http,
+                &self.token,
+                "conversations.replies",
+                &params,
+            )
+            .await?;
+
+            let page = data.messages.unwrap_or_default();
+            let page_empty = page.is_empty();
+            all_messages.extend(page);
+
+            if page_empty || all_messages.len() >= MAX_REPLIES {
+                all_messages.truncate(MAX_REPLIES);
+                break;
+            }
+
+            cursor = data
+                .response_metadata
+                .map(|r| r.next_cursor)
+                .unwrap_or_default();
+            if cursor.is_empty() || !data.has_more {
+                break;
+            }
+        }
+
+        Ok(all_messages)
     }
 }
 
@@ -159,11 +200,12 @@ impl Source for SlackChannelSource {
             let channel_id = resolve_channel_id(&self.http, &self.token, ch_ref).await?;
             let channel_name = ch_ref.strip_prefix('#').unwrap_or(ch_ref);
 
-            let data: HistoryData = slack_post(
-                &self.http,
-                &self.token,
-                "conversations.history",
-                &[
+            // Paginate through conversations.history; cap at 500 messages per channel.
+            const MAX_HISTORY: usize = 500;
+            let mut messages: Vec<SlackMessage> = Vec::new();
+            let mut history_cursor = String::new();
+            loop {
+                let mut params: Vec<(&str, &str)> = vec![
                     ("channel", channel_id.as_str()),
                     ("oldest", oldest_ts.as_str()),
                     ("latest", latest_ts.as_str()),
@@ -171,11 +213,36 @@ impl Source for SlackChannelSource {
                     // date filter still trims anything outside the target day.
                     ("inclusive", "true"),
                     ("limit", "100"),
-                ],
-            )
-            .await?;
+                ];
+                if !history_cursor.is_empty() {
+                    params.push(("cursor", history_cursor.as_str()));
+                }
 
-            let messages = data.messages.unwrap_or_default();
+                let data: HistoryData = slack_post(
+                    &self.http,
+                    &self.token,
+                    "conversations.history",
+                    &params,
+                )
+                .await?;
+
+                let page = data.messages.unwrap_or_default();
+                let page_empty = page.is_empty();
+                messages.extend(page);
+
+                if page_empty || messages.len() >= MAX_HISTORY {
+                    messages.truncate(MAX_HISTORY);
+                    break;
+                }
+
+                history_cursor = data
+                    .response_metadata
+                    .map(|r| r.next_cursor)
+                    .unwrap_or_default();
+                if history_cursor.is_empty() || !data.has_more {
+                    break;
+                }
+            }
 
             for root in messages {
                 let text = root.text.clone().unwrap_or_default();
@@ -187,7 +254,18 @@ impl Source for SlackChannelSource {
                 let has_replies = root.reply_count.unwrap_or(0) > 0
                     || root.thread_ts.as_deref() == Some(root.ts.as_str());
                 let mut thread = if p.include_threads && has_replies {
-                    self.fetch_thread(&channel_id, &root.ts).await?
+                    match self.fetch_thread(&channel_id, &root.ts).await {
+                        Ok(t) => t,
+                        Err(e) => {
+                            tracing::warn!(
+                                channel = channel_name,
+                                ts = root.ts.as_str(),
+                                error = %e,
+                                "slack-channel: thread fetch failed, using root message only"
+                            );
+                            vec![root.clone()]
+                        }
+                    }
                 } else {
                     vec![root.clone()]
                 };

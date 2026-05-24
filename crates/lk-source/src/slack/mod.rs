@@ -119,9 +119,10 @@ pub(crate) async fn resolve_users(http: &reqwest::Client, token: &str) -> HashMa
     }
 
     // Paginate through the full member list (large workspaces exceed 1000).
+    const MAX_PAGES: usize = 50; // 50 × 200 = 10,000 users
     let mut map = HashMap::new();
     let mut cursor = String::new();
-    loop {
+    for _ in 0..MAX_PAGES {
         let mut params: Vec<(&str, &str)> = vec![("limit", "200")];
         if !cursor.is_empty() {
             params.push(("cursor", cursor.as_str()));
@@ -129,6 +130,9 @@ pub(crate) async fn resolve_users(http: &reqwest::Client, token: &str) -> HashMa
         let page: Result<MembersPage, _> = slack_post(http, token, "users.list", &params).await;
         match page {
             Ok(data) => {
+                if data.members.is_empty() {
+                    break;
+                }
                 for m in &data.members {
                     map.insert(m.id.clone(), display_name(m));
                 }
@@ -160,25 +164,48 @@ async fn resolve_channel_id(
     let name = channel_ref.strip_prefix('#').unwrap_or(channel_ref);
 
     #[derive(Deserialize)]
-    struct Channels {
-        channels: Vec<ChannelInfo>,
+    struct ResponseMetadata {
+        #[serde(default)]
+        next_cursor: String,
     }
 
-    let data: Channels = slack_post(
-        http,
-        token,
-        "conversations.list",
-        &[
-            ("types", "public_channel,private_channel"),
-            ("limit", "1000"),
-            ("exclude_archived", "true"),
-        ],
-    )
-    .await?;
+    #[derive(Deserialize)]
+    struct ChannelsPage {
+        #[serde(default)]
+        channels: Vec<ChannelInfo>,
+        #[serde(default)]
+        response_metadata: Option<ResponseMetadata>,
+    }
 
-    data.channels
-        .into_iter()
-        .find(|c| c.name == name)
-        .map(|c| c.id)
-        .ok_or_else(|| SourceError::Parse(format!("channel not found: {channel_ref}")))
+    // Paginate through the full channel list (large workspaces exceed 1000).
+    const MAX_PAGES: usize = 25; // 25 × 200 = 5,000 channels
+    let mut cursor = String::new();
+    for _ in 0..MAX_PAGES {
+        let mut params: Vec<(&str, &str)> = vec![
+            ("types", "public_channel,private_channel"),
+            ("limit", "200"),
+            ("exclude_archived", "true"),
+        ];
+        if !cursor.is_empty() {
+            params.push(("cursor", cursor.as_str()));
+        }
+        let page: ChannelsPage =
+            slack_post(http, token, "conversations.list", &params).await?;
+
+        if let Some(ch) = page.channels.into_iter().find(|c| c.name == name) {
+            return Ok(ch.id);
+        }
+
+        cursor = page
+            .response_metadata
+            .map(|r| r.next_cursor)
+            .unwrap_or_default();
+        if cursor.is_empty() {
+            break;
+        }
+    }
+
+    Err(SourceError::Parse(format!(
+        "channel not found: {channel_ref}"
+    )))
 }

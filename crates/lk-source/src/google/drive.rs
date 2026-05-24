@@ -134,16 +134,30 @@ impl Source for DriveSource {
 
         let mut items = Vec::new();
         for file in files {
-            let content_resp = check_response(
-                self.http
-                    .get(format!("{BASE}/files/{}", file.id))
-                    .bearer_auth(&token)
-                    .query(&[("alt", "media")])
-                    .send()
-                    .await?,
-            )
-            .await?;
-            let content = content_resp.text().await?;
+            let download = async {
+                let content_resp = check_response(
+                    self.http
+                        .get(format!("{BASE}/files/{}", file.id))
+                        .bearer_auth(&token)
+                        .query(&[("alt", "media")])
+                        .send()
+                        .await?,
+                )
+                .await?;
+                content_resp.text().await.map_err(SourceError::Http)
+            };
+
+            let content = match download.await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(
+                        file = %file.name,
+                        error = %e,
+                        "drive: skipping file (download failed)"
+                    );
+                    continue;
+                }
+            };
 
             let ts = file
                 .modified_time

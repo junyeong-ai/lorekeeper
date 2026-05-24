@@ -49,6 +49,8 @@ struct ExcludeConfig {
 #[derive(Deserialize)]
 struct ListResponse {
     messages: Option<Vec<MessageRef>>,
+    #[serde(rename = "nextPageToken")]
+    next_page_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -140,40 +142,77 @@ impl Source for GmailSource {
             max.as_second()
         );
 
-        let resp = check_response(
-            self.http
+        const PAGE_SIZE: usize = 50;
+        const MAX_MESSAGES: usize = 200;
+
+        let mut refs: Vec<MessageRef> = Vec::new();
+        let mut page_token: Option<String> = None;
+
+        loop {
+            let mut req = self
+                .http
                 .get(format!("{BASE}/messages"))
                 .bearer_auth(&token)
-                .query(&[("q", &query), ("maxResults", &"50".to_string())])
-                .send()
-                .await?,
-        )
-        .await?;
+                .query(&[
+                    ("q", query.as_str()),
+                    ("maxResults", &PAGE_SIZE.to_string()),
+                ]);
+            if let Some(ref pt) = page_token {
+                req = req.query(&[("pageToken", pt.as_str())]);
+            }
 
-        let list: ListResponse = resp.json().await?;
-        let refs = list.messages.unwrap_or_default();
+            let resp = check_response(req.send().await?).await?;
+            let list: ListResponse = resp.json().await?;
+
+            let page = list.messages.unwrap_or_default();
+            let page_empty = page.is_empty();
+            refs.extend(page);
+
+            if page_empty || refs.len() >= MAX_MESSAGES {
+                refs.truncate(MAX_MESSAGES);
+                break;
+            }
+
+            match list.next_page_token {
+                Some(pt) => page_token = Some(pt),
+                None => break,
+            }
+        }
 
         tracing::info!(count = refs.len(), "gmail: listed messages");
 
         let mut items = Vec::new();
         for r in &refs {
-            let resp = check_response(
-                self.http
-                    .get(format!("{BASE}/messages/{}", r.id))
-                    .bearer_auth(&token)
-                    .query(&[
-                        ("format", "metadata"),
-                        ("metadataHeaders", "From"),
-                        ("metadataHeaders", "To"),
-                        ("metadataHeaders", "Subject"),
-                        ("metadataHeaders", "Date"),
-                    ])
-                    .send()
-                    .await?,
-            )
-            .await?;
+            let fetch = async {
+                let resp = check_response(
+                    self.http
+                        .get(format!("{BASE}/messages/{}", r.id))
+                        .bearer_auth(&token)
+                        .query(&[
+                            ("format", "metadata"),
+                            ("metadataHeaders", "From"),
+                            ("metadataHeaders", "To"),
+                            ("metadataHeaders", "Subject"),
+                            ("metadataHeaders", "Date"),
+                        ])
+                        .send()
+                        .await?,
+                )
+                .await?;
+                resp.json::<Message>().await.map_err(SourceError::Http)
+            };
 
-            let msg: Message = resp.json().await?;
+            let msg = match fetch.await {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::warn!(
+                        message_id = %r.id,
+                        error = %e,
+                        "gmail: skipping message (fetch failed)"
+                    );
+                    continue;
+                }
+            };
 
             if let Some(ref exc) = p.exclude
                 && Self::should_exclude(&msg, exc)
