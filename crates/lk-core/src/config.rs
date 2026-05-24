@@ -77,6 +77,23 @@ impl Config {
             tracing::warn!("all sources are disabled; ingest will have nothing to do");
         }
 
+        if self.identity.name.trim().is_empty() {
+            return Err(ConfigError::Validation(
+                "identity.name must not be empty".into(),
+            ));
+        }
+        if self.identity.email.trim().is_empty() {
+            return Err(ConfigError::Validation(
+                "identity.email must not be empty".into(),
+            ));
+        }
+
+        if self.llm.model.trim().is_empty() {
+            return Err(ConfigError::Validation(
+                "llm.model must not be empty".into(),
+            ));
+        }
+
         self.vault.dirs.validate()?;
 
         if let Some(tz_name) = self.vault.timezone.as_deref()

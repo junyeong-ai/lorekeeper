@@ -24,9 +24,19 @@ struct DriveParams {
 
 /// Validate this source's params at config-load time, before any network work.
 pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
-    serde_json::from_value::<DriveParams>(params.clone())
-        .map(|_| ())
-        .map_err(|e| SourceError::InvalidParams(e.to_string()))
+    let p: DriveParams = serde_json::from_value(params.clone())
+        .map_err(|e| SourceError::InvalidParams(e.to_string()))?;
+    if p.folder.trim().is_empty() {
+        return Err(SourceError::InvalidParams(
+            "drive `folder` must not be empty (use the Drive folder name or ID)".into(),
+        ));
+    }
+    if p.file_pattern.trim().is_empty() {
+        return Err(SourceError::InvalidParams(
+            "drive `file_pattern` must not be empty".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Escape a value for inclusion inside a single-quoted Drive query string literal.
