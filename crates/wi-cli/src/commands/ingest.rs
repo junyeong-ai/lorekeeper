@@ -205,6 +205,11 @@ pub async fn run(
     }
 
     if dry_run {
+        if had_failure {
+            return Err(miette::miette!(
+                "dry-run completed with source failures; see output above"
+            ));
+        }
         return Ok(());
     }
 

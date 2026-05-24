@@ -123,14 +123,26 @@ impl Source for CalendarSource {
                 let id = ev.id?;
                 let summary = ev.summary.unwrap_or_else(|| "(no title)".into());
 
-                let ts_str = ev
+                // Timed events carry an RFC3339 `dateTime`; all-day events carry only a
+                // `date` (YYYY-MM-DD). Parse the latter as a civil date anchored to the
+                // configured timezone instead of letting `Timestamp::parse` fail and fall
+                // back to `now()`, which would file the event under the wrong day.
+                let ts = ev
                     .start
                     .as_ref()
-                    .and_then(|s| s.date_time.as_deref().or(s.date.as_deref()))
-                    .unwrap_or_default();
-                let ts = ts_str
-                    .parse::<jiff::Timestamp>()
-                    .unwrap_or_else(|_| jiff::Timestamp::now());
+                    .and_then(|s| {
+                        if let Some(dt) = s.date_time.as_deref() {
+                            dt.parse::<jiff::Timestamp>().ok()
+                        } else if let Some(d) = s.date.as_deref() {
+                            d.parse::<jiff::civil::Date>()
+                                .ok()
+                                .and_then(|date| date.to_zoned(ctx.timezone.clone()).ok())
+                                .map(|z| z.timestamp())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(jiff::Timestamp::now);
 
                 let attendee_names: Vec<String> = ev
                     .attendees

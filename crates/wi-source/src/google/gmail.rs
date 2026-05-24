@@ -121,27 +121,23 @@ impl Source for GmailSource {
 
         let token = self.auth.access_token().await?;
 
-        // Constrain the query to the target day (Gmail date operators are day-granular,
-        // `before:` exclusive) anchored to ctx.target_date so --date backfill fetches the
-        // right day instead of "newer_than N hours from now". The OR group is parenthesized
-        // so the date bounds apply to every include_query, not just the last term.
-        let lookback_days = (i64::from(p.lookback_hours) / 24).max(1);
-        let after = ctx
-            .target_date
-            .checked_sub(jiff::Span::new().days(lookback_days))
-            .map_err(|e| SourceError::Parse(e.to_string()))?
-            .strftime("%Y/%m/%d");
-        let before = ctx
-            .target_date
-            .tomorrow()
-            .map_err(|e| SourceError::Parse(e.to_string()))?
-            .strftime("%Y/%m/%d");
+        // Constrain the query to the target day's window anchored to ctx.target_date so
+        // --date backfill fetches the right day instead of "newer_than N hours from now".
+        // Gmail's after:/before: accept epoch seconds, which (unlike YYYY/MM/DD) are
+        // timezone-exact — the bounds come from day_window in the vault's timezone. The OR
+        // group is parenthesized so the bounds apply to every include_query, not just the
+        // last term.
+        let (min, max) = ctx.day_window(p.lookback_hours, 0)?;
         let base = if p.include_queries.is_empty() {
             "is:unread".to_string()
         } else {
             format!("({})", p.include_queries.join(" OR "))
         };
-        let query = format!("{base} after:{after} before:{before}");
+        let query = format!(
+            "{base} after:{} before:{}",
+            min.as_second(),
+            max.as_second()
+        );
 
         let resp = check_response(
             self.http

@@ -80,7 +80,9 @@ impl Source for SlackSearchSource {
         // to the target day (`after` the prior day, `before` the next) anchored to
         // ctx.target_date — not "now" — so --date backfill searches the right day. The
         // pipeline still date-filters precisely afterward.
-        let lookback_days = (i64::from(p.lookback_hours) / 24).max(1);
+        // Slack search date operators are day-granular, so round the hour lookback UP to
+        // whole days — flooring would drop the boundary day for e.g. a 36h window.
+        let lookback_days = ((i64::from(p.lookback_hours) + 23) / 24).max(1);
         let after = ctx
             .target_date
             .checked_sub(jiff::Span::new().days(lookback_days))
