@@ -321,6 +321,37 @@ mod tests {
     }
 
     #[test]
+    fn cascade_tries_each_strategy_in_order() {
+        let dir = TempDir::new().unwrap();
+        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85).unwrap();
+        let cascade = vec![
+            DedupStrategy::EventId,
+            DedupStrategy::Url,
+            DedupStrategy::Title,
+        ];
+
+        cache
+            .record(&[ev("seed", "Seeded Title", Some("https://example.com/a"))])
+            .unwrap();
+
+        // Matches via Url only (different id, different title).
+        let by_url = vec![ev(
+            "other",
+            "Totally different",
+            Some("https://example.com/a"),
+        )];
+        assert_eq!(cache.deduplicate(by_url, &cascade).unwrap().len(), 0);
+
+        // Matches via Title only (different id, no url).
+        let by_title = vec![ev("other2", "Seeded Title", None)];
+        assert_eq!(cache.deduplicate(by_title, &cascade).unwrap().len(), 0);
+
+        // Matches nothing in the cascade → novel.
+        let novel = vec![ev("fresh", "Brand New", Some("https://example.com/z"))];
+        assert_eq!(cache.deduplicate(novel, &cascade).unwrap().len(), 1);
+    }
+
+    #[test]
     fn intra_batch_duplicates_are_filtered() {
         let dir = TempDir::new().unwrap();
         let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85).unwrap();

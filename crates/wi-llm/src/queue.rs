@@ -295,4 +295,34 @@ mod tests {
             "buffered tasks must not touch the filesystem"
         );
     }
+
+    #[tokio::test]
+    async fn flush_rename_failure_leaves_no_tmp() {
+        // Force the atomic rename to fail by occupying the final path with a directory,
+        // then assert flush errors AND the temp file is cleaned up (no partial .jsonl,
+        // no lingering .tmp).
+        let dir = TempDir::new().unwrap();
+        let client = QueueLlmClient::new(dir.path().to_path_buf());
+        client
+            .summarize(SummarizeRequest {
+                text: "x".into(),
+                max_sentences: 5,
+                target: TaskTarget {
+                    vault_path: "p".into(),
+                    kind: TargetKind::DailySummary,
+                },
+            })
+            .await
+            .unwrap();
+
+        std::fs::create_dir_all(client.queue_path()).unwrap();
+
+        let result = client.flush().await;
+        assert!(result.is_err(), "rename onto a directory must fail");
+        let tmp = client.queue_path().with_extension("jsonl.tmp");
+        assert!(
+            !tmp.exists(),
+            "temp file must be cleaned up on rename failure"
+        );
+    }
 }
