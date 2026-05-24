@@ -1,5 +1,6 @@
 use lk_core::config::SourceType;
 use lk_core::event::{Event, EventId, RawItem};
+use lk_core::text::collapse_blank_lines;
 
 /// Strip Unicode emoji from text. Long-lived documents don't benefit from
 /// decorative emoji (marketing 🎀, reactions 🎉) — they add visual noise and
@@ -65,25 +66,6 @@ pub fn normalize(
             }
         })
         .collect()
-}
-
-/// Squeeze 3+ consecutive newlines down to a paragraph break so converted bodies from
-/// any source don't accumulate excess vertical whitespace in vault pages.
-fn collapse_blank_lines(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut newlines = 0;
-    for ch in text.chars() {
-        if ch == '\n' {
-            newlines += 1;
-            if newlines <= 2 {
-                out.push(ch);
-            }
-        } else {
-            newlines = 0;
-            out.push(ch);
-        }
-    }
-    out
 }
 
 #[cfg(test)]

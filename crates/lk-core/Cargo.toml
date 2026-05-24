@@ -13,5 +13,6 @@ serde_yaml_ng = { workspace = true }
 jiff = { workspace = true }
 blake3 = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
 unicode-normalization = { workspace = true }
 regex = { workspace = true }

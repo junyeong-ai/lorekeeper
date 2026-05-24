@@ -104,13 +104,8 @@ impl TemplateEngine {
         context: &serde_json::Value,
     ) -> Result<String, VaultError> {
         let tmpl = self.env.get_template(template_name)?;
-        let mut rendered = tmpl.render(context)?;
-        // Collapse 3+ consecutive newlines to clean paragraph breaks (templates +
-        // event bodies can accumulate excess whitespace).
-        while rendered.contains("\n\n\n") {
-            rendered = rendered.replace("\n\n\n", "\n\n");
-        }
-        Ok(rendered)
+        let rendered = tmpl.render(context)?;
+        Ok(lk_core::text::collapse_blank_lines(&rendered))
     }
 
     /// `Ok(true)` if the template exists (user dir or embedded) and parses, `Ok(false)`
