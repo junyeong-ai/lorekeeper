@@ -26,7 +26,9 @@ fn is_schema_mismatch(e: &redb::TableError) -> bool {
 }
 
 pub struct DedupCache {
-    db: Database,
+    /// `None` is a read-only "empty" cache used by dry-run: it never creates or
+    /// writes a file, treats every event as novel, and no-ops on record/prune.
+    db: Option<Database>,
     title_threshold: f64,
 }
 
@@ -39,6 +41,25 @@ impl DedupCache {
 
         let db = Self::open_or_reset(path)?;
 
+        Ok(Self {
+            db: Some(db),
+            title_threshold,
+        })
+    }
+
+    /// Open WITHOUT creating anything — for dry-run, which must not touch the vault.
+    /// If the cache file exists it is opened for reading so the preview reflects real
+    /// dedup state; if it doesn't, every event is reported novel (as a real first run
+    /// would also see), and no file is created.
+    pub fn open_read_only(path: &Path, title_threshold: f64) -> Result<Self, PipelineError> {
+        let db = if path.exists() {
+            Some(
+                Database::open(path)
+                    .map_err(|e| PipelineError::Dedup(format!("open db (read-only): {e}")))?,
+            )
+        } else {
+            None
+        };
         Ok(Self {
             db,
             title_threshold,
@@ -97,8 +118,12 @@ impl DedupCache {
         events: Vec<Event>,
         cascade: &[DedupStrategy],
     ) -> Result<Vec<Event>, PipelineError> {
-        let txn = self
-            .db
+        // Read-only/empty cache (dry-run, no existing file): nothing has been seen, so
+        // every event is novel.
+        let Some(db) = &self.db else {
+            return Ok(events);
+        };
+        let txn = db
             .begin_read()
             .map_err(|e| PipelineError::Dedup(e.to_string()))?;
 
@@ -194,9 +219,12 @@ impl DedupCache {
     }
 
     pub fn record(&self, events: &[Event]) -> Result<(), PipelineError> {
+        // A read-only/empty cache never persists — dry-run never commits anyway.
+        let Some(db) = &self.db else {
+            return Ok(());
+        };
         let now = jiff::Timestamp::now().as_second() as u64;
-        let txn = self
-            .db
+        let txn = db
             .begin_write()
             .map_err(|e| PipelineError::Dedup(e.to_string()))?;
 
@@ -235,8 +263,10 @@ impl DedupCache {
 
     /// Remove entries with `seen_at_secs < cutoff_secs`. Returns number of entries removed.
     pub fn prune(&self, cutoff_secs: u64) -> Result<u64, PipelineError> {
-        let txn = self
-            .db
+        let Some(db) = &self.db else {
+            return Ok(0);
+        };
+        let txn = db
             .begin_write()
             .map_err(|e| PipelineError::Dedup(e.to_string()))?;
 

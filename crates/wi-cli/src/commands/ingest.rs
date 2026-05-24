@@ -62,7 +62,10 @@ pub async fn run(
     // flush is sub-second, so any tmp older than an hour is from a process that
     // died mid-flush (or was killed). Each ingest writes its own PID-suffixed
     // tmp, so a concurrent ingest's just-created tmp is too young to be swept.
-    sweep_stale_tmps(&vault_root).await?;
+    // Skipped under --dry-run, which must not mutate the vault at all.
+    if !dry_run {
+        sweep_stale_tmps(&vault_root).await?;
+    }
 
     let tz = config.vault.timezone();
     let today = jiff::Timestamp::now().to_zoned(tz.clone()).date();
@@ -82,8 +85,12 @@ pub async fn run(
         .map_err(|e| miette::miette!("{e}"))?,
     );
     let pipeline = Arc::new(
-        wi_pipeline::Pipeline::new(&vault_root, ctx, &config)
-            .map_err(|e| miette::miette!("{e}"))?,
+        if dry_run {
+            wi_pipeline::Pipeline::new_dry_run(&vault_root, ctx, &config)
+        } else {
+            wi_pipeline::Pipeline::new(&vault_root, ctx, &config)
+        }
+        .map_err(|e| miette::miette!("{e}"))?,
     );
     let writer = wi_vault::VaultWriter::new(&vault_root);
     let log = wi_vault::IngestLog::new(vault_root.join(".wiki-ingest").join("ingest.jsonl"));
@@ -142,7 +149,9 @@ pub async fn run(
             Ok(s) => s,
             Err(e) => {
                 eprintln!("  ✗ {e}");
-                record_failure(&log, id, &started_at, &e.to_string()).await;
+                if !dry_run {
+                    record_failure(&log, id, &started_at, &e.to_string()).await;
+                }
                 had_failure = true;
                 continue;
             }
@@ -152,7 +161,9 @@ pub async fn run(
             Ok(items) => items,
             Err(e) => {
                 eprintln!("  ✗ extract: {e}");
-                record_failure(&log, id, &started_at, &e.to_string()).await;
+                if !dry_run {
+                    record_failure(&log, id, &started_at, &e.to_string()).await;
+                }
                 had_failure = true;
                 continue;
             }
@@ -163,7 +174,9 @@ pub async fn run(
             Ok(r) => r,
             Err(e) => {
                 eprintln!("  ✗ pipeline: {e}");
-                record_failure(&log, id, &started_at, &e.to_string()).await;
+                if !dry_run {
+                    record_failure(&log, id, &started_at, &e.to_string()).await;
+                }
                 had_failure = true;
                 continue;
             }

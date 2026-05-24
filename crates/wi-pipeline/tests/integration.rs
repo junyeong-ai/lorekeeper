@@ -386,6 +386,40 @@ async fn write_failure_keeps_events_novel_for_retry() {
 }
 
 #[tokio::test]
+async fn dry_run_pipeline_creates_no_dedup_file() {
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let config = base_config(vault);
+    let llm: Arc<dyn LlmClient> = Arc::new(NoopLlmClient);
+    let ctx = make_ctx(&config, llm);
+    let pipeline = Pipeline::new_dry_run(vault, ctx, &config).unwrap();
+    let sc = config.sources.get("test-source").unwrap().clone();
+
+    let ts: jiff::Timestamp = "2026-05-23T10:00:00Z".parse().unwrap();
+    let opts = IngestOptions {
+        dry_run: true,
+        force: false,
+        target_date: None,
+    };
+    let r = pipeline
+        .plan(
+            "test-source",
+            &sc,
+            vec![raw_item("S", "B", "M1", ts)],
+            &opts,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.events.len(), 1, "no prior cache → event is novel");
+
+    // A dry-run must never create the dedup database file.
+    assert!(
+        !vault.join(".wiki-ingest").join("dedup.redb").exists(),
+        "dry-run must not create the dedup cache"
+    );
+}
+
+#[tokio::test]
 async fn plan_does_not_commit_dedup_until_commit_called() {
     let dir = TempDir::new().unwrap();
     let vault = dir.path();

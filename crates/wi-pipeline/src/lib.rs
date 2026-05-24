@@ -85,15 +85,35 @@ impl Pipeline {
     ) -> Result<Self, PipelineError> {
         let dedup_path = vault_root.join(".wiki-ingest").join("dedup.redb");
         let dedup = DedupCache::open(&dedup_path, config.dedup.title_threshold)?;
-        let reader = VaultReader::new(vault_root);
+        Ok(Self::with_dedup(ctx, dedup, config, vault_root))
+    }
 
-        Ok(Self {
+    /// Pipeline for `--dry-run`: dedup is opened read-only and never creates the cache
+    /// file, so a preview run leaves the vault untouched while still reflecting real
+    /// dedup state when a cache already exists.
+    pub fn new_dry_run(
+        vault_root: &Path,
+        ctx: Arc<PipelineContext>,
+        config: &Config,
+    ) -> Result<Self, PipelineError> {
+        let dedup_path = vault_root.join(".wiki-ingest").join("dedup.redb");
+        let dedup = DedupCache::open_read_only(&dedup_path, config.dedup.title_threshold)?;
+        Ok(Self::with_dedup(ctx, dedup, config, vault_root))
+    }
+
+    fn with_dedup(
+        ctx: Arc<PipelineContext>,
+        dedup: DedupCache,
+        config: &Config,
+        vault_root: &Path,
+    ) -> Self {
+        Self {
             ctx,
             dedup,
-            reader,
+            reader: VaultReader::new(vault_root),
             dedup_config: config.dedup.clone(),
             run_lock: tokio::sync::Mutex::new(()),
-        })
+        }
     }
 
     /// Build daily and concept pages without recording dedup. The caller writes pages
