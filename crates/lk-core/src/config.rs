@@ -30,10 +30,13 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let content = std::fs::read_to_string(path)?;
         let mut config: Self = serde_yaml_ng::from_str(&content)?;
+        // Validate the raw config BEFORE path resolution — otherwise an empty
+        // vault.root gets transformed into the config directory, bypassing the
+        // emptiness check.
+        config.validate()?;
         if let Some(parent) = path.parent() {
             config.vault.resolve_relative_to(parent);
         }
-        config.validate()?;
         Ok(config)
     }
 
@@ -45,6 +48,12 @@ impl Config {
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
+        if self.vault.root.trim().is_empty() {
+            return Err(ConfigError::Validation(
+                "vault.root must not be empty or whitespace-only".into(),
+            ));
+        }
+
         if self.sources.is_empty() {
             return Err(ConfigError::Validation("no sources defined".into()));
         }
@@ -62,6 +71,10 @@ impl Config {
                     "source ID '{id}' is a path traversal component"
                 )));
             }
+        }
+
+        if self.sources.values().all(|sc| !sc.enabled) {
+            tracing::warn!("all sources are disabled; ingest will have nothing to do");
         }
 
         self.vault.dirs.validate()?;

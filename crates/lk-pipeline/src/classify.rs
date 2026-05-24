@@ -43,7 +43,7 @@ pub fn flag_personal(events: &mut [Event], identity: &Identity) {
                 .is_some_and(|sid| contains_bounded(&author, sid) || contains_bounded(&meta, sid))
             || jira_id
                 .as_deref()
-                .is_some_and(|jid| contains_bounded(&author, jid));
+                .is_some_and(|jid| contains_bounded(&author, jid) || contains_bounded(&meta, jid));
 
         if matched {
             event.is_personal = true;

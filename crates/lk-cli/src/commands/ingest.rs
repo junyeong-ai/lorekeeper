@@ -113,6 +113,11 @@ pub async fn run(
             .collect(),
     };
 
+    for (id, sc) in &sources {
+        lk_source::validate_params(sc.source_type, &sc.params)
+            .map_err(|e| miette::miette!("sources.{id} ({}): {e}", sc.source_type))?;
+    }
+
     if dry_run {
         eprintln!("[dry-run] no vault writes will be performed");
     }

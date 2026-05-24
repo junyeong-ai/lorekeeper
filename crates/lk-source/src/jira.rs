@@ -89,6 +89,8 @@ struct NameField {
 
 #[derive(Deserialize)]
 struct UserField {
+    #[serde(rename = "accountId")]
+    account_id: Option<String>,
     #[serde(rename = "displayName")]
     display_name: Option<String>,
     #[serde(rename = "emailAddress")]
@@ -196,6 +198,12 @@ impl Source for JiraSource {
                     &description,
                 );
 
+                let assignee_account_id = issue
+                    .fields
+                    .assignee
+                    .as_ref()
+                    .and_then(|a| a.account_id.clone());
+
                 RawItem {
                     external_id: Some(issue.key.clone()),
                     title: format!("[{}] {}", issue.key, summary),
@@ -209,6 +217,7 @@ impl Source for JiraSource {
                         "labels": issue.fields.labels,
                         "duedate": issue.fields.duedate,
                         "start_date": start_date,
+                        "assignee_account_id": assignee_account_id,
                     }),
                 }
             })

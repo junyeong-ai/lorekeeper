@@ -73,21 +73,13 @@ impl DedupCache {
     }
 
     fn open_or_reset(path: &Path) -> Result<Database, PipelineError> {
-        let mut wiped = false;
+        let mut backed_up = false;
         loop {
             let db = match Database::create(path) {
                 Ok(db) => db,
-                // An out-of-date on-disk format (after a redb major upgrade) is recoverable
-                // by recreating the cache, exactly like a schema-type change below. Distinct
-                // from corruption/I-O, which redb reports as Storage and we must not wipe.
-                Err(redb::DatabaseError::UpgradeRequired(_)) if !wiped => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        "dedup file format outdated; recreating cache"
-                    );
-                    std::fs::remove_file(path)
-                        .map_err(|e| PipelineError::Dedup(format!("remove stale cache: {e}")))?;
-                    wiped = true;
+                Err(redb::DatabaseError::UpgradeRequired(_)) if !backed_up => {
+                    Self::backup_stale_cache(path, "file format outdated")?;
+                    backed_up = true;
                     continue;
                 }
                 Err(e) => return Err(PipelineError::Dedup(format!("open db: {e}"))),
@@ -110,21 +102,11 @@ impl DedupCache {
                         .map_err(|e| PipelineError::Dedup(e.to_string()))?;
                     return Ok(db);
                 }
-                // Only a deliberate schema change (table key/value types differ from what
-                // this build defines) is safe to recover by wiping. Storage-level errors
-                // (I/O failure, on-disk corruption) must fail closed — silently wiping
-                // would destroy recoverable dedup history and silently re-ingest everything.
-                Err(e) if is_schema_mismatch(&e) && !wiped => {
-                    tracing::warn!(
-                        error = %e,
-                        path = %path.display(),
-                        "dedup schema changed; recreating cache"
-                    );
+                Err(e) if is_schema_mismatch(&e) && !backed_up => {
                     drop(txn);
                     drop(db);
-                    std::fs::remove_file(path)
-                        .map_err(|e| PipelineError::Dedup(format!("remove stale cache: {e}")))?;
-                    wiped = true;
+                    Self::backup_stale_cache(path, "schema changed")?;
+                    backed_up = true;
                     continue;
                 }
                 Err(e) => {
@@ -132,6 +114,22 @@ impl DedupCache {
                 }
             }
         }
+    }
+
+    fn backup_stale_cache(path: &Path, reason: &str) -> Result<(), PipelineError> {
+        let backup = path.with_extension(format!(
+            "redb.backup.{}-pid{}",
+            jiff::Timestamp::now().as_second(),
+            std::process::id(),
+        ));
+        std::fs::rename(path, &backup)
+            .map_err(|e| PipelineError::Dedup(format!("backup stale cache: {e}")))?;
+        tracing::warn!(
+            backup = %backup.display(),
+            reason,
+            "dedup database format outdated; created backup and started fresh"
+        );
+        Ok(())
     }
 
     pub fn deduplicate(
