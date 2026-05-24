@@ -19,7 +19,7 @@ irm https://raw.githubusercontent.com/junyeong-ai/lorekeeper/main/scripts/instal
 The installer:
 - Downloads the prebuilt `lore` binary to `~/.local/bin` (configurable)
 - Installs `templates/` to `$XDG_DATA_HOME/lorekeeper/templates/`
-- Installs the Claude Code skills (`lorekeeper`, `lore-process`) to `~/.claude/skills/`
+- Installs the Claude Code skills (`lorekeeper`, `lore-process`, `lore-wiki`) to `~/.claude/skills/`
 - Verifies SHA256 checksums
 - Adds quarantine strip + ad-hoc codesign on macOS
 - Checks `PATH` and prints next steps

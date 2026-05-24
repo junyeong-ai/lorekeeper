@@ -572,7 +572,7 @@ main() {
     if [ "$skill_level" != "none" ]; then
         # Install all bundled skills. lorekeeper = lore command invocation surface;
         # lore-process = queue drainer used in queue-mode workflows.
-        for skill in "lorekeeper" "lore-process" "lore-setup"; do
+        for skill in "lorekeeper" "lore-process" "lore-setup" "lore-wiki"; do
             local skill_src=""
             if [ -n "$repo_dir" ] && [ -d "$repo_dir/.claude/skills/$skill" ]; then
                 skill_src="$repo_dir/.claude/skills/$skill"
