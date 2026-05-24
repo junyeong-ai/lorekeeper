@@ -8,6 +8,7 @@ pub mod init;
 pub mod maintenance;
 pub mod performance;
 pub mod schedule;
+pub mod schema;
 pub mod status;
 pub mod synthesis;
 pub mod validate;

@@ -1,3 +1,4 @@
+use super::schema::render_agents_md;
 use super::{find_config, load_config};
 
 pub async fn run(opts: &super::GlobalOpts) -> miette::Result<()> {
@@ -17,5 +18,20 @@ pub async fn run(opts: &super::GlobalOpts) -> miette::Result<()> {
     eprintln!("  vault: {}", config.vault.root);
     eprintln!("  timezone: {:?}", config.vault.timezone);
     eprintln!("  sources ({}): {}", enabled.len(), enabled.join(", "));
+
+    // Check AGENTS.md drift — warn if missing or out of date.
+    let locale = config.vault.locale();
+    let expected = render_agents_md(locale);
+    let agents_path = config.vault.root_path().join("wiki").join("AGENTS.md");
+    let needs_regen = match tokio::fs::read_to_string(&agents_path).await {
+        Ok(on_disk) => on_disk != expected,
+        Err(_) => true,
+    };
+    if needs_regen {
+        eprintln!(
+            "  warning: wiki/AGENTS.md is missing or out of date; run `lore schema` to regenerate"
+        );
+    }
+
     Ok(())
 }

@@ -63,6 +63,12 @@ enum Command {
         #[arg(long, default_value = "lore")]
         bin: String,
     },
+    /// Generate wiki/AGENTS.md — single source of truth for page formats
+    Schema {
+        /// Vault root override (default: vault.root from config)
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
     /// Prune ingest log and dedup cache entries older than 90 days
     Maintenance,
     /// Wikilink graph analysis for the vault
@@ -85,6 +91,12 @@ enum InitTarget {
         /// Vault root override (default: vault.root from config)
         #[arg(long)]
         vault: Option<PathBuf>,
+    },
+    /// Generate wiki/AGENTS.md (page format reference)
+    Schema {
+        /// Vault root override (default: vault.root from config)
+        #[arg(long)]
+        root: Option<PathBuf>,
     },
 }
 
@@ -147,8 +159,10 @@ async fn main() -> miette::Result<()> {
     match cli.command {
         Command::Init { target } => match target {
             InitTarget::Credentials { vault } => commands::init::credentials(&opts, vault).await,
+            InitTarget::Schema { root } => commands::schema::run(&opts, root).await,
         },
         Command::Validate => commands::validate::run(&opts).await,
+        Command::Schema { root } => commands::schema::run(&opts, root).await,
         Command::Status => commands::status::run(&opts).await,
         Command::Ingest {
             source,
