@@ -86,7 +86,7 @@ enum Command {
 
 #[derive(clap::Subcommand)]
 enum InitTarget {
-    /// Interactively write <vault>/.lorekeeper/credentials.json
+    /// Interactively write `<vault>/.lorekeeper/credentials.json`
     Credentials {
         /// Vault root override (default: vault.root from config)
         #[arg(long)]
