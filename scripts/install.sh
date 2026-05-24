@@ -572,7 +572,7 @@ main() {
     if [ "$skill_level" != "none" ]; then
         # Install all bundled skills. wiki-ingest = wi command invocation surface;
         # wi-process = queue drainer used in queue-mode workflows.
-        for skill in "wiki-ingest" "wi-process"; do
+        for skill in "wiki-ingest" "wi-process" "wi-setup"; do
             local skill_src=""
             if [ -n "$repo_dir" ] && [ -d "$repo_dir/.claude/skills/$skill" ]; then
                 skill_src="$repo_dir/.claude/skills/$skill"
