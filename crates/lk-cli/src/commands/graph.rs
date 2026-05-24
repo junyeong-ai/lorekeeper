@@ -314,7 +314,14 @@ fn run_backlinks_sync(
     json: bool,
     dry_run: bool,
 ) -> Result<bool, String> {
-    let (root, config, _tz, locale) = resolve_config_full(opts, root_override)?;
+    let (root, mut config, _tz, locale) = resolve_config_full(opts, root_override)?;
+
+    // Backlinks must see every page that can wikilink a concept — not just `wiki/`.
+    // Daily ingest output and personal pages reference concepts too; if the scope
+    // excludes them, the diff against existing sources becomes a destructive churn
+    // that removes correct daily/me backlinks on every run.
+    config.scope.dirs = vault_page_dirs(&root);
+
     let pages = scan::scan_vault(&root, &config).map_err(|e| format!("{e}"))?;
 
     let sync = backlinks::sync_concept_backlinks(&pages, &root, locale, dry_run)
@@ -353,6 +360,27 @@ fn resolve_config(
 /// the pipeline (`Event::date` is derived the same way), and `backlinks-sync`
 /// needs the locale to pick the `## <Sources>` heading text. A `--root` override
 /// gets system timezone + default locale (Ko), since no config is loaded.
+/// Every vault-relative page directory that exists on disk — anything that can
+/// wikilink another page belongs in the scope. Used by commands that need a full
+/// backlink view (not the user-configured `graph.scope.dirs`, which is
+/// intentionally narrowed for analysis like `lint`/`cluster`). Missing
+/// directories are skipped so a partially-populated vault doesn't error out.
+fn vault_page_dirs(root: &std::path::Path) -> Vec<PathBuf> {
+    [
+        "wiki",
+        "daily",
+        "me",
+        "weekly",
+        "monthly",
+        "quarterly",
+        "annually",
+    ]
+    .iter()
+    .filter(|name| root.join(name).is_dir())
+    .map(PathBuf::from)
+    .collect()
+}
+
 fn resolve_config_full(
     opts: &GlobalOpts,
     root_override: Option<PathBuf>,

@@ -29,18 +29,20 @@ struct ManualParams {
     /// surprise deletion.
     #[serde(default = "default_extensions")]
     extensions: Vec<String>,
-    /// Archive consumed files under `<inbox_dir>/archived/{date}/`. Set to
-    /// false for read-only inspection.
-    #[serde(default = "default_true")]
+    /// Archive consumed files under `<inbox_dir>/archived/{date}/`.
+    ///
+    /// **Default: false** — archival runs during the extract phase, before vault
+    /// writes and dedup commit. A later pipeline failure would leave the inbox
+    /// empty without the corresponding events recorded, making re-ingest
+    /// impossible. Enable only when this trade-off is understood; the safer
+    /// pattern is to leave files in place and let `content-hash` dedup absorb
+    /// the re-runs.
+    #[serde(default)]
     archive_after_ingest: bool,
 }
 
 fn default_extensions() -> Vec<String> {
     vec!["md".into(), "txt".into(), "markdown".into(), "json".into()]
-}
-
-fn default_true() -> bool {
-    true
 }
 
 /// Validate this source's params at config-load time, before any I/O.
@@ -103,7 +105,14 @@ impl Source for ManualSource {
                 }
             };
             let path = entry.path();
-            if !path.is_file() {
+            // Reject symlinks — a symlink in the inbox could otherwise read
+            // outside the inbox directory. Use `symlink_metadata` so the check
+            // doesn't follow the link.
+            let file_type = match path.symlink_metadata() {
+                Ok(m) => m.file_type(),
+                Err(_) => continue,
+            };
+            if !file_type.is_file() {
                 continue;
             }
             let ext = match path.extension().and_then(|s| s.to_str()) {
@@ -154,14 +163,16 @@ fn read_item(path: &Path) -> Result<RawItem, SourceError> {
         .unwrap_or_else(jiff::Timestamp::now);
 
     let (title, content) = split_title(&body, path);
-    let stem = path
-        .file_stem()
+    // Full filename (with extension) so `note.md` and `note.txt` don't collide
+    // on the external_id and dedup as the same item.
+    let file_name = path
+        .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("manual")
         .to_string();
 
     Ok(RawItem {
-        external_id: Some(format!("manual:{stem}")),
+        external_id: Some(format!("manual:{file_name}")),
         title,
         body: content,
         url: None,
@@ -279,6 +290,7 @@ mod tests {
         let src = ManualSource::new();
         let params = serde_json::json!({
             "inbox_dir": tmp.path(),
+            "archive_after_ingest": true,
         });
         let ctx = ExtractContext {
             target_date: jiff::civil::date(2026, 5, 24),

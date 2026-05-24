@@ -14,9 +14,11 @@ Google Drive ──┐          ┌─ Extract (per-source)    daily/{source-id}
 Gmail ─────────┤          ├─ Normalize → Event       me/work-log/
 Slack ─────────┼─ config ─┤  Deduplicate (cascade)   weekly/ monthly/
 Jira ──────────┤  .yaml   ├─ Classify (labels)       quarterly/ annually/
-Calendar ──────┘          ├─ Concepts (LLM)          wiki/concepts/
-                          ├─ Render (templates)      wiki/AGENTS.md
-                          └─ Graph (lint, cluster)
+Calendar ──────┤          ├─ Concepts (LLM)          wiki/concepts/
+Manual inbox ──┘          ├─ Render (templates)      wiki/documents/
+                          ├─ Wiki index (catalog)    wiki/index.md
+                          └─ Graph (lint, stale,     wiki/AGENTS.md
+                               cluster, backlinks)
 ```
 
 ## Workspace
@@ -91,6 +93,7 @@ Auto-discovered: `./config.yaml` → `~/.config/lorekeeper/config.yaml`.
 | `slack-search` | Slack API | Keyword trend search (user token required) |
 | `jira` | Jira REST API | Issue tracking (ADF→Markdown, status/period snapshot) |
 | `google-calendar` | Calendar API | Schedule tracking (HTML→Markdown) |
+| `manual` | Local inbox | User-curated files (md/txt/json → archive after ingest) |
 
 ## Output model
 
@@ -99,4 +102,6 @@ Auto-discovered: `./config.yaml` → `~/.config/lorekeeper/config.yaml`.
 - `me/work-log/` — personal items (`track_personal` + identity matching)
 - `weekly/synthesis/`, `weekly/me/`, `monthly/me/`, `quarterly/me/`, `annually/me/`
 - `wiki/concepts/` — extracted concepts (merged across runs)
-- `wiki/AGENTS.md` — generated page format schema
+- `wiki/documents/` — user-curated knowledge artifacts (papers, books, articles)
+- `wiki/index.md` — hierarchical page catalog (`lore wiki index`)
+- `wiki/AGENTS.md` — generated page format schema (`lore schema`)

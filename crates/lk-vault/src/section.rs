@@ -20,23 +20,43 @@ pub fn replace_section(content: &str, heading: &str, new_body: &str) -> String {
     let target = format!("## {heading}");
     let lines: Vec<&str> = content.split_inclusive('\n').collect();
 
-    let Some(start_idx) = lines.iter().position(|l| {
-        let stripped = l.strip_suffix('\n').unwrap_or(l);
-        stripped == target
-    }) else {
+    // Walk lines while tracking fenced-code state (``` or ~~~ blocks). Headings
+    // that appear inside a fenced block are quoted code, not document structure,
+    // and must not be treated as section boundaries.
+    let mut in_fence = false;
+    let mut start_idx = None;
+    for (i, line) in lines.iter().enumerate() {
+        let stripped = line.strip_suffix('\n').unwrap_or(line);
+        let trimmed = stripped.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if !in_fence && stripped == target {
+            start_idx = Some(i);
+            break;
+        }
+    }
+    let Some(start_idx) = start_idx else {
         return content.to_string();
     };
 
-    // End of section = the next line that starts with "## " (a new H2). End of
-    // file counts as a section terminator too.
-    let end_idx = lines[start_idx + 1..]
-        .iter()
-        .position(|l| {
-            let stripped = l.strip_suffix('\n').unwrap_or(l);
-            stripped.starts_with("## ")
-        })
-        .map(|rel| rel + start_idx + 1)
-        .unwrap_or(lines.len());
+    // End of section = the next live H2 (a "## " line outside any fenced block).
+    // End of file counts as a section terminator too.
+    let mut in_fence = false;
+    let mut end_idx = lines.len();
+    for (rel, line) in lines[start_idx + 1..].iter().enumerate() {
+        let stripped = line.strip_suffix('\n').unwrap_or(line);
+        let trimmed = stripped.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if !in_fence && stripped.starts_with("## ") {
+            end_idx = rel + start_idx + 1;
+            break;
+        }
+    }
 
     let mut out = String::with_capacity(content.len());
     for line in &lines[..=start_idx] {
@@ -124,6 +144,28 @@ mod tests {
         assert!(out.starts_with("---\nid: x\n---\n"));
         assert!(out.contains("## Summary\n\nsumtext\n"));
         assert!(out.contains("## Sources\n\n- [[b]]\n- [[c]]\n\n## Meta\n"));
+    }
+
+    #[test]
+    fn code_fence_inside_section_body_does_not_end_section_early() {
+        // A `## Sources` line inside a code fence must NOT terminate the section —
+        // the real boundary is `## Meta` after the fence closes. The entire old
+        // body (including the code fence) is replaced.
+        let doc = "## Sources\n\n- [[old]]\n\n```\n## Sources (quoted)\n```\n\n## Meta\n";
+        let out = replace_section(doc, "Sources", "- [[new]]");
+        assert_eq!(out, "## Sources\n\n- [[new]]\n\n## Meta\n");
+    }
+
+    #[test]
+    fn skips_target_heading_inside_fenced_code_block() {
+        // The FIRST `## Sources` appears inside a fence — it must be skipped and
+        // the second (real) one used.
+        let doc = "```\n## Sources\nquoted\n```\n\n## Sources\n\n- [[old]]\n";
+        let out = replace_section(doc, "Sources", "- [[new]]");
+        assert_eq!(
+            out,
+            "```\n## Sources\nquoted\n```\n\n## Sources\n\n- [[new]]\n"
+        );
     }
 
     #[test]

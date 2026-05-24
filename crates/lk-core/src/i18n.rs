@@ -133,8 +133,6 @@ pub struct Strings {
     pub index_daily: &'static str,
     pub index_worklog: &'static str,
     pub index_synthesis: &'static str,
-    // Document page title
-    pub document_title: &'static str,
 }
 
 static KO: Strings = Strings {
@@ -202,7 +200,6 @@ static KO: Strings = Strings {
     index_daily: "일일",
     index_worklog: "업무 로그",
     index_synthesis: "종합",
-    document_title: "수집 문서",
 };
 
 static EN: Strings = Strings {
@@ -270,7 +267,6 @@ static EN: Strings = Strings {
     index_daily: "Daily",
     index_worklog: "Work Log",
     index_synthesis: "Synthesis",
-    document_title: "Document",
 };
 
 #[cfg(test)]

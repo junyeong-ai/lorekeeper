@@ -38,6 +38,10 @@ map to `RawItem`.
     with `tracing::warn!` and skipped — one inaccessible thread or file does not abort the
     entire source. All API list endpoints are cursor-paginated with per-adapter caps
     (Slack history 500, replies 200, Gmail 200).
+- **Manual source** (`manual.rs`): watches an inbox directory for user-dropped files
+  (`.md`, `.txt`, `.json`). Files are read into `RawItem` with `external_id =
+  "manual:{filename}"`. Symlinks are rejected. Archive-after-ingest defaults to
+  false (extract runs before dedup commit; archive would break safe retry).
 - `Source` has no `source_type()` accessor — the factory selects by the input enum.
 - `markdown` module normalizes rich text to Markdown, loss-aversely (unmapped constructs
   degrade to their text): `adf_to_markdown`, `html_to_markdown` (via `htmd`),

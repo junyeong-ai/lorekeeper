@@ -10,7 +10,7 @@ Deterministic transform stages between `lk-source` and `lk-vault`. Shares an
   are planned — never per source (that would let a later source's write clobber an
   earlier one). `commit()` records dedup and must run only after writes + flush succeed.
 - **`new_dry_run`** opens the dedup cache read-only (no file creation).
-- **DedupCache**: cascade is `event-id → url → title`. Persisted-table lookups are gated
+- **DedupCache**: cascade is `event-id → content-hash → url → title`. Persisted-table lookups are gated
   on the cache being present, but the intra-batch (seen-id/url + novel-title) checks
   ALWAYS run — so a dry-run with no cache still matches a real run. Titles are keyed
   `{date}:{title}` and scanned by date-prefix range. The cache is recreated only on a

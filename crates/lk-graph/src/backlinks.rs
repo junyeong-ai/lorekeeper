@@ -62,8 +62,15 @@ pub fn sync_concept_backlinks(
 ) -> Result<SyncReport, GraphError> {
     // Reverse index: concept slug (filename) → sorted set of source page ids that
     // wikilink to it. Use BTreeMap/BTreeSet so the rendered body is deterministic.
+    //
+    // Only event/document pages are considered sources — concept-to-concept links
+    // belong in `## 관련` (Related), not `## 출처` (Sources), and navigation pages
+    // (`wiki/index.md`, `wiki/AGENTS.md`) shouldn't appear as sources at all.
     let mut incoming: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for page in pages {
+        if !is_valid_source(&page.path) {
+            continue;
+        }
         for target in &page.outgoing {
             incoming
                 .entry(target.clone())
@@ -149,6 +156,22 @@ pub fn sync_concept_backlinks(
     }
 
     Ok(report)
+}
+
+/// True iff this vault-relative path can act as a backlink *source* — an event
+/// or document page where a concept appearance is meaningful provenance.
+/// Concept-to-concept links and navigation pages (`wiki/index.md`,
+/// `wiki/AGENTS.md`) are excluded: cross-references between concepts belong in
+/// `## 관련` (Related), not in `## 출처` (Sources).
+fn is_valid_source(path: &Path) -> bool {
+    let s = path.to_string_lossy().replace('\\', "/");
+    s.starts_with("daily/")
+        || s.starts_with("me/")
+        || s.starts_with("weekly/")
+        || s.starts_with("monthly/")
+        || s.starts_with("quarterly/")
+        || s.starts_with("annually/")
+        || s.starts_with("wiki/documents/")
 }
 
 /// True iff this vault-relative path is a `wiki/concepts/<name>.md` page. Concept

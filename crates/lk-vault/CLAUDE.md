@@ -18,3 +18,12 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   skipped, not silently dropped — corruption stays observable without blanking history.
 - Frontmatter values derived from LLM output (e.g. concept `title`) are emitted as JSON
   strings (`serde_json::to_string` / `| tojson`) so quotes/colons can't break the YAML.
+- **`section::replace_section`** rewrites the body of one `## <heading>` section,
+  preserving everything else. Tracks fenced-code state so `## ` lines inside
+  ``` blocks are not treated as section boundaries.
+- **`index::build_index`** generates `wiki/index.md` — a hierarchical page catalog
+  grouped by category (concepts, documents, daily/{source}, work-log, synthesis).
+  One-liner summaries are extracted from each page's primary heading.
+  `write_index` handles the atomic write.
+- **`VaultWriter::write_page_sync`** is a sync wrapper around the same
+  atomic temp+rename flow. Used by graph commands (pure sync, no tokio runtime).
