@@ -35,15 +35,20 @@ If AGENTS.md is missing, tell the user to run `lore schema` first.
 
 ### `/lore-wiki add <source>`
 
-Manual ad-hoc ingest of a URL, file, or pasted text.
+Manual ad-hoc ingest of a URL, file, **folder**, or pasted text. When given a
+folder path, scan it recursively for `.md`, `.txt`, and `.pdf` files, process
+each as an independent source, and report the aggregate results.
 
 1. Read `wiki/AGENTS.md` for the concept page format.
-2. Extract every named entity, technology, and topic as concepts (not a lone
-   summary — typically several per source).
-3. For each concept: create or merge a concept page following AGENTS.md's
+2. If `<source>` is a folder, list all readable files and process each below.
+3. For each source: extract every named entity, technology, and topic as
+   concepts (not a lone summary — typically several per source).
+4. For each concept: create or merge a concept page following AGENTS.md's
    concept format exactly (frontmatter + four sections). Machine sections are
    filled; LLM sections (synthesis, related) are filled by the model.
-4. Report what was created/updated.
+   **When creating a new concept**, fill the `## 핵심` section with a 1-2
+   sentence definition rather than leaving it empty.
+5. Report what was created/updated, grouped by source file.
 
 ### `/lore-wiki query <question>`
 
