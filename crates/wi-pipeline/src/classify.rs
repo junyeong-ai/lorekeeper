@@ -12,9 +12,9 @@ pub fn assign_static_labels(events: &mut [Event], labels: &[String]) {
 }
 
 pub fn flag_personal(events: &mut [Event], identity: &Identity) {
-    // Empty identity tokens would make `str::contains` match every event (`"x".contains("")`
-    // is always true), flagging the whole vault as personal. Drop blanks up front.
-    let nonblank = |s: String| if s.is_empty() { None } else { Some(s) };
+    // Empty/whitespace identity tokens would make matching degenerate (a blank or
+    // all-space needle), flagging unrelated events as personal. Drop them up front.
+    let nonblank = |s: String| if s.trim().is_empty() { None } else { Some(s) };
     let email = nonblank(identity.email.to_lowercase());
     let name = nonblank(identity.name.to_lowercase());
     let slack_id = identity
@@ -57,10 +57,12 @@ pub fn flag_personal(events: &mut [Event], identity: &Identity) {
 /// A character that can be part of the same identifier token (name, email, Slack/
 /// Jira id) as a matched needle. Includes alphanumerics (Hangul/CJK included via
 /// `is_alphanumeric`) plus the punctuation that appears *inside* emails and
-/// usernames, so a match flanked by any of these is treated as a sub-token, not a
-/// whole-token hit.
+/// usernames. `@` is deliberately excluded: it is part of an email but also a
+/// mention sigil (`<@U123>`), and `.` alone already blocks the only false positive
+/// it guarded (`test@example.com` inside `test@example.com.au`), so excluding it
+/// avoids a false negative on `@`-prefixed identifiers without reintroducing that.
 fn is_identifier_char(c: char) -> bool {
-    c.is_alphanumeric() || matches!(c, '.' | '_' | '%' | '+' | '-' | '@')
+    c.is_alphanumeric() || matches!(c, '.' | '_' | '%' | '+' | '-')
 }
 
 /// Substring match that requires the needle to NOT be flanked by identifier
@@ -110,7 +112,7 @@ pub fn classify_by_keywords(
         for (category, keywords) in classify {
             let matched = keywords
                 .iter()
-                .filter(|kw| !kw.is_empty())
+                .filter(|kw| !kw.trim().is_empty())
                 .any(|kw| text.contains(&kw.to_lowercase()));
 
             if matched {
@@ -181,6 +183,21 @@ mod tests {
         let mut events2 = vec![make_event("Status", Some("Kim"))];
         flag_personal(&mut events2, &identity);
         assert!(events2[0].is_personal);
+    }
+
+    #[test]
+    fn slack_id_matches_next_to_sigil() {
+        let identity = Identity {
+            name: "X".into(),
+            email: "x@y.com".into(),
+            slack_id: Some("U0123456789".into()),
+            jira_id: None,
+        };
+        // A Slack user id adjacent to the `@` mention sigil must still match — `@`
+        // is not treated as part of the identifier token.
+        let mut events = vec![make_event("hi", Some("<@U0123456789>"))];
+        flag_personal(&mut events, &identity);
+        assert!(events[0].is_personal);
     }
 
     #[test]

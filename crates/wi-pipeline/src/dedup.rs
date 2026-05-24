@@ -112,7 +112,11 @@ impl DedupCache {
             .open_table(TITLES)
             .map_err(|e| PipelineError::Dedup(e.to_string()))?;
 
-        let mut novel = Vec::with_capacity(events.len());
+        let mut novel: Vec<Event> = Vec::with_capacity(events.len());
+        // Per-run sets so two identical events in the SAME input batch don't both pass
+        // as novel — the persisted tables only reflect prior committed runs.
+        let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut seen_urls: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         for event in events {
             let mut dup = false;
@@ -120,10 +124,11 @@ impl DedupCache {
             for strategy in cascade {
                 match strategy {
                     DedupStrategy::EventId => {
-                        if id_table
-                            .get(event.id.as_str())
-                            .map_err(|e| PipelineError::Dedup(e.to_string()))?
-                            .is_some()
+                        if seen_ids.contains(event.id.as_str())
+                            || id_table
+                                .get(event.id.as_str())
+                                .map_err(|e| PipelineError::Dedup(e.to_string()))?
+                                .is_some()
                         {
                             dup = true;
                             break;
@@ -131,10 +136,11 @@ impl DedupCache {
                     }
                     DedupStrategy::Url => {
                         if let Some(ref url) = event.url
-                            && url_table
-                                .get(url.as_str())
-                                .map_err(|e| PipelineError::Dedup(e.to_string()))?
-                                .is_some()
+                            && (seen_urls.contains(url)
+                                || url_table
+                                    .get(url.as_str())
+                                    .map_err(|e| PipelineError::Dedup(e.to_string()))?
+                                    .is_some())
                         {
                             dup = true;
                             break;
@@ -144,7 +150,8 @@ impl DedupCache {
                         // Titles are keyed `{date}:{title}`; all of one date's titles form a
                         // contiguous lexicographic run. Seek to the date prefix and stop at
                         // the first key outside it, so this scans one date's titles rather
-                        // than the entire (up to 90-day) cache.
+                        // than the entire (up to 90-day) cache. Also compare against titles
+                        // already accepted earlier in this same batch.
                         let prefix = format!("{}:", event.date);
                         let range = title_table
                             .range(prefix.as_str()..)
@@ -161,6 +168,12 @@ impl DedupCache {
                                 break;
                             }
                         }
+                        if !dup {
+                            dup = novel.iter().any(|n| {
+                                n.date == event.date
+                                    && sorensen_dice(&n.title, &event.title) >= self.title_threshold
+                            });
+                        }
                         if dup {
                             break;
                         }
@@ -169,6 +182,10 @@ impl DedupCache {
             }
 
             if !dup {
+                seen_ids.insert(event.id.as_str().to_string());
+                if let Some(ref url) = event.url {
+                    seen_urls.insert(url.clone());
+                }
                 novel.push(event);
             }
         }
@@ -301,6 +318,25 @@ mod tests {
 
         let novel2 = cache.deduplicate(events, &cascade).unwrap();
         assert_eq!(novel2.len(), 0);
+    }
+
+    #[test]
+    fn intra_batch_duplicates_are_filtered() {
+        let dir = TempDir::new().unwrap();
+        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85).unwrap();
+        let cascade = vec![DedupStrategy::EventId, DedupStrategy::Url];
+
+        // Two events with the same id in ONE batch (nothing committed yet).
+        let batch = vec![
+            ev("a", "A", Some("http://x")),
+            ev("a", "A", Some("http://x")),
+        ];
+        let novel = cache.deduplicate(batch, &cascade).unwrap();
+        assert_eq!(
+            novel.len(),
+            1,
+            "duplicate within the same batch must be dropped"
+        );
     }
 
     #[test]

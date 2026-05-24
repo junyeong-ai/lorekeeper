@@ -71,7 +71,12 @@ impl Synthesizer {
         context: &serde_json::Value,
         fallback: impl FnOnce() -> String,
     ) -> Result<String, PipelineError> {
-        if self.ctx.engine.available(template) {
+        if self
+            .ctx
+            .engine
+            .available(template)
+            .map_err(|e| PipelineError::Render(e.to_string()))?
+        {
             self.ctx
                 .engine
                 .render(template, context)

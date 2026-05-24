@@ -83,11 +83,16 @@ pub fn render_daily_page(
     let source_template = format!("{source_id}.md.jinja");
     let type_template = source_type.default_template_name();
 
-    let content = if engine.available(&source_template) {
+    let avail = |name: &str| {
+        engine
+            .available(name)
+            .map_err(|e| PipelineError::Render(e.to_string()))
+    };
+    let content = if avail(&source_template)? {
         engine
             .render(&source_template, &context)
             .map_err(|e| PipelineError::Render(e.to_string()))?
-    } else if engine.available(type_template) {
+    } else if avail(type_template)? {
         engine
             .render(type_template, &context)
             .map_err(|e| PipelineError::Render(e.to_string()))?

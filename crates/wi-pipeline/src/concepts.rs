@@ -177,7 +177,10 @@ impl ConceptDraft {
             "tags": ["concept"],
         });
 
-        let content = if engine.available("concept.md.jinja") {
+        let content = if engine
+            .available("concept.md.jinja")
+            .map_err(|e| PipelineError::Render(e.to_string()))?
+        {
             engine
                 .render("concept.md.jinja", &context)
                 .map_err(|e| PipelineError::Render(e.to_string()))?
@@ -190,10 +193,14 @@ impl ConceptDraft {
 
     fn fallback(&self, ctx: &serde_json::Value) -> String {
         let sources_json = serde_json::to_string(&ctx["sources"]).unwrap_or_else(|_| "[]".into());
+        // The concept name is LLM-derived and may contain quotes/colons; emit it as a
+        // JSON string (valid YAML) rather than wrapping in raw double-quotes, which a
+        // name containing `"` would break.
+        let title_yaml = serde_json::to_string(&self.name).unwrap_or_else(|_| "\"\"".into());
         format!(
-            "---\nid: {}\ntitle: \"{}\"\ncreated: {}\nupdated: {}\nconfidence: {}\nreference_count: {}\nsources: {}\ntags: [\"concept\"]\n---\n\n# {}\n",
+            "---\nid: {}\ntitle: {}\ncreated: {}\nupdated: {}\nconfidence: {}\nreference_count: {}\nsources: {}\ntags: [\"concept\"]\n---\n\n# {}\n",
             self.slug,
-            self.name,
+            title_yaml,
             self.first_seen,
             self.last_seen,
             self.confidence,
@@ -248,5 +255,26 @@ mod tests {
         assert_eq!(canonical_slug("foo/bar", "Foo Bar"), "foobar");
         assert_eq!(canonical_slug("..", "Up Up"), "up-up");
         assert_eq!(canonical_slug("", "Hello World"), "hello-world");
+    }
+
+    #[test]
+    fn fallback_frontmatter_escapes_quotes_in_name() {
+        let draft = ConceptDraft {
+            slug: "rag".into(),
+            name: r#"RAG: "Retrieval" Augmented"#.into(),
+            confidence: Confidence::Extracted,
+            first_seen: jiff::civil::date(2026, 5, 1),
+            last_seen: jiff::civil::date(2026, 5, 1),
+            reference_count: 1,
+            sources: vec!["daily/x/2026-05-01".into()],
+        };
+        let ctx = serde_json::json!({ "sources": draft.sources });
+        let page = draft.fallback(&ctx);
+        // The title is emitted as a JSON string (valid YAML) with the inner quotes
+        // escaped, rather than raw `title: "RAG: "Retrieval"..."` which would be invalid.
+        assert!(
+            page.contains(r#"title: "RAG: \"Retrieval\" Augmented""#),
+            "title not properly escaped:\n{page}"
+        );
     }
 }

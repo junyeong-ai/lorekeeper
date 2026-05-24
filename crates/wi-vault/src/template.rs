@@ -25,7 +25,15 @@ impl TemplateEngine {
         Ok(rendered)
     }
 
-    pub fn available(&self, name: &str) -> bool {
-        self.env.get_template(name).is_ok()
+    /// `Ok(true)` if the template exists and parses, `Ok(false)` if it simply isn't
+    /// present (caller should fall back), `Err` if it exists but failed to load/parse.
+    /// Distinguishing these prevents a user's template with a syntax error from being
+    /// silently treated as "absent" and falling back to the embedded renderer.
+    pub fn available(&self, name: &str) -> Result<bool, VaultError> {
+        match self.env.get_template(name) {
+            Ok(_) => Ok(true),
+            Err(e) if e.kind() == minijinja::ErrorKind::TemplateNotFound => Ok(false),
+            Err(e) => Err(e.into()),
+        }
     }
 }

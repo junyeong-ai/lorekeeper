@@ -60,7 +60,10 @@ pub fn aggregate_and_render(
             "groups": groups_json,
         });
 
-        let content = if engine.available("work-log.md.jinja") {
+        let content = if engine
+            .available("work-log.md.jinja")
+            .map_err(|e| PipelineError::Render(e.to_string()))?
+        {
             engine
                 .render("work-log.md.jinja", &context)
                 .map_err(|e| PipelineError::Render(e.to_string()))?
