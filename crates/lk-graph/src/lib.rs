@@ -5,6 +5,7 @@
 //! owns only the graph structure and I/O (walkdir/rayon vault scan, index-file fixup,
 //! file rename).
 
+pub mod backlinks;
 pub mod cluster;
 pub mod export;
 pub mod graph;

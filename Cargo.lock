@@ -1051,6 +1051,7 @@ dependencies = [
  "globset",
  "jiff",
  "lk-core",
+ "lk-vault",
  "petgraph",
  "rayon",
  "regex",

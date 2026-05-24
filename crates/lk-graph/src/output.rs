@@ -1,5 +1,6 @@
 use serde::Serialize;
 
+use crate::backlinks::{ConceptUpdate, SyncReport};
 use crate::cluster::{ClusterResult, LinkSuggestion};
 use crate::export::GraphExport;
 use crate::graph::{BrokenLink, HubEntry};
@@ -282,4 +283,45 @@ pub fn print_stale(r: &StaleReport) {
     }
 
     println!("\nTotal: {} stale page(s)", r.count);
+}
+
+#[derive(Debug, Serialize)]
+pub struct BacklinksSyncReport {
+    #[serde(flatten)]
+    pub sync: SyncReport,
+    pub changed: usize,
+}
+
+pub fn print_backlinks_sync(r: &BacklinksSyncReport) {
+    println!("=== Backlinks sync ===");
+
+    if r.sync.dry_run {
+        println!("(dry-run: no files written)");
+    }
+
+    if r.sync.updated.is_empty() {
+        println!("\nAll {} concept page(s) in sync.", r.sync.unchanged);
+        return;
+    }
+
+    println!("\nUpdated: {} concept page(s)", r.sync.updated.len());
+    for entry in &r.sync.updated {
+        println!("  {}{}", entry.path.display(), format_diff(entry));
+    }
+    println!("Unchanged: {} concept page(s)", r.sync.unchanged);
+}
+
+fn format_diff(update: &ConceptUpdate) -> String {
+    let mut parts = Vec::new();
+    if !update.added.is_empty() {
+        parts.push(format!("+{} source(s)", update.added.len()));
+    }
+    if !update.removed.is_empty() {
+        parts.push(format!("-{} source(s)", update.removed.len()));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("  ({})", parts.join(", "))
+    }
 }

@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use lk_core::config::GraphConfig;
-use lk_graph::{cluster, export, graph, index, normalize, output, scan, stale};
+use lk_core::i18n::Locale;
+use lk_graph::{backlinks, cluster, export, graph, index, normalize, output, scan, stale};
 
 use super::GlobalOpts;
 
@@ -58,6 +59,12 @@ pub enum GraphCmd {
         #[arg(long, default_value_t = 90)]
         days: u32,
     },
+    /// Rewrite each `wiki/concepts/*` page's `## <Sources>` section from the graph
+    BacklinksSync {
+        /// Report what would change without writing
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 /// Returns exit code: 0 = ok/no findings, 1 = findings, 2 = runtime error.
@@ -83,10 +90,15 @@ fn run_inner(
     json: bool,
     root_override: Option<PathBuf>,
 ) -> Result<bool, String> {
-    // `stale` needs timezone from the full config — and doesn't use the WikiGraph
-    // at all — so dispatch it up front before paying the graph-build cost.
-    if let GraphCmd::Stale { days } = cmd {
-        return run_stale(opts, root_override, json, days);
+    // `stale` and `backlinks-sync` need timezone/locale from the full config —
+    // and don't use the WikiGraph at all — so dispatch them up front before paying
+    // the graph-build cost.
+    match cmd {
+        GraphCmd::Stale { days } => return run_stale(opts, root_override, json, days),
+        GraphCmd::BacklinksSync { dry_run } => {
+            return run_backlinks_sync(opts, root_override, json, dry_run);
+        }
+        _ => {}
     }
 
     let (root, mut config) = resolve_config(opts, root_override)?;
@@ -258,9 +270,9 @@ fn run_inner(
             }
             false
         }
-        // Dispatched at the top of `run_inner` because it needs the timezone from
-        // the full config and doesn't touch the WikiGraph.
-        GraphCmd::Stale { .. } => unreachable!(),
+        // Dispatched at the top of `run_inner` because they need timezone/locale
+        // from the full config and don't touch the WikiGraph.
+        GraphCmd::Stale { .. } | GraphCmd::BacklinksSync { .. } => unreachable!(),
     };
 
     Ok(has_findings)
@@ -272,7 +284,7 @@ fn run_stale(
     json: bool,
     days: u32,
 ) -> Result<bool, String> {
-    let (root, config, tz) = resolve_config_with_tz(opts, root_override)?;
+    let (root, config, tz, _locale) = resolve_config_full(opts, root_override)?;
     let pages = scan::scan_vault(&root, &config).map_err(|e| format!("{e}"))?;
 
     // Same date derivation as the ingest pipeline (`commands::ingest`): now in the
@@ -296,6 +308,30 @@ fn run_stale(
     Ok(count > 0)
 }
 
+fn run_backlinks_sync(
+    opts: &GlobalOpts,
+    root_override: Option<PathBuf>,
+    json: bool,
+    dry_run: bool,
+) -> Result<bool, String> {
+    let (root, config, _tz, locale) = resolve_config_full(opts, root_override)?;
+    let pages = scan::scan_vault(&root, &config).map_err(|e| format!("{e}"))?;
+
+    let sync = backlinks::sync_concept_backlinks(&pages, &root, locale, dry_run)
+        .map_err(|e| format!("{e}"))?;
+    let changed = sync.updated.len();
+    let report = output::BacklinksSyncReport { sync, changed };
+
+    if json {
+        output::print_json(&report)?;
+    } else {
+        output::print_backlinks_sync(&report);
+    }
+    // Per spec: `backlinks-sync` exits 0 even when it makes changes — a change is
+    // a successful normalisation, not a finding to escalate.
+    Ok(false)
+}
+
 /// Resolve vault root and graph config. If `--root` is given, uses that and default
 /// config. Otherwise loads `config.yaml` and reads `vault.root` + `graph:`.
 fn resolve_config(
@@ -312,21 +348,28 @@ fn resolve_config(
     Ok((root, config.graph))
 }
 
-/// Like [`resolve_config`] but also returns the configured timezone. `stale` needs
-/// it to compute "today" consistently with the rest of the pipeline (`Event::date`
-/// is derived the same way). A `--root` override gets system timezone since no
-/// config is loaded.
-fn resolve_config_with_tz(
+/// Like [`resolve_config`] but also returns the configured timezone and locale.
+/// `stale` needs the timezone to compute "today" consistently with the rest of
+/// the pipeline (`Event::date` is derived the same way), and `backlinks-sync`
+/// needs the locale to pick the `## <Sources>` heading text. A `--root` override
+/// gets system timezone + default locale (Ko), since no config is loaded.
+fn resolve_config_full(
     opts: &GlobalOpts,
     root_override: Option<PathBuf>,
-) -> Result<(PathBuf, GraphConfig, jiff::tz::TimeZone), String> {
+) -> Result<(PathBuf, GraphConfig, jiff::tz::TimeZone, Locale), String> {
     if let Some(root) = root_override {
-        return Ok((root, GraphConfig::default(), jiff::tz::TimeZone::system()));
+        return Ok((
+            root,
+            GraphConfig::default(),
+            jiff::tz::TimeZone::system(),
+            Locale::default(),
+        ));
     }
 
     let config_path = super::find_config(opts).map_err(|e| format!("{e}"))?;
     let config = super::load_config(&config_path).map_err(|e| format!("{e}"))?;
     let root = config.vault.root_path();
     let tz = config.vault.timezone();
-    Ok((root, config.graph, tz))
+    let locale = config.vault.locale();
+    Ok((root, config.graph, tz, locale))
 }

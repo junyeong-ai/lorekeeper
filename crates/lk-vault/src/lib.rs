@@ -1,6 +1,7 @@
 mod index;
 mod log;
 mod reader;
+mod section;
 mod template;
 mod writer;
 
@@ -11,6 +12,7 @@ pub use lk_core::frontmatter::{Frontmatter, Page, parse_page};
 pub use self::index::{build_index, first_line_under_heading, write_index};
 pub use self::log::{IngestLog, LogEntry, LogStatus};
 pub use self::reader::VaultReader;
+pub use self::section::replace_section;
 pub use self::template::TemplateEngine;
 pub use self::writer::VaultWriter;
 
