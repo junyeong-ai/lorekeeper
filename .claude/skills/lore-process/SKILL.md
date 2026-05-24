@@ -87,7 +87,7 @@ Each line in a queue file is one task:
 `target.kind` values: `daily-summary` | `daily-concepts` |
 `weekly-synthesis-narrative` | `weekly-personal-narrative` |
 `monthly-personal-narrative` | `quarterly-personal-narrative` |
-`annual-personal-narrative`
+`annual-personal-narrative` | `work-log-synthesis`
 `target.anchor`: the exact section heading (e.g. `"## Summary"` or `"## 요약"`)
 the pipeline wrote, resolved from i18n at queue time. Always use this as the
 locate key — never hardcode headings per `target.kind`.
@@ -150,6 +150,22 @@ locate key — never hardcode headings per `target.kind`.
         and crucially `aliases: ["Concept Name"]` so the `[[Concept
         Name]]` links above resolve to the slug-named file — match the
         format of existing concept pages).
+
+      - **Work-log synthesis** (`work-log-synthesis`): the input text
+        contains personal events from multiple sources, each prefixed
+        with `[source_id]`. Instead of a plain summary, **group the
+        events by topic/project** across sources. Format as:
+        ```
+        ### Topic Name
+        - 📅 calendar event *(my-schedule)*
+        - 💬 slack discussion *(team-slack)*
+        - 📧 email follow-up *(email-digest)*
+        ```
+        Use source-type emoji indicators: 📅 calendar, 💬 slack,
+        📧 gmail, 📄 google-drive, 🎫 jira.
+        Correlate events that share the same project, topic, or concept
+        across different sources. A single event may appear in multiple
+        topic groups if it spans topics. Aim for concise topic names.
 
       - **Synthesis narratives** (`weekly-*`, `monthly-*`, etc.): these
         pages contain multiple `## ` sections (period, categories,

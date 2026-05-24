@@ -98,11 +98,10 @@ fn page_schemas() -> Vec<PageSchema> {
             type_name: "work-log",
             path_pattern: "me/work-log/YYYY-MM-DD.md",
             frontmatter: &["id", "title", "created", "labels", "categories", "sources"],
-            sections: vec![s(
-                "(categories)",
-                |i| format!("{{{{ {} }}}}", i.uncategorized),
-                Owner::Machine,
-            )],
+            sections: vec![
+                s("Topic Summary", |i| i.topic_summary.to_string(), Owner::Llm),
+                s("Details", |i| i.details.to_string(), Owner::Machine),
+            ],
         },
         PageSchema {
             type_name: "weekly-synthesis",

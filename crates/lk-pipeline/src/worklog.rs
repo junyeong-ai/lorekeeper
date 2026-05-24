@@ -1,20 +1,23 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use lk_core::config::{PerformanceConfig, VaultDirs};
 use lk_core::event::Event;
 use lk_core::i18n::Locale;
 use lk_core::vault_path::VaultPath;
+use lk_llm::LlmClient;
 use lk_vault::TemplateEngine;
 
 use crate::PipelineError;
 use crate::render::RenderOutput;
 
-pub fn aggregate_and_render(
+pub async fn aggregate_and_render(
     events: &[Event],
     perf: &PerformanceConfig,
     engine: &TemplateEngine,
     dirs: &VaultDirs,
     locale: Locale,
+    llm: &Arc<dyn LlmClient>,
 ) -> Result<Vec<RenderOutput>, PipelineError> {
     if events.is_empty() {
         return Ok(vec![]);
@@ -68,7 +71,45 @@ pub fn aggregate_and_render(
             .render("work-log.md.jinja", &context)
             .map_err(|e| PipelineError::Render(e.to_string()))?;
 
-        outputs.push(RenderOutput { path, content });
+        outputs.push(RenderOutput {
+            path: path.clone(),
+            content,
+        });
+
+        // Emit a queue task for the LLM to fill the topic summary section with
+        // cross-source correlation. The input concatenates every personal event's
+        // title, body, and source_id so the LLM can group by topic across sources.
+        let synthesis_input: String = day_events
+            .iter()
+            .map(|e| format!("[{}] {}\n{}", e.source_id, e.title, e.body))
+            .collect::<Vec<_>>()
+            .join("\n---\n");
+
+        let anchor = format!("## {}", locale.strings().topic_summary);
+        let vault_path = path.to_string();
+
+        match llm
+            .summarize(lk_llm::SummarizeRequest {
+                text: synthesis_input,
+                max_sentences: 10,
+                target: lk_llm::TaskTarget {
+                    vault_path,
+                    kind: lk_llm::TargetKind::WorkLogSynthesis,
+                    anchor,
+                },
+            })
+            .await
+        {
+            Ok(_) => {}
+            Err(e) if e.is_fatal() => return Err(PipelineError::Llm(e)),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    date = %date,
+                    "work-log synthesis task failed; continuing without topic summary"
+                );
+            }
+        }
     }
 
     Ok(outputs)

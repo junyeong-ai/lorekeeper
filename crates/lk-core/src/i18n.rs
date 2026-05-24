@@ -119,6 +119,9 @@ pub struct Strings {
     pub work_log_title: &'static str,
     pub weekly_synthesis_title: &'static str,
     pub weekly_personal_title: &'static str,
+    // Work-log sections
+    pub topic_summary: &'static str,
+    pub details: &'static str,
 }
 
 static KO: Strings = Strings {
@@ -176,6 +179,8 @@ static KO: Strings = Strings {
     work_log_title: "업무 기록",
     weekly_synthesis_title: "주간 종합",
     weekly_personal_title: "내 주간 업무",
+    topic_summary: "주제별 요약",
+    details: "상세",
 };
 
 static EN: Strings = Strings {
@@ -233,6 +238,8 @@ static EN: Strings = Strings {
     work_log_title: "Work Log",
     weekly_synthesis_title: "Weekly Synthesis",
     weekly_personal_title: "My Week",
+    topic_summary: "Topics",
+    details: "Details",
 };
 
 #[cfg(test)]

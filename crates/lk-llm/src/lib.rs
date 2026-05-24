@@ -60,6 +60,8 @@ pub enum TargetKind {
     QuarterlyPersonalNarrative,
     /// Personal annual review narrative.
     AnnualPersonalNarrative,
+    /// Cross-source topic synthesis for a work-log page.
+    WorkLogSynthesis,
 }
 
 /// Where the result of a semantic task should land in the vault. Carried through the

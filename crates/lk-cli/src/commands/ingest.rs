@@ -285,6 +285,7 @@ pub async fn run(
     if !any_write_failed && !all_personal.is_empty() {
         let work_logs = pipeline
             .aggregate_work_log(&all_personal)
+            .await
             .map_err(|e| miette::miette!("work-log: {e}"))?;
         for wl in &work_logs {
             if let Err(e) = writer.write_page(wl.path.as_ref(), &wl.content).await {

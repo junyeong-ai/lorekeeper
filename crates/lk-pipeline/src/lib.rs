@@ -299,7 +299,7 @@ impl Pipeline {
         self.dedup.record(events)
     }
 
-    pub fn aggregate_work_log(
+    pub async fn aggregate_work_log(
         &self,
         personal_events: &[Event],
     ) -> Result<Vec<RenderOutput>, PipelineError> {
@@ -309,7 +309,9 @@ impl Pipeline {
             &self.ctx.engine,
             &self.ctx.dirs,
             self.ctx.locale,
+            &self.ctx.llm,
         )
+        .await
     }
 }
 
