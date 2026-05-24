@@ -104,6 +104,34 @@ fn page_schemas() -> Vec<PageSchema> {
             ],
         },
         PageSchema {
+            type_name: "document",
+            path_pattern: "wiki/documents/{slug}.md",
+            frontmatter: &[
+                "id",
+                "title",
+                "aliases",
+                "created",
+                "updated",
+                "document_type",
+                "source_url",
+                "source_file",
+                "authors",
+                "year",
+                "tags",
+                "concepts",
+            ],
+            sections: vec![
+                s("Summary", |i| i.summary.to_string(), Owner::Llm),
+                s("Content", |i| i.document_content.to_string(), Owner::Machine),
+                s(
+                    "Extracted Concepts",
+                    |i| i.related_concepts.to_string(),
+                    Owner::Machine,
+                ),
+                s("Related", |i| i.related.to_string(), Owner::Llm),
+            ],
+        },
+        PageSchema {
             type_name: "weekly-synthesis",
             path_pattern: "weekly/synthesis/YYYY-Www.md",
             frontmatter: &[
@@ -324,6 +352,7 @@ mod tests {
             "concept",
             "daily",
             "work-log",
+            "document",
             "weekly-synthesis",
             "weekly-personal",
             "monthly-summary",

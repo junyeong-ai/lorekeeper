@@ -125,6 +125,16 @@ pub struct Strings {
     // Work-log sections
     pub topic_summary: &'static str,
     pub details: &'static str,
+    // Document page sections
+    pub document_content: &'static str,
+    // Wiki index categories (lore wiki index output)
+    pub index_concepts: &'static str,
+    pub index_documents: &'static str,
+    pub index_daily: &'static str,
+    pub index_worklog: &'static str,
+    pub index_synthesis: &'static str,
+    // Document page title
+    pub document_title: &'static str,
 }
 
 static KO: Strings = Strings {
@@ -186,6 +196,13 @@ static KO: Strings = Strings {
     pages_this_week: "이번 주 페이지",
     topic_summary: "주제별 요약",
     details: "상세",
+    document_content: "내용",
+    index_concepts: "개념",
+    index_documents: "문서",
+    index_daily: "일일",
+    index_worklog: "업무 로그",
+    index_synthesis: "종합",
+    document_title: "수집 문서",
 };
 
 static EN: Strings = Strings {
@@ -247,6 +264,13 @@ static EN: Strings = Strings {
     pages_this_week: "pages this week",
     topic_summary: "Topics",
     details: "Details",
+    document_content: "Content",
+    index_concepts: "Concepts",
+    index_documents: "Documents",
+    index_daily: "Daily",
+    index_worklog: "Work Log",
+    index_synthesis: "Synthesis",
+    document_title: "Document",
 };
 
 #[cfg(test)]

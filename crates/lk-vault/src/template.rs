@@ -17,6 +17,10 @@ const EMBEDDED: &[(&str, &str)] = &[
         include_str!("../../../templates/concept.md.jinja"),
     ),
     (
+        "document.md.jinja",
+        include_str!("../../../templates/document.md.jinja"),
+    ),
+    (
         "gmail.md.jinja",
         include_str!("../../../templates/gmail.md.jinja"),
     ),

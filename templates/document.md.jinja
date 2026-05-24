@@ -1,0 +1,41 @@
+---
+id: {{ slug }}
+title: {{ title | tojson }}
+aliases: {{ aliases | tojson }}
+created: {{ created }}
+updated: {{ updated }}
+document_type: {{ document_type }}
+{% if source_url -%}
+source_url: {{ source_url | tojson }}
+{% endif -%}
+{% if source_file -%}
+source_file: {{ source_file | tojson }}
+{% endif -%}
+{% if authors -%}
+authors: {{ authors | tojson }}
+{% endif -%}
+{% if year -%}
+year: {{ year }}
+{% endif -%}
+tags: {{ tags | tojson }}
+concepts: {{ concept_slugs | tojson }}
+---
+
+# {{ title }}
+
+## {{ i18n.summary }}
+
+{{ summary }}
+
+## {{ i18n.document_content }}
+
+{{ content }}
+
+## {{ i18n.related_concepts }}
+
+{% for c in concepts -%}
+- [[{{ c }}]]
+{% endfor %}
+
+## {{ i18n.related }}
+
