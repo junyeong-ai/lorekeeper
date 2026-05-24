@@ -236,14 +236,6 @@ mod tests {
         }
     }
 
-    fn concept_page(stem: &str, body: &str) -> Page {
-        make_page(
-            &format!("wiki/concepts/{stem}"),
-            &format!("wiki/concepts/{stem}.md"),
-            &[],
-        )
-    }
-
     fn write_concept(dir: &TempDir, stem: &str, sources: &[&str]) {
         let path = dir.path().join("wiki/concepts").join(format!("{stem}.md"));
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -257,8 +249,6 @@ mod tests {
             )
         };
         std::fs::write(&path, body).unwrap();
-        // Suppress unused warning when called from tests that only need the body.
-        let _ = concept_page;
     }
 
     #[test]

@@ -122,7 +122,11 @@ fn page_schemas() -> Vec<PageSchema> {
             ],
             sections: vec![
                 s("Summary", |i| i.summary.to_string(), Owner::Llm),
-                s("Content", |i| i.document_content.to_string(), Owner::Machine),
+                s(
+                    "Content",
+                    |i| i.document_content.to_string(),
+                    Owner::Machine,
+                ),
                 s(
                     "Extracted Concepts",
                     |i| i.related_concepts.to_string(),

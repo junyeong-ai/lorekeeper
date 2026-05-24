@@ -36,12 +36,7 @@ struct ManualParams {
 }
 
 fn default_extensions() -> Vec<String> {
-    vec![
-        "md".into(),
-        "txt".into(),
-        "markdown".into(),
-        "json".into(),
-    ]
+    vec!["md".into(), "txt".into(), "markdown".into(), "json".into()]
 }
 
 fn default_true() -> bool {
