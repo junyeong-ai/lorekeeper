@@ -97,6 +97,10 @@ Calendar ──────┘          ├─ Concepts (LLM)          wiki/conc
 | `lore schedule` | Print crontab entries (uses plain `lore` for PATH lookup) |
 | `lore schedule --bin /full/path/lore` | Override bin path in cron lines |
 | `lore maintenance` | Prune ingest log, dedup cache, and drained queue files older than 90 days |
+| `lore schema` | Generate `wiki/AGENTS.md` (page format schema from locale) |
+| `lore graph lint` | Structural health: orphans, broken links, hubs |
+| `lore graph suggest-links` | Community-based cross-reference suggestions |
+| `lore graph cluster` | Topic communities via Louvain modularity |
 
 ## LLM provider modes
 
@@ -123,9 +127,10 @@ crates/
   lk-source/    Source adapters: Gmail, Drive, Slack, Jira, Calendar
   lk-pipeline/  Transform stages: normalize, dedup, classify, render, synthesis
   lk-llm/       LlmClient trait + providers (anthropic, queue, noop) and a test mock
+  lk-graph/     Wikilink graph analysis (lint, hubs, cluster, suggest-links)
   lk-cli/       Binary entry point (lore)
 
-templates/      Jinja2 markdown templates (.md.jinja)
+templates/      Jinja2 markdown templates (.md.jinja, embedded in the binary)
 ```
 
 ## Output Model

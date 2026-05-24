@@ -65,9 +65,9 @@ Answer a question grounded in vault content, with compounding.
 Three-layer health check. Surface findings for human review — never
 auto-resolve.
 
-1. **Structural** — run `lore graph lint --json`, report findings (orphans,
+1. **Structural** — run `lore graph --json lint`, report findings (orphans,
    broken links, hubs).
-2. **Missing cross-references** — run `lore graph suggest-links --json`, then
+2. **Missing cross-references** — run `lore graph --json suggest-links`, then
    confirm topical relatedness before proposing a link. Community grounding +
    LLM confirmation = double gate against false positives.
 3. **Contradictions** — scoped to one concept page at a time whose `sources`

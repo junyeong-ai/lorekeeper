@@ -2,7 +2,8 @@
 
 Config-driven knowledge ingestion pipeline for Obsidian wikis. A Rust CLI (`lore`)
 collects daily data from heterogeneous sources, deduplicates, classifies, extracts
-concepts, and writes structured markdown pages.
+concepts, and writes structured markdown pages. Includes graph analysis for wiki
+structural health.
 
 ## Architecture
 
@@ -14,7 +15,8 @@ Gmail ─────────┤          ├─ Normalize → Event       m
 Slack ─────────┼─ config ─┤  Deduplicate (cascade)   weekly/ monthly/
 Jira ──────────┤  .yaml   ├─ Classify (labels)       quarterly/ annually/
 Calendar ──────┘          ├─ Concepts (LLM)          wiki/concepts/
-                          └─ Render (templates)
+                          ├─ Render (templates)      wiki/AGENTS.md
+                          └─ Graph (lint, cluster)
 ```
 
 ## Workspace
@@ -24,53 +26,58 @@ Each crate has its own `CLAUDE.md` with the invariants for working inside it
 
 ```
 crates/
-  lk-core/      Domain types, config + validation, vault path builder, slugify
-  lk-vault/     Obsidian vault I/O: atomic write, frontmatter, templates, ingest log
-  lk-source/    Source adapters + factory, per-adapter param validation
+  lk-core/      Domain types, config, i18n, slugify (NFKC), frontmatter, wikilink, vault paths
+  lk-vault/     Obsidian vault I/O: atomic write, templates (embedded), ingest log
+  lk-source/    Source adapters + factory, markdown normalization (ADF/HTML/Slack→MD)
   lk-pipeline/  Pipeline (per-source plan/commit), dedup, classify, concepts, synthesis
   lk-llm/       LlmClient trait + providers: anthropic, queue, noop (+ mock for tests)
+  lk-graph/     Wikilink graph analysis: lint, hubs, cluster, suggest-links (no HTTP/async)
   lk-cli/       Binary `lore` — one module per subcommand under commands/
-templates/      Jinja2 markdown templates (.md.jinja)
+templates/      Jinja2 markdown templates (.md.jinja), compiled into the binary
 ```
 
 ## Project-wide invariants
 
 - **Source ID = vault directory**: the key under `sources:` becomes the `daily/{id}/`
-  output path AND selects the adapter. It must not contain path separators.
-- **Date derivation**: an event's date is `timestamp.to_zoned(vault.timezone()).date()`
-  — always via the configured timezone, never UTC by accident.
-- **Multi-date batches**: events spanning several dates produce one `daily/` page per
-  date, not collapsed into the first event's date.
-- **Atomic ingest** (`lore ingest`, 5 phases): plan all sources → write daily/concept
-  pages → write work-log → flush LLM queue (atomic temp+rename) → commit dedup. The
-  flush precedes the dedup commit, so a crash between them re-extracts and re-queues on
-  the next run. Any failure aborts before dedup commit and exits non-zero, so re-running
-  is idempotent and lossless.
+  output path AND selects the adapter. Must not contain path separators, `.`, or `..`.
+- **Date derivation**: `timestamp.to_zoned(vault.timezone()).date()` — always via the
+  configured timezone, never UTC by accident.
+- **Multi-date batches**: events spanning several dates produce one `daily/` page per date.
+- **Atomic ingest** (`lore ingest`, 5 phases): plan → write daily/concept → work-log →
+  flush LLM queue (atomic temp+rename) → commit dedup. Any failure aborts before dedup
+  commit, so re-running is idempotent.
+- **i18n**: `vault.locale` (ko/en) switches all labels/headings. Templates use
+  `{{ i18n.* }}` from the Strings bundle; source content is never translated.
+- **Single source of truth**: `lore schema` generates `wiki/AGENTS.md` from the i18n
+  bundle, defining page formats and section ownership (machine vs LLM). Templates,
+  queue `target.anchor`, and skills all derive from `lk-core::i18n`.
+- **Domain logic is single-sourced in lk-core**: slugify (NFKC), frontmatter parsing,
+  wikilink extraction, vault paths. lk-vault and lk-graph both consume these — zero
+  duplicate implementations.
 - **LLM provider modes** (`llm.provider`, default `queue`):
-  - `queue` — pipeline emits JSONL tasks to `<vault>/.lorekeeper/queue/`; the
-    `/lore-process` Claude Code skill drains them with its native session (no API key).
-  - `anthropic` — direct Messages API for unattended cron (needs `ANTHROPIC_API_KEY`;
-    missing key degrades to noop with a warning).
-  - `noop` — no semantic work; pages render with empty summary/concept sections.
-- **`--dry-run` is side-effect-free**: no vault writes, no dedup file creation, no log
-  writes. Use it to preview.
+  - `queue` — JSONL tasks to `.lorekeeper/queue/`; `/lore-process` drains with Claude Code.
+  - `anthropic` — direct Messages API for unattended cron.
+  - `noop` — no semantic work.
+- **`--dry-run` is side-effect-free**: no vault writes, no dedup, no log.
 
 ## Development
 
 ```bash
-cargo check                    # type check
-cargo clippy -- -D warnings    # lint (must be clean)
-cargo fmt                      # format
-cargo nextest run --workspace  # tests
-cargo run -- validate          # verify config.yaml + source params
-cargo run -- ingest ai-news    # run a single source
+cargo check                        # type check
+cargo clippy -- -D warnings        # lint (must be clean)
+cargo fmt                          # format
+cargo nextest run --workspace      # tests
+lore validate                      # verify config.yaml + source params
+lore ingest ai-news                # run a single source
+lore schema                        # generate wiki/AGENTS.md
+lore graph lint                    # structural health check
 ```
 
 ## Config
 
-User settings live in `config.yaml` (gitignored); copy `config.example.yaml`.
-The key under `sources:` is the source ID = vault directory name = adapter selector.
-A relative `vault.root` resolves against the config file's directory, not the CWD.
+User settings in `config.yaml` (gitignored); copy `config.example.yaml`.
+Auto-discovered: `./config.yaml` → `~/.config/lorekeeper/config.yaml`.
+`vault.root` resolves relative to the config file's directory, not the CWD.
 
 ## Source types
 
@@ -78,16 +85,16 @@ A relative `vault.root` resolves against the config file's directory, not the CW
 |------|---------|---------|
 | `google-drive` | Drive API | File-based sources (newsletters) |
 | `gmail` | Gmail API | Email digest |
-| `slack-channel` | Slack API | Channel message reader |
-| `slack-search` | Slack API | Keyword trend search |
-| `jira` | Jira REST API | Issue/ticket tracking |
-| `google-calendar` | Calendar API | Schedule/meeting tracking |
+| `slack-channel` | Slack API | Channel reader (threads, bot filter, watch_users) |
+| `slack-search` | Slack API | Keyword trend search (user token required) |
+| `jira` | Jira REST API | Issue tracking (ADF→Markdown, status/period snapshot) |
+| `google-calendar` | Calendar API | Schedule tracking (HTML→Markdown) |
 
 ## Output model
 
 **Primary** (per-source): `daily/{source-id}/YYYY-MM-DD.md`
 **Derived** (cross-source):
-- `me/work-log/` — aggregated from sources with `track_personal: true`
-- `weekly/synthesis/` — cross-source weekly themes
-- `weekly/me/`, `monthly/me/`, `quarterly/me/`, `annually/me/` — performance tracking
+- `me/work-log/` — personal items (`track_personal` + identity matching)
+- `weekly/synthesis/`, `weekly/me/`, `monthly/me/`, `quarterly/me/`, `annually/me/`
 - `wiki/concepts/` — extracted concepts (merged across runs)
+- `wiki/AGENTS.md` — generated page format schema
