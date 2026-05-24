@@ -1,4 +1,5 @@
 config.yaml
+credentials.json
 .wiki-ingest/
 .DS_Store
 target/

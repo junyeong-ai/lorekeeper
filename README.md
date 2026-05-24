@@ -180,7 +180,13 @@ Two ways to provide credentials, env vars take precedence over file:
 - `WI_JIRA_URL`, `WI_JIRA_EMAIL`, `WI_JIRA_TOKEN`
 - `ANTHROPIC_API_KEY` (only for `llm.provider: anthropic`; if missing in that mode, the run degrades to the no-op LLM with a warning. Not needed for the default `queue` mode.)
 
-**Credentials file** at `{vault_root}/.wiki-ingest/credentials.json`:
+**Credentials file** (recommended — one file instead of seven env vars). Copy the
+template and fill in values:
+```bash
+cp credentials.example.json "<vault_root>/.wiki-ingest/credentials.json"
+chmod 600 "<vault_root>/.wiki-ingest/credentials.json"
+$EDITOR "<vault_root>/.wiki-ingest/credentials.json"
+```
 ```json
 {
   "google": { "client_id": "...", "client_secret": "...", "refresh_token": "..." },
@@ -188,6 +194,8 @@ Two ways to provide credentials, env vars take precedence over file:
   "jira":   { "base_url": "https://...", "email": "...", "api_token": "..." }
 }
 ```
+All three blocks are optional — keep only the sources you use. Matching env vars (all
+of a service's vars together) override the file per service.
 
 ## Development
 
