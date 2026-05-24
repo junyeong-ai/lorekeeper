@@ -315,9 +315,7 @@ fn convert_mrkdwn_formatting(text: &str) -> String {
         }
 
         // Try to convert *bold* or ~strike~.
-        if (chars[i] == '*' || chars[i] == '~')
-            && is_word_boundary_before(i, &chars)
-        {
+        if (chars[i] == '*' || chars[i] == '~') && is_word_boundary_before(i, &chars) {
             let marker = chars[i];
             if let Some(end) = find_closing_marker(i + 1, marker, &chars) {
                 // The closing marker must be followed by a word boundary.
@@ -367,9 +365,7 @@ fn is_word_boundary_before(pos: usize, chars: &[char]) -> bool {
         return true;
     }
     let prev = chars[pos - 1];
-    prev.is_whitespace()
-        || is_cjk_char(prev)
-        || matches!(prev, '(' | '[' | '{' | '"' | '\'' | '\n')
+    prev.is_whitespace() || is_cjk_char(prev) || matches!(prev, '(' | '[' | '{' | '"' | '\'' | '\n')
 }
 
 /// The position after `pos` is a word boundary (end of string, whitespace, CJK character,
@@ -591,13 +587,19 @@ mod tests {
     #[test]
     fn slack_bold_converted() {
         let u = no_users();
-        assert_eq!(slack_to_markdown("this is *bold* text", &u), "this is **bold** text");
+        assert_eq!(
+            slack_to_markdown("this is *bold* text", &u),
+            "this is **bold** text"
+        );
     }
 
     #[test]
     fn slack_strike_converted() {
         let u = no_users();
-        assert_eq!(slack_to_markdown("this is ~struck~ out", &u), "this is ~~struck~~ out");
+        assert_eq!(
+            slack_to_markdown("this is ~struck~ out", &u),
+            "this is ~~struck~~ out"
+        );
     }
 
     #[test]

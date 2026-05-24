@@ -189,8 +189,7 @@ async fn resolve_channel_id(
         if !cursor.is_empty() {
             params.push(("cursor", cursor.as_str()));
         }
-        let page: ChannelsPage =
-            slack_post(http, token, "conversations.list", &params).await?;
+        let page: ChannelsPage = slack_post(http, token, "conversations.list", &params).await?;
 
         if let Some(ch) = page.channels.into_iter().find(|c| c.name == name) {
             return Ok(ch.id);

@@ -149,13 +149,8 @@ impl SlackChannelSource {
                 params.push(("cursor", cursor.as_str()));
             }
 
-            let data: HistoryData = slack_post(
-                &self.http,
-                &self.token,
-                "conversations.replies",
-                &params,
-            )
-            .await?;
+            let data: HistoryData =
+                slack_post(&self.http, &self.token, "conversations.replies", &params).await?;
 
             let page = data.messages.unwrap_or_default();
             let page_empty = page.is_empty();
@@ -218,13 +213,8 @@ impl Source for SlackChannelSource {
                     params.push(("cursor", history_cursor.as_str()));
                 }
 
-                let data: HistoryData = slack_post(
-                    &self.http,
-                    &self.token,
-                    "conversations.history",
-                    &params,
-                )
-                .await?;
+                let data: HistoryData =
+                    slack_post(&self.http, &self.token, "conversations.history", &params).await?;
 
                 let page = data.messages.unwrap_or_default();
                 let page_empty = page.is_empty();
