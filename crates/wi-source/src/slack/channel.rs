@@ -73,6 +73,9 @@ impl Source for SlackChannelSource {
                 "channel": channel_id,
                 "oldest": oldest_ts,
                 "latest": latest_ts,
+                // Include a message whose ts lands exactly on a boundary; the pipeline's
+                // date filter still trims anything outside the target day.
+                "inclusive": true,
                 "limit": 100,
             }),
         )

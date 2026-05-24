@@ -105,24 +105,33 @@ async fn concept_pages_written_with_merge() {
         .unwrap();
 
     assert_eq!(result.concepts.len(), 1);
-    let concept_output = result
-        .concept_pages
+    let concept_pages = pipeline.render_concept_pages().await.unwrap();
+    let concept_output = concept_pages
         .iter()
         .find(|o| o.path.to_string().contains("wiki/concepts/claude-code"))
-        .expect("concept page must be in outputs");
+        .expect("concept page must be rendered");
 
     let writer = wi_vault::VaultWriter::new(vault);
-    for out in result.daily_pages.iter().chain(result.concept_pages.iter()) {
+    for out in result.daily_pages.iter().chain(concept_pages.iter()) {
         writer
             .write_page(out.path.as_ref(), &out.content)
             .await
             .unwrap();
     }
 
-    // Re-ingest on a different date — should merge into existing concept page
+    // Re-ingest on a different date with a FRESH pipeline, so the merge reads the
+    // on-disk concept page (exercising the created/updated round-trip). Drop the first
+    // pipeline so its single-writer dedup lock is released.
+    drop(pipeline);
+    let llm2: Arc<dyn LlmClient> = Arc::new(MockLlmClient::with_concepts(vec![ExtractedConcept {
+        name: "Claude Code".into(),
+        slug: "claude-code".into(),
+        confidence: Confidence::Extracted,
+    }]));
+    let pipeline2 = Pipeline::new(vault, make_ctx(&config, llm2), &config).unwrap();
     let ts2: jiff::Timestamp = "2026-05-24T10:00:00Z".parse().unwrap();
     let items2 = vec![raw_item("Anthropic releases v2", "...", "MSG-2", ts2)];
-    let result2 = pipeline
+    pipeline2
         .plan(
             "test-source",
             config.sources.get("test-source").unwrap(),
@@ -135,9 +144,8 @@ async fn concept_pages_written_with_merge() {
         )
         .await
         .unwrap();
-
-    let concept_output2 = result2
-        .concept_pages
+    let concept_pages2 = pipeline2.render_concept_pages().await.unwrap();
+    let concept_output2 = concept_pages2
         .iter()
         .find(|o| o.path.to_string().contains("claude-code"))
         .unwrap();
@@ -157,8 +165,11 @@ async fn concept_pages_written_with_merge() {
         "last_seen (updated) must advance to the new date"
     );
     assert!(
-        concept_output2.content.contains("2026-05-24"),
-        "should add second source reference"
+        concept_output2
+            .content
+            .contains(r#"aliases: ["Claude Code"]"#),
+        "concept page must carry an alias so [[Claude Code]] resolves:\n{}",
+        concept_output2.content
     );
     let _ = concept_output;
 }
@@ -277,6 +288,75 @@ async fn multi_date_events_produce_multiple_daily_pages() {
 }
 
 #[tokio::test]
+async fn concept_accumulates_across_sources_in_one_run() {
+    // Two different sources mention the same concept in a single run. The concept page
+    // must merge into ONE page with reference_count 2 and both source refs — not be
+    // overwritten by whichever source is written last.
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let mut config = base_config(vault);
+    config.sources.insert(
+        "second-source".to_string(),
+        SourceConfig {
+            source_type: SourceType::Gmail,
+            enabled: true,
+            schedule: None,
+            params: serde_json::Value::Object(Default::default()),
+            classify: Default::default(),
+            labels: vec![],
+            extract_concepts: true,
+            track_personal: false,
+        },
+    );
+
+    let llm: Arc<dyn LlmClient> = Arc::new(MockLlmClient::with_concepts(vec![ExtractedConcept {
+        name: "Shared Concept".into(),
+        slug: "shared-concept".into(),
+        confidence: Confidence::Extracted,
+    }]));
+    let pipeline = Pipeline::new(vault, make_ctx(&config, llm), &config).unwrap();
+
+    let ts: jiff::Timestamp = "2026-05-23T10:00:00Z".parse().unwrap();
+    let opts = IngestOptions {
+        dry_run: false,
+        force: false,
+        target_date: None,
+    };
+    for sid in ["test-source", "second-source"] {
+        pipeline
+            .plan(
+                sid,
+                config.sources.get(sid).unwrap(),
+                vec![raw_item("Anthropic ships", "...", &format!("{sid}-1"), ts)],
+                &opts,
+            )
+            .await
+            .unwrap();
+    }
+
+    let pages = pipeline.render_concept_pages().await.unwrap();
+    let shared = pages
+        .iter()
+        .find(|o| o.path.to_string().contains("shared-concept"))
+        .expect("one merged concept page");
+    assert_eq!(
+        pages
+            .iter()
+            .filter(|o| o.path.to_string().contains("shared-concept"))
+            .count(),
+        1,
+        "concept must be a single merged page, not one per source"
+    );
+    assert!(
+        shared.content.contains("reference_count: 2"),
+        "both sources must accumulate into the count:\n{}",
+        shared.content
+    );
+    assert!(shared.content.contains("daily/test-source/2026-05-23"));
+    assert!(shared.content.contains("daily/second-source/2026-05-23"));
+}
+
+#[tokio::test]
 async fn llm_failure_does_not_break_pipeline() {
     let dir = TempDir::new().unwrap();
     let vault = dir.path();
@@ -310,7 +390,10 @@ async fn llm_failure_does_not_break_pipeline() {
         1,
         "daily page should still be produced"
     );
-    assert!(result.concept_pages.is_empty());
+    assert!(
+        pipeline.render_concept_pages().await.unwrap().is_empty(),
+        "a failing LLM yields no concept pages"
+    );
 }
 
 #[cfg(unix)]

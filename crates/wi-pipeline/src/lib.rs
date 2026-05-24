@@ -50,16 +50,15 @@ pub struct IngestResult {
     pub events: Vec<Event>,
     pub concepts: Vec<ExtractedConcept>,
     pub daily_pages: Vec<RenderOutput>,
-    pub concept_pages: Vec<RenderOutput>,
 }
 
 impl IngestResult {
     pub fn is_empty(&self) -> bool {
-        self.daily_pages.is_empty() && self.concept_pages.is_empty()
+        self.daily_pages.is_empty()
     }
 
     pub fn page_count(&self) -> usize {
-        self.daily_pages.len() + self.concept_pages.len()
+        self.daily_pages.len()
     }
 }
 
@@ -75,6 +74,11 @@ pub struct Pipeline {
     reader: VaultReader,
     dedup_config: DedupConfig,
     run_lock: tokio::sync::Mutex<()>,
+    /// Concept accumulation spans the WHOLE run, not a single `plan` call: a concept
+    /// page is a cross-source aggregate, so two sources mentioning the same slug must
+    /// merge into one page. Rendered once via `render_concept_pages` after all sources
+    /// are planned.
+    concept_drafts: tokio::sync::Mutex<ConceptDrafts>,
 }
 
 impl Pipeline {
@@ -113,6 +117,7 @@ impl Pipeline {
             reader: VaultReader::new(vault_root),
             dedup_config: config.dedup.clone(),
             run_lock: tokio::sync::Mutex::new(()),
+            concept_drafts: tokio::sync::Mutex::new(ConceptDrafts::new()),
         }
     }
 
@@ -168,7 +173,6 @@ impl Pipeline {
 
         let mut daily_pages: Vec<RenderOutput> = Vec::new();
         let mut all_concepts: Vec<ExtractedConcept> = Vec::new();
-        let mut concept_drafts = ConceptDrafts::new();
 
         for (date, day_events) in &by_date {
             let combined: String = day_events
@@ -262,23 +266,32 @@ impl Pipeline {
             )?;
             daily_pages.push(output);
 
-            for concept in &day_concepts {
-                concept_drafts
-                    .merge(concept, source_id, *date, &self.reader, &self.ctx.dirs)
-                    .await?;
+            // Merge into the run-level accumulator (shared across all sources) so a
+            // concept mentioned by multiple sources aggregates into one page.
+            {
+                let mut drafts = self.concept_drafts.lock().await;
+                for concept in &day_concepts {
+                    drafts
+                        .merge(concept, source_id, *date, &self.reader, &self.ctx.dirs)
+                        .await?;
+                }
             }
             all_concepts.extend(day_concepts);
         }
-
-        let concept_pages = concept_drafts.render(&self.ctx.engine, &self.ctx.dirs)?;
 
         Ok(IngestResult {
             source_id: source_id.into(),
             events,
             concepts: all_concepts,
             daily_pages,
-            concept_pages,
         })
+    }
+
+    /// Render the concept pages accumulated across every `plan` call in this run.
+    /// Call once after all sources are planned and before committing dedup.
+    pub async fn render_concept_pages(&self) -> Result<Vec<RenderOutput>, PipelineError> {
+        let drafts = self.concept_drafts.lock().await;
+        drafts.render(&self.ctx.engine, &self.ctx.dirs)
     }
 
     /// Mark events as processed. Call AFTER vault writes succeed to avoid losing pages
@@ -306,6 +319,5 @@ fn empty_result(source_id: &str) -> IngestResult {
         events: vec![],
         concepts: vec![],
         daily_pages: vec![],
-        concept_pages: vec![],
     }
 }

@@ -204,7 +204,7 @@ pub async fn run(
         }
 
         if dry_run {
-            for out in result.daily_pages.iter().chain(result.concept_pages.iter()) {
+            for out in &result.daily_pages {
                 eprintln!("  [dry-run] would write: {}", out.path);
             }
             continue;
@@ -218,6 +218,14 @@ pub async fn run(
     }
 
     if dry_run {
+        // Concept pages are accumulated across all sources, so preview them once.
+        let concept_pages = pipeline
+            .render_concept_pages()
+            .await
+            .map_err(|e| miette::miette!("concept render: {e}"))?;
+        for out in &concept_pages {
+            eprintln!("  [dry-run] would write: {}", out.path);
+        }
         if had_failure {
             return Err(miette::miette!(
                 "dry-run completed with source failures; see output above"
@@ -232,12 +240,7 @@ pub async fn run(
     let mut all_personal: Vec<wi_core::event::Event> = Vec::new();
 
     for p in &planned {
-        for out in p
-            .result
-            .daily_pages
-            .iter()
-            .chain(p.result.concept_pages.iter())
-        {
+        for out in &p.result.daily_pages {
             if let Err(e) = writer.write_page(out.path.as_ref(), &out.content).await {
                 eprintln!("  ✗ vault write {}: {e}", out.path);
                 any_write_failed = true;
@@ -260,6 +263,24 @@ pub async fn run(
                 p.id,
                 p.result.events.iter().filter(|e| e.is_personal).count()
             );
+        }
+    }
+
+    // Concept pages are a cross-source aggregate, rendered once from the run-level
+    // accumulator so two sources mentioning the same concept merge into one page.
+    if !any_write_failed {
+        let concept_pages = pipeline
+            .render_concept_pages()
+            .await
+            .map_err(|e| miette::miette!("concept render: {e}"))?;
+        for out in &concept_pages {
+            if let Err(e) = writer.write_page(out.path.as_ref(), &out.content).await {
+                eprintln!("  ✗ vault write {}: {e}", out.path);
+                any_write_failed = true;
+                break;
+            }
+            total_pages += 1;
+            eprintln!("  ✓ wrote: {}", out.path);
         }
     }
 

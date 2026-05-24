@@ -200,9 +200,12 @@ impl ConceptDraft {
         // JSON string (valid YAML) rather than wrapping in raw double-quotes, which a
         // name containing `"` would break.
         let title_yaml = serde_json::to_string(&self.name).unwrap_or_else(|_| "\"\"".into());
+        // `aliases` lets Obsidian resolve `[[Name]]` links (used by daily pages and the
+        // /wi-process skill) to this slug-named file.
         format!(
-            "---\nid: {}\ntitle: {}\ncreated: {}\nupdated: {}\nconfidence: {}\nreference_count: {}\nsources: {}\ntags: [\"concept\"]\n---\n\n# {}\n",
+            "---\nid: {}\ntitle: {}\naliases: [{}]\ncreated: {}\nupdated: {}\nconfidence: {}\nreference_count: {}\nsources: {}\ntags: [\"concept\"]\n---\n\n# {}\n",
             self.slug,
+            title_yaml,
             title_yaml,
             self.first_seen,
             self.last_seen,

@@ -126,10 +126,12 @@ Each line in a queue file is one task:
 
       - **`daily-concepts`** target: locate `## 관련 개념` and replace
         its body with `- [[Concept Name 1]]\n- [[Concept Name 2]]\n...`.
-        Create each concept page in `wiki/concepts/` if it doesn't
-        exist (use frontmatter id, name, first_seen, last_seen,
-        reference_count, sources fields — match the format from existing
-        concept pages).
+        Create each concept page at `wiki/concepts/{slug}.md` if it
+        doesn't exist (use frontmatter `id`, `title`, `created`,
+        `updated`, `confidence`, `reference_count`, `sources`, `tags`,
+        and crucially `aliases: ["Concept Name"]` so the `[[Concept
+        Name]]` links above resolve to the slug-named file — match the
+        format of existing concept pages).
 
       - **Synthesis narratives** — each `target.kind` maps to one
         specific anchor heading. Search the page for the EXACT heading
