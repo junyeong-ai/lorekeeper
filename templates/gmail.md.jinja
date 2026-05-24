@@ -20,7 +20,7 @@ action_required: {{ action_count }}
 ## {{ i18n.action_required }}
 
 {% for item in action_required_items %}
-- **{{ item.subject }}** from {{ item.sender }} — {{ item.summary }}
+- **{{ item.subject }}** {{ i18n.from }} {{ item.sender }} — {{ item.summary }}
 {% endfor %}
 
 {% endif %}

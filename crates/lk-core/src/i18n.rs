@@ -102,6 +102,7 @@ pub struct Strings {
     pub confidence: &'static str,
     pub original_message: &'static str,
     // Inline field labels (adapters / renderers)
+    pub from: &'static str,
     pub status: &'static str,
     pub period: &'static str,
     pub location: &'static str,
@@ -119,6 +120,8 @@ pub struct Strings {
     pub work_log_title: &'static str,
     pub weekly_synthesis_title: &'static str,
     pub weekly_personal_title: &'static str,
+    // Synthesis placeholders
+    pub pages_this_week: &'static str,
     // Work-log sections
     pub topic_summary: &'static str,
     pub details: &'static str,
@@ -164,6 +167,7 @@ static KO: Strings = Strings {
     reference_count: "참조 횟수",
     confidence: "추출 방식",
     original_message: "원본 메시지",
+    from: "발신",
     status: "상태",
     period: "기간",
     location: "위치",
@@ -179,6 +183,7 @@ static KO: Strings = Strings {
     work_log_title: "업무 기록",
     weekly_synthesis_title: "주간 종합",
     weekly_personal_title: "내 주간 업무",
+    pages_this_week: "이번 주 페이지",
     topic_summary: "주제별 요약",
     details: "상세",
 };
@@ -223,6 +228,7 @@ static EN: Strings = Strings {
     reference_count: "References",
     confidence: "Extraction",
     original_message: "Original message",
+    from: "from",
     status: "Status",
     period: "Period",
     location: "Location",
@@ -238,6 +244,7 @@ static EN: Strings = Strings {
     work_log_title: "Work Log",
     weekly_synthesis_title: "Weekly Synthesis",
     weekly_personal_title: "My Week",
+    pages_this_week: "pages this week",
     topic_summary: "Topics",
     details: "Details",
 };

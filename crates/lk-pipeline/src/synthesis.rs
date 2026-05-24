@@ -116,7 +116,7 @@ impl Synthesizer {
             // the one that drives the actual narrative content.
             source_summaries.push(serde_json::json!({
                 "source_id": source_id,
-                "summary": format!("{} pages this week", pages.len()),
+                "summary": format!("{} {}", pages.len(), self.ctx.locale.strings().pages_this_week),
             }));
 
             combined.push_str(&format!("=== {source_id} ===\n{combined_source}\n\n"));
