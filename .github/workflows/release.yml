@@ -57,7 +57,9 @@ jobs:
 
       - name: Install cross
         if: matrix.cross
-        run: cargo install cross --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
 
       - name: Build (cross)
         if: matrix.cross
@@ -97,8 +99,7 @@ jobs:
           cp README.md LICENSE 2>/dev/null "$stage/" || cp README.md "$stage/"
           archive="${stage}.${ARCHIVE_EXT}"
           if [ "$ARCHIVE_EXT" = "zip" ]; then
-            (cd "$(dirname "$stage")" && 7z a -tzip "../${archive}" "$(basename "$stage")" >/dev/null)
-            mv "../${archive}" "${archive}" 2>/dev/null || true
+            powershell -Command "Compress-Archive -Path '$stage' -DestinationPath '$archive' -Force"
           else
             tar -czf "$archive" "$stage"
           fi
