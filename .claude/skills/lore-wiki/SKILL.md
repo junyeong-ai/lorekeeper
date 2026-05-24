@@ -79,6 +79,16 @@ auto-resolve.
    cite conflicting claims. Flag with `confidence: ambiguous` and a review
    note. Never choose a side. One page at a time to avoid combinatorial
    blow-up.
+4. **Frontiers — data gaps + new directions** (the 4th lint dimension Karpathy
+   identified as the highest-leverage long-term concern). Report:
+   - Concepts mentioned in daily pages but missing a dedicated wiki page
+     (cross-check `[[...]]` wikilinks vs files under `wiki/concepts/`).
+   - Topics with high cross-source activity (3+ sources in a week) but shallow
+     concept coverage (placeholder `## 핵심` or single source listed).
+   - Stale concept syntheses — `last_seen` recent but `## 핵심` was written
+     long before the recent reference burst.
+   This layer is LLM judgment, not a deterministic check. Surface as questions
+   for human review, never auto-create pages.
 
 ### `/lore-wiki status`
 
