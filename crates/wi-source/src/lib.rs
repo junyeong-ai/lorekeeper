@@ -124,18 +124,33 @@ pub fn create_source(
         SourceType::SlackChannel | SourceType::SlackSearch => {
             let sc = creds.slack.as_ref().ok_or_else(|| {
                 SourceError::Auth(
-                    "Slack credentials not configured. \
-                     Set WI_SLACK_TOKEN or add to .wiki-ingest/credentials.json"
+                    "Slack credentials not configured. Set WI_SLACK_TOKEN / \
+                     WI_SLACK_USER_TOKEN or add a slack block to credentials.json"
                         .into(),
                 )
             })?;
-            let token = sc.bot_token.clone();
             match source_type {
-                SourceType::SlackChannel => Ok(Box::new(slack::channel::SlackChannelSource::new(
-                    http, token,
-                ))),
+                SourceType::SlackChannel => {
+                    let token = sc.history_token().ok_or_else(|| {
+                        SourceError::Auth("slack-channel needs a bot_token or user_token".into())
+                    })?;
+                    Ok(Box::new(slack::channel::SlackChannelSource::new(
+                        http,
+                        token.to_string(),
+                    )))
+                }
                 SourceType::SlackSearch => {
-                    Ok(Box::new(slack::search::SlackSearchSource::new(http, token)))
+                    let token = sc.search_token().ok_or_else(|| {
+                        SourceError::Auth(
+                            "slack-search requires a user_token (xoxp-); bot tokens \
+                             cannot call search.messages"
+                                .into(),
+                        )
+                    })?;
+                    Ok(Box::new(slack::search::SlackSearchSource::new(
+                        http,
+                        token.to_string(),
+                    )))
                 }
                 _ => unreachable!(),
             }

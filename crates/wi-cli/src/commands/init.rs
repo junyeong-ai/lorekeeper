@@ -22,7 +22,12 @@ pub async fn credentials(opts: &GlobalOpts, vault_override: Option<PathBuf>) -> 
         Some(v) => v,
         None => load_config(&find_config(opts)?)?.vault.root_path(),
     };
-    let mut creds = Credentials::from_file(&vault_root).map_err(|e| miette::miette!("{e}"))?;
+    // Seed defaults from the existing file, but never let a malformed file block the
+    // wizard — fixing credentials is exactly its job.
+    let mut creds = Credentials::from_file(&vault_root).unwrap_or_else(|e| {
+        eprintln!("! existing credentials.json couldn't be parsed ({e}); starting fresh.");
+        Credentials::default()
+    });
 
     eprintln!(
         "Configuring credentials for vault: {}",
@@ -49,13 +54,25 @@ pub async fn credentials(opts: &GlobalOpts, vault_override: Option<PathBuf>) -> 
     }
 
     if confirm("Configure Slack?", creds.slack.is_some())? {
-        let existing = creds.slack.as_ref();
-        creds.slack = Some(SlackCredentials {
-            bot_token: secret(
-                "  bot_token (xoxb-…)",
-                existing.map(|s| s.bot_token.as_str()),
-            )?,
-        });
+        let existing = creds.slack.clone().unwrap_or_default();
+        // Both optional; slack-search needs a user token, the channel reader takes either.
+        let bot = optional_secret(
+            "  bot_token (xoxb-…, enter to skip)",
+            existing.bot_token.as_deref(),
+        )?;
+        let user = optional_secret(
+            "  user_token (xoxp-…, enter to skip)",
+            existing.user_token.as_deref(),
+        )?;
+        if bot.is_none() && user.is_none() {
+            eprintln!("  (no token entered — leaving Slack unconfigured)");
+            creds.slack = None;
+        } else {
+            creds.slack = Some(SlackCredentials {
+                bot_token: bot,
+                user_token: user,
+            });
+        }
     }
 
     if confirm("Configure Jira?", creds.jira.is_some())? {
@@ -95,6 +112,20 @@ fn input(prompt: &str, existing: Option<&str>) -> miette::Result<String> {
     builder
         .interact_text()
         .map_err(|e| miette::miette!("prompt: {e}"))
+}
+
+/// Masked optional secret. Empty entry keeps the existing value (if any) or means "unset".
+fn optional_secret(prompt: &str, existing: Option<&str>) -> miette::Result<Option<String>> {
+    let entered = Password::new()
+        .with_prompt(prompt)
+        .allow_empty_password(true)
+        .interact()
+        .map_err(|e| miette::miette!("prompt: {e}"))?;
+    Ok(if entered.is_empty() {
+        existing.map(str::to_string)
+    } else {
+        Some(entered)
+    })
 }
 
 /// Masked secret field. When a value already exists, an empty entry keeps it (so the user

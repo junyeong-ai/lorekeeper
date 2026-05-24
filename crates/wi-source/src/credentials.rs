@@ -21,9 +21,27 @@ pub struct GoogleCredentials {
     pub refresh_token: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Slack accepts either a bot token (`xoxb-`) or a user token (`xoxp-`) — or both.
+/// `conversations.history` works with either; `search.messages` requires a user token,
+/// so the slack-search adapter needs `user_token`. At least one must be set.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SlackCredentials {
-    pub bot_token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_token: Option<String>,
+}
+
+impl SlackCredentials {
+    /// Token for `conversations.history` (channel reader): bot token preferred, else user.
+    pub fn history_token(&self) -> Option<&str> {
+        self.bot_token.as_deref().or(self.user_token.as_deref())
+    }
+
+    /// Token for `search.messages`: a user token is mandatory — bot tokens cannot search.
+    pub fn search_token(&self) -> Option<&str> {
+        self.user_token.as_deref()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,8 +123,17 @@ impl Credentials {
             });
         }
 
-        if let Ok(token) = std::env::var("WI_SLACK_TOKEN") {
-            self.slack = Some(SlackCredentials { bot_token: token });
+        let bot = std::env::var("WI_SLACK_TOKEN").ok();
+        let user = std::env::var("WI_SLACK_USER_TOKEN").ok();
+        if bot.is_some() || user.is_some() {
+            let mut slack = self.slack.clone().unwrap_or_default();
+            if let Some(b) = bot {
+                slack.bot_token = Some(b);
+            }
+            if let Some(u) = user {
+                slack.user_token = Some(u);
+            }
+            self.slack = Some(slack);
         }
 
         if let (Ok(url), Ok(email), Ok(token)) = (
@@ -133,7 +160,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let creds = Credentials {
             slack: Some(SlackCredentials {
-                bot_token: "xoxb-abc".into(),
+                user_token: Some("xoxp-abc".into()),
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -141,11 +169,14 @@ mod tests {
         assert_eq!(path, Credentials::path(dir.path()));
 
         let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(raw.contains("slack"), "configured provider present");
+        assert!(raw.contains("user_token"), "configured token present");
+        assert!(!raw.contains("bot_token"), "unset token omitted");
         assert!(!raw.contains("google"), "unset provider omitted");
 
         let back = Credentials::from_file(dir.path()).unwrap();
-        assert_eq!(back.slack.unwrap().bot_token, "xoxb-abc");
+        let slack = back.slack.unwrap();
+        assert_eq!(slack.search_token(), Some("xoxp-abc"));
+        assert_eq!(slack.history_token(), Some("xoxp-abc")); // falls back to user token
         assert!(back.google.is_none());
     }
 

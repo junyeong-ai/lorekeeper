@@ -196,12 +196,24 @@ $EDITOR "<vault_root>/.wiki-ingest/credentials.json"
 ```json
 {
   "google": { "client_id": "...", "client_secret": "...", "refresh_token": "..." },
-  "slack":  { "bot_token": "xoxb-..." },
+  "slack":  { "bot_token": "xoxb-...", "user_token": "xoxp-..." },
   "jira":   { "base_url": "https://...", "email": "...", "api_token": "..." }
 }
 ```
-All three blocks are optional — keep only the sources you use. Matching env vars (all
-of a service's vars together) override the file per service.
+All three blocks are optional — keep only the sources you use. Matching env vars
+(`WI_GOOGLE_*`, `WI_SLACK_TOKEN` / `WI_SLACK_USER_TOKEN`, `WI_JIRA_*`) override the file
+per service.
+
+**Slack tokens**: provide a bot token (`xoxb-`), a user token (`xoxp-`), or both. The
+channel reader (`slack-channel`) accepts either; the keyword-trend search
+(`slack-search`) requires a **user token** because Slack's `search.messages` API is not
+available to bot tokens.
+
+**Google `refresh_token`**: this is not shown in the Cloud Console alongside the
+client ID/secret — it's minted once by completing the OAuth consent flow with
+`access_type=offline` (e.g. via the [OAuth 2.0 Playground](https://developers.google.com/oauthplayground),
+using your own client ID/secret and the Gmail/Drive/Calendar read-only scopes). The
+pipeline then uses it to refresh access tokens unattended.
 
 ## Development
 

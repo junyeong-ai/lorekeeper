@@ -21,6 +21,10 @@ map to `RawItem`.
     which would fall back to `now`).
   - **Gmail**: uses epoch-second `after:`/`before:` from `day_window` (timezone-exact);
     the `include_queries` OR group is parenthesized so the bounds bind to every term.
-  - **Slack**: channel uses `oldest`/`latest` + `inclusive`; search rounds the hour
+  - **Slack** tokens: `SlackCredentials` holds optional `bot_token` (xoxb) and
+    `user_token` (xoxp). `conversations.history` (slack-channel) accepts either
+    (`history_token`, bot preferred); `search.messages` (slack-search) is user-token-only
+    per Slack — `search_token` returns only `user_token` and `create_source` errors if
+    it's absent. Channel uses `oldest`/`latest` + `inclusive`; search rounds the hour
     lookback up to whole days for its date-granular operators.
 - `Source` has no `source_type()` accessor — the factory selects by the input enum.
