@@ -1,9 +1,9 @@
-mod claude;
+mod anthropic;
 pub mod mock;
 mod noop;
 mod queue;
 
-pub use claude::ClaudeClient;
+pub use anthropic::AnthropicClient;
 pub use mock::MockLlmClient;
 pub use noop::NoopLlmClient;
 pub use queue::QueueLlmClient;

@@ -1,6 +1,6 @@
 ---
 name: wiki-ingest
-description: Daily knowledge ingestion pipeline that collects from Gmail, Google Drive, Google Calendar, Slack, and Jira into an Obsidian vault. Deduplicates events, classifies them with configurable labels and personal-work flags, extracts concepts via Claude, and writes structured markdown pages. Tracks personal work for weekly/monthly/quarterly/annual performance reviews. Atomic 4-phase ingest guarantees no data loss on partial failures. Read-only commands (status, health, performance) are safe to invoke any time; ingest and synthesis are typically cron-scheduled but can be triggered ad-hoc.
+description: Daily knowledge ingestion pipeline that collects from Gmail, Google Drive, Google Calendar, Slack, and Jira into an Obsidian vault. Deduplicates events, classifies them with configurable labels and personal-work flags, extracts concepts via Claude, and writes structured markdown pages. Tracks personal work for weekly/monthly/quarterly/annual performance reviews. Atomic 5-phase ingest guarantees no data loss on partial failures. Read-only commands (status, health, performance) are safe to invoke any time; ingest and synthesis are typically cron-scheduled but can be triggered ad-hoc.
 when_to_use: |
   ingest, 수집, 위키 수집, 정리, 업무 정리, 종합 보고, weekly summary, monthly summary,
   quarterly review, annual review, performance review, 성과 리뷰, 분기 리뷰,
@@ -9,7 +9,9 @@ when_to_use: |
   업무 기록, concept extraction, 개념 추출, vault ingest, dedup pruning,
   log rotation, 메일 정리, 캘린더 정리, 슬랙 트렌드, jira 업무, 내 업무 추적
 argument-hint: "<subcommand> [args]"
-allowed-tools: Bash(wi *)
+allowed-tools: |
+  Bash(wi *)
+  Bash(crontab *)
 ---
 
 # wiki-ingest — Daily knowledge ingestion for Obsidian

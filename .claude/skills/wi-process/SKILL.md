@@ -14,6 +14,8 @@ allowed-tools: |
   Bash(head *)
   Bash(mv *)
   Bash(mkdir *)
+  Bash(wi *)
+  Bash(date *)
   mcp__obsidian__*
 ---
 
@@ -187,10 +189,11 @@ succeeded. Failure rules:
 
 ## When NOT to invoke
 
-- `wi ingest` writes the queue file atomically (temp + rename) only at
-  the very end of a successful run, so a concurrent ingest cannot
-  produce a partial `.jsonl` you might consume mid-write. There is no
-  append-while-reading hazard. You may still want to wait so the user
+- `wi ingest` writes the queue file atomically (temp + rename) after all
+  vault pages are written and before it commits dedup, so a concurrent
+  ingest cannot produce a partial `.jsonl` you might consume mid-write.
+  There is no append-while-reading hazard. You may still want to wait so
+  the user
   sees the new pages before they get edited.
 - Don't manually edit the queue-targeted sections between ingest and
   process — your edits will be overwritten.

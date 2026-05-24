@@ -24,6 +24,7 @@ fn default_lookback() -> u32 {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct QuerySpec {
     channel: String,
     keywords: Vec<String>,

@@ -35,12 +35,8 @@ pub fn dedup_cache_for_maintenance(
 
 #[derive(Debug, Error)]
 pub enum PipelineError {
-    #[error("normalize: {0}")]
-    Normalize(String),
     #[error("dedup: {0}")]
     Dedup(String),
-    #[error("classify: {0}")]
-    Classify(String),
     #[error("render: {0}")]
     Render(String),
     #[error(transparent)]

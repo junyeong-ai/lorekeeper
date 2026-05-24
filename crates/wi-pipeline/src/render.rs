@@ -68,7 +68,6 @@ pub fn render_daily_page(
         "events": events_json,
         "summary": summary,
         "concepts": concepts,
-        "events_count": events.len(),
         "total": events.len(),
         "filtered": events.len(),
         "filter_rate": 0,

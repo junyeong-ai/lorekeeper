@@ -28,6 +28,8 @@ pub struct Page {
 /// begins with whitespace then `---`, and a `---` appearing inside a YAML value or a
 /// `---not-a-delimiter` line. CRLF is normalized to LF up front.
 pub fn parse_page(content: &str) -> Result<Page, String> {
+    // Strip a leading UTF-8 BOM so a BOM-prefixed file's frontmatter is still recognized.
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
     let normalized = content.replace("\r\n", "\n");
 
     let Some(rest) = normalized.strip_prefix("---\n") else {
@@ -133,5 +135,14 @@ mod tests {
     #[test]
     fn unclosed_frontmatter_errors() {
         assert!(parse_page("---\nid: x\nno closing delimiter\n").is_err());
+    }
+
+    #[test]
+    fn bom_prefixed_frontmatter_is_recognized() {
+        let page = parse_page("\u{feff}---\nid: bom\n---\n\n# Body\n").unwrap();
+        assert_eq!(
+            page.frontmatter.get("id").and_then(|v| v.as_str()),
+            Some("bom")
+        );
     }
 }

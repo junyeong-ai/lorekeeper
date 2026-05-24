@@ -5,7 +5,7 @@ use wi_core::concept::ExtractedConcept;
 
 use crate::{ExtractConceptsRequest, LlmClient, LlmError, SummarizeRequest};
 
-pub struct ClaudeClient {
+pub struct AnthropicClient {
     http: reqwest::Client,
     api_key: String,
     model: String,
@@ -22,7 +22,7 @@ struct ContentBlock {
     text: Option<String>,
 }
 
-impl ClaudeClient {
+impl AnthropicClient {
     pub fn new(config: &wi_core::config::LlmConfig) -> Result<Self, LlmError> {
         let api_key = std::env::var("ANTHROPIC_API_KEY")
             .map_err(|_| LlmError::Api("ANTHROPIC_API_KEY not set".into()))?;
@@ -99,7 +99,7 @@ fn strip_code_fences(text: &str) -> &str {
 }
 
 #[async_trait]
-impl LlmClient for ClaudeClient {
+impl LlmClient for AnthropicClient {
     async fn summarize(&self, req: SummarizeRequest) -> Result<String, LlmError> {
         self.call(
             "You are a concise summarizer. Output only the summary, no preamble.",

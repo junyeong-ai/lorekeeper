@@ -38,6 +38,7 @@ fn default_lookback() -> u32 {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ExcludeConfig {
     #[serde(default)]
     subjects: Vec<String>,
