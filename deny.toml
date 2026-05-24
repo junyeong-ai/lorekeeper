@@ -21,14 +21,9 @@ allow = [
     "Unicode-3.0",
     "CC0-1.0",
     "Zlib",
-    "MPL-2.0",
-    "OpenSSL",
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.8
-
-[[licenses.exceptions]]
-allow = ["OpenSSL"]
-name = "ring"
 
 [bans]
 multiple-versions = "warn"
