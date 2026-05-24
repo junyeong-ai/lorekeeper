@@ -186,6 +186,12 @@ Two ways to provide credentials, env vars take precedence over file:
 `<vault>/.wiki-ingest/credentials.json` with `0600` permissions. Re-running edits in
 place — press enter to keep an existing secret.
 
+For Google it can **mint the refresh token for you**: it opens the consent page in your
+browser, captures the redirect on a localhost port, and stores the resulting token — no
+OAuth Playground needed. This requires the OAuth client to be of type **"Desktop app"**
+(Google then allows the `http://127.0.0.1` redirect automatically); it requests the
+Gmail / Drive / Calendar **read-only** scopes.
+
 **Credentials file by hand** (one file instead of seven env vars). Copy the template
 and fill in values:
 ```bash
@@ -211,9 +217,11 @@ available to bot tokens.
 
 **Google `refresh_token`**: this is not shown in the Cloud Console alongside the
 client ID/secret — it's minted once by completing the OAuth consent flow with
-`access_type=offline` (e.g. via the [OAuth 2.0 Playground](https://developers.google.com/oauthplayground),
-using your own client ID/secret and the Gmail/Drive/Calendar read-only scopes). The
-pipeline then uses it to refresh access tokens unattended.
+`access_type=offline`. Easiest: run `wi init credentials` and let it mint the token in
+your browser (needs a "Desktop app" OAuth client). Manual alternative: the
+[OAuth 2.0 Playground](https://developers.google.com/oauthplayground) with your own
+client ID/secret and the Gmail/Drive/Calendar read-only scopes. The pipeline then uses
+the refresh token to renew access tokens unattended.
 
 ## Development
 

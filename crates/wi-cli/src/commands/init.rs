@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use dialoguer::{Confirm, Input, Password};
 use wi_source::credentials::{Credentials, GoogleCredentials, JiraCredentials, SlackCredentials};
+use wi_source::obtain_google_refresh_token;
 
 use super::{GlobalOpts, find_config, load_config};
 
@@ -39,17 +40,21 @@ pub async fn credentials(opts: &GlobalOpts, vault_override: Option<PathBuf>) -> 
         "Configure Google (Gmail / Drive / Calendar)?",
         creds.google.is_some(),
     )? {
-        let existing = creds.google.as_ref();
+        let existing = creds.google.clone();
+        let client_id = input(
+            "  client_id",
+            existing.as_ref().map(|g| g.client_id.as_str()),
+        )?;
+        let client_secret = secret(
+            "  client_secret",
+            existing.as_ref().map(|g| g.client_secret.as_str()),
+        )?;
+        let refresh_token =
+            google_refresh_token(existing.as_ref(), &client_id, &client_secret).await?;
         creds.google = Some(GoogleCredentials {
-            client_id: input("  client_id", existing.map(|g| g.client_id.as_str()))?,
-            client_secret: secret(
-                "  client_secret",
-                existing.map(|g| g.client_secret.as_str()),
-            )?,
-            refresh_token: secret(
-                "  refresh_token",
-                existing.map(|g| g.refresh_token.as_str()),
-            )?,
+            client_id,
+            client_secret,
+            refresh_token,
         });
     }
 
@@ -93,6 +98,37 @@ pub async fn credentials(opts: &GlobalOpts, vault_override: Option<PathBuf>) -> 
     eprintln!("\n✓ Wrote {} (owner-only, 0600)", path.display());
     eprintln!("  Run `wi validate` then `wi ingest`.");
     Ok(())
+}
+
+/// Resolve the Google refresh token: keep an existing one, re-authorize in the browser to
+/// mint a fresh one, or paste one manually. A refresh token isn't shown in the Cloud
+/// Console, so the browser flow is the path most users need.
+async fn google_refresh_token(
+    existing: Option<&GoogleCredentials>,
+    client_id: &str,
+    client_secret: &str,
+) -> miette::Result<String> {
+    if let Some(g) = existing.filter(|g| !g.refresh_token.is_empty())
+        && !confirm(
+            "  re-authorize in the browser for a new refresh_token? (No = keep existing)",
+            false,
+        )?
+    {
+        return Ok(g.refresh_token.clone());
+    }
+
+    if confirm(
+        "  authorize in the browser now to mint a refresh_token? (No = paste one)",
+        true,
+    )? {
+        let http = reqwest::Client::new();
+        obtain_google_refresh_token(&http, client_id, client_secret)
+            .await
+            .map_err(|e| miette::miette!("{e}"))
+    } else {
+        // Manual paste — required (no existing value to fall back to here).
+        secret("  refresh_token", None)
+    }
 }
 
 fn confirm(prompt: &str, default: bool) -> miette::Result<bool> {

@@ -23,5 +23,7 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   (clap `conflicts_with`), and flushes the LLM queue after writing its pages.
 - **`wi init credentials`** (in `init.rs`) is the interactive credential wizard. UX
   (dialoguer prompts, masked secrets, TTY guard) lives here; the JSON shape + atomic
-  `0600` write live in `wi_source::credentials` (`from_file`/`save`). `Init` is a
-  subcommand-of-subcommand so future scaffolders (`wi init config`) slot in cleanly.
+  `0600` write live in `wi_source::credentials` (`from_file`/`save`). The Google branch
+  can mint a refresh token via `wi_source::obtain_google_refresh_token` (browser OAuth
+  loopback) or accept a pasted one. `Init` is a subcommand-of-subcommand so future
+  scaffolders (`wi init config`) slot in cleanly.

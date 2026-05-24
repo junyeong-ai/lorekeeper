@@ -1,6 +1,7 @@
 pub mod calendar;
 pub mod drive;
 pub mod gmail;
+pub mod oauth;
 
 use std::sync::Mutex;
 

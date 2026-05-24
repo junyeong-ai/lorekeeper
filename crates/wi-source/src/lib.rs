@@ -14,6 +14,10 @@ use wi_core::event::RawItem;
 use credentials::Credentials;
 use google::GoogleAuth;
 
+/// Mint a Google refresh token via an interactive OAuth loopback flow (used by
+/// `wi init credentials`).
+pub use google::oauth::obtain_refresh_token as obtain_google_refresh_token;
+
 #[derive(Debug, Error)]
 pub enum SourceError {
     #[error("HTTP: {0}")]
