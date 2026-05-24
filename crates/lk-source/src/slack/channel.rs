@@ -1,9 +1,11 @@
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use serde::Deserialize;
 
 use lk_core::event::RawItem;
 
-use super::{resolve_channel_id, slack_post};
+use super::{resolve_channel_id, resolve_users, slack_post};
 use crate::markdown::slack_to_markdown;
 use crate::{ExtractContext, Source, SourceError};
 
@@ -146,6 +148,8 @@ impl Source for SlackChannelSource {
         let p: ChannelParams = serde_json::from_value(params.clone())
             .map_err(|e| SourceError::InvalidParams(e.to_string()))?;
 
+        let users = resolve_users(&self.http, &self.token).await;
+
         let (oldest, latest) = ctx.day_window(p.lookback_hours, 0)?;
         let oldest_ts = format!("{}.000000", oldest.as_second());
         let latest_ts = format!("{}.000000", latest.as_second());
@@ -202,20 +206,42 @@ impl Source for SlackChannelSource {
                     continue;
                 }
 
-                let body = render_thread(&thread, ctx.locale.strings().thread_replies);
+                let body = render_thread(&thread, ctx.locale.strings().thread_replies, &users);
                 // Title from the converted body so it shares the Markdown normalization
                 // (mentions/entities resolved) rather than showing raw Slack tokens.
                 let title = body.lines().next().unwrap_or_default().to_string();
+                // Strip the first line from body so it doesn't duplicate the heading.
+                let body = body
+                    .split_once('\n')
+                    .map(|x| x.1)
+                    .unwrap_or("")
+                    .trim_start()
+                    .to_string();
+
                 let secs: f64 = root.ts.parse().unwrap_or(0.0);
                 let ts = jiff::Timestamp::from_second(secs as i64)
                     .unwrap_or_else(|_| jiff::Timestamp::now());
+
+                // Standard Slack permalink: /archives/{channel}/p{ts_no_dot}
+                let permalink = format!(
+                    "https://slack.com/archives/{}/p{}",
+                    channel_id,
+                    root.ts.replace('.', "")
+                );
+
+                // Resolve author user id to display name.
+                let author = root
+                    .user
+                    .as_ref()
+                    .and_then(|uid| users.get(uid).cloned())
+                    .or(root.user.clone());
 
                 items.push(RawItem {
                     external_id: Some(format!("{channel_id}/{}", root.ts)),
                     title,
                     body,
-                    url: None,
-                    author: root.user.clone(),
+                    url: Some(permalink),
+                    author,
                     timestamp: ts,
                     metadata: serde_json::json!({
                         "channel": channel_name,
@@ -237,8 +263,12 @@ impl Source for SlackChannelSource {
 
 /// Render a message (and its thread, if present) as Markdown. The root becomes the body;
 /// replies are listed under a marker so the LLM sees the full discussion in order.
-fn render_thread(thread: &[SlackMessage], replies_label: &str) -> String {
-    let render = |m: &SlackMessage| slack_to_markdown(m.text.as_deref().unwrap_or(""));
+fn render_thread(
+    thread: &[SlackMessage],
+    replies_label: &str,
+    users: &HashMap<String, String>,
+) -> String {
+    let render = |m: &SlackMessage| slack_to_markdown(m.text.as_deref().unwrap_or(""), users);
     let Some((root, replies)) = thread.split_first() else {
         return String::new();
     };
@@ -248,8 +278,9 @@ fn render_thread(thread: &[SlackMessage], replies_label: &str) -> String {
     }
     let mut out = format!("{root_md}\n\n--- {replies_label} {} ---", replies.len());
     for r in replies {
-        let user = r.user.as_deref().unwrap_or("unknown");
-        out.push_str(&format!("\n@{user}: {}", render(r)));
+        let raw_uid = r.user.as_deref().unwrap_or("unknown");
+        let display = users.get(raw_uid).map(String::as_str).unwrap_or(raw_uid);
+        out.push_str(&format!("\n@{display}: {}", render(r)));
     }
     out
 }
@@ -268,6 +299,10 @@ mod tests {
             bot_id: None,
             subtype: None,
         }
+    }
+
+    fn no_users() -> HashMap<String, String> {
+        HashMap::new()
     }
 
     #[test]
@@ -320,21 +355,27 @@ mod tests {
 
     #[test]
     fn render_thread_lists_replies() {
+        let mut users = HashMap::new();
+        users.insert("U1".to_string(), "Alice".to_string());
+        users.insert("U2".to_string(), "Bob".to_string());
         let thread = vec![
             msg("1", "U1", "root question"),
             msg("2", "U2", "first answer"),
             msg("3", "U1", "thanks <@U2>"),
         ];
-        let body = render_thread(&thread, "쓰레드 답글");
+        let body = render_thread(&thread, "쓰레드 답글", &users);
         assert!(body.starts_with("root question"));
         assert!(body.contains("--- 쓰레드 답글 2 ---"));
-        assert!(body.contains("@U2: first answer"));
-        assert!(body.contains("@U1: thanks @U2")); // slack mention normalized
+        assert!(body.contains("@Bob: first answer"));
+        assert!(body.contains("@Alice: thanks @Bob")); // slack mention + user resolved
     }
 
     #[test]
     fn render_single_message_is_just_body() {
         let thread = vec![msg("1", "U1", "solo <@U2> ping")];
-        assert_eq!(render_thread(&thread, "쓰레드 답글"), "solo @U2 ping");
+        assert_eq!(
+            render_thread(&thread, "쓰레드 답글", &no_users()),
+            "solo @U2 ping"
+        );
     }
 }

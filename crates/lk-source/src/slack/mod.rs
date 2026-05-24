@@ -1,6 +1,8 @@
 pub mod channel;
 pub mod search;
 
+use std::collections::HashMap;
+
 use serde::Deserialize;
 
 use crate::SourceError;
@@ -70,6 +72,81 @@ fn looks_like_channel_id(s: &str) -> bool {
         && s.len() >= 9
         && s.chars()
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+}
+
+/// Resolve all workspace user IDs to display names via `users.list`. Returns an empty map
+/// on any error so callers degrade gracefully to raw IDs.
+pub(crate) async fn resolve_users(http: &reqwest::Client, token: &str) -> HashMap<String, String> {
+    #[derive(Deserialize)]
+    struct Profile {
+        display_name: Option<String>,
+        real_name: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    struct Member {
+        id: String,
+        name: Option<String>,
+        profile: Option<Profile>,
+    }
+
+    #[derive(Deserialize)]
+    struct ResponseMetadata {
+        #[serde(default)]
+        next_cursor: String,
+    }
+
+    #[derive(Deserialize)]
+    struct MembersPage {
+        #[serde(default)]
+        members: Vec<Member>,
+        #[serde(default)]
+        response_metadata: Option<ResponseMetadata>,
+    }
+
+    fn display_name(m: &Member) -> String {
+        m.profile
+            .as_ref()
+            .and_then(|p| {
+                p.display_name
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .or(p.real_name.as_deref().filter(|s| !s.is_empty()))
+            })
+            .or(m.name.as_deref())
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    // Paginate through the full member list (large workspaces exceed 1000).
+    let mut map = HashMap::new();
+    let mut cursor = String::new();
+    loop {
+        let mut params: Vec<(&str, &str)> = vec![("limit", "200")];
+        if !cursor.is_empty() {
+            params.push(("cursor", cursor.as_str()));
+        }
+        let page: Result<MembersPage, _> = slack_post(http, token, "users.list", &params).await;
+        match page {
+            Ok(data) => {
+                for m in &data.members {
+                    map.insert(m.id.clone(), display_name(m));
+                }
+                cursor = data
+                    .response_metadata
+                    .map(|r| r.next_cursor)
+                    .unwrap_or_default();
+                if cursor.is_empty() {
+                    break;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to resolve Slack users; falling back to raw IDs");
+                break;
+            }
+        }
+    }
+    map
 }
 
 async fn resolve_channel_id(

@@ -3,7 +3,8 @@ use serde::Deserialize;
 
 use lk_core::event::RawItem;
 
-use super::slack_post;
+use super::{resolve_users, slack_post};
+use crate::markdown::slack_to_markdown;
 use crate::{ExtractContext, Source, SourceError};
 
 pub struct SlackSearchSource {
@@ -58,6 +59,7 @@ struct SearchMatch {
 
 #[derive(Debug, Deserialize)]
 struct MatchChannel {
+    id: Option<String>,
     name: Option<String>,
 }
 
@@ -76,6 +78,8 @@ impl Source for SlackSearchSource {
     ) -> Result<Vec<RawItem>, SourceError> {
         let p: SearchParams = serde_json::from_value(params.clone())
             .map_err(|e| SourceError::InvalidParams(e.to_string()))?;
+
+        let users = resolve_users(&self.http, &self.token).await;
 
         // Slack search date operators are day-granular and exclusive. Bound the query
         // to the target day (`after` the prior day, `before` the next) anchored to
@@ -123,7 +127,16 @@ impl Source for SlackSearchSource {
             );
 
             for m in matches {
-                let title = m.text.lines().next().unwrap_or_default().to_string();
+                let body = slack_to_markdown(&m.text, &users);
+                let title = body.lines().next().unwrap_or_default().to_string();
+                // Strip the first line from body so it doesn't duplicate the heading.
+                let body = body
+                    .split_once('\n')
+                    .map(|x| x.1)
+                    .unwrap_or("")
+                    .trim_start()
+                    .to_string();
+
                 let secs: f64 = m.ts.parse().unwrap_or(0.0);
                 let ts = jiff::Timestamp::from_second(secs as i64)
                     .unwrap_or_else(|_| jiff::Timestamp::now());
@@ -134,12 +147,30 @@ impl Source for SlackSearchSource {
                     .and_then(|c| c.name.as_deref())
                     .unwrap_or(channel_name);
 
+                // Resolve author user id to display name.
+                let author = m
+                    .user
+                    .as_ref()
+                    .and_then(|uid| users.get(uid).cloned())
+                    .or(m.user);
+
+                // Use the API permalink if available, otherwise construct one.
+                let url = m.permalink.or_else(|| {
+                    m.channel.as_ref().and_then(|c| c.id.as_ref()).map(|cid| {
+                        format!(
+                            "https://slack.com/archives/{}/p{}",
+                            cid,
+                            m.ts.replace('.', "")
+                        )
+                    })
+                });
+
                 all_items.push(RawItem {
                     external_id: Some(format!("search:{ch}/{}", m.ts)),
                     title,
-                    body: m.text,
-                    url: m.permalink,
-                    author: m.user,
+                    body,
+                    url,
+                    author,
                     timestamp: ts,
                     metadata: serde_json::json!({
                         "channel": ch,

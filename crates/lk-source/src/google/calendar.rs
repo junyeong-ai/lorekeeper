@@ -176,18 +176,17 @@ impl Source for CalendarSource {
                     .map(crate::markdown::html_to_markdown)
                     .unwrap_or_default();
                 let s = ctx.locale.strings();
-                let body = format!(
-                    "{}\n\n{}: {}\n{}: {}",
-                    description,
-                    s.location,
-                    ev.location.as_deref().unwrap_or("N/A"),
-                    s.attendees,
-                    if attendee_names.is_empty() {
-                        "N/A".into()
-                    } else {
-                        attendee_names.join(", ")
-                    }
-                );
+                let mut body_parts: Vec<String> = Vec::new();
+                if !description.is_empty() {
+                    body_parts.push(description);
+                }
+                if let Some(loc) = ev.location.as_deref().filter(|l| !l.is_empty()) {
+                    body_parts.push(format!("{}: {loc}", s.location));
+                }
+                if !attendee_names.is_empty() {
+                    body_parts.push(format!("{}: {}", s.attendees, attendee_names.join(", ")));
+                }
+                let body = body_parts.join("\n\n");
 
                 Some(RawItem {
                     external_id: Some(id),

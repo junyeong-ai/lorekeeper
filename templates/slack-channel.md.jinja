@@ -19,9 +19,7 @@ events_count: {{ events | length }}
 ### {{ event.title }}
 
 {{ event.body }}
-{% if event.author %}
-— {{ event.author }}
-{% endif %}
+{% if event.author %}— {{ event.author }}{% endif %}{% if event.url %} [🔗]({{ event.url }}){% endif %}
 
 {% endfor %}
 ## {{ i18n.related_concepts }}

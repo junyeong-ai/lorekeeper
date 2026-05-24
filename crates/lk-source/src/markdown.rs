@@ -3,6 +3,8 @@
 //! Slack's `<…>` token soup. Conversions are loss-averse: any construct without a Markdown
 //! equivalent degrades to its text content rather than being dropped.
 
+use std::collections::HashMap;
+
 use serde_json::Value;
 
 /// Convert an HTML fragment to Markdown via `htmd`. On any conversion error the original
@@ -176,13 +178,16 @@ fn apply_marks(text_node: &Value) -> String {
 }
 
 /// Convert Slack mrkdwn to Markdown: rewrite `<…>` tokens (user/channel mentions, special
-/// commands, links) and decode HTML entities. Emphasis markers (`*`, `_`, `~`) are left
-/// as-is — they remain readable text, so no information is lost.
-pub fn slack_to_markdown(text: &str) -> String {
-    decode_entities(&rewrite_angle_tokens(text))
+/// commands, links) and decode HTML entities. User-id mentions are resolved to display
+/// names via `users`. Emphasis markers (`*`, `_`, `~`) are left as-is — they remain
+/// readable text, so no information is lost.
+pub fn slack_to_markdown(text: &str, users: &HashMap<String, String>) -> String {
+    let rewritten = rewrite_angle_tokens(text, users);
+    let decoded = decode_entities(&rewritten);
+    strip_emoji_shortcodes(&decoded)
 }
 
-fn rewrite_angle_tokens(text: &str) -> String {
+fn rewrite_angle_tokens(text: &str, users: &HashMap<String, String>) -> String {
     let mut out = String::new();
     let mut rest = text;
     while let Some(lt) = rest.find('<') {
@@ -190,7 +195,7 @@ fn rewrite_angle_tokens(text: &str) -> String {
         let after = &rest[lt + 1..];
         match after.find('>') {
             Some(gt) => {
-                out.push_str(&convert_slack_token(&after[..gt]));
+                out.push_str(&convert_slack_token(&after[..gt], users));
                 rest = &after[gt + 1..];
             }
             // Unbalanced '<' — emit literally and continue past it.
@@ -212,12 +217,15 @@ fn label_after_pipe(s: &str) -> Option<&str> {
     s.split('|').nth(1).filter(|l| !l.is_empty())
 }
 
-fn convert_slack_token(token: &str) -> String {
+fn convert_slack_token(token: &str, users: &HashMap<String, String>) -> String {
     if let Some(rest) = token.strip_prefix('@') {
-        format!(
-            "@{}",
-            label_after_pipe(rest).unwrap_or_else(|| rest.split('|').next().unwrap_or(rest))
-        )
+        // Prefer the pipe-label, then the resolved display name, then the raw user id.
+        let user_id = rest.split('|').next().unwrap_or(rest);
+        let name = label_after_pipe(rest)
+            .map(|s| s.to_string())
+            .or_else(|| users.get(user_id).cloned())
+            .unwrap_or_else(|| user_id.to_string());
+        format!("@{name}")
     } else if let Some(rest) = token.strip_prefix('#') {
         format!(
             "#{}",
@@ -243,9 +251,44 @@ fn decode_entities(text: &str) -> String {
         .replace("&amp;", "&")
 }
 
+/// Strip Slack emoji shortcodes (`:grin:`, `:custom_emoji:`). Emoji aren't core
+/// information in long-lived documents — they're decorative — so removing them is
+/// cleaner than maintaining an ever-growing mapping table (standard + per-workspace
+/// custom emoji make exhaustive conversion infeasible and a maintenance burden).
+fn strip_emoji_shortcodes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(':') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        match after.find(':') {
+            Some(end) if end > 0 && end <= 40 => {
+                let code = &after[..end];
+                let is_shortcode = !code.contains(' ')
+                    && code
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '+');
+                if is_shortcode {
+                    // Drop the shortcode entirely (no replacement needed).
+                    rest = &after[end + 1..];
+                } else {
+                    out.push(':');
+                    rest = after;
+                }
+            }
+            _ => {
+                out.push(':');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Squeeze 3+ consecutive newlines down to a paragraph break so converted blocks don't
 /// accumulate excess vertical whitespace.
-fn collapse_blank_lines(text: &str) -> String {
+pub fn collapse_blank_lines(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut newlines = 0;
     for ch in text.chars() {
@@ -319,22 +362,52 @@ mod tests {
         assert_eq!(adf_to_markdown(&adf), "```rust\nlet x = 1;\n```");
     }
 
+    fn no_users() -> HashMap<String, String> {
+        HashMap::new()
+    }
+
     #[test]
     fn slack_tokens_rewritten() {
-        assert_eq!(slack_to_markdown("hi <@U123>"), "hi @U123");
-        assert_eq!(slack_to_markdown("<@U1|june> shipped"), "@june shipped");
-        assert_eq!(slack_to_markdown("see <#C1|general>"), "see #general");
+        let u = no_users();
+        assert_eq!(slack_to_markdown("hi <@U123>", &u), "hi @U123");
+        assert_eq!(slack_to_markdown("<@U1|june> shipped", &u), "@june shipped");
+        assert_eq!(slack_to_markdown("see <#C1|general>", &u), "see #general");
         assert_eq!(
-            slack_to_markdown("docs <https://x.io|here>"),
+            slack_to_markdown("docs <https://x.io|here>", &u),
             "docs [here](https://x.io)"
         );
-        assert_eq!(slack_to_markdown("raw <https://x.io>"), "raw https://x.io");
-        assert_eq!(slack_to_markdown("<!here> ping"), "@here ping");
+        assert_eq!(
+            slack_to_markdown("raw <https://x.io>", &u),
+            "raw https://x.io"
+        );
+        assert_eq!(slack_to_markdown("<!here> ping", &u), "@here ping");
+    }
+
+    #[test]
+    fn slack_resolves_user_id_to_display_name() {
+        let mut users = HashMap::new();
+        users.insert("U123".to_string(), "Alice".to_string());
+        assert_eq!(slack_to_markdown("hi <@U123>", &users), "hi @Alice");
+        // Pipe-label still takes priority over the resolved name.
+        assert_eq!(slack_to_markdown("<@U123|bob> said", &users), "@bob said");
     }
 
     #[test]
     fn slack_decodes_entities() {
-        assert_eq!(slack_to_markdown("a &lt;b&gt; &amp; c"), "a <b> & c");
+        assert_eq!(
+            slack_to_markdown("a &lt;b&gt; &amp; c", &no_users()),
+            "a <b> & c"
+        );
+    }
+
+    #[test]
+    fn slack_emoji_shortcodes_stripped() {
+        let u = no_users();
+        // Emoji shortcodes are stripped entirely (not converted) — they're decorative,
+        // not core document information, and maintaining a mapping is infeasible.
+        assert_eq!(slack_to_markdown(":+1: great", &u), " great");
+        assert_eq!(slack_to_markdown(":pray::fire:", &u), "");
+        assert_eq!(slack_to_markdown(":custom_parrot:", &u), "");
     }
 
     #[test]
@@ -348,6 +421,6 @@ mod tests {
     #[test]
     fn empty_inputs_are_empty() {
         assert_eq!(html_to_markdown("   "), "");
-        assert_eq!(slack_to_markdown(""), "");
+        assert_eq!(slack_to_markdown("", &no_users()), "");
     }
 }
