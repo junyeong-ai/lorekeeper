@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::{build_llm_client, find_config, load_config, parse_date, resolve_template_dir};
+use super::{build_llm_client, find_config, load_config, parse_date};
 
 pub async fn run(
     opts: &super::GlobalOpts,
@@ -77,12 +77,8 @@ pub async fn run(
     let extract_target = target_date.unwrap_or(today);
 
     let ctx = Arc::new(
-        wi_pipeline::PipelineContext::new(
-            &resolve_template_dir(opts, &vault_root),
-            llm.clone(),
-            &config,
-        )
-        .map_err(|e| miette::miette!("{e}"))?,
+        wi_pipeline::PipelineContext::new(opts.template_dir.as_deref(), llm.clone(), &config)
+            .map_err(|e| miette::miette!("{e}"))?,
     );
     let pipeline = Arc::new(
         if dry_run {

@@ -20,7 +20,7 @@ pub struct PipelineContext {
 
 impl PipelineContext {
     pub fn new(
-        template_dir: &Path,
+        template_dir: Option<&Path>,
         llm: Arc<dyn LlmClient>,
         config: &Config,
     ) -> Result<Self, PipelineError> {

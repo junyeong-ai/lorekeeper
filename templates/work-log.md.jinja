@@ -1,13 +1,13 @@
 ---
 id: work-log-{{ date }}
-title: "업무 기록 {{ date }}"
+title: "{{ i18n.work_log_title }} {{ date }}"
 created: {{ date }}
 labels: ["personal"]
 categories: {{ categories | tojson }}
 sources: {{ sources | tojson }}
 ---
 
-# 업무 기록 {{ date }}
+# {{ i18n.work_log_title }} {{ date }}
 
 {% for group in groups %}
 ## {{ group.category }}

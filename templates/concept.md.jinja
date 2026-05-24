@@ -12,15 +12,15 @@ tags: {{ tags | tojson }}
 
 # {{ name }}
 
-## 출처
+## {{ i18n.concept_sources }}
 
 {% for source in sources %}
 - [[{{ source }}]]
 {% endfor %}
 
-## 메타
+## {{ i18n.concept_meta }}
 
-- 처음 등장: {{ first_seen }}
-- 최근 등장: {{ last_seen }}
-- 참조 횟수: {{ reference_count }}
-- 추출 방식: {{ confidence }}
+- {{ i18n.first_seen }}: {{ first_seen }}
+- {{ i18n.last_seen }}: {{ last_seen }}
+- {{ i18n.reference_count }}: {{ reference_count }}
+- {{ i18n.confidence }}: {{ confidence }}

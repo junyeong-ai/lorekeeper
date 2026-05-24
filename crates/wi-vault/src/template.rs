@@ -8,19 +8,58 @@ use crate::VaultError;
 /// of these by name; otherwise these are used — so a binary-only install (no repo, no
 /// templates dir) always has every template and never falls back to ad-hoc rendering.
 const EMBEDDED: &[(&str, &str)] = &[
-    ("annual-review.md.jinja", include_str!("../../../templates/annual-review.md.jinja")),
-    ("concept.md.jinja", include_str!("../../../templates/concept.md.jinja")),
-    ("gmail.md.jinja", include_str!("../../../templates/gmail.md.jinja")),
-    ("google-calendar.md.jinja", include_str!("../../../templates/google-calendar.md.jinja")),
-    ("google-drive.md.jinja", include_str!("../../../templates/google-drive.md.jinja")),
-    ("jira.md.jinja", include_str!("../../../templates/jira.md.jinja")),
-    ("monthly-summary.md.jinja", include_str!("../../../templates/monthly-summary.md.jinja")),
-    ("quarterly-review.md.jinja", include_str!("../../../templates/quarterly-review.md.jinja")),
-    ("slack-channel.md.jinja", include_str!("../../../templates/slack-channel.md.jinja")),
-    ("slack-search.md.jinja", include_str!("../../../templates/slack-search.md.jinja")),
-    ("weekly-personal.md.jinja", include_str!("../../../templates/weekly-personal.md.jinja")),
-    ("weekly-synthesis.md.jinja", include_str!("../../../templates/weekly-synthesis.md.jinja")),
-    ("work-log.md.jinja", include_str!("../../../templates/work-log.md.jinja")),
+    (
+        "annual-review.md.jinja",
+        include_str!("../../../templates/annual-review.md.jinja"),
+    ),
+    (
+        "concept.md.jinja",
+        include_str!("../../../templates/concept.md.jinja"),
+    ),
+    (
+        "gmail.md.jinja",
+        include_str!("../../../templates/gmail.md.jinja"),
+    ),
+    (
+        "google-calendar.md.jinja",
+        include_str!("../../../templates/google-calendar.md.jinja"),
+    ),
+    (
+        "google-drive.md.jinja",
+        include_str!("../../../templates/google-drive.md.jinja"),
+    ),
+    (
+        "jira.md.jinja",
+        include_str!("../../../templates/jira.md.jinja"),
+    ),
+    (
+        "monthly-summary.md.jinja",
+        include_str!("../../../templates/monthly-summary.md.jinja"),
+    ),
+    (
+        "quarterly-review.md.jinja",
+        include_str!("../../../templates/quarterly-review.md.jinja"),
+    ),
+    (
+        "slack-channel.md.jinja",
+        include_str!("../../../templates/slack-channel.md.jinja"),
+    ),
+    (
+        "slack-search.md.jinja",
+        include_str!("../../../templates/slack-search.md.jinja"),
+    ),
+    (
+        "weekly-personal.md.jinja",
+        include_str!("../../../templates/weekly-personal.md.jinja"),
+    ),
+    (
+        "weekly-synthesis.md.jinja",
+        include_str!("../../../templates/weekly-synthesis.md.jinja"),
+    ),
+    (
+        "work-log.md.jinja",
+        include_str!("../../../templates/work-log.md.jinja"),
+    ),
 ];
 
 fn embedded(name: &str) -> Option<String> {
@@ -35,20 +74,26 @@ pub struct TemplateEngine {
 }
 
 impl TemplateEngine {
-    pub fn new(template_dir: &Path) -> Result<Self, VaultError> {
+    /// `user_dir: Some` overrides embedded templates per-file from that directory;
+    /// `None` uses only the embedded defaults. There is no implicit directory search —
+    /// the embedded copies are the source of truth.
+    pub fn new(user_dir: Option<&Path>) -> Result<Self, VaultError> {
         let mut env = Environment::new();
-        let dir = template_dir.to_path_buf();
-        // User dir wins (per-deployment override); the embedded copy is the default.
+        let dir = user_dir.map(Path::to_path_buf);
         env.set_loader(move |name| {
-            let path = dir.join(name);
-            match std::fs::read_to_string(&path) {
-                Ok(src) => Ok(Some(src)),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(embedded(name)),
-                Err(e) => Err(minijinja::Error::new(
-                    minijinja::ErrorKind::InvalidOperation,
-                    format!("read template {name}: {e}"),
-                )),
+            if let Some(d) = &dir {
+                match std::fs::read_to_string(d.join(name)) {
+                    Ok(src) => return Ok(Some(src)),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        return Err(minijinja::Error::new(
+                            minijinja::ErrorKind::InvalidOperation,
+                            format!("read template {name}: {e}"),
+                        ));
+                    }
+                }
             }
+            Ok(embedded(name))
         });
         Ok(Self { env })
     }

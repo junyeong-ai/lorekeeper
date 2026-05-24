@@ -1,30 +1,30 @@
 ---
 id: {{ source_id }}-{{ date }}
-title: "슬랙 키워드 트렌드 {{ date }}"
+title: "{{ i18n.slack_search_title }} {{ date }}"
 created: {{ date }}
 labels: {{ labels | tojson }}
 source: {{ source_id }}
 events_count: {{ events | length }}
 ---
 
-# 슬랙 키워드 트렌드 {{ date }}
+# {{ i18n.slack_search_title }} {{ date }}
 
-## 요약
+## {{ i18n.summary }}
 
 {{ summary }}
 
-## 주요 메시지
+## {{ i18n.key_messages }}
 
 {% for event in events %}
 ### {{ event.title }}
 
 {{ event.body }}
 {% if event.url %}
-[원본 메시지]({{ event.url }})
+[{{ i18n.original_message }}]({{ event.url }})
 {% endif %}
 
 {% endfor %}
-## 관련 개념
+## {{ i18n.related_concepts }}
 
 {% for concept in concepts %}
 - [[{{ concept }}]]

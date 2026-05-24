@@ -1,19 +1,19 @@
 ---
 id: {{ source_id }}-{{ date }}
-title: "AI 뉴스 {{ date }}"
+title: "{{ i18n.drive_title }} {{ date }}"
 created: {{ date }}
 labels: {{ labels | tojson }}
 source: {{ source_id }}
 events_count: {{ events | length }}
 ---
 
-# AI 뉴스 {{ date }}
+# {{ i18n.drive_title }} {{ date }}
 
-## 요약
+## {{ i18n.summary }}
 
 {{ summary }}
 
-## 주요 이벤트
+## {{ i18n.key_events }}
 
 {% for event in events %}
 ### {{ event.title }}
@@ -21,7 +21,7 @@ events_count: {{ events | length }}
 {{ event.body }}
 
 {% endfor %}
-## 관련 개념
+## {{ i18n.related_concepts }}
 
 {% for concept in concepts %}
 - [[{{ concept }}]]

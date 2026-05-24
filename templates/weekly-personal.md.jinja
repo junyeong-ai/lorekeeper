@@ -1,23 +1,23 @@
 ---
 id: me-{{ year }}-W{{ "%02d" | format(week) }}
-title: "내 주간 업무 {{ year }}-W{{ "%02d" | format(week) }}"
+title: "{{ i18n.weekly_personal_title }} {{ year }}-W{{ "%02d" | format(week) }}"
 created: {{ end_date }}
 labels: ["personal"]
 period: "{{ year }}-W{{ "%02d" | format(week) }}"
 days_logged: {{ days_logged }}
 ---
 
-# 내 주간 업무 {{ year }}-W{{ "%02d" | format(week) }}
+# {{ i18n.weekly_personal_title }} {{ year }}-W{{ "%02d" | format(week) }}
 
-## 기간
+## {{ i18n.period }}
 
 {{ start_date }} ~ {{ end_date }}
 
-## 핵심 요약
+## {{ i18n.key_summary }}
 
 {{ narrative }}
 
-## 업무 카테고리
+## {{ i18n.work_categories }}
 
 {% for c in categories %}
 - {{ c }}

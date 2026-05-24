@@ -288,7 +288,7 @@ impl Pipeline {
     /// Call once after all sources are planned and before committing dedup.
     pub async fn render_concept_pages(&self) -> Result<Vec<RenderOutput>, PipelineError> {
         let drafts = self.concept_drafts.lock().await;
-        drafts.render(&self.ctx.engine, &self.ctx.dirs)
+        drafts.render(&self.ctx.engine, &self.ctx.dirs, self.ctx.locale)
     }
 
     /// Mark events as processed. Call AFTER vault writes succeed to avoid losing pages

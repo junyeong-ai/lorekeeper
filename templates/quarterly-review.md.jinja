@@ -1,32 +1,32 @@
 ---
 id: performance-{{ year }}-Q{{ quarter }}
-title: "{{ year }}년 {{ quarter }}분기 업무 성과 리뷰"
+title: "{{ title }}"
 created: {{ date }}
 labels: ["personal", "strategy"]
 period: "{{ year }}-Q{{ quarter }}"
 ---
 
-# {{ year }}년 {{ quarter }}분기 업무 성과 리뷰
+# {{ title }}
 
-## 기간
+## {{ i18n.period }}
 
 {{ start_date }} ~ {{ end_date }}
 
-## 업무 카테고리 분포
+## {{ i18n.category_distribution }}
 
-| 카테고리 | 건수 | 비중 |
+| {{ i18n.col_category }} | {{ i18n.col_count }} | {{ i18n.col_ratio }} |
 |---|---|---|
 {% for cat in category_stats %}
 | {{ cat.name }} | {{ cat.count }} | {{ cat.percent }}% |
 {% endfor %}
 
-## 주요 성과 Top 5
+## {{ i18n.top_achievements }}
 
 {% for a in achievements %}
 {{ loop.index }}. {{ a }}
 {% endfor %}
 
-## 월별 요약
+## {{ i18n.monthly_breakdown }}
 
 {% for m in monthly_summaries %}
 ### {{ m.month }}
@@ -35,14 +35,14 @@ period: "{{ year }}-Q{{ quarter }}"
 
 {% endfor %}
 
-## 팀 내 기여도
+## {{ i18n.team_contribution }}
 
 {{ team_contribution }}
 
-## 성장 영역
+## {{ i18n.growth_areas }}
 
 {{ growth_areas }}
 
-## 다음 분기 방향
+## {{ i18n.next_quarter }}
 
 {{ next_direction }}

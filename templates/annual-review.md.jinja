@@ -1,18 +1,18 @@
 ---
 id: annual-{{ year }}
-title: "{{ year }}년 연간 성과 리뷰"
+title: "{{ title }}"
 created: {{ year }}-12-31
 labels: ["personal", "strategy"]
 period: "{{ year }}"
 ---
 
-# {{ year }}년 연간 성과 리뷰
+# {{ title }}
 
-## 종합 요약
+## {{ i18n.overall_summary }}
 
 {{ narrative }}
 
-## 분기별 요약
+## {{ i18n.quarterly_breakdown }}
 
 {% for q in quarter_summaries %}
 ### {{ q.quarter }}
@@ -21,7 +21,7 @@ period: "{{ year }}"
 
 {% endfor %}
 
-## 업무 카테고리
+## {{ i18n.work_categories }}
 
 {% for c in categories %}
 - {{ c }}

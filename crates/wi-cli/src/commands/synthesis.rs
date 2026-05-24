@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::{build_llm_client, find_config, load_config, parse_date, resolve_template_dir};
+use super::{build_llm_client, find_config, load_config, parse_date};
 
 pub enum Period {
     Weekly {
@@ -27,12 +27,8 @@ pub async fn run(opts: &super::GlobalOpts, period: Period) -> miette::Result<()>
     let llm = build_llm_client(&config, &vault_root);
 
     let ctx = Arc::new(
-        wi_pipeline::PipelineContext::new(
-            &resolve_template_dir(opts, &vault_root),
-            llm.clone(),
-            &config,
-        )
-        .map_err(|e| miette::miette!("{e}"))?,
+        wi_pipeline::PipelineContext::new(opts.template_dir.as_deref(), llm.clone(), &config)
+            .map_err(|e| miette::miette!("{e}"))?,
     );
     let synth = wi_pipeline::Synthesizer::new(&vault_root, ctx, &config);
     let writer = wi_vault::VaultWriter::new(&vault_root);

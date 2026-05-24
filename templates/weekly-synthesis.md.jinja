@@ -1,15 +1,15 @@
 ---
 id: synthesis-{{ year }}-W{{ "%02d" | format(week) }}
-title: "주간 종합 {{ year }}-W{{ "%02d" | format(week) }}"
+title: "{{ i18n.weekly_synthesis_title }} {{ year }}-W{{ "%02d" | format(week) }}"
 created: {{ date }}
 labels: {{ labels | tojson }}
 period: "{{ year }}-W{{ "%02d" | format(week) }}"
 sources_covered: {{ sources | tojson }}
 ---
 
-# 주간 종합 {{ year }}-W{{ "%02d" | format(week) }}
+# {{ i18n.weekly_synthesis_title }} {{ year }}-W{{ "%02d" | format(week) }}
 
-## 이번 주 핵심 주제
+## {{ i18n.key_themes_this_week }}
 
 {% for theme in themes %}
 ### {{ loop.index }}. {{ theme.title }}
@@ -18,7 +18,7 @@ sources_covered: {{ sources | tojson }}
 
 {% endfor %}
 
-## 소스별 요약
+## {{ i18n.source_summaries }}
 
 {% for source in source_summaries %}
 ### {{ source.source_id }}
@@ -27,7 +27,7 @@ sources_covered: {{ sources | tojson }}
 
 {% endfor %}
 
-## 새로 등장한 개념
+## {{ i18n.new_concepts }}
 
 {% for concept in new_concepts %}
 - [[{{ concept }}]]

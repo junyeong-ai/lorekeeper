@@ -90,35 +90,3 @@ pub fn parse_date(
         None => Ok(fallback),
     }
 }
-
-/// Resolve template directory lookup order:
-///   1. `--template-dir` / `WI_TEMPLATE_DIR` (explicit override)
-///   2. `<vault>/.wiki-ingest/templates/`     (per-vault user override)
-///   3. `$XDG_DATA_HOME/wi-ingest/templates/` (installed by `scripts/install.sh`)
-///   4. `./templates/`                        (development fallback)
-pub fn resolve_template_dir(opts: &GlobalOpts, vault_root: &Path) -> PathBuf {
-    if let Some(p) = opts.template_dir.as_ref() {
-        return p.clone();
-    }
-    let vault_templates = vault_root.join(".wiki-ingest").join("templates");
-    if vault_templates.exists() {
-        return vault_templates;
-    }
-    let xdg = xdg_data_template_dir();
-    if xdg.exists() {
-        return xdg;
-    }
-    PathBuf::from("templates")
-}
-
-fn xdg_data_template_dir() -> PathBuf {
-    let base = std::env::var("XDG_DATA_HOME")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
-            PathBuf::from(home).join(".local").join("share")
-        });
-    base.join("wi-ingest").join("templates")
-}

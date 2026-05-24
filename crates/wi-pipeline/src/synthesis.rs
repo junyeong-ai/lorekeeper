@@ -233,6 +233,7 @@ impl Synthesizer {
         let context = serde_json::json!({
             "year": year,
             "month": month,
+            "title": self.ctx.locale.monthly_title(year, month as i8),
             "start_date": start.to_string(),
             "end_date": end.to_string(),
             "narrative": narrative,
@@ -300,6 +301,7 @@ impl Synthesizer {
         let context = serde_json::json!({
             "year": year,
             "quarter": quarter,
+            "title": self.ctx.locale.quarterly_title(year, quarter),
             "date": end.to_string(),
             "start_date": start.to_string(),
             "end_date": end.to_string(),
@@ -357,6 +359,7 @@ impl Synthesizer {
 
         let context = serde_json::json!({
             "year": year,
+            "title": self.ctx.locale.annual_title(year),
             "narrative": narrative,
             "quarter_summaries": quarter_summaries,
             "categories": self.ctx.perf.work_categories,

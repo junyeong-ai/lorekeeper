@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use wi_core::concept::{Confidence, ExtractedConcept, slugify};
 use wi_core::config::VaultDirs;
+use wi_core::i18n::Locale;
 use wi_core::vault_path::VaultPath;
 use wi_vault::{TemplateEngine, VaultReader};
 
@@ -138,10 +139,11 @@ impl ConceptDrafts {
         &self,
         engine: &TemplateEngine,
         dirs: &VaultDirs,
+        locale: Locale,
     ) -> Result<Vec<RenderOutput>, PipelineError> {
         self.drafts
             .values()
-            .map(|d| d.render(engine, dirs))
+            .map(|d| d.render(engine, dirs, locale))
             .collect()
     }
 }
@@ -166,6 +168,7 @@ impl ConceptDraft {
         &self,
         engine: &TemplateEngine,
         dirs: &VaultDirs,
+        locale: Locale,
     ) -> Result<RenderOutput, PipelineError> {
         let path = VaultPath::concept(dirs, &self.slug);
 
@@ -178,42 +181,15 @@ impl ConceptDraft {
             "reference_count": self.reference_count,
             "sources": self.sources,
             "tags": ["concept"],
+            "i18n": locale.strings(),
         });
 
-        let content = if engine
-            .available("concept.md.jinja")
-            .map_err(|e| PipelineError::Render(e.to_string()))?
-        {
-            engine
-                .render("concept.md.jinja", &context)
-                .map_err(|e| PipelineError::Render(e.to_string()))?
-        } else {
-            self.fallback(&context)
-        };
+        // concept.md.jinja is embedded, so it always resolves.
+        let content = engine
+            .render("concept.md.jinja", &context)
+            .map_err(|e| PipelineError::Render(e.to_string()))?;
 
         Ok(RenderOutput { path, content })
-    }
-
-    fn fallback(&self, ctx: &serde_json::Value) -> String {
-        let sources_json = serde_json::to_string(&ctx["sources"]).unwrap_or_else(|_| "[]".into());
-        // The concept name is LLM-derived and may contain quotes/colons; emit it as a
-        // JSON string (valid YAML) rather than wrapping in raw double-quotes, which a
-        // name containing `"` would break.
-        let title_yaml = serde_json::to_string(&self.name).unwrap_or_else(|_| "\"\"".into());
-        // `aliases` lets Obsidian resolve `[[Name]]` links (used by daily pages and the
-        // /wi-process skill) to this slug-named file.
-        format!(
-            "---\nid: {}\ntitle: {}\naliases: [{}]\ncreated: {}\nupdated: {}\nconfidence: {}\nreference_count: {}\nsources: {}\ntags: [\"concept\"]\n---\n\n# {}\n",
-            self.slug,
-            title_yaml,
-            title_yaml,
-            self.first_seen,
-            self.last_seen,
-            self.confidence,
-            self.reference_count,
-            sources_json,
-            self.name,
-        )
     }
 }
 
@@ -264,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn fallback_frontmatter_escapes_quotes_in_name() {
+    fn rendered_frontmatter_escapes_quotes_in_name() {
         let draft = ConceptDraft {
             slug: "rag".into(),
             name: r#"RAG: "Retrieval" Augmented"#.into(),
@@ -274,13 +250,17 @@ mod tests {
             reference_count: 1,
             sources: vec!["daily/x/2026-05-01".into()],
         };
-        let ctx = serde_json::json!({ "sources": draft.sources });
-        let page = draft.fallback(&ctx);
-        // The title is emitted as a JSON string (valid YAML) with the inner quotes
-        // escaped, rather than raw `title: "RAG: "Retrieval"..."` which would be invalid.
+        let engine = TemplateEngine::new(None).unwrap();
+        let page = draft
+            .render(&engine, &VaultDirs::default(), Locale::Ko)
+            .unwrap();
+        // `| tojson` escapes inner quotes so the YAML title stays valid, rather than raw
+        // `title: "RAG: "Retrieval"..."` which would break parsing.
         assert!(
-            page.contains(r#"title: "RAG: \"Retrieval\" Augmented""#),
-            "title not properly escaped:\n{page}"
+            page.content
+                .contains(r#"title: "RAG: \"Retrieval\" Augmented""#),
+            "title not properly escaped:\n{}",
+            page.content
         );
     }
 }

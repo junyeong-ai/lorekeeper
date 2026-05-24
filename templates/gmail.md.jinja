@@ -1,6 +1,6 @@
 ---
 id: {{ source_id }}-{{ date }}
-title: "이메일 다이제스트 {{ date }}"
+title: "{{ i18n.gmail_title }} {{ date }}"
 created: {{ date }}
 labels: {{ labels | tojson }}
 source: {{ source_id }}
@@ -10,14 +10,14 @@ filtered_threads: {{ filtered }}
 action_required: {{ action_count }}
 ---
 
-# 이메일 다이제스트 {{ date }}
+# {{ i18n.gmail_title }} {{ date }}
 
-## 요약
+## {{ i18n.summary }}
 
 {{ summary }}
 
 {% if action_required_items %}
-## ⚡ 조치 필요
+## ⚡ {{ i18n.action_required }}
 
 {% for item in action_required_items %}
 - **{{ item.subject }}** from {{ item.sender }} — {{ item.summary }}
@@ -25,7 +25,7 @@ action_required: {{ action_count }}
 
 {% endif %}
 {% if decision_items %}
-## 📋 의사결정
+## 📋 {{ i18n.decisions }}
 
 {% for item in decision_items %}
 - **{{ item.subject }}** — {{ item.summary }}
@@ -33,7 +33,7 @@ action_required: {{ action_count }}
 
 {% endif %}
 {% if project_items %}
-## 📊 프로젝트 업데이트
+## 📊 {{ i18n.project_updates }}
 
 {% for item in project_items %}
 - **{{ item.subject }}** — {{ item.summary }}
@@ -41,7 +41,7 @@ action_required: {{ action_count }}
 
 {% endif %}
 {% if knowledge_items %}
-## 📚 지식 공유
+## 📚 {{ i18n.knowledge_sharing }}
 
 {% for item in knowledge_items %}
 - **{{ item.subject }}** — {{ item.summary }}
@@ -49,20 +49,20 @@ action_required: {{ action_count }}
 
 {% endif %}
 {% if meeting_items %}
-## 🤝 미팅 후속
+## 🤝 {{ i18n.meeting_followup }}
 
 {% for item in meeting_items %}
 - **{{ item.subject }}** — {{ item.summary }}
 {% endfor %}
 
 {% endif %}
-## 📈 통계
+## 📈 {{ i18n.statistics }}
 
-- 전체 수신: {{ total }}건
-- 의미 있는 메일: {{ filtered }}건 (필터링률: {{ filter_rate }}%)
-- 조치 필요: {{ action_count }}건
+- {{ i18n.total_received }}: {{ total }}{{ i18n.count_unit }}
+- {{ i18n.meaningful_mail }}: {{ filtered }}{{ i18n.count_unit }} ({{ i18n.filter_rate }}: {{ filter_rate }}%)
+- {{ i18n.action_required }}: {{ action_count }}{{ i18n.count_unit }}
 
-## 관련 개념
+## {{ i18n.related_concepts }}
 
 {% for concept in concepts %}
 - [[{{ concept }}]]

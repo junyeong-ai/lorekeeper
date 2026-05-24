@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use tempfile::TempDir;
@@ -11,10 +10,6 @@ use wi_core::config::{
 use wi_core::event::RawItem;
 use wi_llm::{LlmClient, MockLlmClient, NoopLlmClient};
 use wi_pipeline::{IngestOptions, Pipeline, PipelineContext, Synthesizer};
-
-fn template_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../templates")
-}
 
 fn base_config(vault_root: &std::path::Path) -> Config {
     let mut sources = std::collections::BTreeMap::new();
@@ -67,7 +62,7 @@ fn raw_item(title: &str, body: &str, external_id: &str, when: jiff::Timestamp) -
 }
 
 fn make_ctx(config: &Config, llm: Arc<dyn LlmClient>) -> Arc<PipelineContext> {
-    Arc::new(PipelineContext::new(&template_dir(), llm, config).unwrap())
+    Arc::new(PipelineContext::new(None, llm, config).unwrap())
 }
 
 #[tokio::test]

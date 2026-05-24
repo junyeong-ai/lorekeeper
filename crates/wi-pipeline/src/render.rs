@@ -128,4 +128,3 @@ fn truncate(s: &str, max: usize) -> &str {
         &s[..end]
     }
 }
-
