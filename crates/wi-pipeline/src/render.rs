@@ -96,12 +96,11 @@ pub fn render_daily_page(
         engine
             .render(&source_template, &context)
             .map_err(|e| PipelineError::Render(e.to_string()))?
-    } else if avail(type_template)? {
+    } else {
+        // The per-type template is always embedded, so this never falls through.
         engine
             .render(type_template, &context)
             .map_err(|e| PipelineError::Render(e.to_string()))?
-    } else {
-        render_fallback(source_id, date, events, labels, summary, concepts, strings)
     };
 
     Ok(RenderOutput { path, content })
@@ -130,34 +129,3 @@ fn truncate(s: &str, max: usize) -> &str {
     }
 }
 
-fn render_fallback(
-    source_id: &str,
-    date: jiff::civil::Date,
-    events: &[Event],
-    labels: &[String],
-    summary: &str,
-    concepts: &[String],
-    strings: &wi_core::i18n::Strings,
-) -> String {
-    let labels_json = serde_json::to_string(labels).unwrap_or_else(|_| "[]".into());
-    let mut out = format!(
-        "---\nid: {source_id}-{date}\ntitle: \"{source_id} {date}\"\ncreated: {date}\nlabels: {labels_json}\nevents_count: {}\n---\n\n# {source_id} {date}\n\n",
-        events.len()
-    );
-
-    // Section anchors are always emitted (even with empty bodies) so the queue-mode
-    // consumer `/wi-process` has a stable insertion point regardless of when the LLM
-    // result arrives.
-    out.push_str(&format!("## {}\n\n{summary}\n\n", strings.summary));
-
-    for event in events {
-        out.push_str(&format!("## {}\n\n{}\n\n", event.title, event.body));
-    }
-
-    out.push_str(&format!("## {}\n\n", strings.related_concepts));
-    for c in concepts {
-        out.push_str(&format!("- [[{c}]]\n"));
-    }
-
-    out
-}

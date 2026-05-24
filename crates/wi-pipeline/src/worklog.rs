@@ -63,24 +63,10 @@ pub fn aggregate_and_render(
             "i18n": locale.strings(),
         });
 
-        let content = if engine
-            .available("work-log.md.jinja")
-            .map_err(|e| PipelineError::Render(e.to_string()))?
-        {
-            engine
-                .render("work-log.md.jinja", &context)
-                .map_err(|e| PipelineError::Render(e.to_string()))?
-        } else {
-            // Mirror the template's frontmatter so downstream synthesis can read
-            // `categories` (quarterly/annual category stats) even without a template.
-            let categories_json =
-                serde_json::to_string(&categories).unwrap_or_else(|_| "[]".into());
-            let sources_json = serde_json::to_string(&sources).unwrap_or_else(|_| "[]".into());
-            let title = locale.strings().work_log_title;
-            format!(
-                "---\nid: work-log-{date}\ntitle: \"{title} {date}\"\ncreated: {date}\nlabels: [\"personal\"]\ncategories: {categories_json}\nsources: {sources_json}\n---\n\n# {title} {date}\n\n"
-            )
-        };
+        // The work-log template is embedded, so it always resolves.
+        let content = engine
+            .render("work-log.md.jinja", &context)
+            .map_err(|e| PipelineError::Render(e.to_string()))?;
 
         outputs.push(RenderOutput { path, content });
     }

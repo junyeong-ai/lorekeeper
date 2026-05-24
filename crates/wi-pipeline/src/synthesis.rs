@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use wi_core::config::Config;
-use wi_core::i18n::Locale;
 use wi_core::vault_path::VaultPath;
 use wi_vault::{Page, VaultReader};
 
@@ -65,26 +64,20 @@ impl Synthesizer {
         }
     }
 
-    /// Render `template` if installed, else fall back to the embedded renderer.
-    fn render_or_fallback(
-        &self,
-        template: &str,
-        context: &serde_json::Value,
-        fallback: impl FnOnce() -> String,
-    ) -> Result<String, PipelineError> {
-        if self
-            .ctx
-            .engine
-            .available(template)
-            .map_err(|e| PipelineError::Render(e.to_string()))?
-        {
-            self.ctx
-                .engine
-                .render(template, context)
-                .map_err(|e| PipelineError::Render(e.to_string()))
-        } else {
-            Ok(fallback())
+    /// Render a synthesis/personal template, injecting localized labels as `i18n.*`.
+    /// Every period template is embedded, so this always resolves; a user template dir
+    /// merely overrides.
+    fn render(&self, template: &str, context: &serde_json::Value) -> Result<String, PipelineError> {
+        let mut ctx = context.clone();
+        if let Some(map) = ctx.as_object_mut() {
+            let i18n = serde_json::to_value(self.ctx.locale.strings())
+                .map_err(|e| PipelineError::Render(e.to_string()))?;
+            map.insert("i18n".to_string(), i18n);
         }
+        self.ctx
+            .engine
+            .render(template, &ctx)
+            .map_err(|e| PipelineError::Render(e.to_string()))
     }
 
     pub async fn weekly_synthesis(
@@ -154,9 +147,7 @@ impl Synthesizer {
             "narrative": themes_text,
         });
 
-        let content = self.render_or_fallback("weekly-synthesis.md.jinja", &context, || {
-            fallback_weekly_synthesis(year, week, &context, self.ctx.locale)
-        })?;
+        let content = self.render("weekly-synthesis.md.jinja", &context)?;
 
         Ok(Some(RenderOutput { path, content }))
     }
@@ -203,9 +194,7 @@ impl Synthesizer {
             "categories": self.ctx.perf.work_categories,
         });
 
-        let content = self.render_or_fallback("weekly-personal.md.jinja", &context, || {
-            fallback_personal(year, week, &context, self.ctx.locale)
-        })?;
+        let content = self.render("weekly-personal.md.jinja", &context)?;
 
         Ok(Some(RenderOutput { path, content }))
     }
@@ -251,9 +240,7 @@ impl Synthesizer {
             "categories": self.ctx.perf.work_categories,
         });
 
-        let content = self.render_or_fallback("monthly-summary.md.jinja", &context, || {
-            fallback_monthly(year, month, &context, self.ctx.locale)
-        })?;
+        let content = self.render("monthly-summary.md.jinja", &context)?;
 
         Ok(Some(RenderOutput { path, content }))
     }
@@ -328,9 +315,7 @@ impl Synthesizer {
             "next_direction": "",
         });
 
-        let content = self.render_or_fallback("quarterly-review.md.jinja", &context, || {
-            fallback_quarterly(year, quarter, &context, self.ctx.locale)
-        })?;
+        let content = self.render("quarterly-review.md.jinja", &context)?;
 
         Ok(Some(RenderOutput { path, content }))
     }
@@ -377,9 +362,7 @@ impl Synthesizer {
             "categories": self.ctx.perf.work_categories,
         });
 
-        let content = self.render_or_fallback("annual-review.md.jinja", &context, || {
-            fallback_annual(year, &context, self.ctx.locale)
-        })?;
+        let content = self.render("annual-review.md.jinja", &context)?;
 
         Ok(Some(RenderOutput { path, content }))
     }
@@ -541,67 +524,6 @@ fn split_into_lines(text: &str) -> Vec<String> {
             }
         })
         .collect()
-}
-
-// Fallback renderers used when the user has not installed Jinja templates.
-// Each emits a stable `##` section anchor that holds the narrative body, so
-// `/wi-process` can locate and replace it in queue mode even when no template
-// is available. The anchor names match the corresponding Jinja templates.
-
-fn fallback_weekly_synthesis(
-    year: i16,
-    week: u8,
-    ctx: &serde_json::Value,
-    locale: Locale,
-) -> String {
-    let s = locale.strings();
-    let title = s.weekly_synthesis_title;
-    format!(
-        "---\nid: synthesis-{year}-W{week:02}\ntitle: \"{title} {year}-W{week:02}\"\ncreated: {}\nlabels: [\"synthesis\"]\n---\n\n# {title} {year}-W{week:02}\n\n## {}\n\n{}\n",
-        ctx["date"].as_str().unwrap_or(""),
-        s.key_themes_this_week,
-        ctx["narrative"].as_str().unwrap_or(""),
-    )
-}
-
-fn fallback_personal(year: i16, week: u8, ctx: &serde_json::Value, locale: Locale) -> String {
-    let s = locale.strings();
-    let title = s.weekly_personal_title;
-    format!(
-        "---\nid: me-{year}-W{week:02}\ntitle: \"{title} {year}-W{week:02}\"\ncreated: {}\nlabels: [\"personal\"]\n---\n\n# {title} {year}-W{week:02}\n\n## {}\n\n{}\n",
-        ctx["end_date"].as_str().unwrap_or(""),
-        s.key_summary,
-        ctx["narrative"].as_str().unwrap_or(""),
-    )
-}
-
-fn fallback_monthly(year: i16, month: u8, ctx: &serde_json::Value, locale: Locale) -> String {
-    let title = locale.monthly_title(year, month as i8);
-    format!(
-        "---\nid: me-{year}-{month:02}\ntitle: \"{title}\"\ncreated: {}\nlabels: [\"personal\"]\n---\n\n# {title}\n\n## {}\n\n{}\n",
-        ctx["end_date"].as_str().unwrap_or(""),
-        locale.strings().key_summary,
-        ctx["narrative"].as_str().unwrap_or(""),
-    )
-}
-
-fn fallback_quarterly(year: i16, quarter: u8, ctx: &serde_json::Value, locale: Locale) -> String {
-    let title = locale.quarterly_title(year, quarter);
-    format!(
-        "---\nid: performance-{year}-Q{quarter}\ntitle: \"{title}\"\ncreated: {}\nlabels: [\"personal\", \"strategy\"]\n---\n\n# {title}\n\n## {}\n\n{}\n",
-        ctx["date"].as_str().unwrap_or(""),
-        locale.strings().top_achievements,
-        ctx["narrative"].as_str().unwrap_or(""),
-    )
-}
-
-fn fallback_annual(year: i16, ctx: &serde_json::Value, locale: Locale) -> String {
-    let title = locale.annual_title(year);
-    format!(
-        "---\nid: annual-{year}\ntitle: \"{title}\"\ncreated: {year}-12-31\nlabels: [\"personal\", \"strategy\"]\n---\n\n# {title}\n\n## {}\n\n{}\n",
-        locale.strings().overall_summary,
-        ctx["narrative"].as_str().unwrap_or(""),
-    )
 }
 
 #[cfg(test)]
