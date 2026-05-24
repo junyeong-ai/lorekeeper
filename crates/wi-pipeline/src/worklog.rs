@@ -68,8 +68,13 @@ pub fn aggregate_and_render(
                 .render("work-log.md.jinja", &context)
                 .map_err(|e| PipelineError::Render(e.to_string()))?
         } else {
+            // Mirror the template's frontmatter so downstream synthesis can read
+            // `categories` (quarterly/annual category stats) even without a template.
+            let categories_json =
+                serde_json::to_string(&categories).unwrap_or_else(|_| "[]".into());
+            let sources_json = serde_json::to_string(&sources).unwrap_or_else(|_| "[]".into());
             format!(
-                "---\nid: work-log-{date}\ntitle: \"업무 기록 {date}\"\ncreated: {date}\nlabels: [\"personal\"]\n---\n\n# 업무 기록 {date}\n\n"
+                "---\nid: work-log-{date}\ntitle: \"업무 기록 {date}\"\ncreated: {date}\nlabels: [\"personal\"]\ncategories: {categories_json}\nsources: {sources_json}\n---\n\n# 업무 기록 {date}\n\n"
             )
         };
 

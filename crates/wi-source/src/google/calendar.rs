@@ -96,9 +96,18 @@ impl Source for CalendarSource {
 
         let (time_min, time_max) = ctx.day_window(p.lookback_hours, p.lookahead_hours)?;
 
+        // Build the URL via path-segment pushing so the calendar id is percent-encoded;
+        // ids can contain characters (`#`, spaces) that would otherwise corrupt the path.
+        let mut url = reqwest::Url::parse(&format!("{BASE}/calendars"))
+            .map_err(|e| SourceError::Parse(format!("calendar url: {e}")))?;
+        url.path_segments_mut()
+            .map_err(|_| SourceError::Parse("calendar url cannot be a base".into()))?
+            .push(&p.calendar_id)
+            .push("events");
+
         let resp = check_response(
             self.http
-                .get(format!("{BASE}/calendars/{}/events", p.calendar_id))
+                .get(url)
                 .bearer_auth(&token)
                 .query(&[
                     ("timeMin", &time_min.to_string()),

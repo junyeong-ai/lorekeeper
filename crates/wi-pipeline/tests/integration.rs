@@ -148,8 +148,13 @@ async fn concept_pages_written_with_merge() {
         concept_output2.content
     );
     assert!(
-        concept_output2.content.contains("2026-05-23"),
-        "should retain first_seen reference"
+        concept_output2.content.contains("created: 2026-05-23"),
+        "first_seen (created) must survive re-ingest, not reset to today:\n{}",
+        concept_output2.content
+    );
+    assert!(
+        concept_output2.content.contains("updated: 2026-05-24"),
+        "last_seen (updated) must advance to the new date"
     );
     assert!(
         concept_output2.content.contains("2026-05-24"),

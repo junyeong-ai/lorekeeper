@@ -29,6 +29,13 @@ pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
         .map_err(|e| SourceError::InvalidParams(e.to_string()))
 }
 
+/// Escape a value for inclusion inside a single-quoted Drive query string literal.
+/// Per the Drive API, `\` and `'` must be backslash-escaped; otherwise a folder or
+/// filename containing a quote (e.g. `Team's Docs`) produces a malformed query.
+fn escape_drive_literal(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
 #[derive(Deserialize)]
 struct FileList {
     files: Option<Vec<FileMeta>>,
@@ -57,7 +64,8 @@ impl DriveSource {
             }
             let q = format!(
                 "name = '{}' and '{}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
-                segment, parent_id
+                escape_drive_literal(segment),
+                parent_id
             );
             let resp = check_response(
                 self.http
@@ -101,7 +109,8 @@ impl Source for DriveSource {
 
         let q = format!(
             "name contains '{}' and '{}' in parents and trashed = false",
-            name_fragment, folder_id
+            escape_drive_literal(&name_fragment),
+            folder_id
         );
 
         let resp = check_response(
@@ -156,5 +165,17 @@ impl Source for DriveSource {
         }
 
         Ok(items)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escapes_quotes_and_backslashes_in_drive_literals() {
+        assert_eq!(escape_drive_literal("Team's Docs"), r"Team\'s Docs");
+        assert_eq!(escape_drive_literal(r"a\b"), r"a\\b");
+        assert_eq!(escape_drive_literal("plain"), "plain");
     }
 }

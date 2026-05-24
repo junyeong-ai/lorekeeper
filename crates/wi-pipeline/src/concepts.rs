@@ -75,15 +75,18 @@ impl ConceptDrafts {
                             .collect()
                     })
                     .unwrap_or_default();
+                // The persisted page stores these as `created`/`updated` (the keys the
+                // template and fallback write). Reading `first_seen`/`last_seen` would
+                // always miss and reset the origin date to today on every re-ingest.
                 let first_seen = page
                     .frontmatter
-                    .get("first_seen")
+                    .get("created")
                     .and_then(|v| v.as_str())
                     .and_then(|s| s.parse::<jiff::civil::Date>().ok())
                     .unwrap_or(date);
                 let last_seen = page
                     .frontmatter
-                    .get("last_seen")
+                    .get("updated")
                     .and_then(|v| v.as_str())
                     .and_then(|s| s.parse::<jiff::civil::Date>().ok())
                     .unwrap_or(date);

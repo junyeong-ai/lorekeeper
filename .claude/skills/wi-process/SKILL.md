@@ -106,8 +106,9 @@ Each line in a queue file is one task:
    b. **For each task** (in file order):
 
       - **`kind: summarize`** — synthesize a concise summary in the
-        user's preferred language (Korean if `daily-*-narrative`).
-        Aim for `input.max_sentences` bullet points. No preamble.
+        user's preferred language (Korean for `daily-summary` and the
+        `*-narrative` synthesis targets). Aim for `input.max_sentences`
+        bullet points. No preamble.
 
       - **`kind: extract-concepts`** — identify named entities,
         technologies, and key topics. Output a list of concept names
