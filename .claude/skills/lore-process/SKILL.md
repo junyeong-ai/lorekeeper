@@ -120,6 +120,12 @@ locate key — never hardcode headings per `target.kind`.
         (in the source language). Each concept should also produce a
         `wiki/concepts/{slug}.md` entry (create if missing, merge if
         exists — increment reference_count, append source ref).
+        **When creating a new concept page**, fill the `## 핵심` (Synthesis)
+        section with a 1-2 sentence definition/context of the concept based
+        on the source text. Don't leave it empty — even a first-appearance
+        concept benefits from a brief grounding. On merge (concept already
+        exists), update the synthesis if the new source adds meaningful
+        context; otherwise leave it.
 
    c. **Edit the target page** via Obsidian MCP. Every task carries
       `target.anchor` — the exact `## …` heading the pipeline wrote,

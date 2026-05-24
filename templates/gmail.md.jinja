@@ -17,7 +17,7 @@ action_required: {{ action_count }}
 {{ summary }}
 
 {% if action_required_items %}
-## ⚡ {{ i18n.action_required }}
+## {{ i18n.action_required }}
 
 {% for item in action_required_items %}
 - **{{ item.subject }}** from {{ item.sender }} — {{ item.summary }}
@@ -25,7 +25,7 @@ action_required: {{ action_count }}
 
 {% endif %}
 {% if decision_items %}
-## 📋 {{ i18n.decisions }}
+## {{ i18n.decisions }}
 
 {% for item in decision_items %}
 - **{{ item.subject }}** — {{ item.summary }}
@@ -33,7 +33,7 @@ action_required: {{ action_count }}
 
 {% endif %}
 {% if project_items %}
-## 📊 {{ i18n.project_updates }}
+## {{ i18n.project_updates }}
 
 {% for item in project_items %}
 - **{{ item.subject }}** — {{ item.summary }}
@@ -41,7 +41,7 @@ action_required: {{ action_count }}
 
 {% endif %}
 {% if knowledge_items %}
-## 📚 {{ i18n.knowledge_sharing }}
+## {{ i18n.knowledge_sharing }}
 
 {% for item in knowledge_items %}
 - **{{ item.subject }}** — {{ item.summary }}
@@ -49,14 +49,14 @@ action_required: {{ action_count }}
 
 {% endif %}
 {% if meeting_items %}
-## 🤝 {{ i18n.meeting_followup }}
+## {{ i18n.meeting_followup }}
 
 {% for item in meeting_items %}
 - **{{ item.subject }}** — {{ item.summary }}
 {% endfor %}
 
 {% endif %}
-## 📈 {{ i18n.statistics }}
+## {{ i18n.statistics }}
 
 - {{ i18n.total_received }}: {{ total }}{{ i18n.count_unit }}
 - {{ i18n.meaningful_mail }}: {{ filtered }}{{ i18n.count_unit }} ({{ i18n.filter_rate }}: {{ filter_rate }}%)

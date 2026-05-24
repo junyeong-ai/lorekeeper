@@ -1,6 +1,32 @@
 use lk_core::config::SourceType;
 use lk_core::event::{Event, EventId, RawItem};
 
+/// Strip Unicode emoji from text. Long-lived documents don't benefit from
+/// decorative emoji (marketing 🎀, reactions 🎉) — they add visual noise and
+/// break grep/search. Slack shortcode emoji are already stripped in
+/// `slack_to_markdown`; this catches emoji that arrive as Unicode (Gmail
+/// subjects, Calendar descriptions, Jira bodies).
+fn strip_unicode_emoji(text: &str) -> String {
+    text.chars()
+        .filter(|c| {
+            // Keep ASCII + extended Latin + CJK + Hangul + common symbols.
+            // Drop emoji blocks: Emoticons, Dingbats, Symbols, Flags, Misc.
+            let cp = *c as u32;
+            !(0x1F600..=0x1F64F).contains(&cp)   // Emoticons
+                && !(0x1F300..=0x1F5FF).contains(&cp) // Misc Symbols & Pictographs
+                && !(0x1F680..=0x1F6FF).contains(&cp) // Transport & Map
+                && !(0x1F900..=0x1F9FF).contains(&cp) // Supplemental Symbols
+                && !(0x1FA00..=0x1FA6F).contains(&cp) // Chess, Extended-A
+                && !(0x1FA70..=0x1FAFF).contains(&cp) // Symbols Extended-A
+                && !(0x2600..=0x26FF).contains(&cp)    // Misc Symbols
+                && !(0x2700..=0x27BF).contains(&cp)    // Dingbats
+                && !(0xFE00..=0xFE0F).contains(&cp)    // Variation Selectors
+                && !(0x200D..=0x200D).contains(&cp)    // ZWJ
+                && !(0xE0020..=0xE007F).contains(&cp) // Tags
+        })
+        .collect()
+}
+
 pub fn normalize(
     source_id: &str,
     source_type: SourceType,
@@ -28,8 +54,8 @@ pub fn normalize(
                 source_id: source_id.to_string(),
                 source_type,
                 date,
-                title: item.title,
-                body: collapse_blank_lines(&item.body),
+                title: strip_unicode_emoji(&item.title),
+                body: strip_unicode_emoji(&collapse_blank_lines(&item.body)),
                 url: item.url,
                 author: item.author,
                 labels: vec![],
