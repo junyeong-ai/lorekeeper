@@ -57,6 +57,11 @@ impl Config {
                     "source ID '{id}' must not contain path separators"
                 )));
             }
+            if id == "." || id == ".." {
+                return Err(ConfigError::Validation(format!(
+                    "source ID '{id}' is a path traversal component"
+                )));
+            }
         }
 
         self.vault.dirs.validate()?;
@@ -112,6 +117,21 @@ impl Config {
             validate_cron(sched).map_err(|e| {
                 ConfigError::Validation(format!("synthesis.{period}.schedule: {e}"))
             })?;
+        }
+
+        // Graph scope: dirs must be non-empty and vault-relative (no traversal).
+        if self.graph.scope.dirs.is_empty() {
+            return Err(ConfigError::Validation(
+                "graph.scope.dirs cannot be empty".into(),
+            ));
+        }
+        for dir in &self.graph.scope.dirs {
+            let s = dir.to_string_lossy();
+            if s.is_empty() || dir.is_absolute() || s.contains("..") {
+                return Err(ConfigError::Validation(format!(
+                    "graph.scope.dirs entry '{s}' must be a relative path without '..'"
+                )));
+            }
         }
 
         Ok(())
