@@ -128,6 +128,7 @@ pub async fn run(
     let extract_ctx = wi_source::ExtractContext {
         target_date: extract_target,
         timezone: tz,
+        locale: config.vault.locale(),
     };
 
     // Phase 1: Plan all sources (no commits, no writes yet).

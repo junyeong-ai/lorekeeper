@@ -13,8 +13,9 @@ Deterministic transform stages between `wi-source` and `wi-vault`. Shares an
 - **DedupCache**: cascade is `event-id → url → title`. Persisted-table lookups are gated
   on the cache being present, but the intra-batch (seen-id/url + novel-title) checks
   ALWAYS run — so a dry-run with no cache still matches a real run. Titles are keyed
-  `{date}:{title}` and scanned by date-prefix range. The cache is wiped only on a real
-  schema-type mismatch, never on I/O/corruption errors.
+  `{date}:{title}` and scanned by date-prefix range. The cache is recreated only on a
+  recoverable mismatch — a schema-type change or an outdated on-disk format after a redb
+  major upgrade (`DatabaseError::UpgradeRequired`) — never on I/O/corruption errors.
 - **classify**: `flag_personal` matches identity tokens with `contains_bounded`
   (alphanumeric/`._%+-` word boundary) to avoid name/email substring false positives
   (`kim`⊄`kimberly`, `test@x.com`⊄`test@x.com.au`); `@` is intentionally excluded so

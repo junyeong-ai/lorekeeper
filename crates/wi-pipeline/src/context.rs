@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use wi_core::config::{Config, Identity, PerformanceConfig, VaultDirs};
+use wi_core::i18n::Locale;
 use wi_llm::LlmClient;
 use wi_vault::TemplateEngine;
 
@@ -14,6 +15,7 @@ pub struct PipelineContext {
     pub(crate) perf: PerformanceConfig,
     pub(crate) identity: Identity,
     pub(crate) timezone: jiff::tz::TimeZone,
+    pub(crate) locale: Locale,
 }
 
 impl PipelineContext {
@@ -30,6 +32,7 @@ impl PipelineContext {
             perf: config.performance.clone(),
             identity: config.identity.clone(),
             timezone: config.vault.timezone(),
+            locale: config.vault.locale(),
         })
     }
 }

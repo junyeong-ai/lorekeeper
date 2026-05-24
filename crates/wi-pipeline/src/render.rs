@@ -1,5 +1,6 @@
 use wi_core::config::{SourceType, VaultDirs};
 use wi_core::event::Event;
+use wi_core::i18n::Locale;
 use wi_core::vault_path::VaultPath;
 use wi_vault::TemplateEngine;
 
@@ -18,6 +19,7 @@ pub struct RenderContext<'a> {
     pub labels: &'a [String],
     pub summary: &'a str,
     pub concepts: &'a [String],
+    pub locale: Locale,
 }
 
 pub fn render_daily_page(
@@ -33,7 +35,9 @@ pub fn render_daily_page(
         labels,
         summary,
         concepts,
+        locale,
     } = *ctx;
+    let strings = locale.strings();
 
     let path = VaultPath::daily(dirs, source_id, date);
 
@@ -68,6 +72,7 @@ pub fn render_daily_page(
         "events": events_json,
         "summary": summary,
         "concepts": concepts,
+        "i18n": strings,
         "total": events.len(),
         "filtered": events.len(),
         "filter_rate": 0,
@@ -96,7 +101,7 @@ pub fn render_daily_page(
             .render(type_template, &context)
             .map_err(|e| PipelineError::Render(e.to_string()))?
     } else {
-        render_fallback(source_id, date, events, labels, summary, concepts)
+        render_fallback(source_id, date, events, labels, summary, concepts, strings)
     };
 
     Ok(RenderOutput { path, content })
@@ -132,6 +137,7 @@ fn render_fallback(
     labels: &[String],
     summary: &str,
     concepts: &[String],
+    strings: &wi_core::i18n::Strings,
 ) -> String {
     let labels_json = serde_json::to_string(labels).unwrap_or_else(|_| "[]".into());
     let mut out = format!(
@@ -142,13 +148,13 @@ fn render_fallback(
     // Section anchors are always emitted (even with empty bodies) so the queue-mode
     // consumer `/wi-process` has a stable insertion point regardless of when the LLM
     // result arrives.
-    out.push_str(&format!("## 요약\n\n{summary}\n\n"));
+    out.push_str(&format!("## {}\n\n{summary}\n\n", strings.summary));
 
     for event in events {
         out.push_str(&format!("## {}\n\n{}\n\n", event.title, event.body));
     }
 
-    out.push_str("## 관련 개념\n\n");
+    out.push_str(&format!("## {}\n\n", strings.related_concepts));
     for c in concepts {
         out.push_str(&format!("- [[{c}]]\n"));
     }

@@ -106,11 +106,11 @@ impl Source for SlackSearchSource {
                 &self.http,
                 &self.token,
                 "search.messages",
-                &serde_json::json!({
-                    "query": query,
-                    "sort": "timestamp",
-                    "count": 50,
-                }),
+                &[
+                    ("query", query.as_str()),
+                    ("sort", "timestamp"),
+                    ("count", "50"),
+                ],
             )
             .await?;
 

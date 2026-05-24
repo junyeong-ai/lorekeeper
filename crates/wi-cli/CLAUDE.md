@@ -7,6 +7,11 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
 - **Global flags** `--config`/`WI_CONFIG` and `--template-dir`/`WI_TEMPLATE_DIR` are
   injected into the cron lines `wi schedule` generates, so scheduled runs don't depend on
   CWD. `--template-dir` falls back to `XDG_DATA_HOME/wi-ingest/templates`.
+- **`find_config`** resolves in order: `--config`/`WI_CONFIG` → `./config.yaml` →
+  `~/.config/wi-ingest/config.yaml` (XDG). The XDG path is what makes a binary-only install
+  (no repo) work. There is no `config.example.yaml` fallback — running with the example's
+  placeholder values silently is a footgun. A vault-relative config can't be auto-found
+  (the vault path lives *inside* the config).
 - **`build_llm_client`** maps `llm.provider` to a client; `anthropic` with a missing
   `ANTHROPIC_API_KEY` warns and degrades to `NoopLlmClient`.
 - **`wi ingest`** owns the 5-phase flow and the exit code: any source/extract/pipeline

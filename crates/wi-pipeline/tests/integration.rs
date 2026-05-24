@@ -37,6 +37,7 @@ fn base_config(vault_root: &std::path::Path) -> Config {
             root: vault_root.to_string_lossy().into(),
             dirs: VaultDirs::default(),
             timezone: Some("UTC".into()),
+            locale: None,
         },
         identity: Identity {
             name: "Test User".into(),

@@ -256,6 +256,7 @@ impl Pipeline {
                     labels: &labels,
                     summary: &summary,
                     concepts: &concept_names,
+                    locale: self.ctx.locale,
                 },
                 &self.ctx.engine,
                 &self.ctx.dirs,
@@ -305,6 +306,7 @@ impl Pipeline {
             &self.ctx.perf,
             &self.ctx.engine,
             &self.ctx.dirs,
+            self.ctx.locale,
         )
     }
 }

@@ -15,16 +15,19 @@ struct SlackResponse<T> {
     data: T,
 }
 
+/// POST to a Slack Web API method with `application/x-www-form-urlencoded` params. Every
+/// method accepts form encoding, whereas JSON bodies are rejected by read methods such as
+/// `search.messages` — so form is the one encoding that works across all of them.
 async fn slack_post<T: serde::de::DeserializeOwned>(
     http: &reqwest::Client,
     token: &str,
     method: &str,
-    body: &serde_json::Value,
+    params: &[(&str, &str)],
 ) -> Result<T, SourceError> {
     let resp = http
         .post(format!("{API}/{method}"))
         .bearer_auth(token)
-        .json(body)
+        .form(params)
         .send()
         .await?;
 
@@ -61,12 +64,24 @@ struct ChannelInfo {
     name: String,
 }
 
+/// A bare Slack channel id (`C…`/`G…`/`D…` + uppercase alphanumerics) — config may give
+/// either an id or a `#name`. Ids are used directly; only names need a lookup.
+fn looks_like_channel_id(s: &str) -> bool {
+    matches!(s.chars().next(), Some('C' | 'G' | 'D'))
+        && s.len() >= 9
+        && s.chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+}
+
 async fn resolve_channel_id(
     http: &reqwest::Client,
     token: &str,
-    channel_name: &str,
+    channel_ref: &str,
 ) -> Result<String, SourceError> {
-    let name = channel_name.strip_prefix('#').unwrap_or(channel_name);
+    if looks_like_channel_id(channel_ref) {
+        return Ok(channel_ref.to_string());
+    }
+    let name = channel_ref.strip_prefix('#').unwrap_or(channel_ref);
 
     #[derive(Deserialize)]
     struct Channels {
@@ -77,11 +92,11 @@ async fn resolve_channel_id(
         http,
         token,
         "conversations.list",
-        &serde_json::json!({
-            "types": "public_channel,private_channel",
-            "limit": 1000,
-            "exclude_archived": true,
-        }),
+        &[
+            ("types", "public_channel,private_channel"),
+            ("limit", "1000"),
+            ("exclude_archived", "true"),
+        ],
     )
     .await?;
 
@@ -89,5 +104,5 @@ async fn resolve_channel_id(
         .into_iter()
         .find(|c| c.name == name)
         .map(|c| c.id)
-        .ok_or_else(|| SourceError::Parse(format!("channel not found: {channel_name}")))
+        .ok_or_else(|| SourceError::Parse(format!("channel not found: {channel_ref}")))
 }

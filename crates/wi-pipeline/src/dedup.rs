@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use strsim::sorensen_dice;
 
 use wi_core::config::DedupStrategy;
@@ -53,10 +53,16 @@ impl DedupCache {
     /// would also see), and no file is created.
     pub fn open_read_only(path: &Path, title_threshold: f64) -> Result<Self, PipelineError> {
         let db = if path.exists() {
-            Some(
-                Database::open(path)
-                    .map_err(|e| PipelineError::Dedup(format!("open db (read-only): {e}")))?,
-            )
+            match Database::open(path) {
+                Ok(db) => Some(db),
+                // A stale on-disk format (after a redb major upgrade) can't be recreated
+                // here — dry-run must not mutate the vault. Treat it as no usable prior
+                // state (every event novel), which the next real run fixes by recreating.
+                Err(redb::DatabaseError::UpgradeRequired(_)) => None,
+                Err(e) => {
+                    return Err(PipelineError::Dedup(format!("open db (read-only): {e}")));
+                }
+            }
         } else {
             None
         };
@@ -69,8 +75,23 @@ impl DedupCache {
     fn open_or_reset(path: &Path) -> Result<Database, PipelineError> {
         let mut wiped = false;
         loop {
-            let db = Database::create(path)
-                .map_err(|e| PipelineError::Dedup(format!("open db: {e}")))?;
+            let db = match Database::create(path) {
+                Ok(db) => db,
+                // An out-of-date on-disk format (after a redb major upgrade) is recoverable
+                // by recreating the cache, exactly like a schema-type change below. Distinct
+                // from corruption/I-O, which redb reports as Storage and we must not wipe.
+                Err(redb::DatabaseError::UpgradeRequired(_)) if !wiped => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        "dedup file format outdated; recreating cache"
+                    );
+                    std::fs::remove_file(path)
+                        .map_err(|e| PipelineError::Dedup(format!("remove stale cache: {e}")))?;
+                    wiped = true;
+                    continue;
+                }
+                Err(e) => return Err(PipelineError::Dedup(format!("open db: {e}"))),
+            };
 
             let txn = db
                 .begin_write()

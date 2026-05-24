@@ -1,6 +1,7 @@
 pub mod credentials;
 mod google;
 mod jira;
+pub(crate) mod markdown;
 mod slack;
 
 use std::sync::Arc;
@@ -36,6 +37,8 @@ pub enum SourceError {
 pub struct ExtractContext {
     pub target_date: jiff::civil::Date,
     pub timezone: jiff::tz::TimeZone,
+    /// Output language for labels adapters add (status/period, thread marker, …).
+    pub locale: wi_core::i18n::Locale,
 }
 
 impl ExtractContext {
@@ -181,6 +184,7 @@ mod tests {
         ExtractContext {
             target_date: date.parse().unwrap(),
             timezone: jiff::tz::TimeZone::get(tz).unwrap(),
+            locale: wi_core::i18n::Locale::default(),
         }
     }
 

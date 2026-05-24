@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use wi_core::config::{PerformanceConfig, VaultDirs};
 use wi_core::event::Event;
+use wi_core::i18n::Locale;
 use wi_core::vault_path::VaultPath;
 use wi_vault::TemplateEngine;
 
@@ -13,6 +14,7 @@ pub fn aggregate_and_render(
     perf: &PerformanceConfig,
     engine: &TemplateEngine,
     dirs: &VaultDirs,
+    locale: Locale,
 ) -> Result<Vec<RenderOutput>, PipelineError> {
     if events.is_empty() {
         return Ok(vec![]);
@@ -58,6 +60,7 @@ pub fn aggregate_and_render(
             "categories": categories,
             "sources": sources,
             "groups": groups_json,
+            "i18n": locale.strings(),
         });
 
         let content = if engine
@@ -73,8 +76,9 @@ pub fn aggregate_and_render(
             let categories_json =
                 serde_json::to_string(&categories).unwrap_or_else(|_| "[]".into());
             let sources_json = serde_json::to_string(&sources).unwrap_or_else(|_| "[]".into());
+            let title = locale.strings().work_log_title;
             format!(
-                "---\nid: work-log-{date}\ntitle: \"업무 기록 {date}\"\ncreated: {date}\nlabels: [\"personal\"]\ncategories: {categories_json}\nsources: {sources_json}\n---\n\n# 업무 기록 {date}\n\n"
+                "---\nid: work-log-{date}\ntitle: \"{title} {date}\"\ncreated: {date}\nlabels: [\"personal\"]\ncategories: {categories_json}\nsources: {sources_json}\n---\n\n# {title} {date}\n\n"
             )
         };
 

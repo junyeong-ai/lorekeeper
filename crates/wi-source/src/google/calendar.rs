@@ -168,10 +168,20 @@ impl Source for CalendarSource {
                     })
                     .unwrap_or_default();
 
+                // Google Calendar descriptions are HTML (`<ul>`, `<a>`, `<br>`); convert to
+                // Markdown so the daily page and LLM see clean text, not raw tags.
+                let description = ev
+                    .description
+                    .as_deref()
+                    .map(crate::markdown::html_to_markdown)
+                    .unwrap_or_default();
+                let s = ctx.locale.strings();
                 let body = format!(
-                    "{}\n\nLocation: {}\nAttendees: {}",
-                    ev.description.as_deref().unwrap_or_default(),
+                    "{}\n\n{}: {}\n{}: {}",
+                    description,
+                    s.location,
                     ev.location.as_deref().unwrap_or("N/A"),
+                    s.attendees,
                     if attendee_names.is_empty() {
                         "N/A".into()
                     } else {

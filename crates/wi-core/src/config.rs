@@ -191,11 +191,20 @@ pub struct VaultConfig {
     pub dirs: VaultDirs,
     #[serde(default)]
     pub timezone: Option<String>,
+    /// Output language for the labels/headers wiki-ingest *adds* (e.g. "ko", "en").
+    /// Source content (mail/Slack/Jira bodies) is never translated. Absent/unknown → Ko.
+    #[serde(default)]
+    pub locale: Option<String>,
 }
 
 impl VaultConfig {
     pub fn root_path(&self) -> PathBuf {
         expand_tilde(&self.root)
+    }
+
+    /// Output locale for added labels/headers, parsed from `vault.locale`.
+    pub fn locale(&self) -> crate::i18n::Locale {
+        crate::i18n::Locale::from_tag(self.locale.as_deref())
     }
 
     /// Resolve a relative vault root against the config file's parent directory so the

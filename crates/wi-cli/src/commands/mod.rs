@@ -23,15 +23,31 @@ pub fn find_config(opts: &GlobalOpts) -> miette::Result<PathBuf> {
         }
         return Ok(p.clone());
     }
-    for name in ["config.yaml", "config.example.yaml"] {
-        let p = PathBuf::from(name);
-        if p.exists() {
-            return Ok(p);
-        }
+    // Project/dev checkout: config next to the working directory.
+    let cwd = PathBuf::from("config.yaml");
+    if cwd.exists() {
+        return Ok(cwd);
+    }
+    // Binary-only install (no repo): the standard XDG config location. A vault-relative
+    // path can't be auto-discovered — the vault path itself lives inside the config.
+    if let Some(p) = xdg_config_path()
+        && p.exists()
+    {
+        return Ok(p);
     }
     Err(miette::miette!(
-        "No config file found. Set --config, WI_CONFIG, or copy config.example.yaml to config.yaml."
+        "No config found. Create ./config.yaml or ~/.config/wi-ingest/config.yaml \
+         (copy config.example.yaml), or pass --config / set WI_CONFIG."
     ))
+}
+
+/// `$XDG_CONFIG_HOME/wi-ingest/config.yaml`, falling back to `~/.config/wi-ingest/...`.
+fn xdg_config_path() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    Some(base.join("wi-ingest").join("config.yaml"))
 }
 
 pub fn load_config(path: &Path) -> miette::Result<wi_core::config::Config> {

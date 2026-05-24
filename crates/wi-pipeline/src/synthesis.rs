@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use wi_core::config::Config;
+use wi_core::i18n::Locale;
 use wi_core::vault_path::VaultPath;
 use wi_vault::{Page, VaultReader};
 
@@ -154,7 +155,7 @@ impl Synthesizer {
         });
 
         let content = self.render_or_fallback("weekly-synthesis.md.jinja", &context, || {
-            fallback_weekly_synthesis(year, week, &context)
+            fallback_weekly_synthesis(year, week, &context, self.ctx.locale)
         })?;
 
         Ok(Some(RenderOutput { path, content }))
@@ -203,7 +204,7 @@ impl Synthesizer {
         });
 
         let content = self.render_or_fallback("weekly-personal.md.jinja", &context, || {
-            fallback_personal(year, week, &context)
+            fallback_personal(year, week, &context, self.ctx.locale)
         })?;
 
         Ok(Some(RenderOutput { path, content }))
@@ -251,7 +252,7 @@ impl Synthesizer {
         });
 
         let content = self.render_or_fallback("monthly-summary.md.jinja", &context, || {
-            fallback_monthly(year, month, &context)
+            fallback_monthly(year, month, &context, self.ctx.locale)
         })?;
 
         Ok(Some(RenderOutput { path, content }))
@@ -328,7 +329,7 @@ impl Synthesizer {
         });
 
         let content = self.render_or_fallback("quarterly-review.md.jinja", &context, || {
-            fallback_quarterly(year, quarter, &context)
+            fallback_quarterly(year, quarter, &context, self.ctx.locale)
         })?;
 
         Ok(Some(RenderOutput { path, content }))
@@ -377,7 +378,7 @@ impl Synthesizer {
         });
 
         let content = self.render_or_fallback("annual-review.md.jinja", &context, || {
-            fallback_annual(year, &context)
+            fallback_annual(year, &context, self.ctx.locale)
         })?;
 
         Ok(Some(RenderOutput { path, content }))
@@ -547,41 +548,58 @@ fn split_into_lines(text: &str) -> Vec<String> {
 // `/wi-process` can locate and replace it in queue mode even when no template
 // is available. The anchor names match the corresponding Jinja templates.
 
-fn fallback_weekly_synthesis(year: i16, week: u8, ctx: &serde_json::Value) -> String {
+fn fallback_weekly_synthesis(
+    year: i16,
+    week: u8,
+    ctx: &serde_json::Value,
+    locale: Locale,
+) -> String {
+    let s = locale.strings();
+    let title = s.weekly_synthesis_title;
     format!(
-        "---\nid: synthesis-{year}-W{week:02}\ntitle: \"주간 종합 {year}-W{week:02}\"\ncreated: {}\nlabels: [\"synthesis\"]\n---\n\n# 주간 종합 {year}-W{week:02}\n\n## 이번 주 핵심 주제\n\n{}\n",
+        "---\nid: synthesis-{year}-W{week:02}\ntitle: \"{title} {year}-W{week:02}\"\ncreated: {}\nlabels: [\"synthesis\"]\n---\n\n# {title} {year}-W{week:02}\n\n## {}\n\n{}\n",
         ctx["date"].as_str().unwrap_or(""),
+        s.key_themes_this_week,
         ctx["narrative"].as_str().unwrap_or(""),
     )
 }
 
-fn fallback_personal(year: i16, week: u8, ctx: &serde_json::Value) -> String {
+fn fallback_personal(year: i16, week: u8, ctx: &serde_json::Value, locale: Locale) -> String {
+    let s = locale.strings();
+    let title = s.weekly_personal_title;
     format!(
-        "---\nid: me-{year}-W{week:02}\ntitle: \"내 주간 업무 {year}-W{week:02}\"\ncreated: {}\nlabels: [\"personal\"]\n---\n\n# 내 주간 업무 {year}-W{week:02}\n\n## 핵심 요약\n\n{}\n",
+        "---\nid: me-{year}-W{week:02}\ntitle: \"{title} {year}-W{week:02}\"\ncreated: {}\nlabels: [\"personal\"]\n---\n\n# {title} {year}-W{week:02}\n\n## {}\n\n{}\n",
         ctx["end_date"].as_str().unwrap_or(""),
+        s.key_summary,
         ctx["narrative"].as_str().unwrap_or(""),
     )
 }
 
-fn fallback_monthly(year: i16, month: u8, ctx: &serde_json::Value) -> String {
+fn fallback_monthly(year: i16, month: u8, ctx: &serde_json::Value, locale: Locale) -> String {
+    let title = locale.monthly_title(year, month as i8);
     format!(
-        "---\nid: me-{year}-{month:02}\ntitle: \"{year}년 {month}월 업무 요약\"\ncreated: {}\nlabels: [\"personal\"]\n---\n\n# {year}년 {month}월 업무 요약\n\n## 핵심 요약\n\n{}\n",
+        "---\nid: me-{year}-{month:02}\ntitle: \"{title}\"\ncreated: {}\nlabels: [\"personal\"]\n---\n\n# {title}\n\n## {}\n\n{}\n",
         ctx["end_date"].as_str().unwrap_or(""),
+        locale.strings().key_summary,
         ctx["narrative"].as_str().unwrap_or(""),
     )
 }
 
-fn fallback_quarterly(year: i16, quarter: u8, ctx: &serde_json::Value) -> String {
+fn fallback_quarterly(year: i16, quarter: u8, ctx: &serde_json::Value, locale: Locale) -> String {
+    let title = locale.quarterly_title(year, quarter);
     format!(
-        "---\nid: performance-{year}-Q{quarter}\ntitle: \"{year}년 {quarter}분기 성과 리뷰\"\ncreated: {}\nlabels: [\"personal\", \"strategy\"]\n---\n\n# {year}년 {quarter}분기 성과 리뷰\n\n## 주요 성과 Top 5\n\n{}\n",
+        "---\nid: performance-{year}-Q{quarter}\ntitle: \"{title}\"\ncreated: {}\nlabels: [\"personal\", \"strategy\"]\n---\n\n# {title}\n\n## {}\n\n{}\n",
         ctx["date"].as_str().unwrap_or(""),
+        locale.strings().top_achievements,
         ctx["narrative"].as_str().unwrap_or(""),
     )
 }
 
-fn fallback_annual(year: i16, ctx: &serde_json::Value) -> String {
+fn fallback_annual(year: i16, ctx: &serde_json::Value, locale: Locale) -> String {
+    let title = locale.annual_title(year);
     format!(
-        "---\nid: annual-{year}\ntitle: \"{year}년 연간 성과 리뷰\"\ncreated: {year}-12-31\nlabels: [\"personal\", \"strategy\"]\n---\n\n# {year}년 연간 성과 리뷰\n\n## 종합 요약\n\n{}\n",
+        "---\nid: annual-{year}\ntitle: \"{title}\"\ncreated: {year}-12-31\nlabels: [\"personal\", \"strategy\"]\n---\n\n# {title}\n\n## {}\n\n{}\n",
+        locale.strings().overall_summary,
         ctx["narrative"].as_str().unwrap_or(""),
     )
 }
