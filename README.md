@@ -34,19 +34,15 @@ Uninstall: `./scripts/uninstall.sh [--yes] [--keep-data]`.
 ```bash
 # 1. Install (see above)
 
-# 2. Create your config
-cp config.example.yaml config.yaml
+# 2. Create your config — auto-discovered at ./config.yaml (repo) or
+#    ~/.config/wi-ingest/config.yaml (binary-only install). Override with --config/WI_CONFIG.
+cp config.example.yaml config.yaml                                  # from a repo
+# cp ~/.config/wi-ingest/config.example.yaml ~/.config/wi-ingest/config.yaml   # binary install
 $EDITOR config.yaml
 
-# 3. Set credentials (env vars or <vault>/.wiki-ingest/credentials.json)
-export WI_GOOGLE_CLIENT_ID=...
-export WI_GOOGLE_CLIENT_SECRET=...
-export WI_GOOGLE_REFRESH_TOKEN=...
-export WI_SLACK_TOKEN=xoxb-...
-export WI_JIRA_URL=https://...atlassian.net
-export WI_JIRA_EMAIL=you@company.com
-export WI_JIRA_TOKEN=...
-export ANTHROPIC_API_KEY=sk-ant-...    # optional
+# 3. Set credentials — easiest is the interactive wizard:
+wi init credentials
+#    (or env vars / <vault>/.wiki-ingest/credentials.json by hand)
 
 # 4. Verify
 wi validate

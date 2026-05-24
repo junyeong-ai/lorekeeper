@@ -231,6 +231,19 @@ install_templates() {
     log_ok "Templates installed"
 }
 
+# Drop config.example.yaml into the XDG config dir so a binary-only install (no git
+# clone) has a template to copy to config.yaml. `wi` auto-discovers
+# ~/.config/wi-ingest/config.yaml, so this is where users should put their real config.
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/wi-ingest"
+install_config_example() {
+    local src="$1"
+    [ -f "$src" ] || return 0
+    render_step "Installing config example to ${CONFIG_DIR}"
+    mkdir -p "$CONFIG_DIR"
+    cp "$src" "${CONFIG_DIR}/config.example.yaml"
+    log_ok "Config example → ${CONFIG_DIR}/config.example.yaml"
+}
+
 build_from_source() {
     local repo_dir="$1"
     render_step "Building from source (cargo build --release --locked)"
@@ -434,7 +447,7 @@ main() {
     TMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t wi-install)"
 
     detect_tty || true
-    local platform="" version method bin_dest skill_level binary_src templates_src
+    local platform="" version method bin_dest skill_level binary_src templates_src config_example_src
 
     local repo_dir=""
     if [ -f "$(dirname "$0")/../Cargo.toml" ]; then
@@ -542,15 +555,18 @@ main() {
                 local stage="${TMP_DIR}/${BINARY_NAME}-v${version}-${platform}"
                 binary_src="${stage}/${BINARY_NAME}"
                 templates_src="${stage}/templates"
+                config_example_src="${stage}/config.example.yaml"
                 ;;
             source)
                 [ -n "$repo_dir" ] || die "--from-source requires running from a cloned repo"
                 binary_src="$(build_from_source "$repo_dir")"
                 templates_src="${repo_dir}/templates"
+                config_example_src="${repo_dir}/config.example.yaml"
                 ;;
         esac
         install_binary "$binary_src" "$INSTALL_DIR"
         install_templates "$templates_src" "$DATA_DIR"
+        install_config_example "$config_example_src"
     fi
 
     if [ "$skill_level" != "none" ]; then
@@ -573,11 +589,14 @@ main() {
     check_path "$INSTALL_DIR"
     printf '\n%s✅ Installation complete%s\n' "$C_GREEN$C_BOLD" "$C_RESET"
     printf '\nNext steps:\n'
-    printf '  %s%s validate%s              Verify config.yaml in current directory\n' "$C_BOLD" "$BINARY_NAME" "$C_RESET"
-    printf '  %s%s ingest --dry-run%s      Preview ingest without writing\n' "$C_BOLD" "$BINARY_NAME" "$C_RESET"
-    printf '  %s%s schedule%s              Generate crontab entries\n' "$C_BOLD" "$BINARY_NAME" "$C_RESET"
-    printf '  %s/wiki-ingest%s              Use wi commands via Claude Code\n' "$C_BOLD" "$C_RESET"
-    printf '  %s/wi-process%s               Drain the LLM work queue (queue-mode runs)\n' "$C_BOLD" "$C_RESET"
+    printf '  %s1.%s Create your config (auto-discovered, no repo needed):\n' "$C_BOLD" "$C_RESET"
+    printf '       cp %s/config.example.yaml %s/config.yaml\n' "$CONFIG_DIR" "$CONFIG_DIR"
+    printf '       $EDITOR %s/config.yaml\n' "$CONFIG_DIR"
+    printf '  %s2.%s %s init credentials%s     Enter API tokens interactively\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
+    printf '  %s3.%s %s validate%s             Verify config + credentials\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
+    printf '  %s4.%s %s ingest --dry-run%s     Preview ingest without writing\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
+    printf '  %s5.%s %s schedule%s | crontab -  Register the daily cron\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
+    printf '  %s/wiki-ingest%s · %s/wi-process%s   via Claude Code (queue-mode)\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
 }
 
 main "$@"

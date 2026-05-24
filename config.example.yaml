@@ -1,6 +1,11 @@
 # wiki-ingest configuration
 # Copy to config.yaml and customize for your environment.
 # config.yaml is gitignored — safe for personal settings.
+#
+# Location (auto-discovered in this order):
+#   1. --config / WI_CONFIG
+#   2. ./config.yaml                       (running from a repo checkout)
+#   3. ~/.config/wi-ingest/config.yaml     (binary-only install)
 
 # ─── Vault 경로 ───────────────────────────────────────────
 vault:
@@ -40,16 +45,22 @@ sources:
     track_personal: false
 
   # ── Team (팀 관찰) ──
+  # 채널 전체 = 팀 업무 현황. 내가 쓴 메시지는 work-log로 자동 분리(track_personal +
+  # identity.slack_id). 대화 대부분이 쓰레드라 include_threads로 답글 맥락까지 모읍니다.
   team-slack:
     type: slack-channel
     enabled: true
     schedule: "0 9 * * 1-5"
     params:
-      channel: "#aix-team-digest"
+      # 단일 channel 또는 channels: ["C0123…", "#name"] (복수, id/이름 혼용 가능)
+      channels: ["#aix-team-digest"]
       lookback_hours: 24
+      include_threads: true     # 쓰레드 답글까지 맥락 포함
+      exclude_bots: true        # 봇/통합 메시지 제외 (기본 true)
+      # watch_users: ["U0123…"] # (선택) 특정 사용자가 쓰거나 멘션된 쓰레드만; 비우면 전체
     labels: [team-ops]
     extract_concepts: true
-    track_personal: false
+    track_personal: true
 
   # ── Personal (내 활동 — 직접 수집) ──
   my-tasks:
@@ -57,11 +68,12 @@ sources:
     enabled: true
     schedule: "0 9 * * 1-5"
     params:
+      # 그날 변경된(=작업한) 이슈 = 작업 이력 스냅샷. 마감/시작일은 그날 시점 값으로
+      # 페이지에 표시되지만, 검색 기준은 updated (날짜 변경에 의한 과거 오염 방지).
       jql: >
         assignee = currentUser()
         AND updated >= -1d
         ORDER BY updated DESC
-      fields: [summary, status, priority, labels, updated]
       max_results: 50
     labels: [personal]
     extract_concepts: false

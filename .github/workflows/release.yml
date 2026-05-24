@@ -93,6 +93,7 @@ jobs:
             cp "target/${TARGET}/release/wi" "$stage/"
           fi
           cp templates/*.md.jinja "$stage/templates/"
+          cp config.example.yaml "$stage/"
           cp README.md LICENSE 2>/dev/null "$stage/" || cp README.md "$stage/"
           archive="${stage}.${ARCHIVE_EXT}"
           if [ "$ARCHIVE_EXT" = "zip" ]; then
