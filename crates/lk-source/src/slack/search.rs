@@ -147,7 +147,9 @@ impl Source for SlackSearchSource {
                     .and_then(|c| c.name.as_deref())
                     .unwrap_or(channel_name);
 
-                // Resolve author user id to display name.
+                // Preserve raw user id for identity matching (flag_personal
+                // inspects metadata), then resolve to display name for the page.
+                let author_id = m.user.clone();
                 let author = m
                     .user
                     .as_ref()
@@ -175,6 +177,7 @@ impl Source for SlackSearchSource {
                     metadata: serde_json::json!({
                         "channel": ch,
                         "keywords": spec.keywords,
+                        "author_id": author_id,
                     }),
                 });
             }

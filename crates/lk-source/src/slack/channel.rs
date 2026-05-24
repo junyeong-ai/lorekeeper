@@ -246,6 +246,7 @@ impl Source for SlackChannelSource {
                     metadata: serde_json::json!({
                         "channel": channel_name,
                         "reply_count": root.reply_count,
+                        "author_id": root.user,
                     }),
                 });
             }
