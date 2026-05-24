@@ -71,11 +71,8 @@ Required: `./config.yaml` or path via `LORE_CONFIG` env / `--config` flag.
 Relative `vault.root` is resolved against the config file's parent dir,
 not the process CWD — so installed `lore` always finds the right vault.
 
-Template resolution order:
-1. `--template-dir` / `LORE_TEMPLATE_DIR`
-2. `<vault>/.lorekeeper/templates/` (per-vault override)
-3. `$XDG_DATA_HOME/lorekeeper/templates/` (installer default)
-4. `./templates/` (development)
+Templates are embedded in the binary (no external directory needed). To override,
+pass `--template-dir` / `LORE_TEMPLATE_DIR` pointing to a custom template directory.
 
 ## Credentials
 

@@ -6,7 +6,7 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
 
 - **Global flags** `--config`/`LORE_CONFIG` and `--template-dir`/`LORE_TEMPLATE_DIR` are
   injected into the cron lines `lore schedule` generates, so scheduled runs don't depend on
-  CWD. `--template-dir` falls back to `XDG_DATA_HOME/lorekeeper/templates`.
+  CWD. Templates are embedded in the binary by default; `--template-dir` overrides them.
 - **`find_config`** resolves in order: `--config`/`LORE_CONFIG` → `./config.yaml` →
   `~/.config/lorekeeper/config.yaml` (XDG). The XDG path is what makes a binary-only install
   (no repo) work. There is no `config.example.yaml` fallback — running with the example's

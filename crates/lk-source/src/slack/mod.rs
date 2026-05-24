@@ -60,7 +60,6 @@ async fn slack_post<T: serde::de::DeserializeOwned>(
 #[derive(Debug, Deserialize)]
 struct ChannelInfo {
     id: String,
-    #[allow(dead_code)]
     name: String,
 }
 

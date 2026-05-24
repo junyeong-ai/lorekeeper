@@ -7,11 +7,11 @@ use clap::Parser;
 #[derive(Parser)]
 #[command(name = "lore", about = "Knowledge ingestion pipeline for Obsidian")]
 struct Cli {
-    /// Path to config file (default: ./config.yaml or ./config.example.yaml)
+    /// Path to config file (default: ./config.yaml or ~/.config/lorekeeper/config.yaml)
     #[arg(long, global = true, env = "LORE_CONFIG")]
     config: Option<PathBuf>,
 
-    /// Template directory override (default: <vault>/.lorekeeper/templates or ./templates)
+    /// Override template directory (default: embedded templates; this overrides them)
     #[arg(long, global = true, env = "LORE_TEMPLATE_DIR")]
     template_dir: Option<PathBuf>,
 

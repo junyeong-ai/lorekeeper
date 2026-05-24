@@ -82,7 +82,11 @@ fn page_schemas() -> Vec<PageSchema> {
             frontmatter: &["id", "title", "created", "labels", "source", "events_count"],
             sections: vec![
                 s("Summary", |i| i.summary.to_string(), Owner::Llm),
-                s("Events", |i| i.key_events.to_string(), Owner::Machine),
+                s(
+                    "Events / Messages",
+                    |i| format!("{} / {}", i.key_events, i.key_messages),
+                    Owner::Machine,
+                ),
                 s(
                     "Concepts",
                     |i| i.related_concepts.to_string(),
