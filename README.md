@@ -84,6 +84,7 @@ Calendar ──────┘          ├─ Concepts (LLM)          wiki/conc
 
 | Command | Purpose |
 |---------|---------|
+| `wi init credentials` | Interactive wizard — writes `<vault>/.wiki-ingest/credentials.json` |
 | `wi validate` | Verify config.yaml |
 | `wi ingest [source]` | Run ingestion (all enabled sources or single ID) |
 | `wi ingest --dry-run` | Preview without writing to vault |
@@ -180,8 +181,13 @@ Two ways to provide credentials, env vars take precedence over file:
 - `WI_JIRA_URL`, `WI_JIRA_EMAIL`, `WI_JIRA_TOKEN`
 - `ANTHROPIC_API_KEY` (only for `llm.provider: anthropic`; if missing in that mode, the run degrades to the no-op LLM with a warning. Not needed for the default `queue` mode.)
 
-**Credentials file** (recommended — one file instead of seven env vars). Copy the
-template and fill in values:
+**Interactive wizard** (easiest): `wi init credentials` prompts for each provider
+(skip the ones you don't use), masks secret entry, and writes
+`<vault>/.wiki-ingest/credentials.json` with `0600` permissions. Re-running edits in
+place — press enter to keep an existing secret.
+
+**Credentials file by hand** (one file instead of seven env vars). Copy the template
+and fill in values:
 ```bash
 cp credentials.example.json "<vault_root>/.wiki-ingest/credentials.json"
 chmod 600 "<vault_root>/.wiki-ingest/credentials.json"

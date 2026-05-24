@@ -30,3 +30,4 @@ minijinja = { version = "2", features = ["loader", "json"] }
 redb = "2"
 strsim = "0.11"
 blake3 = "1"
+dialoguer = "0.11"

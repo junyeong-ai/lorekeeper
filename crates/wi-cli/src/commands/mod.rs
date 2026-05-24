@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 pub mod health;
 pub mod ingest;
+pub mod init;
 pub mod maintenance;
 pub mod performance;
 pub mod schedule;

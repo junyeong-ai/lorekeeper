@@ -21,3 +21,7 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   single-writer). It never touches live `*.jsonl.tmp` — the ingest startup sweep does.
 - **`wi synthesis <period>`** rejects `--date`/`--year` together with `--previous`
   (clap `conflicts_with`), and flushes the LLM queue after writing its pages.
+- **`wi init credentials`** (in `init.rs`) is the interactive credential wizard. UX
+  (dialoguer prompts, masked secrets, TTY guard) lives here; the JSON shape + atomic
+  `0600` write live in `wi_source::credentials` (`from_file`/`save`). `Init` is a
+  subcommand-of-subcommand so future scaffolders (`wi init config`) slot in cleanly.

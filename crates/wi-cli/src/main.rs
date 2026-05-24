@@ -21,6 +21,11 @@ struct Cli {
 
 #[derive(clap::Subcommand)]
 enum Command {
+    /// Scaffold project files interactively
+    Init {
+        #[command(subcommand)]
+        target: InitTarget,
+    },
     /// Run ingestion for one or all sources
     Ingest {
         /// Source ID (omit to run all enabled sources)
@@ -60,6 +65,16 @@ enum Command {
     },
     /// Prune ingest log and dedup cache entries older than 90 days
     Maintenance,
+}
+
+#[derive(clap::Subcommand)]
+enum InitTarget {
+    /// Interactively write <vault>/.wiki-ingest/credentials.json
+    Credentials {
+        /// Vault root override (default: vault.root from config)
+        #[arg(long)]
+        vault: Option<PathBuf>,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -107,6 +122,9 @@ async fn main() -> miette::Result<()> {
     };
 
     match cli.command {
+        Command::Init { target } => match target {
+            InitTarget::Credentials { vault } => commands::init::credentials(&opts, vault).await,
+        },
         Command::Validate => commands::validate::run(&opts).await,
         Command::Status => commands::status::run(&opts).await,
         Command::Ingest {
