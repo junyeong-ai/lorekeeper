@@ -43,13 +43,15 @@ pub enum TaskKind {
 
 impl QueueLlmClient {
     pub fn new(queue_dir: PathBuf) -> Self {
-        // Combine second-resolution wall time + process id so two CLI invocations that
-        // start in the same second land in different queue files. Each Rust process is
-        // the sole writer of its file — no inter-process append locking required.
+        // Wall-clock second + PID separates distinct CLI invocations; a process-global
+        // sequence additionally separates two clients constructed in the same process and
+        // second, so their flushes never rename onto the same final path.
+        static SEQ: AtomicU64 = AtomicU64::new(0);
         let run_id = format!(
-            "{}-pid{}",
+            "{}-pid{}-{}",
             jiff::Zoned::now().strftime("%Y-%m-%dT%H-%M-%SZ"),
-            std::process::id()
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed),
         );
         Self {
             queue_dir,

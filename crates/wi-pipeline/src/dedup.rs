@@ -118,24 +118,27 @@ impl DedupCache {
         events: Vec<Event>,
         cascade: &[DedupStrategy],
     ) -> Result<Vec<Event>, PipelineError> {
-        // Read-only/empty cache (dry-run, no existing file): nothing has been seen, so
-        // every event is novel.
-        let Some(db) = &self.db else {
-            return Ok(events);
+        // Persisted tables exist only when a real (writable) cache is open. In read-only/
+        // empty mode (dry-run, no file) they're absent, but intra-batch dedup must STILL
+        // run so a dry-run preview matches what a real run would actually write.
+        let read_txn = match &self.db {
+            Some(db) => Some(
+                db.begin_read()
+                    .map_err(|e| PipelineError::Dedup(e.to_string()))?,
+            ),
+            None => None,
         };
-        let txn = db
-            .begin_read()
-            .map_err(|e| PipelineError::Dedup(e.to_string()))?;
-
-        let id_table = txn
-            .open_table(EVENT_IDS)
-            .map_err(|e| PipelineError::Dedup(e.to_string()))?;
-        let url_table = txn
-            .open_table(URLS)
-            .map_err(|e| PipelineError::Dedup(e.to_string()))?;
-        let title_table = txn
-            .open_table(TITLES)
-            .map_err(|e| PipelineError::Dedup(e.to_string()))?;
+        let tables = match &read_txn {
+            Some(txn) => Some((
+                txn.open_table(EVENT_IDS)
+                    .map_err(|e| PipelineError::Dedup(e.to_string()))?,
+                txn.open_table(URLS)
+                    .map_err(|e| PipelineError::Dedup(e.to_string()))?,
+                txn.open_table(TITLES)
+                    .map_err(|e| PipelineError::Dedup(e.to_string()))?,
+            )),
+            None => None,
+        };
 
         let mut novel: Vec<Event> = Vec::with_capacity(events.len());
         // Per-run sets so two identical events in the SAME input batch don't both pass
@@ -149,26 +152,31 @@ impl DedupCache {
             for strategy in cascade {
                 match strategy {
                     DedupStrategy::EventId => {
-                        if seen_ids.contains(event.id.as_str())
-                            || id_table
+                        let in_cache = match &tables {
+                            Some((ids, _, _)) => ids
                                 .get(event.id.as_str())
                                 .map_err(|e| PipelineError::Dedup(e.to_string()))?
-                                .is_some()
-                        {
+                                .is_some(),
+                            None => false,
+                        };
+                        if seen_ids.contains(event.id.as_str()) || in_cache {
                             dup = true;
                             break;
                         }
                     }
                     DedupStrategy::Url => {
-                        if let Some(ref url) = event.url
-                            && (seen_urls.contains(url)
-                                || url_table
+                        if let Some(ref url) = event.url {
+                            let in_cache = match &tables {
+                                Some((_, urls, _)) => urls
                                     .get(url.as_str())
                                     .map_err(|e| PipelineError::Dedup(e.to_string()))?
-                                    .is_some())
-                        {
-                            dup = true;
-                            break;
+                                    .is_some(),
+                                None => false,
+                            };
+                            if seen_urls.contains(url) || in_cache {
+                                dup = true;
+                                break;
+                            }
                         }
                     }
                     DedupStrategy::Title => {
@@ -178,19 +186,21 @@ impl DedupCache {
                         // than the entire (up to 90-day) cache. Also compare against titles
                         // already accepted earlier in this same batch.
                         let prefix = format!("{}:", event.date);
-                        let range = title_table
-                            .range(prefix.as_str()..)
-                            .map_err(|e| PipelineError::Dedup(e.to_string()))?;
-
-                        for entry in range {
-                            let entry = entry.map_err(|e| PipelineError::Dedup(e.to_string()))?;
-                            let key = entry.0.value();
-                            let Some(existing) = key.strip_prefix(&prefix) else {
-                                break;
-                            };
-                            if sorensen_dice(&event.title, existing) >= self.title_threshold {
-                                dup = true;
-                                break;
+                        if let Some((_, _, title_table)) = &tables {
+                            let range = title_table
+                                .range(prefix.as_str()..)
+                                .map_err(|e| PipelineError::Dedup(e.to_string()))?;
+                            for entry in range {
+                                let entry =
+                                    entry.map_err(|e| PipelineError::Dedup(e.to_string()))?;
+                                let key = entry.0.value();
+                                let Some(existing) = key.strip_prefix(&prefix) else {
+                                    break;
+                                };
+                                if sorensen_dice(&event.title, existing) >= self.title_threshold {
+                                    dup = true;
+                                    break;
+                                }
                             }
                         }
                         if !dup {
@@ -379,6 +389,24 @@ mod tests {
         // Matches nothing in the cascade → novel.
         let novel = vec![ev("fresh", "Brand New", Some("https://example.com/z"))];
         assert_eq!(cache.deduplicate(novel, &cascade).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn read_only_empty_cache_still_dedups_within_batch() {
+        // Dry-run with no existing cache (open_read_only → None) must still drop
+        // intra-batch duplicates so the preview matches a real run.
+        let dir = TempDir::new().unwrap();
+        let cache = DedupCache::open_read_only(&dir.path().join("absent.redb"), 0.85).unwrap();
+        let cascade = vec![DedupStrategy::EventId];
+        let batch = vec![ev("a", "A", None), ev("a", "A", None)];
+        let novel = cache.deduplicate(batch, &cascade).unwrap();
+        assert_eq!(
+            novel.len(),
+            1,
+            "intra-batch dup must be dropped even with no cache file"
+        );
+        // And no file was created.
+        assert!(!dir.path().join("absent.redb").exists());
     }
 
     #[test]

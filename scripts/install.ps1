@@ -148,7 +148,9 @@ function Install-Skill($level, $src, $skillName) {
 # ── main ─────────────────────────────────────────────────────────────────
 
 $repoDir = $null
-$scriptParent = Split-Path -Parent $PSCommandPath
+# When run via `irm ... | iex`, $PSCommandPath is empty; guard so the one-liner
+# install path doesn't error before downloading anything.
+$scriptParent = if ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { $null }
 if ($scriptParent -and (Test-Path (Join-Path $scriptParent '..\Cargo.toml'))) {
     $repoDir = (Resolve-Path (Join-Path $scriptParent '..')).Path
 }
