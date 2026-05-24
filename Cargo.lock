@@ -1049,6 +1049,7 @@ name = "lk-graph"
 version = "0.1.0"
 dependencies = [
  "globset",
+ "jiff",
  "lk-core",
  "petgraph",
  "rayon",

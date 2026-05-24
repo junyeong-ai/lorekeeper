@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use lk_core::config::GraphConfig;
-use lk_graph::{cluster, export, graph, index, normalize, output, scan};
+use lk_graph::{cluster, export, graph, index, normalize, output, scan, stale};
 
 use super::GlobalOpts;
 
@@ -52,6 +52,12 @@ pub enum GraphCmd {
         #[arg(long)]
         min_community_size: Option<usize>,
     },
+    /// Report pages whose `updated`/`created` frontmatter is older than N days
+    Stale {
+        /// Threshold in days (default: 90)
+        #[arg(long, default_value_t = 90)]
+        days: u32,
+    },
 }
 
 /// Returns exit code: 0 = ok/no findings, 1 = findings, 2 = runtime error.
@@ -77,6 +83,12 @@ fn run_inner(
     json: bool,
     root_override: Option<PathBuf>,
 ) -> Result<bool, String> {
+    // `stale` needs timezone from the full config — and doesn't use the WikiGraph
+    // at all — so dispatch it up front before paying the graph-build cost.
+    if let GraphCmd::Stale { days } = cmd {
+        return run_stale(opts, root_override, json, days);
+    }
+
     let (root, mut config) = resolve_config(opts, root_override)?;
 
     let pages = scan::scan_vault(&root, &config).map_err(|e| format!("{e}"))?;
@@ -246,9 +258,42 @@ fn run_inner(
             }
             false
         }
+        // Dispatched at the top of `run_inner` because it needs the timezone from
+        // the full config and doesn't touch the WikiGraph.
+        GraphCmd::Stale { .. } => unreachable!(),
     };
 
     Ok(has_findings)
+}
+
+fn run_stale(
+    opts: &GlobalOpts,
+    root_override: Option<PathBuf>,
+    json: bool,
+    days: u32,
+) -> Result<bool, String> {
+    let (root, config, tz) = resolve_config_with_tz(opts, root_override)?;
+    let pages = scan::scan_vault(&root, &config).map_err(|e| format!("{e}"))?;
+
+    // Same date derivation as the ingest pipeline (`commands::ingest`): now in the
+    // vault's timezone, then the calendar date. UTC-by-accident gives the wrong
+    // answer near midnight.
+    let today = jiff::Timestamp::now().to_zoned(tz).date();
+
+    let stale_pages = stale::find_stale(&pages, &root, today, days).map_err(|e| format!("{e}"))?;
+    let count = stale_pages.len();
+    let report = output::StaleReport {
+        threshold_days: days,
+        stale: stale_pages,
+        count,
+    };
+
+    if json {
+        output::print_json(&report)?;
+    } else {
+        output::print_stale(&report);
+    }
+    Ok(count > 0)
 }
 
 /// Resolve vault root and graph config. If `--root` is given, uses that and default
@@ -265,4 +310,23 @@ fn resolve_config(
     let config = super::load_config(&config_path).map_err(|e| format!("{e}"))?;
     let root = config.vault.root_path();
     Ok((root, config.graph))
+}
+
+/// Like [`resolve_config`] but also returns the configured timezone. `stale` needs
+/// it to compute "today" consistently with the rest of the pipeline (`Event::date`
+/// is derived the same way). A `--root` override gets system timezone since no
+/// config is loaded.
+fn resolve_config_with_tz(
+    opts: &GlobalOpts,
+    root_override: Option<PathBuf>,
+) -> Result<(PathBuf, GraphConfig, jiff::tz::TimeZone), String> {
+    if let Some(root) = root_override {
+        return Ok((root, GraphConfig::default(), jiff::tz::TimeZone::system()));
+    }
+
+    let config_path = super::find_config(opts).map_err(|e| format!("{e}"))?;
+    let config = super::load_config(&config_path).map_err(|e| format!("{e}"))?;
+    let root = config.vault.root_path();
+    let tz = config.vault.timezone();
+    Ok((root, config.graph, tz))
 }

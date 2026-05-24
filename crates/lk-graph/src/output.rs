@@ -3,6 +3,7 @@ use serde::Serialize;
 use crate::cluster::{ClusterResult, LinkSuggestion};
 use crate::export::GraphExport;
 use crate::graph::{BrokenLink, HubEntry};
+use crate::stale::{Category, StalePage};
 
 #[derive(Debug, Serialize)]
 pub struct BuildReport {
@@ -242,4 +243,43 @@ pub fn print_suggest_links(r: &SuggestLinksReport) {
         );
     }
     println!("{} suggestion(s)", r.count);
+}
+
+#[derive(Debug, Serialize)]
+pub struct StaleReport {
+    pub threshold_days: u32,
+    pub stale: Vec<StalePage>,
+    pub count: usize,
+}
+
+pub fn print_stale(r: &StaleReport) {
+    println!("=== Stale pages (>= {} days) ===", r.threshold_days);
+
+    if r.stale.is_empty() {
+        println!("\nNo stale pages.");
+        return;
+    }
+
+    // Bucket by category, preserving the input ordering (oldest first) within
+    // each bucket. `Category` derives `Ord`, so the outer iteration is also
+    // deterministic.
+    let mut buckets: std::collections::BTreeMap<Category, Vec<&StalePage>> =
+        std::collections::BTreeMap::new();
+    for page in &r.stale {
+        buckets.entry(page.category).or_default().push(page);
+    }
+
+    for (category, entries) in &buckets {
+        println!("\n{} ({}):", category.label(), entries.len());
+        for entry in entries {
+            println!(
+                "  {:>4} days  {}  (updated: {})",
+                entry.days_old,
+                entry.path.display(),
+                entry.updated
+            );
+        }
+    }
+
+    println!("\nTotal: {} stale page(s)", r.count);
 }
