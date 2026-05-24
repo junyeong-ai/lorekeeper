@@ -95,13 +95,3 @@ Auto-discovered: `./config.yaml` → `~/.config/lorekeeper/config.yaml`.
 | `google-calendar` | Calendar API | Schedule tracking (HTML→Markdown) |
 | `manual` | Local inbox | User-curated files (md/txt/json → archive after ingest) |
 
-## Output model
-
-**Primary** (per-source): `daily/{source-id}/YYYY-MM-DD.md`
-**Derived** (cross-source):
-- `me/work-log/` — personal items (`track_personal` + identity matching)
-- `weekly/synthesis/`, `weekly/me/`, `monthly/me/`, `quarterly/me/`, `annually/me/`
-- `wiki/concepts/` — extracted concepts (merged across runs)
-- `wiki/documents/` — user-curated knowledge artifacts (papers, books, articles)
-- `wiki/index.md` — hierarchical page catalog (`lore wiki index`)
-- `wiki/AGENTS.md` — generated page format schema (`lore schema`)

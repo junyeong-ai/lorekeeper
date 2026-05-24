@@ -72,8 +72,10 @@ Google Drive ──┐          ┌─ Extract (per-source)    daily/{source-id}
 Gmail ─────────┤          ├─ Normalize → Event       me/work-log/
 Slack ─────────┼─ config ─┤  Deduplicate (cascade)   weekly/ monthly/
 Jira ──────────┤  .yaml   ├─ Classify (labels)       quarterly/ annually/
-Calendar ──────┘          ├─ Concepts (LLM)          wiki/concepts/
-                          └─ Render (templates)
+Calendar ──────┤          ├─ Concepts (LLM)          wiki/concepts/
+Manual inbox ──┘          ├─ Wiki index (catalog)    wiki/documents/
+                          └─ Graph (lint, stale,     wiki/index.md
+                               cluster, backlinks)   wiki/AGENTS.md
 ```
 
 ## Commands

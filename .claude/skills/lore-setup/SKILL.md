@@ -45,3 +45,10 @@ allowed-tools: |
   `identity.slack_id`로 work-log에 자동 분리. `watch_users`는 특정인만 좁힐 때만.
 - **Gmail은 `category:primary`** 권장 — 봇/알림(GitHub 등)을 빼고 업무 메일만.
 - 자격증명은 `lore init credentials`로 입력 — 이 스킬은 ID/조건만 채운다.
+
+## When NOT to invoke
+
+- 자격증명(토큰/시크릿) 입력 → `lore init credentials`
+- 수집 실행 → `/lorekeeper`
+- 큐 처리 → `/lore-process`
+- vault 검색/감사 → `/lore-wiki`

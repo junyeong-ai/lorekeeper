@@ -1,0 +1,8 @@
+- **Source ID = vault directory**: the key under `sources:` becomes `daily/{id}/`. Must not contain `/`, `\`, `.`, or `..`.
+- **Date derivation**: `timestamp.to_zoned(vault.timezone()).date()` — always via configured timezone, never UTC.
+- **Atomic ingest** (5 phases): plan → write daily/concept → work-log → flush LLM queue → commit dedup. Each source's dedup commits only after its own writes + flush succeed.
+- **i18n single source of truth**: `vault.locale` (ko/en) switches all labels. Templates use `{{ i18n.* }}`. Source content is never translated.
+- **Domain logic single-sourced in lk-core**: slugify (NFKC), frontmatter, wikilink, text normalization. Zero duplicate implementations across crates.
+- **LLM provider modes**: `queue` (JSONL → `/lore-process`), `anthropic` (direct API), `noop`.
+- **`--dry-run` is side-effect-free**: no vault writes, no dedup, no log.
+- **Dedup cascade**: `[event-id, content-hash, url, title]`. content-hash = blake3 of whitespace-normalized title+body.
