@@ -11,6 +11,8 @@
 vault:
   root: ~/Documents/Obsidian Vault
   timezone: system          # IANA name (e.g., "Asia/Seoul") or "system"
+  locale: ko                # output language for added labels/headers: ko | en
+                            # (source content — mail/Slack/Jira bodies — is never translated)
   dirs:
     daily: daily
     weekly: weekly
