@@ -13,7 +13,11 @@ pub async fn run(opts: &super::GlobalOpts, strict: bool) -> miette::Result<()> {
     let mut never = 0u32;
 
     for (id, sc) in config.enabled_sources() {
-        match log.last_success(id).await.ok().flatten() {
+        let last = log
+            .last_success(id)
+            .await
+            .map_err(|e| miette::miette!("read ingest log: {e}"))?;
+        match last {
             Some(entry) => {
                 let age_secs = now.as_second() - entry.timestamp.as_second();
                 let hours = age_secs / 3600;

@@ -1,8 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use tokio::io::AsyncWriteExt;
-
 use crate::VaultError;
 
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -14,10 +12,6 @@ pub struct VaultWriter {
 impl VaultWriter {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
-    }
-
-    pub fn root(&self) -> &Path {
-        &self.root
     }
 
     pub async fn write_page(&self, rel_path: &Path, content: &str) -> Result<(), VaultError> {
@@ -46,21 +40,6 @@ impl VaultWriter {
         }
         Ok(())
     }
-
-    pub async fn append(&self, rel_path: &Path, content: &str) -> Result<(), VaultError> {
-        let full = self.root.join(rel_path);
-        if let Some(parent) = full.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&full)
-            .await?;
-        file.write_all(content.as_bytes()).await?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -83,17 +62,5 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(content, "# Hello");
-    }
-
-    #[tokio::test]
-    async fn append_creates_file() {
-        let (dir, writer) = setup().await;
-        let rel = Path::new("wiki/log.md");
-        writer.append(rel, "line 1\n").await.unwrap();
-        writer.append(rel, "line 2\n").await.unwrap();
-        let content = tokio::fs::read_to_string(dir.path().join(rel))
-            .await
-            .unwrap();
-        assert_eq!(content, "line 1\nline 2\n");
     }
 }

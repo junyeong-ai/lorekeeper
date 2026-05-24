@@ -12,10 +12,6 @@ impl VaultReader {
         Self { root: root.into() }
     }
 
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-
     pub async fn read_page(&self, rel_path: &Path) -> Result<Option<Page>, VaultError> {
         let full = self.root.join(rel_path);
         match tokio::fs::read_to_string(&full).await {
@@ -24,15 +20,6 @@ impl VaultReader {
                 Ok(Some(page))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    pub async fn exists(&self, rel_path: &Path) -> Result<bool, VaultError> {
-        let full = self.root.join(rel_path);
-        match tokio::fs::metadata(&full).await {
-            Ok(_) => Ok(true),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(e) => Err(e.into()),
         }
     }

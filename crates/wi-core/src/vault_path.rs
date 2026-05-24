@@ -70,10 +70,6 @@ impl VaultPath {
         )
     }
 
-    pub fn wiki_index(dirs: &VaultDirs) -> Self {
-        Self(PathBuf::from(&dirs.wiki).join("index.md"))
-    }
-
     pub fn resolve(&self, vault_root: &Path) -> PathBuf {
         vault_root.join(&self.0)
     }

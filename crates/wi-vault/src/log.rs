@@ -57,13 +57,20 @@ impl IngestLog {
             Err(e) => return Err(e.into()),
         };
 
-        let entry = content
-            .lines()
-            .rev()
-            .filter_map(|line| serde_json::from_str::<LogEntry>(line).ok())
-            .find(|e| e.source_id == source_id && e.status == LogStatus::Success);
-
-        Ok(entry)
+        for line in content.lines().rev() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<LogEntry>(line) {
+                Ok(e) if e.source_id == source_id && e.status == LogStatus::Success => {
+                    return Ok(Some(e));
+                }
+                Ok(_) => {}
+                // A corrupt line is observable, not silently treated as "no history".
+                Err(e) => tracing::warn!(error = %e, "skipping malformed ingest-log line"),
+            }
+        }
+        Ok(None)
     }
 
     pub async fn all_entries(&self) -> Result<Vec<LogEntry>, VaultError> {
@@ -73,9 +80,16 @@ impl IngestLog {
             Err(e) => return Err(e.into()),
         };
 
-        Ok(content
-            .lines()
-            .filter_map(|line| serde_json::from_str(line).ok())
-            .collect())
+        let mut entries = Vec::new();
+        for line in content.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str(line) {
+                Ok(e) => entries.push(e),
+                Err(e) => tracing::warn!(error = %e, "skipping malformed ingest-log line"),
+            }
+        }
+        Ok(entries)
     }
 }

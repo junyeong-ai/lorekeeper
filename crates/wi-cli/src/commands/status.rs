@@ -6,7 +6,11 @@ pub async fn run(opts: &super::GlobalOpts) -> miette::Result<()> {
     let log = wi_vault::IngestLog::new(vault_root.join(".wiki-ingest").join("ingest.jsonl"));
 
     for (id, sc) in config.enabled_sources() {
-        match log.last_success(id).await.ok().flatten() {
+        let last = log
+            .last_success(id)
+            .await
+            .map_err(|e| miette::miette!("read ingest log: {e}"))?;
+        match last {
             Some(e) => eprintln!(
                 "  {id} ({}) — last: {}, {} events",
                 sc.source_type, e.timestamp, e.events_count

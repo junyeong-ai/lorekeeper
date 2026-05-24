@@ -9,7 +9,7 @@ pub async fn run(opts: &super::GlobalOpts) -> miette::Result<()> {
     let files = reader
         .list_markdown(&work_log_dir)
         .await
-        .unwrap_or_default();
+        .map_err(|e| miette::miette!("read work-log dir {}: {e}", work_log_dir.display()))?;
 
     if files.is_empty() {
         eprintln!("No work-log data found at {}.", work_log_dir.display());
@@ -21,7 +21,11 @@ pub async fn run(opts: &super::GlobalOpts) -> miette::Result<()> {
     let mut total = 0usize;
 
     for file in &recent {
-        if let Ok(Some(page)) = reader.read_page(file).await
+        let page = reader
+            .read_page(file)
+            .await
+            .map_err(|e| miette::miette!("read {}: {e}", file.display()))?;
+        if let Some(page) = page
             && let Some(cats) = page
                 .frontmatter
                 .get("categories")

@@ -194,7 +194,7 @@ pub async fn run(
                     error: None,
                 })
                 .await
-                .ok();
+                .unwrap_or_else(|e| tracing::warn!(error = %e, "ingest-log write failed"));
             }
             continue;
         }
@@ -336,7 +336,7 @@ pub async fn run(
             },
         })
         .await
-        .ok();
+        .unwrap_or_else(|e| tracing::warn!(error = %e, "ingest-log write failed"));
     }
 
     had_failure |= any_write_failed;
@@ -435,5 +435,5 @@ async fn record_failure(
         error: Some(error.into()),
     })
     .await
-    .ok();
+    .unwrap_or_else(|e| tracing::warn!(error = %e, "ingest-log write failed"));
 }
