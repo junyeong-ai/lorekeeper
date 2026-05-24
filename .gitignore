@@ -3,3 +3,5 @@ credentials.json
 .lorekeeper/
 .DS_Store
 target/
+
+.claude/worktrees/
