@@ -9,10 +9,12 @@ events_count: {{ events | length }}
 
 # {{ i18n.slack_channel_title }} {{ date }}
 
+{% if summary %}
 ## {{ i18n.summary }}
 
 {{ summary }}
 
+{% endif %}
 ## {{ i18n.key_messages }}
 
 {% for event in events %}

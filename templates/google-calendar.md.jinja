@@ -9,10 +9,12 @@ events_count: {{ events | length }}
 
 # {{ i18n.calendar_title }} {{ date }}
 
+{% if summary %}
 ## {{ i18n.summary }}
 
 {{ summary }}
 
+{% endif %}
 ## {{ i18n.key_events }}
 
 {% for event in events %}

@@ -67,12 +67,6 @@ pub struct Strings {
     pub project_updates: &'static str,
     pub knowledge_sharing: &'static str,
     pub meeting_followup: &'static str,
-    pub statistics: &'static str,
-    pub total_received: &'static str,
-    pub meaningful_mail: &'static str,
-    pub filter_rate: &'static str,
-    /// Unit suffix for counts (Korean "건"); empty in languages that don't use one.
-    pub count_unit: &'static str,
     // Personal / synthesis sections
     pub key_summary: &'static str,
     pub work_categories: &'static str,
@@ -143,11 +137,6 @@ static KO: Strings = Strings {
     project_updates: "프로젝트 업데이트",
     knowledge_sharing: "지식 공유",
     meeting_followup: "미팅 후속",
-    statistics: "통계",
-    total_received: "전체 수신",
-    meaningful_mail: "의미 있는 메일",
-    filter_rate: "필터링률",
-    count_unit: "건",
     key_summary: "핵심 요약",
     work_categories: "업무 카테고리",
     key_themes_this_week: "이번 주 핵심 주제",
@@ -209,11 +198,6 @@ static EN: Strings = Strings {
     project_updates: "Project Updates",
     knowledge_sharing: "Knowledge Sharing",
     meeting_followup: "Meeting Follow-up",
-    statistics: "Statistics",
-    total_received: "Total received",
-    meaningful_mail: "Meaningful",
-    filter_rate: "filter rate",
-    count_unit: "",
     key_summary: "Summary",
     work_categories: "Work Categories",
     key_themes_this_week: "Key Themes This Week",
@@ -288,6 +272,5 @@ mod tests {
     fn strings_localized() {
         assert_eq!(Locale::Ko.strings().summary, "요약");
         assert_eq!(Locale::En.strings().summary, "Summary");
-        assert_eq!(Locale::En.strings().count_unit, "");
     }
 }

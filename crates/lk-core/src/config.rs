@@ -128,6 +128,12 @@ impl Config {
                 .map_err(|_| ConfigError::Validation(format!("invalid timezone: '{tz_name}'")))?;
         }
 
+        if self.dedup.cascade.is_empty() {
+            return Err(ConfigError::Validation(
+                "dedup.cascade must contain at least one strategy".into(),
+            ));
+        }
+
         if !(0.0..=1.0).contains(&self.dedup.title_threshold) {
             return Err(ConfigError::Validation(format!(
                 "dedup.title_threshold must be in [0.0, 1.0], got {}",
@@ -328,9 +334,7 @@ impl VaultConfig {
     pub fn timezone(&self) -> jiff::tz::TimeZone {
         match self.timezone.as_deref() {
             Some("system") | None => jiff::tz::TimeZone::system(),
-            Some(name) => {
-                jiff::tz::TimeZone::get(name).unwrap_or_else(|_| jiff::tz::TimeZone::system())
-            }
+            Some(name) => jiff::tz::TimeZone::get(name).expect("valid timezone"),
         }
     }
 }

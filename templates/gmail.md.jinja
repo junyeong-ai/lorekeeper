@@ -5,17 +5,17 @@ created: {{ date }}
 labels: {{ labels | tojson }}
 source: {{ source_id }}
 events_count: {{ events | length }}
-total_threads: {{ total }}
-filtered_threads: {{ filtered }}
 action_required: {{ action_count }}
 ---
 
 # {{ i18n.gmail_title }} {{ date }}
 
+{% if summary %}
 ## {{ i18n.summary }}
 
 {{ summary }}
 
+{% endif %}
 {% if action_required_items %}
 ## {{ i18n.action_required }}
 
@@ -56,12 +56,6 @@ action_required: {{ action_count }}
 {% endfor %}
 
 {% endif %}
-## {{ i18n.statistics }}
-
-- {{ i18n.total_received }}: {{ total }}{{ i18n.count_unit }}
-- {{ i18n.meaningful_mail }}: {{ filtered }}{{ i18n.count_unit }} ({{ i18n.filter_rate }}: {{ filter_rate }}%)
-- {{ i18n.action_required }}: {{ action_count }}{{ i18n.count_unit }}
-
 {% if extract_concepts %}
 ## {{ i18n.related_concepts }}
 

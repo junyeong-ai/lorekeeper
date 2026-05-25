@@ -15,7 +15,7 @@ pub struct RenderContext<'a> {
     pub source_id: &'a str,
     pub source_type: SourceType,
     pub date: jiff::civil::Date,
-    pub events: &'a [Event],
+    pub events: &'a [&'a Event],
     pub labels: &'a [String],
     pub summary: &'a str,
     pub concepts: &'a [String],
@@ -79,9 +79,6 @@ pub fn render_daily_page(
         "concepts": concepts,
         "extract_concepts": extract_concepts,
         "i18n": strings,
-        "total": events.len(),
-        "filtered": events.len(),
-        "filter_rate": 0,
         "action_count": action_items.len(),
         "action_required_items": action_items,
         "decision_items": decision_items,
@@ -112,7 +109,7 @@ pub fn render_daily_page(
     Ok(RenderOutput { path, content })
 }
 
-fn filter_by_class(events: &[Event], class: &str) -> Vec<serde_json::Value> {
+fn filter_by_class(events: &[&Event], class: &str) -> Vec<serde_json::Value> {
     events
         .iter()
         .filter(|e| e.classification.as_deref() == Some(class))

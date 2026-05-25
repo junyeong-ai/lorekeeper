@@ -165,9 +165,9 @@ impl Pipeline {
             classify::classify_with_llm(&mut events, &config.classify, &self.ctx.llm).await;
         }
 
-        let mut by_date: BTreeMap<jiff::civil::Date, Vec<Event>> = BTreeMap::new();
-        for event in events.clone() {
-            by_date.entry(event.date).or_default().push(event);
+        let mut by_date: BTreeMap<jiff::civil::Date, Vec<usize>> = BTreeMap::new();
+        for (i, event) in events.iter().enumerate() {
+            by_date.entry(event.date).or_default().push(i);
         }
 
         let mut daily_pages: Vec<RenderOutput> = Vec::new();
@@ -176,7 +176,8 @@ impl Pipeline {
         // Normalize once: blank focus = no filter, identical across every provider path.
         let focus = config.normalized_focus();
 
-        for (date, day_events) in &by_date {
+        for (date, day_indices) in &by_date {
+            let day_events: Vec<&Event> = day_indices.iter().map(|&i| &events[i]).collect();
             let combined: String = day_events
                 .iter()
                 .map(|e| format!("{}\n{}", e.title, e.body))
@@ -251,7 +252,7 @@ impl Pipeline {
 
             let labels: Vec<String> = {
                 let mut set = std::collections::BTreeSet::new();
-                for e in day_events {
+                for e in &day_events {
                     set.extend(e.labels.iter().cloned());
                 }
                 set.into_iter().collect()
@@ -262,7 +263,7 @@ impl Pipeline {
                     source_id,
                     source_type: config.source_type,
                     date: *date,
-                    events: day_events,
+                    events: &day_events,
                     labels: &labels,
                     summary: &summary,
                     concepts: &concept_names,
