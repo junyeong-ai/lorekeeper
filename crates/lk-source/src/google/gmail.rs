@@ -44,6 +44,12 @@ struct ExcludeConfig {
     subjects: Vec<String>,
     #[serde(default)]
     senders: Vec<String>,
+    #[serde(default = "default_true")]
+    calendar_invites: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -231,6 +237,13 @@ impl Source for GmailSource {
                 continue;
             }
 
+            if p.exclude.as_ref().is_none_or(|e| e.calendar_invites)
+                && has_calendar_attachment(&msg)
+            {
+                tracing::debug!(message_id = %msg.id, "gmail: skipping calendar invite");
+                continue;
+            }
+
             let subject = Self::header(&msg, "Subject").unwrap_or("(no subject)");
             let from = Self::header(&msg, "From").unwrap_or_default();
             let snippet = msg.snippet.as_deref().unwrap_or_default();
@@ -324,6 +337,29 @@ fn collect_parts(
             _ => {}
         }
     }
+}
+
+fn has_calendar_attachment(msg: &Message) -> bool {
+    fn check_parts(parts: Option<&[MimePart]>) -> bool {
+        let Some(parts) = parts else { return false };
+        for part in parts {
+            if part
+                .mime_type
+                .as_deref()
+                .is_some_and(|m| m.starts_with("text/calendar"))
+            {
+                return true;
+            }
+            if check_parts(part.parts.as_deref()) {
+                return true;
+            }
+        }
+        false
+    }
+    msg.payload
+        .as_ref()
+        .map(|p| check_parts(p.parts.as_deref()))
+        .unwrap_or(false)
 }
 
 fn decode_base64url(data: &str) -> String {

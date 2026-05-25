@@ -110,6 +110,7 @@ sources:
       exclude:
         subjects: ["[Automated]", "noreply", "no-reply"]
         senders: ["notifications@", "mailer-daemon@", "calendar-notification@"]
+        calendar_invites: true  # text/calendar 첨부(초대/수락/거절) 자동 제외 (기본 true)
     # 키워드 → 분류 (소스 레벨, params와 분리). 순서대로 매칭; 첫 번째 매칭 규칙이 적용.
     classify:
       - category: action_required
