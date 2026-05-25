@@ -25,9 +25,6 @@ use crate::VaultError;
 /// `writer.rs` but scoped to index writes).
 static INDEX_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// Hard cap on the one-line summary appended after each `[[wikilink]]`.
-const SUMMARY_MAX_CHARS: usize = 100;
-
 /// Build the `wiki/index.md` body for the vault at `vault_root`, using `locale` to pick
 /// section headings and the body-heading targets used by the one-line extractors.
 ///
@@ -286,9 +283,7 @@ fn render_group(
     writeln!(out, "## {title} ({count})").unwrap();
     writeln!(out).unwrap();
     for entry in entries {
-        let summary = extract(&entry.body)
-            .map(|s| truncate_chars(&s, SUMMARY_MAX_CHARS))
-            .unwrap_or_default();
+        let summary = extract(&entry.body).unwrap_or_default();
         if summary.is_empty() {
             writeln!(out, "- [[{}]]", entry.link_target).unwrap();
         } else {
@@ -404,18 +399,6 @@ fn first_non_blank_body_line(body: &str) -> Option<String> {
         return Some(trimmed.to_string());
     }
     None
-}
-
-/// Char-aware truncation. Cuts at `max` Unicode scalars and appends an ellipsis.
-fn truncate_chars(s: &str, max: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max {
-        s.to_string()
-    } else {
-        let mut out: String = chars.into_iter().take(max).collect();
-        out.push('…');
-        out
-    }
 }
 
 #[cfg(test)]
@@ -615,15 +598,6 @@ mod tests {
             first_bullet_under_heading(body, "요약"),
             Some("One".to_string())
         );
-    }
-
-    #[test]
-    fn truncate_chars_handles_multibyte() {
-        assert_eq!(truncate_chars("hello", 10), "hello");
-        let s = "한글입니다가나다라마바사아자차카타파하";
-        let t = truncate_chars(s, 5);
-        assert_eq!(t.chars().count(), 6); // 5 + ellipsis
-        assert!(t.ends_with('…'));
     }
 
     #[tokio::test]
