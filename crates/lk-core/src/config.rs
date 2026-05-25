@@ -593,7 +593,7 @@ impl Default for SummaryConfig {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct SynthesisConfig {
     pub weekly: WeeklySynthesisConfig,
     pub monthly: PeriodSynthesisConfig,
@@ -632,7 +632,7 @@ impl SynthesisConfig {
 /// weekly narrative, so it alone takes `include_sources`. The other periods are
 /// work-log-only performance reviews and share the leaner `PeriodSynthesisConfig`.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct WeeklySynthesisConfig {
     pub enabled: bool,
     pub schedule: Option<String>,
@@ -654,7 +654,7 @@ impl Default for WeeklySynthesisConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct PeriodSynthesisConfig {
     pub enabled: bool,
     pub schedule: Option<String>,
