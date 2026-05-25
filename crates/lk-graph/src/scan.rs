@@ -95,12 +95,12 @@ fn parse_file(path: &Path, root: &Path) -> Result<Page, String> {
         });
 
     let rel = path.strip_prefix(root).unwrap_or(path);
-    let id = slug_from_path(rel);
+    let id = path_slug(rel);
 
     let mut outgoing = Vec::new();
     let mut seen = HashSet::new();
     for raw_target in wikilink::extract_wikilinks(&parsed.body) {
-        let target = normalize_target(&raw_target);
+        let target = resolve_wikilink_target(&raw_target);
         if !target.is_empty() && seen.insert(target.clone()) {
             outgoing.push(target);
         }
@@ -162,7 +162,7 @@ impl VaultExistence {
         let mut ids = HashSet::with_capacity(pages.len());
         for page in pages {
             ids.insert(page.id.clone());
-            let slug = filename_slug(&page.path);
+            let slug = stem_slug(&page.path);
             if !slug.is_empty() {
                 by_filename.entry(slug).or_insert_with(|| page.id.clone());
             }
@@ -205,25 +205,25 @@ impl VaultExistence {
     }
 }
 
-/// Filename-slug of a page path: slugify the file stem (the resolution key used
+/// Stem-slug of a page path: slugify the file stem (the resolution key used
 /// by [`crate::graph`] for filename-based wikilink matching).
-pub fn filename_slug(path: &Path) -> String {
+pub fn stem_slug(path: &Path) -> String {
     path.file_stem()
         .and_then(|s| s.to_str())
         .and_then(slugify)
         .unwrap_or_default()
 }
 
-/// Normalize a raw wikilink target to its graph resolution key.
+/// Resolve a raw wikilink target to its graph resolution key.
 ///
 /// A **path-style** target (containing a separator, e.g.
 /// `daily/team-slack/2026-05-22`) is slugified per segment and rejoined with
-/// `/`, so it matches a page id ([`slug_from_path`], which likewise normalizes
+/// `/`, so it matches a page id ([`path_slug`], which likewise normalizes
 /// `\` → `/`). A **bare** target (e.g. `Confluence Cloud`) is slugified whole,
 /// matching a filename slug. Without the path branch, `[[daily/x/y]]` would
 /// collapse to `daily-x-y` and resolve to neither form — every cross-folder link
 /// (e.g. a concept's `## 출처` backlinks) would read as broken.
-pub fn normalize_target(raw: &str) -> String {
+pub fn resolve_wikilink_target(raw: &str) -> String {
     if raw.contains(['/', '\\']) {
         raw.split(['/', '\\'])
             .filter_map(slugify)
@@ -246,14 +246,14 @@ pub fn reserved_page_ids(wiki_dir: &Path) -> Vec<String> {
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or(name);
-            slug_from_path(&wiki_dir.join(stem))
+            path_slug(&wiki_dir.join(stem))
         })
         .collect()
 }
 
 /// Slug id for a vault-relative path: drop the extension, normalize separators to `/`,
 /// then slugify each path segment (so `wiki/Concept A.md` → `wiki/concept-a`).
-pub fn slug_from_path(rel: &Path) -> String {
+pub fn path_slug(rel: &Path) -> String {
     let no_ext = rel.with_extension("");
     let s = no_ext.to_string_lossy().replace('\\', "/");
     s.split('/')
@@ -279,24 +279,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalize_target_bare_vs_path() {
+    fn resolve_wikilink_target_bare_vs_path() {
         // Bare target → filename slug.
-        assert_eq!(normalize_target("Confluence Cloud"), "confluence-cloud");
+        assert_eq!(resolve_wikilink_target("Confluence Cloud"), "confluence-cloud");
         // Path-style target → per-segment slug rejoined, matching a page id
         // (not collapsed to `daily-team-slack-2026-05-22`).
         assert_eq!(
-            normalize_target("daily/team-slack/2026-05-22"),
+            resolve_wikilink_target("daily/team-slack/2026-05-22"),
             "daily/team-slack/2026-05-22"
         );
         assert_eq!(
-            normalize_target("wiki/concepts/Agentic AI"),
+            resolve_wikilink_target("wiki/concepts/Agentic AI"),
             "wiki/concepts/agentic-ai"
         );
         // Empty segments collapse away.
-        assert_eq!(normalize_target("daily//x/"), "daily/x");
-        // Backslash separators are normalized to `/`, matching `slug_from_path`.
+        assert_eq!(resolve_wikilink_target("daily//x/"), "daily/x");
+        // Backslash separators are normalized to `/`, matching `path_slug`.
         assert_eq!(
-            normalize_target("daily\\team-slack\\2026-05-22"),
+            resolve_wikilink_target("daily\\team-slack\\2026-05-22"),
             "daily/team-slack/2026-05-22"
         );
     }
@@ -335,21 +335,21 @@ mod tests {
     }
 
     #[test]
-    fn slug_from_path_basic() {
+    fn path_slug_basic() {
         assert_eq!(
-            slug_from_path(Path::new("wiki/Concept A.md")),
+            path_slug(Path::new("wiki/Concept A.md")),
             "wiki/concept-a"
         );
         assert_eq!(
-            slug_from_path(Path::new("wiki/Bad_Name.md")),
+            path_slug(Path::new("wiki/Bad_Name.md")),
             "wiki/bad-name"
         );
     }
 
     #[test]
-    fn slug_from_path_preserves_directory_structure() {
+    fn path_slug_preserves_directory_structure() {
         assert_eq!(
-            slug_from_path(Path::new("wiki/sub/Topic Name.md")),
+            path_slug(Path::new("wiki/sub/Topic Name.md")),
             "wiki/sub/topic-name"
         );
     }

@@ -8,7 +8,7 @@ use lk_core::wikilink;
 
 use crate::GraphError;
 use crate::graph::WikiGraph;
-use crate::scan::{self, VaultExistence, normalize_target};
+use crate::scan::{self, VaultExistence, resolve_wikilink_target};
 
 #[derive(Debug)]
 pub struct IndexDrift {
@@ -40,10 +40,10 @@ pub fn diff(
     // `build_index` catalogs every vault page: concepts by filename
     // (`[[Agentic AI]]`) and daily/me/synthesis pages by path
     // (`[[daily/email-digest/2026-05-19]]`). Resolve both forms via
-    // `normalize_target` so a path entry isn't collapsed to a bogus slug.
+    // `resolve_wikilink_target` so a path entry isn't collapsed to a bogus slug.
     let mut index_links = HashSet::new();
     for page in wikilink::extract_wikilinks(&content) {
-        let slug = normalize_target(&page);
+        let slug = resolve_wikilink_target(&page);
         if !slug.is_empty() {
             index_links.insert(slug);
         }

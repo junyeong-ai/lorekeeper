@@ -7,16 +7,17 @@ use petgraph::Direction;
 use petgraph::graph::{DiGraph, NodeIndex};
 use serde::Serialize;
 
-use crate::scan::{Page, VaultExistence, filename_slug};
+use crate::scan::{Page, VaultExistence, stem_slug};
 
 pub struct WikiGraph {
     graph: DiGraph<NodeData, ()>,
     id_to_node: HashMap<String, NodeIndex>,
     broken: Vec<BrokenLink>,
-    /// Scope node ids that connect to the vault (linked from, or linking out to,
-    /// a page that exists) and so are never orphans even with zero in-scope
-    /// edges. Derived from the `VaultExistence` passed to [`Self::build`].
-    externally_connected: HashSet<String>,
+    /// Scope node ids connected to pages outside the analysis scope (linked from,
+    /// or linking out to, a page that exists in the vault but is not in scope)
+    /// and so are never orphans even with zero in-scope edges. Derived from the
+    /// `VaultExistence` passed to [`Self::build`].
+    cross_scope_connected: HashSet<String>,
 }
 
 pub(crate) struct NodeData {
@@ -58,7 +59,7 @@ impl WikiGraph {
     /// - **broken links**: a wikilink leaving the scope is broken *only* if its
     ///   target does not exist anywhere in the vault.
     /// - **orphans**: a scope page is exempt when it links to, or is linked from,
-    ///   any page in the vault (tracked in `externally_connected`).
+    ///   any page in the vault (tracked in `cross_scope_connected`).
     pub fn build_with_existence(pages: &[Page], existence: &VaultExistence) -> Self {
         let mut graph = DiGraph::new();
         let mut id_to_node = HashMap::with_capacity(pages.len());
@@ -71,7 +72,7 @@ impl WikiGraph {
             });
             id_to_node.insert(page.id.clone(), node);
 
-            let slug = filename_slug(&page.path);
+            let slug = stem_slug(&page.path);
             if !slug.is_empty() {
                 match name_to_node.entry(slug) {
                     Entry::Vacant(e) => {
@@ -91,13 +92,13 @@ impl WikiGraph {
         }
 
         let mut broken = Vec::new();
-        let mut externally_connected = HashSet::new();
+        let mut cross_scope_connected = HashSet::new();
 
         for page in pages {
             let source_idx = id_to_node[&page.id];
             for target in &page.outgoing {
                 // Resolve a bare target by filename slug, a path-style target by
-                // page id — the two forms `normalize_target` produces.
+                // page id — the two forms `resolve_wikilink_target` produces.
                 let in_scope = name_to_node
                     .get(target.as_str())
                     .or_else(|| id_to_node.get(target.as_str()))
@@ -110,7 +111,7 @@ impl WikiGraph {
                     // Resolves to a page outside the analysis scope: not broken,
                     // and a vault-wide outbound connection for orphan purposes.
                     // No edge — the target node is not in the scope graph.
-                    externally_connected.insert(page.id.clone());
+                    cross_scope_connected.insert(page.id.clone());
                 } else {
                     broken.push(BrokenLink {
                         source: page.id.clone(),
@@ -123,7 +124,7 @@ impl WikiGraph {
             // target of a link from another page (possibly out of scope), even
             // if nothing in scope links it.
             if existence.is_linked(&page.id) {
-                externally_connected.insert(page.id.clone());
+                cross_scope_connected.insert(page.id.clone());
             }
         }
 
@@ -134,7 +135,7 @@ impl WikiGraph {
             graph,
             id_to_node,
             broken,
-            externally_connected,
+            cross_scope_connected,
         }
     }
 
@@ -190,7 +191,7 @@ impl WikiGraph {
                 }
                 // A vault-wide connection (in- or out-of-scope) means it is not
                 // truly orphaned, even with zero in-scope edges.
-                if self.externally_connected.contains(id.as_str()) {
+                if self.cross_scope_connected.contains(id.as_str()) {
                     return false;
                 }
                 let idx = **idx;

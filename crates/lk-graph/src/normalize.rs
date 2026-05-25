@@ -149,7 +149,7 @@ mod tests {
     fn make_page(path: &str, outgoing: &[&str]) -> Page {
         let rel = PathBuf::from(path);
         Page {
-            id: scan::slug_from_path(&rel),
+            id: scan::path_slug(&rel),
             path: rel,
             title: "test".to_owned(),
             outgoing: outgoing.iter().map(|s| (*s).to_string()).collect(),
