@@ -169,11 +169,14 @@ impl Source for DriveSource {
                 }
             };
 
-            let ts = file
+            let Some(ts) = file
                 .modified_time
                 .as_deref()
                 .and_then(|s| s.parse::<jiff::Timestamp>().ok())
-                .unwrap_or_else(jiff::Timestamp::now);
+            else {
+                tracing::warn!(file_id = %file.id, "drive: skipping file with unparseable timestamp");
+                continue;
+            };
 
             items.push(RawItem {
                 external_id: Some(file.id.clone()),

@@ -224,12 +224,15 @@ impl Source for GmailSource {
             let from = Self::header(&msg, "From").unwrap_or_default();
             let snippet = msg.snippet.as_deref().unwrap_or_default();
 
-            let ts = msg
+            let Some(ts) = msg
                 .internal_date
                 .as_deref()
                 .and_then(|s| s.parse::<i64>().ok())
                 .and_then(|ms| jiff::Timestamp::from_millisecond(ms).ok())
-                .unwrap_or_else(jiff::Timestamp::now);
+            else {
+                tracing::warn!(message_id = %msg.id, "gmail: skipping message with unparseable timestamp");
+                continue;
+            };
 
             items.push(RawItem {
                 external_id: Some(msg.id.clone()),

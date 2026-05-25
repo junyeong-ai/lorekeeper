@@ -161,13 +161,18 @@ fn read_item(path: &Path) -> Result<RawItem, SourceError> {
         _ => raw,
     };
 
-    let mtime = path
+    let Some(mtime) = path
         .metadata()
         .and_then(|m| m.modified())
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .and_then(|d| jiff::Timestamp::from_second(d.as_secs() as i64).ok())
-        .unwrap_or_else(jiff::Timestamp::now);
+    else {
+        return Err(SourceError::Parse(format!(
+            "unreadable timestamp: {}",
+            path.display()
+        )));
+    };
 
     let (title, content) = split_title(&body, path);
     // Full filename (with extension) so `note.md` and `note.txt` don't collide

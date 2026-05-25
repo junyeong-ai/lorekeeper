@@ -137,9 +137,17 @@ impl Source for SlackSearchSource {
                     .trim_start()
                     .to_string();
 
-                let secs: f64 = m.ts.parse().unwrap_or(0.0);
-                let ts = jiff::Timestamp::from_second(secs as i64)
-                    .unwrap_or_else(|_| jiff::Timestamp::now());
+                let Some(ts) =
+                    m.ts.parse::<f64>()
+                        .ok()
+                        .and_then(|secs| jiff::Timestamp::from_second(secs as i64).ok())
+                else {
+                    tracing::warn!(
+                        ts = m.ts.as_str(),
+                        "slack-search: skipping message with unparseable timestamp"
+                    );
+                    continue;
+                };
 
                 let ch = m
                     .channel

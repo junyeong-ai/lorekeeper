@@ -157,15 +157,18 @@ impl Source for JiraSource {
         let base = self.creds.base_url.trim_end_matches('/');
         let items = issues
             .into_iter()
-            .map(|issue| {
+            .filter_map(|issue| {
                 let summary = issue.fields.summary.as_deref().unwrap_or("(no summary)");
 
-                let ts = issue
+                let Some(ts) = issue
                     .fields
                     .updated
                     .as_deref()
                     .and_then(|s| s.parse::<jiff::Timestamp>().ok())
-                    .unwrap_or_else(jiff::Timestamp::now);
+                else {
+                    tracing::warn!(issue_key = %issue.key, "jira: skipping issue with unparseable timestamp");
+                    return None;
+                };
 
                 let author = issue
                     .fields
@@ -204,7 +207,7 @@ impl Source for JiraSource {
                     .as_ref()
                     .and_then(|a| a.account_id.clone());
 
-                RawItem {
+                Some(RawItem {
                     external_id: Some(issue.key.clone()),
                     title: format!("[{}] {}", issue.key, summary),
                     body,
@@ -219,7 +222,7 @@ impl Source for JiraSource {
                         "start_date": start_date,
                         "assignee_account_id": assignee_account_id,
                     }),
-                }
+                })
             })
             .collect();
 

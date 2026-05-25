@@ -22,7 +22,7 @@ pub async fn run(
     let llm: std::sync::Arc<dyn lk_llm::LlmClient> = if dry_run {
         std::sync::Arc::new(lk_llm::NoopLlmClient)
     } else {
-        build_llm_client(&config, &vault_root)
+        build_llm_client(&config, &vault_root)?
     };
 
     // Guard against silent data loss when provider is switched away from `queue`

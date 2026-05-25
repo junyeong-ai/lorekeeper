@@ -60,25 +60,19 @@ pub fn load_config(path: &Path) -> miette::Result<lk_core::config::Config> {
 pub fn build_llm_client(
     config: &lk_core::config::Config,
     vault_root: &Path,
-) -> Arc<dyn lk_llm::LlmClient> {
+) -> miette::Result<Arc<dyn lk_llm::LlmClient>> {
     match config.llm.provider {
         lk_core::config::LlmProvider::Anthropic => {
-            match lk_llm::AnthropicClient::new(&config.llm) {
-                Ok(c) => Arc::new(c),
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "Anthropic provider selected but ANTHROPIC_API_KEY missing; falling back to NoopLlmClient"
-                    );
-                    Arc::new(lk_llm::NoopLlmClient)
-                }
-            }
+            let c = lk_llm::AnthropicClient::new(&config.llm).map_err(|e| {
+                miette::miette!("provider: anthropic requires ANTHROPIC_API_KEY: {e}")
+            })?;
+            Ok(Arc::new(c))
         }
         lk_core::config::LlmProvider::Queue => {
             let queue_dir = vault_root.join(".lorekeeper").join("queue");
-            Arc::new(lk_llm::QueueLlmClient::new(queue_dir))
+            Ok(Arc::new(lk_llm::QueueLlmClient::new(queue_dir)))
         }
-        lk_core::config::LlmProvider::Noop => Arc::new(lk_llm::NoopLlmClient),
+        lk_core::config::LlmProvider::Noop => Ok(Arc::new(lk_llm::NoopLlmClient)),
     }
 }
 

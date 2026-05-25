@@ -133,25 +133,26 @@ impl Source for CalendarSource {
                 let summary = ev.summary.unwrap_or_else(|| "(no title)".into());
 
                 // Timed events carry an RFC3339 `dateTime`; all-day events carry only a
-                // `date` (YYYY-MM-DD). Parse the latter as a civil date anchored to the
-                // configured timezone instead of letting `Timestamp::parse` fail and fall
-                // back to `now()`, which would file the event under the wrong day.
-                let ts = ev
-                    .start
-                    .as_ref()
-                    .and_then(|s| {
-                        if let Some(dt) = s.date_time.as_deref() {
-                            dt.parse::<jiff::Timestamp>().ok()
-                        } else if let Some(d) = s.date.as_deref() {
-                            d.parse::<jiff::civil::Date>()
-                                .ok()
-                                .and_then(|date| date.to_zoned(ctx.timezone.clone()).ok())
-                                .map(|z| z.timestamp())
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or_else(jiff::Timestamp::now);
+                // `date` (YYYY-MM-DD), parsed as a civil date anchored to the configured
+                // timezone so the event lands on the correct vault day.
+                let ts = match ev.start.as_ref().and_then(|s| {
+                    if let Some(dt) = s.date_time.as_deref() {
+                        dt.parse::<jiff::Timestamp>().ok()
+                    } else if let Some(d) = s.date.as_deref() {
+                        d.parse::<jiff::civil::Date>()
+                            .ok()
+                            .and_then(|date| date.to_zoned(ctx.timezone.clone()).ok())
+                            .map(|z| z.timestamp())
+                    } else {
+                        None
+                    }
+                }) {
+                    Some(t) => t,
+                    None => {
+                        tracing::warn!(event_id = %id, "calendar: skipping event with unparseable timestamp");
+                        return None;
+                    }
+                };
 
                 let attendee_names: Vec<String> = ev
                     .attendees

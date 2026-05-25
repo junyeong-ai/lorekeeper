@@ -286,9 +286,19 @@ impl Source for SlackChannelSource {
                     .trim_start()
                     .to_string();
 
-                let secs: f64 = root.ts.parse().unwrap_or(0.0);
-                let ts = jiff::Timestamp::from_second(secs as i64)
-                    .unwrap_or_else(|_| jiff::Timestamp::now());
+                let Some(ts) = root
+                    .ts
+                    .parse::<f64>()
+                    .ok()
+                    .and_then(|secs| jiff::Timestamp::from_second(secs as i64).ok())
+                else {
+                    tracing::warn!(
+                        channel = channel_name,
+                        ts = root.ts.as_str(),
+                        "slack-channel: skipping message with unparseable timestamp"
+                    );
+                    continue;
+                };
 
                 // Standard Slack permalink: /archives/{channel}/p{ts_no_dot}
                 let permalink = format!(
