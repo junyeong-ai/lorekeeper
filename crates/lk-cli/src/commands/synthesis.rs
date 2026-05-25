@@ -44,9 +44,7 @@ pub async fn run(opts: &super::GlobalOpts, period: Period) -> miette::Result<()>
     let outputs: Vec<lk_pipeline::RenderOutput> = match period {
         // The personal-review periods are the performance subsystem; report the real
         // reason rather than letting the Synthesizer's empty result read as "no data".
-        Period::Monthly { .. } | Period::Quarterly { .. } | Period::Annual { .. }
-            if !perf_on =>
-        {
+        Period::Monthly { .. } | Period::Quarterly { .. } | Period::Annual { .. } if !perf_on => {
             eprintln!("Performance reviews are disabled (performance.enabled: false).");
             Vec::new()
         }

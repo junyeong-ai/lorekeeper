@@ -42,10 +42,7 @@ pub(crate) fn normalize_url(raw: &str) -> String {
         other => {
             // Non-HTTP schemes (ftp, mailto, …) are kept as-is since the
             // scheme itself is semantically meaningful.
-            if url
-                .set_scheme(&other.to_ascii_lowercase())
-                .is_err()
-            {
+            if url.set_scheme(&other.to_ascii_lowercase()).is_err() {
                 return raw.to_string();
             }
             url.set_query(None);
