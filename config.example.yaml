@@ -220,18 +220,19 @@ sources:
     extract_concepts: true
     track_personal: false
 
-  # 수동 큐레이션 — <vault>/inbox/ 디렉토리에 .md/.txt/.json 파일을 떨어뜨리면
-  # 정규 파이프라인(dedup, classify, concept extract)을 통과해 처리된 후
-  # <vault>/inbox/archived/{date}/로 이동. content-hash dedup으로 같은 파일을
-  # 두 번 넣어도 중복 등록되지 않음.
+  # 수동 큐레이션 — <vault>/inbox/ 디렉토리에 파일을 떨어뜨리면
+  # wiki/documents/{slug}.md 개별 문서 페이지로 생성. LLM 요약 + 컨셉 추출 포함.
+  # HTML은 readability 크레이트로 본문 추출 후 마크다운 변환.
+  # content-hash dedup으로 같은 파일을 두 번 넣어도 중복 등록되지 않음.
+  # 처리 완료 후 inbox/archived/{date}/로 이동 (post-commit, 안전).
   manual-inbox:
     type: manual
-    enabled: false      # 활성화하기 전에 inbox_dir이 실제 존재하는지 확인할 것
+    enabled: false
     schedule: "0 11 * * *"
     params:
       inbox_dir: ~/Documents/Obsidian Vault/inbox
-      extensions: [md, txt, markdown, json]
-      archive_after_ingest: true
+      extensions: [md, txt, markdown, json, html, htm]
+      archive_after_ingest: true  # 처리 후 자동 아카이빙 (기본 true)
     labels: [knowledge]
     extract_concepts: true
 
