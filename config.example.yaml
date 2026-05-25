@@ -109,13 +109,18 @@ sources:
       exclude:
         subjects: ["[Automated]", "noreply", "no-reply"]
         senders: ["notifications@", "mailer-daemon@", "calendar-notification@"]
-    # 키워드 → 분류 (소스 레벨, params와 분리)
+    # 키워드 → 분류 (소스 레벨, params와 분리). 순서대로 매칭; 첫 번째 매칭 규칙이 적용.
     classify:
-      action_required: ["action required", "please review", "검토 요청", "확인 부탁"]
-      decisions: ["approved", "결재 완료", "승인"]
-      project_updates: ["진행 상황", "업데이트", "progress"]
-      knowledge_sharing: ["공유드립니다", "FYI", "참고"]
-      meeting_followup: ["회의록", "action items", "후속"]
+      - category: action_required
+        keywords: ["action required", "please review", "검토 요청", "확인 부탁"]
+      - category: decisions
+        keywords: ["approved", "결재 완료", "승인"]
+      - category: project_updates
+        keywords: ["진행 상황", "업데이트", "progress"]
+      - category: knowledge_sharing
+        keywords: ["공유드립니다", "FYI", "참고"]
+      - category: meeting_followup
+        keywords: ["회의록", "action items", "후속"]
     labels: [personal, team-ops]
     extract_concepts: true
     track_personal: true

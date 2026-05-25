@@ -210,7 +210,7 @@ impl VaultExistence {
 pub fn filename_slug(path: &Path) -> String {
     path.file_stem()
         .and_then(|s| s.to_str())
-        .map(slugify)
+        .and_then(slugify)
         .unwrap_or_default()
 }
 
@@ -226,12 +226,11 @@ pub fn filename_slug(path: &Path) -> String {
 pub fn normalize_target(raw: &str) -> String {
     if raw.contains(['/', '\\']) {
         raw.split(['/', '\\'])
-            .map(slugify)
-            .filter(|s| !s.is_empty())
+            .filter_map(slugify)
             .collect::<Vec<_>>()
             .join("/")
     } else {
-        slugify(raw)
+        slugify(raw).unwrap_or_default()
     }
 }
 
@@ -257,7 +256,10 @@ pub fn reserved_page_ids(wiki_dir: &Path) -> Vec<String> {
 pub fn slug_from_path(rel: &Path) -> String {
     let no_ext = rel.with_extension("");
     let s = no_ext.to_string_lossy().replace('\\', "/");
-    s.split('/').map(slugify).collect::<Vec<_>>().join("/")
+    s.split('/')
+        .filter_map(slugify)
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn build_exclude_set(patterns: &[String]) -> Result<GlobSet, GraphError> {

@@ -5,6 +5,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ConfigError;
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ClassifyRule {
+    pub category: String,
+    pub keywords: Vec<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub vault: VaultConfig,
@@ -71,6 +77,27 @@ impl Config {
             }
         }
 
+        for (id, sc) in &self.sources {
+            for rule in &sc.classify {
+                if rule.category.trim().is_empty() {
+                    return Err(ConfigError::Validation(format!(
+                        "sources.{id}.classify: rule has a blank category name"
+                    )));
+                }
+                let non_blank: Vec<_> = rule
+                    .keywords
+                    .iter()
+                    .filter(|kw| !kw.trim().is_empty())
+                    .collect();
+                if non_blank.is_empty() {
+                    return Err(ConfigError::Validation(format!(
+                        "sources.{id}.classify: category '{}' has no non-blank keywords",
+                        rule.category
+                    )));
+                }
+            }
+        }
+
         if self.sources.values().all(|sc| !sc.enabled) {
             tracing::warn!("all sources are disabled; ingest will have nothing to do");
         }
@@ -107,6 +134,14 @@ impl Config {
                 self.dedup.title_threshold
             )));
         }
+
+        if !(0.1..=5.0).contains(&self.graph.cluster.resolution) {
+            return Err(ConfigError::Validation(format!(
+                "graph.cluster.resolution must be in [0.1, 5.0], got {}",
+                self.graph.cluster.resolution
+            )));
+        }
+
         for src_id in &self.synthesis.weekly.include_sources {
             if !self.sources.contains_key(src_id) {
                 return Err(ConfigError::Validation(format!(
@@ -391,11 +426,17 @@ pub struct SourceConfig {
     pub schedule: Option<String>,
     #[serde(default = "empty_object")]
     pub params: serde_json::Value,
-    /// Keyword → category map for deterministic classification. A source-level
+    /// Ordered rules for deterministic keyword classification. A source-level
     /// concern (read by the pipeline), kept out of `params` so adapter params can
     /// reject unknown keys without colliding with this cross-cutting field.
+    /// First matching rule wins; order is preserved.
     #[serde(default)]
-    pub classify: BTreeMap<String, Vec<String>>,
+    pub classify: Vec<ClassifyRule>,
+    /// When true, events that remain unclassified after keyword matching are sent to
+    /// the LLM for semantic classification. Only effective when `llm.provider` is
+    /// `anthropic` (synchronous); in `queue` mode the call gracefully returns `None`.
+    #[serde(default)]
+    pub classify_with_llm: bool,
     #[serde(default)]
     pub labels: Vec<String>,
     #[serde(default)]
@@ -778,8 +819,9 @@ mod tests {
             enabled: true,
             schedule: None,
             params: empty_object(),
-            classify: BTreeMap::new(),
+            classify: vec![],
             labels: vec![],
+            classify_with_llm: false,
             extract_concepts: true,
             focus: f.map(str::to_owned),
             track_personal: false,
@@ -1195,6 +1237,69 @@ graph:
         assert_eq!(config.graph.graph.orphan_exclude, vec!["wiki/index"]);
         assert_eq!(config.graph.cluster.resolution, 1.5);
         assert_eq!(config.graph.cluster.min_community_size, 2);
+    }
+
+    #[test]
+    fn validate_rejects_resolution_out_of_range() {
+        let yaml = r#"
+vault:
+  root: /tmp/vault
+identity:
+  name: test
+  email: test@test.com
+sources:
+  s1:
+    type: gmail
+graph:
+  cluster:
+    resolution: 10.0
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(
+            config.validate().is_err(),
+            "resolution=10.0 should be rejected"
+        );
+
+        let yaml_low = r#"
+vault:
+  root: /tmp/vault
+identity:
+  name: test
+  email: test@test.com
+sources:
+  s1:
+    type: gmail
+graph:
+  cluster:
+    resolution: 0.05
+"#;
+        let config_low: Config = serde_yaml_ng::from_str(yaml_low).unwrap();
+        assert!(
+            config_low.validate().is_err(),
+            "resolution=0.05 should be rejected"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_classify_rule_with_empty_keywords() {
+        let yaml = r#"
+vault:
+  root: /tmp/vault
+identity:
+  name: test
+  email: test@test.com
+sources:
+  s1:
+    type: gmail
+    classify:
+      - category: action_required
+        keywords: []
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(
+            config.validate().is_err(),
+            "classify rule with empty keywords must be rejected"
+        );
     }
 
     #[test]

@@ -286,12 +286,12 @@ pub async fn run(
         }
     }
 
-    // Phase 3: Aggregate and write work-log. Whether the subsystem runs at all is gated
-    // inside aggregate_work_log by performance.enabled — distinct from per-source
+    // Phase 3: Render work-log pages. Whether the subsystem runs at all is gated
+    // inside render_work_log by performance.enabled — distinct from per-source
     // track_personal, which only flags personal events on their daily pages.
     if !any_write_failed && !all_personal.is_empty() {
         let work_logs = pipeline
-            .aggregate_work_log(&all_personal)
+            .render_work_log(&all_personal)
             .await
             .map_err(|e| miette::miette!("work-log: {e}"))?;
         for wl in &work_logs {

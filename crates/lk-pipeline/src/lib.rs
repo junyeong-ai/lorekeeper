@@ -161,6 +161,9 @@ impl Pipeline {
             classify::flag_personal(&mut events, &self.ctx.identity);
         }
         classify::classify_by_keywords(&mut events, &config.classify);
+        if config.classify_with_llm && !options.dry_run {
+            classify::classify_with_llm(&mut events, &config.classify, &self.ctx.llm).await;
+        }
 
         let mut by_date: BTreeMap<jiff::civil::Date, Vec<Event>> = BTreeMap::new();
         for event in events.clone() {
@@ -296,7 +299,7 @@ impl Pipeline {
     /// Call once after all sources are planned and before committing dedup.
     pub async fn render_concept_pages(&self) -> Result<Vec<RenderOutput>, PipelineError> {
         let drafts = self.concept_drafts.lock().await;
-        drafts.render(&self.ctx.engine, &self.ctx.dirs, self.ctx.locale)
+        drafts.render_pages(&self.ctx.engine, &self.ctx.dirs, self.ctx.locale)
     }
 
     /// Mark events as processed. Call AFTER vault writes succeed to avoid losing pages
@@ -305,11 +308,11 @@ impl Pipeline {
         self.dedup.record(events)
     }
 
-    pub async fn aggregate_work_log(
+    pub async fn render_work_log(
         &self,
         personal_events: &[Event],
     ) -> Result<Vec<RenderOutput>, PipelineError> {
-        worklog::aggregate_and_render(
+        worklog::render_work_log(
             personal_events,
             &self.ctx.perf,
             &self.ctx.engine,

@@ -2,12 +2,13 @@ use async_trait::async_trait;
 
 use lk_core::concept::ExtractedConcept;
 
-use crate::{ExtractConceptsRequest, LlmClient, LlmError, SummarizeRequest};
+use crate::{ExtractConceptsRequest, LlmClient, LlmError, SummarizeRequest, Theme, ThemeRequest};
 
 #[derive(Default)]
 pub struct MockLlmClient {
     pub summary: String,
     pub concepts: Vec<ExtractedConcept>,
+    pub themes: Vec<Theme>,
     pub fail: bool,
 }
 
@@ -44,5 +45,12 @@ impl LlmClient for MockLlmClient {
             return Err(LlmError::Api("mock failure".into()));
         }
         Ok(self.concepts.clone())
+    }
+
+    async fn identify_themes(&self, _req: ThemeRequest) -> Result<Vec<Theme>, LlmError> {
+        if self.fail {
+            return Err(LlmError::Api("mock failure".into()));
+        }
+        Ok(self.themes.clone())
     }
 }

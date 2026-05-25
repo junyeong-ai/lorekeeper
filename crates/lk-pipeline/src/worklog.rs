@@ -11,7 +11,7 @@ use lk_vault::TemplateEngine;
 use crate::PipelineError;
 use crate::render::RenderOutput;
 
-pub async fn aggregate_and_render(
+pub async fn render_work_log(
     events: &[Event],
     perf: &PerformanceConfig,
     engine: &TemplateEngine,

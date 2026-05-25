@@ -30,9 +30,11 @@ pub fn scan(pages: &[Page]) -> Vec<Rename> {
             continue;
         };
 
-        let normalized = slugify(stem);
+        let Some(normalized) = slugify(stem) else {
+            continue;
+        };
 
-        if !normalized.is_empty() && stem != normalized {
+        if stem != normalized {
             if !claimed_slugs.insert(normalized.clone()) {
                 eprintln!(
                     "warning: skipping {}: rename to '{}' would collide with another file",
@@ -71,8 +73,10 @@ pub fn apply(renames: &[Rename], pages: &[Page], root: &Path) -> Result<usize, G
         }
     }
 
-    let renamed_normalized: HashSet<String> =
-        renames.iter().map(|r| slugify(&r.old_slug)).collect();
+    let renamed_normalized: HashSet<String> = renames
+        .iter()
+        .filter_map(|r| slugify(&r.old_slug))
+        .collect();
 
     let path_map: HashMap<&Path, &Path> = renames
         .iter()
@@ -118,7 +122,9 @@ fn normalize_wikilinks(content: &str, renamed_slugs: &HashSet<String>) -> String
         .replace_all(content, |caps: &regex::Captures| {
             let raw = &caps[1];
             let (page_raw, anchor) = wikilink::split_wikilink_target(raw);
-            let normalized = slugify(page_raw);
+            let Some(normalized) = slugify(page_raw) else {
+                return caps[0].to_owned();
+            };
 
             if renamed_slugs.contains(&normalized) && page_raw.trim() != normalized {
                 let full = caps.get(0).unwrap().as_str();

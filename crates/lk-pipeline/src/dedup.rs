@@ -17,7 +17,8 @@ const TITLES: TableDefinition<&str, u64> = TableDefinition::new("titles");
 /// vendor-tracking parameters whose presence varies by attribution path but
 /// never carry resource-identifying information.
 const TRACKING_QUERY_EXACT_KEYS: &[&str] = &[
-    "fbclid", "gclid", "mc_cid", "mc_eid", "_hsenc", "_hsmi", "ref",
+    "fbclid", "gclid", "mc_cid", "mc_eid", "_hsenc", "_hsmi", "ref", "msclkid", "ttclid", "twclid",
+    "wbraid", "gbraid",
 ];
 
 /// Query-key prefixes stripped during URL canonicalisation. Only genuine
@@ -298,24 +299,15 @@ impl DedupCache {
                         }
                     }
                     DedupStrategy::Title => {
-                        // Titles are keyed `{date}:{title}`; all of one date's titles form a
-                        // contiguous lexicographic run. Seek to the date prefix and stop at
-                        // the first key outside it, so this scans one date's titles rather
-                        // than the entire (up to 90-day) cache. Also compare against titles
-                        // already accepted earlier in this same batch.
-                        let prefix = format!("{}:", event.date);
                         if let Some((_, _, _, title_table)) = &tables {
-                            let range = title_table
-                                .range(prefix.as_str()..)
+                            let iter = title_table
+                                .iter()
                                 .map_err(|e| PipelineError::Dedup(e.to_string()))?;
-                            for entry in range {
+                            for entry in iter {
                                 let entry =
                                     entry.map_err(|e| PipelineError::Dedup(e.to_string()))?;
                                 let key = entry.0.value();
-                                let Some(existing) = key.strip_prefix(&prefix) else {
-                                    break;
-                                };
-                                if sorensen_dice(&event.title, existing) >= self.title_threshold {
+                                if sorensen_dice(&event.title, key) >= self.title_threshold {
                                     dup = true;
                                     break;
                                 }
@@ -323,8 +315,7 @@ impl DedupCache {
                         }
                         if !dup {
                             dup = novel.iter().any(|n| {
-                                n.date == event.date
-                                    && sorensen_dice(&n.title, &event.title) >= self.title_threshold
+                                sorensen_dice(&n.title, &event.title) >= self.title_threshold
                             });
                         }
                         if dup {
@@ -384,9 +375,8 @@ impl DedupCache {
                         .map_err(|e| PipelineError::Dedup(e.to_string()))?;
                 }
 
-                let title_key = format!("{}:{}", event.date, event.title);
                 titles
-                    .insert(title_key.as_str(), now)
+                    .insert(event.title.as_str(), now)
                     .map_err(|e| PipelineError::Dedup(e.to_string()))?;
             }
         }
@@ -493,6 +483,22 @@ mod tests {
                 "https://example.com/page?utm_source=x&utm_medium=y&utm_campaign=z&utm_term=a&utm_content=b&fbclid=abc&gclid=def&mc_cid=ghi&mc_eid=jkl&_hsenc=mno&_hsmi=pqr&ref=stu"
             ),
             "https://example.com/page"
+        );
+    }
+
+    #[test]
+    fn normalize_url_strips_ad_platform_tracking_params() {
+        assert_eq!(
+            normalize_url("https://example.com/page?msclkid=abc123&id=42"),
+            "https://example.com/page?id=42"
+        );
+        assert_eq!(
+            normalize_url("https://example.com/page?ttclid=tt1&twclid=tw2"),
+            "https://example.com/page"
+        );
+        assert_eq!(
+            normalize_url("https://example.com/page?wbraid=w1&gbraid=g2&tab=news"),
+            "https://example.com/page?tab=news"
         );
     }
 
@@ -730,11 +736,10 @@ mod tests {
     }
 
     #[test]
-    fn title_dedup_matches_within_date_only() {
+    fn title_dedup_matches_across_dates() {
         let dir = TempDir::new().unwrap();
         let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85).unwrap();
 
-        // Record a title under 2026-05-23.
         cache
             .record(&[ev("a", "Anthropic releases Opus 4.7", None)])
             .unwrap();
@@ -745,14 +750,14 @@ mod tests {
         let same_day = vec![ev("b", "Anthropic releases Opus 4.7!", None)];
         assert_eq!(cache.deduplicate(same_day, &cascade).unwrap().len(), 0);
 
-        // The same title on a DIFFERENT date is novel (date-partitioned scan).
+        // The same title on a different date is also a duplicate.
         let other_day = Event {
             date: jiff::civil::date(2026, 6, 1),
             ..ev("c", "Anthropic releases Opus 4.7", None)
         };
         assert_eq!(
             cache.deduplicate(vec![other_day], &cascade).unwrap().len(),
-            1
+            0
         );
     }
 

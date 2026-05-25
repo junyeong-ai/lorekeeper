@@ -77,6 +77,33 @@ pub struct TaskTarget {
     pub anchor: String,
 }
 
+/// Structured theme extraction from combined multi-source text. Used by weekly
+/// synthesis to replace free-text parsing with reliable JSON output.
+#[derive(Debug, Clone)]
+pub struct ThemeRequest {
+    pub text: String,
+    pub max_themes: usize,
+    pub target: TaskTarget,
+}
+
+/// A single theme extracted by `identify_themes`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Theme {
+    pub title: String,
+    pub description: String,
+}
+
+/// Classification of a single event into one of the given categories.
+/// Used as an LLM fallback when deterministic keyword matching produces no match.
+/// Does NOT carry a `TaskTarget` because the result is an in-memory judgment applied
+/// to `Event.classification`, not a vault write.
+#[derive(Debug, Clone)]
+pub struct ClassifyRequest {
+    pub title: String,
+    pub excerpt: String,
+    pub categories: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SummarizeRequest {
     pub text: String,
@@ -108,6 +135,22 @@ pub trait LlmClient: Send + Sync {
         &self,
         req: ExtractConceptsRequest,
     ) -> Result<Vec<ExtractedConcept>, LlmError>;
+
+    /// Extract structured themes from combined multi-source text. Returns a JSON-parsed
+    /// list of themes with titles and descriptions. The default returns an empty vec,
+    /// which suffices for noop and mock clients; queue mode emits a deferred task and
+    /// returns empty (the skill fills the section later).
+    async fn identify_themes(&self, _req: ThemeRequest) -> Result<Vec<Theme>, LlmError> {
+        Ok(vec![])
+    }
+
+    /// Classify a single event into one of the given categories. Used as an LLM fallback
+    /// when deterministic keyword matching produces no match. Returns `None` when the LLM
+    /// declines to classify or the provider doesn't support synchronous inference (queue
+    /// mode). Only `anthropic` mode performs an actual call.
+    async fn classify(&self, _req: ClassifyRequest) -> Result<Option<String>, LlmError> {
+        Ok(None)
+    }
 
     /// Commit any buffered side-effects. The CLI calls this once at the end of a
     /// successful ingest run, AFTER all vault writes have succeeded. Clients that

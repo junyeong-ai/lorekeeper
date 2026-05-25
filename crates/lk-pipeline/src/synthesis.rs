@@ -17,8 +17,6 @@ pub struct Synthesizer {
 }
 
 impl Synthesizer {
-    const MAX_FALLBACK_CHARS: usize = 100_000;
-
     pub fn new(vault_root: &Path, ctx: Arc<PipelineContext>, config: &Config) -> Self {
         let reader = VaultReader::new(vault_root);
         // Cross-source weekly themes are opt-in: only the sources explicitly listed in
@@ -95,14 +93,13 @@ impl Synthesizer {
             .map_err(|e| PipelineError::Render(e.to_string()))
     }
 
-    pub async fn weekly_synthesis(
+    pub async fn try_weekly_synthesis(
         &self,
         date: jiff::civil::Date,
     ) -> Result<Option<RenderOutput>, PipelineError> {
         let (year, week) = iso_year_week(date);
         let (start, end) = iso_week_range(year, week)?;
 
-        let mut source_summaries: Vec<serde_json::Value> = Vec::new();
         let mut combined = String::new();
         let mut covered_sources: Vec<String> = Vec::new();
 
@@ -119,37 +116,35 @@ impl Synthesizer {
                 .collect::<Vec<_>>()
                 .join("\n\n---\n\n");
 
-            // Per-source summaries reuse the same target as the cross-source theme
-            // summary below; queuing both would emit two tasks pointing at the same
-            // narrative section. Skip the per-source LLM call — the page count serves
-            // as a deterministic placeholder. The cross-source themes call below is
-            // the one that drives the actual narrative content.
-            source_summaries.push(serde_json::json!({
-                "source_id": source_id,
-                "summary": format!("{} {}", pages.len(), self.ctx.locale.strings().pages_this_week),
-            }));
-
             combined.push_str(&format!("=== {source_id} ===\n{combined_source}\n\n"));
             covered_sources.push(source_id.clone());
         }
 
-        if source_summaries.is_empty() {
+        if combined.is_empty() {
             return Ok(None);
         }
 
         let path = VaultPath::weekly_synthesis(&self.ctx.dirs, year, week);
-        let Some(themes_text) = self
-            .summarize_or_warn(
-                format!("Identify the top 3-5 themes across all sources this week:\n\n{combined}"),
-                8,
-                path.to_string(),
-                lk_llm::TargetKind::WeeklySynthesisNarrative,
-                format!("## {}", self.ctx.locale.strings().key_themes_this_week),
-                "weekly synthesis",
-            )
-            .await?
-        else {
-            return Ok(None);
+        let themes = match self
+            .ctx
+            .llm
+            .identify_themes(lk_llm::ThemeRequest {
+                text: combined,
+                max_themes: 5,
+                target: lk_llm::TaskTarget {
+                    vault_path: path.to_string(),
+                    kind: lk_llm::TargetKind::WeeklySynthesisNarrative,
+                    anchor: format!("## {}", self.ctx.locale.strings().key_themes_this_week),
+                },
+            })
+            .await
+        {
+            Ok(t) => t,
+            Err(e) if e.is_fatal() => return Err(PipelineError::Llm(e)),
+            Err(e) => {
+                tracing::warn!(error = %e, "weekly theme extraction failed; skipping page");
+                return Ok(None);
+            }
         };
 
         // Weekly synthesis observes concepts already materialized during daily ingest;
@@ -160,10 +155,8 @@ impl Synthesizer {
             "date": end.to_string(),
             "labels": ["synthesis"],
             "sources": covered_sources,
-            "themes": split_into_themes(&themes_text),
-            "source_summaries": source_summaries,
+            "themes": themes,
             "new_concepts": Vec::<String>::new(),
-            "narrative": themes_text,
         });
 
         let content = self.render("weekly-synthesis.md.jinja", &context)?;
@@ -171,7 +164,7 @@ impl Synthesizer {
         Ok(Some(RenderOutput { path, content }))
     }
 
-    pub async fn weekly_personal(
+    pub async fn try_weekly_personal(
         &self,
         date: jiff::civil::Date,
     ) -> Result<Option<RenderOutput>, PipelineError> {
@@ -225,7 +218,7 @@ impl Synthesizer {
         Ok(Some(RenderOutput { path, content }))
     }
 
-    pub async fn monthly_personal(
+    pub async fn try_monthly_personal(
         &self,
         year: i16,
         month: u8,
@@ -279,7 +272,7 @@ impl Synthesizer {
         Ok(Some(RenderOutput { path, content }))
     }
 
-    pub async fn quarterly_personal(
+    pub async fn try_quarterly_personal(
         &self,
         year: i16,
         quarter: u8,
@@ -307,18 +300,21 @@ impl Synthesizer {
             }
         }
 
+        // No monthly summaries yet → fall back to the weekly personal narratives that
+        // overlap the quarter. Those are already LLM-summarized, so the quarterly review
+        // synthesizes from condensed input rather than raw daily work-log.
         if monthly_summaries.is_empty() {
-            let dir = PathBuf::from(&self.ctx.dirs.personal).join("work-log");
-            let pages = self.read_date_range(&dir, start, end).await?;
-            if pages.is_empty() {
+            let weekly_dir = PathBuf::from(&self.ctx.dirs.weekly).join(&self.ctx.dirs.personal);
+            for (wy, ww) in iso_weeks_in_range(start, end)? {
+                let file = weekly_dir.join(format!("{wy}-W{ww:02}.md"));
+                if let Some(page) = self.reader.read_page(&file).await? {
+                    combined.push_str(&format!("=== {wy}-W{ww:02} ===\n"));
+                    combined.push_str(&page.body);
+                    combined.push_str("\n\n");
+                }
+            }
+            if combined.is_empty() {
                 return Ok(None);
-            }
-            for page in pages.iter().rev() {
-                combined.push_str(&page.body);
-                combined.push_str("\n\n");
-            }
-            if combined.len() > Self::MAX_FALLBACK_CHARS {
-                combined.truncate(Self::MAX_FALLBACK_CHARS);
             }
         }
 
@@ -365,19 +361,23 @@ impl Synthesizer {
         Ok(Some(RenderOutput { path, content }))
     }
 
-    pub async fn annual_personal(&self, year: i16) -> Result<Option<RenderOutput>, PipelineError> {
+    pub async fn try_annual_personal(
+        &self,
+        year: i16,
+    ) -> Result<Option<RenderOutput>, PipelineError> {
         if !self.performance_enabled() {
             return Ok(None);
         }
         let quarterly_dir = PathBuf::from(&self.ctx.dirs.quarterly).join(&self.ctx.dirs.personal);
-        let mut quarter_summaries: Vec<serde_json::Value> = Vec::new();
+        let mut period_summaries: Vec<serde_json::Value> = Vec::new();
         let mut combined = String::new();
+        let strings = self.ctx.locale.strings();
 
         for q in 1..=4u8 {
             let file = quarterly_dir.join(format!("{year}-Q{q}.md"));
             if let Some(page) = self.reader.read_page(&file).await? {
-                quarter_summaries.push(serde_json::json!({
-                    "quarter": format!("Q{q}"),
+                period_summaries.push(serde_json::json!({
+                    "label": format!("Q{q}"),
                     "summary": &page.body,
                 }));
                 combined.push_str(&format!("=== {year}-Q{q} ===\n"));
@@ -386,20 +386,45 @@ impl Synthesizer {
             }
         }
 
-        if quarter_summaries.is_empty() {
-            return Ok(None);
+        // Track which tier provided the input so the prompt and template adapt.
+        let breakdown_heading;
+        let prompt_context;
+
+        if period_summaries.is_empty() {
+            // No quarterly reviews → fall back to monthly summaries.
+            let monthly_dir = PathBuf::from(&self.ctx.dirs.monthly).join(&self.ctx.dirs.personal);
+            for m in 1..=12u8 {
+                let file = monthly_dir.join(format!("{year}-{m:02}.md"));
+                if let Some(page) = self.reader.read_page(&file).await? {
+                    period_summaries.push(serde_json::json!({
+                        "label": format!("{year}-{m:02}"),
+                        "summary": &page.body,
+                    }));
+                    combined.push_str(&format!("=== {year}-{m:02} ===\n"));
+                    combined.push_str(&page.body);
+                    combined.push_str("\n\n");
+                }
+            }
+            if combined.is_empty() {
+                return Ok(None);
+            }
+            breakdown_heading = strings.monthly_breakdown;
+            prompt_context = "monthly summaries";
+        } else {
+            breakdown_heading = strings.quarterly_breakdown;
+            prompt_context = "quarterly summaries";
         }
 
         let path = VaultPath::annual_personal(&self.ctx.dirs, year);
         let Some(narrative) = self
             .summarize_or_warn(
                 format!(
-                    "Generate a comprehensive annual performance review based on quarterly summaries:\n\n{combined}"
+                    "Generate a comprehensive annual performance review based on {prompt_context}:\n\n{combined}"
                 ),
                 25,
                 path.to_string(),
                 lk_llm::TargetKind::AnnualPersonalNarrative,
-                format!("## {}", self.ctx.locale.strings().overall_summary),
+                format!("## {}", strings.overall_summary),
                 "annual",
             )
             .await?
@@ -411,7 +436,8 @@ impl Synthesizer {
             "year": year,
             "title": self.ctx.locale.annual_title(year),
             "narrative": narrative,
-            "quarter_summaries": quarter_summaries,
+            "breakdown_heading": breakdown_heading,
+            "period_summaries": period_summaries,
             "categories": self.ctx.perf.work_categories,
         });
 
@@ -500,6 +526,26 @@ fn iso_year_week(date: jiff::civil::Date) -> (i16, u8) {
     (iwd.year(), iwd.week() as u8)
 }
 
+/// The distinct ISO year-weeks that any day in `[start, end]` falls into, in order.
+/// Used to locate the weekly personal narratives overlapping a quarter.
+fn iso_weeks_in_range(
+    start: jiff::civil::Date,
+    end: jiff::civil::Date,
+) -> Result<Vec<(i16, u8)>, PipelineError> {
+    let mut weeks = Vec::new();
+    let mut date = start;
+    while date <= end {
+        let yw = iso_year_week(date);
+        if !weeks.contains(&yw) {
+            weeks.push(yw);
+        }
+        date = date
+            .checked_add(jiff::Span::new().days(1))
+            .map_err(|e| PipelineError::Render(format!("date arithmetic: {e}")))?;
+    }
+    Ok(weeks)
+}
+
 fn iso_week_range(
     year: i16,
     week: u8,
@@ -543,19 +589,6 @@ fn quarter_range(
     let (start, _) = month_range(year, start_month)?;
     let (_, end) = month_range(year, end_month)?;
     Ok((start, end))
-}
-
-fn split_into_themes(text: &str) -> Vec<serde_json::Value> {
-    split_into_lines(text)
-        .into_iter()
-        .map(|line| {
-            let (title, rest) = line.split_once(':').unwrap_or((line.as_str(), ""));
-            serde_json::json!({
-                "title": title.trim(),
-                "description": rest.trim(),
-            })
-        })
-        .collect()
 }
 
 fn split_into_lines(text: &str) -> Vec<String> {

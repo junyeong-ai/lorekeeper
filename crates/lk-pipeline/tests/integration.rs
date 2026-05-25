@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tempfile::TempDir;
 
-use lk_core::concept::{Confidence, ExtractedConcept};
+use lk_core::concept::ExtractedConcept;
 use lk_core::config::{
     Config, DedupConfig, Identity, PerformanceConfig, SourceConfig, SourceType, SynthesisConfig,
     VaultConfig, VaultDirs,
@@ -21,6 +21,7 @@ fn base_config(vault_root: &std::path::Path) -> Config {
             schedule: None,
             params: serde_json::Value::Object(Default::default()),
             classify: Default::default(),
+            classify_with_llm: false,
             labels: vec!["test".into()],
             extract_concepts: true,
             focus: None,
@@ -75,7 +76,6 @@ async fn concept_pages_written_with_merge() {
     let concepts = vec![ExtractedConcept {
         name: "Claude Code".into(),
         slug: "claude-code".into(),
-        confidence: Confidence::Extracted,
     }];
 
     let llm: Arc<dyn LlmClient> = Arc::new(MockLlmClient::with_concepts(concepts));
@@ -123,7 +123,6 @@ async fn concept_pages_written_with_merge() {
     let llm2: Arc<dyn LlmClient> = Arc::new(MockLlmClient::with_concepts(vec![ExtractedConcept {
         name: "Claude Code".into(),
         slug: "claude-code".into(),
-        confidence: Confidence::Extracted,
     }]));
     let pipeline2 = Pipeline::new(vault, make_ctx(&config, llm2), &config).unwrap();
     let ts2: jiff::Timestamp = "2026-05-24T10:00:00Z".parse().unwrap();
@@ -300,6 +299,7 @@ async fn concept_accumulates_across_sources_in_one_run() {
             schedule: None,
             params: serde_json::Value::Object(Default::default()),
             classify: Default::default(),
+            classify_with_llm: false,
             labels: vec![],
             extract_concepts: true,
             focus: None,
@@ -310,7 +310,6 @@ async fn concept_accumulates_across_sources_in_one_run() {
     let llm: Arc<dyn LlmClient> = Arc::new(MockLlmClient::with_concepts(vec![ExtractedConcept {
         name: "Shared Concept".into(),
         slug: "shared-concept".into(),
-        confidence: Confidence::Extracted,
     }]));
     let pipeline = Pipeline::new(vault, make_ctx(&config, llm), &config).unwrap();
 
@@ -688,7 +687,7 @@ async fn weekly_synthesis_is_opt_in_via_include_sources() {
     let synth = Synthesizer::new(vault, make_ctx(&config, llm.clone()), &config);
     assert!(
         synth
-            .weekly_synthesis(jiff::civil::date(2026, 5, 23))
+            .try_weekly_synthesis(jiff::civil::date(2026, 5, 23))
             .await
             .unwrap()
             .is_none(),
@@ -701,7 +700,7 @@ async fn weekly_synthesis_is_opt_in_via_include_sources() {
     let synth = Synthesizer::new(vault, make_ctx(&config, llm), &config);
     assert!(
         synth
-            .weekly_synthesis(jiff::civil::date(2026, 5, 23))
+            .try_weekly_synthesis(jiff::civil::date(2026, 5, 23))
             .await
             .unwrap()
             .is_some(),
@@ -730,7 +729,7 @@ async fn performance_enabled_gates_personal_narratives() {
     let synth = Synthesizer::new(vault, make_ctx(&config, llm.clone()), &config);
     assert!(
         synth
-            .weekly_personal(jiff::civil::date(2026, 5, 23))
+            .try_weekly_personal(jiff::civil::date(2026, 5, 23))
             .await
             .unwrap()
             .is_some(),
@@ -743,7 +742,7 @@ async fn performance_enabled_gates_personal_narratives() {
     let synth = Synthesizer::new(vault, make_ctx(&config, llm), &config);
     assert!(
         synth
-            .weekly_personal(jiff::civil::date(2026, 5, 23))
+            .try_weekly_personal(jiff::civil::date(2026, 5, 23))
             .await
             .unwrap()
             .is_none(),
@@ -779,7 +778,7 @@ async fn work_log_generation_is_gated_by_performance_enabled() {
     let pipeline = Pipeline::new(vault, make_ctx(&config, llm.clone()), &config).unwrap();
     assert!(
         !pipeline
-            .aggregate_work_log(std::slice::from_ref(&event))
+            .render_work_log(std::slice::from_ref(&event))
             .await
             .unwrap()
             .is_empty(),
@@ -793,7 +792,7 @@ async fn work_log_generation_is_gated_by_performance_enabled() {
     let pipeline = Pipeline::new(vault, make_ctx(&config, llm), &config).unwrap();
     assert!(
         pipeline
-            .aggregate_work_log(std::slice::from_ref(&event))
+            .render_work_log(std::slice::from_ref(&event))
             .await
             .unwrap()
             .is_empty(),

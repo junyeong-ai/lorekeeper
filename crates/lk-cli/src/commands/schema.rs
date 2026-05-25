@@ -64,7 +64,6 @@ fn page_schemas() -> Vec<PageSchema> {
                 "aliases",
                 "created",
                 "updated",
-                "confidence",
                 "reference_count",
                 "sources",
                 "tags",
@@ -151,11 +150,6 @@ fn page_schemas() -> Vec<PageSchema> {
                     "Key Themes",
                     |i| i.key_themes_this_week.to_string(),
                     Owner::Llm,
-                ),
-                s(
-                    "Source Summaries",
-                    |i| i.source_summaries.to_string(),
-                    Owner::Machine,
                 ),
                 s(
                     "New Concepts",

@@ -12,12 +12,12 @@ period: "{{ year }}"
 
 {{ narrative }}
 
-## {{ i18n.quarterly_breakdown }}
+## {{ breakdown_heading }}
 
-{% for q in quarter_summaries %}
-### {{ q.quarter }}
+{% for p in period_summaries %}
+### {{ p.label }}
 
-{{ q.summary }}
+{{ p.summary }}
 
 {% endfor %}
 

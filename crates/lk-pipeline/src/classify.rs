@@ -94,11 +94,8 @@ fn contains_bounded(haystack: &str, needle: &str) -> bool {
     false
 }
 
-pub fn classify_by_keywords(
-    events: &mut [Event],
-    classify: &std::collections::BTreeMap<String, Vec<String>>,
-) {
-    if classify.is_empty() {
+pub fn classify_by_keywords(events: &mut [Event], rules: &[lk_core::config::ClassifyRule]) {
+    if rules.is_empty() {
         return;
     }
 
@@ -109,15 +106,67 @@ pub fn classify_by_keywords(
 
         let text = format!("{} {}", event.title, event.body).to_lowercase();
 
-        for (category, keywords) in classify {
-            let matched = keywords
+        for rule in rules {
+            let matched = rule
+                .keywords
                 .iter()
                 .filter(|kw| !kw.trim().is_empty())
                 .any(|kw| contains_bounded(&text, &kw.to_lowercase()));
 
             if matched {
-                event.classification = Some(category.clone());
+                event.classification = Some(rule.category.clone());
                 break;
+            }
+        }
+    }
+}
+
+/// LLM fallback for events that remain unclassified after keyword matching.
+/// Sends each unclassified event to the LLM with the full category list; the LLM
+/// picks the best category or returns `None`. Only effective when the provider supports
+/// synchronous inference (anthropic); queue and noop modes return `None` and the event
+/// stays unclassified — a safe degradation, since the daily page renders it in the
+/// general section and the work-log routes it to `uncategorized`.
+pub async fn classify_with_llm(
+    events: &mut [Event],
+    rules: &[lk_core::config::ClassifyRule],
+    llm: &std::sync::Arc<dyn lk_llm::LlmClient>,
+) {
+    if rules.is_empty() {
+        return;
+    }
+
+    let categories: Vec<String> = rules.iter().map(|r| r.category.clone()).collect();
+
+    for event in events.iter_mut() {
+        if event.classification.is_some() {
+            continue;
+        }
+
+        let excerpt = if event.body.len() > 500 {
+            &event.body[..event.body.floor_char_boundary(500)]
+        } else {
+            &event.body
+        };
+
+        match llm
+            .classify(lk_llm::ClassifyRequest {
+                title: event.title.clone(),
+                excerpt: excerpt.to_string(),
+                categories: categories.clone(),
+            })
+            .await
+        {
+            Ok(Some(cat)) => {
+                event.classification = Some(cat);
+            }
+            Ok(None) => {}
+            Err(e) if e.is_fatal() => {
+                tracing::error!(error = %e, event_id = %event.id, "fatal LLM classify error");
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, event_id = %event.id, "LLM classify failed; skipping");
             }
         }
     }
@@ -256,28 +305,34 @@ mod tests {
 
     #[test]
     fn keyword_classification() {
-        let mut classify = std::collections::BTreeMap::new();
-        classify.insert(
-            "action_required".to_string(),
-            vec!["please review".to_string(), "검토 요청".to_string()],
-        );
-        classify.insert("decisions".to_string(), vec!["approved".to_string()]);
+        let rules = vec![
+            lk_core::config::ClassifyRule {
+                category: "action_required".into(),
+                keywords: vec!["please review".into(), "검토 요청".into()],
+            },
+            lk_core::config::ClassifyRule {
+                category: "decisions".into(),
+                keywords: vec!["approved".into()],
+            },
+        ];
         let mut events = vec![make_event("Please review this PR", None)];
-        classify_by_keywords(&mut events, &classify);
+        classify_by_keywords(&mut events, &rules);
         assert_eq!(events[0].classification.as_deref(), Some("action_required"));
     }
 
     #[test]
     fn keyword_classification_rejects_substring_false_positives() {
-        let mut classify = std::collections::BTreeMap::new();
-        classify.insert("ai_topic".to_string(), vec!["AI".to_string()]);
+        let rules = vec![lk_core::config::ClassifyRule {
+            category: "ai_topic".into(),
+            keywords: vec!["AI".into()],
+        }];
 
         // "FAIR" and "MAIL" contain "AI" as a substring but not as a token.
         let mut events = vec![
             make_event("FAIR conference recap", None),
             make_event("Check your MAIL inbox", None),
         ];
-        classify_by_keywords(&mut events, &classify);
+        classify_by_keywords(&mut events, &rules);
         assert!(
             events[0].classification.is_none(),
             "FAIR must not match keyword AI"
@@ -289,7 +344,7 @@ mod tests {
 
         // Standalone "AI" as a whole token matches.
         let mut events2 = vec![make_event("AI research update", None)];
-        classify_by_keywords(&mut events2, &classify);
+        classify_by_keywords(&mut events2, &rules);
         assert_eq!(events2[0].classification.as_deref(), Some("ai_topic"));
     }
 }

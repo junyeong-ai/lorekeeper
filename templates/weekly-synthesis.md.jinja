@@ -18,15 +18,6 @@ sources_covered: {{ sources | tojson }}
 
 {% endfor %}
 
-## {{ i18n.source_summaries }}
-
-{% for source in source_summaries %}
-### {{ source.source_id }}
-
-{{ source.summary }}
-
-{% endfor %}
-
 ## {{ i18n.new_concepts }}
 
 {% for concept in new_concepts %}

@@ -95,7 +95,7 @@ pub fn sync_concept_backlinks(
             .path
             .file_stem()
             .and_then(|s| s.to_str())
-            .map(slugify)
+            .and_then(slugify)
             .unwrap_or_default();
         if stem.is_empty() {
             continue;

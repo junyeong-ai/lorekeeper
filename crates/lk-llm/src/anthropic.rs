@@ -3,7 +3,10 @@ use serde::Deserialize;
 
 use lk_core::concept::ExtractedConcept;
 
-use crate::{ExtractConceptsRequest, LlmClient, LlmError, SummarizeRequest};
+use crate::{
+    ClassifyRequest, ExtractConceptsRequest, LlmClient, LlmError, SummarizeRequest, Theme,
+    ThemeRequest,
+};
 
 pub struct AnthropicClient {
     http: reqwest::Client,
@@ -118,12 +121,38 @@ impl LlmClient for AnthropicClient {
         req: ExtractConceptsRequest,
     ) -> Result<Vec<ExtractedConcept>, LlmError> {
         let system = format!(
-            r#"Extract the key named entities, topics, and concepts.{} Output JSON array: [{{"name":"...","slug":"...","confidence":"extracted"|"inferred"}}]. ONLY the JSON array."#,
+            r#"Extract the key named entities, topics, and concepts.{} Output JSON array: [{{"name":"...","slug":"..."}}]. ONLY the JSON array."#,
             focus_clause(&req.focus)
         );
         let resp = self.call(&system, &req.text).await?;
         serde_json::from_str(strip_code_fences(&resp))
             .map_err(|e| LlmError::Api(format!("concept parse: {e}")))
+    }
+
+    async fn identify_themes(&self, req: ThemeRequest) -> Result<Vec<Theme>, LlmError> {
+        let system = format!(
+            r#"Identify the top themes from the text below. Output a JSON array of at most {} objects: [{{"title":"...","description":"..."}}]. ONLY the JSON array."#,
+            req.max_themes
+        );
+        let resp = self.call(&system, &req.text).await?;
+        serde_json::from_str(strip_code_fences(&resp))
+            .map_err(|e| LlmError::Api(format!("themes parse: {e}")))
+    }
+
+    async fn classify(&self, req: ClassifyRequest) -> Result<Option<String>, LlmError> {
+        let categories = req.categories.join(", ");
+        let system = format!(
+            "Classify the following into exactly one of these categories: [{categories}]. \
+             Output ONLY the category name, nothing else. If none fit, output \"null\"."
+        );
+        let text = format!("Title: {}\n\n{}", req.title, req.excerpt);
+        let result = self.call(&system, &text).await?;
+        let cat = result.trim().to_string();
+        if cat == "null" || !req.categories.contains(&cat) {
+            Ok(None)
+        } else {
+            Ok(Some(cat))
+        }
     }
 }
 

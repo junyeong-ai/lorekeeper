@@ -7,7 +7,9 @@ use tokio::io::AsyncWriteExt;
 
 use lk_core::concept::ExtractedConcept;
 
-use crate::{ExtractConceptsRequest, LlmClient, LlmError, SummarizeRequest, TaskTarget};
+use crate::{
+    ExtractConceptsRequest, LlmClient, LlmError, SummarizeRequest, TaskTarget, Theme, ThemeRequest,
+};
 
 /// LlmClient that defers semantic work to a Claude Code skill. Buffers task records
 /// in memory during `summarize`/`extract_concepts` calls; `flush` writes the entire
@@ -39,6 +41,7 @@ pub struct QueueTask {
 pub enum TaskKind {
     Summarize,
     ExtractConcepts,
+    IdentifyThemes,
 }
 
 impl QueueLlmClient {
@@ -115,6 +118,22 @@ impl LlmClient for QueueLlmClient {
         let task = QueueTask {
             task_id: self.next_id("ext"),
             kind: TaskKind::ExtractConcepts,
+            created_at: jiff::Timestamp::now(),
+            input,
+            target: req.target,
+        };
+        self.enqueue(task).await;
+        Ok(vec![])
+    }
+
+    async fn identify_themes(&self, req: ThemeRequest) -> Result<Vec<Theme>, LlmError> {
+        let input = serde_json::json!({
+            "text": req.text,
+            "max_themes": req.max_themes,
+        });
+        let task = QueueTask {
+            task_id: self.next_id("thm"),
+            kind: TaskKind::IdentifyThemes,
             created_at: jiff::Timestamp::now(),
             input,
             target: req.target,

@@ -56,7 +56,8 @@ pub fn diff(
         .map(String::as_str)
         .collect();
 
-    let index_dir_slug = slugify(&config.scope.dirs[0].to_string_lossy().replace('\\', "/"));
+    let index_dir_slug =
+        slugify(&config.scope.dirs[0].to_string_lossy().replace('\\', "/")).unwrap_or_default();
     let index_dir_prefix = format!("{index_dir_slug}/");
 
     // The index catalog and AGENTS.md schema are reserved meta pages, never
