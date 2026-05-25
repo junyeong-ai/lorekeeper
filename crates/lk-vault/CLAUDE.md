@@ -20,7 +20,8 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   strings (`serde_json::to_string` / `| tojson`) so quotes/colons can't break the YAML.
 - **`section::replace_section`** rewrites the body of one `## <heading>` section,
   preserving everything else. Tracks fenced-code state so `## ` lines inside
-  ``` blocks are not treated as section boundaries.
+  ``` blocks are not treated as section boundaries. Trims trailing whitespace from
+  heading lines before matching to prevent silent replacement failures.
 - **`index::build_index`** generates `wiki/index.md` — a hierarchical page catalog
   grouped by category (concepts, documents, daily/{source}, work-log, synthesis).
   One-liner summaries are extracted from each page's primary heading.

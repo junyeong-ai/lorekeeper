@@ -18,6 +18,9 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   `[title, body]` — never a bare concatenation (that collides).
 - **`slugify()`** lowercases + strips to `[alnum-]`; concept slugs are always
   re-normalized through it to prevent path injection from LLM output.
+- **`wikilink::extract_wikilinks`** skips fenced code blocks and inline code spans
+  to prevent false edges in the wiki graph. Closing fence detection requires no info
+  string after the marker (per CommonMark). Single source consumed by lk-graph.
 - **`text::collapse_blank_lines`** squeezes 3+ newlines to a paragraph break,
   strips `\r`. Single source consumed by lk-vault, lk-pipeline, lk-source.
 - **`LlmConfig` defaults to `provider: queue`** (matches docs/example).

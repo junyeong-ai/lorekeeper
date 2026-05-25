@@ -43,8 +43,9 @@ impl Synthesizer {
     }
 
     /// Run a summarize task, propagating only fatal (persistence) errors. A transient
-    /// LLM failure degrades to an empty narrative with a warning, so synthesis still
-    /// produces a page. Centralizes the fatal/non-fatal split every period shares.
+    /// LLM failure returns `None` so callers skip page generation rather than producing
+    /// an empty-content page that looks authoritative. Centralizes the fatal/non-fatal
+    /// split every period shares.
     async fn summarize_or_warn(
         &self,
         text: String,
@@ -53,7 +54,7 @@ impl Synthesizer {
         kind: lk_llm::TargetKind,
         anchor: String,
         what: &str,
-    ) -> Result<String, PipelineError> {
+    ) -> Result<Option<String>, PipelineError> {
         match self
             .ctx
             .llm
@@ -69,11 +70,11 @@ impl Synthesizer {
             })
             .await
         {
-            Ok(s) => Ok(s),
+            Ok(s) => Ok(Some(s)),
             Err(e) if e.is_fatal() => Err(PipelineError::Llm(e)),
             Err(e) => {
-                tracing::warn!(error = %e, what, "synthesis summarize failed");
-                Ok(String::new())
+                tracing::warn!(error = %e, what, "synthesis summarize failed; skipping page");
+                Ok(None)
             }
         }
     }
@@ -137,7 +138,7 @@ impl Synthesizer {
         }
 
         let path = VaultPath::weekly_synthesis(&self.ctx.dirs, year, week);
-        let themes_text = self
+        let Some(themes_text) = self
             .summarize_or_warn(
                 format!("Identify the top 3-5 themes across all sources this week:\n\n{combined}"),
                 8,
@@ -146,7 +147,10 @@ impl Synthesizer {
                 format!("## {}", self.ctx.locale.strings().key_themes_this_week),
                 "weekly synthesis",
             )
-            .await?;
+            .await?
+        else {
+            return Ok(None);
+        };
 
         // Weekly synthesis observes concepts already materialized during daily ingest;
         // it does not extract new ones here (which would not be persisted to wiki/concepts).
@@ -191,7 +195,7 @@ impl Synthesizer {
             .join("\n\n---\n\n");
 
         let path = VaultPath::weekly_personal(&self.ctx.dirs, year, week);
-        let narrative = self
+        let Some(narrative) = self
             .summarize_or_warn(
                 format!(
                     "Summarize this week's personal work into key accomplishments by category:\n\n{combined}"
@@ -202,7 +206,10 @@ impl Synthesizer {
                 format!("## {}", self.ctx.locale.strings().key_summary),
                 "weekly personal",
             )
-            .await?;
+            .await?
+        else {
+            return Ok(None);
+        };
         let context = serde_json::json!({
             "year": year,
             "week": week,
@@ -241,7 +248,7 @@ impl Synthesizer {
             .join("\n\n---\n\n");
 
         let path = VaultPath::monthly_personal(&self.ctx.dirs, year, month);
-        let narrative = self
+        let Some(narrative) = self
             .summarize_or_warn(
                 format!(
                     "Generate a monthly work summary with key achievements and category distribution:\n\n{combined}"
@@ -252,7 +259,10 @@ impl Synthesizer {
                 format!("## {}", self.ctx.locale.strings().key_summary),
                 "monthly",
             )
-            .await?;
+            .await?
+        else {
+            return Ok(None);
+        };
         let context = serde_json::json!({
             "year": year,
             "month": month,
@@ -313,7 +323,7 @@ impl Synthesizer {
         }
 
         let path = VaultPath::quarterly_personal(&self.ctx.dirs, year, quarter);
-        let narrative = self
+        let Some(narrative) = self
             .summarize_or_warn(
                 format!(
                     "Generate a quarterly performance review: top 5 achievements, category breakdown, growth areas, next direction:\n\n{combined}"
@@ -324,7 +334,10 @@ impl Synthesizer {
                 format!("## {}", self.ctx.locale.strings().top_achievements),
                 "quarterly",
             )
-            .await?;
+            .await?
+        else {
+            return Ok(None);
+        };
 
         let category_stats = self.aggregate_category_stats(start, end).await?;
 
@@ -378,7 +391,7 @@ impl Synthesizer {
         }
 
         let path = VaultPath::annual_personal(&self.ctx.dirs, year);
-        let narrative = self
+        let Some(narrative) = self
             .summarize_or_warn(
                 format!(
                     "Generate a comprehensive annual performance review based on quarterly summaries:\n\n{combined}"
@@ -389,7 +402,10 @@ impl Synthesizer {
                 format!("## {}", self.ctx.locale.strings().overall_summary),
                 "annual",
             )
-            .await?;
+            .await?
+        else {
+            return Ok(None);
+        };
 
         let context = serde_json::json!({
             "year": year,

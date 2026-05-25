@@ -56,8 +56,9 @@ templates/      Jinja2 markdown templates (.md.jinja), compiled into the binary
   bundle, defining page formats and section ownership (machine vs LLM). Templates,
   queue `target.anchor`, and skills all derive from `lk-core::i18n`.
 - **Domain logic is single-sourced in lk-core**: slugify (NFKC), frontmatter parsing,
-  wikilink extraction, vault paths, text normalization (collapse_blank_lines). lk-vault,
-  lk-source, lk-pipeline, and lk-graph all consume these — zero duplicate implementations.
+  wikilink extraction (skips fenced code blocks and inline code), vault paths, text
+  normalization (collapse_blank_lines). lk-vault, lk-source, lk-pipeline, and lk-graph
+  all consume these — zero duplicate implementations.
 - **LLM provider modes** (`llm.provider`, default `queue`):
   - `queue` — JSONL tasks to `.lorekeeper/queue/`; `/lore-process` drains with Claude Code.
   - `anthropic` — direct Messages API for unattended cron.

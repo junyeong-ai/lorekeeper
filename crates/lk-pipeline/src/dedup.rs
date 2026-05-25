@@ -13,6 +13,25 @@ const CONTENT_HASHES: TableDefinition<&str, u64> = TableDefinition::new("content
 const URLS: TableDefinition<&str, u64> = TableDefinition::new("urls");
 const TITLES: TableDefinition<&str, u64> = TableDefinition::new("titles");
 
+/// Exact query-parameter keys stripped during URL canonicalisation. These are
+/// vendor-tracking parameters whose presence varies by attribution path but
+/// never carry resource-identifying information.
+const TRACKING_QUERY_EXACT_KEYS: &[&str] = &[
+    "fbclid", "gclid", "mc_cid", "mc_eid", "_hsenc", "_hsmi", "ref",
+];
+
+/// Query-key prefixes stripped during URL canonicalisation. Only genuine
+/// prefixes that always carry a trailing discriminator (utm_source,
+/// utm_medium, utm_campaign, utm_term, utm_content).
+const TRACKING_QUERY_PREFIXES: &[&str] = &["utm_"];
+
+fn is_tracking_param(key: &str) -> bool {
+    TRACKING_QUERY_EXACT_KEYS.contains(&key)
+        || TRACKING_QUERY_PREFIXES
+            .iter()
+            .any(|prefix| key.starts_with(prefix))
+}
+
 pub(crate) fn normalize_url(raw: &str) -> String {
     let Ok(mut url) = url::Url::parse(raw) else {
         return raw.to_string();
@@ -54,7 +73,24 @@ pub(crate) fn normalize_url(raw: &str) -> String {
         url.set_path(&path);
     }
 
-    url.set_query(None);
+    // Strip tracking parameters while preserving resource-identifying query
+    // keys. Remaining pairs are sorted for canonical ordering.
+    let mut pairs: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(k, _)| !is_tracking_param(k))
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    pairs.sort();
+
+    if pairs.is_empty() {
+        url.set_query(None);
+    } else {
+        let qs = url::form_urlencoded::Serializer::new(String::new())
+            .extend_pairs(&pairs)
+            .finish();
+        url.set_query(Some(&qs));
+    }
+
     url.set_fragment(None);
 
     url.to_string()
@@ -446,10 +482,42 @@ mod tests {
     }
 
     #[test]
-    fn normalize_url_removes_query_params() {
+    fn normalize_url_strips_tracking_params_preserves_resource_params() {
         assert_eq!(
             normalize_url("https://example.com/path?utm_source=feed&id=1"),
-            "https://example.com/path"
+            "https://example.com/path?id=1"
+        );
+    }
+
+    #[test]
+    fn normalize_url_strips_all_tracking_variants() {
+        assert_eq!(
+            normalize_url(
+                "https://example.com/page?utm_source=x&utm_medium=y&utm_campaign=z&utm_term=a&utm_content=b&fbclid=abc&gclid=def&mc_cid=ghi&mc_eid=jkl&_hsenc=mno&_hsmi=pqr&ref=stu"
+            ),
+            "https://example.com/page"
+        );
+    }
+
+    #[test]
+    fn normalize_url_preserves_resource_identifying_params() {
+        // YouTube video ID
+        assert_eq!(
+            normalize_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ&utm_source=share"),
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        );
+        // Generic resource IDs
+        assert_eq!(
+            normalize_url("https://example.com/item?id=123&page=2"),
+            "https://example.com/item?id=123&page=2"
+        );
+    }
+
+    #[test]
+    fn normalize_url_sorts_remaining_params() {
+        assert_eq!(
+            normalize_url("https://example.com/path?z=3&a=1&m=2"),
+            "https://example.com/path?a=1&m=2&z=3"
         );
     }
 
@@ -630,6 +698,37 @@ mod tests {
             .unwrap();
 
         let dup = vec![ev("b", "Reposted", Some("https://example.com/post"))];
+        assert_eq!(cache.deduplicate(dup, &cascade).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn url_dedup_distinguishes_different_resource_params() {
+        let dir = TempDir::new().unwrap();
+        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85).unwrap();
+        let cascade = vec![DedupStrategy::Url];
+
+        cache
+            .record(&[ev(
+                "a",
+                "Video A",
+                Some("https://www.youtube.com/watch?v=aaa"),
+            )])
+            .unwrap();
+
+        // Same host/path but different resource param is novel.
+        let novel = vec![ev(
+            "b",
+            "Video B",
+            Some("https://www.youtube.com/watch?v=bbb"),
+        )];
+        assert_eq!(cache.deduplicate(novel, &cascade).unwrap().len(), 1);
+
+        // Same resource param with extra tracking is still a duplicate.
+        let dup = vec![ev(
+            "c",
+            "Video A reshared",
+            Some("https://www.youtube.com/watch?v=aaa&utm_source=twitter"),
+        )];
         assert_eq!(cache.deduplicate(dup, &cascade).unwrap().len(), 0);
     }
 

@@ -113,7 +113,7 @@ pub fn classify_by_keywords(
             let matched = keywords
                 .iter()
                 .filter(|kw| !kw.trim().is_empty())
-                .any(|kw| text.contains(&kw.to_lowercase()));
+                .any(|kw| contains_bounded(&text, &kw.to_lowercase()));
 
             if matched {
                 event.classification = Some(category.clone());
@@ -265,5 +265,31 @@ mod tests {
         let mut events = vec![make_event("Please review this PR", None)];
         classify_by_keywords(&mut events, &classify);
         assert_eq!(events[0].classification.as_deref(), Some("action_required"));
+    }
+
+    #[test]
+    fn keyword_classification_rejects_substring_false_positives() {
+        let mut classify = std::collections::BTreeMap::new();
+        classify.insert("ai_topic".to_string(), vec!["AI".to_string()]);
+
+        // "FAIR" and "MAIL" contain "AI" as a substring but not as a token.
+        let mut events = vec![
+            make_event("FAIR conference recap", None),
+            make_event("Check your MAIL inbox", None),
+        ];
+        classify_by_keywords(&mut events, &classify);
+        assert!(
+            events[0].classification.is_none(),
+            "FAIR must not match keyword AI"
+        );
+        assert!(
+            events[1].classification.is_none(),
+            "MAIL must not match keyword AI"
+        );
+
+        // Standalone "AI" as a whole token matches.
+        let mut events2 = vec![make_event("AI research update", None)];
+        classify_by_keywords(&mut events2, &classify);
+        assert_eq!(events2[0].classification.as_deref(), Some("ai_topic"));
     }
 }

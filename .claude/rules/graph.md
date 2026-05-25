@@ -3,7 +3,7 @@ paths: ["crates/lk-graph/**/*.rs"]
 ---
 
 - Pure deterministic — no HTTP, no LLM, no async. deps: lk-core + petgraph + rayon + walkdir.
-- Domain rules single-sourced from lk-core: `slugify` (NFKC), `frontmatter::parse_page`, `wikilink::extract_wikilinks`.
+- Domain rules single-sourced from lk-core: `slugify` (NFKC), `frontmatter::parse_page`, `wikilink::extract_wikilinks` (skips fenced code blocks and inline code).
 - Wikilink resolution (`scan::normalize_target`): bare `[[concept-a]]` matches `concept-a.md` by filename (any depth); path `[[daily/x/2026-05-22]]` matches that page id (`/` preserved, not collapsed). Anchors stripped first.
 - `hubs`/`cluster`/`suggest-links` use the `graph.scope.dirs` subgraph; `broken`/`orphans`/`index-sync` resolve against the full-vault existence universe (`scan::VaultExistence` via `WikiGraph::build_with_existence`) so cross-folder links aren't false positives. Reserved meta pages (`index.md`, `AGENTS.md` from `lk_core::vault_path::RESERVED_WIKI_FILES`) are never orphans/index-drift.
 - Exit codes: 0 = ok/no findings, 1 = findings, 2 = runtime error.
