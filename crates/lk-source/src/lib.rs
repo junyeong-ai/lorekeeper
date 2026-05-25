@@ -6,6 +6,10 @@ pub(crate) mod markdown;
 mod rss;
 mod slack;
 
+/// Move consumed manual-inbox files into `<inbox>/archived/{date}/` after the
+/// pipeline has committed daily pages and dedup.
+pub use manual::post_commit_archive;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;

@@ -62,6 +62,10 @@ pub enum TargetKind {
     AnnualPersonalNarrative,
     /// Cross-source topic synthesis for a work-log page.
     WorkLogSynthesis,
+    /// Document page summary.
+    DocumentSummary,
+    /// Document page concept wiki-links.
+    DocumentConcepts,
 }
 
 /// Where the result of a semantic task should land in the vault. Carried through the

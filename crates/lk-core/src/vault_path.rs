@@ -77,6 +77,14 @@ impl VaultPath {
         )
     }
 
+    pub fn document(dirs: &VaultDirs, slug: &str) -> Self {
+        Self(
+            PathBuf::from(&dirs.wiki)
+                .join("documents")
+                .join(format!("{slug}.md")),
+        )
+    }
+
     pub fn resolve(&self, vault_root: &Path) -> PathBuf {
         vault_root.join(&self.0)
     }
@@ -137,6 +145,16 @@ mod tests {
         let dirs = VaultDirs::default();
         let path = VaultPath::concept(&dirs, "claude-code");
         assert_eq!(path.to_string(), "wiki/concepts/claude-code.md");
+    }
+
+    #[test]
+    fn document_path() {
+        let dirs = VaultDirs::default();
+        let path = VaultPath::document(&dirs, "cloud-sql-extensions-report");
+        assert_eq!(
+            path.to_string(),
+            "wiki/documents/cloud-sql-extensions-report.md"
+        );
     }
 
     #[test]

@@ -209,6 +209,9 @@ pub async fn run(
             for out in &result.daily_pages {
                 eprintln!("  [dry-run] would write: {}", out.path);
             }
+            for out in &result.document_pages {
+                eprintln!("  [dry-run] would write: {} (document)", out.path);
+            }
             continue;
         }
 
@@ -250,6 +253,15 @@ pub async fn run(
             }
             total_pages += 1;
             eprintln!("  ✓ wrote: {} ({})", out.path, p.id);
+        }
+        for out in &p.result.document_pages {
+            if let Err(e) = writer.write_page(out.path.as_ref(), &out.content).await {
+                eprintln!("  ✗ vault write {}: {e}", out.path);
+                any_write_failed = true;
+                break;
+            }
+            total_pages += 1;
+            eprintln!("  ✓ wrote: {} (document)", out.path);
         }
         if any_write_failed {
             break;
@@ -342,6 +354,21 @@ pub async fn run(
         })
         .await
         .unwrap_or_else(|e| tracing::warn!(error = %e, "ingest-log write failed"));
+    }
+
+    // Phase 6: Post-commit archive for manual sources. Runs only after dedup
+    // commit succeeded, so files stay in inbox for retry if any earlier phase failed.
+    if !any_write_failed {
+        for p in &planned {
+            let sc = sources.iter().find(|(id, _)| id == &p.id).map(|(_, sc)| sc);
+            if let Some(sc) = sc
+                && sc.source_type == lk_core::config::SourceType::Manual
+                && let Err(e) =
+                    lk_source::post_commit_archive(&sc.params, &p.result.events, extract_target)
+            {
+                tracing::warn!(source = %p.id, error = %e, "post-commit archive failed");
+            }
+        }
     }
 
     had_failure |= any_write_failed;

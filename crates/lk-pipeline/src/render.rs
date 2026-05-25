@@ -109,6 +109,82 @@ pub fn render_daily_page(
     Ok(RenderOutput { path, content })
 }
 
+pub struct DocumentRenderContext<'a> {
+    pub slug: &'a str,
+    pub event: &'a Event,
+    pub summary: &'a str,
+    pub concepts: &'a [String],
+    pub extract_concepts: bool,
+    pub locale: Locale,
+}
+
+pub fn render_document_page(
+    ctx: &DocumentRenderContext<'_>,
+    engine: &TemplateEngine,
+    dirs: &VaultDirs,
+) -> Result<RenderOutput, PipelineError> {
+    let DocumentRenderContext {
+        slug,
+        event,
+        summary,
+        concepts,
+        extract_concepts: _,
+        locale,
+    } = ctx;
+    let strings = locale.strings();
+
+    let path = VaultPath::document(dirs, slug);
+
+    // Derive document_type from source_file extension in metadata.
+    let source_file = event
+        .metadata
+        .get("source_file")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let document_type = match source_file.rsplit('.').next().unwrap_or("") {
+        "html" | "htm" => "report",
+        "json" => "data",
+        _ => "note", // md, txt, markdown, and everything else
+    };
+
+    let today = jiff::Zoned::now().date();
+
+    let mut tags = vec!["document".to_string()];
+    tags.extend(event.labels.iter().cloned());
+
+    let concept_slugs: Vec<String> = concepts
+        .iter()
+        .filter_map(|name| lk_core::concept::slugify(name))
+        .collect();
+
+    let aliases: Vec<&str> = vec![];
+
+    let context = serde_json::json!({
+        "slug": slug,
+        "title": event.title,
+        "aliases": aliases,
+        "created": today.to_string(),
+        "updated": today.to_string(),
+        "document_type": document_type,
+        "source_url": event.url,
+        "source_file": source_file,
+        "authors": serde_json::Value::Array(vec![]),
+        "year": event.date.year(),
+        "tags": tags,
+        "concept_slugs": concept_slugs,
+        "summary": summary,
+        "content": event.body,
+        "concepts": concepts,
+        "i18n": strings,
+    });
+
+    let content = engine
+        .render("document.md.jinja", &context)
+        .map_err(|e| PipelineError::Render(e.to_string()))?;
+
+    Ok(RenderOutput { path, content })
+}
+
 fn filter_by_class(events: &[&Event], class: &str) -> Vec<serde_json::Value> {
     events
         .iter()

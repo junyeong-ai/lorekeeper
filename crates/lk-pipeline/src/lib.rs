@@ -19,7 +19,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use lk_core::concept::ExtractedConcept;
-use lk_core::config::{Config, DedupConfig, SourceConfig};
+use lk_core::config::{Config, DedupConfig, SourceConfig, SourceType};
 use lk_core::event::{Event, RawItem};
 use lk_vault::VaultReader;
 
@@ -50,11 +50,12 @@ pub struct IngestResult {
     pub events: Vec<Event>,
     pub concepts: Vec<ExtractedConcept>,
     pub daily_pages: Vec<RenderOutput>,
+    pub document_pages: Vec<RenderOutput>,
 }
 
 impl IngestResult {
     pub fn is_empty(&self) -> bool {
-        self.daily_pages.is_empty()
+        self.daily_pages.is_empty() && self.document_pages.is_empty()
     }
 }
 
@@ -163,6 +164,12 @@ impl Pipeline {
         classify::classify_by_keywords(&mut events, &config.classify);
         if config.classify_with_llm && !options.dry_run {
             classify::classify_with_llm(&mut events, &config.classify, &self.ctx.llm).await;
+        }
+
+        if config.source_type == SourceType::Manual {
+            return self
+                .plan_documents(source_id, config, events, options)
+                .await;
         }
 
         let mut by_date: BTreeMap<jiff::civil::Date, Vec<usize>> = BTreeMap::new();
@@ -319,6 +326,7 @@ impl Pipeline {
             events,
             concepts: all_concepts,
             daily_pages,
+            document_pages: vec![],
         })
     }
 
@@ -348,6 +356,179 @@ impl Pipeline {
             &self.ctx.llm,
         )
         .await
+    }
+
+    async fn plan_documents(
+        &self,
+        source_id: &str,
+        config: &SourceConfig,
+        events: Vec<Event>,
+        _options: &IngestOptions,
+    ) -> Result<IngestResult, PipelineError> {
+        let focus = config.normalized_focus();
+
+        let existing_concepts = if config.extract_concepts {
+            self.load_existing_concept_refs().await
+        } else {
+            vec![]
+        };
+
+        let mut document_pages: Vec<RenderOutput> = Vec::new();
+        let mut all_concepts: Vec<lk_core::concept::ExtractedConcept> = Vec::new();
+
+        for event in &events {
+            // Derive slug from title; fall back to source_file metadata.
+            let slug = match lk_core::concept::slugify(&event.title) {
+                Some(s) => s,
+                None => {
+                    let source_file = event
+                        .metadata
+                        .get("source_file")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    match lk_core::concept::slugify(source_file) {
+                        Some(s) => s,
+                        None => {
+                            tracing::warn!(
+                                source = source_id,
+                                title = %event.title,
+                                "skipping document with empty slug"
+                            );
+                            continue;
+                        }
+                    }
+                }
+            };
+
+            let vault_path =
+                lk_core::vault_path::VaultPath::document(&self.ctx.dirs, &slug).to_string();
+
+            let summary = match self
+                .ctx
+                .llm
+                .summarize(lk_llm::SummarizeRequest {
+                    text: format!("{}\n{}", event.title, event.body),
+                    max_sentences: 5,
+                    focus: focus.clone(),
+                    target: lk_llm::TaskTarget {
+                        vault_path: vault_path.clone(),
+                        kind: lk_llm::TargetKind::DocumentSummary,
+                        anchor: format!("## {}", self.ctx.locale.strings().summary),
+                    },
+                })
+                .await
+            {
+                Ok(s) => s,
+                Err(e) if e.is_fatal() => return Err(PipelineError::Llm(e)),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        source = source_id,
+                        slug = %slug,
+                        "document summarize failed; continuing without summary"
+                    );
+                    String::new()
+                }
+            };
+
+            let doc_concepts: Vec<lk_core::concept::ExtractedConcept> = if config.extract_concepts {
+                match self
+                    .ctx
+                    .llm
+                    .extract_concepts(lk_llm::ExtractConceptsRequest {
+                        text: format!("{}\n{}", event.title, event.body),
+                        source_id: source_id.to_string(),
+                        date: event.date,
+                        focus: focus.clone(),
+                        target: lk_llm::TaskTarget {
+                            vault_path: vault_path.clone(),
+                            kind: lk_llm::TargetKind::DocumentConcepts,
+                            anchor: format!("## {}", self.ctx.locale.strings().related_concepts),
+                        },
+                        existing_concepts: existing_concepts.clone(),
+                        categories: self.ctx.concept_categories.clone(),
+                    })
+                    .await
+                {
+                    Ok(c) => {
+                        let valid_cat_ids: Vec<&str> = self
+                            .ctx
+                            .concept_categories
+                            .iter()
+                            .map(|c| c.id.as_str())
+                            .collect();
+                        c.into_iter()
+                            .filter(concepts::is_valid)
+                            .map(|mut ec| {
+                                if let Some(ref cat) = ec.category
+                                    && !valid_cat_ids.contains(&cat.as_str())
+                                {
+                                    ec.category = None;
+                                }
+                                ec
+                            })
+                            .collect()
+                    }
+                    Err(e) if e.is_fatal() => return Err(PipelineError::Llm(e)),
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            source = source_id,
+                            slug = %slug,
+                            "document concept extraction failed; continuing without concepts"
+                        );
+                        vec![]
+                    }
+                }
+            } else {
+                vec![]
+            };
+
+            let concept_names: Vec<String> = doc_concepts.iter().map(|c| c.name.clone()).collect();
+
+            match render::render_document_page(
+                &render::DocumentRenderContext {
+                    slug: &slug,
+                    event,
+                    summary: &summary,
+                    concepts: &concept_names,
+                    extract_concepts: config.extract_concepts,
+                    locale: self.ctx.locale,
+                },
+                &self.ctx.engine,
+                &self.ctx.dirs,
+            ) {
+                Ok(output) => document_pages.push(output),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        source = source_id,
+                        slug = %slug,
+                        "document render failed; skipping"
+                    );
+                    continue;
+                }
+            }
+
+            // Merge concepts into run-level accumulator.
+            {
+                let mut drafts = self.concept_drafts.lock().await;
+                for concept in &doc_concepts {
+                    drafts
+                        .merge(concept, source_id, event.date, &self.reader, &self.ctx.dirs)
+                        .await?;
+                }
+            }
+            all_concepts.extend(doc_concepts);
+        }
+
+        Ok(IngestResult {
+            source_id: source_id.into(),
+            events,
+            concepts: all_concepts,
+            daily_pages: vec![],
+            document_pages,
+        })
     }
 
     async fn load_existing_concept_refs(&self) -> Vec<lk_llm::ExistingConceptRef> {
@@ -396,5 +577,6 @@ fn empty_result(source_id: &str) -> IngestResult {
         events: vec![],
         concepts: vec![],
         daily_pages: vec![],
+        document_pages: vec![],
     }
 }

@@ -64,6 +64,7 @@ fn page_schemas() -> Vec<PageSchema> {
                 "aliases",
                 "created",
                 "updated",
+                "category",
                 "source_count",
                 "sources",
                 "tags",
@@ -71,7 +72,6 @@ fn page_schemas() -> Vec<PageSchema> {
             sections: vec![
                 s("Synthesis", |i| i.concept_synthesis.to_string(), Owner::Llm),
                 s("Sources", |i| i.concept_sources.to_string(), Owner::Machine),
-                s("Metadata", |i| i.concept_meta.to_string(), Owner::Machine),
                 s("Related", |i| i.related.to_string(), Owner::Llm),
             ],
         },
@@ -332,14 +332,12 @@ mod tests {
         assert!(ko.contains("locale: ko"));
         assert!(ko.contains("`## 핵심`"));
         assert!(ko.contains("`## 출처`"));
-        assert!(ko.contains("`## 메타`"));
         assert!(ko.contains("`## 관련`"));
 
         let en = render_agents_md(Locale::En);
         assert!(en.contains("locale: en"));
         assert!(en.contains("`## Synthesis`"));
         assert!(en.contains("`## Sources`"));
-        assert!(en.contains("`## Metadata`"));
         assert!(en.contains("`## Related`"));
     }
 
