@@ -595,7 +595,7 @@ impl Default for SummaryConfig {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct SynthesisConfig {
-    pub weekly: PeriodSynthesisConfig,
+    pub weekly: WeeklySynthesisConfig,
     pub monthly: PeriodSynthesisConfig,
     pub quarterly: PeriodSynthesisConfig,
     pub annual: PeriodSynthesisConfig,
@@ -628,17 +628,36 @@ impl SynthesisConfig {
     }
 }
 
+/// Weekly synthesis carries the cross-source themes page on top of the personal
+/// weekly narrative, so it alone takes `include_sources`. The other periods are
+/// work-log-only performance reviews and share the leaner `PeriodSynthesisConfig`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
-pub struct PeriodSynthesisConfig {
+pub struct WeeklySynthesisConfig {
     pub enabled: bool,
     pub schedule: Option<String>,
     /// Sources rolled up into the cross-source weekly themes page. Opt-in: an empty
     /// list produces no themes page. List work/communication sources (team chat,
     /// tickets) where a weekly thematic recap adds value — not knowledge feeds, whose
     /// value already lives in the continuously-accumulated concept graph.
-    #[serde(default)]
     pub include_sources: Vec<String>,
+}
+
+impl Default for WeeklySynthesisConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            schedule: None,
+            include_sources: vec![],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct PeriodSynthesisConfig {
+    pub enabled: bool,
+    pub schedule: Option<String>,
 }
 
 impl Default for PeriodSynthesisConfig {
@@ -646,7 +665,6 @@ impl Default for PeriodSynthesisConfig {
         Self {
             enabled: true,
             schedule: None,
-            include_sources: vec![],
         }
     }
 }
