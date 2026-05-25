@@ -34,6 +34,14 @@ impl Synthesizer {
         }
     }
 
+    /// The personal narratives (weekly/monthly/quarterly/annual) are the work-log
+    /// performance subsystem, gated by `performance.enabled`. Disabled → no review pages,
+    /// even if work-log entries exist. The cross-source weekly themes page is independent
+    /// and not gated here.
+    fn performance_enabled(&self) -> bool {
+        self.ctx.perf.enabled
+    }
+
     /// Run a summarize task, propagating only fatal (persistence) errors. A transient
     /// LLM failure degrades to an empty narrative with a warning, so synthesis still
     /// produces a page. Centralizes the fatal/non-fatal split every period shares.
@@ -163,6 +171,9 @@ impl Synthesizer {
         &self,
         date: jiff::civil::Date,
     ) -> Result<Option<RenderOutput>, PipelineError> {
+        if !self.performance_enabled() {
+            return Ok(None);
+        }
         let (year, week) = iso_year_week(date);
         let (start, end) = iso_week_range(year, week)?;
 
@@ -212,6 +223,9 @@ impl Synthesizer {
         year: i16,
         month: u8,
     ) -> Result<Option<RenderOutput>, PipelineError> {
+        if !self.performance_enabled() {
+            return Ok(None);
+        }
         let (start, end) = month_range(year, month)?;
         let dir = PathBuf::from(&self.ctx.dirs.personal).join("work-log");
         let pages = self.read_date_range(&dir, start, end).await?;
@@ -260,6 +274,9 @@ impl Synthesizer {
         year: i16,
         quarter: u8,
     ) -> Result<Option<RenderOutput>, PipelineError> {
+        if !self.performance_enabled() {
+            return Ok(None);
+        }
         let (start, end) = quarter_range(year, quarter)?;
         let months: Vec<u8> = ((quarter - 1) * 3 + 1..=quarter * 3).collect();
 
@@ -336,6 +353,9 @@ impl Synthesizer {
     }
 
     pub async fn annual_personal(&self, year: i16) -> Result<Option<RenderOutput>, PipelineError> {
+        if !self.performance_enabled() {
+            return Ok(None);
+        }
         let quarterly_dir = PathBuf::from(&self.ctx.dirs.quarterly).join(&self.ctx.dirs.personal);
         let mut quarter_summaries: Vec<serde_json::Value> = Vec::new();
         let mut combined = String::new();

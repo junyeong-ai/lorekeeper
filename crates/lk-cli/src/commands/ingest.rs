@@ -286,7 +286,9 @@ pub async fn run(
         }
     }
 
-    // Phase 3: Aggregate and write work-log.
+    // Phase 3: Aggregate and write work-log. Whether the subsystem runs at all is gated
+    // inside aggregate_work_log by performance.enabled — distinct from per-source
+    // track_personal, which only flags personal events on their daily pages.
     if !any_write_failed && !all_personal.is_empty() {
         let work_logs = pipeline
             .aggregate_work_log(&all_personal)

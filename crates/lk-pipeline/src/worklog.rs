@@ -19,7 +19,9 @@ pub async fn aggregate_and_render(
     locale: Locale,
     llm: &Arc<dyn LlmClient>,
 ) -> Result<Vec<RenderOutput>, PipelineError> {
-    if events.is_empty() {
+    // The work-log is the performance subsystem; `performance.enabled` gates it at the
+    // mechanism boundary so no caller can produce one while the subsystem is off.
+    if !perf.enabled || events.is_empty() {
         return Ok(vec![]);
     }
 

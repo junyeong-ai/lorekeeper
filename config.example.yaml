@@ -248,6 +248,9 @@ labels:
 
 # ─── 성과 추적 ───────────────────────────────────────────
 performance:
+  # Master switch for the work-log/performance subsystem (work-log generation +
+  # weekly/monthly/quarterly/annual personal reviews). Off → none are produced, even
+  # if sources set track_personal (which only flags events on their daily pages).
   enabled: true
   work_categories:
     - project-delivery
@@ -271,8 +274,8 @@ performance:
 
 # ─── 종합 보고 ───────────────────────────────────────────
 # weekly는 두 갈래: (1) include_sources의 소스 횡단 "주간 테마" 페이지(opt-in),
-# (2) me/work-log 기반 개인 주간 요약(항상 생성). monthly/quarterly/annual은
-# 모두 work-log 기반 개인 성과 리뷰다 — 지식/뉴스 소스는 관여하지 않는다.
+# (2) me/work-log 기반 개인 주간 요약. (2)와 monthly/quarterly/annual은 모두 work-log
+# 기반 개인 성과 리뷰로 performance.enabled로 함께 켜고 끈다 — 지식/뉴스 소스는 무관.
 synthesis:
   weekly:
     enabled: true

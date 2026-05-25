@@ -2,6 +2,10 @@ use super::{find_config, load_config};
 
 pub async fn run(opts: &super::GlobalOpts) -> miette::Result<()> {
     let config = load_config(&find_config(opts)?)?;
+    if !config.performance.enabled {
+        eprintln!("Performance subsystem is disabled (performance.enabled: false).");
+        return Ok(());
+    }
     let vault_root = config.vault.root_path();
     let reader = lk_vault::VaultReader::new(&vault_root);
 

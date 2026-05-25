@@ -709,3 +709,95 @@ async fn weekly_synthesis_is_opt_in_via_include_sources() {
         "a source listed in include_sources opts into the weekly themes page"
     );
 }
+
+#[tokio::test]
+async fn performance_enabled_gates_personal_narratives() {
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+
+    // A work-log page exists in the target ISO week.
+    let work_log = vault.join("me").join("work-log");
+    std::fs::create_dir_all(&work_log).unwrap();
+    std::fs::write(
+        work_log.join("2026-05-20.md"),
+        "---\nid: work-log-2026-05-20\ncategories: [project-delivery]\n---\n\n# Work\n\nbody\n",
+    )
+    .unwrap();
+
+    let llm: Arc<dyn LlmClient> = Arc::new(NoopLlmClient);
+
+    // performance.enabled: true → the personal weekly review is produced.
+    let config = base_config(vault);
+    let synth = Synthesizer::new(vault, make_ctx(&config, llm.clone()), &config);
+    assert!(
+        synth
+            .weekly_personal(jiff::civil::date(2026, 5, 23))
+            .await
+            .unwrap()
+            .is_some(),
+        "personal review should be produced when performance is enabled"
+    );
+
+    // performance.enabled: false → no review, even though the work-log page exists.
+    let mut config = base_config(vault);
+    config.performance.enabled = false;
+    let synth = Synthesizer::new(vault, make_ctx(&config, llm), &config);
+    assert!(
+        synth
+            .weekly_personal(jiff::civil::date(2026, 5, 23))
+            .await
+            .unwrap()
+            .is_none(),
+        "disabling performance must suppress personal reviews"
+    );
+}
+
+#[tokio::test]
+async fn work_log_generation_is_gated_by_performance_enabled() {
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+
+    let event = lk_core::event::Event {
+        id: lk_core::event::EventId::new("test-source", jiff::civil::date(2026, 5, 20), "x"),
+        source_id: "test-source".into(),
+        source_type: SourceType::Gmail,
+        date: jiff::civil::date(2026, 5, 20),
+        title: "did a thing".into(),
+        body: "details".into(),
+        url: None,
+        author: None,
+        labels: vec!["personal".into()],
+        classification: None,
+        is_personal: true,
+        content_hash: lk_core::event::content_hash("did a thing", "details"),
+        metadata: serde_json::Value::Null,
+    };
+
+    let llm: Arc<dyn LlmClient> = Arc::new(NoopLlmClient);
+
+    // Enabled → the personal event yields a work-log page.
+    let config = base_config(vault);
+    let pipeline = Pipeline::new(vault, make_ctx(&config, llm.clone()), &config).unwrap();
+    assert!(
+        !pipeline
+            .aggregate_work_log(std::slice::from_ref(&event))
+            .await
+            .unwrap()
+            .is_empty(),
+        "work-log should be produced when performance is enabled"
+    );
+    drop(pipeline); // release the single-writer dedup lock before reopening
+
+    // Disabled → no work-log at the mechanism boundary, regardless of caller.
+    let mut config = base_config(vault);
+    config.performance.enabled = false;
+    let pipeline = Pipeline::new(vault, make_ctx(&config, llm), &config).unwrap();
+    assert!(
+        pipeline
+            .aggregate_work_log(std::slice::from_ref(&event))
+            .await
+            .unwrap()
+            .is_empty(),
+        "disabling performance must suppress work-log generation"
+    );
+}

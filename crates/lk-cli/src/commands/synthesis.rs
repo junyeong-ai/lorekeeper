@@ -40,7 +40,16 @@ pub async fn run(opts: &super::GlobalOpts, period: Period) -> miette::Result<()>
     // buffer before ANY write happens. This decouples buffering from page writes:
     // if a write fails partway, we abort BEFORE flushing, so the buffered tasks are
     // dropped consistently — the same recovery story as `lore ingest`.
+    let perf_on = config.performance.enabled;
     let outputs: Vec<lk_pipeline::RenderOutput> = match period {
+        // The personal-review periods are the performance subsystem; report the real
+        // reason rather than letting the Synthesizer's empty result read as "no data".
+        Period::Monthly { .. } | Period::Quarterly { .. } | Period::Annual { .. }
+            if !perf_on =>
+        {
+            eprintln!("Performance reviews are disabled (performance.enabled: false).");
+            Vec::new()
+        }
         Period::Weekly { date, previous } => {
             let target = resolve_weekly_target(date.as_deref(), previous, today)?;
             let mut outs = Vec::new();
