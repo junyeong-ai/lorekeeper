@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use lk_core::config::GraphConfig;
 use lk_core::i18n::Locale;
-use lk_graph::{backlinks, cluster, export, graph, index, normalize, output, scan, stale};
+use lk_graph::{backlinks, cache, cluster, export, graph, index, normalize, output, scan, stale};
 
 use super::GlobalOpts;
 
@@ -68,8 +68,14 @@ pub enum GraphCmd {
 }
 
 /// Returns exit code: 0 = ok/no findings, 1 = findings, 2 = runtime error.
-pub fn run(opts: &GlobalOpts, cmd: GraphCmd, json: bool, root_override: Option<PathBuf>) -> i32 {
-    match run_inner(opts, cmd, json, root_override) {
+pub fn run(
+    opts: &GlobalOpts,
+    cmd: GraphCmd,
+    json: bool,
+    root_override: Option<PathBuf>,
+    incremental: bool,
+) -> i32 {
+    match run_inner(opts, cmd, json, root_override, incremental) {
         Ok(has_findings) => {
             if has_findings {
                 1
@@ -89,19 +95,40 @@ fn run_inner(
     cmd: GraphCmd,
     json: bool,
     root_override: Option<PathBuf>,
+    incremental: bool,
 ) -> Result<bool, String> {
     // `stale` and `backlinks-sync` need timezone/locale from the full config —
     // and don't use the WikiGraph at all — so dispatch them up front before paying
     // the graph-build cost.
     match cmd {
-        GraphCmd::Stale { days } => return run_stale(opts, root_override, json, days),
+        GraphCmd::Stale { days } => {
+            return run_stale(opts, root_override, json, days, incremental);
+        }
         GraphCmd::BacklinksSync { dry_run } => {
-            return run_backlinks_sync(opts, root_override, json, dry_run);
+            return run_backlinks_sync(opts, root_override, json, dry_run, incremental);
         }
         _ => {}
     }
 
     let (root, mut config) = resolve_config(opts, root_override)?;
+
+    // Incremental: check the mtime cache before paying for a full vault scan.
+    if incremental {
+        let cp = cache::cache_path(&root);
+        if let Some(cached) = cache::load(&cp) {
+            let dirty = cache::is_dirty(
+                &root,
+                &config.scope.dirs,
+                config.scope.follow_links,
+                &cached,
+            )
+            .map_err(|e| format!("{e}"))?;
+            if !dirty {
+                eprintln!("No changes since last scan");
+                return Ok(false);
+            }
+        }
+    }
 
     let pages = scan::scan_vault(&root, &config).map_err(|e| format!("{e}"))?;
 
@@ -291,6 +318,12 @@ fn run_inner(
         GraphCmd::Stale { .. } | GraphCmd::BacklinksSync { .. } => unreachable!(),
     };
 
+    // Persist the mtime cache after a successful scan so the next `--incremental`
+    // run can skip the rescan if nothing changed.
+    if incremental {
+        save_cache_best_effort(&root, &config);
+    }
+
     Ok(has_findings)
 }
 
@@ -299,8 +332,27 @@ fn run_stale(
     root_override: Option<PathBuf>,
     json: bool,
     days: u32,
+    incremental: bool,
 ) -> Result<bool, String> {
     let (root, config, tz, _locale) = resolve_config_full(opts, root_override)?;
+
+    if incremental {
+        let cp = cache::cache_path(&root);
+        if let Some(cached) = cache::load(&cp) {
+            let dirty = cache::is_dirty(
+                &root,
+                &config.scope.dirs,
+                config.scope.follow_links,
+                &cached,
+            )
+            .map_err(|e| format!("{e}"))?;
+            if !dirty {
+                eprintln!("No changes since last scan");
+                return Ok(false);
+            }
+        }
+    }
+
     let pages = scan::scan_vault(&root, &config).map_err(|e| format!("{e}"))?;
 
     // Same date derivation as the ingest pipeline (`commands::ingest`): now in the
@@ -321,6 +373,11 @@ fn run_stale(
     } else {
         output::print_stale(&report);
     }
+
+    if incremental {
+        save_cache_best_effort(&root, &config);
+    }
+
     Ok(count > 0)
 }
 
@@ -329,6 +386,7 @@ fn run_backlinks_sync(
     root_override: Option<PathBuf>,
     json: bool,
     dry_run: bool,
+    incremental: bool,
 ) -> Result<bool, String> {
     let (root, mut config, _tz, locale) = resolve_config_full(opts, root_override)?;
 
@@ -337,6 +395,23 @@ fn run_backlinks_sync(
     // excludes them, the diff against existing sources becomes a destructive churn
     // that removes correct daily/me backlinks on every run.
     config.scope.dirs = vault_page_dirs(&root);
+
+    if incremental {
+        let cp = cache::cache_path(&root);
+        if let Some(cached) = cache::load(&cp) {
+            let dirty = cache::is_dirty(
+                &root,
+                &config.scope.dirs,
+                config.scope.follow_links,
+                &cached,
+            )
+            .map_err(|e| format!("{e}"))?;
+            if !dirty {
+                eprintln!("No changes since last scan");
+                return Ok(false);
+            }
+        }
+    }
 
     let pages = scan::scan_vault(&root, &config).map_err(|e| format!("{e}"))?;
 
@@ -350,9 +425,26 @@ fn run_backlinks_sync(
     } else {
         output::print_backlinks_sync(&report);
     }
+
+    if incremental {
+        save_cache_best_effort(&root, &config);
+    }
+
     // Per spec: `backlinks-sync` exits 0 even when it makes changes — a change is
     // a successful normalisation, not a finding to escalate.
     Ok(false)
+}
+
+/// Best-effort cache save: build a fresh mtime snapshot and persist it. Warnings
+/// are printed to stderr but errors are not propagated — a failed cache save must
+/// not turn a successful graph command into a failure.
+fn save_cache_best_effort(root: &std::path::Path, config: &GraphConfig) {
+    if let Ok(fresh) = cache::build(root, &config.scope.dirs, config.scope.follow_links) {
+        let cp = cache::cache_path(root);
+        if let Err(e) = cache::save(&cp, &fresh) {
+            eprintln!("warning: failed to save graph cache: {e}");
+        }
+    }
 }
 
 /// Resolve vault root and graph config. If `--root` is given, uses that and default

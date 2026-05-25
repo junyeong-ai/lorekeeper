@@ -90,6 +90,7 @@ sources:
       calendar_id: primary
       lookback_hours: 24
       lookahead_hours: 24
+      fetch_meeting_notes: true  # Google Drive 링크의 회의록 자동 추출
     labels: [personal]
     extract_concepts: false
     track_personal: true
@@ -155,7 +156,7 @@ sources:
       lookback_hours: 24
       max_items_per_feed: 50
       feeds:
-        # 벤더
+        # 벤더 — 대부분 RSS에 전체 본문 포함, fetch_full_text 불필요
         - { id: openai,            url: "https://openai.com/news/rss.xml" }
         - { id: deepmind,          url: "https://deepmind.google/blog/rss.xml" }
         - { id: google-ai,         url: "https://blog.google/technology/ai/rss/" }
@@ -164,12 +165,12 @@ sources:
         - { id: aws-ml,            url: "https://aws.amazon.com/blogs/machine-learning/feed/" }
         - { id: ms-research,       url: "https://www.microsoft.com/en-us/research/feed/" }
         - { id: bair,              url: "https://bair.berkeley.edu/blog/feed.xml" }
-        # 실무자 / 심층 분석
-        - { id: sebastian-raschka, url: "https://magazine.sebastianraschka.com/feed" }
-        - { id: simon-willison,    url: "https://simonwillison.net/atom/everything/" }
-        # 애그리게이터 / 뉴스레터(RSS)
-        - { id: import-ai,         url: "https://importai.substack.com/feed" }
-        - { id: latent-space,      url: "https://www.latent.space/feed" }
+        # 실무자 / 심층 분석 — 발췌만 제공하는 피드는 fetch_full_text로 원문 추출
+        - { id: sebastian-raschka, url: "https://magazine.sebastianraschka.com/feed", fetch_full_text: true }
+        - { id: simon-willison,    url: "https://simonwillison.net/atom/everything/", fetch_full_text: true }
+        # 애그리게이터 / 뉴스레터(RSS) — 발췌만 제공, 원문 추출 권장
+        - { id: import-ai,         url: "https://importai.substack.com/feed", fetch_full_text: true }
+        - { id: latent-space,      url: "https://www.latent.space/feed", fetch_full_text: true }
         - { id: the-gradient,      url: "https://thegradient.pub/rss/" }
         # 한글 AI
         - { id: aitimes,           url: "https://www.aitimes.com/rss/allArticle.xml" }
@@ -280,6 +281,23 @@ synthesis:
   annual:
     enabled: true
     schedule: "0 8 1 1 *"           # Jan 1st 08:00
+
+# ─── 개념 분류 ──────────────────────────────────────────
+# Concept categorization for wiki/concepts/ pages.
+# Categories give the LLM a fixed vocabulary when assigning topics.
+# Omit the entire block to skip categorization.
+# concepts:
+#   categories:
+#     - id: ai-ml
+#       label: "AI/ML"
+#     - id: infrastructure
+#       label: "인프라"
+#     - id: software-engineering
+#       label: "소프트웨어 엔지니어링"
+#     - id: product-service
+#       label: "제품/서비스"
+#     - id: organization
+#       label: "조직/이벤트"
 
 # ─── 그래프 분석 ─────────────────────────────────────────
 # Wikilink graph analysis (lore graph lint/cluster/suggest-links).

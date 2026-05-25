@@ -1,8 +1,8 @@
 # lk-pipeline
 
 Deterministic transform stages between `lk-source` and `lk-vault`. Shares an
-`Arc<PipelineContext>` (engine, llm, dirs, perf, identity, timezone, locale) with the
-`Synthesizer`.
+`Arc<PipelineContext>` (engine, llm, dirs, perf, identity, timezone, locale,
+concept_categories) with the `Synthesizer`.
 
 - **`Pipeline::plan` is per-source**; it returns that source's daily pages and merges
   any extracted concepts into a **run-level** `Mutex<ConceptDrafts>`. Concept pages are a
@@ -33,7 +33,10 @@ Deterministic transform stages between `lk-source` and `lk-vault`. Shares an
   unclassified events are sent to the LLM as a fallback (synchronous in `anthropic`
   mode; no-op in `queue` mode).
 - **Concept merge** reads existing `created`/`updated` frontmatter (the keys actually
-  written), preserves the original title, and dedupes `sources`/`source_count`.
+  written), preserves the original title and category (established identity), and
+  dedupes `sources`/`source_count`. Before extraction, `load_existing_concept_refs()`
+  scans the vault's concept directory + in-memory drafts and passes them as
+  `existing_concepts` in the LLM request, preventing duplicate concept creation.
 - **Synthesizer** methods are `try_weekly_synthesis` + `try_*_personal`; they share
   `summarize_or_warn` (propagates only fatal LLM errors). `try_weekly_synthesis` uses
   `identify_themes` for structured JSON theme extraction. Every `TaskTarget` carries

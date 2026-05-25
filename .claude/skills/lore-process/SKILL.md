@@ -123,10 +123,40 @@ locate key — never hardcode headings per `target.kind`.
       human-interest or politics) contributes focused knowledge without
       polluting the graph. No `focus` → no filtering.
 
-      - **`kind: summarize`** — synthesize a concise summary in the
+      - **`kind: summarize`** — synthesize a knowledge-rich summary in the
         user's preferred language (Korean for `daily-summary` and the
         `*-narrative` synthesis targets). Aim for `input.max_sentences`
-        bullet points. No preamble.
+        substantive points. No preamble.
+
+        **Source-type-aware synthesis.** Infer the source type from
+        `target.vault_path` (e.g. `daily/team-slack/`, `daily/ai-news/`)
+        and adapt the synthesis strategy:
+
+        **Slack sources** (`team-slack`, `*-slack`):
+        - Extract key decisions, action items with owners
+        - Ignore repetitive agreement messages (ok, +1, sounds good)
+        - Structure as: decision/outcome → action items → context
+        - Preserve technical details, project names, and links
+        - Each thread should be distilled to its essence, not raw-dumped
+
+        **Email sources** (`email-digest`, `*-email`):
+        - Extract the core ask or decision from each email
+        - Identify action items with owners and deadlines
+        - Skip signatures, disclaimers, forwarded-chain noise
+        - For email chains, focus on the most recent exchange
+
+        **RSS/news sources** (`ai-news`, `tech-news`):
+        - Focus on key findings, announcements, techniques
+        - For technical articles: what it is, why it matters, key numbers
+        - Skip author bios, CTAs, navigation artifacts
+
+        **Calendar sources** (`my-schedule`):
+        - Highlight meeting outcomes and decisions if notes are present
+        - Link events to related projects/concepts
+
+        For all types: produce genuine knowledge, not just headlines.
+        Not too short (meaningless one-liners) nor too verbose (raw dump).
+        Always preserve source URLs/links for traceability.
 
       - **`kind: identify-themes`** — extract structured themes from
         the combined multi-source text. Identify the top N themes
@@ -139,6 +169,45 @@ locate key — never hardcode headings per `target.kind`.
         (in the source language). Each concept should also produce a
         `wiki/concepts/{slug}.md` entry (create if missing, merge if
         exists — increment source_count, append source ref).
+
+        **Concept dedup.** Before creating any concept page, check for
+        duplicates against the concept registry:
+
+        1. At the start of processing a queue file, run `lore wiki concepts`
+           to load the current concept registry into context.
+        2. If `input.existing_concepts` is present, use it as the
+           authoritative registry (it was snapshot at ingest time).
+        3. For each extracted concept, check if a slug-equivalent or
+           semantically equivalent concept already exists. Use existing
+           slug + name when matched — do NOT create a variant.
+        4. Slug normalization: NFKC → lowercase → non-alphanumeric to
+           hyphen → collapse runs → trim. Same as `lk_core::slugify`.
+
+        **Source reference format.** The `sources` array entries MUST use
+        the vault-relative path pattern: `daily/{source_id}/{date}`.
+        Derive from the task: `daily/{input.source_id}/{input.date}`.
+        NEVER use bare source IDs like `"email-digest"`.
+
+        **Category assignment.** If `input.categories` is present, assign
+        exactly one category ID from that list to each concept. Include
+        `category: {id}` in frontmatter. If absent, omit the field.
+
+        **Concept page format.** Use exactly these frontmatter keys:
+        ```yaml
+        ---
+        id: {slug}
+        title: "{Name}"
+        aliases: ["{Name}"]
+        created: {YYYY-MM-DD}
+        updated: {YYYY-MM-DD}
+        category: {category-id}
+        source_count: {N}
+        sources: ["daily/{source-id}/{date}", ...]
+        tags: ["concept"]
+        ---
+        ```
+        Do NOT add `confidence`, `reference_count`, or any other keys.
+
         **When creating a new concept page**, fill the `## 핵심` (Synthesis)
         section with a 1-2 sentence definition/context of the concept based
         on the source text. Don't leave it empty — even a first-appearance
@@ -165,11 +234,9 @@ locate key — never hardcode headings per `target.kind`.
       - **`daily-concepts`** target: replace the section body with
         `- [[Concept Name 1]]\n- [[Concept Name 2]]\n...`.
         Create each concept page at `wiki/concepts/{slug}.md` if it
-        doesn't exist (use frontmatter `id`, `title`, `created`,
-        `updated`, `source_count`, `sources`, `tags`,
-        and crucially `aliases: ["Concept Name"]` so the `[[Concept
-        Name]]` links above resolve to the slug-named file — match the
-        format of existing concept pages).
+        doesn't exist, following the concept page format above.
+        Crucially include `aliases: ["Concept Name"]` so the
+        `[[Concept Name]]` wikilinks resolve to the slug-named file.
 
       - **Work-log synthesis** (`work-log-synthesis`): the input text
         contains personal events from multiple sources, each prefixed
@@ -186,6 +253,10 @@ locate key — never hardcode headings per `target.kind`.
         Correlate events that share the same project, topic, or concept
         across different sources. A single event may appear in multiple
         topic groups if it spans topics. Aim for concise topic names.
+        Include 1-2 sentences of context per topic (not just the event title).
+        Note decisions made, blockers encountered, and next steps.
+        Skip trivial notifications (calendar accepts, read receipts, approvals).
+        Preserve source links for traceability.
 
       - **Synthesis narratives** (`weekly-*`, `monthly-*`, etc.): these
         pages contain multiple `## ` sections (period, categories,

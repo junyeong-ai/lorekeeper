@@ -644,10 +644,7 @@ mod tests {
         while let Some(entry) = entries.next_entry().await.unwrap() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            assert!(
-                !name.ends_with(".tmp"),
-                "leftover temp file: {name}"
-            );
+            assert!(!name.ends_with(".tmp"), "leftover temp file: {name}");
         }
     }
 }

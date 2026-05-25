@@ -24,6 +24,9 @@ pub struct Config {
     pub synthesis: SynthesisConfig,
     #[serde(default)]
     pub llm: LlmConfig,
+    /// Concept extraction and categorization settings.
+    #[serde(default)]
+    pub concepts: ConceptConfig,
     /// Wikilink graph analysis settings (consumed by `lore graph` / `lk-graph`).
     /// Optional and fully defaulted; absent in config.yaml means "use defaults".
     #[serde(default)]
@@ -202,6 +205,39 @@ impl Config {
                         "synthesis.{period} is scheduled but performance.enabled is false — \
                          the review can never run; enable performance or clear \
                          synthesis.{period}.schedule"
+                    )));
+                }
+            }
+        }
+
+        {
+            let mut seen = std::collections::HashSet::new();
+            for cat in &self.concepts.categories {
+                if cat.id.trim().is_empty() {
+                    return Err(ConfigError::Validation(
+                        "concepts.categories: category id must not be empty".into(),
+                    ));
+                }
+                if !cat
+                    .id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-')
+                {
+                    return Err(ConfigError::Validation(format!(
+                        "concepts.categories: category id '{}' must contain only ASCII alphanumeric characters and hyphens",
+                        cat.id
+                    )));
+                }
+                if cat.label.trim().is_empty() {
+                    return Err(ConfigError::Validation(format!(
+                        "concepts.categories: category '{}' has an empty label",
+                        cat.id
+                    )));
+                }
+                if !seen.insert(&cat.id) {
+                    return Err(ConfigError::Validation(format!(
+                        "concepts.categories: duplicate category id '{}'",
+                        cat.id
                     )));
                 }
             }
@@ -726,6 +762,19 @@ pub enum LlmProvider {
     /// No LLM work. Daily pages render without summary/concepts sections. Useful for
     /// development, CI, or vault-only sources where Rust templating is sufficient.
     Noop,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ConceptConfig {
+    pub categories: Vec<ConceptCategory>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConceptCategory {
+    pub id: String,
+    pub label: String,
 }
 
 /// Wikilink graph analysis configuration. Mirrors the sections of the retired
@@ -1312,6 +1361,71 @@ sources:
             config.validate().is_err(),
             "classify rule with empty keywords must be rejected"
         );
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_concept_category() {
+        let yaml = r#"
+vault:
+  root: /tmp/vault
+identity:
+  name: test
+  email: test@test.com
+sources:
+  s1:
+    type: gmail
+concepts:
+  categories:
+    - id: ai-ml
+      label: "AI/ML"
+    - id: ai-ml
+      label: "Duplicate"
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(
+            config.validate().is_err(),
+            "duplicate concept category id must be rejected"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_concept_category_with_special_chars() {
+        let yaml = r#"
+vault:
+  root: /tmp/vault
+identity:
+  name: test
+  email: test@test.com
+sources:
+  s1:
+    type: gmail
+concepts:
+  categories:
+    - id: "ai/ml"
+      label: "AI/ML"
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(
+            config.validate().is_err(),
+            "category id with '/' must be rejected"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_empty_concept_categories() {
+        let yaml = r#"
+vault:
+  root: /tmp/vault
+identity:
+  name: test
+  email: test@test.com
+sources:
+  s1:
+    type: gmail
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(config.validate().is_ok());
+        assert!(config.concepts.categories.is_empty());
     }
 
     #[test]

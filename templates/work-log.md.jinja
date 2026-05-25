@@ -18,7 +18,8 @@ sources: {{ sources | tojson }}
 ### {{ group.category }}
 
 {% for item in group.items %}
-- {{ item.summary }} *({{ item.source_id }})*
+- **{{ item.title }}** *({{ item.source_id }})*{% if item.body_excerpt %}
+  {{ item.body_excerpt }}{% endif %}
 {% endfor %}
 
 {% endif %}

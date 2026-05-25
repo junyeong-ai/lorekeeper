@@ -21,7 +21,7 @@ events_count: {{ events | length }}
 ### {{ event.title }}
 
 {{ event.body }}
-{% if event.author %}— {{ event.author }}{% endif %}{% if event.url %} [🔗]({{ event.url }}){% endif %}
+{% if event.url %}[🔗 원본 스레드]({{ event.url }}){% endif %}
 
 {% endfor %}
 {% if extract_concepts %}

@@ -10,3 +10,4 @@ paths: ["crates/lk-graph/**/*.rs"]
 - `backlinks-sync` scans full vault (not `graph.scope.dirs`) so daily/me pages are included. Only event/document pages qualify as sources — concept-to-concept links belong in Related, not Sources.
 - `stale` reports frontmatter `updated` (or `created` fallback) older than threshold. Groups by path prefix.
 - Mutations gated: `index::fix()` and `normalize::apply()` only with `--fix`; `backlinks-sync` only without `--dry-run`.
+- `cache`: `--incremental` skips the full vault scan when no `.md` files changed (mtime-based `ScanCache` in `<vault>/.lorekeeper/graph-cache.json`). Atomic write (temp+rename). `is_dirty()` compares file count + per-file mtimes against the cache.

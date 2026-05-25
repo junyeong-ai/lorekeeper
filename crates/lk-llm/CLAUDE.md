@@ -8,6 +8,11 @@ about; provider choice is config-driven (`build_llm_client` in lk-cli).
   parsed); `classify` returns `Option<String>` (category name or None). `flush` is the
   transactional commit point for buffered side-effects. `identify_themes` and `classify`
   have default no-op implementations so noop/mock clients work without overrides.
+- **Concept dedup context**: `ExtractConceptsRequest` carries `existing_concepts:
+  Vec<ExistingConceptRef>` (slug + name of vault concepts) and `categories:
+  Vec<CategoryRef>` (config-driven category list). `anthropic` folds both into the
+  system prompt so the LLM reuses established names and assigns valid categories;
+  `queue` serializes them into the task `input` for `/lore-process`.
 - **`focus`** (`Option<String>` on both requests, from `SourceConfig.focus`) is a
   source's natural-language relevance criterion. `anthropic` folds it into the prompt
   ("only content matching this focus … ignore anything off-topic"); `queue` serializes

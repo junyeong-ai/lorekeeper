@@ -4,7 +4,8 @@ title: {{ name | tojson }}
 aliases: [{{ name | tojson }}]
 created: {{ first_seen }}
 updated: {{ last_seen }}
-source_count: {{ source_count }}
+{% if category %}category: {{ category }}
+{% endif %}source_count: {{ source_count }}
 sources: {{ sources | tojson }}
 tags: {{ tags | tojson }}
 ---

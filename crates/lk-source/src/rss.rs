@@ -35,6 +35,10 @@ struct FeedConfig {
     /// Stable provenance id surfaced in item metadata (e.g. `openai`, `hf-blog`).
     id: String,
     url: String,
+    /// When true, fetch the full article HTML from each entry's link URL and
+    /// extract readable content via `readability`, replacing the feed summary.
+    #[serde(default)]
+    fetch_full_text: bool,
 }
 
 fn default_lookback() -> u32 {
@@ -82,6 +86,33 @@ pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
 impl RssSource {
     pub fn new(http: reqwest::Client) -> Self {
         Self { http }
+    }
+
+    /// Fetch the full article from `url`, extract readable content via
+    /// `readability`, and convert the result to Markdown.  Falls back to
+    /// converting the raw HTML when readability extraction fails.
+    async fn fetch_article(&self, article_url: &str) -> Result<String, SourceError> {
+        let resp = self
+            .http
+            .get(article_url)
+            .header(reqwest::header::USER_AGENT, USER_AGENT)
+            .timeout(std::time::Duration::from_secs(15))
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            return Err(SourceError::Api {
+                status: resp.status().as_u16(),
+                message: format!("fetching article: {article_url}"),
+            });
+        }
+        let html = resp.text().await?;
+        let parsed_url = url::Url::parse(article_url)
+            .map_err(|e| SourceError::Parse(format!("invalid article URL: {e}")))?;
+        let mut cursor = std::io::Cursor::new(html.as_bytes());
+        match readability::extractor::extract(&mut cursor, &parsed_url) {
+            Ok(product) => Ok(crate::markdown::html_to_markdown(&product.content)),
+            Err(_) => Ok(crate::markdown::html_to_markdown(&html)),
+        }
     }
 
     async fn fetch_feed(&self, url: &str) -> Result<feed_rs::model::Feed, SourceError> {
@@ -138,12 +169,27 @@ impl Source for RssSource {
                 if kept >= p.max_items_per_feed {
                     break;
                 }
-                items.push(
-                    match map_entry(&feed_cfg.id, &feed_title, entry, min, max) {
-                        Some(item) => item,
-                        None => continue,
-                    },
-                );
+                let mut item = match map_entry(&feed_cfg.id, &feed_title, entry, min, max) {
+                    Some(item) => item,
+                    None => continue,
+                };
+                // Optionally replace the feed summary with the full article.
+                if feed_cfg.fetch_full_text
+                    && let Some(ref article_url) = item.url
+                {
+                    match self.fetch_article(article_url).await {
+                        Ok(body) => item.body = body,
+                        Err(e) => {
+                            tracing::warn!(
+                                feed = %feed_cfg.id,
+                                url = %article_url,
+                                error = %e,
+                                "rss: full-text fetch failed, keeping feed content"
+                            );
+                        }
+                    }
+                }
+                items.push(item);
                 kept += 1;
             }
             tracing::info!(feed = %feed_cfg.id, kept, "rss: feed extracted");

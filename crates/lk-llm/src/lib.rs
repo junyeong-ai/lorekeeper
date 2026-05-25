@@ -115,6 +115,21 @@ pub struct SummarizeRequest {
     pub target: TaskTarget,
 }
 
+/// Compact reference to an existing concept, passed to the LLM so it can reuse
+/// established names instead of creating duplicates with variant spellings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExistingConceptRef {
+    pub slug: String,
+    pub name: String,
+}
+
+/// Category definition passed to the LLM for concept classification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CategoryRef {
+    pub id: String,
+    pub label: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct ExtractConceptsRequest {
     pub text: String,
@@ -125,6 +140,11 @@ pub struct ExtractConceptsRequest {
     /// items in a broad source never pollute the knowledge graph.
     pub focus: Option<String>,
     pub target: TaskTarget,
+    /// Existing concept slugs+names. The LLM should reuse an existing entry when
+    /// the extracted entity matches, preventing duplicate concept pages.
+    pub existing_concepts: Vec<ExistingConceptRef>,
+    /// Valid category IDs the LLM may assign to each concept. Empty = no categorization.
+    pub categories: Vec<CategoryRef>,
 }
 
 #[async_trait]

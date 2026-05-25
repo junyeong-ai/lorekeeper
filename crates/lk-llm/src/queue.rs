@@ -115,6 +115,13 @@ impl LlmClient for QueueLlmClient {
         if let Some(focus) = &req.focus {
             input["focus"] = serde_json::Value::String(focus.clone());
         }
+        if !req.existing_concepts.is_empty() {
+            input["existing_concepts"] =
+                serde_json::to_value(&req.existing_concepts).expect("serializable");
+        }
+        if !req.categories.is_empty() {
+            input["categories"] = serde_json::to_value(&req.categories).expect("serializable");
+        }
         let task = QueueTask {
             task_id: self.next_id("ext"),
             kind: TaskKind::ExtractConcepts,
@@ -278,6 +285,8 @@ mod tests {
                 kind: TargetKind::DailyConcepts,
                 anchor: "## Related Concepts".into(),
             },
+            existing_concepts: vec![],
+            categories: vec![],
         };
         let concepts = client.extract_concepts(req).await.unwrap();
         assert!(concepts.is_empty(), "queue mode emits task, returns empty");
@@ -307,6 +316,8 @@ mod tests {
                     kind: TargetKind::DailyConcepts,
                     anchor: "## Related Concepts".into(),
                 },
+                existing_concepts: vec![],
+                categories: vec![],
             })
             .await
             .unwrap();

@@ -22,7 +22,7 @@ events_count: {{ events | length }}
 
 {% if item.author %}*{{ item.author }}*{% endif %}{% if item.url %} · 🔗 {{ item.url }}{% endif %}
 
-{{ item.summary }}
+{{ item.body }}
 
 {% endfor %}
 

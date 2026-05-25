@@ -5,6 +5,8 @@ use unicode_normalization::UnicodeNormalization;
 pub struct ExtractedConcept {
     pub name: String,
     pub slug: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
 }
 
 /// Normalize an arbitrary name into a path-safe slug.

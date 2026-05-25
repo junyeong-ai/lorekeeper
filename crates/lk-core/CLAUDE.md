@@ -23,6 +23,11 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   string after the marker (per CommonMark). Single source consumed by lk-graph.
 - **`text::collapse_blank_lines`** squeezes 3+ newlines to a paragraph break,
   strips `\r`. Single source consumed by lk-vault, lk-pipeline, lk-source.
+- **`ConceptConfig`** (`concepts:` in YAML): optional `categories` list
+  (`Vec<ConceptCategory>`, each with `id` + `label`). Validated: no empty ids, no
+  empty labels, no duplicate ids. Empty list = no categorization (concepts get no
+  `category` field). `ExtractedConcept` carries an optional `category` assigned by
+  the LLM from this list; the pipeline silently drops unknown category IDs.
 - **`LlmConfig` defaults to `provider: queue`** (matches docs/example). Uses
   `deny_unknown_fields` so typos in config keys are caught at load time.
 - **`VaultDirs.annual`** is the config key; its default directory value is `"annually"`

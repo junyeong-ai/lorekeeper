@@ -48,6 +48,7 @@ cargo nextest run --workspace      # tests
 lore validate                      # verify config.yaml + source params
 lore ingest ai-news                # run a single source
 lore schema                        # generate wiki/AGENTS.md
+lore wiki concepts                 # list all concept pages
 lore graph lint                    # structural health check
 ```
 

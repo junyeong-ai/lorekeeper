@@ -59,7 +59,7 @@ pub fn render_daily_page(
                 "is_personal": e.is_personal,
                 "subject": e.title,
                 "sender": e.author,
-                "summary": truncate(&e.body, 200),
+                "summary": e.body,
             })
         })
         .collect();
@@ -117,17 +117,8 @@ fn filter_by_class(events: &[&Event], class: &str) -> Vec<serde_json::Value> {
             serde_json::json!({
                 "subject": e.title,
                 "sender": e.author,
-                "summary": truncate(&e.body, 200),
+                "summary": e.body,
             })
         })
         .collect()
-}
-
-fn truncate(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        s
-    } else {
-        let end = s.floor_char_boundary(max);
-        &s[..end]
-    }
 }

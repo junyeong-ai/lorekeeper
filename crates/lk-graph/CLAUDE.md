@@ -2,7 +2,8 @@
 
 Wikilink graph analysis. Pure deterministic — no HTTP, no LLM. The only vault
 writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
-`backlinks-sync` without `--dry-run`).
+`backlinks-sync` without `--dry-run`) and the mtime scan cache
+(`<vault>/.lorekeeper/graph-cache.json`, atomic temp+rename).
 
 - **deps**: `lk-core` (slugify, frontmatter, wikilink) + `petgraph` + `rayon` +
   `walkdir`. No reqwest/tokio — independent of the ingestion stack.
@@ -26,6 +27,10 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
   `lk_core::vault_path::RESERVED_WIKI_FILES`) are never orphans or index-drift.
 - **Exit codes**: 0 = ok/no findings, 1 = findings, 2 = runtime error.
   `hubs`/`cluster`/`export`/`suggest-links` never exit 1.
+- **`cache`**: mtime-based scan cache for `--incremental`. `build()` walks
+  scope dirs and records per-file mtimes. `is_dirty()` compares against the
+  cache; `save()` persists atomically. The CLI skips the full scan when
+  `is_dirty()` returns false.
 - **`suggest_links`**: pairs in the same Louvain community with no edge, ranked
   by shared-neighbor count. Read-only, deterministic.
 - **Mutations gated**: `index::fix()`, `normalize::apply()`, and

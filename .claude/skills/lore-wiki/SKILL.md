@@ -56,9 +56,15 @@ each as an independent source, and report the aggregate results.
 
 Answer a question grounded in vault content, with compounding.
 
-1. Search the vault (concepts, daily pages, explorations) for relevant pages.
-2. Synthesize an answer grounded in vault content.
-3. **Compounding judgment** — after answering, judge reusability:
+1. **Gather context.** Run `lore wiki concepts` to get the concept registry.
+   Search the vault (concepts, daily pages, explorations) for relevant pages.
+   Read the most relevant pages to ground the answer.
+2. Synthesize an answer grounded in vault content. Cite sources using
+   `[[wikilink]]` format.
+3. **Concept enrichment.** If the answer reveals connections between concepts
+   that aren't currently wikilinked in their `## 관련` sections, note
+   these as suggested edits (but do NOT auto-apply).
+4. **Compounding judgment** — after answering, judge reusability:
    - **Reusable** (synthesis, comparison, multi-source analysis) → write to
      `wiki/explorations/{slug}.md`, wikilink cited concepts/sources, tell the
      user where it landed.
@@ -91,6 +97,14 @@ auto-resolve.
      long before the recent reference burst.
    This layer is LLM judgment, not a deterministic check. Surface as questions
    for human review, never auto-create pages.
+5. **Concept lifecycle** — run `lore graph stale --days 90` and filter for
+   `wiki/concepts/` entries. For each stale concept:
+   - Check if it has been referenced in any daily page in the last 90 days
+     (grep for `[[{title}]]` or `[[{slug}]]` in `daily/`).
+   - If truly stale (no recent references, low source_count), suggest adding
+     `status: archived` to frontmatter. Do NOT auto-archive.
+   - If referenced recently but `updated` is old, flag for synthesis refresh
+     (the `## 핵심` section may be outdated).
 
 ### `/lore-wiki status`
 

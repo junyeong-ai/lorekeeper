@@ -47,6 +47,7 @@ fn base_config(vault_root: &std::path::Path) -> Config {
         performance: PerformanceConfig::default(),
         synthesis: SynthesisConfig::default(),
         llm: Default::default(),
+        concepts: Default::default(),
         graph: Default::default(),
     }
 }
@@ -76,6 +77,7 @@ async fn concept_pages_written_with_merge() {
     let concepts = vec![ExtractedConcept {
         name: "Claude Code".into(),
         slug: "claude-code".into(),
+        category: None,
     }];
 
     let llm: Arc<dyn LlmClient> = Arc::new(MockLlmClient::with_concepts(concepts));
@@ -123,6 +125,7 @@ async fn concept_pages_written_with_merge() {
     let llm2: Arc<dyn LlmClient> = Arc::new(MockLlmClient::with_concepts(vec![ExtractedConcept {
         name: "Claude Code".into(),
         slug: "claude-code".into(),
+        category: None,
     }]));
     let pipeline2 = Pipeline::new(vault, make_ctx(&config, llm2), &config).unwrap();
     let ts2: jiff::Timestamp = "2026-05-24T10:00:00Z".parse().unwrap();
@@ -310,6 +313,7 @@ async fn concept_accumulates_across_sources_in_one_run() {
     let llm: Arc<dyn LlmClient> = Arc::new(MockLlmClient::with_concepts(vec![ExtractedConcept {
         name: "Shared Concept".into(),
         slug: "shared-concept".into(),
+        category: None,
     }]));
     let pipeline = Pipeline::new(vault, make_ctx(&config, llm), &config).unwrap();
 

@@ -71,7 +71,24 @@ struct Message {
 
 #[derive(Deserialize)]
 struct Payload {
+    #[serde(rename = "mimeType")]
+    mime_type: Option<String>,
     headers: Option<Vec<Header>>,
+    body: Option<PartBody>,
+    parts: Option<Vec<MimePart>>,
+}
+
+#[derive(Deserialize)]
+struct MimePart {
+    #[serde(rename = "mimeType")]
+    mime_type: Option<String>,
+    body: Option<PartBody>,
+    parts: Option<Vec<MimePart>>,
+}
+
+#[derive(Deserialize)]
+struct PartBody {
+    data: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -188,13 +205,7 @@ impl Source for GmailSource {
                     self.http
                         .get(format!("{BASE}/messages/{}", r.id))
                         .bearer_auth(&token)
-                        .query(&[
-                            ("format", "metadata"),
-                            ("metadataHeaders", "From"),
-                            ("metadataHeaders", "To"),
-                            ("metadataHeaders", "Subject"),
-                            ("metadataHeaders", "Date"),
-                        ])
+                        .query(&[("format", "full")])
                         .send()
                         .await?,
                 )
@@ -224,6 +235,15 @@ impl Source for GmailSource {
             let from = Self::header(&msg, "From").unwrap_or_default();
             let snippet = msg.snippet.as_deref().unwrap_or_default();
 
+            let body = {
+                let extracted = msg.payload.as_ref().map(extract_body).unwrap_or_default();
+                if extracted.is_empty() {
+                    snippet.to_string()
+                } else {
+                    extracted
+                }
+            };
+
             let Some(ts) = msg
                 .internal_date
                 .as_deref()
@@ -237,7 +257,7 @@ impl Source for GmailSource {
             items.push(RawItem {
                 external_id: Some(msg.id.clone()),
                 title: subject.to_string(),
-                body: snippet.to_string(),
+                body,
                 url: Some(format!(
                     "https://mail.google.com/mail/u/0/#inbox/{}",
                     msg.id
@@ -258,4 +278,59 @@ impl Source for GmailSource {
         );
         Ok(items)
     }
+}
+
+fn extract_body(payload: &Payload) -> String {
+    let mut plain = None;
+    let mut html = None;
+    collect_parts(
+        payload.mime_type.as_deref(),
+        payload.body.as_ref(),
+        payload.parts.as_deref(),
+        &mut plain,
+        &mut html,
+    );
+    if let Some(text) = plain {
+        return text;
+    }
+    if let Some(h) = html {
+        return crate::markdown::html_to_markdown(&h);
+    }
+    String::new()
+}
+
+fn collect_parts(
+    mime: Option<&str>,
+    body: Option<&PartBody>,
+    parts: Option<&[MimePart]>,
+    plain: &mut Option<String>,
+    html: &mut Option<String>,
+) {
+    if let Some(parts) = parts {
+        for part in parts {
+            collect_parts(
+                part.mime_type.as_deref(),
+                part.body.as_ref(),
+                part.parts.as_deref(),
+                plain,
+                html,
+            );
+        }
+    } else if let Some(data) = body.and_then(|b| b.data.as_deref()) {
+        let decoded = decode_base64url(data);
+        match mime {
+            Some("text/plain") if plain.is_none() => *plain = Some(decoded),
+            Some("text/html") if html.is_none() => *html = Some(decoded),
+            _ => {}
+        }
+    }
+}
+
+fn decode_base64url(data: &str) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(data)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .unwrap_or_default()
 }

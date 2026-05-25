@@ -176,6 +176,12 @@ impl Pipeline {
         // Normalize once: blank focus = no filter, identical across every provider path.
         let focus = config.normalized_focus();
 
+        let existing_concepts = if config.extract_concepts {
+            self.load_existing_concept_refs().await
+        } else {
+            vec![]
+        };
+
         for (date, day_indices) in &by_date {
             let day_events: Vec<&Event> = day_indices.iter().map(|&i| &events[i]).collect();
             let combined: String = day_events
@@ -229,10 +235,30 @@ impl Pipeline {
                             kind: lk_llm::TargetKind::DailyConcepts,
                             anchor: format!("## {}", self.ctx.locale.strings().related_concepts),
                         },
+                        existing_concepts: existing_concepts.clone(),
+                        categories: self.ctx.concept_categories.clone(),
                     })
                     .await
                 {
-                    Ok(c) => c.into_iter().filter(concepts::is_valid).collect(),
+                    Ok(c) => {
+                        let valid_cat_ids: Vec<&str> = self
+                            .ctx
+                            .concept_categories
+                            .iter()
+                            .map(|c| c.id.as_str())
+                            .collect();
+                        c.into_iter()
+                            .filter(concepts::is_valid)
+                            .map(|mut ec| {
+                                if let Some(ref cat) = ec.category
+                                    && !valid_cat_ids.contains(&cat.as_str())
+                                {
+                                    ec.category = None;
+                                }
+                                ec
+                            })
+                            .collect()
+                    }
                     Err(e) if e.is_fatal() => return Err(PipelineError::Llm(e)),
                     Err(e) => {
                         tracing::warn!(
@@ -322,6 +348,45 @@ impl Pipeline {
             &self.ctx.llm,
         )
         .await
+    }
+
+    async fn load_existing_concept_refs(&self) -> Vec<lk_llm::ExistingConceptRef> {
+        let concept_dir = std::path::Path::new(&self.ctx.dirs.wiki).join("concepts");
+        let files = match self.reader.list_markdown(&concept_dir).await {
+            Ok(f) => f,
+            Err(_) => return vec![],
+        };
+
+        let mut refs = Vec::with_capacity(files.len());
+        for file in &files {
+            if let Ok(Some(page)) = self.reader.read_page(file).await {
+                let slug = page
+                    .frontmatter
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let name = page
+                    .frontmatter
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                if !slug.is_empty() && !name.is_empty() {
+                    refs.push(lk_llm::ExistingConceptRef {
+                        slug: slug.to_string(),
+                        name: name.to_string(),
+                    });
+                }
+            }
+        }
+
+        let drafts = self.concept_drafts.lock().await;
+        for (slug, name) in drafts.known_slugs_and_names() {
+            if !refs.iter().any(|r| r.slug == slug) {
+                refs.push(lk_llm::ExistingConceptRef { slug, name });
+            }
+        }
+
+        refs
     }
 }
 

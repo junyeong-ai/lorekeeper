@@ -281,7 +281,10 @@ mod tests {
     #[test]
     fn resolve_wikilink_target_bare_vs_path() {
         // Bare target → filename slug.
-        assert_eq!(resolve_wikilink_target("Confluence Cloud"), "confluence-cloud");
+        assert_eq!(
+            resolve_wikilink_target("Confluence Cloud"),
+            "confluence-cloud"
+        );
         // Path-style target → per-segment slug rejoined, matching a page id
         // (not collapsed to `daily-team-slack-2026-05-22`).
         assert_eq!(
@@ -336,14 +339,8 @@ mod tests {
 
     #[test]
     fn path_slug_basic() {
-        assert_eq!(
-            path_slug(Path::new("wiki/Concept A.md")),
-            "wiki/concept-a"
-        );
-        assert_eq!(
-            path_slug(Path::new("wiki/Bad_Name.md")),
-            "wiki/bad-name"
-        );
+        assert_eq!(path_slug(Path::new("wiki/Concept A.md")), "wiki/concept-a");
+        assert_eq!(path_slug(Path::new("wiki/Bad_Name.md")), "wiki/bad-name");
     }
 
     #[test]

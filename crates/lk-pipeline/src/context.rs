@@ -16,6 +16,7 @@ pub struct PipelineContext {
     pub(crate) identity: Identity,
     pub(crate) timezone: jiff::tz::TimeZone,
     pub(crate) locale: Locale,
+    pub(crate) concept_categories: Vec<lk_llm::CategoryRef>,
 }
 
 impl PipelineContext {
@@ -25,6 +26,15 @@ impl PipelineContext {
         config: &Config,
     ) -> Result<Self, PipelineError> {
         let engine = TemplateEngine::new(template_dir)?;
+        let concept_categories = config
+            .concepts
+            .categories
+            .iter()
+            .map(|c| lk_llm::CategoryRef {
+                id: c.id.clone(),
+                label: c.label.clone(),
+            })
+            .collect();
         Ok(Self {
             engine,
             llm,
@@ -33,6 +43,7 @@ impl PipelineContext {
             identity: config.identity.clone(),
             timezone: config.vault.timezone(),
             locale: config.vault.locale(),
+            concept_categories,
         })
     }
 }

@@ -76,7 +76,10 @@ impl AnthropicClient {
 
             if !resp.status().is_success() {
                 let status = resp.status();
-                let text = resp.text().await.unwrap_or_else(|e| format!("{status}: <body read failed: {e}>"));
+                let text = resp
+                    .text()
+                    .await
+                    .unwrap_or_else(|e| format!("{status}: <body read failed: {e}>"));
                 return Err(LlmError::Api(text));
             }
 
@@ -121,10 +124,31 @@ impl LlmClient for AnthropicClient {
         &self,
         req: ExtractConceptsRequest,
     ) -> Result<Vec<ExtractedConcept>, LlmError> {
-        let system = format!(
-            r#"Extract the key named entities, topics, and concepts.{} Output JSON array: [{{"name":"...","slug":"..."}}]. ONLY the JSON array."#,
+        let mut system = format!(
+            "Extract the key named entities, topics, and concepts.{}",
             focus_clause(&req.focus)
         );
+
+        if !req.existing_concepts.is_empty() {
+            system.push_str(&existing_clause(&req.existing_concepts));
+        }
+
+        if !req.categories.is_empty() {
+            let cat_list: String = req
+                .categories
+                .iter()
+                .map(|c| format!("{}: {}", c.id, c.label))
+                .collect::<Vec<_>>()
+                .join(", ");
+            system.push_str(&format!(
+                r#" Assign exactly one category from [{cat_list}]. Output JSON array: [{{"name":"...","slug":"...","category":"..."}}]. ONLY the JSON array."#
+            ));
+        } else {
+            system.push_str(
+                r#" Output JSON array: [{"name":"...","slug":"..."}]. ONLY the JSON array."#,
+            );
+        }
+
         let resp = self.call(&system, &req.text).await?;
         serde_json::from_str(strip_code_fences(&resp))
             .map_err(|e| LlmError::Api(format!("concept parse: {e}")))
@@ -157,9 +181,18 @@ impl LlmClient for AnthropicClient {
     }
 }
 
-/// A standalone instruction restricting output to the source's `focus`, or empty
-/// when unset — the single relevance phrasing shared by summarize and extract-concepts
-/// (and mirrored by the queue-draining skill). `focus` is already normalized by
+fn existing_clause(existing: &[crate::ExistingConceptRef]) -> String {
+    let names: Vec<String> = existing
+        .iter()
+        .map(|c| format!("{} ({})", c.name, c.slug))
+        .collect();
+    format!(
+        " Existing concepts (reuse exact name+slug when the entity matches, do NOT create duplicates): [{}].",
+        names.join(", ")
+    )
+}
+
+/// Relevance filter clause appended to the system prompt. Normalized by
 /// `SourceConfig::normalized_focus` (never blank), so no trimming is needed here.
 fn focus_clause(focus: &Option<String>) -> String {
     match focus {

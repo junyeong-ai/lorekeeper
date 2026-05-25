@@ -6,6 +6,7 @@
 //! file rename).
 
 pub mod backlinks;
+pub mod cache;
 pub mod cluster;
 pub mod export;
 pub mod graph;

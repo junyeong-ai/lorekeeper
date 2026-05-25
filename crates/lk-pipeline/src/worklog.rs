@@ -53,7 +53,8 @@ pub async fn render_work_log(
                 serde_json::json!({
                     "category": g.category,
                     "items": g.items.iter().map(|i| serde_json::json!({
-                        "summary": i.summary,
+                        "title": i.title,
+                        "body_excerpt": i.body_excerpt,
                         "source_id": i.source_id,
                     })).collect::<Vec<_>>(),
                 })
@@ -124,11 +125,16 @@ struct WorkLogGroup {
 }
 
 struct WorkLogItem {
-    summary: String,
+    title: String,
+    body_excerpt: String,
     source_id: String,
 }
 
-fn group_by_category(events: &[Event], perf: &PerformanceConfig, locale: Locale) -> Vec<WorkLogGroup> {
+fn group_by_category(
+    events: &[Event],
+    perf: &PerformanceConfig,
+    locale: Locale,
+) -> Vec<WorkLogGroup> {
     let mut groups: Vec<WorkLogGroup> = perf
         .work_categories
         .iter()
@@ -145,8 +151,10 @@ fn group_by_category(events: &[Event], perf: &PerformanceConfig, locale: Locale)
     let other_idx = groups.len() - 1;
 
     for event in events {
+        let body_excerpt: String = event.body.chars().take(150).collect();
         let item = WorkLogItem {
-            summary: event.title.clone(),
+            title: event.title.clone(),
+            body_excerpt,
             source_id: event.source_id.clone(),
         };
 

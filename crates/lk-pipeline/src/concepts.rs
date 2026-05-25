@@ -18,6 +18,7 @@ pub struct ConceptDrafts {
 struct ConceptDraft {
     slug: String,
     name: String,
+    category: Option<String>,
     first_seen: jiff::civil::Date,
     last_seen: jiff::civil::Date,
     source_count: u64,
@@ -59,6 +60,7 @@ impl ConceptDrafts {
                 let source_count = page
                     .frontmatter
                     .get("source_count")
+                    .or_else(|| page.frontmatter.get("reference_count"))
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
                 let sources: Vec<String> = page
@@ -94,10 +96,18 @@ impl ConceptDrafts {
                     .and_then(|v| v.as_str())
                     .map(String::from)
                     .unwrap_or_else(|| concept.name.clone());
+                let category = page
+                    .frontmatter
+                    .get("category")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+                    .or_else(|| concept.category.clone());
 
                 ConceptDraft {
                     slug: safe_slug.clone(),
                     name,
+                    category,
                     first_seen,
                     last_seen,
                     source_count,
@@ -107,6 +117,7 @@ impl ConceptDrafts {
             None => ConceptDraft {
                 slug: safe_slug.clone(),
                 name: concept.name.clone(),
+                category: concept.category.clone(),
                 first_seen: date,
                 last_seen: date,
                 source_count: 0,
@@ -117,6 +128,13 @@ impl ConceptDrafts {
         draft.add_reference(source_ref, date);
         self.drafts.insert(safe_slug, draft);
         Ok(())
+    }
+
+    pub fn known_slugs_and_names(&self) -> Vec<(String, String)> {
+        self.drafts
+            .values()
+            .map(|d| (d.slug.clone(), d.name.clone()))
+            .collect()
     }
 
     pub fn render_pages(
@@ -159,6 +177,7 @@ impl ConceptDraft {
         let context = serde_json::json!({
             "slug": self.slug,
             "name": self.name,
+            "category": self.category.as_deref().unwrap_or(""),
             "first_seen": self.first_seen.to_string(),
             "last_seen": self.last_seen.to_string(),
             "source_count": self.source_count,
@@ -209,6 +228,7 @@ mod tests {
         let draft = ConceptDraft {
             slug: "rag".into(),
             name: r#"RAG: "Retrieval" Augmented"#.into(),
+            category: Some("ai-ml".into()),
             first_seen: jiff::civil::date(2026, 5, 1),
             last_seen: jiff::civil::date(2026, 5, 1),
             source_count: 1,
@@ -224,6 +244,38 @@ mod tests {
             page.content
                 .contains(r#"title: "RAG: \"Retrieval\" Augmented""#),
             "title not properly escaped:\n{}",
+            page.content
+        );
+        assert!(
+            page.content.contains("category: ai-ml"),
+            "category should appear in frontmatter:\n{}",
+            page.content
+        );
+    }
+
+    #[test]
+    fn category_omitted_when_none() {
+        let draft = ConceptDraft {
+            slug: "test".into(),
+            name: "Test".into(),
+            category: None,
+            first_seen: jiff::civil::date(2026, 5, 1),
+            last_seen: jiff::civil::date(2026, 5, 1),
+            source_count: 0,
+            sources: vec![],
+        };
+        let engine = TemplateEngine::new(None).unwrap();
+        let page = draft
+            .render(&engine, &VaultDirs::default(), Locale::Ko)
+            .unwrap();
+        assert!(
+            !page.content.contains("category"),
+            "category field must be absent when None:\n{}",
+            page.content
+        );
+        assert!(
+            page.content.contains("source_count: 0"),
+            "source_count must still render correctly:\n{}",
             page.content
         );
     }
