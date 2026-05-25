@@ -152,8 +152,15 @@ impl Source for ManualSource {
 /// first non-blank line if the body starts with a markdown H1, otherwise from
 /// the file stem.
 fn read_item(path: &Path) -> Result<RawItem, SourceError> {
-    let body = std::fs::read_to_string(path)
+    let raw = std::fs::read_to_string(path)
         .map_err(|e| SourceError::Parse(format!("read {}: {e}", path.display())))?;
+
+    // Convert HTML to Markdown so the vault stores clean content, not raw tags.
+    let body = match path.extension().and_then(|e| e.to_str()) {
+        Some("html" | "htm") => crate::markdown::html_to_markdown(&raw),
+        _ => raw,
+    };
+
     let mtime = path
         .metadata()
         .and_then(|m| m.modified())

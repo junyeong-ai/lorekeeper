@@ -422,7 +422,7 @@ impl SourceType {
             SourceType::SlackChannel => "slack-channel.md.jinja",
             SourceType::SlackSearch => "slack-search.md.jinja",
             SourceType::Jira => "jira.md.jinja",
-            SourceType::Manual => "document.md.jinja",
+            SourceType::Manual => "manual.md.jinja",
         }
     }
 }

@@ -1,0 +1,27 @@
+---
+id: {{ id }}
+title: "{{ title }}"
+created: {{ created }}
+labels: {{ labels | tojson }}
+source: manual-inbox
+events_count: {{ events | length }}
+---
+
+# {{ title }}
+
+## {{ i18n.summary }}
+
+## {{ i18n.key_events }}
+
+{% for item in events -%}
+### {{ item.title }}
+
+{{ item.body }}
+
+{% if item.url -%}
+[원본]({{ item.url }})
+{% endif %}
+{% endfor %}
+
+## {{ i18n.related_concepts }}
+
