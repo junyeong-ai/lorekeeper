@@ -522,7 +522,6 @@ pub struct PerformanceConfig {
     pub source_type_category_map: BTreeMap<SourceType, String>,
     /// Label used for events that match no category.
     pub uncategorized_label: String,
-    pub summaries: SummaryConfig,
 }
 
 impl PerformanceConfig {
@@ -567,27 +566,6 @@ impl Default for PerformanceConfig {
             source_category_map: BTreeMap::new(),
             source_type_category_map,
             uncategorized_label: "기타".into(),
-            summaries: SummaryConfig::default(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
-pub struct SummaryConfig {
-    pub weekly: bool,
-    pub monthly: bool,
-    pub quarterly: bool,
-    pub annual: bool,
-}
-
-impl Default for SummaryConfig {
-    fn default() -> Self {
-        Self {
-            weekly: true,
-            monthly: true,
-            quarterly: true,
-            annual: true,
         }
     }
 }

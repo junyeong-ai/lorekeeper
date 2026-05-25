@@ -266,11 +266,6 @@ performance:
   source_type_category_map:
     jira: project-delivery
     google-calendar: team-contribution
-  summaries:
-    weekly: true
-    monthly: true
-    quarterly: true
-    annual: true
 
 # ─── 종합 보고 ───────────────────────────────────────────
 # weekly는 두 갈래: (1) include_sources의 소스 횡단 "주간 테마" 페이지(opt-in),
