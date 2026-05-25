@@ -60,7 +60,6 @@ impl ConceptDrafts {
                 let source_count = page
                     .frontmatter
                     .get("source_count")
-                    .or_else(|| page.frontmatter.get("reference_count"))
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
                 let sources: Vec<String> = page

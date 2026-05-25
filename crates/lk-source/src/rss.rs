@@ -178,7 +178,8 @@ impl Source for RssSource {
                     && let Some(ref article_url) = item.url
                 {
                     match self.fetch_article(article_url).await {
-                        Ok(body) => item.body = body,
+                        Ok(body) if !body.trim().is_empty() => item.body = body,
+                        Ok(_) => {}
                         Err(e) => {
                             tracing::warn!(
                                 feed = %feed_cfg.id,

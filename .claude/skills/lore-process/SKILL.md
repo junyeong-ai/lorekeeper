@@ -206,7 +206,7 @@ locate key — never hardcode headings per `target.kind`.
         tags: ["concept"]
         ---
         ```
-        Do NOT add `confidence`, `reference_count`, or any other keys.
+        Do NOT add any keys beyond those listed above.
 
         **When creating a new concept page**, fill the `## 핵심` (Synthesis)
         section with a 1-2 sentence definition/context of the concept based

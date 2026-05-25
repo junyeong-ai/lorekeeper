@@ -108,7 +108,6 @@ async fn run_concepts(opts: &super::GlobalOpts, json: bool) -> miette::Result<()
         let source_count = page
             .frontmatter
             .get("source_count")
-            .or_else(|| page.frontmatter.get("reference_count"))
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
         if slug.is_empty() {

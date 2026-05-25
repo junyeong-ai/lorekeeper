@@ -117,7 +117,7 @@ fn filter_by_class(events: &[&Event], class: &str) -> Vec<serde_json::Value> {
             serde_json::json!({
                 "subject": e.title,
                 "sender": e.author,
-                "summary": e.body,
+                "body": e.body,
             })
         })
         .collect()

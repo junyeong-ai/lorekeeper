@@ -151,7 +151,14 @@ fn group_by_category(
     let other_idx = groups.len() - 1;
 
     for event in events {
-        let body_excerpt: String = event.body.chars().take(150).collect();
+        let body_excerpt: String = event
+            .body
+            .chars()
+            .take(150)
+            .map(|c| if c == '\n' { ' ' } else { c })
+            .collect::<String>()
+            .trim()
+            .to_string();
         let item = WorkLogItem {
             title: event.title.clone(),
             body_excerpt,

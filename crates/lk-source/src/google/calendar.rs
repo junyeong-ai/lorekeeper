@@ -261,13 +261,14 @@ impl Source for CalendarSource {
                 let file_ids = extract_drive_file_ids(&description);
                 for file_id in file_ids.into_iter().take(MAX_DRIVE_FETCHES_PER_EVENT) {
                     match fetch_drive_content(&self.http, &token, &file_id).await {
-                        Ok(content) => {
+                        Ok(content) if !content.trim().is_empty() => {
                             body_parts.push(format!(
                                 "**{}:**\n\n{}",
                                 s.meeting_notes,
                                 content.trim()
                             ));
                         }
+                        Ok(_) => {}
                         Err(e) => {
                             tracing::warn!(
                                 event_id = %id,
