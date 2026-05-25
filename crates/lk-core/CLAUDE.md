@@ -18,6 +18,8 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   `[title, body]` — never a bare concatenation (that collides).
 - **`slugify()`** lowercases + strips to `[alnum-]`; concept slugs are always
   re-normalized through it to prevent path injection from LLM output.
+- **`text::collapse_blank_lines`** squeezes 3+ newlines to a paragraph break,
+  strips `\r`. Single source consumed by lk-vault, lk-pipeline, lk-source.
 - **`LlmConfig` defaults to `provider: queue`** (matches docs/example).
 - **`VaultDirs.annual`** is the config key; its default directory value is `"annually"`
   (the on-disk folder series stays daily/weekly/monthly/quarterly/annually).
