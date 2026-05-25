@@ -126,7 +126,7 @@ The skill is **fully idempotent**: re-running on a partially-processed queue fil
 crates/
   lk-core/      Domain types, config, error, vault path builder
   lk-vault/     Obsidian vault I/O: read, write, frontmatter, templates, log
-  lk-source/    Source adapters: Gmail, Drive, Slack, Jira, Calendar
+  lk-source/    Source adapters: Gmail, Drive, Slack, Jira, Calendar, Manual
   lk-pipeline/  Transform stages: normalize, dedup, classify, render, synthesis
   lk-llm/       LlmClient trait + providers (anthropic, queue, noop) and a test mock
   lk-graph/     Wikilink graph analysis (lint, hubs, cluster, suggest-links)
@@ -153,10 +153,10 @@ templates/      Jinja2 markdown templates (.md.jinja, embedded in the binary)
 Templates live in `templates/` and use Jinja2 syntax (minijinja). Lookup order:
 
 1. `{source-id}.md.jinja` — user override per source ID (optional)
-2. `{source-type}.md.jinja` — default per source type (`gmail`, `google-drive`, `slack-channel`, `slack-search`, `jira`, `google-calendar`)
+2. `{source-type}.md.jinja` — default per source type (`gmail`, `google-drive`, `slack-channel`, `slack-search`, `jira`, `google-calendar`, `manual`)
 3. Embedded fallback
 
-Periodic templates: `work-log`, `weekly-synthesis`, `weekly-personal`, `monthly-summary`, `quarterly-review`, `annual-review`, `concept`.
+Periodic templates: `work-log`, `weekly-synthesis`, `weekly-personal`, `monthly-summary`, `quarterly-review`, `annual-review`, `concept`, `document`.
 
 ## Timezone
 
@@ -168,7 +168,7 @@ Periodic templates: `work-log`, `weekly-synthesis`, `weekly-personal`, `monthly-
 
 ```bash
 # Generate cron entries from config
-lore schedule > /tmp/wi-cron.txt
+lore schedule > /tmp/lore-cron.txt
 crontab /tmp/lore-cron.txt
 ```
 

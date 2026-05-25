@@ -16,8 +16,8 @@ Deterministic transform stages between `lk-source` and `lk-vault`. Shares an
   `{date}:{title}` and scanned by date-prefix range. The cache is recreated only on a
   recoverable mismatch — a schema-type change or an outdated on-disk format after a redb
   major upgrade (`DatabaseError::UpgradeRequired`) — never on I/O/corruption errors. On
-  recreation the stale file is renamed to `*.redb.backup.{timestamp}` (not deleted),
-  preserving dedup history for manual recovery.
+  recreation the stale file is renamed to `*.redb.backup.{timestamp}-pid{pid}` (not
+  deleted), preserving dedup history for manual recovery.
 - **classify**: `flag_personal` matches identity tokens with `contains_bounded`
   (alphanumeric/`._%+-` word boundary) to avoid name/email substring false positives
   (`kim`⊄`kimberly`, `test@x.com`⊄`test@x.com.au`); `@` is intentionally excluded so

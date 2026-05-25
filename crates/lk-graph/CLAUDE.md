@@ -1,7 +1,8 @@
 # lk-graph
 
-Wikilink graph analysis. Pure deterministic — no HTTP, no LLM, no vault writes
-(except `--fix` for index-sync and normalize).
+Wikilink graph analysis. Pure deterministic — no HTTP, no LLM. The only vault
+writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
+`backlinks-sync` without `--dry-run`).
 
 - **deps**: `lk-core` (slugify, frontmatter, wikilink) + `petgraph` + `rayon` +
   `walkdir`. No reqwest/tokio — independent of the ingestion stack.
@@ -24,7 +25,7 @@ Wikilink graph analysis. Pure deterministic — no HTTP, no LLM, no vault writes
   `daily/` is not an orphan. Reserved meta pages (`index.md`, `AGENTS.md` —
   `lk_core::vault_path::RESERVED_WIKI_FILES`) are never orphans or index-drift.
 - **Exit codes**: 0 = ok/no findings, 1 = findings, 2 = runtime error.
-  `build`/`hubs`/`cluster`/`export`/`suggest-links` never exit 1.
+  `hubs`/`cluster`/`export`/`suggest-links` never exit 1.
 - **`suggest_links`**: pairs in the same Louvain community with no edge, ranked
   by shared-neighbor count. Read-only, deterministic.
 - **Mutations gated**: `index::fix()`, `normalize::apply()`, and

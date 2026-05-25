@@ -16,7 +16,9 @@ allowed-tools: |
   Bash(jq *)
   Bash(find *)
   Bash(grep *)
-  mcp__obsidian__*
+  Read
+  Edit
+  Write
 ---
 
 # lore-wiki — Semantic wiki operations for Lorekeeper

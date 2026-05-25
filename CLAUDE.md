@@ -93,5 +93,5 @@ Auto-discovered: `./config.yaml` → `~/.config/lorekeeper/config.yaml`.
 | `slack-search` | Slack API | Keyword trend search (user token required) |
 | `jira` | Jira REST API | Issue tracking (ADF→Markdown, status/period snapshot) |
 | `google-calendar` | Calendar API | Schedule tracking (HTML→Markdown) |
-| `manual` | Local inbox | User-curated files (md/txt/json → archive after ingest) |
+| `manual` | Local inbox | User-curated files dropped in `inbox/` (md/txt/markdown/json by default; opt-in archive) |
 

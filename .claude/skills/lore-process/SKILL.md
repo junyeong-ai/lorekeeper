@@ -1,6 +1,6 @@
 ---
 name: lore-process
-description: Consume Lorekeeper LLM work queue. When `lore ingest` runs in queue mode (config `llm.provider: queue`), the Rust pipeline writes JSONL task files under `<vault>/.lorekeeper/queue/`. This skill drains those queues — running summarize and concept extraction using Claude Code's native LLM (no API key needed) and editing the target Obsidian pages via Obsidian MCP. Idempotent — partial progress is resumable; processed files move to `.lorekeeper/queue/processed/`. Run after each `lore ingest` (or daily) to enrich pages that were written with empty summary/concept sections.
+description: Consume Lorekeeper LLM work queue. When `lore ingest` runs in queue mode (config `llm.provider: queue`), the Rust pipeline writes JSONL task files under `<vault>/.lorekeeper/queue/`. This skill drains those queues — running summarize and concept extraction using Claude Code's native LLM (no API key needed) and editing the target vault pages (plain markdown files) in place. Idempotent — partial progress is resumable; processed files move to `.lorekeeper/queue/processed/`. Run after each `lore ingest` (or daily) to enrich pages that were written with empty summary/concept sections.
 when_to_use: |
   lore-process, /lore-process, 큐 처리, queue process, drain queue, 처리 큐,
   wiki 처리, summary 채워, 요약 채우기, 개념 추출 실행, concept extraction run,
@@ -16,7 +16,9 @@ allowed-tools: |
   Bash(mkdir *)
   Bash(lore *)
   Bash(date *)
-  mcp__obsidian__*
+  Read
+  Edit
+  Write
 ---
 
 # lore-process — Drain the Lorekeeper LLM queue
@@ -30,8 +32,9 @@ file is visible, every task in it is fully written and points at a page that
 already exists on disk.
 
 This skill consumes those tasks: read the queue, perform the LLM work using
-your own session, edit target pages via Obsidian MCP, then move the processed
-queue file to `.lorekeeper/queue/processed/`.
+your own session, edit the target pages' sections in place (each page is a
+plain markdown file at `target.vault_path`), then move the processed queue file
+to `.lorekeeper/queue/processed/`.
 
 ### Queue file lifecycle
 
@@ -94,8 +97,9 @@ locate key — never hardcode headings per `target.kind`.
 
 ## Processing protocol
 
-1. **Discover the vault root.** Default: the active Obsidian vault. The user
-   may pass `--vault <path>` as an argument.
+1. **Discover the vault root.** Read `vault.root` from `config.yaml`
+   (auto-discovered at `./config.yaml` → `~/.config/lorekeeper/config.yaml`).
+   The user may override with `--vault <path>`.
 
 2. **List unprocessed queue files** in `<vault>/.lorekeeper/queue/` (top
    level only — `processed/` is the archive):
@@ -127,7 +131,8 @@ locate key — never hardcode headings per `target.kind`.
         exists), update the synthesis if the new source adds meaningful
         context; otherwise leave it.
 
-   c. **Edit the target page** via Obsidian MCP. Every task carries
+   c. **Edit the target page** — the markdown file at `target.vault_path`,
+      using the Edit tool (section replace). Every task carries
       `target.anchor` — the exact `## …` heading the pipeline wrote,
       resolved from i18n at queue time (e.g. `"## Summary"` for English
       or `"## 요약"` for Korean). Use it as the locate key for all task
@@ -172,7 +177,7 @@ locate key — never hardcode headings per `target.kind`.
         etc.) — only the one matching `target.anchor` is replaced.
         Leave all other headings untouched.
 
-   d. **On task failure** (page not found, MCP error, malformed task):
+   d. **On task failure** (page not found, edit error, malformed task):
       record the failed `task_id` and the reason. **Abort processing
       of this queue file** — do not attempt the remaining tasks. The
       queue file stays on disk so the next `/lore-process` run replays
