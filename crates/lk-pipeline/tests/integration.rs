@@ -668,24 +668,44 @@ async fn queue_mode_emits_jsonl_tasks_with_targets() {
 }
 
 #[tokio::test]
-async fn synthesis_defaults_to_enabled_sources_when_include_empty() {
+async fn weekly_synthesis_is_opt_in_via_include_sources() {
     let dir = TempDir::new().unwrap();
     let vault = dir.path();
-    let config = base_config(vault);
+
+    // A daily page exists in the target ISO week (Mon 2026-05-18 .. Sun 2026-05-24).
+    let daily = vault.join("daily").join("test-source");
+    std::fs::create_dir_all(&daily).unwrap();
+    std::fs::write(
+        daily.join("2026-05-20.md"),
+        "---\nid: test-source-2026-05-20\n---\n\n# News\n\nbody\n",
+    )
+    .unwrap();
 
     let llm: Arc<dyn LlmClient> = Arc::new(NoopLlmClient);
-    let ctx = make_ctx(&config, llm);
-    let synth = Synthesizer::new(vault, ctx, &config);
 
-    let synthesis = synth
-        .weekly_synthesis(jiff::civil::date(2026, 5, 23))
-        .await
-        .unwrap();
-    let personal = synth
-        .weekly_personal(jiff::civil::date(2026, 5, 23))
-        .await
-        .unwrap();
-    // No pages on disk → both None; the test verifies Synthesizer didn't refuse to run
-    // due to empty include_sources.
-    assert!(synthesis.is_none() && personal.is_none());
+    // Empty include_sources → the source is NOT swept into a cross-source themes page,
+    // even though its daily page sits in range. Knowledge feeds stay out of the digest.
+    let config = base_config(vault);
+    let synth = Synthesizer::new(vault, make_ctx(&config, llm.clone()), &config);
+    assert!(
+        synth
+            .weekly_synthesis(jiff::civil::date(2026, 5, 23))
+            .await
+            .unwrap()
+            .is_none(),
+        "empty include_sources must produce no cross-source themes page"
+    );
+
+    // Listing the source opts it in → a themes page is produced.
+    let mut config = base_config(vault);
+    config.synthesis.weekly.include_sources = vec!["test-source".into()];
+    let synth = Synthesizer::new(vault, make_ctx(&config, llm), &config);
+    assert!(
+        synth
+            .weekly_synthesis(jiff::civil::date(2026, 5, 23))
+            .await
+            .unwrap()
+            .is_some(),
+        "a source listed in include_sources opts into the weekly themes page"
+    );
 }

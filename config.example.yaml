@@ -270,11 +270,16 @@ performance:
     annual: true
 
 # ─── 종합 보고 ───────────────────────────────────────────
+# weekly는 두 갈래: (1) include_sources의 소스 횡단 "주간 테마" 페이지(opt-in),
+# (2) me/work-log 기반 개인 주간 요약(항상 생성). monthly/quarterly/annual은
+# 모두 work-log 기반 개인 성과 리뷰다 — 지식/뉴스 소스는 관여하지 않는다.
 synthesis:
   weekly:
     enabled: true
     schedule: "0 8 * * 1"           # Monday 08:00
-    include_sources: [ai-news, team-slack, slack-trends]
+    # 업무/소통 소스만 — 주간 테마 회고가 가치 있는 맥락. 뉴스/RSS 같은 지식 피드는
+    # 넣지 않는다(개념 그래프에 이미 연속 누적되므로 주간 다이제스트가 중복).
+    include_sources: [team-slack, slack-trends]
   monthly:
     enabled: true
     schedule: "0 8 1 * *"           # 1st of month 08:00

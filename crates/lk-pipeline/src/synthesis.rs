@@ -21,14 +21,12 @@ impl Synthesizer {
 
     pub fn new(vault_root: &Path, ctx: Arc<PipelineContext>, config: &Config) -> Self {
         let reader = VaultReader::new(vault_root);
-        let sources = if config.synthesis.weekly.include_sources.is_empty() {
-            config
-                .enabled_sources()
-                .map(|(id, _)| id.to_string())
-                .collect()
-        } else {
-            config.synthesis.weekly.include_sources.clone()
-        };
+        // Cross-source weekly themes are opt-in: only the sources explicitly listed in
+        // `synthesis.weekly.include_sources` are rolled up. Knowledge feeds (news, RSS)
+        // deliberately stay out — their value is the continuously-accumulated concept
+        // graph, so a weekly digest of them would be redundant. An empty list yields no
+        // themes page; the personal weekly narrative (work-log) is produced regardless.
+        let sources = config.synthesis.weekly.include_sources.clone();
         Self {
             ctx,
             reader,

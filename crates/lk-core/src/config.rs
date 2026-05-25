@@ -633,6 +633,10 @@ impl SynthesisConfig {
 pub struct PeriodSynthesisConfig {
     pub enabled: bool,
     pub schedule: Option<String>,
+    /// Sources rolled up into the cross-source weekly themes page. Opt-in: an empty
+    /// list produces no themes page. List work/communication sources (team chat,
+    /// tickets) where a weekly thematic recap adds value — not knowledge feeds, whose
+    /// value already lives in the continuously-accumulated concept graph.
     #[serde(default)]
     pub include_sources: Vec<String>,
 }
