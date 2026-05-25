@@ -208,10 +208,10 @@ fn collect_files(rel_dir: &Path, abs_dir: &Path) -> Vec<Entry> {
         if path.extension().and_then(|s| s.to_str()) != Some("md") {
             continue;
         }
-        // Skip the index itself if some future run nests `wiki/index.md` under the
-        // walk, and skip AGENTS.md (it's a schema doc, not a page).
+        // Skip Lorekeeper's reserved meta files (the index catalog itself and the
+        // AGENTS.md schema doc) — they are not knowledge pages.
         if let Some(name) = path.file_name().and_then(|n| n.to_str())
-            && (name == "index.md" || name == "AGENTS.md")
+            && lk_core::vault_path::RESERVED_WIKI_FILES.contains(&name)
         {
             continue;
         }

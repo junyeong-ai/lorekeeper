@@ -2,19 +2,21 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::hash_map::Entry;
 
-use lk_core::concept::slugify;
 use lk_core::config::GraphConfig;
 use petgraph::Direction;
 use petgraph::graph::{DiGraph, NodeIndex};
 use serde::Serialize;
 
-use crate::scan::Page;
+use crate::scan::{Page, VaultExistence, filename_slug};
 
 pub struct WikiGraph {
     graph: DiGraph<NodeData, ()>,
     id_to_node: HashMap<String, NodeIndex>,
-    name_to_node: HashMap<String, NodeIndex>,
     broken: Vec<BrokenLink>,
+    /// Scope node ids that connect to the vault (linked from, or linking out to,
+    /// a page that exists) and so are never orphans even with zero in-scope
+    /// edges. Derived from the `VaultExistence` passed to [`Self::build`].
+    externally_connected: HashSet<String>,
 }
 
 pub(crate) struct NodeData {
@@ -38,7 +40,26 @@ pub struct HubEntry {
 }
 
 impl WikiGraph {
+    /// Build the analysis graph over `pages`, treating that set as the whole
+    /// universe: a wikilink with no resolvable target is broken, and a page with
+    /// no edges is an orphan. The right model when the scope *is* the vault (and
+    /// the convenient default for tests); for a narrowed scope whose links reach
+    /// pages outside it, use [`Self::build_with_existence`].
     pub fn build(pages: &[Page]) -> Self {
+        Self::build_with_existence(pages, &VaultExistence::from_pages(pages))
+    }
+
+    /// Build the analysis graph over `pages` (the scope) while resolving
+    /// integrity checks against the full-vault `existence` universe.
+    ///
+    /// The graph itself — nodes and edges — stays scope-internal, so `hubs`,
+    /// `cluster`, and `suggest_links` are unaffected. Only the two integrity
+    /// checks consult `existence`:
+    /// - **broken links**: a wikilink leaving the scope is broken *only* if its
+    ///   target does not exist anywhere in the vault.
+    /// - **orphans**: a scope page is exempt when it links to, or is linked from,
+    ///   any page in the vault (tracked in `externally_connected`).
+    pub fn build_with_existence(pages: &[Page], existence: &VaultExistence) -> Self {
         let mut graph = DiGraph::new();
         let mut id_to_node = HashMap::with_capacity(pages.len());
         let mut name_to_node: HashMap<String, NodeIndex> = HashMap::with_capacity(pages.len());
@@ -50,15 +71,9 @@ impl WikiGraph {
             });
             id_to_node.insert(page.id.clone(), node);
 
-            let filename_slug = page
-                .path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .map(slugify)
-                .unwrap_or_default();
-
-            if !filename_slug.is_empty() {
-                match name_to_node.entry(filename_slug) {
+            let slug = filename_slug(&page.path);
+            if !slug.is_empty() {
+                match name_to_node.entry(slug) {
                     Entry::Vacant(e) => {
                         e.insert(node);
                     }
@@ -76,20 +91,39 @@ impl WikiGraph {
         }
 
         let mut broken = Vec::new();
+        let mut externally_connected = HashSet::new();
 
         for page in pages {
             let source_idx = id_to_node[&page.id];
             for target in &page.outgoing {
-                if let Some(&target_idx) = name_to_node.get(target.as_str()) {
+                // Resolve a bare target by filename slug, a path-style target by
+                // page id — the two forms `normalize_target` produces.
+                let in_scope = name_to_node
+                    .get(target.as_str())
+                    .or_else(|| id_to_node.get(target.as_str()))
+                    .copied();
+                if let Some(target_idx) = in_scope {
                     if source_idx != target_idx {
                         graph.add_edge(source_idx, target_idx, ());
                     }
+                } else if existence.resolves(target) {
+                    // Resolves to a page outside the analysis scope: not broken,
+                    // and a vault-wide outbound connection for orphan purposes.
+                    // No edge — the target node is not in the scope graph.
+                    externally_connected.insert(page.id.clone());
                 } else {
                     broken.push(BrokenLink {
                         source: page.id.clone(),
                         target: target.clone(),
                     });
                 }
+            }
+
+            // Inbound from anywhere in the vault: this page is the resolved
+            // target of a link from another page (possibly out of scope), even
+            // if nothing in scope links it.
+            if existence.is_linked(&page.id) {
+                externally_connected.insert(page.id.clone());
             }
         }
 
@@ -99,8 +133,8 @@ impl WikiGraph {
         WikiGraph {
             graph,
             id_to_node,
-            name_to_node,
             broken,
+            externally_connected,
         }
     }
 
@@ -140,18 +174,23 @@ impl WikiGraph {
     }
 
     pub fn orphans(&self, config: &GraphConfig) -> Vec<String> {
-        let exclude: HashSet<&str> = config
-            .graph
-            .orphan_exclude
-            .iter()
-            .map(String::as_str)
-            .collect();
+        let mut exclude: HashSet<String> = config.graph.orphan_exclude.iter().cloned().collect();
+        // Lorekeeper's own meta pages (index catalog, AGENTS.md schema) are not
+        // knowledge pages and legitimately have no wikilinks — never orphans.
+        if let Some(wiki_dir) = config.scope.dirs.first() {
+            exclude.extend(crate::scan::reserved_page_ids(wiki_dir));
+        }
 
         let mut result: Vec<String> = self
             .id_to_node
             .iter()
             .filter(|(id, idx)| {
                 if exclude.contains(id.as_str()) {
+                    return false;
+                }
+                // A vault-wide connection (in- or out-of-scope) means it is not
+                // truly orphaned, even with zero in-scope edges.
+                if self.externally_connected.contains(id.as_str()) {
                     return false;
                 }
                 let idx = **idx;
@@ -172,12 +211,6 @@ impl WikiGraph {
 
     pub fn node_ids(&self) -> impl Iterator<Item = &str> {
         self.id_to_node.keys().map(String::as_str)
-    }
-
-    pub fn resolve_filename(&self, slug: &str) -> Option<&str> {
-        self.name_to_node
-            .get(slug)
-            .map(|&idx| self.graph[idx].id.as_str())
     }
 
     pub fn node_index(&self, id: &str) -> Option<usize> {
@@ -230,7 +263,7 @@ impl WikiGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scan::Page;
+    use crate::scan::{Page, VaultExistence};
     use std::path::PathBuf;
 
     fn make_page(id: &str, outgoing: &[&str]) -> Page {
@@ -338,12 +371,141 @@ mod tests {
 
     #[test]
     fn duplicate_filename_keeps_first() {
-        let pages = vec![make_page("wiki/alpha", &[]), make_page("docs/alpha", &[])];
+        // Two pages share the filename slug `alpha`; a `[[alpha]]` link resolves
+        // to the first-inserted page (the second is shadowed, with a warning).
+        let pages = vec![
+            make_page("wiki/alpha", &[]),
+            make_page("docs/alpha", &[]),
+            make_page("wiki/linker", &["alpha"]),
+        ];
         let g = WikiGraph::build(&pages);
 
-        assert_eq!(g.node_count(), 2);
-        let resolved = g.resolve_filename("alpha");
-        assert!(resolved.is_some());
-        assert_eq!(resolved.unwrap(), "wiki/alpha");
+        assert_eq!(g.node_count(), 3);
+        let edges: Vec<(String, String)> = g
+            .edge_pairs()
+            .map(|(s, t)| (g.node_id(s).to_owned(), g.node_id(t).to_owned()))
+            .collect();
+        assert_eq!(
+            edges,
+            vec![("wiki/linker".to_owned(), "wiki/alpha".to_owned())]
+        );
+        assert!(g.broken_links().is_empty());
+    }
+
+    #[test]
+    fn path_style_link_resolves_to_page_id() {
+        // `[[wiki/sub/b]]` (path form) resolves to the page whose id is
+        // `wiki/sub/b`, not just the filename `b`.
+        let pages = vec![
+            make_page("wiki/a", &["wiki/sub/b"]),
+            make_page("wiki/sub/b", &[]),
+        ];
+        let g = WikiGraph::build(&pages);
+
+        assert_eq!(g.edge_count(), 1);
+        assert!(g.broken_links().is_empty());
+    }
+
+    #[test]
+    fn cross_scope_link_not_broken_with_existence() {
+        // A `wiki/` concept links a `daily/` page (out of the analysis scope).
+        // Without the existence universe it reads as broken (legacy); with it,
+        // the link resolves to an existing vault page and is exempt.
+        let scope = vec![make_page(
+            "wiki/concepts/foo",
+            &["daily/team-slack/2026-05-22"],
+        )];
+        let full = vec![
+            make_page("wiki/concepts/foo", &["daily/team-slack/2026-05-22"]),
+            make_page("daily/team-slack/2026-05-22", &[]),
+        ];
+
+        let legacy = WikiGraph::build(&scope);
+        assert_eq!(legacy.broken_links().len(), 1);
+
+        let existence = VaultExistence::from_pages(&full);
+        let g = WikiGraph::build_with_existence(&scope, &existence);
+        assert!(g.broken_links().is_empty());
+    }
+
+    #[test]
+    fn orphan_exempted_by_external_inbound() {
+        // A `wiki/` concept with no in-scope edges, linked only from a `daily/`
+        // page (out of scope), is not a true orphan.
+        let config = GraphConfig::default();
+        let scope = vec![make_page("wiki/concepts/bar", &[])];
+        let full = vec![
+            make_page("wiki/concepts/bar", &[]),
+            make_page("daily/team-slack/2026-05-22", &["bar"]),
+        ];
+
+        let legacy = WikiGraph::build(&scope);
+        assert_eq!(legacy.orphans(&config), vec!["wiki/concepts/bar"]);
+
+        let existence = VaultExistence::from_pages(&full);
+        let g = WikiGraph::build_with_existence(&scope, &existence);
+        assert!(g.orphans(&config).is_empty());
+    }
+
+    #[test]
+    fn orphan_exempted_by_external_outbound() {
+        // A `wiki/` concept that links out to an existing `daily/` page (and is
+        // linked by nothing) is connected to the vault, not an orphan.
+        let config = GraphConfig::default();
+        let scope = vec![make_page(
+            "wiki/concepts/baz",
+            &["daily/team-slack/2026-05-22"],
+        )];
+        let full = vec![
+            make_page("wiki/concepts/baz", &["daily/team-slack/2026-05-22"]),
+            make_page("daily/team-slack/2026-05-22", &[]),
+        ];
+
+        let existence = VaultExistence::from_pages(&full);
+        let g = WikiGraph::build_with_existence(&scope, &existence);
+        assert!(g.orphans(&config).is_empty());
+    }
+
+    #[test]
+    fn self_only_link_is_orphan() {
+        // A page whose only wikilink points at itself is disconnected; the
+        // self-reference must not exempt it from orphan status.
+        let config = GraphConfig::default();
+        let pages = vec![make_page("wiki/lonely", &["lonely"])];
+        let g = WikiGraph::build(&pages);
+
+        assert_eq!(g.orphans(&config), vec!["wiki/lonely"]);
+    }
+
+    #[test]
+    fn duplicate_slug_does_not_over_exempt_orphan() {
+        // Two pages share the filename `dup`; `[[dup]]` resolves to the first.
+        // The second, unreferenced, is still an orphan — a flat slug set would
+        // have exempted both.
+        let config = GraphConfig::default();
+        let pages = vec![
+            make_page("wiki/a/dup", &[]),
+            make_page("wiki/b/dup", &[]),
+            make_page("wiki/linker", &["dup"]),
+        ];
+        let g = WikiGraph::build(&pages);
+
+        assert_eq!(g.orphans(&config), vec!["wiki/b/dup"]);
+    }
+
+    #[test]
+    fn truly_disconnected_page_still_orphan_with_existence() {
+        // Existence awareness must not hide a genuinely disconnected page:
+        // nothing links it and it links nothing that exists.
+        let config = GraphConfig::default();
+        let scope = vec![
+            make_page("wiki/connected", &["other"]),
+            make_page("wiki/other", &[]),
+            make_page("wiki/lonely", &[]),
+        ];
+        let existence = VaultExistence::from_pages(&scope);
+        let g = WikiGraph::build_with_existence(&scope, &existence);
+
+        assert_eq!(g.orphans(&config), vec!["wiki/lonely"]);
     }
 }

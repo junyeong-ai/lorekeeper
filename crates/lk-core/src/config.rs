@@ -669,7 +669,10 @@ pub struct GraphConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GraphScopeConfig {
-    /// Vault-relative directories to scan for markdown pages.
+    /// Vault-relative directories that bound *structural analysis*
+    /// (`hubs`/`cluster`/`suggest-links`) — default `["wiki"]`. Integrity checks
+    /// (`broken`/`orphans`/`index-sync`) instead resolve against the full vault,
+    /// so a narrow scope here does not cause cross-folder false positives.
     pub dirs: Vec<PathBuf>,
     /// Glob patterns (matched against vault-relative paths) to exclude from the scan.
     pub exclude: Vec<String>,

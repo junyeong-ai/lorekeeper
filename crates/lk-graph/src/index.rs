@@ -8,7 +8,7 @@ use lk_core::wikilink;
 
 use crate::GraphError;
 use crate::graph::WikiGraph;
-use crate::scan;
+use crate::scan::{self, VaultExistence, normalize_target};
 
 #[derive(Debug)]
 pub struct IndexDrift {
@@ -22,7 +22,12 @@ impl IndexDrift {
     }
 }
 
-pub fn diff(graph: &WikiGraph, root: &Path, config: &GraphConfig) -> IndexDrift {
+pub fn diff(
+    graph: &WikiGraph,
+    existence: &VaultExistence,
+    root: &Path,
+    config: &GraphConfig,
+) -> IndexDrift {
     let index_path = root.join(&config.scope.dirs[0]).join("index.md");
 
     let Ok(content) = std::fs::read_to_string(&index_path) else {
@@ -32,9 +37,13 @@ pub fn diff(graph: &WikiGraph, root: &Path, config: &GraphConfig) -> IndexDrift 
         };
     };
 
+    // `build_index` catalogs every vault page: concepts by filename
+    // (`[[Agentic AI]]`) and daily/me/synthesis pages by path
+    // (`[[daily/email-digest/2026-05-19]]`). Resolve both forms via
+    // `normalize_target` so a path entry isn't collapsed to a bogus slug.
     let mut index_links = HashSet::new();
     for page in wikilink::extract_wikilinks(&content) {
-        let slug = slugify(page);
+        let slug = normalize_target(page);
         if !slug.is_empty() {
             index_links.insert(slug);
         }
@@ -50,7 +59,11 @@ pub fn diff(graph: &WikiGraph, root: &Path, config: &GraphConfig) -> IndexDrift 
     let index_dir_slug = slugify(&config.scope.dirs[0].to_string_lossy().replace('\\', "/"));
     let index_dir_prefix = format!("{index_dir_slug}/");
 
-    let index_id = scan::slug_from_path(&config.scope.dirs[0].join("index"));
+    // The index catalog and AGENTS.md schema are reserved meta pages, never
+    // cataloged (same exclusion the index builder applies).
+    let reserved: HashSet<String> = scan::reserved_page_ids(&config.scope.dirs[0])
+        .into_iter()
+        .collect();
 
     let disk_ids: HashSet<&str> = graph.node_ids().collect();
 
@@ -60,22 +73,29 @@ pub fn diff(graph: &WikiGraph, root: &Path, config: &GraphConfig) -> IndexDrift 
             if !id.starts_with(&index_dir_prefix) {
                 return false;
             }
-            if id == index_id {
+            if reserved.contains(id) {
                 return false;
             }
             if exclude.contains(id) {
                 return false;
             }
+            // The index links concepts by filename (`[[Agentic AI]]`) but other
+            // wiki pages (e.g. `wiki/documents/*`) by path (`[[wiki/documents/x]]`).
+            // Accept either form so path-linked pages aren't false "missing".
             let filename = id.rsplit('/').next().unwrap_or(id);
-            !index_links.contains(filename)
+            !index_links.contains(filename) && !index_links.contains(id)
         })
         .map(ToString::to_string)
         .collect();
     missing_from_index.sort();
 
+    // An index entry is missing from disk only if it resolves to no page
+    // anywhere in the vault — checked against the full-vault existence universe,
+    // not the (wiki-only) analysis scope, so path entries to `daily/` pages
+    // aren't false-flagged.
     let mut missing_from_disk: Vec<String> = index_links
         .iter()
-        .filter(|slug| graph.resolve_filename(slug).is_none())
+        .filter(|slug| !existence.resolves(slug))
         .cloned()
         .collect();
     missing_from_disk.sort();
@@ -152,7 +172,8 @@ mod tests {
         ];
 
         let graph = WikiGraph::build(&pages);
-        let drift = diff(&graph, tmp.path(), &config);
+        let existence = VaultExistence::from_pages(&pages);
+        let drift = diff(&graph, &existence, tmp.path(), &config);
 
         assert!(drift.missing_from_index.contains(&"wiki/gamma".to_owned()));
         assert!(drift.missing_from_disk.is_empty());
@@ -176,7 +197,8 @@ mod tests {
         ];
 
         let graph = WikiGraph::build(&pages);
-        let drift = diff(&graph, tmp.path(), &config);
+        let existence = VaultExistence::from_pages(&pages);
+        let drift = diff(&graph, &existence, tmp.path(), &config);
 
         assert!(drift.missing_from_disk.contains(&"nonexistent".to_owned()));
     }
@@ -209,7 +231,8 @@ mod tests {
         let pages = vec![make_page("wiki/alpha", &[]), make_page("wiki/beta", &[])];
 
         let graph = WikiGraph::build(&pages);
-        let drift = diff(&graph, tmp.path(), &config);
+        let existence = VaultExistence::from_pages(&pages);
+        let drift = diff(&graph, &existence, tmp.path(), &config);
 
         assert!(drift.is_in_sync());
     }

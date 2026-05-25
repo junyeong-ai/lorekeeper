@@ -11,9 +11,18 @@ Wikilink graph analysis. Pure deterministic — no HTTP, no LLM, no vault writes
 - **Config**: `config.yaml` `graph:` section (`GraphConfig` in lk-core).
   `scope.dirs` (default `["wiki"]`), `min_hub_degree`, `orphan_exclude`,
   `cluster.*`. All `deny_unknown_fields`. Validated: non-empty, relative, no `..`.
-- **Wikilink resolution**: filename-based (`[[concept-a]]` matches any
-  `concept-a.md` regardless of directory depth). Anchors (`#heading`, `^block`)
-  stripped before resolution.
+- **Wikilink resolution** (`scan::normalize_target`): a bare target
+  (`[[concept-a]]`) matches any `concept-a.md` by filename, regardless of depth;
+  a path target (`[[daily/team-slack/2026-05-22]]`) matches that page id
+  (per-segment slugified, `/` preserved — *not* collapsed to `daily-…`). Anchors
+  (`#heading`, `^block`) stripped before resolution.
+- **Integrity checks vs analysis scope**: `hubs`/`cluster`/`suggest-links`
+  operate on the `graph.scope.dirs` subgraph (default `["wiki"]`). But
+  `broken`/`orphans`/`index-sync` resolve against a full-vault *existence
+  universe* (`scan::VaultExistence`, built via `build_with_existence`): a `wiki/`
+  page linking a `daily/` page is not broken, and a concept linked only from
+  `daily/` is not an orphan. Reserved meta pages (`index.md`, `AGENTS.md` —
+  `lk_core::vault_path::RESERVED_WIKI_FILES`) are never orphans or index-drift.
 - **Exit codes**: 0 = ok/no findings, 1 = findings, 2 = runtime error.
   `build`/`hubs`/`cluster`/`export`/`suggest-links` never exit 1.
 - **`suggest_links`**: pairs in the same Louvain community with no edge, ranked

@@ -104,14 +104,30 @@ fn run_inner(
     let (root, mut config) = resolve_config(opts, root_override)?;
 
     let pages = scan::scan_vault(&root, &config).map_err(|e| format!("{e}"))?;
-    let g = graph::WikiGraph::build(&pages);
+
+    // Integrity checks (broken links, orphans, index-sync) must reason about
+    // every page on disk, not just the analysis scope — otherwise a `wiki/`
+    // concept linking a `daily/` page reads as a broken link, and a concept
+    // linked only from `daily/` reads as an orphan. Only those commands pay for
+    // the full-vault scan; the structural commands (hubs/cluster/export/
+    // normalize/suggest-links) read the scope subgraph alone, whose edges are
+    // existence-independent, so scope-as-universe suffices for them.
+    let existence = if matches!(
+        cmd,
+        GraphCmd::Lint | GraphCmd::Broken | GraphCmd::Orphans | GraphCmd::IndexSync { .. }
+    ) {
+        build_vault_existence(&root, &config)?
+    } else {
+        scan::VaultExistence::from_pages(&pages)
+    };
+    let g = graph::WikiGraph::build_with_existence(&pages, &existence);
 
     let has_findings = match cmd {
         GraphCmd::Lint => {
             let hubs = g.hubs(10, config.graph.min_hub_degree);
             let orphans = g.orphans(&config);
             let broken = g.broken_links().to_vec();
-            let drift = index::diff(&g, &root, &config);
+            let drift = index::diff(&g, &existence, &root, &config);
 
             let findings = orphans.len()
                 + broken.len()
@@ -207,7 +223,7 @@ fn run_inner(
             false
         }
         GraphCmd::IndexSync { fix } => {
-            let drift = index::diff(&g, &root, &config);
+            let drift = index::diff(&g, &existence, &root, &config);
             let has = !drift.is_in_sync();
             let has_unfixable = !drift.missing_from_disk.is_empty();
             let fixed = if fix && !drift.missing_from_index.is_empty() {
@@ -360,10 +376,25 @@ fn resolve_config(
 /// the pipeline (`Event::date` is derived the same way), and `backlinks-sync`
 /// needs the locale to pick the `## <Sources>` heading text. A `--root` override
 /// gets system timezone + default locale (Ko), since no config is loaded.
+/// Scan the full vault into a [`scan::VaultExistence`] for integrity checks.
+/// Reuses the analysis `config` (exclude globs, follow_links) but widens the
+/// scope to every page directory, so broken-link and orphan detection reason
+/// about pages outside `graph.scope.dirs`.
+fn build_vault_existence(
+    root: &std::path::Path,
+    config: &GraphConfig,
+) -> Result<scan::VaultExistence, String> {
+    let mut full = config.clone();
+    full.scope.dirs = vault_page_dirs(root);
+    let pages = scan::scan_vault(root, &full).map_err(|e| format!("{e}"))?;
+    Ok(scan::VaultExistence::from_pages(&pages))
+}
+
 /// Every vault-relative page directory that exists on disk — anything that can
-/// wikilink another page belongs in the scope. Used by commands that need a full
-/// backlink view (not the user-configured `graph.scope.dirs`, which is
-/// intentionally narrowed for analysis like `lint`/`cluster`). Missing
+/// wikilink another page. Used by commands that need a full-vault view
+/// (`backlinks-sync`, and the existence universe behind `lint`'s integrity
+/// checks) rather than the user-configured `graph.scope.dirs`, which stays
+/// narrowed for structural analysis (`hubs`/`cluster`/`suggest-links`). Missing
 /// directories are skipped so a partially-populated vault doesn't error out.
 fn vault_page_dirs(root: &std::path::Path) -> Vec<PathBuf> {
     [

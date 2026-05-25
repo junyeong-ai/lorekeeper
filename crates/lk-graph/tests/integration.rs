@@ -101,7 +101,8 @@ fn index_sync_detects_drift() {
     let config = default_config();
     let pages = scan::scan_vault(&root, &config).unwrap();
     let g = graph::WikiGraph::build(&pages);
-    let drift = index::diff(&g, &root, &config);
+    let existence = scan::VaultExistence::from_pages(&pages);
+    let drift = index::diff(&g, &existence, &root, &config);
     // concept-c and orphan-page are missing from index.md
     assert!(!drift.is_in_sync());
 }
@@ -120,7 +121,8 @@ fn index_sync_fix_mutates_and_idempotent() {
     let g = graph::WikiGraph::build(&pages);
 
     // Before fix.
-    let drift = index::diff(&g, tmp.path(), &config);
+    let existence = scan::VaultExistence::from_pages(&pages);
+    let drift = index::diff(&g, &existence, tmp.path(), &config);
     assert!(!drift.is_in_sync());
 
     // Fix.
@@ -132,7 +134,8 @@ fn index_sync_fix_mutates_and_idempotent() {
     // After fix, re-scan to pick up potentially changed pages.
     let pages2 = scan::scan_vault(tmp.path(), &config).unwrap();
     let g2 = graph::WikiGraph::build(&pages2);
-    let drift2 = index::diff(&g2, tmp.path(), &config);
+    let existence2 = scan::VaultExistence::from_pages(&pages2);
+    let drift2 = index::diff(&g2, &existence2, tmp.path(), &config);
     assert!(drift2.is_in_sync());
 }
 
@@ -219,7 +222,8 @@ fn lint_combined_report() {
     let hubs = g.hubs(10, config.graph.min_hub_degree);
     let orphans = g.orphans(&config);
     let broken = g.broken_links().to_vec();
-    let drift = index::diff(&g, &root, &config);
+    let existence = scan::VaultExistence::from_pages(&pages);
+    let drift = index::diff(&g, &existence, &root, &config);
 
     let findings = orphans.len()
         + broken.len()
