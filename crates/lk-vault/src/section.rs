@@ -27,12 +27,13 @@ pub fn replace_section(content: &str, heading: &str, new_body: &str) -> String {
     let mut start_idx = None;
     for (i, line) in lines.iter().enumerate() {
         let stripped = line.strip_suffix('\n').unwrap_or(line);
+        let heading_line = stripped.trim_end();
         let trimmed = stripped.trim_start();
         if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
             in_fence = !in_fence;
             continue;
         }
-        if !in_fence && stripped == target {
+        if !in_fence && heading_line == target {
             start_idx = Some(i);
             break;
         }
@@ -47,12 +48,13 @@ pub fn replace_section(content: &str, heading: &str, new_body: &str) -> String {
     let mut end_idx = lines.len();
     for (rel, line) in lines[start_idx + 1..].iter().enumerate() {
         let stripped = line.strip_suffix('\n').unwrap_or(line);
+        let heading_line = stripped.trim_end();
         let trimmed = stripped.trim_start();
         if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
             in_fence = !in_fence;
             continue;
         }
-        if !in_fence && stripped.starts_with("## ") {
+        if !in_fence && heading_line.starts_with("## ") {
             end_idx = rel + start_idx + 1;
             break;
         }
@@ -95,6 +97,16 @@ mod tests {
         assert_eq!(
             out,
             "# Title\n\n## Sources\n\n- [[new1]]\n- [[new2]]\n\n## Meta\n\n- key: value\n"
+        );
+    }
+
+    #[test]
+    fn matches_headings_with_trailing_spaces() {
+        let doc = "# Title\n\n## Sources  \n\n- [[old]]\n\n## Meta   \n\n- key: value\n";
+        let out = replace_section(doc, "Sources", "- [[new]]");
+        assert_eq!(
+            out,
+            "# Title\n\n## Sources  \n\n- [[new]]\n\n## Meta   \n\n- key: value\n"
         );
     }
 

@@ -43,7 +43,7 @@ pub fn diff(
     // `normalize_target` so a path entry isn't collapsed to a bogus slug.
     let mut index_links = HashSet::new();
     for page in wikilink::extract_wikilinks(&content) {
-        let slug = normalize_target(page);
+        let slug = normalize_target(&page);
         if !slug.is_empty() {
             index_links.insert(slug);
         }

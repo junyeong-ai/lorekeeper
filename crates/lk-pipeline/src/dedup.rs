@@ -13,6 +13,53 @@ const CONTENT_HASHES: TableDefinition<&str, u64> = TableDefinition::new("content
 const URLS: TableDefinition<&str, u64> = TableDefinition::new("urls");
 const TITLES: TableDefinition<&str, u64> = TableDefinition::new("titles");
 
+pub(crate) fn normalize_url(raw: &str) -> String {
+    let Ok(mut url) = url::Url::parse(raw) else {
+        return raw.to_string();
+    };
+
+    let scheme = match url.scheme() {
+        "http" | "https" => "https",
+        other => {
+            // Non-HTTP schemes (ftp, mailto, …) are kept as-is since the
+            // scheme itself is semantically meaningful.
+            if url
+                .set_scheme(&other.to_ascii_lowercase())
+                .is_err()
+            {
+                return raw.to_string();
+            }
+            url.set_query(None);
+            url.set_fragment(None);
+            return url.to_string();
+        }
+    };
+    if url.set_scheme(scheme).is_err() {
+        return raw.to_string();
+    }
+
+    if let Some(host) = url.host_str() {
+        let host = host.to_ascii_lowercase();
+        if url.set_host(Some(&host)).is_err() {
+            return raw.to_string();
+        }
+    }
+
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+
+    let path = url.path();
+    if path.len() > 1 && path.ends_with('/') {
+        let path = path.trim_end_matches('/').to_string();
+        url.set_path(&path);
+    }
+
+    url.set_query(None);
+    url.set_fragment(None);
+
+    url.to_string()
+}
+
 /// True only for errors that mean the on-disk table layout no longer matches this build's
 /// schema. These are recoverable by recreating the cache. `Storage` errors (I/O, corruption)
 /// are NOT schema mismatches and must propagate.
@@ -203,6 +250,7 @@ impl DedupCache {
                     }
                     DedupStrategy::Url => {
                         if let Some(ref url) = event.url {
+                            let url = normalize_url(url);
                             let in_cache = match &tables {
                                 Some((_, _, urls, _)) => urls
                                     .get(url.as_str())
@@ -210,7 +258,7 @@ impl DedupCache {
                                     .is_some(),
                                 None => false,
                             };
-                            if seen_urls.contains(url) || in_cache {
+                            if seen_urls.contains(&url) || in_cache {
                                 dup = true;
                                 break;
                             }
@@ -257,7 +305,7 @@ impl DedupCache {
                 seen_ids.insert(event.id.as_str().to_string());
                 seen_hashes.insert(event.content_hash.clone());
                 if let Some(ref url) = event.url {
-                    seen_urls.insert(url.clone());
+                    seen_urls.insert(normalize_url(url));
                 }
                 novel.push(event);
             }
@@ -298,6 +346,7 @@ impl DedupCache {
                     .map_err(|e| PipelineError::Dedup(e.to_string()))?;
 
                 if let Some(ref url) = event.url {
+                    let url = normalize_url(url);
                     urls.insert(url.as_str(), now)
                         .map_err(|e| PipelineError::Dedup(e.to_string()))?;
                 }
@@ -386,6 +435,67 @@ mod tests {
             content_hash: lk_core::event::content_hash(title, ""),
             metadata: serde_json::Value::Null,
         }
+    }
+
+    #[test]
+    fn normalize_url_removes_trailing_slash() {
+        assert_eq!(
+            normalize_url("https://example.com/path/"),
+            "https://example.com/path"
+        );
+    }
+
+    #[test]
+    fn normalize_url_removes_query_params() {
+        assert_eq!(
+            normalize_url("https://example.com/path?utm_source=feed&id=1"),
+            "https://example.com/path"
+        );
+    }
+
+    #[test]
+    fn normalize_url_removes_fragment() {
+        assert_eq!(
+            normalize_url("https://example.com/path#section"),
+            "https://example.com/path"
+        );
+    }
+
+    #[test]
+    fn normalize_url_lowercases_scheme_and_host() {
+        assert_eq!(
+            normalize_url("HTTPS://EXAMPLE.COM/path"),
+            "https://example.com/path"
+        );
+    }
+
+    #[test]
+    fn normalize_url_leaves_already_normalized_url_unchanged() {
+        assert_eq!(
+            normalize_url("https://example.com/path"),
+            "https://example.com/path"
+        );
+    }
+
+    #[test]
+    fn normalize_url_leaves_non_url_string_unchanged() {
+        assert_eq!(normalize_url("not a url"), "not a url");
+    }
+
+    #[test]
+    fn normalize_url_upgrades_http_to_https() {
+        assert_eq!(
+            normalize_url("http://example.com/path"),
+            "https://example.com/path"
+        );
+    }
+
+    #[test]
+    fn normalize_url_strips_auth_info() {
+        assert_eq!(
+            normalize_url("https://user:pass@example.com/path"),
+            "https://example.com/path"
+        );
     }
 
     #[test]
@@ -503,6 +613,24 @@ mod tests {
         // Different URL is novel.
         let novel = vec![ev("c", "Other", Some("https://example.com/other"))];
         assert_eq!(cache.deduplicate(novel, &cascade).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn url_dedup_matches_normalized_urls() {
+        let dir = TempDir::new().unwrap();
+        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85).unwrap();
+        let cascade = vec![DedupStrategy::Url];
+
+        cache
+            .record(&[ev(
+                "a",
+                "First",
+                Some("HTTPS://EXAMPLE.COM/post/?utm_source=feed#section"),
+            )])
+            .unwrap();
+
+        let dup = vec![ev("b", "Reposted", Some("https://example.com/post"))];
+        assert_eq!(cache.deduplicate(dup, &cascade).unwrap().len(), 0);
     }
 
     #[test]

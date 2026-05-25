@@ -19,6 +19,7 @@ redb = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+url = "2"
 
 [dev-dependencies]
 tempfile = "3"

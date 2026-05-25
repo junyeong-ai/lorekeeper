@@ -100,7 +100,7 @@ fn parse_file(path: &Path, root: &Path) -> Result<Page, String> {
     let mut outgoing = Vec::new();
     let mut seen = HashSet::new();
     for raw_target in wikilink::extract_wikilinks(&parsed.body) {
-        let target = normalize_target(raw_target);
+        let target = normalize_target(&raw_target);
         if !target.is_empty() && seen.insert(target.clone()) {
             outgoing.push(target);
         }

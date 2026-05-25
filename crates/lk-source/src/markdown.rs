@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use lk_core::text::collapse_blank_lines;
 use serde_json::Value;
 
 /// Convert an HTML fragment to Markdown via `htmd`. On any conversion error the original
@@ -441,12 +442,6 @@ fn strip_emoji_shortcodes(text: &str) -> String {
     }
     out.push_str(rest);
     out
-}
-
-/// Squeeze 3+ consecutive newlines down to a paragraph break so converted blocks don't
-/// accumulate excess vertical whitespace.
-pub fn collapse_blank_lines(text: &str) -> String {
-    lk_core::text::collapse_blank_lines(text)
 }
 
 #[cfg(test)]
