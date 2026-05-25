@@ -35,7 +35,7 @@ impl ConceptDrafts {
     pub async fn merge(
         &mut self,
         concept: &ExtractedConcept,
-        source_id: &str,
+        source_ref: &str,
         date: jiff::civil::Date,
         reader: &VaultReader,
         dirs: &VaultDirs,
@@ -45,7 +45,7 @@ impl ConceptDrafts {
             return Ok(());
         };
 
-        let source_ref = strip_md_extension(&VaultPath::daily(dirs, source_id, date).to_string());
+        let source_ref = source_ref.to_string();
 
         if let Some(draft) = self.drafts.get_mut(&safe_slug) {
             draft.add_reference(source_ref, date);
@@ -204,7 +204,7 @@ pub fn is_valid(concept: &ExtractedConcept) -> bool {
     canonical_slug(&concept.slug, &concept.name).is_some()
 }
 
-fn strip_md_extension(s: &str) -> String {
+pub(crate) fn strip_md_extension(s: &str) -> String {
     s.strip_suffix(".md").unwrap_or(s).to_string()
 }
 

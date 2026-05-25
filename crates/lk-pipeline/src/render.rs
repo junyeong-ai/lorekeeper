@@ -147,7 +147,7 @@ pub fn render_document_page(
         _ => "note", // md, txt, markdown, and everything else
     };
 
-    let today = jiff::Zoned::now().date();
+    let date = event.date;
 
     let mut tags = vec!["document".to_string()];
     tags.extend(event.labels.iter().cloned());
@@ -163,8 +163,8 @@ pub fn render_document_page(
         "slug": slug,
         "title": event.title,
         "aliases": aliases,
-        "created": today.to_string(),
-        "updated": today.to_string(),
+        "created": date.to_string(),
+        "updated": date.to_string(),
         "document_type": document_type,
         "source_url": event.url,
         "source_file": source_file,
