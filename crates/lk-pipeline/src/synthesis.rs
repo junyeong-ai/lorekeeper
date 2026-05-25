@@ -17,6 +17,8 @@ pub struct Synthesizer {
 }
 
 impl Synthesizer {
+    const MAX_FALLBACK_CHARS: usize = 100_000;
+
     pub fn new(vault_root: &Path, ctx: Arc<PipelineContext>, config: &Config) -> Self {
         let reader = VaultReader::new(vault_root);
         let sources = if config.synthesis.weekly.include_sources.is_empty() {
@@ -285,9 +287,12 @@ impl Synthesizer {
             if pages.is_empty() {
                 return Ok(None);
             }
-            for page in &pages {
+            for page in pages.iter().rev() {
                 combined.push_str(&page.body);
                 combined.push_str("\n\n");
+            }
+            if combined.len() > Self::MAX_FALLBACK_CHARS {
+                combined.truncate(Self::MAX_FALLBACK_CHARS);
             }
         }
 

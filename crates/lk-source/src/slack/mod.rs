@@ -2,12 +2,16 @@ pub mod channel;
 pub mod search;
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use serde::Deserialize;
+use tokio::time::sleep;
 
 use crate::SourceError;
 
 const API: &str = "https://slack.com/api";
+const MAX_RETRIES: u32 = 3;
+const DEFAULT_RETRY_AFTER: u64 = 5;
 
 #[derive(Deserialize)]
 struct SlackResponse<T> {
@@ -26,37 +30,60 @@ async fn slack_post<T: serde::de::DeserializeOwned>(
     method: &str,
     params: &[(&str, &str)],
 ) -> Result<T, SourceError> {
-    let resp = http
-        .post(format!("{API}/{method}"))
-        .bearer_auth(token)
-        .form(params)
-        .send()
-        .await?;
+    let mut attempts = 0u32;
 
-    if !resp.status().is_success() {
-        let status = resp.status().as_u16();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(SourceError::Api {
-            status,
-            message: text,
-        });
+    loop {
+        let resp = http
+            .post(format!("{API}/{method}"))
+            .bearer_auth(token)
+            .form(params)
+            .send()
+            .await?;
+
+        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            attempts += 1;
+            if attempts > MAX_RETRIES {
+                let text = resp.text().await.unwrap_or_default();
+                return Err(SourceError::Api {
+                    status: 429,
+                    message: text,
+                });
+            }
+            let retry_after = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(DEFAULT_RETRY_AFTER);
+            sleep(Duration::from_secs(retry_after)).await;
+            continue;
+        }
+
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(SourceError::Api {
+                status,
+                message: text,
+            });
+        }
+
+        let wrapper: SlackResponse<T> = resp
+            .json()
+            .await
+            .map_err(|e| SourceError::Parse(e.to_string()))?;
+
+        if !wrapper.ok {
+            return Err(SourceError::Api {
+                status: 200,
+                message: wrapper
+                    .error
+                    .unwrap_or_else(|| "unknown Slack error".into()),
+            });
+        }
+
+        return Ok(wrapper.data);
     }
-
-    let wrapper: SlackResponse<T> = resp
-        .json()
-        .await
-        .map_err(|e| SourceError::Parse(e.to_string()))?;
-
-    if !wrapper.ok {
-        return Err(SourceError::Api {
-            status: 200,
-            message: wrapper
-                .error
-                .unwrap_or_else(|| "unknown Slack error".into()),
-        });
-    }
-
-    Ok(wrapper.data)
 }
 
 #[derive(Debug, Deserialize)]
