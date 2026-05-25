@@ -47,25 +47,10 @@ pub async fn render_work_log(
 
         let path = VaultPath::work_log(dirs, date);
 
-        let groups_json: Vec<serde_json::Value> = groups
-            .iter()
-            .map(|g| {
-                serde_json::json!({
-                    "category": g.category,
-                    "items": g.items.iter().map(|i| serde_json::json!({
-                        "title": i.title,
-                        "body_excerpt": i.body_excerpt,
-                        "source_id": i.source_id,
-                    })).collect::<Vec<_>>(),
-                })
-            })
-            .collect();
-
         let context = serde_json::json!({
             "date": date.to_string(),
             "categories": categories,
             "sources": sources,
-            "groups": groups_json,
             "i18n": locale.strings(),
         });
 
@@ -121,13 +106,7 @@ pub async fn render_work_log(
 
 struct WorkLogGroup {
     category: String,
-    items: Vec<WorkLogItem>,
-}
-
-struct WorkLogItem {
-    title: String,
-    body_excerpt: String,
-    source_id: String,
+    count: usize,
 }
 
 fn group_by_category(
@@ -140,31 +119,17 @@ fn group_by_category(
         .iter()
         .map(|c| WorkLogGroup {
             category: c.clone(),
-            items: vec![],
+            count: 0,
         })
         .collect();
 
     groups.push(WorkLogGroup {
         category: perf.uncategorized_label(locale).to_owned(),
-        items: vec![],
+        count: 0,
     });
     let other_idx = groups.len() - 1;
 
     for event in events {
-        let body_excerpt: String = event
-            .body
-            .chars()
-            .take(150)
-            .map(|c| if c == '\n' { ' ' } else { c })
-            .collect::<String>()
-            .trim()
-            .to_string();
-        let item = WorkLogItem {
-            title: event.title.clone(),
-            body_excerpt,
-            source_id: event.source_id.clone(),
-        };
-
         let category = perf.resolve_category(
             &event.source_id,
             event.source_type,
@@ -176,9 +141,9 @@ fn group_by_category(
             None => None,
         };
 
-        groups[idx.unwrap_or(other_idx)].items.push(item);
+        groups[idx.unwrap_or(other_idx)].count += 1;
     }
 
-    groups.retain(|g| !g.items.is_empty());
+    groups.retain(|g| g.count > 0);
     groups
 }

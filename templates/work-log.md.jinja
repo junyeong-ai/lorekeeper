@@ -11,16 +11,8 @@ sources: {{ sources | tojson }}
 
 ## {{ i18n.topic_summary }}
 
-## {{ i18n.details }}
+## {{ i18n.concept_sources }}
 
-{% for group in groups %}
-{% if group.items %}
-### {{ group.category }}
-
-{% for item in group.items %}
-- **{{ item.title }}** *({{ item.source_id }})*{% if item.body_excerpt %}
-  {{ item.body_excerpt }}{% endif %}
-{% endfor %}
-
-{% endif %}
+{% for source in sources %}
+- [[daily/{{ source }}/{{ date }}]]
 {% endfor %}
