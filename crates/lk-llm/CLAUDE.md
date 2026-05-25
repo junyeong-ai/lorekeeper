@@ -26,7 +26,7 @@ about; provider choice is config-driven (`build_llm_client` in lk-cli).
   uniform (`*PersonalNarrative` for monthly/quarterly/annual, matching weekly); serde
   kebab-case names stay for classification/logging.
 - **`ClassifyRequest`** does not carry a `TaskTarget` because classification is an
-  in-memory judgment (sets `Event.classification`), not a vault write. Only `anthropic`
+  in-memory judgment (sets `Event.work_category`), not a vault write. Only `anthropic`
   mode performs a synchronous call; `queue` and `noop` return `None`, and the event
   stays unclassified (safe degradation — daily page renders it in the general section).
 - **Providers**:

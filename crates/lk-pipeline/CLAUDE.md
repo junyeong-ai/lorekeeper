@@ -17,8 +17,8 @@ Deterministic transform stages between `lk-source` and `lk-vault`. Shares an
   http→https, host lowercase, trailing slash removal, auth stripping, tracking-param
   removal (`utm_*`, `fbclid`, `gclid`, `msclkid`, `ttclid`, `twclid`, `wbraid`,
   `gbraid`, …) with resource-identifying params preserved and sorted. Titles are
-  keyed by the title string alone and scanned across the full table (no date
-  partition). The cache is recreated only on a recoverable mismatch — a schema-type
+  compared case-insensitively (both sides lowercased) and scanned across the
+  full table (no date partition). The cache is recreated only on a recoverable mismatch — a schema-type
   change or an outdated on-disk format after a redb major upgrade
   (`DatabaseError::UpgradeRequired`) — never on I/O/corruption errors. On recreation
   the stale file is renamed to `*.redb.backup.{timestamp}-pid{pid}` (not deleted),
@@ -33,7 +33,7 @@ Deterministic transform stages between `lk-source` and `lk-vault`. Shares an
   unclassified events are sent to the LLM as a fallback (synchronous in `anthropic`
   mode; no-op in `queue` mode).
 - **Concept merge** reads existing `created`/`updated` frontmatter (the keys actually
-  written), preserves the original title, and dedupes `sources`/`reference_count`.
+  written), preserves the original title, and dedupes `sources`/`source_count`.
 - **Synthesizer** methods are `try_weekly_synthesis` + `try_*_personal`; they share
   `summarize_or_warn` (propagates only fatal LLM errors). `try_weekly_synthesis` uses
   `identify_themes` for structured JSON theme extraction. Every `TaskTarget` carries

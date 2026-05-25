@@ -146,7 +146,7 @@ templates/      Jinja2 markdown templates (.md.jinja, embedded in the binary)
 - `monthly/me/YYYY-MM.md` — monthly work summary
 - `quarterly/me/YYYY-Q{n}.md` — quarterly performance review
 - `annually/me/YYYY.md` — annual performance review
-- `wiki/concepts/{slug}.md` — extracted concepts (merge-on-rewrite: `reference_count` and `sources` accumulate)
+- `wiki/concepts/{slug}.md` — extracted concepts (merge-on-rewrite: `source_count` and `sources` accumulate)
 
 ## Templates
 

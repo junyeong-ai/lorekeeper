@@ -13,7 +13,7 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
 - **`SourceConfig.classify`** is a `Vec<ClassifyRule>` (ordered rules, first match
   wins), kept OUT of the free-form `params` so adapter params can use
   `deny_unknown_fields`. Validation rejects rules with empty keywords.
-- **`EventId::new(source_id, date, content)`** = `source:date:blake3(content)[..12]`.
+- **`EventId::new(source_id, date, content)`** = `source:date:blake3(content)[..16]`.
   In `lk-pipeline::normalize`, `content` is the `external_id` or a JSON array of
   `[title, body]` — never a bare concatenation (that collides).
 - **`slugify()`** lowercases + strips to `[alnum-]`; concept slugs are always
@@ -23,6 +23,7 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   string after the marker (per CommonMark). Single source consumed by lk-graph.
 - **`text::collapse_blank_lines`** squeezes 3+ newlines to a paragraph break,
   strips `\r`. Single source consumed by lk-vault, lk-pipeline, lk-source.
-- **`LlmConfig` defaults to `provider: queue`** (matches docs/example).
+- **`LlmConfig` defaults to `provider: queue`** (matches docs/example). Uses
+  `deny_unknown_fields` so typos in config keys are caught at load time.
 - **`VaultDirs.annual`** is the config key; its default directory value is `"annually"`
   (the on-disk folder series stays daily/weekly/monthly/quarterly/annually).

@@ -12,7 +12,7 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
 - **Config**: `config.yaml` `graph:` section (`GraphConfig` in lk-core).
   `scope.dirs` (default `["wiki"]`), `min_hub_degree`, `orphan_exclude`,
   `cluster.*`. All `deny_unknown_fields`. Validated: non-empty, relative, no `..`.
-- **Wikilink resolution** (`scan::normalize_target`): a bare target
+- **Wikilink resolution** (`scan::resolve_wikilink_target`): a bare target
   (`[[concept-a]]`) matches any `concept-a.md` by filename, regardless of depth;
   a path target (`[[daily/team-slack/2026-05-22]]`) matches that page id
   (per-segment slugified, `/` preserved — *not* collapsed to `daily-…`). Anchors

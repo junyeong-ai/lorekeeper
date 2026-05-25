@@ -138,7 +138,7 @@ locate key — never hardcode headings per `target.kind`.
         if present, names it). Output a list of concept names
         (in the source language). Each concept should also produce a
         `wiki/concepts/{slug}.md` entry (create if missing, merge if
-        exists — increment reference_count, append source ref).
+        exists — increment source_count, append source ref).
         **When creating a new concept page**, fill the `## 핵심` (Synthesis)
         section with a 1-2 sentence definition/context of the concept based
         on the source text. Don't leave it empty — even a first-appearance
@@ -166,7 +166,7 @@ locate key — never hardcode headings per `target.kind`.
         `- [[Concept Name 1]]\n- [[Concept Name 2]]\n...`.
         Create each concept page at `wiki/concepts/{slug}.md` if it
         doesn't exist (use frontmatter `id`, `title`, `created`,
-        `updated`, `reference_count`, `sources`, `tags`,
+        `updated`, `source_count`, `sources`, `tags`,
         and crucially `aliases: ["Concept Name"]` so the `[[Concept
         Name]]` links above resolve to the slug-named file — match the
         format of existing concept pages).
@@ -223,7 +223,7 @@ succeeded. Failure rules:
     edit produces identical content. No drift.
   - Concept page merging preserves original `first_seen` and dedupes the
     `sources` array — re-adding the same source ref is a no-op.
-  - `reference_count` is only incremented when a genuinely new source
+  - `source_count` is only incremented when a genuinely new source
     ref is appended.
 - **Never partially-commit progress** to the queue file itself
   (no `processed.jsonl` sidecar): the source-of-truth is the vault edits,
