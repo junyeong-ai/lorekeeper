@@ -13,8 +13,6 @@ pub struct Config {
     #[serde(default)]
     pub dedup: DedupConfig,
     #[serde(default)]
-    pub labels: LabelConfig,
-    #[serde(default)]
     pub performance: PerformanceConfig,
     #[serde(default)]
     pub synthesis: SynthesisConfig,
@@ -147,6 +145,25 @@ impl Config {
             validate_cron(sched).map_err(|e| {
                 ConfigError::Validation(format!("synthesis.{period}.schedule: {e}"))
             })?;
+        }
+
+        // A scheduled personal-review period can never run while the performance
+        // subsystem is off; reject the contradiction rather than emit a no-op cron.
+        // (Weekly is exempt — its cross-source themes run independently of performance.)
+        if !self.performance.enabled {
+            for (period, cfg) in [
+                ("monthly", &self.synthesis.monthly),
+                ("quarterly", &self.synthesis.quarterly),
+                ("annual", &self.synthesis.annual),
+            ] {
+                if cfg.enabled && cfg.schedule.is_some() {
+                    return Err(ConfigError::Validation(format!(
+                        "synthesis.{period} is scheduled but performance.enabled is false — \
+                         the review can never run; enable performance or clear \
+                         synthesis.{period}.schedule"
+                    )));
+                }
+            }
         }
 
         // Graph scope: dirs must be non-empty and vault-relative (no traversal).
@@ -492,27 +509,6 @@ pub enum DedupStrategy {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
-pub struct LabelConfig {
-    pub categories: Vec<String>,
-}
-
-impl Default for LabelConfig {
-    fn default() -> Self {
-        Self {
-            categories: vec![
-                "ai-industry".into(),
-                "ai-internal".into(),
-                "team-ops".into(),
-                "strategy".into(),
-                "personal".into(),
-                "learning".into(),
-            ],
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
 pub struct PerformanceConfig {
     pub enabled: bool,
     pub work_categories: Vec<String>,
@@ -574,9 +570,9 @@ impl Default for PerformanceConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct SynthesisConfig {
     pub weekly: WeeklySynthesisConfig,
-    pub monthly: PeriodSynthesisConfig,
-    pub quarterly: PeriodSynthesisConfig,
-    pub annual: PeriodSynthesisConfig,
+    pub monthly: PersonalReviewSynthesisConfig,
+    pub quarterly: PersonalReviewSynthesisConfig,
+    pub annual: PersonalReviewSynthesisConfig,
 }
 
 impl SynthesisConfig {
@@ -608,7 +604,7 @@ impl SynthesisConfig {
 
 /// Weekly synthesis carries the cross-source themes page on top of the personal
 /// weekly narrative, so it alone takes `include_sources`. The other periods are
-/// work-log-only performance reviews and share the leaner `PeriodSynthesisConfig`.
+/// work-log-only performance reviews and share the leaner `PersonalReviewSynthesisConfig`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct WeeklySynthesisConfig {
@@ -633,12 +629,12 @@ impl Default for WeeklySynthesisConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct PeriodSynthesisConfig {
+pub struct PersonalReviewSynthesisConfig {
     pub enabled: bool,
     pub schedule: Option<String>,
 }
 
-impl Default for PeriodSynthesisConfig {
+impl Default for PersonalReviewSynthesisConfig {
     fn default() -> Self {
         Self {
             enabled: true,
@@ -1062,6 +1058,30 @@ synthesis:
 "#;
         let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_scheduled_review_when_performance_disabled() {
+        let yaml = r#"
+vault:
+  root: /tmp/vault
+identity:
+  name: test
+  email: test@test.com
+sources:
+  s1:
+    type: gmail
+performance:
+  enabled: false
+synthesis:
+  monthly:
+    schedule: "0 8 1 * *"
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(
+            config.validate().is_err(),
+            "scheduling a personal review with performance disabled must be rejected"
+        );
     }
 
     #[test]

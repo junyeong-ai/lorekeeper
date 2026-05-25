@@ -4,8 +4,8 @@ use tempfile::TempDir;
 
 use lk_core::concept::{Confidence, ExtractedConcept};
 use lk_core::config::{
-    Config, DedupConfig, Identity, LabelConfig, PerformanceConfig, SourceConfig, SourceType,
-    SynthesisConfig, VaultConfig, VaultDirs,
+    Config, DedupConfig, Identity, PerformanceConfig, SourceConfig, SourceType, SynthesisConfig,
+    VaultConfig, VaultDirs,
 };
 use lk_core::event::RawItem;
 use lk_llm::{LlmClient, MockLlmClient, NoopLlmClient};
@@ -43,7 +43,6 @@ fn base_config(vault_root: &std::path::Path) -> Config {
         },
         sources,
         dedup: DedupConfig::default(),
-        labels: LabelConfig::default(),
         performance: PerformanceConfig::default(),
         synthesis: SynthesisConfig::default(),
         llm: Default::default(),

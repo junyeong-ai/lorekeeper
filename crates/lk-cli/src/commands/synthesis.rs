@@ -68,7 +68,14 @@ pub async fn run(opts: &super::GlobalOpts, period: Period) -> miette::Result<()>
                 outs.push(out);
             }
             if outs.is_empty() {
-                eprintln!("No source data found for week of {target}.");
+                if !perf_on && config.synthesis.weekly.include_sources.is_empty() {
+                    eprintln!(
+                        "Weekly synthesis produced nothing: include_sources is empty and \
+                         performance.enabled is false — nothing is configured to run."
+                    );
+                } else {
+                    eprintln!("No source data found for week of {target}.");
+                }
             }
             outs
         }

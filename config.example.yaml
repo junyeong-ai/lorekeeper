@@ -234,18 +234,6 @@ dedup:
   cascade: [event-id, content-hash, url, title]
   title_threshold: 0.85
 
-# ─── 라벨 ────────────────────────────────────────────────
-labels:
-  categories:
-    - tech
-    - ai-tech
-    - ai-industry
-    - ai-internal
-    - team-ops
-    - strategy
-    - personal
-    - learning
-
 # ─── 성과 추적 ───────────────────────────────────────────
 performance:
   # Master switch for the work-log/performance subsystem (work-log generation +
