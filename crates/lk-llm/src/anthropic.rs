@@ -51,7 +51,7 @@ impl AnthropicClient {
                 .http
                 .post("https://api.anthropic.com/v1/messages")
                 .header("x-api-key", &self.api_key)
-                .header("anthropic-version", "2023-06-01")
+                .header("anthropic-version", "2024-10-22")
                 .json(&body)
                 .send()
                 .await?;
@@ -75,7 +75,8 @@ impl AnthropicClient {
             }
 
             if !resp.status().is_success() {
-                let text = resp.text().await.unwrap_or_default();
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_else(|e| format!("{status}: <body read failed: {e}>"));
                 return Err(LlmError::Api(text));
             }
 

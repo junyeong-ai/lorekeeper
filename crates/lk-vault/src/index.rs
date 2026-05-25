@@ -12,6 +12,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use jiff::Timestamp;
 use lk_core::frontmatter::parse_page;
@@ -19,6 +20,10 @@ use lk_core::i18n::Locale;
 use walkdir::WalkDir;
 
 use crate::VaultError;
+
+/// Monotonic sequence counter for atomic temp file uniqueness (mirrors `TMP_SEQ` in
+/// `writer.rs` but scoped to index writes).
+static INDEX_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Hard cap on the one-line summary appended after each `[[wikilink]]`.
 const SUMMARY_MAX_CHARS: usize = 100;
@@ -156,7 +161,8 @@ pub async fn write_index(vault_root: &Path, locale: Locale) -> Result<PathBuf, V
     let wiki_dir = vault_root.join("wiki");
     tokio::fs::create_dir_all(&wiki_dir).await?;
     let final_path = wiki_dir.join("index.md");
-    let tmp_path = wiki_dir.join(format!(".index.md.tmp.{}", std::process::id()));
+    let seq = INDEX_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = wiki_dir.join(format!(".index.md.{}.{seq}.tmp", std::process::id()));
 
     match tokio::fs::write(&tmp_path, &content).await {
         Ok(()) => {}
@@ -633,13 +639,13 @@ mod tests {
         let content = tokio::fs::read_to_string(&path).await.unwrap();
         assert!(content.contains("[[X]]"));
 
-        // Ensure no `.index.md.tmp.*` leftovers in wiki/.
+        // Ensure no `.index.md.*` temp leftovers in wiki/.
         let mut entries = tokio::fs::read_dir(tmp.path().join("wiki")).await.unwrap();
         while let Some(entry) = entries.next_entry().await.unwrap() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
             assert!(
-                !name.starts_with(".index.md.tmp"),
+                !name.ends_with(".tmp"),
                 "leftover temp file: {name}"
             );
         }

@@ -561,11 +561,19 @@ pub struct PerformanceConfig {
     pub source_category_map: BTreeMap<String, String>,
     /// Per-source-type default category (fallback when source_category_map has no entry).
     pub source_type_category_map: BTreeMap<SourceType, String>,
-    /// Label used for events that match no category.
-    pub uncategorized_label: String,
+    /// Label used for events that match no category. When `None`, falls back
+    /// to the locale-appropriate default via `uncategorized_label()`.
+    pub uncategorized_label: Option<String>,
 }
 
 impl PerformanceConfig {
+    /// Resolve the uncategorized label, falling back to the locale default.
+    pub fn uncategorized_label(&self, locale: crate::i18n::Locale) -> &str {
+        self.uncategorized_label
+            .as_deref()
+            .unwrap_or(locale.strings().uncategorized)
+    }
+
     /// Resolve the work category for an event, checking source-ID map, then source-type map,
     /// then work_category, falling back to `None`.
     pub fn resolve_category(
@@ -606,7 +614,7 @@ impl Default for PerformanceConfig {
             ],
             source_category_map: BTreeMap::new(),
             source_type_category_map,
-            uncategorized_label: "기타".into(),
+            uncategorized_label: None,
         }
     }
 }
@@ -689,7 +697,7 @@ impl Default for PersonalReviewSynthesisConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct LlmConfig {
     pub provider: LlmProvider,
     pub model: String,

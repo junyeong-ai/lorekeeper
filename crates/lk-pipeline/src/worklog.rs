@@ -32,7 +32,7 @@ pub async fn render_work_log(
 
     let mut outputs = Vec::new();
     for (date, day_events) in by_date {
-        let groups = group_by_category(&day_events, perf);
+        let groups = group_by_category(&day_events, perf, locale);
         if groups.is_empty() {
             continue;
         }
@@ -128,7 +128,7 @@ struct WorkLogItem {
     source_id: String,
 }
 
-fn group_by_category(events: &[Event], perf: &PerformanceConfig) -> Vec<WorkLogGroup> {
+fn group_by_category(events: &[Event], perf: &PerformanceConfig, locale: Locale) -> Vec<WorkLogGroup> {
     let mut groups: Vec<WorkLogGroup> = perf
         .work_categories
         .iter()
@@ -139,7 +139,7 @@ fn group_by_category(events: &[Event], perf: &PerformanceConfig) -> Vec<WorkLogG
         .collect();
 
     groups.push(WorkLogGroup {
-        category: perf.uncategorized_label.clone(),
+        category: perf.uncategorized_label(locale).to_owned(),
         items: vec![],
     });
     let other_idx = groups.len() - 1;

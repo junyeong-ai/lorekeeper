@@ -307,15 +307,16 @@ impl DedupCache {
                                 let entry =
                                     entry.map_err(|e| PipelineError::Dedup(e.to_string()))?;
                                 let key = entry.0.value();
-                                if sorensen_dice(&event.title, key) >= self.title_threshold {
+                                if sorensen_dice(&event.title.to_lowercase(), &key.to_lowercase()) >= self.title_threshold {
                                     dup = true;
                                     break;
                                 }
                             }
                         }
                         if !dup {
+                            let event_title_lower = event.title.to_lowercase();
                             dup = novel.iter().any(|n| {
-                                sorensen_dice(&n.title, &event.title) >= self.title_threshold
+                                sorensen_dice(&n.title.to_lowercase(), &event_title_lower) >= self.title_threshold
                             });
                         }
                         if dup {

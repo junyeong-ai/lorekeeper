@@ -30,7 +30,7 @@ impl EventId {
     pub fn new(source_id: &str, date: jiff::civil::Date, content: &str) -> Self {
         let hash = blake3::hash(content.as_bytes());
         let hex = hash.to_hex();
-        let short = &hex[..12];
+        let short = &hex[..16];
         Self(format!("{source_id}:{date}:{short}"))
     }
 
@@ -59,6 +59,10 @@ impl std::fmt::Display for EventId {
     }
 }
 
+/// Intermediate representation produced by source adapters before normalization.
+/// Each adapter maps its API response into one or more `RawItem`s, which
+/// `lk-pipeline::normalize` then converts into `Event`s (assigning date, id,
+/// content hash, etc.).
 #[derive(Debug, Clone)]
 pub struct RawItem {
     pub external_id: Option<String>,
