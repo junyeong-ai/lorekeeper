@@ -79,7 +79,7 @@ sources:
         ORDER BY updated DESC
       max_results: 50
     labels: [personal]
-    extract_concepts: false
+    extract_concepts: true
     track_personal: true
 
   my-schedule:
@@ -92,7 +92,7 @@ sources:
       lookahead_hours: 24
       fetch_meeting_notes: true  # Google Drive 링크의 회의록 자동 추출
     labels: [personal]
-    extract_concepts: false
+    extract_concepts: true
     track_personal: true
 
   email-digest:
