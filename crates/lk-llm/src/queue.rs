@@ -36,12 +36,13 @@ pub struct QueueTask {
     pub target: TaskTarget,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TaskKind {
     Summarize,
     ExtractConcepts,
     IdentifyThemes,
+    RefineEvents,
 }
 
 impl QueueLlmClient {
@@ -93,9 +94,18 @@ impl LlmClient for QueueLlmClient {
         if let Some(focus) = &req.focus {
             input["focus"] = serde_json::Value::String(focus.clone());
         }
+        let kind = if req.target.kind == crate::TargetKind::DailyRefineEvents {
+            TaskKind::RefineEvents
+        } else {
+            TaskKind::Summarize
+        };
         let task = QueueTask {
-            task_id: self.next_id("sum"),
-            kind: TaskKind::Summarize,
+            task_id: self.next_id(if kind == TaskKind::RefineEvents {
+                "ref"
+            } else {
+                "sum"
+            }),
+            kind,
             created_at: jiff::Timestamp::now(),
             input,
             target: req.target,

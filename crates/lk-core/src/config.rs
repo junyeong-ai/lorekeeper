@@ -534,6 +534,13 @@ impl SourceType {
     /// (`{source-id}.md.jinja`) take precedence at render time; this is the
     /// type-level fallback. Co-located with the enum so adding a source type
     /// is a single-site change the compiler enforces exhaustively.
+    pub fn events_heading(self, strings: &crate::i18n::Strings) -> &'static str {
+        match self {
+            SourceType::SlackChannel | SourceType::SlackSearch => strings.key_messages,
+            _ => strings.key_events,
+        }
+    }
+
     pub fn default_template_name(self) -> &'static str {
         match self {
             SourceType::Gmail => "gmail.md.jinja",

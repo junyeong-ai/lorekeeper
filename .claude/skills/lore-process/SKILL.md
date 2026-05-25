@@ -86,8 +86,9 @@ Each line in a queue file is one task:
 }
 ```
 
-`kind` values: `summarize` | `extract-concepts` | `identify-themes`
-`target.kind` values: `daily-summary` | `daily-concepts` |
+`kind` values: `summarize` | `extract-concepts` | `identify-themes` | `refine-events`
+`target.kind` values: `daily-summary` | `daily-refine-events` | `daily-concepts` |
+`document-summary` | `document-concepts` |
 `weekly-synthesis-narrative` | `weekly-personal-narrative` |
 `monthly-personal-narrative` | `quarterly-personal-narrative` |
 `annual-personal-narrative` | `work-log-synthesis`
@@ -137,9 +138,6 @@ locate key — never hardcode headings per `target.kind`.
         - Ignore repetitive agreement messages (ok, +1, sounds good)
         - Structure as: decision/outcome → action items → context
         - Preserve technical details, project names, and links
-        - **After filling `## 요약`, also rewrite `## 주요 메시지`**: for
-          each thread, replace the raw dump with a distilled Korean
-          summary (decisions, outcomes, context). Keep the 🔗 link.
 
         **Email sources** (`email-digest`, `*-email`):
         - Extract the core ask or decision from each email
@@ -151,30 +149,31 @@ locate key — never hardcode headings per `target.kind`.
         - Focus on key findings, announcements, techniques
         - For technical articles: what it is, why it matters, key numbers
         - Skip author bios, CTAs, navigation artifacts
-        - **After filling `## 요약`, also rewrite `## 주요 이벤트`** in the
-          target page: for each `### event title`, replace the raw English
-          body with a Korean knowledge summary (2-5 sentences covering
-          what it is, why it matters, key details). Keep the original
-          `🔗 URL` link for traceability. Remove HN metadata noise
-          (Points, Comments, Article URL duplicates).
 
         **Calendar sources** (`my-schedule`):
         - Highlight meeting outcomes and decisions if notes are present
-        - Link events to related projects/concepts
-        - **After filling `## 요약`, also rewrite `## 주요 이벤트`**: for
-          each event, if meeting notes are embedded (long text), distill
-          to a Korean summary (decisions, action items, key discussion
-          points, 5-10 sentences). Keep 🔗 link and attendee list.
 
         **Jira sources** (`my-tasks`):
-        - **After filling `## 요약`, also rewrite `## 주요 이벤트`**: for
-          each Jira issue, replace the full description with a Korean
-          knowledge summary (3-5 sentences: what the issue is about,
-          current status, key deliverables/blockers). Keep 🔗 Jira link.
+        - Summarize key task status changes and deliverables
 
         For all types: produce genuine knowledge, not just headlines.
         Not too short (meaningless one-liners) nor too verbose (raw dump).
         Always preserve source URLs/links for traceability.
+
+      - **`kind: refine-events`** — rewrite the raw event bodies under
+        `target.anchor` (e.g. `## 주요 이벤트` or `## 주요 메시지`)
+        into refined knowledge in `input.locale` language.
+
+        For EACH `### event heading` in the section:
+        1. Replace the raw body with a knowledge summary (2-5 sentences)
+        2. Cover: what it is, why it matters, key details/decisions
+        3. Keep the original `🔗` source link for traceability
+        4. Remove noise: HN metadata (Points, Comments, Article URL),
+           email signatures, raw thread dumps, Jira checklists
+        5. If meeting notes are embedded, distill to decisions + action items
+
+        The `### heading` lines themselves must be preserved — only
+        replace the body text between headings.
 
       - **`kind: identify-themes`** — extract structured themes from
         the combined multi-source text. Identify the top N themes

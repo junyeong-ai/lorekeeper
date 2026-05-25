@@ -229,6 +229,32 @@ impl Pipeline {
                 }
             };
 
+            let events_anchor = format!(
+                "## {}",
+                config.source_type.events_heading(self.ctx.locale.strings())
+            );
+            if let Err(e) = self
+                .ctx
+                .llm
+                .summarize(lk_llm::SummarizeRequest {
+                    text: combined.clone(),
+                    max_sentences: day_events.len().min(20),
+                    focus: focus.clone(),
+                    locale: self.ctx.locale.tag().to_string(),
+                    target: lk_llm::TaskTarget {
+                        vault_path: daily_path.clone(),
+                        kind: lk_llm::TargetKind::DailyRefineEvents,
+                        anchor: events_anchor,
+                    },
+                })
+                .await
+            {
+                if e.is_fatal() {
+                    return Err(PipelineError::Llm(e));
+                }
+                tracing::warn!(error = %e, "refine-events task failed; events stay as raw");
+            }
+
             let day_concepts: Vec<ExtractedConcept> = if config.extract_concepts {
                 match self
                     .ctx

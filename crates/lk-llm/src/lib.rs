@@ -62,6 +62,9 @@ pub enum TargetKind {
     AnnualPersonalNarrative,
     /// Cross-source topic synthesis for a work-log page.
     WorkLogSynthesis,
+    /// Refine event bodies in-place: translate to locale language, distill raw
+    /// content to knowledge summaries, remove noise, keep source links.
+    DailyRefineEvents,
     /// Document page summary.
     DocumentSummary,
     /// Document page concept wiki-links.
