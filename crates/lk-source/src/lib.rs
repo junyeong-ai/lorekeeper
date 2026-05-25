@@ -3,6 +3,7 @@ mod google;
 mod jira;
 mod manual;
 pub(crate) mod markdown;
+mod rss;
 mod slack;
 
 use std::sync::Arc;
@@ -99,6 +100,7 @@ pub fn validate_params(
         SourceType::SlackChannel => slack::channel::validate_params(params),
         SourceType::SlackSearch => slack::search::validate_params(params),
         SourceType::Jira => jira::validate_params(params),
+        SourceType::Rss => rss::validate_params(params),
         SourceType::Manual => manual::validate_params(params),
     }
 }
@@ -175,6 +177,8 @@ pub fn create_source(
             })?;
             Ok(Box::new(jira::JiraSource::new(http, jc.clone())))
         }
+        // RSS feeds are public HTTP — no credentials.
+        SourceType::Rss => Ok(Box::new(rss::RssSource::new(http))),
         SourceType::Manual => Ok(Box::new(manual::ManualSource::new())),
     }
 }
@@ -225,6 +229,10 @@ mod tests {
                 serde_json::json!({"queries": [{"channel": "#x", "keywords": ["a"]}]}),
             ),
             (SourceType::Jira, serde_json::json!({"jql": "x"})),
+            (
+                SourceType::Rss,
+                serde_json::json!({"feeds": [{"id": "openai", "url": "https://openai.com/news/rss.xml"}]}),
+            ),
         ];
         for (st, params) in cases {
             assert!(validate_params(st, &params).is_ok(), "valid {st} params");

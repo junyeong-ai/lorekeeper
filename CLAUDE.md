@@ -87,11 +87,12 @@ Auto-discovered: `./config.yaml` → `~/.config/lorekeeper/config.yaml`.
 
 | Type | Adapter | Use for |
 |------|---------|---------|
-| `google-drive` | Drive API | File-based sources (newsletters) |
-| `gmail` | Gmail API | Email digest |
+| `google-drive` | Drive API | File-based sources (curated docs in a Drive folder) |
+| `gmail` | Gmail API | Email digest; newsletters split out via a Gmail label (`label:` / `-label:`) |
 | `slack-channel` | Slack API | Channel reader (threads, bot filter, watch_users) |
 | `slack-search` | Slack API | Keyword trend search (user token required) |
 | `jira` | Jira REST API | Issue tracking (ADF→Markdown, status/period snapshot) |
 | `google-calendar` | Calendar API | Schedule tracking (HTML→Markdown) |
+| `rss` | RSS/Atom (`feed-rs`) | External knowledge feeds (vendor blogs, news) → concepts; no auth, multi-feed, per-feed error isolation |
 | `manual` | Local inbox | User-curated files dropped in `inbox/` (md/txt/markdown/json by default; opt-in archive) |
 

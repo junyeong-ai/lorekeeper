@@ -21,8 +21,10 @@ events_count: {{ events | length }}
 {{ event.body }}
 
 {% endfor %}
+{% if extract_concepts %}
 ## {{ i18n.related_concepts }}
 
 {% for concept in concepts %}
 - [[{{ concept }}]]
 {% endfor %}
+{% endif %}

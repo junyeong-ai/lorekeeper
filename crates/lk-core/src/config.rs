@@ -404,6 +404,9 @@ pub enum SourceType {
     SlackSearch,
     Jira,
     GoogleCalendar,
+    /// RSS/Atom feed reader for external knowledge sources (vendor blogs, news
+    /// aggregators). Public HTTP, no credentials. One source can poll many feeds.
+    Rss,
     /// User-curated inbox: files dropped into `<vault>/inbox/` are picked up,
     /// processed through the same pipeline as automated sources, and archived.
     Manual,
@@ -422,6 +425,7 @@ impl SourceType {
             SourceType::SlackChannel => "slack-channel.md.jinja",
             SourceType::SlackSearch => "slack-search.md.jinja",
             SourceType::Jira => "jira.md.jinja",
+            SourceType::Rss => "rss.md.jinja",
             SourceType::Manual => "manual.md.jinja",
         }
     }

@@ -34,6 +34,12 @@ map to `RawItem`.
     true) drops bot posts from root + replies. Text → `markdown::slack_to_markdown`.
     `search.messages` (slack-search) is user-token-only per Slack. Tokens: `history_token`
     prefers bot (xoxb), `search_token` requires user (xoxp).
+  - **RSS** (`rss.rs`): one source polls many public feeds (`feeds: [{id, url}]`) via
+    `feed-rs` (RSS/Atom/JSON Feed) — no credentials. A feed that 404s or fails to parse is
+    `tracing::warn!`-skipped, never aborting the source. `body` is `content`→`summary` HTML
+    run through `markdown::html_to_markdown`. An entry with no `published`/`updated` date is
+    skipped (NOT dated to `now` — that would misfile old posts onto today); likewise a
+    title-less entry. Provenance: entry author → feed title → configured feed id.
   - **Error isolation**: individual item failures (thread fetch, file download) are caught
     with `tracing::warn!` and skipped — one inaccessible thread or file does not abort the
     entire source. All API list endpoints are cursor-paginated with per-adapter caps

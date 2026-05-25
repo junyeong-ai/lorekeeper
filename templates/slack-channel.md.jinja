@@ -22,8 +22,10 @@ events_count: {{ events | length }}
 {% if event.author %}— {{ event.author }}{% endif %}{% if event.url %} [🔗]({{ event.url }}){% endif %}
 
 {% endfor %}
+{% if extract_concepts %}
 ## {{ i18n.related_concepts }}
 
 {% for concept in concepts %}
 - [[{{ concept }}]]
 {% endfor %}
+{% endif %}

@@ -19,6 +19,10 @@ pub struct RenderContext<'a> {
     pub labels: &'a [String],
     pub summary: &'a str,
     pub concepts: &'a [String],
+    /// Whether this source extracts concepts. Templates render the `## 관련 개념`
+    /// section only when true, so awareness-only sources (e.g. aggregators with
+    /// `extract_concepts: false`) don't carry a permanently-empty section.
+    pub extract_concepts: bool,
     pub locale: Locale,
 }
 
@@ -35,6 +39,7 @@ pub fn render_daily_page(
         labels,
         summary,
         concepts,
+        extract_concepts,
         locale,
     } = *ctx;
     let strings = locale.strings();
@@ -72,6 +77,7 @@ pub fn render_daily_page(
         "events": events_json,
         "summary": summary,
         "concepts": concepts,
+        "extract_concepts": extract_concepts,
         "i18n": strings,
         "total": events.len(),
         "filtered": events.len(),

@@ -258,6 +258,7 @@ impl Pipeline {
                     labels: &labels,
                     summary: &summary,
                     concepts: &concept_names,
+                    extract_concepts: config.extract_concepts,
                     locale: self.ctx.locale,
                 },
                 &self.ctx.engine,

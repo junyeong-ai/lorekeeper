@@ -62,8 +62,10 @@ action_required: {{ action_count }}
 - {{ i18n.meaningful_mail }}: {{ filtered }}{{ i18n.count_unit }} ({{ i18n.filter_rate }}: {{ filter_rate }}%)
 - {{ i18n.action_required }}: {{ action_count }}{{ i18n.count_unit }}
 
+{% if extract_concepts %}
 ## {{ i18n.related_concepts }}
 
 {% for concept in concepts %}
 - [[{{ concept }}]]
 {% endfor %}
+{% endif %}

@@ -1,13 +1,13 @@
 ---
 id: {{ source_id }}-{{ date }}
-title: "{{ i18n.jira_title }} {{ date }}"
+title: "{{ i18n.rss_title }} {{ date }}"
 created: {{ date }}
 labels: {{ labels | tojson }}
 source: {{ source_id }}
 events_count: {{ events | length }}
 ---
 
-# {{ i18n.jira_title }} {{ date }}
+# {{ i18n.rss_title }} {{ date }}
 
 ## {{ i18n.summary }}
 
@@ -15,16 +15,19 @@ events_count: {{ events | length }}
 
 ## {{ i18n.key_events }}
 
-{% for event in events %}
-### {{ event.title }}
+{% for item in events -%}
+### {{ item.title }}
 
-{{ event.body }}
+{% if item.author %}*{{ item.author }}*{% endif %}{% if item.url %} · 🔗 {{ item.url }}{% endif %}
+
+{{ item.summary }}
 
 {% endfor %}
+
 {% if extract_concepts %}
 ## {{ i18n.related_concepts }}
 
-{% for concept in concepts %}
+{% for concept in concepts -%}
 - [[{{ concept }}]]
 {% endfor %}
 {% endif %}
