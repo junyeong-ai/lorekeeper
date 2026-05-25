@@ -3,8 +3,8 @@
 Domain types and config — no I/O, no async. Depended on by every other crate.
 
 - **`Config::load` validates eagerly**: `validate()` rejects empty/`/`-containing source
-  IDs, bad cron, out-of-range thresholds, unknown synthesis/category references, and —
-  importantly — `vault.dirs.*` values that are absolute or contain `..` (path-traversal
+  IDs, bad cron, out-of-range thresholds, empty dedup cascade, unknown synthesis/category
+  references, and `vault.dirs.*` values that are absolute or contain `..` (path-traversal
   guard before any path is built). A relative `vault.root` is resolved against the config
   file's parent directory.
 - **`SourceType` is a closed enum** with `default_template_name()` co-located on it.

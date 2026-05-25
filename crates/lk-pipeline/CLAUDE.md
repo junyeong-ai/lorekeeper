@@ -1,7 +1,7 @@
 # lk-pipeline
 
 Deterministic transform stages between `lk-source` and `lk-vault`. Shares an
-`Arc<PipelineContext>` (engine, llm, dirs, perf, identity, timezone) with the
+`Arc<PipelineContext>` (engine, llm, dirs, perf, identity, timezone, locale) with the
 `Synthesizer`.
 
 - **`Pipeline::plan` is per-source**; it returns that source's daily pages and merges
@@ -28,7 +28,8 @@ Deterministic transform stages between `lk-source` and `lk-vault`. Shares an
   (`kim`⊄`kimberly`, `test@x.com`⊄`test@x.com.au`); `@` is intentionally excluded so
   Slack `<@U…>` mentions still match. `classify_by_keywords` reads
   `SourceConfig.classify` (ordered `Vec<ClassifyRule>`, first match wins) and uses
-  plain substring — correct for CJK keywords. When `classify_with_llm` is true,
+  `contains_bounded` (token-boundary match) — prevents substring false positives
+  while remaining correct for CJK keywords. When `classify_with_llm` is true,
   unclassified events are sent to the LLM as a fallback (synchronous in `anthropic`
   mode; no-op in `queue` mode).
 - **Concept merge** reads existing `created`/`updated` frontmatter (the keys actually

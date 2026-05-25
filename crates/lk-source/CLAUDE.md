@@ -1,6 +1,6 @@
 # lk-source
 
-Source adapters. Each implements `Source::extract(params, ctx) -> Vec<RawItem>`;
+Source adapters. Each implements `Source::extract(params, ctx) -> Result<Vec<RawItem>, SourceError>`;
 `create_source(source_type, ..)` is the factory. No dedup/render here — just fetch +
 map to `RawItem`.
 
@@ -17,15 +17,15 @@ map to `RawItem`.
   - **Drive**: `folder`/`file_pattern` go through `escape_drive_literal` (`\` and `'`)
     before interpolation into the query string.
   - **Calendar**: `calendar_id` is percent-encoded via `Url::path_segments_mut`; all-day
-    events parse `start.date` as a civil date in the vault tz (not `Timestamp::parse`,
-    which would fall back to `now`). `description` is HTML → `markdown::html_to_markdown`.
+    events parse `start.date` as a civil date in the vault tz. Events with unparseable
+    timestamps are skipped. `description` is HTML → `markdown::html_to_markdown`.
   - **Gmail**: uses epoch-second `after:`/`before:` from `day_window` (timezone-exact);
     the `include_queries` OR group is parenthesized so the bounds bind to every term.
   - **Jira**: current `GET /rest/api/3/search/jql` (the old `/search` was removed, returns
-    410). `description` is ADF JSON → `markdown::adf_to_markdown`. Search by `updated` only
-    (a daily *work snapshot*); `duedate` + `customfield_10015` (start date) render as a
-    status/period header but are never search filters — they change and would corrupt past
-    snapshots.
+    410). `description` is ADF JSON → `markdown::adf_to_markdown`. The user supplies a
+    `jql` query string directly in config; convention is to search by `updated` for daily
+    work snapshots. `duedate` + `customfield_10015` (start date) render as a status/period
+    header.
   - **Slack**: every call goes through `slack_post` as `x-www-form-urlencoded` (JSON is
     rejected by read methods like `search.messages`). `resolve_channel_id` passes bare ids
     (`C…/G…/D…`) through and only name-resolves `#name`. `slack-channel` reads whole channels
@@ -40,12 +40,13 @@ map to `RawItem`.
     run through `markdown::html_to_markdown`. An entry with no `published`/`updated` date is
     skipped (NOT dated to `now` — that would misfile old posts onto today); likewise a
     title-less entry. Provenance: entry author → feed title → configured feed id.
-  - **Error isolation**: individual item failures (thread fetch, file download) are caught
-    with `tracing::warn!` and skipped — one inaccessible thread or file does not abort the
-    entire source. All API list endpoints are cursor-paginated with per-adapter caps
-    (Slack history 500, replies 200, Gmail 200).
+  - **Error isolation**: individual item failures (thread fetch, file download, timestamp
+    parse) are caught with `tracing::warn!` and skipped — one inaccessible thread or file
+    does not abort the entire source. Gmail and Slack history use cursor pagination with
+    per-adapter caps (Slack history 500, replies 200, Gmail 200); other adapters issue
+    bounded single requests.
 - **Manual source** (`manual.rs`): watches an inbox directory for user-dropped files
-  (`.md`, `.txt`, `.json`). Files are read into `RawItem` with `external_id =
+  (`.md`, `.txt`, `.markdown`, `.json` by default). Files are read into `RawItem` with `external_id =
   "manual:{filename}"`. Symlinks are rejected. Archive-after-ingest defaults to
   false (extract runs before dedup commit; archive would break safe retry).
 - `Source` has no `source_type()` accessor — the factory selects by the input enum.

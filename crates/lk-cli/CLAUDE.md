@@ -12,8 +12,8 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   (no repo) work. There is no `config.example.yaml` fallback — running with the example's
   placeholder values silently is a footgun. A vault-relative config can't be auto-found
   (the vault path lives *inside* the config).
-- **`build_llm_client`** maps `llm.provider` to a client; `anthropic` with a missing
-  `ANTHROPIC_API_KEY` warns and degrades to `NoopLlmClient`.
+- **`build_llm_client`** maps `llm.provider` to a client; returns `miette::Result` so
+  `anthropic` with a missing `ANTHROPIC_API_KEY` is a hard error (no silent degradation).
 - **`lore ingest`** owns the 5-phase flow and the exit code: any source/extract/pipeline
   failure (`had_failure`) or write/flush failure returns non-zero — including under
   `--dry-run`. Dry-run uses `Pipeline::new_dry_run`, skips the tmp sweep, and does not

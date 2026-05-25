@@ -14,7 +14,8 @@ about; provider choice is config-driven (`build_llm_client` in lk-cli).
   it into the task `input` so `/lore-process` applies the same filter. `None` = no
   filtering. This is how a broad source (a news aggregator carrying human-interest or
   politics) contributes focused tech knowledge without polluting the concept graph —
-  the filter runs at extraction, so off-topic items never become concept pages.
+  the filter runs at LLM summarization/concept-extraction time, so off-topic items
+  in broad sources are excluded from summaries and never become concept pages.
 - **`LlmError::is_fatal()`** is true only for `QueueIo` (a persistence failure that must
   abort the run). Transient errors (network, rate limit, API) are non-fatal: callers log
   and degrade to an empty result so a flaky LLM never fails the whole ingest.
@@ -33,7 +34,7 @@ about; provider choice is config-driven (`build_llm_client` in lk-cli).
     all four semantic methods (`summarize`, `extract_concepts`, `identify_themes`,
     `classify`).
   - `QueueLlmClient` — buffers tasks in memory; `flush` writes the whole run to
-    `<run-id>.jsonl.tmp`, fsyncs, and renames atomically (cleaning the temp on failure).
+    `<run-id>.jsonl.tmp`, fsyncs, and renames atomically (cleaning the temp on rename failure).
     Invariant: a `.jsonl` file becomes visible only after its target pages were written,
     so it never references a page that doesn't exist. `run_id` = timestamp + PID +
     process-global sequence (collision-free even for two clients in one process/second).
