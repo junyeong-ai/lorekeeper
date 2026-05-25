@@ -114,8 +114,6 @@ fn page_schemas() -> Vec<PageSchema> {
                 "document_type",
                 "source_url",
                 "source_file",
-                "authors",
-                "year",
                 "tags",
                 "concepts",
             ],
@@ -131,7 +129,6 @@ fn page_schemas() -> Vec<PageSchema> {
                     |i| i.related_concepts.to_string(),
                     Owner::Machine,
                 ),
-                s("Related", |i| i.related.to_string(), Owner::Llm),
             ],
         },
         PageSchema {

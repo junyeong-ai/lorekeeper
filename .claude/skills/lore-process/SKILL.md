@@ -123,10 +123,10 @@ locate key — never hardcode headings per `target.kind`.
       human-interest or politics) contributes focused knowledge without
       polluting the graph. No `focus` → no filtering.
 
-      - **`kind: summarize`** — synthesize a knowledge-rich summary in the
-        user's preferred language (Korean for `daily-summary` and the
-        `*-narrative` synthesis targets). Aim for `input.max_sentences`
-        substantive points. No preamble.
+      - **`kind: summarize`** — synthesize a knowledge-rich summary.
+        Use the language specified in `input.locale` (e.g. `"ko"` → Korean,
+        `"en"` → English). If absent, default to Korean.
+        Aim for `input.max_sentences` substantive points. No preamble.
 
         **Source-type-aware synthesis.** Infer the source type from
         `target.vault_path` (e.g. `daily/team-slack/`, `daily/ai-news/`)
@@ -137,7 +137,9 @@ locate key — never hardcode headings per `target.kind`.
         - Ignore repetitive agreement messages (ok, +1, sounds good)
         - Structure as: decision/outcome → action items → context
         - Preserve technical details, project names, and links
-        - Each thread should be distilled to its essence, not raw-dumped
+        - **After filling `## 요약`, also rewrite `## 주요 메시지`**: for
+          each thread, replace the raw dump with a distilled Korean
+          summary (decisions, outcomes, context). Keep the 🔗 link.
 
         **Email sources** (`email-digest`, `*-email`):
         - Extract the core ask or decision from each email
@@ -149,6 +151,12 @@ locate key — never hardcode headings per `target.kind`.
         - Focus on key findings, announcements, techniques
         - For technical articles: what it is, why it matters, key numbers
         - Skip author bios, CTAs, navigation artifacts
+        - **After filling `## 요약`, also rewrite `## 주요 이벤트`** in the
+          target page: for each `### event title`, replace the raw English
+          body with a Korean knowledge summary (2-5 sentences covering
+          what it is, why it matters, key details). Keep the original
+          `🔗 URL` link for traceability. Remove HN metadata noise
+          (Points, Comments, Article URL duplicates).
 
         **Calendar sources** (`my-schedule`):
         - Highlight meeting outcomes and decisions if notes are present

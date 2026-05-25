@@ -11,12 +11,6 @@ source_url: {{ source_url | tojson }}
 {% if source_file -%}
 source_file: {{ source_file | tojson }}
 {% endif -%}
-{% if authors -%}
-authors: {{ authors | tojson }}
-{% endif -%}
-{% if year -%}
-year: {{ year }}
-{% endif -%}
 tags: {{ tags | tojson }}
 concepts: {{ concept_slugs | tojson }}
 ---
@@ -36,6 +30,3 @@ concepts: {{ concept_slugs | tojson }}
 {% for c in concepts -%}
 - [[{{ c }}]]
 {% endfor %}
-
-## {{ i18n.related }}
-
