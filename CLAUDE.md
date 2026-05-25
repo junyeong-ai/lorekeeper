@@ -41,7 +41,7 @@ templates/      Jinja2 markdown templates (.md.jinja), compiled into the binary
 ## Project-wide invariants
 
 - **Source ID = vault directory**: the key under `sources:` becomes the `daily/{id}/`
-  output path AND selects the adapter. Must not contain path separators, `.`, or `..`.
+  output path AND selects the adapter. Must not contain `/`, `\`, `.`, or `..`.
 - **Date derivation**: `timestamp.to_zoned(vault.timezone()).date()` — always via the
   configured timezone, never UTC by accident.
 - **Multi-date batches**: events spanning several dates produce one `daily/` page per date.

@@ -86,7 +86,7 @@ Each line in a queue file is one task:
 }
 ```
 
-`kind` values: `summarize` | `extract-concepts`
+`kind` values: `summarize` | `extract-concepts` | `identify-themes`
 `target.kind` values: `daily-summary` | `daily-concepts` |
 `weekly-synthesis-narrative` | `weekly-personal-narrative` |
 `monthly-personal-narrative` | `quarterly-personal-narrative` |
@@ -128,6 +128,11 @@ locate key — never hardcode headings per `target.kind`.
         `*-narrative` synthesis targets). Aim for `input.max_sentences`
         bullet points. No preamble.
 
+      - **`kind: identify-themes`** — extract structured themes from
+        the combined multi-source text. Identify the top N themes
+        (`input.max_themes`). Write each theme as a numbered subsection
+        (`### 1. Theme Title\n\nDescription`) under `target.anchor`.
+
       - **`kind: extract-concepts`** — identify the key named entities,
         topics, and concepts (whatever the source's domain — the focus,
         if present, names it). Output a list of concept names
@@ -161,7 +166,7 @@ locate key — never hardcode headings per `target.kind`.
         `- [[Concept Name 1]]\n- [[Concept Name 2]]\n...`.
         Create each concept page at `wiki/concepts/{slug}.md` if it
         doesn't exist (use frontmatter `id`, `title`, `created`,
-        `updated`, `confidence`, `reference_count`, `sources`, `tags`,
+        `updated`, `reference_count`, `sources`, `tags`,
         and crucially `aliases: ["Concept Name"]` so the `[[Concept
         Name]]` links above resolve to the slug-named file — match the
         format of existing concept pages).

@@ -15,25 +15,32 @@ Deterministic transform stages between `lk-source` and `lk-vault`. Shares an
   intra-batch (seen-id/url + novel-title) checks ALWAYS run — so a dry-run with no
   cache still matches a real run. URLs are canonicalised before lookup and storage:
   http→https, host lowercase, trailing slash removal, auth stripping, tracking-param
-  removal (`utm_*`, `fbclid`, `gclid`, …) with resource-identifying params preserved
-  and sorted. Titles are keyed `{date}:{title}` and scanned by date-prefix range. The
-  cache is recreated only on a recoverable mismatch — a schema-type change or an
-  outdated on-disk format after a redb major upgrade (`DatabaseError::UpgradeRequired`)
-  — never on I/O/corruption errors. On recreation the stale file is renamed to
-  `*.redb.backup.{timestamp}-pid{pid}` (not deleted), preserving dedup history for
-  manual recovery.
+  removal (`utm_*`, `fbclid`, `gclid`, `msclkid`, `ttclid`, `twclid`, `wbraid`,
+  `gbraid`, …) with resource-identifying params preserved and sorted. Titles are
+  keyed by the title string alone and scanned across the full table (no date
+  partition). The cache is recreated only on a recoverable mismatch — a schema-type
+  change or an outdated on-disk format after a redb major upgrade
+  (`DatabaseError::UpgradeRequired`) — never on I/O/corruption errors. On recreation
+  the stale file is renamed to `*.redb.backup.{timestamp}-pid{pid}` (not deleted),
+  preserving dedup history for manual recovery.
 - **classify**: `flag_personal` matches identity tokens with `contains_bounded`
   (alphanumeric/`._%+-` word boundary) to avoid name/email substring false positives
   (`kim`⊄`kimberly`, `test@x.com`⊄`test@x.com.au`); `@` is intentionally excluded so
-  Slack `<@U…>` mentions still match. `classify_by_keywords` reads `SourceConfig.classify`
-  and uses plain substring — correct for CJK keywords (no word boundaries).
+  Slack `<@U…>` mentions still match. `classify_by_keywords` reads
+  `SourceConfig.classify` (ordered `Vec<ClassifyRule>`, first match wins) and uses
+  plain substring — correct for CJK keywords. When `classify_with_llm` is true,
+  unclassified events are sent to the LLM as a fallback (synchronous in `anthropic`
+  mode; no-op in `queue` mode).
 - **Concept merge** reads existing `created`/`updated` frontmatter (the keys actually
-  written), preserves the original title + strongest confidence (extracted > inferred),
-  and dedupes `sources`/`reference_count`.
-- **Synthesizer** methods are `weekly_synthesis` + `*_personal`; they share
-  `summarize_or_warn` (propagates only fatal LLM errors) and `render_or_fallback`.
-  Every `TaskTarget` carries `anchor` — the exact `## …` heading resolved from i18n
-  at construction time — so the skill never needs a hardcoded kind→heading table.
+  written), preserves the original title, and dedupes `sources`/`reference_count`.
+- **Synthesizer** methods are `try_weekly_synthesis` + `try_*_personal`; they share
+  `summarize_or_warn` (propagates only fatal LLM errors). `try_weekly_synthesis` uses
+  `identify_themes` for structured JSON theme extraction. Every `TaskTarget` carries
+  `anchor` — the exact `## …` heading resolved from i18n at construction time — so
+  the skill never needs a hardcoded kind→heading table.
+- **Synthesis fallback cascade**: quarterly reads monthly → weekly-personal → None;
+  annual reads quarterly → monthly → None. Raw daily work-log is never fed directly
+  to a higher-level synthesis (each level reads only pre-summarized pages).
 - Fallback renderers must emit the same `##` anchors the templates use (so `/lore-process`
   can find the section) and the same frontmatter keys synthesis reads (e.g. work-log
   `categories`).

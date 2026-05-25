@@ -2,7 +2,9 @@
 - **Date derivation**: `timestamp.to_zoned(vault.timezone()).date()` — always via configured timezone, never UTC.
 - **Atomic ingest** (5 phases): plan → write daily/concept → work-log → flush LLM queue → commit dedup. Each source's dedup commits only after its own writes + flush succeed.
 - **i18n single source of truth**: `vault.locale` (ko/en) switches all labels. Templates use `{{ i18n.* }}`. Source content is never translated.
-- **Domain logic single-sourced in lk-core**: slugify (NFKC), frontmatter, wikilink, text normalization. Zero duplicate implementations across crates.
+- **Domain logic single-sourced in lk-core**: slugify (NFKC, returns `Option<String>`), frontmatter, wikilink, text normalization. Zero duplicate implementations across crates.
 - **LLM provider modes**: `queue` (JSONL → `/lore-process`), `anthropic` (direct API), `noop`.
 - **`--dry-run` is side-effect-free**: no vault writes, no dedup, no log.
-- **Dedup cascade**: `[event-id, content-hash, url, title]`. content-hash = blake3 of whitespace-normalized title+body.
+- **Dedup cascade**: `[event-id, content-hash, url, title]`. content-hash = blake3 of whitespace-normalized title+body. Title dedup scans the full table (no date partition).
+- **Classification**: ordered `Vec<ClassifyRule>` (first match wins). Optional `classify_with_llm` sends unclassified events to LLM (anthropic mode only; queue mode returns None).
+- **Synthesis fallback cascade**: quarterly: monthly → weekly-personal → None; annual: quarterly → monthly → None. Raw daily is never fed to higher-level synthesis.

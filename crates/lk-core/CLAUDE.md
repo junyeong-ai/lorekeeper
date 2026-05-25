@@ -10,9 +10,9 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
 - **`SourceType` is a closed enum** with `default_template_name()` co-located on it.
   Adding a source type is a compiler-checked change here + a `lk-source` adapter/factory
   arm. Don't replace it with a runtime registry — exhaustive matching is the point.
-- **`SourceConfig.classify`** is a typed `BTreeMap<String, Vec<String>>` (keyword →
-  category), kept OUT of the free-form `params` so adapter params can use
-  `deny_unknown_fields`.
+- **`SourceConfig.classify`** is a `Vec<ClassifyRule>` (ordered rules, first match
+  wins), kept OUT of the free-form `params` so adapter params can use
+  `deny_unknown_fields`. Validation rejects rules with empty keywords.
 - **`EventId::new(source_id, date, content)`** = `source:date:blake3(content)[..12]`.
   In `lk-pipeline::normalize`, `content` is the `external_id` or a JSON array of
   `[title, body]` — never a bare concatenation (that collides).

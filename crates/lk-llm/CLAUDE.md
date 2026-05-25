@@ -3,8 +3,11 @@
 The `LlmClient` trait and its providers. The trait is the only seam the pipeline knows
 about; provider choice is config-driven (`build_llm_client` in lk-cli).
 
-- **Trait surface**: `summarize`, `extract_concepts`, and `flush` (default no-op).
-  `flush` is the transactional commit point for buffered side-effects.
+- **Trait surface**: `summarize`, `extract_concepts`, `identify_themes`, `classify`,
+  and `flush` (default no-op). `identify_themes` returns structured `Vec<Theme>` (JSON
+  parsed); `classify` returns `Option<String>` (category name or None). `flush` is the
+  transactional commit point for buffered side-effects. `identify_themes` and `classify`
+  have default no-op implementations so noop/mock clients work without overrides.
 - **`focus`** (`Option<String>` on both requests, from `SourceConfig.focus`) is a
   source's natural-language relevance criterion. `anthropic` folds it into the prompt
   ("only content matching this focus … ignore anything off-topic"); `queue` serializes
@@ -21,12 +24,19 @@ about; provider choice is config-driven (`build_llm_client` in lk-cli).
   `target.anchor` instead of a hardcoded kind→heading table. `TargetKind` variants are
   uniform (`*PersonalNarrative` for monthly/quarterly/annual, matching weekly); serde
   kebab-case names stay for classification/logging.
+- **`ClassifyRequest`** does not carry a `TaskTarget` because classification is an
+  in-memory judgment (sets `Event.classification`), not a vault write. Only `anthropic`
+  mode performs a synchronous call; `queue` and `noop` return `None`, and the event
+  stays unclassified (safe degradation — daily page renders it in the general section).
 - **Providers**:
-  - `AnthropicClient` — direct Messages API, with retry/backoff on 429.
+  - `AnthropicClient` — direct Messages API, with retry/backoff on 429. Implements
+    all four semantic methods (`summarize`, `extract_concepts`, `identify_themes`,
+    `classify`).
   - `QueueLlmClient` — buffers tasks in memory; `flush` writes the whole run to
     `<run-id>.jsonl.tmp`, fsyncs, and renames atomically (cleaning the temp on failure).
     Invariant: a `.jsonl` file becomes visible only after its target pages were written,
     so it never references a page that doesn't exist. `run_id` = timestamp + PID +
     process-global sequence (collision-free even for two clients in one process/second).
-  - `NoopLlmClient` — empty results.
-  - `MockLlmClient` — tests only.
+    Supports `TaskKind::Summarize`, `ExtractConcepts`, `IdentifyThemes`.
+  - `NoopLlmClient` — empty results (uses default trait impls).
+  - `MockLlmClient` — tests only, with configurable `summary`, `concepts`, `themes`.
