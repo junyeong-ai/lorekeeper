@@ -128,8 +128,9 @@ locate key — never hardcode headings per `target.kind`.
         `*-narrative` synthesis targets). Aim for `input.max_sentences`
         bullet points. No preamble.
 
-      - **`kind: extract-concepts`** — identify named entities,
-        technologies, and key topics. Output a list of concept names
+      - **`kind: extract-concepts`** — identify the key named entities,
+        topics, and concepts (whatever the source's domain — the focus,
+        if present, names it). Output a list of concept names
         (in the source language). Each concept should also produce a
         `wiki/concepts/{slug}.md` entry (create if missing, merge if
         exists — increment reference_count, append source ref).

@@ -118,7 +118,7 @@ impl LlmClient for AnthropicClient {
         req: ExtractConceptsRequest,
     ) -> Result<Vec<ExtractedConcept>, LlmError> {
         let system = format!(
-            r#"Extract named entities, technologies, key topics.{} Output JSON array: [{{"name":"...","slug":"...","confidence":"extracted"|"inferred"}}]. ONLY the JSON array."#,
+            r#"Extract the key named entities, topics, and concepts.{} Output JSON array: [{{"name":"...","slug":"...","confidence":"extracted"|"inferred"}}]. ONLY the JSON array."#,
             focus_clause(&req.focus)
         );
         let resp = self.call(&system, &req.text).await?;
