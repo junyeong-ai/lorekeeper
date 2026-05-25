@@ -54,7 +54,7 @@ pub fn render_daily_page(
                 "body": e.body,
                 "author": e.author,
                 "url": e.url,
-                "classification": e.classification,
+                "work_category": e.work_category,
                 "labels": e.labels,
                 "is_personal": e.is_personal,
                 "subject": e.title,
@@ -112,7 +112,7 @@ pub fn render_daily_page(
 fn filter_by_class(events: &[&Event], class: &str) -> Vec<serde_json::Value> {
     events
         .iter()
-        .filter(|e| e.classification.as_deref() == Some(class))
+        .filter(|e| e.work_category.as_deref() == Some(class))
         .map(|e| {
             serde_json::json!({
                 "subject": e.title,

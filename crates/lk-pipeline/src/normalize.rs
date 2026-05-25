@@ -63,7 +63,7 @@ pub fn normalize(
                 url: item.url,
                 author: item.author,
                 labels: vec![],
-                classification: None,
+                work_category: None,
                 is_personal: false,
                 content_hash: ch,
                 metadata: item.metadata,

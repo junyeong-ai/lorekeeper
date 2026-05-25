@@ -96,7 +96,7 @@ pub struct Theme {
 /// Classification of a single event into one of the given categories.
 /// Used as an LLM fallback when deterministic keyword matching produces no match.
 /// Does NOT carry a `TaskTarget` because the result is an in-memory judgment applied
-/// to `Event.classification`, not a vault write.
+/// to `Event.work_category`, not a vault write.
 #[derive(Debug, Clone)]
 pub struct ClassifyRequest {
     pub title: String,

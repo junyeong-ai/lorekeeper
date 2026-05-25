@@ -765,7 +765,7 @@ async fn work_log_generation_is_gated_by_performance_enabled() {
         url: None,
         author: None,
         labels: vec!["personal".into()],
-        classification: None,
+        work_category: None,
         is_personal: true,
         content_hash: lk_core::event::content_hash("did a thing", "details"),
         metadata: serde_json::Value::Null,

@@ -100,7 +100,7 @@ pub fn classify_by_keywords(events: &mut [Event], rules: &[lk_core::config::Clas
     }
 
     for event in events {
-        if event.classification.is_some() {
+        if event.work_category.is_some() {
             continue;
         }
 
@@ -114,7 +114,7 @@ pub fn classify_by_keywords(events: &mut [Event], rules: &[lk_core::config::Clas
                 .any(|kw| contains_bounded(&text, &kw.to_lowercase()));
 
             if matched {
-                event.classification = Some(rule.category.clone());
+                event.work_category = Some(rule.category.clone());
                 break;
             }
         }
@@ -139,7 +139,7 @@ pub async fn classify_with_llm(
     let categories: Vec<String> = rules.iter().map(|r| r.category.clone()).collect();
 
     for event in events.iter_mut() {
-        if event.classification.is_some() {
+        if event.work_category.is_some() {
             continue;
         }
 
@@ -158,7 +158,7 @@ pub async fn classify_with_llm(
             .await
         {
             Ok(Some(cat)) => {
-                event.classification = Some(cat);
+                event.work_category = Some(cat);
             }
             Ok(None) => {}
             Err(e) if e.is_fatal() => {
@@ -189,7 +189,7 @@ mod tests {
             url: None,
             author: author.map(String::from),
             labels: vec![],
-            classification: None,
+            work_category: None,
             is_personal: false,
             content_hash: lk_core::event::content_hash(title, ""),
             metadata: serde_json::Value::Null,
@@ -317,7 +317,7 @@ mod tests {
         ];
         let mut events = vec![make_event("Please review this PR", None)];
         classify_by_keywords(&mut events, &rules);
-        assert_eq!(events[0].classification.as_deref(), Some("action_required"));
+        assert_eq!(events[0].work_category.as_deref(), Some("action_required"));
     }
 
     #[test]
@@ -334,17 +334,17 @@ mod tests {
         ];
         classify_by_keywords(&mut events, &rules);
         assert!(
-            events[0].classification.is_none(),
+            events[0].work_category.is_none(),
             "FAIR must not match keyword AI"
         );
         assert!(
-            events[1].classification.is_none(),
+            events[1].work_category.is_none(),
             "MAIL must not match keyword AI"
         );
 
         // Standalone "AI" as a whole token matches.
         let mut events2 = vec![make_event("AI research update", None)];
         classify_by_keywords(&mut events2, &rules);
-        assert_eq!(events2[0].classification.as_deref(), Some("ai_topic"));
+        assert_eq!(events2[0].work_category.as_deref(), Some("ai_topic"));
     }
 }

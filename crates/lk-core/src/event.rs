@@ -13,7 +13,7 @@ pub struct Event {
     pub url: Option<String>,
     pub author: Option<String>,
     pub labels: Vec<String>,
-    pub classification: Option<String>,
+    pub work_category: Option<String>,
     pub is_personal: bool,
     /// Source-agnostic hash of title+body. Used by the `content-hash` dedup
     /// strategy to catch the same content arriving via multiple sources or

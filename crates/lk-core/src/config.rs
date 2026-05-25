@@ -567,12 +567,12 @@ pub struct PerformanceConfig {
 
 impl PerformanceConfig {
     /// Resolve the work category for an event, checking source-ID map, then source-type map,
-    /// then classification, falling back to `None`.
+    /// then work_category, falling back to `None`.
     pub fn resolve_category(
         &self,
         source_id: &str,
         source_type: SourceType,
-        classification: Option<&str>,
+        work_category: Option<&str>,
     ) -> Option<String> {
         if let Some(c) = self.source_category_map.get(source_id) {
             return Some(c.clone());
@@ -580,7 +580,7 @@ impl PerformanceConfig {
         if let Some(c) = self.source_type_category_map.get(&source_type) {
             return Some(c.clone());
         }
-        if let Some(cls) = classification
+        if let Some(cls) = work_category
             && self.work_categories.iter().any(|c| c == cls)
         {
             return Some(cls.to_string());
@@ -1184,7 +1184,7 @@ performance:
     }
 
     #[test]
-    fn resolve_category_falls_back_to_classification() {
+    fn resolve_category_falls_back_to_work_category() {
         let perf = PerformanceConfig::default();
         let cat = perf.resolve_category("e", SourceType::Gmail, Some("technical-leadership"));
         assert_eq!(cat.as_deref(), Some("technical-leadership"));

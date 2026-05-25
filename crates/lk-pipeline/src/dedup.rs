@@ -453,7 +453,7 @@ mod tests {
             url: url.map(String::from),
             author: None,
             labels: vec![],
-            classification: None,
+            work_category: None,
             is_personal: false,
             content_hash: lk_core::event::content_hash(title, ""),
             metadata: serde_json::Value::Null,

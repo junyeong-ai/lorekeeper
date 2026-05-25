@@ -153,7 +153,7 @@ fn group_by_category(events: &[Event], perf: &PerformanceConfig) -> Vec<WorkLogG
         let category = perf.resolve_category(
             &event.source_id,
             event.source_type,
-            event.classification.as_deref(),
+            event.work_category.as_deref(),
         );
 
         let idx = match category {
