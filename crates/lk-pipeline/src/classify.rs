@@ -29,12 +29,19 @@ pub fn flag_personal(events: &mut [Event], identity: &Identity) {
         .and_then(nonblank);
 
     for event in events {
+        let is_self = event
+            .metadata
+            .get("is_self")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
         let author = event.author.as_deref().unwrap_or_default().to_lowercase();
         let meta = event.metadata.to_string().to_lowercase();
 
-        let matched = email
-            .as_deref()
-            .is_some_and(|e| contains_bounded(&author, e) || contains_bounded(&meta, e))
+        let matched = is_self
+            || email
+                .as_deref()
+                .is_some_and(|e| contains_bounded(&author, e) || contains_bounded(&meta, e))
             || name
                 .as_deref()
                 .is_some_and(|n| contains_bounded(&author, n))

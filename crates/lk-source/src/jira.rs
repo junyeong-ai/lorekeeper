@@ -125,6 +125,25 @@ impl Source for JiraSource {
         }
         let fields_csv = fields.join(",");
 
+        let myself_url = format!(
+            "{}/rest/api/3/myself",
+            self.creds.base_url.trim_end_matches('/')
+        );
+        let my_account_id: Option<String> = match self
+            .http
+            .get(&myself_url)
+            .basic_auth(&self.creds.email, Some(&self.creds.api_token))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => resp
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|v| v.get("accountId")?.as_str().map(String::from)),
+            _ => None,
+        };
+
         let resp = self
             .http
             .get(&url)
@@ -170,12 +189,18 @@ impl Source for JiraSource {
                     return None;
                 };
 
-                let author = issue
-                    .fields
-                    .assignee
-                    .as_ref()
-                    .and_then(|a| a.display_name.as_deref().or(a.email_address.as_deref()))
-                    .map(String::from);
+                let assignee = issue.fields.assignee.as_ref();
+                let assignee_aid = assignee.and_then(|a| a.account_id.as_deref());
+                let is_me = my_account_id
+                    .as_deref()
+                    .is_some_and(|me| assignee_aid == Some(me));
+                let author = if is_me {
+                    Some(self.creds.email.clone())
+                } else {
+                    assignee
+                        .and_then(|a| a.email_address.as_deref().or(a.display_name.as_deref()))
+                        .map(String::from)
+                };
 
                 let status = issue.fields.status.and_then(|s| s.name);
                 let description = issue
@@ -221,6 +246,7 @@ impl Source for JiraSource {
                         "duedate": issue.fields.duedate,
                         "start_date": start_date,
                         "assignee_account_id": assignee_account_id,
+                        "is_self": is_me,
                     }),
                 })
             })

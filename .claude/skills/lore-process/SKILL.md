@@ -161,6 +161,16 @@ locate key — never hardcode headings per `target.kind`.
         **Calendar sources** (`my-schedule`):
         - Highlight meeting outcomes and decisions if notes are present
         - Link events to related projects/concepts
+        - **After filling `## 요약`, also rewrite `## 주요 이벤트`**: for
+          each event, if meeting notes are embedded (long text), distill
+          to a Korean summary (decisions, action items, key discussion
+          points, 5-10 sentences). Keep 🔗 link and attendee list.
+
+        **Jira sources** (`my-tasks`):
+        - **After filling `## 요약`, also rewrite `## 주요 이벤트`**: for
+          each Jira issue, replace the full description with a Korean
+          knowledge summary (3-5 sentences: what the issue is about,
+          current status, key deliverables/blockers). Keep 🔗 Jira link.
 
         For all types: produce genuine knowledge, not just headlines.
         Not too short (meaningless one-liners) nor too verbose (raw dump).
