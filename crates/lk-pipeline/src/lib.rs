@@ -312,14 +312,17 @@ impl Pipeline {
             // Merge into the run-level accumulator (shared across all sources) so a
             // concept mentioned by multiple sources aggregates into one page.
             {
-                let daily_ref = concepts::strip_md_extension(
-                    &lk_core::vault_path::VaultPath::daily(&self.ctx.dirs, source_id, *date)
-                        .to_string(),
-                );
+                let source = concepts::ConceptSource {
+                    ref_path: concepts::strip_md_extension(
+                        &lk_core::vault_path::VaultPath::daily(&self.ctx.dirs, source_id, *date)
+                            .to_string(),
+                    ),
+                    date: *date,
+                };
                 let mut drafts = self.concept_drafts.lock().await;
                 for concept in &day_concepts {
                     drafts
-                        .merge(concept, &daily_ref, *date, &self.reader, &self.ctx.dirs)
+                        .merge(concept, &source, &self.reader, &self.ctx.dirs)
                         .await?;
                 }
             }
@@ -518,13 +521,17 @@ impl Pipeline {
 
             // Merge concepts into run-level accumulator.
             {
-                let doc_ref = concepts::strip_md_extension(
-                    &lk_core::vault_path::VaultPath::document(&self.ctx.dirs, &slug).to_string(),
-                );
+                let source = concepts::ConceptSource {
+                    ref_path: concepts::strip_md_extension(
+                        &lk_core::vault_path::VaultPath::document(&self.ctx.dirs, &slug)
+                            .to_string(),
+                    ),
+                    date: event.date,
+                };
                 let mut drafts = self.concept_drafts.lock().await;
                 for concept in &doc_concepts {
                     drafts
-                        .merge(concept, &doc_ref, event.date, &self.reader, &self.ctx.dirs)
+                        .merge(concept, &source, &self.reader, &self.ctx.dirs)
                         .await?;
                 }
             }

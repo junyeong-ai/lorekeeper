@@ -9,6 +9,13 @@ use lk_vault::{TemplateEngine, VaultReader};
 use crate::PipelineError;
 use crate::render::RenderOutput;
 
+/// Identifies where a concept was mentioned — the vault page path and the date
+/// it was observed. Bundled so callers always pass the pair together.
+pub struct ConceptSource {
+    pub ref_path: String,
+    pub date: jiff::civil::Date,
+}
+
 /// In-memory aggregator for concept page state across multiple dates in a single run.
 /// Reads existing vault pages on first encounter, then merges further mentions.
 pub struct ConceptDrafts {
@@ -35,8 +42,7 @@ impl ConceptDrafts {
     pub async fn merge(
         &mut self,
         concept: &ExtractedConcept,
-        source_ref: &str,
-        date: jiff::civil::Date,
+        source: &ConceptSource,
         reader: &VaultReader,
         dirs: &VaultDirs,
     ) -> Result<(), PipelineError> {
@@ -45,7 +51,8 @@ impl ConceptDrafts {
             return Ok(());
         };
 
-        let source_ref = source_ref.to_string();
+        let source_ref = source.ref_path.clone();
+        let date = source.date;
 
         if let Some(draft) = self.drafts.get_mut(&safe_slug) {
             draft.add_reference(source_ref, date);
