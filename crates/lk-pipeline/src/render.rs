@@ -20,8 +20,8 @@ pub struct RenderContext<'a> {
     pub summary: &'a str,
     pub concepts: &'a [String],
     /// Whether this source extracts concepts. Templates render the `## 관련 개념`
-    /// section only when true, so awareness-only sources (e.g. aggregators with
-    /// `extract_concepts: false`) don't carry a permanently-empty section.
+    /// section only when true, so a source that opts out (`extract_concepts: false`,
+    /// e.g. a personal work-log feed) doesn't carry a permanently-empty section.
     pub extract_concepts: bool,
     pub locale: Locale,
 }

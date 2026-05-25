@@ -383,8 +383,27 @@ pub struct SourceConfig {
     pub labels: Vec<String>,
     #[serde(default)]
     pub extract_concepts: bool,
+    /// Optional natural-language relevance criterion. When set, the LLM keeps only
+    /// concepts (and summary content) matching it — so a broad source (e.g. a news
+    /// aggregator) contributes focused knowledge instead of off-topic noise.
+    #[serde(default)]
+    pub focus: Option<String>,
     #[serde(default)]
     pub track_personal: bool,
+}
+
+impl SourceConfig {
+    /// The relevance focus, normalized: blank or whitespace-only is treated as
+    /// "no focus". Single source of truth so every consumer — both LLM provider
+    /// paths and the queue-draining skill — sees the same `Option`, never a
+    /// spurious empty-string filter.
+    pub fn normalized_focus(&self) -> Option<String> {
+        self.focus
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    }
 }
 
 fn yes() -> bool {
@@ -754,6 +773,28 @@ mod tests {
             assert!(!config.sources.is_empty());
             assert!(config.sources.contains_key("ai-news"));
         }
+    }
+
+    #[test]
+    fn normalized_focus_treats_blank_as_none() {
+        let mk = |f: Option<&str>| SourceConfig {
+            source_type: SourceType::Rss,
+            enabled: true,
+            schedule: None,
+            params: empty_object(),
+            classify: BTreeMap::new(),
+            labels: vec![],
+            extract_concepts: true,
+            focus: f.map(str::to_owned),
+            track_personal: false,
+        };
+        assert_eq!(mk(None).normalized_focus(), None);
+        assert_eq!(mk(Some("")).normalized_focus(), None);
+        assert_eq!(mk(Some("   ")).normalized_focus(), None);
+        assert_eq!(
+            mk(Some("  AI/ML only  ")).normalized_focus(),
+            Some("AI/ML only".to_string())
+        );
     }
 
     #[test]

@@ -92,6 +92,7 @@ pub async fn aggregate_and_render(
             .summarize(lk_llm::SummarizeRequest {
                 text: synthesis_input,
                 max_sentences: 10,
+                focus: None,
                 target: lk_llm::TaskTarget {
                     vault_path,
                     kind: lk_llm::TargetKind::WorkLogSynthesis,

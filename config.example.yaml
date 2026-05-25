@@ -172,11 +172,12 @@ sources:
         # - { id: arxiv-cs-lg,     url: "http://export.arxiv.org/rss/cs.LG" }
     labels: [ai-tech]
     extract_concepts: true
+    focus: "AI/ML 모델·기법·아키텍처·인프라·도구·연구 등 AI 기술 주제."
     track_personal: false
 
-  # 일반 테크 동향 + 한글 — 애그리게이터(HN/긱뉴스) + 국내 엔지니어링 블로그.
-  # 폭넓은 기술 '인지(awareness)' 인덱스 — 애그리게이터는 비-기술 노이즈(인물/정책/의료)가
-  # 섞여 개념-지식엔 부적합하므로 extract_concepts:false. AI 지식 개념은 ai-news가 담당.
+  # 폭넓은 테크 동향 + 한글 — 애그리게이터(HN/긱뉴스) + 국내 엔지니어링 블로그.
+  # 애그리게이터는 비-기술 노이즈(인물/정치/생활)가 섞이므로 focus(LLM 관련성 필터)로
+  # 기술 주제만 개념화 — 노이즈는 그래프에 쌓이지 않음.
   tech-news:
     type: rss
     enabled: false
@@ -195,7 +196,8 @@ sources:
         - { id: toss-tech,   url: "https://toss.tech/rss.xml" }
         - { id: yozm-it,     url: "https://yozm.wishket.com/magazine/feed/" }
     labels: [tech]
-    extract_concepts: false
+    extract_concepts: true
+    focus: "소프트웨어 엔지니어링·AI/ML·시스템·개발 도구·인프라 등 기술 주제만. 인물 부고·생활·정치·일반 시사 등 비기술 항목은 개념화하지 말 것."
     track_personal: false
 
   # 이메일 뉴스레터(RSS 없는 구독) — Gmail에서 `ai-news` 라벨로 라우팅(필터 1회 설정).

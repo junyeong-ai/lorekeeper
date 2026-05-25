@@ -114,6 +114,15 @@ locate key — never hardcode headings per `target.kind`.
 
    b. **For each task** (in file order):
 
+      **Relevance focus.** If `input.focus` is present, it is the source's
+      natural-language relevance criterion. Treat everything outside that focus
+      as off-topic and exclude it: for `summarize`, cover only matching content;
+      for `extract-concepts`, extract concepts ONLY from items matching the
+      focus and skip off-topic items entirely (create no concepts for them).
+      This is how a broad source (e.g. a news aggregator that also surfaces
+      human-interest or politics) contributes focused knowledge without
+      polluting the graph. No `focus` → no filtering.
+
       - **`kind: summarize`** — synthesize a concise summary in the
         user's preferred language (Korean for `daily-summary` and the
         `*-narrative` synthesis targets). Aim for `input.max_sentences`

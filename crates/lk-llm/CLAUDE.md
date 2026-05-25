@@ -5,6 +5,13 @@ about; provider choice is config-driven (`build_llm_client` in lk-cli).
 
 - **Trait surface**: `summarize`, `extract_concepts`, and `flush` (default no-op).
   `flush` is the transactional commit point for buffered side-effects.
+- **`focus`** (`Option<String>` on both requests, from `SourceConfig.focus`) is a
+  source's natural-language relevance criterion. `anthropic` folds it into the prompt
+  ("only content matching this focus … ignore anything off-topic"); `queue` serializes
+  it into the task `input` so `/lore-process` applies the same filter. `None` = no
+  filtering. This is how a broad source (a news aggregator carrying human-interest or
+  politics) contributes focused tech knowledge without polluting the concept graph —
+  the filter runs at extraction, so off-topic items never become concept pages.
 - **`LlmError::is_fatal()`** is true only for `QueueIo` (a persistence failure that must
   abort the run). Transient errors (network, rate limit, API) are non-fatal: callers log
   and degrade to an empty result so a flaky LLM never fails the whole ingest.

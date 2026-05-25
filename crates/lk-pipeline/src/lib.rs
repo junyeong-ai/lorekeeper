@@ -170,6 +170,9 @@ impl Pipeline {
         let mut daily_pages: Vec<RenderOutput> = Vec::new();
         let mut all_concepts: Vec<ExtractedConcept> = Vec::new();
 
+        // Normalize once: blank focus = no filter, identical across every provider path.
+        let focus = config.normalized_focus();
+
         for (date, day_events) in &by_date {
             let combined: String = day_events
                 .iter()
@@ -186,6 +189,7 @@ impl Pipeline {
                 .summarize(lk_llm::SummarizeRequest {
                     text: combined.clone(),
                     max_sentences: 5,
+                    focus: focus.clone(),
                     target: lk_llm::TaskTarget {
                         vault_path: daily_path.clone(),
                         kind: lk_llm::TargetKind::DailySummary,
@@ -215,6 +219,7 @@ impl Pipeline {
                         text: combined.clone(),
                         source_id: source_id.to_string(),
                         date: *date,
+                        focus: focus.clone(),
                         target: lk_llm::TaskTarget {
                             vault_path: daily_path,
                             kind: lk_llm::TargetKind::DailyConcepts,

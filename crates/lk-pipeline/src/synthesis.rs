@@ -54,6 +54,7 @@ impl Synthesizer {
             .summarize(lk_llm::SummarizeRequest {
                 text,
                 max_sentences,
+                focus: None,
                 target: lk_llm::TaskTarget {
                     vault_path,
                     kind,

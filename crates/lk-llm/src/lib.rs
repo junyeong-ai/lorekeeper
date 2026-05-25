@@ -81,6 +81,10 @@ pub struct TaskTarget {
 pub struct SummarizeRequest {
     pub text: String,
     pub max_sentences: usize,
+    /// Optional natural-language relevance criterion (the source's `focus`). When
+    /// set, the summary covers only content matching it and ignores off-topic
+    /// items — so a broad source (e.g. a news aggregator) yields a focused digest.
+    pub focus: Option<String>,
     pub target: TaskTarget,
 }
 
@@ -89,6 +93,10 @@ pub struct ExtractConceptsRequest {
     pub text: String,
     pub source_id: String,
     pub date: jiff::civil::Date,
+    /// Optional natural-language relevance criterion (the source's `focus`). When
+    /// set, concepts are extracted only from content matching it, so off-topic
+    /// items in a broad source never pollute the knowledge graph.
+    pub focus: Option<String>,
     pub target: TaskTarget,
 }
 

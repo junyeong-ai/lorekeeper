@@ -23,6 +23,7 @@ fn base_config(vault_root: &std::path::Path) -> Config {
             classify: Default::default(),
             labels: vec!["test".into()],
             extract_concepts: true,
+            focus: None,
             track_personal: false,
         },
     );
@@ -302,6 +303,7 @@ async fn concept_accumulates_across_sources_in_one_run() {
             classify: Default::default(),
             labels: vec![],
             extract_concepts: true,
+            focus: None,
             track_personal: false,
         },
     );

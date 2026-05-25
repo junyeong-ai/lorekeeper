@@ -82,14 +82,18 @@ impl QueueLlmClient {
 #[async_trait]
 impl LlmClient for QueueLlmClient {
     async fn summarize(&self, req: SummarizeRequest) -> Result<String, LlmError> {
+        let mut input = serde_json::json!({
+            "text": req.text,
+            "max_sentences": req.max_sentences,
+        });
+        if let Some(focus) = &req.focus {
+            input["focus"] = serde_json::Value::String(focus.clone());
+        }
         let task = QueueTask {
             task_id: self.next_id("sum"),
             kind: TaskKind::Summarize,
             created_at: jiff::Timestamp::now(),
-            input: serde_json::json!({
-                "text": req.text,
-                "max_sentences": req.max_sentences,
-            }),
+            input,
             target: req.target,
         };
         self.enqueue(task).await;
@@ -100,15 +104,19 @@ impl LlmClient for QueueLlmClient {
         &self,
         req: ExtractConceptsRequest,
     ) -> Result<Vec<ExtractedConcept>, LlmError> {
+        let mut input = serde_json::json!({
+            "text": req.text,
+            "source_id": req.source_id,
+            "date": req.date.to_string(),
+        });
+        if let Some(focus) = &req.focus {
+            input["focus"] = serde_json::Value::String(focus.clone());
+        }
         let task = QueueTask {
             task_id: self.next_id("ext"),
             kind: TaskKind::ExtractConcepts,
             created_at: jiff::Timestamp::now(),
-            input: serde_json::json!({
-                "text": req.text,
-                "source_id": req.source_id,
-                "date": req.date.to_string(),
-            }),
+            input,
             target: req.target,
         };
         self.enqueue(task).await;
@@ -183,6 +191,7 @@ mod tests {
         let req = SummarizeRequest {
             text: "Some content".into(),
             max_sentences: 5,
+            focus: None,
             target: TaskTarget {
                 vault_path: "daily/test/2026-05-23.md".into(),
                 kind: TargetKind::DailySummary,
@@ -218,6 +227,7 @@ mod tests {
             let req = SummarizeRequest {
                 text: "x".into(),
                 max_sentences: 5,
+                focus: None,
                 target: TaskTarget {
                     vault_path: "p".into(),
                     kind: TargetKind::DailySummary,
@@ -243,6 +253,7 @@ mod tests {
             text: "Anthropic releases Opus 4.7".into(),
             source_id: "ai-news".into(),
             date: jiff::civil::date(2026, 5, 23),
+            focus: None,
             target: TaskTarget {
                 vault_path: "daily/ai-news/2026-05-23.md".into(),
                 kind: TargetKind::DailyConcepts,
@@ -258,6 +269,38 @@ mod tests {
             .unwrap();
         let task: QueueTask = serde_json::from_str(content.trim()).unwrap();
         assert!(matches!(task.kind, TaskKind::ExtractConcepts));
+        // No focus set → no `focus` key in the task input.
+        assert!(task.input.get("focus").is_none());
+    }
+
+    #[tokio::test]
+    async fn focus_is_serialized_into_task_input() {
+        let dir = TempDir::new().unwrap();
+        let client = QueueLlmClient::new(dir.path().to_path_buf());
+        client
+            .extract_concepts(ExtractConceptsRequest {
+                text: "mixed feed".into(),
+                source_id: "tech-news".into(),
+                date: jiff::civil::date(2026, 5, 23),
+                focus: Some("software engineering and AI/ML only".into()),
+                target: TaskTarget {
+                    vault_path: "daily/tech-news/2026-05-23.md".into(),
+                    kind: TargetKind::DailyConcepts,
+                    anchor: "## Related Concepts".into(),
+                },
+            })
+            .await
+            .unwrap();
+        client.flush().await.unwrap();
+
+        let content = tokio::fs::read_to_string(client.queue_path())
+            .await
+            .unwrap();
+        let task: QueueTask = serde_json::from_str(content.trim()).unwrap();
+        assert_eq!(
+            task.input.get("focus").and_then(|v| v.as_str()),
+            Some("software engineering and AI/ML only")
+        );
     }
 
     #[tokio::test]
@@ -285,6 +328,7 @@ mod tests {
         let req = SummarizeRequest {
             text: "x".into(),
             max_sentences: 5,
+            focus: None,
             target: TaskTarget {
                 vault_path: "p".into(),
                 kind: TargetKind::DailySummary,
@@ -313,6 +357,7 @@ mod tests {
             .summarize(SummarizeRequest {
                 text: "x".into(),
                 max_sentences: 5,
+                focus: None,
                 target: TaskTarget {
                     vault_path: "p".into(),
                     kind: TargetKind::DailySummary,

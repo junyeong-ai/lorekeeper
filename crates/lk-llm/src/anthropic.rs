@@ -104,8 +104,10 @@ impl LlmClient for AnthropicClient {
         self.call(
             "You are a concise summarizer. Output only the summary, no preamble.",
             &format!(
-                "Summarize in at most {} bullet points:\n\n{}",
-                req.max_sentences, req.text
+                "Summarize in at most {} bullet points.{}\n\n{}",
+                req.max_sentences,
+                focus_clause(&req.focus),
+                req.text
             ),
         )
         .await
@@ -115,13 +117,25 @@ impl LlmClient for AnthropicClient {
         &self,
         req: ExtractConceptsRequest,
     ) -> Result<Vec<ExtractedConcept>, LlmError> {
-        let resp = self
-            .call(
-                r#"Extract named entities, technologies, key topics. Output JSON array: [{"name":"...","slug":"...","confidence":"extracted"|"inferred"}]. ONLY the JSON array."#,
-                &req.text,
-            )
-            .await?;
+        let system = format!(
+            r#"Extract named entities, technologies, key topics.{} Output JSON array: [{{"name":"...","slug":"...","confidence":"extracted"|"inferred"}}]. ONLY the JSON array."#,
+            focus_clause(&req.focus)
+        );
+        let resp = self.call(&system, &req.text).await?;
         serde_json::from_str(strip_code_fences(&resp))
             .map_err(|e| LlmError::Api(format!("concept parse: {e}")))
+    }
+}
+
+/// A standalone instruction restricting output to the source's `focus`, or empty
+/// when unset — the single relevance phrasing shared by summarize and extract-concepts
+/// (and mirrored by the queue-draining skill). `focus` is already normalized by
+/// `SourceConfig::normalized_focus` (never blank), so no trimming is needed here.
+fn focus_clause(focus: &Option<String>) -> String {
+    match focus {
+        Some(f) => {
+            format!(" Limit to content matching this focus: {f}; ignore anything off-topic.")
+        }
+        None => String::new(),
     }
 }
