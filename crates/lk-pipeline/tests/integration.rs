@@ -147,7 +147,7 @@ async fn concept_pages_written_with_merge() {
         .unwrap();
 
     assert!(
-        concept_output2.content.contains("reference_count: 2"),
+        concept_output2.content.contains("source_count: 2"),
         "expected merged count 2, content was:\n{}",
         concept_output2.content
     );
@@ -286,7 +286,7 @@ async fn multi_date_events_produce_multiple_daily_pages() {
 #[tokio::test]
 async fn concept_accumulates_across_sources_in_one_run() {
     // Two different sources mention the same concept in a single run. The concept page
-    // must merge into ONE page with reference_count 2 and both source refs — not be
+    // must merge into ONE page with source_count 2 and both source refs — not be
     // overwritten by whichever source is written last.
     let dir = TempDir::new().unwrap();
     let vault = dir.path();
@@ -345,7 +345,7 @@ async fn concept_accumulates_across_sources_in_one_run() {
         "concept must be a single merged page, not one per source"
     );
     assert!(
-        shared.content.contains("reference_count: 2"),
+        shared.content.contains("source_count: 2"),
         "both sources must accumulate into the count:\n{}",
         shared.content
     );

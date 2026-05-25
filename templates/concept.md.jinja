@@ -4,7 +4,7 @@ title: {{ name | tojson }}
 aliases: [{{ name | tojson }}]
 created: {{ first_seen }}
 updated: {{ last_seen }}
-reference_count: {{ reference_count }}
+source_count: {{ source_count }}
 sources: {{ sources | tojson }}
 tags: {{ tags | tojson }}
 ---
@@ -25,7 +25,7 @@ tags: {{ tags | tojson }}
 
 - {{ i18n.first_seen }}: {{ first_seen }}
 - {{ i18n.last_seen }}: {{ last_seen }}
-- {{ i18n.reference_count }}: {{ reference_count }}
+- {{ i18n.source_count }}: {{ source_count }}
 
 ## {{ i18n.related }}
 

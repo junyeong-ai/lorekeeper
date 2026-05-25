@@ -20,7 +20,7 @@ struct ConceptDraft {
     name: String,
     first_seen: jiff::civil::Date,
     last_seen: jiff::civil::Date,
-    reference_count: u64,
+    source_count: u64,
     sources: Vec<String>,
 }
 
@@ -56,9 +56,9 @@ impl ConceptDrafts {
 
         let mut draft = match existing.as_ref() {
             Some(page) => {
-                let reference_count = page
+                let source_count = page
                     .frontmatter
-                    .get("reference_count")
+                    .get("source_count")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
                 let sources: Vec<String> = page
@@ -100,7 +100,7 @@ impl ConceptDrafts {
                     name,
                     first_seen,
                     last_seen,
-                    reference_count,
+                    source_count,
                     sources,
                 }
             }
@@ -109,7 +109,7 @@ impl ConceptDrafts {
                 name: concept.name.clone(),
                 first_seen: date,
                 last_seen: date,
-                reference_count: 0,
+                source_count: 0,
                 sources: vec![],
             },
         };
@@ -142,7 +142,7 @@ impl ConceptDraft {
     fn add_reference(&mut self, source_ref: String, date: jiff::civil::Date) {
         if !self.sources.contains(&source_ref) {
             self.sources.push(source_ref);
-            self.reference_count += 1;
+            self.source_count += 1;
         }
         self.first_seen = self.first_seen.min(date);
         self.last_seen = self.last_seen.max(date);
@@ -161,7 +161,7 @@ impl ConceptDraft {
             "name": self.name,
             "first_seen": self.first_seen.to_string(),
             "last_seen": self.last_seen.to_string(),
-            "reference_count": self.reference_count,
+            "source_count": self.source_count,
             "sources": self.sources,
             "tags": ["concept"],
             "i18n": locale.strings(),
@@ -211,7 +211,7 @@ mod tests {
             name: r#"RAG: "Retrieval" Augmented"#.into(),
             first_seen: jiff::civil::date(2026, 5, 1),
             last_seen: jiff::civil::date(2026, 5, 1),
-            reference_count: 1,
+            source_count: 1,
             sources: vec!["daily/x/2026-05-01".into()],
         };
         let engine = TemplateEngine::new(None).unwrap();

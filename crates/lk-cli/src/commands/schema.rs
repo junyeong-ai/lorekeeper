@@ -64,7 +64,7 @@ fn page_schemas() -> Vec<PageSchema> {
                 "aliases",
                 "created",
                 "updated",
-                "reference_count",
+                "source_count",
                 "sources",
                 "tags",
             ],
