@@ -60,6 +60,7 @@ impl Synthesizer {
                 text,
                 max_sentences,
                 focus: None,
+                locale: self.ctx.locale.tag().to_string(),
                 target: lk_llm::TaskTarget {
                     vault_path,
                     kind,

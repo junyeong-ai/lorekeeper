@@ -81,6 +81,7 @@ pub async fn render_work_log(
                 text: synthesis_input,
                 max_sentences: 10,
                 focus: None,
+                locale: locale.tag().to_string(),
                 target: lk_llm::TaskTarget {
                     vault_path,
                     kind: lk_llm::TargetKind::WorkLogSynthesis,

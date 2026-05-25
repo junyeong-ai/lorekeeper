@@ -207,6 +207,7 @@ impl Pipeline {
                     text: combined.clone(),
                     max_sentences: 5,
                     focus: focus.clone(),
+                    locale: self.ctx.locale.tag().to_string(),
                     target: lk_llm::TaskTarget {
                         vault_path: daily_path.clone(),
                         kind: lk_llm::TargetKind::DailySummary,
@@ -410,6 +411,7 @@ impl Pipeline {
                     text: format!("{}\n{}", event.title, event.body),
                     max_sentences: 5,
                     focus: focus.clone(),
+                    locale: self.ctx.locale.tag().to_string(),
                     target: lk_llm::TaskTarget {
                         vault_path: vault_path.clone(),
                         kind: lk_llm::TargetKind::DocumentSummary,

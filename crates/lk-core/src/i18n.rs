@@ -20,6 +20,13 @@ impl Locale {
         }
     }
 
+    pub fn tag(self) -> &'static str {
+        match self {
+            Locale::Ko => "ko",
+            Locale::En => "en",
+        }
+    }
+
     pub fn strings(self) -> &'static Strings {
         match self {
             Locale::Ko => &KO,

@@ -88,6 +88,7 @@ impl LlmClient for QueueLlmClient {
         let mut input = serde_json::json!({
             "text": req.text,
             "max_sentences": req.max_sentences,
+            "locale": req.locale,
         });
         if let Some(focus) = &req.focus {
             input["focus"] = serde_json::Value::String(focus.clone());
@@ -217,6 +218,7 @@ mod tests {
         let req = SummarizeRequest {
             text: "Some content".into(),
             max_sentences: 5,
+            locale: "ko".into(),
             focus: None,
             target: TaskTarget {
                 vault_path: "daily/test/2026-05-23.md".into(),
@@ -253,6 +255,7 @@ mod tests {
             let req = SummarizeRequest {
                 text: "x".into(),
                 max_sentences: 5,
+                locale: "ko".into(),
                 focus: None,
                 target: TaskTarget {
                     vault_path: "p".into(),
@@ -358,6 +361,7 @@ mod tests {
         let req = SummarizeRequest {
             text: "x".into(),
             max_sentences: 5,
+            locale: "ko".into(),
             focus: None,
             target: TaskTarget {
                 vault_path: "p".into(),
@@ -387,6 +391,7 @@ mod tests {
             .summarize(SummarizeRequest {
                 text: "x".into(),
                 max_sentences: 5,
+                locale: "ko".into(),
                 focus: None,
                 target: TaskTarget {
                     vault_path: "p".into(),

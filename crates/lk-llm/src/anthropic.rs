@@ -108,8 +108,9 @@ fn strip_code_fences(text: &str) -> &str {
 #[async_trait]
 impl LlmClient for AnthropicClient {
     async fn summarize(&self, req: SummarizeRequest) -> Result<String, LlmError> {
+        let lang = locale_instruction(&req.locale);
         self.call(
-            "You are a concise summarizer. Output only the summary, no preamble.",
+            &format!("You are a concise summarizer.{lang} Output only the summary, no preamble."),
             &format!(
                 "Summarize in at most {} bullet points.{}\n\n{}",
                 req.max_sentences,
@@ -190,6 +191,14 @@ fn existing_clause(existing: &[crate::ExistingConceptRef]) -> String {
         " Existing concepts (reuse exact name+slug when the entity matches, do NOT create duplicates): [{}].",
         names.join(", ")
     )
+}
+
+fn locale_instruction(locale: &str) -> String {
+    match locale {
+        "ko" => " Always respond in Korean (한국어).".to_string(),
+        "en" => String::new(),
+        other => format!(" Always respond in {other}."),
+    }
 }
 
 /// Relevance filter clause appended to the system prompt. Normalized by

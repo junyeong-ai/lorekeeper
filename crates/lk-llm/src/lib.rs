@@ -116,6 +116,8 @@ pub struct SummarizeRequest {
     /// set, the summary covers only content matching it and ignores off-topic
     /// items — so a broad source (e.g. a news aggregator) yields a focused digest.
     pub focus: Option<String>,
+    /// Output language for the summary (e.g. "ko", "en"). Derived from vault.locale.
+    pub locale: String,
     pub target: TaskTarget,
 }
 
