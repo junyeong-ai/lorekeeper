@@ -160,6 +160,14 @@ impl Pipeline {
         classify::assign_static_labels(&mut events, &config.labels);
         if config.track_personal {
             classify::flag_personal(&mut events, &self.ctx.identity);
+            if !events.iter().any(|e| e.is_personal) {
+                for event in &mut events {
+                    event.is_personal = true;
+                    if !event.labels.contains(&"personal".to_string()) {
+                        event.labels.push("personal".into());
+                    }
+                }
+            }
         }
         classify::classify_by_keywords(&mut events, &config.classify);
         if config.classify_with_llm && !options.dry_run {

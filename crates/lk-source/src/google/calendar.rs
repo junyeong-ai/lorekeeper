@@ -70,13 +70,12 @@ struct CalEvent {
 }
 
 #[derive(Deserialize)]
-#[allow(dead_code)]
 struct Attachment {
     #[serde(rename = "fileUrl")]
-    file_url: Option<String>,
+    _file_url: Option<String>,
     title: Option<String>,
     #[serde(rename = "mimeType")]
-    mime_type: Option<String>,
+    _mime_type: Option<String>,
     #[serde(rename = "fileId")]
     file_id: Option<String>,
 }
@@ -272,22 +271,25 @@ impl Source for CalendarSource {
 
             // Optionally fetch meeting notes from Drive links in description + attachments.
             if p.fetch_meeting_notes {
-                let mut file_ids = extract_drive_file_ids(&description);
+                let mut file_entries: Vec<(String, Option<String>)> =
+                    extract_drive_file_ids(&description)
+                        .into_iter()
+                        .map(|id| (id, None))
+                        .collect();
                 for att in &ev.attachments {
                     if let Some(ref fid) = att.file_id
-                        && !file_ids.contains(fid)
+                        && !file_entries.iter().any(|(id, _)| id == fid)
                     {
-                        file_ids.push(fid.clone());
+                        file_entries.push((fid.clone(), att.title.clone()));
                     }
                 }
-                for file_id in file_ids.into_iter().take(MAX_DRIVE_FETCHES_PER_EVENT) {
+                for (file_id, att_title) in
+                    file_entries.into_iter().take(MAX_DRIVE_FETCHES_PER_EVENT)
+                {
                     match fetch_drive_content(&self.http, &token, &file_id).await {
                         Ok(content) if !content.trim().is_empty() => {
-                            body_parts.push(format!(
-                                "**{}:**\n\n{}",
-                                s.meeting_notes,
-                                content.trim()
-                            ));
+                            let header = att_title.as_deref().unwrap_or(s.meeting_notes);
+                            body_parts.push(format!("**{header}:**\n\n{}", content.trim()));
                         }
                         Ok(_) => {}
                         Err(e) => {
