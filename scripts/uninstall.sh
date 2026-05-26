@@ -3,7 +3,7 @@
 set -euo pipefail
 
 BINARY_NAME="lore"
-SKILL_NAMES=("lorekeeper" "lore-process" "lore-setup" "lore-wiki")
+SKILL_NAMES=("lore-ingest" "lore-process" "lore-setup" "lore-wiki" "lore-capture" "lore-extract")
 
 INSTALL_DIR="${LORE_INSTALL_DIR:-$HOME/.local/bin}"
 DATA_DIR="${LORE_INSTALL_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/lorekeeper}"
@@ -41,8 +41,8 @@ Usage:
 Removes:
   - $LORE_INSTALL_DIR/lore                        (binary)
   - $LORE_INSTALL_DATA_DIR/templates              (installed templates)
-  - ~/.claude/skills/lorekeeper                   (user-level skill)
-  - ./.claude/skills/lorekeeper                   (project-level skill, if present)
+  - ~/.claude/skills/lore-*                        (user-level skills)
+  - ./.claude/skills/lore-*                        (project-level skills, if present)
 
 Flags:
   --yes, -y       Skip all confirmations

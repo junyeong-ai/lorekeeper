@@ -4,7 +4,7 @@ set -euo pipefail
 
 REPO="junyeong-ai/lorekeeper"
 BINARY_NAME="lore"
-SKILL_NAME="lorekeeper"
+SKILL_NAME="lore-ingest"
 LATEST_URL="https://github.com/${REPO}/releases/latest"
 RELEASE_BASE="https://github.com/${REPO}/releases/download"
 
@@ -408,8 +408,8 @@ render_review() {
     printf '  %sbinary%s    %s (v%s, %s)\n' "$C_DIM" "$C_RESET" "$bin_dest" "$version" "$method"
     printf '  %stemplates%s %s/templates\n' "$C_DIM" "$C_RESET" "$data_dest"
     case "$skill_level" in
-        user)    printf '  %sskill%s     ~/.claude/skills/%s\n' "$C_DIM" "$C_RESET" "$SKILL_NAME" ;;
-        project) printf '  %sskill%s     ./.claude/skills/%s\n' "$C_DIM" "$C_RESET" "$SKILL_NAME" ;;
+        user)    printf '  %sskills%s    ~/.claude/skills/lore-*\n' "$C_DIM" "$C_RESET" ;;
+        project) printf '  %sskills%s    ./.claude/skills/lore-*\n' "$C_DIM" "$C_RESET" ;;
         none)    printf '  %sskill%s     (skipped)\n' "$C_DIM" "$C_RESET" ;;
     esac
 }
@@ -495,8 +495,8 @@ main() {
     else
         local pick
         pick="$(prompt_choice "Claude Code skill" 1 \
-            "User-level            ~/.claude/skills/${SKILL_NAME}" \
-            "Project-level         ./.claude/skills/${SKILL_NAME}" \
+            "User-level            ~/.claude/skills/lore-*" \
+            "Project-level         ./.claude/skills/lore-*" \
             "Skip")"
         case "$pick" in
             User-level*)    skill_level="user" ;;
@@ -570,9 +570,8 @@ main() {
     fi
 
     if [ "$skill_level" != "none" ]; then
-        # Install all bundled skills. lorekeeper = lore command invocation surface;
-        # lore-process = queue drainer used in queue-mode workflows.
-        for skill in "lorekeeper" "lore-process" "lore-setup" "lore-wiki"; do
+        # Install all bundled skills.
+        for skill in "lore-ingest" "lore-process" "lore-setup" "lore-wiki" "lore-capture" "lore-extract"; do
             local skill_src=""
             if [ -n "$repo_dir" ] && [ -d "$repo_dir/.claude/skills/$skill" ]; then
                 skill_src="$repo_dir/.claude/skills/$skill"
@@ -596,7 +595,7 @@ main() {
     printf '  %s3.%s %slore validate%s           Verify config + credentials\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
     printf '  %s4.%s %slore ingest --dry-run%s   Preview ingest without writing\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
     printf '  %s5.%s %slore schedule%s | crontab -  Register the daily cron\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
-    printf '  %s/lorekeeper%s · %s/lore-process%s   via Claude Code (queue-mode)\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
+    printf '  %s/lore-setup%s · %s/lore-ingest%s · %s/lore-process%s · %s/lore-wiki%s · %s/lore-capture%s · %s/lore-extract%s\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
 }
 
 main "$@"

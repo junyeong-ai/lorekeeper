@@ -139,7 +139,7 @@ jobs:
           # One archive per skill, named `{skill}-skill-v{version}.tar.gz` to match
           # what scripts/install.sh and install.ps1 download. Each contains the
           # skill directory.
-          for skill in lorekeeper lore-process lore-setup lore-wiki; do
+          for skill in lore-ingest lore-process lore-setup lore-wiki lore-capture lore-extract; do
             archive="${skill}-skill-v${VERSION}.tar.gz"
             tar -czf "$archive" -C .claude/skills "$skill"
             sha256sum "$archive" > "${archive}.sha256"

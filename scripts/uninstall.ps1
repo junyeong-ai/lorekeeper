@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $BinaryName = 'lore'
-$SkillNames = @('lorekeeper', 'lore-process', 'lore-setup', 'lore-wiki')
+$SkillNames = @('lore-ingest', 'lore-process', 'lore-setup', 'lore-wiki', 'lore-capture', 'lore-extract')
 $InstallDir = if ($env:LORE_INSTALL_DIR) { $env:LORE_INSTALL_DIR }
               else { Join-Path $env:USERPROFILE '.local\bin' }
 $DataDir = if ($env:LORE_INSTALL_DATA_DIR) { $env:LORE_INSTALL_DATA_DIR }

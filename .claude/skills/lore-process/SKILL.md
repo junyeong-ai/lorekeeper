@@ -2,9 +2,8 @@
 name: lore-process
 description: Consume Lorekeeper LLM work queue. When `lore ingest` runs in queue mode (config `llm.provider: queue`), the Rust pipeline writes JSONL task files under `<vault>/.lorekeeper/queue/`. This skill drains those queues — running summarize and concept extraction using Claude Code's native LLM (no API key needed) and editing the target vault pages (plain markdown files) in place. Idempotent — partial progress is resumable; processed files move to `.lorekeeper/queue/processed/`. Run after each `lore ingest` (or daily) to enrich pages that were written with empty summary/concept sections.
 when_to_use: |
-  lore-process, /lore-process, 큐 처리, queue process, drain queue, 처리 큐,
-  wiki 처리, summary 채워, 요약 채우기, 개념 추출 실행, concept extraction run,
-  daily 페이지 보강, enrich daily pages, post-ingest, ingest 후 처리
+  lore-process, queue process, drain queue, fill summaries,
+  concept extraction run, enrich daily pages, post-ingest
 argument-hint: "[--vault path] [--limit N]"
 allowed-tools: |
   Bash(ls *)
@@ -309,7 +308,7 @@ succeeded. Failure rules:
 - **Re-running on a partially-processed file is safe** because:
   - Daily summary/concept edits replace the section body — repeating the
     edit produces identical content. No drift.
-  - Concept page merging preserves original `first_seen` and dedupes the
+  - Concept page merging preserves original `created` and dedupes the
     `sources` array — re-adding the same source ref is a no-op.
   - `source_count` is only incremented when a genuinely new source
     ref is appended.

@@ -2,10 +2,9 @@
 name: lore-wiki
 description: Semantic wiki operations for the Lorekeeper vault. Add sources, query with compounding, audit structural and semantic health. Reads wiki/AGENTS.md for page formats and section vocabulary — never hardcodes headings. Pairs with `lore` (the deterministic binary) for graph analysis and queue processing.
 when_to_use: |
-  wiki query, wiki 질문, 지식 검색, 지식 조회, knowledge search, ask wiki,
-  wiki add, 지식 추가, wiki에 추가, add to wiki, ingest document,
-  wiki audit, 감사, wiki 검사, lint wiki, check wiki health,
-  wiki status, wiki 상태
+  wiki query, knowledge search, ask wiki, search vault,
+  wiki add, add to wiki, ingest document, add source,
+  wiki audit, lint wiki, check wiki health, wiki status
 argument-hint: "<command> [args]"
 allowed-tools: |
   Bash(lore *)
@@ -92,7 +91,7 @@ auto-resolve.
      (cross-check `[[...]]` wikilinks vs files under `wiki/concepts/`).
    - Topics with high cross-source activity (3+ sources in a week) but shallow
      concept coverage (placeholder `## 핵심` or single source listed).
-   - Stale concept syntheses — `last_seen` recent but `## 핵심` was written
+   - Stale concept syntheses — `updated` recent but `## 핵심` was written
      long before the recent reference burst.
    This layer is LLM judgment, not a deterministic check. Surface as questions
    for human review, never auto-create pages.
@@ -113,17 +112,9 @@ Quick vault stats.
 - Last ingest time (read `.lorekeeper/ingest.jsonl`).
 - Any pending queue files.
 
-## Natural-language trigger mapping
-
-- "이 문서 위키에 넣어줘" / "add this to wiki" → `/lore-wiki add`
-- "위키에서 찾아봐" / "search the wiki" → `/lore-wiki query`
-- "위키 건강 검사" / "audit the wiki" → `/lore-wiki audit`
-- "위키 상태" / "wiki status" → `/lore-wiki status`
-
 ## When NOT to invoke
 
-- For deterministic ingest (daily cron, source fetching) use `/lorekeeper`
-  (the `lore ingest` skill).
+- For deterministic ingest (daily cron, source fetching) use `/lore-ingest`.
 - For draining the LLM queue after ingest, use `/lore-process`.
 - This skill is for semantic operations: ad-hoc knowledge ingest, vault
   queries, and health audits.

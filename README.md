@@ -19,7 +19,7 @@ irm https://raw.githubusercontent.com/junyeong-ai/lorekeeper/main/scripts/instal
 The installer:
 - Downloads the prebuilt `lore` binary to `~/.local/bin` (configurable)
 - Installs `templates/` to `$XDG_DATA_HOME/lorekeeper/templates/`
-- Installs the Claude Code skills (`lorekeeper`, `lore-process`, `lore-wiki`) to `~/.claude/skills/`
+- Installs the Claude Code skills (`lore-ingest`, `lore-process`, `lore-setup`, `lore-wiki`, `lore-capture`, `lore-extract`) to `~/.claude/skills/`
 - Verifies SHA256 checksums
 - Adds quarantine strip + ad-hoc codesign on macOS
 - Checks `PATH` and prints next steps
@@ -73,9 +73,19 @@ Gmail ─────────┤          ├─ Normalize → Event       m
 Slack ─────────┼─ config ─┤  Deduplicate (cascade)   weekly/ monthly/
 Jira ──────────┤  .yaml   ├─ Classify (labels)       quarterly/ annually/
 Calendar ──────┤          ├─ Concepts (LLM)          wiki/concepts/
-Manual inbox ──┘          ├─ Wiki index (catalog)    wiki/documents/
-                          └─ Graph (lint, stale,     wiki/index.md
-                               cluster, backlinks)   wiki/AGENTS.md
+RSS/Atom ──────┤          ├─ Render (templates)      wiki/documents/
+Manual inbox ──┘          ├─ Wiki index (catalog)    wiki/index.md
+                          └─ Graph (lint, stale,     wiki/AGENTS.md
+                               cluster, backlinks)
+
+Claude Code Skills        Semantic Plane             (same vault)
+──────────────────        ──────────────             ────────────
+/lore-ingest ────────── lore CLI wrapper ──────────→ daily/ weekly/ …
+/lore-process ───────── LLM queue drain ──────────→ summaries + concepts
+/lore-capture ───────── real-time capture ─────────→ wiki/documents/
+/lore-extract ───────── batch repo extraction ─────→ wiki/documents/
+/lore-wiki ──────────── query / audit / add ───────→ wiki/
+/lore-setup ─────────── config builder ────────────→ config.yaml
 ```
 
 ## Commands
@@ -110,7 +120,7 @@ Manual inbox ──┘          ├─ Wiki index (catalog)    wiki/documents/
 
 | Mode | Default | Best for |
 |------|:-------:|---------|
-| `queue` | ✓ | Daily Claude Code users. Pipeline emits JSONL tasks to `<vault>/.lorekeeper/queue/`; the `/lore-process` skill drains them using Claude Code's native LLM session — no API key, no separate billing. |
+| `queue` | ✓ | Daily Claude Code users. Pipeline emits JSONL tasks to `<vault>/.lorekeeper/queue/`; `/lore-process` drains them using Claude Code's native LLM session — no API key, no separate billing. |
 | `noop` |  | Development, CI, or vault-only sources where you only need Rust templating without semantic enrichment. |
 | `anthropic` |  | Unattended cron on headless servers (no Claude Code session available). Requires `ANTHROPIC_API_KEY`; pipeline does end-to-end work in one process. |
 
@@ -119,6 +129,29 @@ Workflow in `queue` mode:
 2. `/lore-process` (run in Claude Code) — drains the queue, fills summaries, creates/merges concept pages
 
 The skill is **fully idempotent**: re-running on a partially-processed queue file is safe because vault edits replace section content rather than append, and concept page merging preserves accumulated state.
+
+## Claude Code Skills
+
+Six skills provide the Claude Code integration surface. All follow the `lore-{verb}` naming convention and are written in English (AI-native design).
+
+| Skill | Purpose | Model-invocable |
+|-------|---------|:---------------:|
+| `/lore-ingest` | Daily source ingestion — wraps the `lore` CLI for ingest, synthesis, status, health, schedule | No (manual trigger) |
+| `/lore-process` | Drain the LLM queue after ingest — fills summaries, extracts concepts, synthesises work-log topics | Yes |
+| `/lore-setup` | Interactive config builder — discovers Slack channel IDs, Jira projects, Google calendars via CLIs | Yes |
+| `/lore-wiki` | Semantic wiki operations — add sources, query with compounding, audit structural + semantic health | Yes |
+| `/lore-capture` | Real-time knowledge capture — grab insights from active troubleshooting before context fades | Yes |
+| `/lore-extract` | Batch project knowledge extraction — scan → manifest → run → audit workflow for existing docs | Yes |
+
+**`/lore-capture`** and **`/lore-extract`** are the project-knowledge harvesting pair:
+- **capture**: one insight at a time, during active work (high urgency, low volume)
+- **extract**: entire documentation corpus, planned batch operation (low urgency, high volume)
+
+Both write to `wiki/documents/` and `wiki/concepts/`, sharing the same concept dedup and graph infrastructure as daily ingestion.
+
+### Extraction manifest
+
+`/lore-extract` persists a manifest at `<vault>/.lorekeeper/extracts/<project>/manifest.yaml` during the scan phase. The manifest records discovered sources, transferability classifications, identifier strip patterns, and concept category mappings. Subsequent runs consume the manifest for consistency; re-scans diff against the previous state for incremental updates.
 
 ## Workspace Structure
 

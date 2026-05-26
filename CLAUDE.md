@@ -15,8 +15,8 @@ Gmail ─────────┤          ├─ Normalize → Event       m
 Slack ─────────┼─ config ─┤  Deduplicate (cascade)   weekly/ monthly/
 Jira ──────────┤  .yaml   ├─ Classify (labels)       quarterly/ annually/
 Calendar ──────┤          ├─ Concepts (LLM)          wiki/concepts/
-Manual inbox ──┘          ├─ Render (templates)      wiki/documents/
-                          ├─ Wiki index (catalog)    wiki/index.md
+RSS/Atom ──────┤          ├─ Render (templates)      wiki/documents/
+Manual inbox ──┘          ├─ Wiki index (catalog)    wiki/index.md
                           └─ Graph (lint, stale,     wiki/AGENTS.md
                                cluster, backlinks)
 ```

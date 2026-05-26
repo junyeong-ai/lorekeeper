@@ -17,7 +17,7 @@ Set-StrictMode -Version Latest
 
 $Repo = 'junyeong-ai/lorekeeper'
 $BinaryName = 'lore'
-$SkillNames = @('lorekeeper', 'lore-process', 'lore-setup')
+$SkillNames = @('lore-ingest', 'lore-process', 'lore-setup', 'lore-wiki', 'lore-capture', 'lore-extract')
 $ReleaseBase = "https://github.com/$Repo/releases/download"
 $LatestUrl = "https://github.com/$Repo/releases/latest"
 
@@ -177,8 +177,8 @@ Write-Host 'Review' -ForegroundColor White
 Write-Host "  binary    $(Join-Path $InstallDir "$BinaryName.exe") (v$version, $method)"
 Write-Host "  templates $(Join-Path $DataDir 'templates')"
 switch ($Skill) {
-    'user'    { Write-Host "  skills    $env:USERPROFILE\.claude\skills\{lorekeeper,lore-process,lore-setup}" }
-    'project' { Write-Host "  skills    .\.claude\skills\{lorekeeper,lore-process,lore-setup}" }
+    'user'    { Write-Host "  skills    $env:USERPROFILE\.claude\skills\{lore-ingest,lore-process,lore-setup,lore-wiki,lore-capture,lore-extract}" }
+    'project' { Write-Host "  skills    .\.claude\skills\{lore-ingest,lore-process,lore-setup,lore-wiki,lore-capture,lore-extract}" }
     'none'    { Write-Host '  skills    (skipped)' }
 }
 
@@ -240,4 +240,4 @@ Write-Host 'Next steps:'
 Write-Host "  $BinaryName validate              Verify config.yaml in current directory"
 Write-Host "  $BinaryName ingest --dry-run      Preview ingest without writing"
 Write-Host "  $BinaryName schedule              Generate scheduled task entries"
-Write-Host "  /lorekeeper                  Use as Claude Code skill"
+Write-Host "  /lore-setup  /lore-ingest  /lore-process  /lore-wiki  /lore-capture  /lore-extract"
