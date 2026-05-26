@@ -288,18 +288,18 @@ synthesis:
 # Concept categorization for wiki/concepts/ pages.
 # Categories give the LLM a fixed vocabulary when assigning topics.
 # Omit the entire block to skip categorization.
-# concepts:
-#   categories:
-#     - id: ai-ml
-#       label: "AI/ML"
-#     - id: infrastructure
-#       label: "인프라"
-#     - id: software-engineering
-#       label: "소프트웨어 엔지니어링"
-#     - id: product-service
-#       label: "제품/서비스"
-#     - id: organization
-#       label: "조직/이벤트"
+concepts:
+  categories:
+    - id: ai-ml
+      label: "AI/ML"
+    - id: infrastructure
+      label: "인프라"
+    - id: software-engineering
+      label: "소프트웨어 엔지니어링"
+    - id: product-service
+      label: "제품/서비스"
+    - id: organization
+      label: "조직/이벤트"
 
 # ─── 그래프 분석 ─────────────────────────────────────────
 # Wikilink graph analysis (lore graph lint/cluster/suggest-links).
