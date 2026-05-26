@@ -35,16 +35,40 @@ pub async fn run_index(
     opts: &super::GlobalOpts,
     root_override: Option<PathBuf>,
 ) -> miette::Result<()> {
-    let (vault_root, locale) = resolve_vault(opts, root_override)?;
+    let (vault_root, locale, threshold) = resolve_vault_with_threshold(opts, root_override)?;
 
     tracing::info!(vault = %vault_root.display(), locale = ?locale, "building wiki index");
 
-    let path = lk_vault::write_index(&vault_root, locale)
+    let path = lk_vault::write_index(&vault_root, locale, threshold)
         .await
         .map_err(|e| miette::miette!("write wiki/index.md: {e}"))?;
 
     eprintln!("Wrote {}", path.display());
     Ok(())
+}
+
+fn resolve_vault_with_threshold(
+    opts: &super::GlobalOpts,
+    root_override: Option<PathBuf>,
+) -> miette::Result<(PathBuf, Locale, usize)> {
+    match root_override {
+        Some(r) => {
+            let (locale, threshold) = match find_config(opts).and_then(|p| load_config(&p)) {
+                Ok(config) => (config.vault.locale(), config.concepts.index_split_threshold),
+                Err(_) => (Locale::default(), 100),
+            };
+            Ok((r, locale, threshold))
+        }
+        None => {
+            let path = find_config(opts)?;
+            let config = load_config(&path)?;
+            Ok((
+                config.vault.root_path(),
+                config.vault.locale(),
+                config.concepts.index_split_threshold,
+            ))
+        }
+    }
 }
 
 async fn run_concepts(opts: &super::GlobalOpts, json: bool) -> miette::Result<()> {
@@ -155,26 +179,4 @@ struct ConceptEntry {
     title: String,
     category: String,
     source_count: u64,
-}
-
-/// Resolve the vault root + output locale. `--root` skips config loading and falls back
-/// to the default locale (Ko) if the config can't be located — mirrors `lore schema`.
-fn resolve_vault(
-    opts: &super::GlobalOpts,
-    root_override: Option<PathBuf>,
-) -> miette::Result<(PathBuf, Locale)> {
-    match root_override {
-        Some(r) => {
-            let locale = match find_config(opts).and_then(|p| load_config(&p)) {
-                Ok(config) => config.vault.locale(),
-                Err(_) => Locale::default(),
-            };
-            Ok((r, locale))
-        }
-        None => {
-            let path = find_config(opts)?;
-            let config = load_config(&path)?;
-            Ok((config.vault.root_path(), config.vault.locale()))
-        }
-    }
 }

@@ -300,6 +300,7 @@ concepts:
       label: "제품/서비스"
     - id: organization
       label: "조직/이벤트"
+  index_split_threshold: 100  # 컨셉이 이 수를 넘으면 카테고리별 서브페이지 자동 생성
 
 # ─── 그래프 분석 ─────────────────────────────────────────
 # Wikilink graph analysis (lore graph lint/cluster/suggest-links).

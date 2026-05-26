@@ -25,13 +25,24 @@ use crate::VaultError;
 /// `writer.rs` but scoped to index writes).
 static INDEX_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// Output from `build_index`: the main index page plus optional per-category sub-pages
+/// when the concept count exceeds the split threshold.
+pub struct IndexOutput {
+    pub main: String,
+    pub sub_pages: Vec<(String, String)>,
+}
+
 /// Build the `wiki/index.md` body for the vault at `vault_root`, using `locale` to pick
 /// section headings and the body-heading targets used by the one-line extractors.
 ///
 /// Returns the rendered markdown (caller writes it). Walks the vault filesystem
 /// directly — directories that don't exist are simply skipped (an empty vault yields
 /// just the header).
-pub fn build_index(vault_root: &Path, locale: Locale) -> Result<String, VaultError> {
+pub fn build_index(
+    vault_root: &Path,
+    locale: Locale,
+    index_split_threshold: usize,
+) -> Result<IndexOutput, VaultError> {
     let strings = locale.strings();
 
     let concepts = collect_dir(vault_root, Path::new("wiki/concepts"));
@@ -94,6 +105,8 @@ pub fn build_index(vault_root: &Path, locale: Locale) -> Result<String, VaultErr
     )
     .unwrap();
 
+    let mut sub_pages: Vec<(String, String)> = Vec::new();
+
     if !concepts.is_empty() {
         let heading = strings.concept_synthesis;
         let mut by_category: BTreeMap<String, Vec<&Entry>> = BTreeMap::new();
@@ -105,33 +118,68 @@ pub fn build_index(vault_root: &Path, locale: Locale) -> Result<String, VaultErr
             }
         }
 
+        let split = index_split_threshold > 0 && concepts.len() >= index_split_threshold;
+
         writeln!(out).unwrap();
         writeln!(out, "## {} ({})", strings.index_concepts, concepts.len()).unwrap();
 
-        for (cat, entries) in &by_category {
+        if split {
             writeln!(out).unwrap();
-            writeln!(out, "### {cat} ({})", entries.len()).unwrap();
-            writeln!(out).unwrap();
-            for entry in entries {
-                let summary = first_line_under_heading(&entry.body, heading).unwrap_or_default();
-                if summary.is_empty() {
-                    writeln!(out, "- [[{}]]", entry.link_target).unwrap();
-                } else {
-                    writeln!(out, "- [[{}]] — {}", entry.link_target, summary).unwrap();
+            for (cat, entries) in &by_category {
+                writeln!(
+                    out,
+                    "- [[wiki/index/{cat}|{cat}]] ({} concepts)",
+                    entries.len()
+                )
+                .unwrap();
+
+                let mut page = String::new();
+                writeln!(page, "# {cat}").unwrap();
+                writeln!(page).unwrap();
+                writeln!(page, "> {} concepts", entries.len()).unwrap();
+                writeln!(page).unwrap();
+                for entry in entries {
+                    let summary =
+                        first_line_under_heading(&entry.body, heading).unwrap_or_default();
+                    if summary.is_empty() {
+                        writeln!(page, "- [[{}]]", entry.link_target).unwrap();
+                    } else {
+                        writeln!(page, "- [[{}]] — {}", entry.link_target, summary).unwrap();
+                    }
+                }
+                sub_pages.push((format!("wiki/index/{cat}.md"), page));
+            }
+            if !uncategorized.is_empty() {
+                writeln!(out, "- 미분류 ({} concepts)", uncategorized.len()).unwrap();
+            }
+        } else {
+            for (cat, entries) in &by_category {
+                writeln!(out).unwrap();
+                writeln!(out, "### {cat} ({})", entries.len()).unwrap();
+                writeln!(out).unwrap();
+                for entry in entries {
+                    let summary =
+                        first_line_under_heading(&entry.body, heading).unwrap_or_default();
+                    if summary.is_empty() {
+                        writeln!(out, "- [[{}]]", entry.link_target).unwrap();
+                    } else {
+                        writeln!(out, "- [[{}]] — {}", entry.link_target, summary).unwrap();
+                    }
                 }
             }
-        }
 
-        if !uncategorized.is_empty() {
-            writeln!(out).unwrap();
-            writeln!(out, "### 미분류 ({})", uncategorized.len()).unwrap();
-            writeln!(out).unwrap();
-            for entry in &uncategorized {
-                let summary = first_line_under_heading(&entry.body, heading).unwrap_or_default();
-                if summary.is_empty() {
-                    writeln!(out, "- [[{}]]", entry.link_target).unwrap();
-                } else {
-                    writeln!(out, "- [[{}]] — {}", entry.link_target, summary).unwrap();
+            if !uncategorized.is_empty() {
+                writeln!(out).unwrap();
+                writeln!(out, "### 미분류 ({})", uncategorized.len()).unwrap();
+                writeln!(out).unwrap();
+                for entry in &uncategorized {
+                    let summary =
+                        first_line_under_heading(&entry.body, heading).unwrap_or_default();
+                    if summary.is_empty() {
+                        writeln!(out, "- [[{}]]", entry.link_target).unwrap();
+                    } else {
+                        writeln!(out, "- [[{}]] — {}", entry.link_target, summary).unwrap();
+                    }
                 }
             }
         }
@@ -178,22 +226,38 @@ pub fn build_index(vault_root: &Path, locale: Locale) -> Result<String, VaultErr
         );
     }
 
-    Ok(out)
+    Ok(IndexOutput {
+        main: out,
+        sub_pages,
+    })
 }
 
 /// Build the index and write it atomically to `<vault_root>/wiki/index.md`.
 ///
 /// The temp file lives next to the final path so the rename is on the same filesystem
 /// and therefore atomic. Returns the absolute path that was written.
-pub async fn write_index(vault_root: &Path, locale: Locale) -> Result<PathBuf, VaultError> {
-    let content = build_index(vault_root, locale)?;
+pub async fn write_index(
+    vault_root: &Path,
+    locale: Locale,
+    index_split_threshold: usize,
+) -> Result<PathBuf, VaultError> {
+    let output = build_index(vault_root, locale, index_split_threshold)?;
     let wiki_dir = vault_root.join("wiki");
     tokio::fs::create_dir_all(&wiki_dir).await?;
+
+    for (rel_path, content) in &output.sub_pages {
+        let abs = vault_root.join(rel_path);
+        if let Some(parent) = abs.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(&abs, content).await?;
+    }
+
     let final_path = wiki_dir.join("index.md");
     let seq = INDEX_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp_path = wiki_dir.join(format!(".index.md.{}.{seq}.tmp", std::process::id()));
 
-    match tokio::fs::write(&tmp_path, &content).await {
+    match tokio::fs::write(&tmp_path, &output.main).await {
         Ok(()) => {}
         Err(e) => {
             let _ = tokio::fs::remove_file(&tmp_path).await;
@@ -458,7 +522,7 @@ mod tests {
     #[test]
     fn empty_vault_yields_header_only() {
         let tmp = TempDir::new().unwrap();
-        let out = build_index(tmp.path(), Locale::Ko).unwrap();
+        let out = build_index(tmp.path(), Locale::Ko, 0).unwrap().main;
         assert!(out.starts_with("# Wiki Index"));
         assert!(out.contains("0 pages"));
         // No category sections should be rendered.
@@ -475,7 +539,7 @@ mod tests {
             "---\nid: agentic-ai\ntitle: \"Agentic AI\"\n---\n\n# Agentic AI\n\n\
              ## 핵심\n\n자율적으로 도구를 사용하는 AI 에이전트 패러다임.\n\n## 관련\n",
         );
-        let out = build_index(tmp.path(), Locale::Ko).unwrap();
+        let out = build_index(tmp.path(), Locale::Ko, 0).unwrap().main;
         assert!(out.contains("## 개념 (1)"));
         assert!(out.contains("[[Agentic AI]]"));
         assert!(out.contains("자율적으로 도구를 사용하는 AI 에이전트 패러다임."));
@@ -490,7 +554,7 @@ mod tests {
             "---\nid: whitepaper\ntitle: White Paper\n---\n\n# White Paper\n\n\
              ## Summary\n\nA short overview of the paper.\n\n## Content\n",
         );
-        let out = build_index(tmp.path(), Locale::En).unwrap();
+        let out = build_index(tmp.path(), Locale::En, 0).unwrap().main;
         assert!(out.contains("## Documents (1)"));
         assert!(out.contains("[[wiki/documents/whitepaper]]"));
         assert!(out.contains("A short overview of the paper."));
@@ -509,7 +573,7 @@ mod tests {
             "daily/team-slack/2026-05-22.md",
             "---\nid: s-1\ntitle: Slack\n---\n\n## 요약\n\n- 슬랙 트렌드\n",
         );
-        let out = build_index(tmp.path(), Locale::Ko).unwrap();
+        let out = build_index(tmp.path(), Locale::Ko, 0).unwrap().main;
         assert!(out.contains("## 일일 — email-digest (1)"));
         assert!(out.contains("## 일일 — team-slack (1)"));
         assert!(out.contains("[[daily/email-digest/2026-05-22]] — 첫 번째 메일 요약"));
@@ -524,7 +588,7 @@ mod tests {
             "me/work-log/2026-05-22.md",
             "---\nid: w-1\ntitle: Work\n---\n\n## 주제별 요약\n\n### 태블로 MCP\n- 미팅\n\n### 다른 주제\n",
         );
-        let out = build_index(tmp.path(), Locale::Ko).unwrap();
+        let out = build_index(tmp.path(), Locale::Ko, 0).unwrap().main;
         assert!(out.contains("## 업무 로그 (1)"));
         assert!(out.contains("[[me/work-log/2026-05-22]] — 태블로 MCP"));
     }
@@ -542,7 +606,7 @@ mod tests {
             "monthly/me/2026-05.md",
             "---\nid: m\ntitle: May\n---\n\n# May\n\nMay summary.\n",
         );
-        let out = build_index(tmp.path(), Locale::Ko).unwrap();
+        let out = build_index(tmp.path(), Locale::Ko, 0).unwrap().main;
         assert!(out.contains("## 종합 (2)"));
         assert!(out.contains("[[monthly/me/2026-05]] — May summary."));
         assert!(out.contains("[[weekly/synthesis/2026-W21]] — This week we focused on X."));
@@ -561,7 +625,7 @@ mod tests {
             "wiki/concepts/with-front.md",
             "---\nid: x\ntitle: \"X\"\n---\n\n## 핵심\n\nKept.\n",
         );
-        let out = build_index(tmp.path(), Locale::Ko).unwrap();
+        let out = build_index(tmp.path(), Locale::Ko, 0).unwrap().main;
         // Only the frontmatter-bearing page should show up.
         assert!(out.contains("## 개념 (1)"));
         assert!(out.contains("[[X]] — Kept."));
@@ -587,7 +651,7 @@ mod tests {
             "wiki/concepts/x.md",
             "---\nid: x\ntitle: \"X\"\n---\n\n## 핵심\n\nReal.\n",
         );
-        let out = build_index(tmp.path(), Locale::Ko).unwrap();
+        let out = build_index(tmp.path(), Locale::Ko, 0).unwrap().main;
         assert!(!out.contains("Old body"));
         assert!(!out.contains("[[Agents]]"));
         assert!(out.contains("[[X]]"));
@@ -649,7 +713,7 @@ mod tests {
             "wiki/concepts/x.md",
             "---\nid: x\ntitle: \"X\"\n---\n\n## 핵심\n\nbody\n",
         );
-        let path = write_index(tmp.path(), Locale::Ko).await.unwrap();
+        let path = write_index(tmp.path(), Locale::Ko, 0).await.unwrap();
         assert!(path.ends_with("wiki/index.md"));
         let content = tokio::fs::read_to_string(&path).await.unwrap();
         assert!(content.contains("[[X]]"));

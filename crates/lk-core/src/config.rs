@@ -770,10 +770,23 @@ pub enum LlmProvider {
     Noop,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ConceptConfig {
     pub categories: Vec<ConceptCategory>,
+    /// When the total concept count exceeds this threshold, the wiki index
+    /// splits into per-category sub-pages (`wiki/index/{category}.md`).
+    /// Below the threshold, all concepts render inline in `wiki/index.md`.
+    pub index_split_threshold: usize,
+}
+
+impl Default for ConceptConfig {
+    fn default() -> Self {
+        Self {
+            categories: Vec::new(),
+            index_split_threshold: 100,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
