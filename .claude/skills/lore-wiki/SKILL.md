@@ -84,9 +84,8 @@ auto-resolve.
    confirm topical relatedness before proposing a link. Community grounding +
    LLM confirmation = double gate against false positives.
 3. **Contradictions** — scoped to one concept page at a time whose `sources`
-   cite conflicting claims. Flag with `confidence: ambiguous` and a review
-   note. Never choose a side. One page at a time to avoid combinatorial
-   blow-up.
+   cite conflicting claims. Add a review note under `## 핵심`. Never choose
+   a side. One page at a time to avoid combinatorial blow-up.
 4. **Frontiers — data gaps + new directions** (the 4th lint dimension Karpathy
    identified as the highest-leverage long-term concern). Report:
    - Concepts mentioned in daily pages but missing a dedicated wiki page

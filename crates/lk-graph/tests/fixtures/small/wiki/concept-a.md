@@ -1,6 +1,5 @@
 ---
 title: Concept A
-confidence: extracted
 created: 2024-01-15
 sources:
   - https://example.com/a

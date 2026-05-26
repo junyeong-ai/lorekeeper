@@ -1,6 +1,5 @@
 ---
 title: Concept B
-confidence: inferred
 created: 2024-02-10
 ---
 
