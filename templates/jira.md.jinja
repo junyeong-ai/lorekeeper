@@ -21,7 +21,7 @@ events_count: {{ events | length }}
 ### {{ event.title }}
 
 {{ event.body }}
-{% if event.url %}[🔗 원본]({{ event.url }}){% endif %}
+{% if event.url %}[🔗 {{ i18n.original_link }}]({{ event.url }}){% endif %}
 
 {% endfor %}
 {% if extract_concepts %}

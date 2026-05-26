@@ -62,7 +62,7 @@ action_required: {{ action_count }}
 ### {{ event.title }}
 
 {{ event.body }}
-{% if event.url %}[🔗 원본]({{ event.url }}){% endif %}
+{% if event.url %}[🔗 {{ i18n.original_link }}]({{ event.url }}){% endif %}
 
 {% endfor %}
 {% if extract_concepts %}

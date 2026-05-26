@@ -107,6 +107,7 @@ pub struct Strings {
     pub location: &'static str,
     pub attendees: &'static str,
     pub meeting_notes: &'static str,
+    pub original_link: &'static str,
     /// Thread-reply marker; used as `--- {thread_replies} {n} ---`.
     pub thread_replies: &'static str,
     pub uncategorized: &'static str,
@@ -174,6 +175,7 @@ static KO: Strings = Strings {
     location: "위치",
     attendees: "참석자",
     meeting_notes: "회의록",
+    original_link: "원본",
     thread_replies: "쓰레드 답글",
     uncategorized: "기타",
     gmail_title: "이메일 다이제스트",
@@ -236,6 +238,7 @@ static EN: Strings = Strings {
     location: "Location",
     attendees: "Attendees",
     meeting_notes: "Meeting Notes",
+    original_link: "Source",
     thread_replies: "thread replies",
     uncategorized: "Other",
     gmail_title: "Email Digest",

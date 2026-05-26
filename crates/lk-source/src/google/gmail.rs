@@ -356,10 +356,12 @@ fn has_calendar_attachment(msg: &Message) -> bool {
         }
         false
     }
-    msg.payload
-        .as_ref()
-        .map(|p| check_parts(p.parts.as_deref()))
-        .unwrap_or(false)
+    msg.payload.as_ref().is_some_and(|p| {
+        p.mime_type
+            .as_deref()
+            .is_some_and(|m| m.starts_with("text/calendar"))
+            || check_parts(p.parts.as_deref())
+    })
 }
 
 fn decode_base64url(data: &str) -> String {
