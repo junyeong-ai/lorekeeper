@@ -150,7 +150,25 @@ pub fn build_index(
                 sub_pages.push((format!("wiki/index/{cat}.md"), page));
             }
             if !uncategorized.is_empty() {
-                writeln!(out, "- 미분류 ({} concepts)", uncategorized.len()).unwrap();
+                writeln!(
+                    out,
+                    "- [[wiki/index/uncategorized|미분류]] ({} concepts)",
+                    uncategorized.len()
+                )
+                .unwrap();
+                let mut page = String::new();
+                writeln!(page, "# 미분류").unwrap();
+                writeln!(page).unwrap();
+                for entry in &uncategorized {
+                    let summary =
+                        first_line_under_heading(&entry.body, heading).unwrap_or_default();
+                    if summary.is_empty() {
+                        writeln!(page, "- [[{}]]", entry.link_target).unwrap();
+                    } else {
+                        writeln!(page, "- [[{}]] — {}", entry.link_target, summary).unwrap();
+                    }
+                }
+                sub_pages.push(("wiki/index/uncategorized.md".into(), page));
             }
         } else {
             for (cat, entries) in &by_category {

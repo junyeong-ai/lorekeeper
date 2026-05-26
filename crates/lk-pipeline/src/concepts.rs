@@ -56,6 +56,9 @@ impl ConceptDrafts {
 
         if let Some(draft) = self.drafts.get_mut(&safe_slug) {
             draft.add_reference(source_ref, date);
+            if draft.category.is_none() {
+                draft.category = concept.category.clone();
+            }
             return Ok(());
         }
 
