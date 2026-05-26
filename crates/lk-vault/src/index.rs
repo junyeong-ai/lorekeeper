@@ -96,13 +96,45 @@ pub fn build_index(vault_root: &Path, locale: Locale) -> Result<String, VaultErr
 
     if !concepts.is_empty() {
         let heading = strings.concept_synthesis;
-        render_group(
-            &mut out,
-            strings.index_concepts,
-            concepts.len(),
-            &concepts,
-            |body| first_line_under_heading(body, heading),
-        );
+        let mut by_category: BTreeMap<String, Vec<&Entry>> = BTreeMap::new();
+        let mut uncategorized: Vec<&Entry> = Vec::new();
+        for entry in &concepts {
+            match &entry.category {
+                Some(cat) => by_category.entry(cat.clone()).or_default().push(entry),
+                None => uncategorized.push(entry),
+            }
+        }
+
+        writeln!(out).unwrap();
+        writeln!(out, "## {} ({})", strings.index_concepts, concepts.len()).unwrap();
+
+        for (cat, entries) in &by_category {
+            writeln!(out).unwrap();
+            writeln!(out, "### {cat} ({})", entries.len()).unwrap();
+            writeln!(out).unwrap();
+            for entry in entries {
+                let summary = first_line_under_heading(&entry.body, heading).unwrap_or_default();
+                if summary.is_empty() {
+                    writeln!(out, "- [[{}]]", entry.link_target).unwrap();
+                } else {
+                    writeln!(out, "- [[{}]] — {}", entry.link_target, summary).unwrap();
+                }
+            }
+        }
+
+        if !uncategorized.is_empty() {
+            writeln!(out).unwrap();
+            writeln!(out, "### 미분류 ({})", uncategorized.len()).unwrap();
+            writeln!(out).unwrap();
+            for entry in &uncategorized {
+                let summary = first_line_under_heading(&entry.body, heading).unwrap_or_default();
+                if summary.is_empty() {
+                    writeln!(out, "- [[{}]]", entry.link_target).unwrap();
+                } else {
+                    writeln!(out, "- [[{}]] — {}", entry.link_target, summary).unwrap();
+                }
+            }
+        }
     }
 
     if !documents.is_empty() {
@@ -184,6 +216,7 @@ struct Entry {
     /// the page title or filename stem.
     link_target: String,
     body: String,
+    category: Option<String>,
 }
 
 fn collect_dir(vault_root: &Path, rel: &Path) -> Vec<Entry> {
@@ -262,10 +295,18 @@ fn collect_files(rel_dir: &Path, abs_dir: &Path) -> Vec<Entry> {
             no_ext
         };
 
+        let category = page
+            .frontmatter
+            .get("category")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+
         entries.push(Entry {
             rel_path,
             link_target,
             body: page.body,
+            category,
         });
     }
     entries.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
