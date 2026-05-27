@@ -10,7 +10,9 @@ fn fixture_root() -> PathBuf {
 }
 
 fn default_config() -> GraphConfig {
-    GraphConfig::default()
+    let mut config = GraphConfig::default();
+    config.scope.dirs = vec![std::path::PathBuf::from("wiki")];
+    config
 }
 
 // --- Build / stats ---
@@ -61,7 +63,7 @@ fn orphans_detected() {
     let config = default_config();
     let pages = scan::scan_vault(&root, &config).unwrap();
     let g = graph::WikiGraph::build(&pages);
-    let orphans = g.orphans(&config);
+    let orphans = g.orphans(&config.graph.orphan_exclude, Path::new("wiki"));
     assert!(!orphans.is_empty(), "fixture has orphan-page.md");
 }
 
@@ -102,7 +104,7 @@ fn index_sync_detects_drift() {
     let pages = scan::scan_vault(&root, &config).unwrap();
     let g = graph::WikiGraph::build(&pages);
     let existence = scan::VaultExistence::from_pages(&pages);
-    let drift = index::diff(&g, &existence, &root, &config);
+    let drift = index::diff(&g, &existence, &root, Path::new("wiki"), &[]);
     // concept-c and orphan-page are missing from index.md
     assert!(!drift.is_in_sync());
 }
@@ -122,11 +124,11 @@ fn index_sync_fix_mutates_and_idempotent() {
 
     // Before fix.
     let existence = scan::VaultExistence::from_pages(&pages);
-    let drift = index::diff(&g, &existence, tmp.path(), &config);
+    let drift = index::diff(&g, &existence, tmp.path(), Path::new("wiki"), &[]);
     assert!(!drift.is_in_sync());
 
     // Fix.
-    let added = index::fix(&drift, tmp.path(), &config).unwrap();
+    let added = index::fix(&drift, tmp.path(), Path::new("wiki")).unwrap();
     assert_eq!(added, 1);
     let content = std::fs::read_to_string(wiki.join("index.md")).unwrap();
     assert!(content.contains("[[beta]]"));
@@ -135,7 +137,7 @@ fn index_sync_fix_mutates_and_idempotent() {
     let pages2 = scan::scan_vault(tmp.path(), &config).unwrap();
     let g2 = graph::WikiGraph::build(&pages2);
     let existence2 = scan::VaultExistence::from_pages(&pages2);
-    let drift2 = index::diff(&g2, &existence2, tmp.path(), &config);
+    let drift2 = index::diff(&g2, &existence2, tmp.path(), Path::new("wiki"), &[]);
     assert!(drift2.is_in_sync());
 }
 
@@ -220,10 +222,10 @@ fn lint_combined_report() {
     let g = graph::WikiGraph::build(&pages);
 
     let hubs = g.hubs(10, config.graph.min_hub_degree);
-    let orphans = g.orphans(&config);
+    let orphans = g.orphans(&config.graph.orphan_exclude, Path::new("wiki"));
     let broken = g.broken_links().to_vec();
     let existence = scan::VaultExistence::from_pages(&pages);
-    let drift = index::diff(&g, &existence, &root, &config);
+    let drift = index::diff(&g, &existence, &root, Path::new("wiki"), &[]);
 
     let findings = orphans.len()
         + broken.len()

@@ -1,3 +1,4 @@
+use lk_core::config::VaultDirs;
 use serde::Serialize;
 
 use crate::backlinks::{ConceptUpdate, SyncReport};
@@ -253,7 +254,7 @@ pub struct StaleReport {
     pub count: usize,
 }
 
-pub fn print_stale(r: &StaleReport) {
+pub fn print_stale(r: &StaleReport, dirs: &VaultDirs) {
     println!("=== Stale pages (>= {} days) ===", r.threshold_days);
 
     if r.stale.is_empty() {
@@ -271,7 +272,7 @@ pub fn print_stale(r: &StaleReport) {
     }
 
     for (category, entries) in &buckets {
-        println!("\n{} ({}):", category.label(), entries.len());
+        println!("\n{} ({}):", category.label(dirs), entries.len());
         for entry in entries {
             println!(
                 "  {:>4} days  {}  (updated: {})",

@@ -390,6 +390,7 @@ mod tests {
         std::fs::write(wiki.join("skip.md"), "# Skip\n").unwrap();
 
         let mut config = GraphConfig::default();
+        config.scope.dirs = vec![PathBuf::from("wiki")];
         config.scope.exclude = vec!["wiki/skip.md".to_string()];
         let pages = scan_vault(tmp.path(), &config).unwrap();
         assert_eq!(pages.len(), 1);

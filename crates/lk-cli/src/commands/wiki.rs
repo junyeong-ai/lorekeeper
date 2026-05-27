@@ -10,7 +10,7 @@ use super::{find_config, load_config};
 
 #[derive(clap::Subcommand)]
 pub enum WikiCmd {
-    /// Generate `<vault>/wiki/index.md` — hierarchical catalog of every vault page
+    /// Generate `<vault>/<wiki>/index.md` — hierarchical catalog of every vault page
     Index {
         /// Vault root override (default: vault.root from config)
         #[arg(long)]
@@ -35,13 +35,13 @@ pub async fn run_index(
     opts: &super::GlobalOpts,
     root_override: Option<PathBuf>,
 ) -> miette::Result<()> {
-    let (vault_root, locale, threshold) = resolve_vault_with_threshold(opts, root_override)?;
+    let (vault_root, locale, threshold, dirs) = resolve_vault_with_threshold(opts, root_override)?;
 
     tracing::info!(vault = %vault_root.display(), locale = ?locale, "building wiki index");
 
-    let path = lk_vault::write_index(&vault_root, locale, threshold)
+    let path = lk_vault::write_index(&vault_root, locale, threshold, &dirs)
         .await
-        .map_err(|e| miette::miette!("write wiki/index.md: {e}"))?;
+        .map_err(|e| miette::miette!("write index.md: {e}"))?;
 
     eprintln!("Wrote {}", path.display());
     Ok(())
@@ -50,14 +50,22 @@ pub async fn run_index(
 fn resolve_vault_with_threshold(
     opts: &super::GlobalOpts,
     root_override: Option<PathBuf>,
-) -> miette::Result<(PathBuf, Locale, usize)> {
+) -> miette::Result<(PathBuf, Locale, usize, lk_core::config::VaultDirs)> {
     match root_override {
         Some(r) => {
-            let (locale, threshold) = match find_config(opts).and_then(|p| load_config(&p)) {
-                Ok(config) => (config.vault.locale(), config.concepts.index_split_threshold),
-                Err(_) => (Locale::default(), 100),
+            let (locale, threshold, dirs) = match find_config(opts).and_then(|p| load_config(&p)) {
+                Ok(config) => (
+                    config.vault.locale(),
+                    config.concepts.index_split_threshold,
+                    config.vault.dirs.clone(),
+                ),
+                Err(_) => (
+                    Locale::default(),
+                    100,
+                    lk_core::config::VaultDirs::default(),
+                ),
             };
-            Ok((r, locale, threshold))
+            Ok((r, locale, threshold, dirs))
         }
         None => {
             let path = find_config(opts)?;
@@ -66,6 +74,7 @@ fn resolve_vault_with_threshold(
                 config.vault.root_path(),
                 config.vault.locale(),
                 config.concepts.index_split_threshold,
+                config.vault.dirs.clone(),
             ))
         }
     }

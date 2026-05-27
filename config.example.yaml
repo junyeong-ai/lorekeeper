@@ -20,6 +20,7 @@ vault:
     quarterly: quarterly
     annual: annually
     personal: me
+    synthesis: synthesis
     wiki: wiki
 
 # ─── 사용자 식별 ──────────────────────────────────────────
@@ -265,7 +266,8 @@ performance:
 
 # ─── 종합 보고 ───────────────────────────────────────────
 # weekly는 두 갈래: (1) include_sources의 소스 횡단 "주간 테마" 페이지(opt-in),
-# (2) me/work-log 기반 개인 주간 요약. (2)와 monthly/quarterly/annual은 모두 work-log
+# (2) me/work-log 기반 개인 주간 요약(me/weekly/). (2)와 me/monthly/, me/quarterly/, me/annually/는 모두 work-log
+# (1)의 팀 종합은 synthesis/weekly/ 에 기록됨.
 # 기반 개인 성과 리뷰로 performance.enabled로 함께 켜고 끈다 — 지식/뉴스 소스는 무관.
 synthesis:
   weekly:
@@ -307,7 +309,7 @@ concepts:
 # Fully optional — omit the entire block to use defaults.
 # graph:
 #   scope:
-#     dirs: [wiki]                   # vault-relative dirs to scan (default: [wiki])
+#     dirs: [wiki]                   # vault-relative dirs to scan (default: vault.dirs.wiki)
 #     exclude: []                    # glob patterns to skip (e.g., ["wiki/log.md"])
 #     follow_links: false            # follow symlinks during walk
 #   graph:

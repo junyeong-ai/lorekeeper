@@ -3,7 +3,6 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use lk_core::concept::slugify;
-use lk_core::config::GraphConfig;
 use lk_core::wikilink;
 
 use crate::GraphError;
@@ -26,9 +25,10 @@ pub fn diff(
     graph: &WikiGraph,
     existence: &VaultExistence,
     root: &Path,
-    config: &GraphConfig,
+    wiki_dir: &Path,
+    orphan_exclude: &[String],
 ) -> IndexDrift {
-    let index_path = root.join(&config.scope.dirs[0]).join("index.md");
+    let index_path = root.join(wiki_dir).join("index.md");
 
     let Ok(content) = std::fs::read_to_string(&index_path) else {
         return IndexDrift {
@@ -38,7 +38,7 @@ pub fn diff(
     };
 
     // `build_index` catalogs every vault page: concepts by `[[slug|title]]`
-    // and daily/me/synthesis pages by path (`[[daily/email-digest/2026-05-19]]`).
+    // and daily/personal/synthesis pages by path (`[[daily/email-digest/2026-05-19]]`).
     // Resolve both forms via `resolve_wikilink_target`.
     let mut index_links = HashSet::new();
     for page in wikilink::extract_wikilinks(&content) {
@@ -48,7 +48,7 @@ pub fn diff(
         }
     }
 
-    let index_dir = root.join(&config.scope.dirs[0]).join("index");
+    let index_dir = root.join(wiki_dir).join("index");
     if index_dir.is_dir() {
         for sub_content in read_sub_page_contents(&index_dir) {
             for page in wikilink::extract_wikilinks(&sub_content) {
@@ -60,22 +60,15 @@ pub fn diff(
         }
     }
 
-    let exclude: HashSet<&str> = config
-        .graph
-        .orphan_exclude
-        .iter()
-        .map(String::as_str)
-        .collect();
+    let exclude: HashSet<&str> = orphan_exclude.iter().map(String::as_str).collect();
 
     let index_dir_slug =
-        slugify(&config.scope.dirs[0].to_string_lossy().replace('\\', "/")).unwrap_or_default();
+        slugify(&wiki_dir.to_string_lossy().replace('\\', "/")).unwrap_or_default();
     let index_dir_prefix = format!("{index_dir_slug}/");
 
     // The index catalog and AGENTS.md schema are reserved meta pages, never
     // cataloged (same exclusion the index builder applies).
-    let reserved: HashSet<String> = scan::reserved_page_ids(&config.scope.dirs[0])
-        .into_iter()
-        .collect();
+    let reserved: HashSet<String> = scan::reserved_page_ids(wiki_dir).into_iter().collect();
 
     let disk_ids: HashSet<&str> = graph.node_ids().collect();
 
@@ -117,12 +110,12 @@ pub fn diff(
     }
 }
 
-pub fn fix(drift: &IndexDrift, root: &Path, config: &GraphConfig) -> Result<usize, GraphError> {
+pub fn fix(drift: &IndexDrift, root: &Path, wiki_dir: &Path) -> Result<usize, GraphError> {
     if drift.missing_from_index.is_empty() {
         return Ok(0);
     }
 
-    let index_path = root.join(&config.scope.dirs[0]).join("index.md");
+    let index_path = root.join(wiki_dir).join("index.md");
     let mut content = std::fs::read_to_string(&index_path)
         .map_err(|e| GraphError::Io(format!("failed to read {}: {e}", index_path.display())))?;
 
@@ -185,7 +178,6 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         setup_wiki(tmp.path());
 
-        let config = GraphConfig::default();
         let pages = vec![
             make_page("wiki/index", &["alpha", "beta"]),
             make_page("wiki/alpha", &[]),
@@ -195,7 +187,7 @@ mod tests {
 
         let graph = WikiGraph::build(&pages);
         let existence = VaultExistence::from_pages(&pages);
-        let drift = diff(&graph, &existence, tmp.path(), &config);
+        let drift = diff(&graph, &existence, tmp.path(), Path::new("wiki"), &[]);
 
         assert!(drift.missing_from_index.contains(&"wiki/gamma".to_owned()));
         assert!(drift.missing_from_disk.is_empty());
@@ -212,7 +204,6 @@ mod tests {
         )
         .unwrap();
 
-        let config = GraphConfig::default();
         let pages = vec![
             make_page("wiki/index", &["alpha", "nonexistent"]),
             make_page("wiki/alpha", &[]),
@@ -220,7 +211,7 @@ mod tests {
 
         let graph = WikiGraph::build(&pages);
         let existence = VaultExistence::from_pages(&pages);
-        let drift = diff(&graph, &existence, tmp.path(), &config);
+        let drift = diff(&graph, &existence, tmp.path(), Path::new("wiki"), &[]);
 
         assert!(drift.missing_from_disk.contains(&"nonexistent".to_owned()));
     }
@@ -230,13 +221,12 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         setup_wiki(tmp.path());
 
-        let config = GraphConfig::default();
         let drift = IndexDrift {
             missing_from_index: vec!["wiki/gamma".to_owned()],
             missing_from_disk: vec![],
         };
 
-        let added = fix(&drift, tmp.path(), &config).unwrap();
+        let added = fix(&drift, tmp.path(), Path::new("wiki")).unwrap();
         assert_eq!(added, 1);
 
         let content = std::fs::read_to_string(tmp.path().join("wiki/index.md")).unwrap();
@@ -249,12 +239,11 @@ mod tests {
         let wiki = tmp.path().join("wiki");
         std::fs::create_dir_all(&wiki).unwrap();
 
-        let config = GraphConfig::default();
         let pages = vec![make_page("wiki/alpha", &[]), make_page("wiki/beta", &[])];
 
         let graph = WikiGraph::build(&pages);
         let existence = VaultExistence::from_pages(&pages);
-        let drift = diff(&graph, &existence, tmp.path(), &config);
+        let drift = diff(&graph, &existence, tmp.path(), Path::new("wiki"), &[]);
 
         assert!(drift.is_in_sync());
     }
@@ -264,13 +253,12 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         setup_wiki(tmp.path());
 
-        let config = GraphConfig::default();
         let drift = IndexDrift {
             missing_from_index: vec![],
             missing_from_disk: vec![],
         };
 
-        let added = fix(&drift, tmp.path(), &config).unwrap();
+        let added = fix(&drift, tmp.path(), Path::new("wiki")).unwrap();
         assert_eq!(added, 0);
     }
 }

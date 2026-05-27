@@ -1,7 +1,7 @@
-//! `wiki/index.md` builder — a deterministic, hierarchical catalog of every vault page.
+//! Wiki index builder — a deterministic, hierarchical catalog of every vault page.
 //!
-//! Walks the vault directories (`wiki/concepts/`, `wiki/documents/`, `wiki/explorations/`, `daily/{source}/`,
-//! `me/work-log/`, plus the four synthesis tiers), parses each markdown file's
+//! Walks the vault directories (wiki concepts/documents/explorations, daily sources,
+//! personal work-log, and synthesis tiers), parses each markdown file's
 //! frontmatter via [`lk_core::frontmatter::parse_page`], extracts a one-line summary
 //! from the page body, groups entries by category, and renders a single markdown
 //! document. No LLM, no heuristics — running it twice produces the same bytes.
@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use jiff::Timestamp;
+use lk_core::config::VaultDirs;
 use lk_core::frontmatter::parse_page;
 use lk_core::i18n::Locale;
 use walkdir::WalkDir;
@@ -32,7 +33,7 @@ pub struct IndexOutput {
     pub sub_pages: Vec<(String, String)>,
 }
 
-/// Build the `wiki/index.md` body for the vault at `vault_root`, using `locale` to pick
+/// Build the wiki index body for the vault at `vault_root`, using `locale` to pick
 /// section headings and the body-heading targets used by the one-line extractors.
 ///
 /// Returns the rendered markdown (caller writes it). Walks the vault filesystem
@@ -42,17 +43,23 @@ pub fn build_index(
     vault_root: &Path,
     locale: Locale,
     index_split_threshold: usize,
+    dirs: &VaultDirs,
 ) -> Result<IndexOutput, VaultError> {
     let strings = locale.strings();
 
-    let concepts = collect_dir(vault_root, Path::new("wiki/concepts"));
-    let documents = collect_dir_grouped(vault_root, Path::new("wiki/documents"), "source_project");
-    let explorations = collect_dir(vault_root, Path::new("wiki/explorations"));
+    let wiki = Path::new(&dirs.wiki);
+    let concept_rel = wiki.join("concepts");
+    let concept_rel_str = concept_rel.to_string_lossy().replace('\\', "/");
+    let concepts =
+        collect_dir_grouped(vault_root, &concept_rel, "category", Some(&concept_rel_str));
+    let documents =
+        collect_dir_grouped(vault_root, &wiki.join("documents"), "source_project", None);
+    let explorations = collect_dir(vault_root, &wiki.join("explorations"));
 
     // daily/ holds one sub-directory per source ID. We keep them as separate groups so
     // the index shows pages-per-source counts and stable ordering.
     let mut daily_groups: BTreeMap<String, Vec<Entry>> = BTreeMap::new();
-    let daily_root = vault_root.join("daily");
+    let daily_root = vault_root.join(&dirs.daily);
     if daily_root.is_dir() {
         let mut sub_dirs: Vec<(String, PathBuf)> = Vec::new();
         for entry in std::fs::read_dir(&daily_root)? {
@@ -64,28 +71,29 @@ pub fn build_index(
         }
         sub_dirs.sort_by(|a, b| a.0.cmp(&b.0));
         for (source_id, dir) in sub_dirs {
-            let rel = Path::new("daily").join(&source_id);
-            let entries = collect_files(&rel, &dir, "category");
+            let rel = Path::new(&dirs.daily).join(&source_id);
+            let entries = collect_files(&rel, &dir, "category", None);
             if !entries.is_empty() {
                 daily_groups.insert(source_id, entries);
             }
         }
     }
 
-    let worklog = collect_dir(vault_root, Path::new("me/work-log"));
+    let worklog = collect_dir(vault_root, &Path::new(&dirs.personal).join("work-log"));
 
     // Synthesis tiers are merged into one bucket so the index has a single "synthesis"
     // section. Each entry keeps its full vault-relative path so the wikilink target is
     // unambiguous.
     let mut synthesis: Vec<Entry> = Vec::new();
-    for sub in &[
-        "weekly/synthesis",
-        "weekly/me",
-        "monthly/me",
-        "quarterly/me",
-        "annually/me",
-    ] {
-        synthesis.extend(collect_dir(vault_root, Path::new(sub)));
+    let synthesis_dirs = [
+        PathBuf::from(&dirs.synthesis).join(&dirs.weekly),
+        PathBuf::from(&dirs.personal).join(&dirs.weekly),
+        PathBuf::from(&dirs.personal).join(&dirs.monthly),
+        PathBuf::from(&dirs.personal).join(&dirs.quarterly),
+        PathBuf::from(&dirs.personal).join(&dirs.annual),
+    ];
+    for sub in &synthesis_dirs {
+        synthesis.extend(collect_dir(vault_root, sub));
     }
     synthesis.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
 
@@ -124,6 +132,7 @@ pub fn build_index(
                 uncategorized_label: strings.uncategorized,
                 split: should_split(concepts.len()),
             },
+            dirs,
         );
     }
 
@@ -140,6 +149,7 @@ pub fn build_index(
                 uncategorized_label: strings.uncategorized,
                 split: should_split(documents.len()),
             },
+            dirs,
         );
     }
 
@@ -163,9 +173,10 @@ pub fn build_index(
         writeln!(out).unwrap();
         for (source_id, entries) in &daily_groups {
             let slug = format!("daily-{source_id}");
+            let wiki = &dirs.wiki;
             writeln!(
                 out,
-                "- [[wiki/index/{slug}|{source_id}]] ({})",
+                "- [[{wiki}/index/{slug}|{source_id}]] ({})",
                 entries.len()
             )
             .unwrap();
@@ -186,7 +197,7 @@ pub fn build_index(
                     writeln!(page, "- [[{}]] — {}", entry.link_target, summary).unwrap();
                 }
             }
-            sub_pages.push((format!("wiki/index/{slug}.md"), page));
+            sub_pages.push((format!("{}/index/{slug}.md", dirs.wiki), page));
         }
     } else {
         for (source_id, entries) in &daily_groups {
@@ -226,7 +237,7 @@ pub fn build_index(
     })
 }
 
-/// Build the index and write it atomically to `<vault_root>/wiki/index.md`.
+/// Build the index and write it atomically to `<vault_root>/<wiki>/index.md`.
 ///
 /// The temp file lives next to the final path so the rename is on the same filesystem
 /// and therefore atomic. Returns the absolute path that was written.
@@ -234,9 +245,10 @@ pub async fn write_index(
     vault_root: &Path,
     locale: Locale,
     index_split_threshold: usize,
+    dirs: &VaultDirs,
 ) -> Result<PathBuf, VaultError> {
-    let output = build_index(vault_root, locale, index_split_threshold)?;
-    let wiki_dir = vault_root.join("wiki");
+    let output = build_index(vault_root, locale, index_split_threshold, dirs)?;
+    let wiki_dir = vault_root.join(&dirs.wiki);
     tokio::fs::create_dir_all(&wiki_dir).await?;
 
     let index_dir = wiki_dir.join("index");
@@ -302,18 +314,28 @@ struct Entry {
 }
 
 fn collect_dir(vault_root: &Path, rel: &Path) -> Vec<Entry> {
-    collect_dir_grouped(vault_root, rel, "category")
+    collect_dir_grouped(vault_root, rel, "category", None)
 }
 
-fn collect_dir_grouped(vault_root: &Path, rel: &Path, group_field: &str) -> Vec<Entry> {
+fn collect_dir_grouped(
+    vault_root: &Path,
+    rel: &Path,
+    group_field: &str,
+    concept_rel_dir: Option<&str>,
+) -> Vec<Entry> {
     let abs = vault_root.join(rel);
     if !abs.is_dir() {
         return Vec::new();
     }
-    collect_files(rel, &abs, group_field)
+    collect_files(rel, &abs, group_field, concept_rel_dir)
 }
 
-fn collect_files(rel_dir: &Path, abs_dir: &Path, group_field: &str) -> Vec<Entry> {
+fn collect_files(
+    rel_dir: &Path,
+    abs_dir: &Path,
+    group_field: &str,
+    concept_rel_dir: Option<&str>,
+) -> Vec<Entry> {
     let mut entries: Vec<Entry> = Vec::new();
     for w in WalkDir::new(abs_dir).follow_links(false) {
         let w = match w {
@@ -367,7 +389,7 @@ fn collect_files(rel_dir: &Path, abs_dir: &Path, group_field: &str) -> Vec<Entry
         let rel_path = rel_path.to_string_lossy().replace('\\', "/");
         let rel_dir_str = rel_dir.to_string_lossy().replace('\\', "/");
 
-        let link_target = if rel_dir_str == "wiki/concepts" {
+        let link_target = if concept_rel_dir.is_some_and(|c| rel_dir_str == c) {
             let title = page
                 .frontmatter
                 .get("title")
@@ -432,6 +454,7 @@ fn render_grouped_section(
     entries: &[Entry],
     extract: impl Fn(&str) -> Option<String>,
     opts: &GroupedSectionOpts<'_>,
+    dirs: &VaultDirs,
 ) {
     let GroupedSectionOpts {
         section_title,
@@ -455,9 +478,10 @@ fn render_grouped_section(
         writeln!(out).unwrap();
         for (group, group_entries) in &by_group {
             let slug = format!("{sub_page_prefix}{group}");
+            let wiki = &dirs.wiki;
             writeln!(
                 out,
-                "- [[wiki/index/{slug}|{group}]] ({})",
+                "- [[{wiki}/index/{slug}|{group}]] ({})",
                 group_entries.len()
             )
             .unwrap();
@@ -475,13 +499,14 @@ fn render_grouped_section(
                     writeln!(page, "- [[{}]] — {}", entry.link_target, summary).unwrap();
                 }
             }
-            sub_pages.push((format!("wiki/index/{slug}.md"), page));
+            sub_pages.push((format!("{}/index/{slug}.md", dirs.wiki), page));
         }
         if !ungrouped.is_empty() {
             let slug = format!("{sub_page_prefix}uncategorized");
+            let wiki = &dirs.wiki;
             writeln!(
                 out,
-                "- [[wiki/index/{slug}|{uncategorized_label}]] ({})",
+                "- [[{wiki}/index/{slug}|{uncategorized_label}]] ({})",
                 ungrouped.len()
             )
             .unwrap();
@@ -496,7 +521,7 @@ fn render_grouped_section(
                     writeln!(page, "- [[{}]] — {}", entry.link_target, summary).unwrap();
                 }
             }
-            sub_pages.push((format!("wiki/index/{slug}.md"), page));
+            sub_pages.push((format!("{}/index/{slug}.md", dirs.wiki), page));
         }
     } else {
         for (group, group_entries) in &by_group {
@@ -653,7 +678,9 @@ mod tests {
     #[test]
     fn empty_vault_yields_header_only() {
         let tmp = TempDir::new().unwrap();
-        let out = build_index(tmp.path(), Locale::Ko, 0).unwrap().main;
+        let out = build_index(tmp.path(), Locale::Ko, 0, &VaultDirs::default())
+            .unwrap()
+            .main;
         assert!(out.starts_with("# Wiki Index"));
         assert!(out.contains("0 pages"));
         // No category sections should be rendered.
@@ -670,7 +697,9 @@ mod tests {
             "---\nid: agentic-ai\ntitle: \"Agentic AI\"\n---\n\n# Agentic AI\n\n\
              ## 핵심\n\n자율적으로 도구를 사용하는 AI 에이전트 패러다임.\n\n## 관련\n",
         );
-        let out = build_index(tmp.path(), Locale::Ko, 0).unwrap().main;
+        let out = build_index(tmp.path(), Locale::Ko, 0, &VaultDirs::default())
+            .unwrap()
+            .main;
         assert!(out.contains("## 개념 (1)"));
         assert!(out.contains("[[agentic-ai|Agentic AI]]"));
         assert!(out.contains("자율적으로 도구를 사용하는 AI 에이전트 패러다임."));
@@ -685,7 +714,9 @@ mod tests {
             "---\nid: whitepaper\ntitle: White Paper\n---\n\n# White Paper\n\n\
              ## Summary\n\nA short overview of the paper.\n\n## Content\n",
         );
-        let out = build_index(tmp.path(), Locale::En, 0).unwrap().main;
+        let out = build_index(tmp.path(), Locale::En, 0, &VaultDirs::default())
+            .unwrap()
+            .main;
         assert!(out.contains("## Documents (1)"));
         assert!(out.contains("[[wiki/documents/whitepaper]]"));
         assert!(out.contains("A short overview of the paper."));
@@ -704,7 +735,9 @@ mod tests {
             "daily/team-slack/2026-05-22.md",
             "---\nid: s-1\ntitle: Slack\n---\n\n## 요약\n\n- 슬랙 트렌드\n",
         );
-        let out = build_index(tmp.path(), Locale::Ko, 0).unwrap().main;
+        let out = build_index(tmp.path(), Locale::Ko, 0, &VaultDirs::default())
+            .unwrap()
+            .main;
         assert!(out.contains("## 일일 — email-digest (1)"));
         assert!(out.contains("## 일일 — team-slack (1)"));
         assert!(out.contains("[[daily/email-digest/2026-05-22]] — 첫 번째 메일 요약"));
@@ -719,7 +752,9 @@ mod tests {
             "me/work-log/2026-05-22.md",
             "---\nid: w-1\ntitle: Work\n---\n\n## 주제별 요약\n\n### 태블로 MCP\n- 미팅\n\n### 다른 주제\n",
         );
-        let out = build_index(tmp.path(), Locale::Ko, 0).unwrap().main;
+        let out = build_index(tmp.path(), Locale::Ko, 0, &VaultDirs::default())
+            .unwrap()
+            .main;
         assert!(out.contains("## 업무 로그 (1)"));
         assert!(out.contains("[[me/work-log/2026-05-22]] — 태블로 MCP"));
     }
@@ -733,7 +768,9 @@ mod tests {
             "---\nid: api-replay\ntitle: \"API Replay\"\n---\n\n# API Replay\n\n\
              ## 질문\n\nAPI 호출만으로 자동화 가능한가?\n\n## 종합\n\n가능하다.\n\n## 근거\n",
         );
-        let out = build_index(tmp.path(), Locale::Ko, 0).unwrap().main;
+        let out = build_index(tmp.path(), Locale::Ko, 0, &VaultDirs::default())
+            .unwrap()
+            .main;
         assert!(out.contains("## 탐구 (1)"));
         assert!(out.contains("[[wiki/explorations/api-replay]]"));
         assert!(out.contains("API 호출만으로 자동화 가능한가?"));
@@ -744,18 +781,20 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write_file(
             tmp.path(),
-            "weekly/synthesis/2026-W21.md",
+            "synthesis/weekly/2026-W21.md",
             "---\nid: w-syn\ntitle: Weekly\n---\n\n# Weekly\n\nThis week we focused on X.\n",
         );
         write_file(
             tmp.path(),
-            "monthly/me/2026-05.md",
+            "me/monthly/2026-05.md",
             "---\nid: m\ntitle: May\n---\n\n# May\n\nMay summary.\n",
         );
-        let out = build_index(tmp.path(), Locale::Ko, 0).unwrap().main;
+        let out = build_index(tmp.path(), Locale::Ko, 0, &VaultDirs::default())
+            .unwrap()
+            .main;
         assert!(out.contains("## 종합 (2)"));
-        assert!(out.contains("[[monthly/me/2026-05]] — May summary."));
-        assert!(out.contains("[[weekly/synthesis/2026-W21]] — This week we focused on X."));
+        assert!(out.contains("[[me/monthly/2026-05]] — May summary."));
+        assert!(out.contains("[[synthesis/weekly/2026-W21]] — This week we focused on X."));
     }
 
     #[test]
@@ -771,7 +810,9 @@ mod tests {
             "wiki/concepts/with-front.md",
             "---\nid: x\ntitle: \"X\"\n---\n\n## 핵심\n\nKept.\n",
         );
-        let out = build_index(tmp.path(), Locale::Ko, 0).unwrap().main;
+        let out = build_index(tmp.path(), Locale::Ko, 0, &VaultDirs::default())
+            .unwrap()
+            .main;
         // Only the frontmatter-bearing page should show up.
         assert!(out.contains("## 개념 (1)"));
         assert!(out.contains("[[with-front|X]] — Kept."));
@@ -797,7 +838,9 @@ mod tests {
             "wiki/concepts/x.md",
             "---\nid: x\ntitle: \"X\"\n---\n\n## 핵심\n\nReal.\n",
         );
-        let out = build_index(tmp.path(), Locale::Ko, 0).unwrap().main;
+        let out = build_index(tmp.path(), Locale::Ko, 0, &VaultDirs::default())
+            .unwrap()
+            .main;
         assert!(!out.contains("Old body"));
         assert!(!out.contains("[[Agents]]"));
         assert!(out.contains("[[x|X]]"));
@@ -859,7 +902,9 @@ mod tests {
             "wiki/concepts/x.md",
             "---\nid: x\ntitle: \"X\"\n---\n\n## 핵심\n\nbody\n",
         );
-        let path = write_index(tmp.path(), Locale::Ko, 0).await.unwrap();
+        let path = write_index(tmp.path(), Locale::Ko, 0, &VaultDirs::default())
+            .await
+            .unwrap();
         assert!(path.ends_with("wiki/index.md"));
         let content = tokio::fs::read_to_string(&path).await.unwrap();
         assert!(content.contains("[[x|X]]"));
@@ -871,5 +916,38 @@ mod tests {
             let name = name.to_string_lossy();
             assert!(!name.ends_with(".tmp"), "leftover temp file: {name}");
         }
+    }
+
+    #[test]
+    fn custom_dirs_produce_correct_paths() {
+        let tmp = TempDir::new().unwrap();
+        let dirs = VaultDirs {
+            wiki: "knowledge".into(),
+            daily: "feed".into(),
+            personal: "my-notes".into(),
+            synthesis: "team-synth".into(),
+            ..Default::default()
+        };
+        write_file(
+            tmp.path(),
+            "knowledge/concepts/llm-wiki.md",
+            "---\nid: llm-wiki\ntitle: \"LLM Wiki\"\ncategory: ai\n---\n\n## Synthesis\n\nA wiki.\n",
+        );
+        write_file(
+            tmp.path(),
+            "feed/ai-news/2026-05-20.md",
+            "---\nid: d1\ntitle: \"News\"\n---\n\n## Summary\n\nHeadlines.\n",
+        );
+        write_file(
+            tmp.path(),
+            "team-synth/weekly/2026-W21.md",
+            "---\nid: ts\ntitle: \"W21\"\n---\n\n## Key Themes\n\nThemes.\n",
+        );
+        let out = build_index(tmp.path(), Locale::En, 0, &dirs).unwrap().main;
+        assert!(out.contains("[[llm-wiki|LLM Wiki]]"));
+        assert!(out.contains("[[feed/ai-news/2026-05-20]]"));
+        assert!(out.contains("[[team-synth/weekly/2026-W21]]"));
+        assert!(!out.contains("wiki/"));
+        assert!(!out.contains("daily/"));
     }
 }

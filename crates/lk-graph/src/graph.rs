@@ -1,11 +1,10 @@
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::collections::hash_map::Entry;
-
-use lk_core::config::GraphConfig;
 use petgraph::Direction;
 use petgraph::graph::{DiGraph, NodeIndex};
 use serde::Serialize;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::collections::hash_map::Entry;
+use std::path::Path;
 
 use crate::scan::{Page, VaultExistence, stem_slug};
 
@@ -174,13 +173,9 @@ impl WikiGraph {
         entries
     }
 
-    pub fn orphans(&self, config: &GraphConfig) -> Vec<String> {
-        let mut exclude: HashSet<String> = config.graph.orphan_exclude.iter().cloned().collect();
-        // Lorekeeper's own meta pages (index catalog, AGENTS.md schema) are not
-        // knowledge pages and legitimately have no wikilinks — never orphans.
-        if let Some(wiki_dir) = config.scope.dirs.first() {
-            exclude.extend(crate::scan::reserved_page_ids(wiki_dir));
-        }
+    pub fn orphans(&self, orphan_exclude: &[String], wiki_dir: &Path) -> Vec<String> {
+        let mut exclude: HashSet<String> = orphan_exclude.iter().cloned().collect();
+        exclude.extend(crate::scan::reserved_page_ids(wiki_dir));
 
         let mut result: Vec<String> = self
             .id_to_node
@@ -265,6 +260,7 @@ impl WikiGraph {
 mod tests {
     use super::*;
     use crate::scan::{Page, VaultExistence};
+    use lk_core::config::GraphConfig;
     use std::path::PathBuf;
 
     fn make_page(id: &str, outgoing: &[&str]) -> Page {
@@ -330,7 +326,7 @@ mod tests {
         ];
         let g = WikiGraph::build(&pages);
 
-        let orphans = g.orphans(&config);
+        let orphans = g.orphans(&config.graph.orphan_exclude, Path::new("wiki"));
         assert_eq!(orphans, vec!["wiki/orphan"]);
     }
 
@@ -346,7 +342,7 @@ mod tests {
         ];
         let g = WikiGraph::build(&pages);
 
-        let orphans = g.orphans(&config);
+        let orphans = g.orphans(&config.graph.orphan_exclude, Path::new("wiki"));
         assert!(orphans.is_empty());
     }
 
@@ -441,11 +437,17 @@ mod tests {
         ];
 
         let legacy = WikiGraph::build(&scope);
-        assert_eq!(legacy.orphans(&config), vec!["wiki/concepts/bar"]);
+        assert_eq!(
+            legacy.orphans(&config.graph.orphan_exclude, Path::new("wiki")),
+            vec!["wiki/concepts/bar"]
+        );
 
         let existence = VaultExistence::from_pages(&full);
         let g = WikiGraph::build_with_existence(&scope, &existence);
-        assert!(g.orphans(&config).is_empty());
+        assert!(
+            g.orphans(&config.graph.orphan_exclude, Path::new("wiki"))
+                .is_empty()
+        );
     }
 
     #[test]
@@ -464,7 +466,10 @@ mod tests {
 
         let existence = VaultExistence::from_pages(&full);
         let g = WikiGraph::build_with_existence(&scope, &existence);
-        assert!(g.orphans(&config).is_empty());
+        assert!(
+            g.orphans(&config.graph.orphan_exclude, Path::new("wiki"))
+                .is_empty()
+        );
     }
 
     #[test]
@@ -475,7 +480,10 @@ mod tests {
         let pages = vec![make_page("wiki/lonely", &["lonely"])];
         let g = WikiGraph::build(&pages);
 
-        assert_eq!(g.orphans(&config), vec!["wiki/lonely"]);
+        assert_eq!(
+            g.orphans(&config.graph.orphan_exclude, Path::new("wiki")),
+            vec!["wiki/lonely"]
+        );
     }
 
     #[test]
@@ -491,7 +499,10 @@ mod tests {
         ];
         let g = WikiGraph::build(&pages);
 
-        assert_eq!(g.orphans(&config), vec!["wiki/b/dup"]);
+        assert_eq!(
+            g.orphans(&config.graph.orphan_exclude, Path::new("wiki")),
+            vec!["wiki/b/dup"]
+        );
     }
 
     #[test]
@@ -507,6 +518,9 @@ mod tests {
         let existence = VaultExistence::from_pages(&scope);
         let g = WikiGraph::build_with_existence(&scope, &existence);
 
-        assert_eq!(g.orphans(&config), vec!["wiki/lonely"]);
+        assert_eq!(
+            g.orphans(&config.graph.orphan_exclude, Path::new("wiki")),
+            vec!["wiki/lonely"]
+        );
     }
 }

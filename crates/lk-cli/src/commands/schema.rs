@@ -34,8 +34,8 @@ struct Section {
 struct PageSchema {
     /// Short type name (e.g. "concept", "daily").
     type_name: &'static str,
-    /// Vault path pattern (e.g. "wiki/concepts/{slug}.md").
-    path_pattern: &'static str,
+    /// Vault path pattern (e.g. "{wiki}/concepts/{slug}.md").
+    path_pattern: String,
     /// Frontmatter keys.
     frontmatter: &'static [&'static str],
     sections: Vec<Section>,
@@ -53,11 +53,11 @@ fn s(
     }
 }
 
-fn page_schemas() -> Vec<PageSchema> {
+fn page_schemas(dirs: &lk_core::config::VaultDirs) -> Vec<PageSchema> {
     vec![
         PageSchema {
             type_name: "concept",
-            path_pattern: "wiki/concepts/{slug}.md",
+            path_pattern: format!("{}/concepts/{{slug}}.md", dirs.wiki),
             frontmatter: &[
                 "id",
                 "title",
@@ -77,7 +77,7 @@ fn page_schemas() -> Vec<PageSchema> {
         },
         PageSchema {
             type_name: "daily",
-            path_pattern: "daily/{source-id}/YYYY-MM-DD.md",
+            path_pattern: format!("{}/{{source-id}}/YYYY-MM-DD.md", dirs.daily),
             frontmatter: &["id", "title", "created", "labels", "source", "events_count"],
             sections: vec![
                 s("Summary", |i| i.summary.to_string(), Owner::Llm),
@@ -95,7 +95,7 @@ fn page_schemas() -> Vec<PageSchema> {
         },
         PageSchema {
             type_name: "work-log",
-            path_pattern: "me/work-log/YYYY-MM-DD.md",
+            path_pattern: format!("{}/work-log/YYYY-MM-DD.md", dirs.personal),
             frontmatter: &["id", "title", "created", "labels", "categories", "sources"],
             sections: vec![
                 s("Topic Summary", |i| i.topic_summary.to_string(), Owner::Llm),
@@ -104,7 +104,7 @@ fn page_schemas() -> Vec<PageSchema> {
         },
         PageSchema {
             type_name: "document",
-            path_pattern: "wiki/documents/{slug}.md",
+            path_pattern: format!("{}/documents/{{slug}}.md", dirs.wiki),
             frontmatter: &[
                 "id",
                 "title",
@@ -134,7 +134,7 @@ fn page_schemas() -> Vec<PageSchema> {
         },
         PageSchema {
             type_name: "exploration",
-            path_pattern: "wiki/explorations/{slug}.md",
+            path_pattern: format!("{}/explorations/{{slug}}.md", dirs.wiki),
             frontmatter: &[
                 "id",
                 "title",
@@ -165,7 +165,7 @@ fn page_schemas() -> Vec<PageSchema> {
         },
         PageSchema {
             type_name: "weekly-synthesis",
-            path_pattern: "weekly/synthesis/YYYY-Www.md",
+            path_pattern: format!("{}/{}/YYYY-Www.md", dirs.synthesis, dirs.weekly),
             frontmatter: &[
                 "id",
                 "title",
@@ -189,7 +189,7 @@ fn page_schemas() -> Vec<PageSchema> {
         },
         PageSchema {
             type_name: "weekly-personal",
-            path_pattern: "weekly/me/YYYY-Www.md",
+            path_pattern: format!("{}/{}/YYYY-Www.md", dirs.personal, dirs.weekly),
             frontmatter: &["id", "title", "created", "labels", "period", "days_logged"],
             sections: vec![
                 s("Period", |i| i.period.to_string(), Owner::Machine),
@@ -203,7 +203,7 @@ fn page_schemas() -> Vec<PageSchema> {
         },
         PageSchema {
             type_name: "monthly-summary",
-            path_pattern: "monthly/me/YYYY-MM.md",
+            path_pattern: format!("{}/{}/YYYY-MM.md", dirs.personal, dirs.monthly),
             frontmatter: &["id", "title", "created", "labels", "period", "days_logged"],
             sections: vec![
                 s("Period", |i| i.period.to_string(), Owner::Machine),
@@ -217,7 +217,7 @@ fn page_schemas() -> Vec<PageSchema> {
         },
         PageSchema {
             type_name: "quarterly-review",
-            path_pattern: "quarterly/me/YYYY-Qq.md",
+            path_pattern: format!("{}/{}/YYYY-Qq.md", dirs.personal, dirs.quarterly),
             frontmatter: &["id", "title", "created", "labels", "period"],
             sections: vec![
                 s("Period", |i| i.period.to_string(), Owner::Machine),
@@ -247,7 +247,7 @@ fn page_schemas() -> Vec<PageSchema> {
         },
         PageSchema {
             type_name: "annual-review",
-            path_pattern: "annually/me/YYYY.md",
+            path_pattern: format!("{}/{}/YYYY.md", dirs.personal, dirs.annual),
             frontmatter: &["id", "title", "created", "labels", "period"],
             sections: vec![
                 s("Overview", |i| i.overall_summary.to_string(), Owner::Llm),
@@ -266,8 +266,8 @@ fn page_schemas() -> Vec<PageSchema> {
     ]
 }
 
-/// Render the AGENTS.md content for a given locale.
-pub fn render_agents_md(locale: Locale) -> String {
+/// Render the AGENTS.md content for a given locale and directory layout.
+pub fn render_agents_md(locale: Locale, dirs: &lk_core::config::VaultDirs) -> String {
     let strings = locale.strings();
     let locale_tag = match locale {
         Locale::Ko => "ko",
@@ -284,7 +284,7 @@ pub fn render_agents_md(locale: Locale) -> String {
     )
     .unwrap();
 
-    for schema in page_schemas() {
+    for schema in page_schemas(dirs) {
         writeln!(out).unwrap();
         writeln!(out, "## {} (`{}`)", schema.type_name, schema.path_pattern).unwrap();
         writeln!(out).unwrap();
@@ -319,25 +319,28 @@ pub fn render_agents_md(locale: Locale) -> String {
 }
 
 pub async fn run(opts: &super::GlobalOpts, root_override: Option<PathBuf>) -> miette::Result<()> {
-    let (vault_root, locale) = match root_override {
+    let (vault_root, locale, dirs) = match root_override {
         Some(r) => {
-            // --root provided; try to load config for locale, fall back to default.
-            let locale = match find_config(opts).and_then(|p| load_config(&p)) {
-                Ok(config) => config.vault.locale(),
-                Err(_) => Locale::default(),
+            let (locale, dirs) = match find_config(opts).and_then(|p| load_config(&p)) {
+                Ok(config) => (config.vault.locale(), config.vault.dirs.clone()),
+                Err(_) => (Locale::default(), lk_core::config::VaultDirs::default()),
             };
-            (r, locale)
+            (r, locale, dirs)
         }
         None => {
             let path = find_config(opts)?;
             let config = load_config(&path)?;
-            (config.vault.root_path(), config.vault.locale())
+            (
+                config.vault.root_path(),
+                config.vault.locale(),
+                config.vault.dirs.clone(),
+            )
         }
     };
 
-    let content = render_agents_md(locale);
+    let content = render_agents_md(locale, &dirs);
 
-    let wiki_dir = vault_root.join("wiki");
+    let wiki_dir = vault_root.join(&dirs.wiki);
     tokio::fs::create_dir_all(&wiki_dir)
         .await
         .map_err(|e| miette::miette!("create wiki dir: {e}"))?;
@@ -357,13 +360,13 @@ mod tests {
 
     #[test]
     fn agents_md_uses_locale_strings() {
-        let ko = render_agents_md(Locale::Ko);
+        let ko = render_agents_md(Locale::Ko, &lk_core::config::VaultDirs::default());
         assert!(ko.contains("locale: ko"));
         assert!(ko.contains("`## 핵심`"));
         assert!(ko.contains("`## 출처`"));
         assert!(ko.contains("`## 관련`"));
 
-        let en = render_agents_md(Locale::En);
+        let en = render_agents_md(Locale::En, &lk_core::config::VaultDirs::default());
         assert!(en.contains("locale: en"));
         assert!(en.contains("`## Synthesis`"));
         assert!(en.contains("`## Sources`"));
@@ -372,7 +375,7 @@ mod tests {
 
     #[test]
     fn agents_md_contains_all_page_types() {
-        let content = render_agents_md(Locale::Ko);
+        let content = render_agents_md(Locale::Ko, &lk_core::config::VaultDirs::default());
         for type_name in [
             "concept",
             "daily",
@@ -396,8 +399,8 @@ mod tests {
     fn agents_md_headings_never_hardcoded() {
         // The Ko and En outputs must produce different headings for the same section,
         // proving they come from locale.strings() and not hardcoded strings.
-        let ko = render_agents_md(Locale::Ko);
-        let en = render_agents_md(Locale::En);
+        let ko = render_agents_md(Locale::Ko, &lk_core::config::VaultDirs::default());
+        let en = render_agents_md(Locale::En, &lk_core::config::VaultDirs::default());
         // concept Synthesis section differs
         assert!(ko.contains("`## 핵심`"));
         assert!(en.contains("`## Synthesis`"));

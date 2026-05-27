@@ -21,15 +21,20 @@ pub async fn run(opts: &super::GlobalOpts) -> miette::Result<()> {
 
     // Check AGENTS.md drift — warn if missing or out of date.
     let locale = config.vault.locale();
-    let expected = render_agents_md(locale);
-    let agents_path = config.vault.root_path().join("wiki").join("AGENTS.md");
+    let expected = render_agents_md(locale, &config.vault.dirs);
+    let agents_path = config
+        .vault
+        .root_path()
+        .join(&config.vault.dirs.wiki)
+        .join("AGENTS.md");
     let needs_regen = match tokio::fs::read_to_string(&agents_path).await {
         Ok(on_disk) => on_disk != expected,
         Err(_) => true,
     };
     if needs_regen {
         eprintln!(
-            "  warning: wiki/AGENTS.md is missing or out of date; run `lore schema` to regenerate"
+            "  warning: {}/AGENTS.md is missing or out of date; run `lore schema` to regenerate",
+            config.vault.dirs.wiki
         );
     }
 

@@ -12,8 +12,8 @@ Data Sources              lore (Rust CLI)            Obsidian Vault
 ────────────              ───────────────            ──────────────
 Google Drive ──┐          ┌─ Extract (per-source)    daily/{source-id}/
 Gmail ─────────┤          ├─ Normalize → Event       me/work-log/
-Slack ─────────┼─ config ─┤  Deduplicate (cascade)   weekly/ monthly/
-Jira ──────────┤  .yaml   ├─ Classify (labels)       quarterly/ annually/
+Slack ─────────┼─ config ─┤  Deduplicate (cascade)   me/{weekly,monthly,quarterly,annually}/
+Jira ──────────┤  .yaml   ├─ Classify (labels)       synthesis/{weekly}/
 Calendar ──────┤          ├─ Concepts (LLM)          wiki/concepts/
 RSS/Atom ──────┤          ├─ Render (templates)      wiki/documents/
 Manual inbox ──┘          ├─ Wiki index (catalog)    wiki/index.md

@@ -70,8 +70,8 @@ Data Sources              lore (Rust CLI)            Obsidian Vault
 ────────────              ───────────────            ──────────────
 Google Drive ──┐          ┌─ Extract (per-source)    daily/{source-id}/
 Gmail ─────────┤          ├─ Normalize → Event       me/work-log/
-Slack ─────────┼─ config ─┤  Deduplicate (cascade)   weekly/ monthly/
-Jira ──────────┤  .yaml   ├─ Classify (labels)       quarterly/ annually/
+Slack ─────────┼─ config ─┤  Deduplicate (cascade)   me/{weekly,monthly,quarterly,annually}/
+Jira ──────────┤  .yaml   ├─ Classify (labels)       synthesis/{weekly}/
 Calendar ──────┤          ├─ Concepts (LLM)          wiki/concepts/
 RSS/Atom ──────┤          ├─ Render (templates)      wiki/documents/
 Manual inbox ──┘          ├─ Wiki index (catalog)    wiki/index.md
@@ -80,7 +80,7 @@ Manual inbox ──┘          ├─ Wiki index (catalog)    wiki/index.md
 
 Claude Code Skills        Semantic Plane             (same vault)
 ──────────────────        ──────────────             ────────────
-/lore-ingest ────────── lore CLI wrapper ──────────→ daily/ weekly/ …
+/lore-ingest ────────── lore CLI wrapper ──────────→ daily/ me/ synthesis/ …
 /lore-process ───────── LLM queue drain ──────────→ summaries + concepts
 /lore-capture ───────── real-time capture ─────────→ wiki/documents/
 /lore-extract ───────── batch repo extraction ─────→ wiki/documents/
@@ -174,11 +174,11 @@ templates/      Jinja2 markdown templates (.md.jinja, embedded in the binary)
 
 **Derived** (cross-source):
 - `me/work-log/YYYY-MM-DD.md` — aggregated from sources with `track_personal: true`, grouped by date
-- `weekly/synthesis/YYYY-W{nn}.md` — cross-source weekly themes
-- `weekly/me/YYYY-W{nn}.md` — personal weekly summary
-- `monthly/me/YYYY-MM.md` — monthly work summary
-- `quarterly/me/YYYY-Q{n}.md` — quarterly performance review
-- `annually/me/YYYY.md` — annual performance review
+- `synthesis/weekly/YYYY-W{nn}.md` — cross-source weekly themes
+- `me/weekly/YYYY-W{nn}.md` — personal weekly summary
+- `me/monthly/YYYY-MM.md` — monthly work summary
+- `me/quarterly/YYYY-Q{n}.md` — quarterly performance review
+- `me/annually/YYYY.md` — annual performance review
 - `wiki/concepts/{slug}.md` — extracted concepts (merge-on-rewrite: `source_count` and `sources` accumulate)
 
 ## Templates

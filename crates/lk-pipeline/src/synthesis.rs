@@ -284,7 +284,7 @@ impl Synthesizer {
         let (start, end) = quarter_range(year, quarter)?;
         let months: Vec<u8> = ((quarter - 1) * 3 + 1..=quarter * 3).collect();
 
-        let monthly_dir = PathBuf::from(&self.ctx.dirs.monthly).join(&self.ctx.dirs.personal);
+        let monthly_dir = PathBuf::from(&self.ctx.dirs.personal).join(&self.ctx.dirs.monthly);
         let mut monthly_summaries: Vec<serde_json::Value> = Vec::new();
         let mut combined = String::new();
 
@@ -305,7 +305,7 @@ impl Synthesizer {
         // overlap the quarter. Those are already LLM-summarized, so the quarterly review
         // synthesizes from condensed input rather than raw daily work-log.
         if monthly_summaries.is_empty() {
-            let weekly_dir = PathBuf::from(&self.ctx.dirs.weekly).join(&self.ctx.dirs.personal);
+            let weekly_dir = PathBuf::from(&self.ctx.dirs.personal).join(&self.ctx.dirs.weekly);
             for (wy, ww) in iso_weeks_in_range(start, end)? {
                 let file = weekly_dir.join(format!("{wy}-W{ww:02}.md"));
                 if let Some(page) = self.reader.read_page(&file).await? {
@@ -369,7 +369,7 @@ impl Synthesizer {
         if !self.performance_enabled() {
             return Ok(None);
         }
-        let quarterly_dir = PathBuf::from(&self.ctx.dirs.quarterly).join(&self.ctx.dirs.personal);
+        let quarterly_dir = PathBuf::from(&self.ctx.dirs.personal).join(&self.ctx.dirs.quarterly);
         let mut period_summaries: Vec<serde_json::Value> = Vec::new();
         let mut combined = String::new();
         let strings = self.ctx.locale.strings();
@@ -393,7 +393,7 @@ impl Synthesizer {
 
         if period_summaries.is_empty() {
             // No quarterly reviews → fall back to monthly summaries.
-            let monthly_dir = PathBuf::from(&self.ctx.dirs.monthly).join(&self.ctx.dirs.personal);
+            let monthly_dir = PathBuf::from(&self.ctx.dirs.personal).join(&self.ctx.dirs.monthly);
             for m in 1..=12u8 {
                 let file = monthly_dir.join(format!("{year}-{m:02}.md"));
                 if let Some(page) = self.reader.read_page(&file).await? {

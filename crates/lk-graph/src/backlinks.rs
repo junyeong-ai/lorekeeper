@@ -1,4 +1,4 @@
-//! Keep `wiki/concepts/*.md` `## <Sources>` sections in sync with the actual
+//! Keep concept page `## <Sources>` sections in sync with the actual
 //! wikilink graph.
 //!
 //! During ingestion the concept renderer writes the `sources:` frontmatter and the
@@ -17,6 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use lk_core::concept::slugify;
+use lk_core::config::VaultDirs;
 use lk_core::i18n::Locale;
 use lk_vault::{VaultWriter, replace_section};
 use serde::Serialize;
@@ -47,7 +48,7 @@ pub struct SyncReport {
     pub dry_run: bool,
 }
 
-/// Recompute the `## <Sources>` section on every `wiki/concepts/{slug}.md` page from
+/// Recompute the `## <Sources>` section on every `{wiki}/concepts/{slug}.md` page from
 /// the incoming wikilinks observed in `pages`, and rewrite any page whose section
 /// differs. Returns the diff per page plus a count of pages that needed no change.
 ///
@@ -59,6 +60,7 @@ pub fn sync_concept_backlinks(
     vault_root: &Path,
     locale: Locale,
     dry_run: bool,
+    dirs: &VaultDirs,
 ) -> Result<SyncReport, GraphError> {
     // Reverse index: concept slug (filename) → sorted set of source page ids that
     // wikilink to it. Use BTreeMap/BTreeSet so the rendered body is deterministic.
@@ -68,7 +70,7 @@ pub fn sync_concept_backlinks(
     // (`wiki/index.md`, `wiki/AGENTS.md`) shouldn't appear as sources at all.
     let mut incoming: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for page in pages {
-        if !is_valid_source(&page.path) {
+        if !is_valid_source(&page.path, dirs) {
             continue;
         }
         for target in &page.outgoing {
@@ -87,7 +89,7 @@ pub fn sync_concept_backlinks(
     };
 
     for page in pages {
-        if !is_concept_page(&page.path) {
+        if !is_concept_page(&page.path, dirs) {
             continue;
         }
 
@@ -163,24 +165,22 @@ pub fn sync_concept_backlinks(
 /// Concept-to-concept links and navigation pages (`wiki/index.md`,
 /// `wiki/AGENTS.md`) are excluded: cross-references between concepts belong in
 /// `## 관련` (Related), not in `## 출처` (Sources).
-fn is_valid_source(path: &Path) -> bool {
+fn is_valid_source(path: &Path, dirs: &VaultDirs) -> bool {
     let s = path.to_string_lossy().replace('\\', "/");
-    s.starts_with("daily/")
-        || s.starts_with("me/")
-        || s.starts_with("weekly/")
-        || s.starts_with("monthly/")
-        || s.starts_with("quarterly/")
-        || s.starts_with("annually/")
-        || s.starts_with("wiki/documents/")
-        || s.starts_with("wiki/explorations/")
+    s.starts_with(&format!("{}/", dirs.daily))
+        || s.starts_with(&format!("{}/", dirs.personal))
+        || s.starts_with(&format!("{}/", dirs.synthesis))
+        || s.starts_with(&format!("{}/documents/", dirs.wiki))
+        || s.starts_with(&format!("{}/explorations/", dirs.wiki))
 }
 
-/// True iff this vault-relative path is a `wiki/concepts/<name>.md` page. Concept
-/// pages live one directory deep under `wiki/concepts/`, so we anchor on the prefix
+/// True iff this vault-relative path is a `{wiki}/concepts/<name>.md` page. Concept
+/// pages live one directory deep under `{wiki}/concepts/`, so we anchor on the prefix
 /// and require an `.md` extension. Cross-platform `\` is normalised before matching.
-fn is_concept_page(path: &Path) -> bool {
+fn is_concept_page(path: &Path, dirs: &VaultDirs) -> bool {
     let s = path.to_string_lossy().replace('\\', "/");
-    s.starts_with("wiki/concepts/") && path.extension().is_some_and(|ext| ext == "md")
+    s.starts_with(&format!("{}/concepts/", dirs.wiki))
+        && path.extension().is_some_and(|ext| ext == "md")
 }
 
 /// Extract `[[…]]` targets from the existing `## <heading>` section, in their
@@ -290,7 +290,9 @@ mod tests {
             ),
         ];
 
-        let report = sync_concept_backlinks(&pages, dir.path(), Locale::Ko, false).unwrap();
+        let report =
+            sync_concept_backlinks(&pages, dir.path(), Locale::Ko, false, &VaultDirs::default())
+                .unwrap();
         assert_eq!(report.updated.len(), 1);
         assert_eq!(report.unchanged, 0);
         assert_eq!(report.updated[0].added, vec!["daily/slack/2026-05-20"]);
@@ -313,7 +315,9 @@ mod tests {
             &[],
         )];
 
-        let report = sync_concept_backlinks(&pages, dir.path(), Locale::Ko, false).unwrap();
+        let report =
+            sync_concept_backlinks(&pages, dir.path(), Locale::Ko, false, &VaultDirs::default())
+                .unwrap();
         assert_eq!(report.updated.len(), 1);
         assert!(report.updated[0].added.is_empty());
         assert_eq!(report.updated[0].removed, vec!["daily/slack/2026-01-01"]);
@@ -339,7 +343,8 @@ mod tests {
             make_page("daily/x/2026-05-20", "daily/x/2026-05-20.md", &["oy365"]),
         ];
 
-        sync_concept_backlinks(&pages, dir.path(), Locale::Ko, false).unwrap();
+        sync_concept_backlinks(&pages, dir.path(), Locale::Ko, false, &VaultDirs::default())
+            .unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("## 핵심\n\nThis is the synthesis paragraph."));
@@ -359,7 +364,9 @@ mod tests {
             make_page("daily/x/2026-05-20", "daily/x/2026-05-20.md", &["oy365"]),
         ];
 
-        let report = sync_concept_backlinks(&pages, dir.path(), Locale::Ko, true).unwrap();
+        let report =
+            sync_concept_backlinks(&pages, dir.path(), Locale::Ko, true, &VaultDirs::default())
+                .unwrap();
         assert!(report.dry_run);
         assert_eq!(report.updated.len(), 1);
 
@@ -378,11 +385,15 @@ mod tests {
         ];
 
         // First run rewrites the page.
-        let first = sync_concept_backlinks(&pages, dir.path(), Locale::Ko, false).unwrap();
+        let first =
+            sync_concept_backlinks(&pages, dir.path(), Locale::Ko, false, &VaultDirs::default())
+                .unwrap();
         assert_eq!(first.updated.len(), 1);
 
         // Second run: every concept page is already in sync.
-        let second = sync_concept_backlinks(&pages, dir.path(), Locale::Ko, false).unwrap();
+        let second =
+            sync_concept_backlinks(&pages, dir.path(), Locale::Ko, false, &VaultDirs::default())
+                .unwrap();
         assert!(second.updated.is_empty());
         assert_eq!(second.unchanged, 1);
     }
@@ -403,7 +414,8 @@ mod tests {
             make_page("daily/x/2026-05-20", "daily/x/2026-05-20.md", &["oy365"]),
         ];
 
-        sync_concept_backlinks(&pages, dir.path(), Locale::En, false).unwrap();
+        sync_concept_backlinks(&pages, dir.path(), Locale::En, false, &VaultDirs::default())
+            .unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("## Sources\n\n- [[daily/x/2026-05-20]]\n\n## Metadata"));
     }
@@ -420,7 +432,9 @@ mod tests {
             &["oy365"],
         )];
 
-        let report = sync_concept_backlinks(&pages, dir.path(), Locale::Ko, false).unwrap();
+        let report =
+            sync_concept_backlinks(&pages, dir.path(), Locale::Ko, false, &VaultDirs::default())
+                .unwrap();
         assert_eq!(report.updated.len(), 0);
         assert_eq!(report.unchanged, 1);
     }

@@ -37,10 +37,9 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let content = std::fs::read_to_string(path)?;
         let mut config: Self = serde_yaml_ng::from_str(&content)?;
-        // Validate the raw config BEFORE path resolution — otherwise an empty
-        // vault.root gets transformed into the config directory, bypassing the
-        // emptiness check.
         config.validate()?;
+        config.vault.dirs.normalize();
+        config.graph.apply_vault_defaults(&config.vault.dirs);
         if let Some(parent) = path.parent() {
             config.vault.resolve_relative_to(parent);
         }
@@ -243,12 +242,6 @@ impl Config {
             }
         }
 
-        // Graph scope: dirs must be non-empty and vault-relative (no traversal).
-        if self.graph.scope.dirs.is_empty() {
-            return Err(ConfigError::Validation(
-                "graph.scope.dirs cannot be empty".into(),
-            ));
-        }
         for dir in &self.graph.scope.dirs {
             let s = dir.to_string_lossy();
             if s.is_empty() || dir.is_absolute() || s.contains("..") {
@@ -375,6 +368,11 @@ impl VaultConfig {
     }
 }
 
+/// Vault directory layout. Three top-level roots — `daily`, `wiki`, and
+/// `synthesis` — plus a `personal` root for all individual performance tracking.
+/// `weekly`, `monthly`, `quarterly`, and `annual` are time-period names used as
+/// subdirectories within both `personal` (e.g. `me/weekly/`) and `synthesis`
+/// (e.g. `synthesis/weekly/`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct VaultDirs {
@@ -384,6 +382,7 @@ pub struct VaultDirs {
     pub quarterly: String,
     pub annual: String,
     pub personal: String,
+    pub synthesis: String,
     pub wiki: String,
 }
 
@@ -396,15 +395,13 @@ impl Default for VaultDirs {
             quarterly: "quarterly".into(),
             annual: "annually".into(),
             personal: "me".into(),
+            synthesis: "synthesis".into(),
             wiki: "wiki".into(),
         }
     }
 }
 
 impl VaultDirs {
-    /// Every vault directory is joined onto the vault root to build output paths. A value
-    /// containing `..`, an absolute prefix, or an empty segment could escape the vault root
-    /// and write arbitrary files, so reject those before any path is constructed.
     fn validate(&self) -> Result<(), ConfigError> {
         let fields = [
             ("daily", &self.daily),
@@ -413,12 +410,39 @@ impl VaultDirs {
             ("quarterly", &self.quarterly),
             ("annual", &self.annual),
             ("personal", &self.personal),
+            ("synthesis", &self.synthesis),
             ("wiki", &self.wiki),
         ];
         for (name, value) in fields {
             validate_vault_dir(name, value)?;
         }
         Ok(())
+    }
+
+    pub fn normalize(&mut self) {
+        use std::path::{Component, Path as StdPath};
+        for field in [
+            &mut self.daily,
+            &mut self.weekly,
+            &mut self.monthly,
+            &mut self.quarterly,
+            &mut self.annual,
+            &mut self.personal,
+            &mut self.synthesis,
+            &mut self.wiki,
+        ] {
+            let normalized: String = StdPath::new(field.as_str())
+                .components()
+                .filter_map(|c| match c {
+                    Component::Normal(s) => Some(s.to_string_lossy()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("/");
+            if normalized != *field {
+                *field = normalized;
+            }
+        }
     }
 }
 
@@ -641,10 +665,6 @@ impl PerformanceConfig {
 
 impl Default for PerformanceConfig {
     fn default() -> Self {
-        let mut source_type_category_map = BTreeMap::new();
-        source_type_category_map.insert(SourceType::Jira, "project-delivery".into());
-        source_type_category_map.insert(SourceType::GoogleCalendar, "team-contribution".into());
-
         Self {
             enabled: true,
             work_categories: vec![
@@ -655,7 +675,7 @@ impl Default for PerformanceConfig {
                 "operational-excellence".into(),
             ],
             source_category_map: BTreeMap::new(),
-            source_type_category_map,
+            source_type_category_map: BTreeMap::new(),
             uncategorized_label: None,
         }
     }
@@ -806,13 +826,21 @@ pub struct GraphConfig {
     pub cluster: GraphClusterConfig,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+impl GraphConfig {
+    pub fn apply_vault_defaults(&mut self, vault_dirs: &VaultDirs) {
+        if self.scope.dirs.is_empty() {
+            self.scope.dirs = vec![PathBuf::from(&vault_dirs.wiki)];
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GraphScopeConfig {
-    /// Vault-relative directories that bound *structural analysis*
-    /// (`hubs`/`cluster`/`suggest-links`) — default `["wiki"]`. Integrity checks
-    /// (`broken`/`orphans`/`index-sync`) instead resolve against the full vault,
-    /// so a narrow scope here does not cause cross-folder false positives.
+    /// Vault-relative directories for structural analysis
+    /// (`hubs`/`cluster`/`suggest-links`). Derived from `vault.dirs.wiki` when
+    /// absent. Integrity checks (`broken`/`orphans`/`index-sync`) resolve against
+    /// the full vault regardless.
     pub dirs: Vec<PathBuf>,
     /// Glob patterns (matched against vault-relative paths) to exclude from the scan.
     pub exclude: Vec<String>,
@@ -838,16 +866,6 @@ pub struct GraphClusterConfig {
     pub max_iterations: usize,
     /// Communities smaller than this are dropped from results.
     pub min_community_size: usize,
-}
-
-impl Default for GraphScopeConfig {
-    fn default() -> Self {
-        Self {
-            dirs: vec![PathBuf::from("wiki")],
-            exclude: Vec::new(),
-            follow_links: false,
-        }
-    }
 }
 
 impl Default for GraphMetricsConfig {
@@ -1254,7 +1272,9 @@ performance:
 
     #[test]
     fn resolve_category_falls_back_to_source_type() {
-        let perf = PerformanceConfig::default();
+        let mut perf = PerformanceConfig::default();
+        perf.source_type_category_map
+            .insert(SourceType::Jira, "project-delivery".into());
         let cat = perf.resolve_category("other-jira", SourceType::Jira, None);
         assert_eq!(cat.as_deref(), Some("project-delivery"));
     }
@@ -1279,7 +1299,7 @@ sources:
     type: gmail
 "#;
         let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
-        assert_eq!(config.graph.scope.dirs, vec![PathBuf::from("wiki")]);
+        assert!(config.graph.scope.dirs.is_empty());
         assert_eq!(config.graph.graph.min_hub_degree, 5);
         assert_eq!(config.graph.cluster.resolution, 1.0);
         assert_eq!(config.graph.cluster.max_iterations, 100);
@@ -1464,5 +1484,23 @@ graph:
 "#;
         let result: Result<Config, _> = serde_yaml_ng::from_str(yaml);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn vault_dirs_normalize_cleans_paths() {
+        let mut dirs = VaultDirs {
+            wiki: "./wiki/".into(),
+            daily: "daily/".into(),
+            personal: "./me".into(),
+            synthesis: "synthesis".into(),
+            weekly: "././weekly//".into(),
+            ..Default::default()
+        };
+        dirs.normalize();
+        assert_eq!(dirs.wiki, "wiki");
+        assert_eq!(dirs.daily, "daily");
+        assert_eq!(dirs.personal, "me");
+        assert_eq!(dirs.synthesis, "synthesis");
+        assert_eq!(dirs.weekly, "weekly");
     }
 }

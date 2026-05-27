@@ -1,10 +1,18 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use lk_core::config::GraphConfig;
+use lk_core::config::{GraphConfig, VaultDirs};
 use lk_core::i18n::Locale;
 use lk_graph::{backlinks, cache, cluster, export, graph, index, normalize, output, scan, stale};
 
 use super::GlobalOpts;
+
+struct ResolvedConfig {
+    root: PathBuf,
+    graph: GraphConfig,
+    tz: jiff::tz::TimeZone,
+    locale: Locale,
+    vault_dirs: VaultDirs,
+}
 
 #[derive(clap::Subcommand)]
 pub enum GraphCmd {
@@ -59,7 +67,7 @@ pub enum GraphCmd {
         #[arg(long, default_value_t = 90)]
         days: u32,
     },
-    /// Rewrite each `wiki/concepts/*` page's `## <Sources>` section from the graph
+    /// Rewrite each concept page's `## <Sources>` section from the graph
     BacklinksSync {
         /// Report what would change without writing
         #[arg(long)]
@@ -110,16 +118,15 @@ fn run_inner(
         _ => {}
     }
 
-    let (root, mut config) = resolve_config(opts, root_override)?;
+    let mut rc = resolve_config_full(opts, root_override)?;
 
-    // Incremental: check the mtime cache before paying for a full vault scan.
     if incremental {
-        let cp = cache::cache_path(&root);
+        let cp = cache::cache_path(&rc.root);
         if let Some(cached) = cache::load(&cp) {
             let dirty = cache::is_dirty(
-                &root,
-                &config.scope.dirs,
-                config.scope.follow_links,
+                &rc.root,
+                &rc.graph.scope.dirs,
+                rc.graph.scope.follow_links,
                 &cached,
             )
             .map_err(|e| format!("{e}"))?;
@@ -130,20 +137,13 @@ fn run_inner(
         }
     }
 
-    let pages = scan::scan_vault(&root, &config).map_err(|e| format!("{e}"))?;
+    let pages = scan::scan_vault(&rc.root, &rc.graph).map_err(|e| format!("{e}"))?;
 
-    // Integrity checks (broken links, orphans, index-sync) must reason about
-    // every page on disk, not just the analysis scope — otherwise a `wiki/`
-    // concept linking a `daily/` page reads as a broken link, and a concept
-    // linked only from `daily/` reads as an orphan. Only those commands pay for
-    // the full-vault scan; the structural commands (hubs/cluster/export/
-    // normalize/suggest-links) read the scope subgraph alone, whose edges are
-    // existence-independent, so scope-as-universe suffices for them.
     let existence = if matches!(
         cmd,
         GraphCmd::Lint | GraphCmd::Broken | GraphCmd::Orphans | GraphCmd::IndexSync { .. }
     ) {
-        build_vault_existence(&root, &config)?
+        build_vault_existence(&rc.root, &rc.graph, &rc.vault_dirs)?
     } else {
         scan::VaultExistence::from_pages(&pages)
     };
@@ -151,10 +151,19 @@ fn run_inner(
 
     let has_findings = match cmd {
         GraphCmd::Lint => {
-            let hubs = g.hubs(10, config.graph.min_hub_degree);
-            let orphans = g.orphans(&config);
+            let hubs = g.hubs(10, rc.graph.graph.min_hub_degree);
+            let orphans = g.orphans(
+                &rc.graph.graph.orphan_exclude,
+                Path::new(&rc.vault_dirs.wiki),
+            );
             let broken = g.broken_links().to_vec();
-            let drift = index::diff(&g, &existence, &root, &config);
+            let drift = index::diff(
+                &g,
+                &existence,
+                &rc.root,
+                Path::new(&rc.vault_dirs.wiki),
+                &rc.graph.graph.orphan_exclude,
+            );
 
             let findings = orphans.len()
                 + broken.len()
@@ -194,7 +203,10 @@ fn run_inner(
             false
         }
         GraphCmd::Orphans => {
-            let orphans = g.orphans(&config);
+            let orphans = g.orphans(
+                &rc.graph.graph.orphan_exclude,
+                Path::new(&rc.vault_dirs.wiki),
+            );
             let count = orphans.len();
             let report = output::OrphansReport { orphans, count };
             let has = report.count > 0;
@@ -219,9 +231,9 @@ fn run_inner(
         }
         GraphCmd::Cluster { label, min_size } => {
             if let Some(size) = min_size {
-                config.cluster.min_community_size = size;
+                rc.graph.cluster.min_community_size = size;
             }
-            let mut result = cluster::detect_communities(&g, &config);
+            let mut result = cluster::detect_communities(&g, &rc.graph);
             if label {
                 cluster::label_communities(&g, &mut result.communities);
             }
@@ -234,7 +246,7 @@ fn run_inner(
         }
         GraphCmd::Export { with_clusters } => {
             let cluster_result = if with_clusters {
-                Some(cluster::detect_communities(&g, &config))
+                Some(cluster::detect_communities(&g, &rc.graph))
             } else {
                 None
             };
@@ -250,11 +262,20 @@ fn run_inner(
             false
         }
         GraphCmd::IndexSync { fix } => {
-            let drift = index::diff(&g, &existence, &root, &config);
+            let drift = index::diff(
+                &g,
+                &existence,
+                &rc.root,
+                Path::new(&rc.vault_dirs.wiki),
+                &rc.graph.graph.orphan_exclude,
+            );
             let has = !drift.is_in_sync();
             let has_unfixable = !drift.missing_from_disk.is_empty();
             let fixed = if fix && !drift.missing_from_index.is_empty() {
-                Some(index::fix(&drift, &root, &config).map_err(|e| format!("{e}"))?)
+                Some(
+                    index::fix(&drift, &rc.root, Path::new(&rc.vault_dirs.wiki))
+                        .map_err(|e| format!("{e}"))?,
+                )
             } else {
                 None
             };
@@ -274,7 +295,7 @@ fn run_inner(
             let renames = normalize::scan(&pages);
             let has = !renames.is_empty();
             let applied = if fix && has {
-                Some(normalize::apply(&renames, &pages, &root).map_err(|e| format!("{e}"))?)
+                Some(normalize::apply(&renames, &pages, &rc.root).map_err(|e| format!("{e}"))?)
             } else {
                 None
             };
@@ -297,9 +318,9 @@ fn run_inner(
         }
         GraphCmd::SuggestLinks { min_community_size } => {
             if let Some(size) = min_community_size {
-                config.cluster.min_community_size = size;
+                rc.graph.cluster.min_community_size = size;
             }
-            let clusters = cluster::detect_communities(&g, &config);
+            let clusters = cluster::detect_communities(&g, &rc.graph);
             let result = cluster::suggest_links(&g, &clusters);
             let count = result.pairs.len();
             let report = output::SuggestLinksReport {
@@ -321,7 +342,7 @@ fn run_inner(
     // Persist the mtime cache after a successful scan so the next `--incremental`
     // run can skip the rescan if nothing changed.
     if incremental {
-        save_cache_best_effort(&root, &config);
+        save_cache_best_effort(&rc.root, &rc.graph);
     }
 
     Ok(has_findings)
@@ -334,15 +355,15 @@ fn run_stale(
     days: u32,
     incremental: bool,
 ) -> Result<bool, String> {
-    let (root, config, tz, _locale) = resolve_config_full(opts, root_override)?;
+    let rc = resolve_config_full(opts, root_override)?;
 
     if incremental {
-        let cp = cache::cache_path(&root);
+        let cp = cache::cache_path(&rc.root);
         if let Some(cached) = cache::load(&cp) {
             let dirty = cache::is_dirty(
-                &root,
-                &config.scope.dirs,
-                config.scope.follow_links,
+                &rc.root,
+                &rc.graph.scope.dirs,
+                rc.graph.scope.follow_links,
                 &cached,
             )
             .map_err(|e| format!("{e}"))?;
@@ -353,14 +374,12 @@ fn run_stale(
         }
     }
 
-    let pages = scan::scan_vault(&root, &config).map_err(|e| format!("{e}"))?;
+    let pages = scan::scan_vault(&rc.root, &rc.graph).map_err(|e| format!("{e}"))?;
 
-    // Same date derivation as the ingest pipeline (`commands::ingest`): now in the
-    // vault's timezone, then the calendar date. UTC-by-accident gives the wrong
-    // answer near midnight.
-    let today = jiff::Timestamp::now().to_zoned(tz).date();
+    let today = jiff::Timestamp::now().to_zoned(rc.tz).date();
 
-    let stale_pages = stale::find_stale(&pages, &root, today, days).map_err(|e| format!("{e}"))?;
+    let stale_pages = stale::find_stale(&pages, &rc.root, today, days, &rc.vault_dirs)
+        .map_err(|e| format!("{e}"))?;
     let count = stale_pages.len();
     let report = output::StaleReport {
         threshold_days: days,
@@ -371,11 +390,11 @@ fn run_stale(
     if json {
         output::print_json(&report)?;
     } else {
-        output::print_stale(&report);
+        output::print_stale(&report, &rc.vault_dirs);
     }
 
     if incremental {
-        save_cache_best_effort(&root, &config);
+        save_cache_best_effort(&rc.root, &rc.graph);
     }
 
     Ok(count > 0)
@@ -388,21 +407,17 @@ fn run_backlinks_sync(
     dry_run: bool,
     incremental: bool,
 ) -> Result<bool, String> {
-    let (root, mut config, _tz, locale) = resolve_config_full(opts, root_override)?;
+    let mut rc = resolve_config_full(opts, root_override)?;
 
-    // Backlinks must see every page that can wikilink a concept — not just `wiki/`.
-    // Daily ingest output and personal pages reference concepts too; if the scope
-    // excludes them, the diff against existing sources becomes a destructive churn
-    // that removes correct daily/me backlinks on every run.
-    config.scope.dirs = vault_page_dirs(&root);
+    rc.graph.scope.dirs = vault_page_dirs(&rc.root, &rc.vault_dirs);
 
     if incremental {
-        let cp = cache::cache_path(&root);
+        let cp = cache::cache_path(&rc.root);
         if let Some(cached) = cache::load(&cp) {
             let dirty = cache::is_dirty(
-                &root,
-                &config.scope.dirs,
-                config.scope.follow_links,
+                &rc.root,
+                &rc.graph.scope.dirs,
+                rc.graph.scope.follow_links,
                 &cached,
             )
             .map_err(|e| format!("{e}"))?;
@@ -413,10 +428,11 @@ fn run_backlinks_sync(
         }
     }
 
-    let pages = scan::scan_vault(&root, &config).map_err(|e| format!("{e}"))?;
+    let pages = scan::scan_vault(&rc.root, &rc.graph).map_err(|e| format!("{e}"))?;
 
-    let sync = backlinks::sync_concept_backlinks(&pages, &root, locale, dry_run)
-        .map_err(|e| format!("{e}"))?;
+    let sync =
+        backlinks::sync_concept_backlinks(&pages, &rc.root, rc.locale, dry_run, &rc.vault_dirs)
+            .map_err(|e| format!("{e}"))?;
     let changed = sync.updated.len();
     let report = output::BacklinksSyncReport { sync, changed };
 
@@ -427,11 +443,9 @@ fn run_backlinks_sync(
     }
 
     if incremental {
-        save_cache_best_effort(&root, &config);
+        save_cache_best_effort(&rc.root, &rc.graph);
     }
 
-    // Per spec: `backlinks-sync` exits 0 even when it makes changes — a change is
-    // a successful normalisation, not a finding to escalate.
     Ok(false)
 }
 
@@ -447,27 +461,8 @@ fn save_cache_best_effort(root: &std::path::Path, config: &GraphConfig) {
     }
 }
 
-/// Resolve vault root and graph config. If `--root` is given, uses that and default
-/// config. Otherwise loads `config.yaml` and reads `vault.root` + `graph:`.
-fn resolve_config(
-    opts: &GlobalOpts,
-    root_override: Option<PathBuf>,
-) -> Result<(PathBuf, GraphConfig), String> {
-    if let Some(root) = root_override {
-        return Ok((root, GraphConfig::default()));
-    }
-
-    let config_path = super::find_config(opts).map_err(|e| format!("{e}"))?;
-    let config = super::load_config(&config_path).map_err(|e| format!("{e}"))?;
-    let root = config.vault.root_path();
-    Ok((root, config.graph))
-}
-
-/// Like [`resolve_config`] but also returns the configured timezone and locale.
-/// `stale` needs the timezone to compute "today" consistently with the rest of
-/// the pipeline (`Event::date` is derived the same way), and `backlinks-sync`
-/// needs the locale to pick the `## <Sources>` heading text. A `--root` override
-/// gets system timezone + default locale (Ko), since no config is loaded.
+/// Resolve vault root, graph config, timezone, locale, and directory layout.
+/// A `--root` override uses system timezone + default locale + default dirs.
 /// Scan the full vault into a [`scan::VaultExistence`] for integrity checks.
 /// Reuses the analysis `config` (exclude globs, follow_links) but widens the
 /// scope to every page directory, so broken-link and orphan detection reason
@@ -475,9 +470,10 @@ fn resolve_config(
 fn build_vault_existence(
     root: &std::path::Path,
     config: &GraphConfig,
+    vault_dirs: &VaultDirs,
 ) -> Result<scan::VaultExistence, String> {
     let mut full = config.clone();
-    full.scope.dirs = vault_page_dirs(root);
+    full.scope.dirs = vault_page_dirs(root, vault_dirs);
     let pages = scan::scan_vault(root, &full).map_err(|e| format!("{e}"))?;
     Ok(scan::VaultExistence::from_pages(&pages))
 }
@@ -488,39 +484,38 @@ fn build_vault_existence(
 /// checks) rather than the user-configured `graph.scope.dirs`, which stays
 /// narrowed for structural analysis (`hubs`/`cluster`/`suggest-links`). Missing
 /// directories are skipped so a partially-populated vault doesn't error out.
-fn vault_page_dirs(root: &std::path::Path) -> Vec<PathBuf> {
-    [
-        "wiki",
-        "daily",
-        "me",
-        "weekly",
-        "monthly",
-        "quarterly",
-        "annually",
-    ]
-    .iter()
-    .filter(|name| root.join(name).is_dir())
-    .map(PathBuf::from)
-    .collect()
+fn vault_page_dirs(root: &std::path::Path, dirs: &VaultDirs) -> Vec<PathBuf> {
+    [&dirs.wiki, &dirs.daily, &dirs.personal, &dirs.synthesis]
+        .iter()
+        .filter(|name| root.join(name).is_dir())
+        .map(|s| PathBuf::from(s.as_str()))
+        .collect()
 }
 
 fn resolve_config_full(
     opts: &GlobalOpts,
     root_override: Option<PathBuf>,
-) -> Result<(PathBuf, GraphConfig, jiff::tz::TimeZone, Locale), String> {
+) -> Result<ResolvedConfig, String> {
     if let Some(root) = root_override {
-        return Ok((
+        let vault_dirs = VaultDirs::default();
+        let mut graph = GraphConfig::default();
+        graph.apply_vault_defaults(&vault_dirs);
+        return Ok(ResolvedConfig {
             root,
-            GraphConfig::default(),
-            jiff::tz::TimeZone::system(),
-            Locale::default(),
-        ));
+            graph,
+            tz: jiff::tz::TimeZone::system(),
+            locale: Locale::default(),
+            vault_dirs,
+        });
     }
 
     let config_path = super::find_config(opts).map_err(|e| format!("{e}"))?;
     let config = super::load_config(&config_path).map_err(|e| format!("{e}"))?;
-    let root = config.vault.root_path();
-    let tz = config.vault.timezone();
-    let locale = config.vault.locale();
-    Ok((root, config.graph, tz, locale))
+    Ok(ResolvedConfig {
+        root: config.vault.root_path(),
+        tz: config.vault.timezone(),
+        locale: config.vault.locale(),
+        vault_dirs: config.vault.dirs.clone(),
+        graph: config.graph,
+    })
 }
