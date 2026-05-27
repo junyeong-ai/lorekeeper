@@ -60,7 +60,7 @@ Auto-discovered: `./config.yaml` → `~/.config/lorekeeper/config.yaml`.
 
 ## Cross-cutting invariants
 
-- **Source ID = vault directory**: the key under `sources:` becomes `daily/{id}/`. Must not contain `/`, `\`, `.`, or `..`.
+- **Source ID = vault directory**: the key under `sources:` becomes `daily/{id}/`. Must not contain `/` or `\`, and must not be `.` or `..`.
 - **Date derivation**: `timestamp.to_zoned(vault.timezone()).date()` — always via configured timezone, never UTC.
 - **Multi-date batches**: events spanning several dates produce one `daily/` page per date.
 - **Atomic ingest** (5 phases): plan → write daily/concept → work-log → flush LLM queue → commit dedup. Each source's dedup commits only after its own writes + flush succeed.

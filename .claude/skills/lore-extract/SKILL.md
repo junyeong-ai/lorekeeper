@@ -75,7 +75,7 @@ concept_mapping:         # project tag → vault category id
 
 extracted:               # per-document tracking (written by run)
   - source: "docs/decisions/some-adr.md"
-    vault_page: "wiki/documents/proj-some-adr.md"
+    vault_page: "<wiki>/documents/proj-some-adr.md"
     domain: cloud-platform
     extracted_at: <ISO-date>
     transferability: T1
