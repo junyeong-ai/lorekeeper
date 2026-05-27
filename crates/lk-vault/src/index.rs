@@ -269,7 +269,12 @@ pub async fn write_index(
         let current: std::collections::HashSet<String> = output
             .sub_pages
             .iter()
-            .filter_map(|(p, _)| std::path::Path::new(p).file_name()?.to_str().map(String::from))
+            .filter_map(|(p, _)| {
+                std::path::Path::new(p)
+                    .file_name()?
+                    .to_str()
+                    .map(String::from)
+            })
             .collect();
         let mut entries = tokio::fs::read_dir(&index_dir).await?;
         while let Some(entry) = entries.next_entry().await? {
