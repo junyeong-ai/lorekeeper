@@ -42,3 +42,6 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
   each concept page to match the wikilink graph. Uses full-vault scope (not
   `graph.scope.dirs`) so daily/me/weekly pages are included. Only event/document
   pages qualify as sources (concept-to-concept links belong in `## 관련`).
+  Note: the actual heading text (`출처`/`Sources`, `관련`/`Related`) is resolved
+  from `locale.strings()` at runtime — the Korean/English forms shown here are
+  examples for both locales, not hardcoded literals.

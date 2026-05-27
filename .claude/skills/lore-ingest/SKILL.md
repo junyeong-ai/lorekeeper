@@ -76,8 +76,10 @@ Templates are embedded in the binary. Override with `--template-dir`.
 | Jira | `LORE_JIRA_URL`, `LORE_JIRA_EMAIL`, `LORE_JIRA_TOKEN` |
 | LLM (optional) | `ANTHROPIC_API_KEY` |
 
-Missing LLM key → `NoopLlmClient` (ingest runs without
-summarisation/concepts).
+`provider: anthropic` with missing `ANTHROPIC_API_KEY` is a hard error.
+Only `provider: noop` explicitly selects `NoopLlmClient` (no
+summarisation/concepts). Default provider is `queue` (buffers tasks
+to JSONL for `/lore-process`).
 
 ## Atomic ingest flow
 

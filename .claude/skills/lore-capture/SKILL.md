@@ -78,30 +78,10 @@ consistent with batch extractions from `/lore-extract`.
 
 ### 4. Write document
 
-Create `wiki/documents/{slug}.md` per AGENTS.md document format.
-Use the vault's configured locale for section headings.
-
-**Frontmatter:**
-```yaml
-id: {slug}
-title: "{Generalised Title}"
-aliases: ["{Title}"]
-created: {today}
-updated: {today}
-document_type: project-knowledge | engineering-guide
-tags: [{technology}]
-concepts: [{concept-slugs}]
-```
-
-**Sections** (adapt by knowledge type):
-
-- **Summary** — 2-3 sentence standalone synopsis
-- **Content** — structured subsections:
-  - Background & Constraints (generalise — strip project identifiers)
-  - Key Findings (the non-obvious behaviour; cite evidence)
-  - Troubleshooting Sequence (hypotheses → outcomes → root cause)
-  - Transferable Patterns (the one-sentence rule-of-thumb)
-- **Related Concepts** — `[[wikilinks]]`
+Write `wiki/documents/{slug}.md` following the document page format
+in `wiki/AGENTS.md`. Use the vault's configured locale for all
+section headings and frontmatter fields — refer to AGENTS.md as
+the authoritative source for both.
 
 ### 5. Create/merge concepts
 

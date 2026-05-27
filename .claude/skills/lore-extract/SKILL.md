@@ -164,9 +164,13 @@ Extract knowledge using the manifest. Requires a prior scan.
 
    f. Extract concepts. Assign categories via `concept_mapping`.
 
-   g. Write `wiki/documents/{project}-{slug}.md` per AGENTS.md:
+   g. Write `wiki/documents/{project}-{slug}.md` per AGENTS.md.
+
+      The following is **illustrative only** — read `wiki/AGENTS.md`
+      for the authoritative frontmatter format and required fields:
 
       ```yaml
+      # Example (illustrative — see AGENTS.md for canonical format)
       id: {project}-{slug}
       title: "{Generalised Title}"
       aliases: ["{Title}"]

@@ -43,6 +43,6 @@ about; provider choice is config-driven (`build_llm_client` in lk-cli).
     Invariant: a `.jsonl` file becomes visible only after its target pages were written,
     so it never references a page that doesn't exist. `run_id` = timestamp + PID +
     process-global sequence (collision-free even for two clients in one process/second).
-    Supports `TaskKind::Summarize`, `ExtractConcepts`, `IdentifyThemes`.
+    Supports `TaskKind::Summarize`, `ExtractConcepts`, `IdentifyThemes`, `RefineEvents`.
   - `NoopLlmClient` — empty results (uses default trait impls).
   - `MockLlmClient` — tests only, with configurable `summary`, `concepts`, `themes`.
