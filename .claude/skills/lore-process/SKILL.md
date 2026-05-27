@@ -183,8 +183,9 @@ locate key — never hardcode headings per `target.kind`.
         topics, and concepts (whatever the source's domain — the focus,
         if present, names it). Output a list of concept names
         (in the source language). Each concept should also produce a
-        `wiki/concepts/{slug}.md` entry (create if missing, merge if
-        exists — increment source_count, append source ref).
+        a concept page (create if missing, merge if exists — increment
+        source_count, append source ref). Use the concept path pattern
+        from AGENTS.md.
 
         **Concept dedup.** Before creating any concept page, check for
         duplicates against the concept registry:
@@ -249,8 +250,8 @@ locate key — never hardcode headings per `target.kind`.
 
       - **`daily-concepts`** target: replace the section body with
         `- [[Concept Name 1]]\n- [[Concept Name 2]]\n...`.
-        Create each concept page at `wiki/concepts/{slug}.md` if it
-        doesn't exist, following the concept page format above.
+        Create each concept page (path from AGENTS.md) if it doesn't
+        exist, following the concept page format above.
         Crucially include `aliases: ["Concept Name"]` so the
         `[[Concept Name]]` wikilinks resolve to the slug-named file.
 
@@ -341,8 +342,7 @@ $ wc -l ~/Documents/Obsidian\ Vault/.lorekeeper/queue/*.jsonl
 # /lore-process
 
 # Result: 14 tasks processed, daily pages now have summaries and concept
-# wiki-links, concept pages created/merged under wiki/concepts/,
-# the queue file is in .lorekeeper/queue/processed/.
+# wiki-links, concept pages created/merged, queue file archived.
 ```
 
 ## Quick verification

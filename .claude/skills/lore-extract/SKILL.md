@@ -32,8 +32,9 @@ into the Lorekeeper vault. Three-phase workflow with a persisted
 scan (discover → manifest) → run (manifest → vault pages) → audit (verify)
 ```
 
-Read `wiki/AGENTS.md` before creating pages. If missing, ask the
-user to run `lore schema`.
+Run `lore validate` to find the vault root and AGENTS.md path.
+Read AGENTS.md before creating pages — it defines path patterns,
+frontmatter, and section headings. If missing, run `lore schema`.
 
 ## Extraction manifest
 
@@ -164,10 +165,10 @@ Extract knowledge using the manifest. Requires a prior scan.
 
    f. Extract concepts. Assign categories via `concept_mapping`.
 
-   g. Write `wiki/documents/{project}-{slug}.md` per AGENTS.md.
+   g. Write to the document path pattern from AGENTS.md.
 
-      The following is **illustrative only** — read `wiki/AGENTS.md`
-      for the authoritative frontmatter format and required fields:
+      The following is **illustrative only** — read AGENTS.md for the
+      authoritative path pattern, frontmatter format, and required fields:
 
       ```yaml
       # Example (illustrative — see AGENTS.md for canonical format)
