@@ -22,8 +22,8 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   preserving everything else. Tracks fenced-code state so `## ` lines inside
   ``` blocks are not treated as section boundaries. Trims trailing whitespace from
   heading lines before matching to prevent silent replacement failures.
-- **`index::build_index`** generates `wiki/index.md` — a hierarchical page catalog
-  grouped by category (concepts, documents, daily/{source}, work-log, synthesis).
+- **`index::build_index`** generates `{wiki}/index.md` — a hierarchical page catalog
+  grouped by category (concepts, documents, daily sources, work-log, synthesis).
   One-liner summaries are extracted from each page's primary heading.
   `write_index` handles the atomic write.
 - **`VaultWriter::write_page_sync`** is a sync wrapper around the same

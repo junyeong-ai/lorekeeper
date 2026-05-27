@@ -32,5 +32,8 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   concepts into per-category sub-pages (`wiki/index/{category}.md`).
 - **`LlmConfig` defaults to `provider: queue`** (matches docs/example). Uses
   `deny_unknown_fields` so typos in config keys are caught at load time.
-- **`VaultDirs.annual`** is the config key; its default directory value is `"annually"`
-  (the on-disk folder series stays daily/weekly/monthly/quarterly/annually).
+- **`VaultDirs.annual`** is the config key; its default directory value is `"annually"`.
+  Personal performance paths nest under `dirs.personal`: `me/weekly/`, `me/monthly/`,
+  `me/quarterly/`, `me/annually/`. Team synthesis lives under `dirs.synthesis`:
+  `synthesis/weekly/`. Time-period names (`weekly`, `monthly`, etc.) are shared as
+  subdirectory names within both `personal` and `synthesis`.

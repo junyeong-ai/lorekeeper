@@ -11,15 +11,16 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
   frontmatter = `lk_core::frontmatter::parse_page`, wikilinks =
   `lk_core::wikilink::extract_wikilinks`. No second implementation.
 - **Config**: `config.yaml` `graph:` section (`GraphConfig` in lk-core).
-  `scope.dirs` (default `["wiki"]`), `min_hub_degree`, `orphan_exclude`,
-  `cluster.*`. All `deny_unknown_fields`. Validated: non-empty, relative, no `..`.
+  `scope.dirs` (derived from `vault.dirs.wiki` when absent), `min_hub_degree`,
+  `orphan_exclude`, `cluster.*`. All `deny_unknown_fields`. Validated: relative,
+  no `..`.
 - **Wikilink resolution** (`scan::resolve_wikilink_target`): a bare target
   (`[[concept-a]]`) matches any `concept-a.md` by filename, regardless of depth;
   a path target (`[[daily/team-slack/2026-05-22]]`) matches that page id
   (per-segment slugified, `/` preserved — *not* collapsed to `daily-…`). Anchors
   (`#heading`, `^block`) stripped before resolution.
 - **Integrity checks vs analysis scope**: `hubs`/`cluster`/`suggest-links`
-  operate on the `graph.scope.dirs` subgraph (default `["wiki"]`). But
+  operate on the `graph.scope.dirs` subgraph. But
   `broken`/`orphans`/`index-sync` resolve against a full-vault *existence
   universe* (`scan::VaultExistence`, built via `build_with_existence`): a `wiki/`
   page linking a `daily/` page is not broken, and a concept linked only from
