@@ -13,6 +13,7 @@ pub mod graph;
 pub mod index;
 pub mod normalize;
 pub mod output;
+pub mod relations;
 pub mod scan;
 pub mod stale;
 

@@ -66,7 +66,9 @@ In practice, cron-scheduled ingests never hit this case.
 
 ## Queue task schema
 
-Each line in a queue file is one task:
+Each line in a queue file is one task. All `vault_path` values are
+vault-relative paths resolved by the pipeline from `vault.dirs.*` —
+never construct them manually; use the path patterns from AGENTS.md.
 
 ```json
 {
@@ -78,7 +80,7 @@ Each line in a queue file is one task:
     "max_sentences": 5
   },
   "target": {
-    "vault_path": "daily/ai-news/2026-05-23.md",
+    "vault_path": "<daily>/ai-news/2026-05-23.md",
     "kind": "daily-summary",
     "anchor": "## Summary"
   }
@@ -129,7 +131,7 @@ locate key — never hardcode headings per `target.kind`.
         Aim for `input.max_sentences` substantive points. No preamble.
 
         **Source-type-aware synthesis.** Infer the source type from
-        `target.vault_path` (e.g. `daily/team-slack/`, `daily/ai-news/`)
+        `target.vault_path` (e.g. `<daily>/team-slack/`, `<daily>/ai-news/`)
         and adapt the synthesis strategy:
 
         **Slack sources** (`team-slack`, `*-slack`):
@@ -201,8 +203,8 @@ locate key — never hardcode headings per `target.kind`.
            hyphen → collapse runs → trim. Same as `lk_core::slugify`.
 
         **Source reference format.** The `sources` array entries MUST use
-        the vault-relative path pattern: `daily/{source_id}/{date}`.
-        Derive from the task: `daily/{input.source_id}/{input.date}`.
+        vault-relative paths matching the daily page pattern from AGENTS.md.
+        Derive from the task's `input.source_id` and `input.date`.
         NEVER use bare source IDs like `"email-digest"`.
 
         **Category assignment.** If `input.categories` is present, assign
@@ -219,7 +221,7 @@ locate key — never hardcode headings per `target.kind`.
         updated: {YYYY-MM-DD}
         category: {category-id}
         source_count: {N}
-        sources: ["daily/{source-id}/{date}", ...]
+        sources: ["<daily>/{source-id}/{date}", ...]
         tags: ["{category-id}"]
         ---
         ```
@@ -353,6 +355,6 @@ After running, the user can check:
 ls "$VAULT/.lorekeeper/queue/"*.jsonl 2>/dev/null
 # (empty)
 
-# Today's daily pages have summary content
-head -30 "$VAULT/daily/ai-news/$(date +%Y-%m-%d).md"
+# Today's daily pages have summary content (path depends on vault.dirs.daily)
+head -30 "$VAULT/<daily>/ai-news/$(date +%Y-%m-%d).md"
 ```

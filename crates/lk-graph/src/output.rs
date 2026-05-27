@@ -5,6 +5,7 @@ use crate::backlinks::{ConceptUpdate, SyncReport};
 use crate::cluster::{ClusterResult, LinkSuggestion};
 use crate::export::GraphExport;
 use crate::graph::{BrokenLink, HubEntry};
+use crate::relations::{self, RelationUpdate};
 use crate::stale::{Category, StalePage};
 
 #[derive(Debug, Serialize)]
@@ -185,7 +186,7 @@ pub fn print_export(r: &ExportReport) {
     if with_clusters {
         println!("clusters: included");
     }
-    println!("(use --json for full graph data)");
+    println!("(use `lore graph --json export` for full graph data)");
 }
 
 pub fn print_lint(r: &LintReport) {
@@ -319,6 +320,47 @@ fn format_diff(update: &ConceptUpdate) -> String {
     }
     if !update.removed.is_empty() {
         parts.push(format!("-{} source(s)", update.removed.len()));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("  ({})", parts.join(", "))
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct RelationsSyncReport {
+    #[serde(flatten)]
+    pub sync: relations::SyncReport,
+    pub changed: usize,
+}
+
+pub fn print_relations_sync(r: &RelationsSyncReport) {
+    println!("=== Relations sync ===");
+
+    if r.sync.dry_run {
+        println!("(dry-run: no files written)");
+    }
+
+    if r.sync.updated.is_empty() {
+        println!("\nAll {} concept page(s) in sync.", r.sync.unchanged);
+        return;
+    }
+
+    println!("\nUpdated: {} concept page(s)", r.sync.updated.len());
+    for entry in &r.sync.updated {
+        println!("  {}{}", entry.path.display(), format_relation_diff(entry));
+    }
+    println!("Unchanged: {} concept page(s)", r.sync.unchanged);
+}
+
+fn format_relation_diff(update: &RelationUpdate) -> String {
+    let mut parts = Vec::new();
+    if !update.added.is_empty() {
+        parts.push(format!("+{} relation(s)", update.added.len()));
+    }
+    if !update.removed.is_empty() {
+        parts.push(format!("-{} relation(s)", update.removed.len()));
     }
     if parts.is_empty() {
         String::new()

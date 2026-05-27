@@ -2,7 +2,7 @@
 
 Wikilink graph analysis. Pure deterministic — no HTTP, no LLM. The only vault
 writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
-`backlinks-sync` without `--dry-run`) and the mtime scan cache
+`backlinks-sync`/`relations-sync` without `--dry-run`) and the mtime scan cache
 (`<vault>/.lorekeeper/graph-cache.json`, atomic temp+rename).
 
 - **deps**: `lk-core` (slugify, frontmatter, wikilink) + `petgraph` + `rayon` +
@@ -16,15 +16,15 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
   no `..`.
 - **Wikilink resolution** (`scan::resolve_wikilink_target`): a bare target
   (`[[concept-a]]`) matches any `concept-a.md` by filename, regardless of depth;
-  a path target (`[[daily/team-slack/2026-05-22]]`) matches that page id
+  a path target (`[[<daily>/team-slack/2026-05-22]]`) matches that page id
   (per-segment slugified, `/` preserved — *not* collapsed to `daily-…`). Anchors
   (`#heading`, `^block`) stripped before resolution.
 - **Integrity checks vs analysis scope**: `hubs`/`cluster`/`suggest-links`
   operate on the `graph.scope.dirs` subgraph. But
   `broken`/`orphans`/`index-sync` resolve against a full-vault *existence
-  universe* (`scan::VaultExistence`, built via `build_with_existence`): a `wiki/`
-  page linking a `daily/` page is not broken, and a concept linked only from
-  `daily/` is not an orphan. Reserved meta pages (`index.md`, `AGENTS.md` —
+  universe* (`scan::VaultExistence`, built via `build_with_existence`): a `<wiki>/`
+  page linking a `<daily>/` page is not broken, and a concept linked only from
+  `<daily>/` is not an orphan. Reserved meta pages (`index.md`, `AGENTS.md` —
   `lk_core::vault_path::RESERVED_WIKI_FILES`) are never orphans or index-drift.
 - **Exit codes**: 0 = ok/no findings, 1 = findings, 2 = runtime error.
   `hubs`/`cluster`/`export`/`suggest-links` never exit 1.
@@ -41,8 +41,14 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
   frontmatter is older than a threshold. Groups by path prefix. Pure read.
 - **`backlinks::sync_concept_backlinks`**: rewrites `## 출처`/`## Sources` on
   each concept page to match the wikilink graph. Uses full-vault scope (not
-  `graph.scope.dirs`) so daily/me/weekly pages are included. Only event/document
+  `graph.scope.dirs`) so `<daily>`/`<personal>`/`<synthesis>` pages are included. Only event/document
   pages qualify as sources (concept-to-concept links belong in `## 관련`).
   Note: the actual heading text (`출처`/`Sources`, `관련`/`Related`) is resolved
   from `locale.strings()` at runtime — the Korean/English forms shown here are
   examples for both locales, not hardcoded literals.
+- **`relations::sync_concept_relations`**: rewrites `## 관련`/`## Related` on
+  each concept page based on Louvain community co-membership. Uses full-vault
+  scope (same as `backlinks-sync`) so `<daily>`/`<personal>` pages contribute
+  to community structure. Two concepts are related iff they are in the same
+  community. Pure deterministic, no LLM. Same idempotent diff-based pattern
+  as `backlinks-sync`.

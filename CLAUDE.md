@@ -8,16 +8,16 @@ structural health.
 ## Architecture
 
 ```
-Data Sources              lore (Rust CLI)            Obsidian Vault
-────────────              ───────────────            ──────────────
-Google Drive ──┐          ┌─ Extract (per-source)    daily/{source-id}/
-Gmail ─────────┤          ├─ Normalize → Event       me/work-log/
-Slack ─────────┼─ config ─┤  Deduplicate (cascade)   me/{weekly,monthly,quarterly,annually}/
-Jira ──────────┤  .yaml   ├─ Classify (labels)       synthesis/{weekly}/
-Calendar ──────┤          ├─ Concepts (LLM)          wiki/concepts/
-RSS/Atom ──────┤          ├─ Render (templates)      wiki/documents/
-Manual inbox ──┘          ├─ Wiki index (catalog)    wiki/index.md
-                          └─ Graph (lint, stale,     wiki/AGENTS.md
+Data Sources              lore (Rust CLI)            Obsidian Vault (vault.dirs.*)
+────────────              ───────────────            ──────────────────────────────
+Google Drive ──┐          ┌─ Extract (per-source)    <daily>/{source-id}/
+Gmail ─────────┤          ├─ Normalize → Event       <personal>/work-log/
+Slack ─────────┼─ config ─┤  Deduplicate (cascade)   <personal>/{weekly,monthly,quarterly,annually}/
+Jira ──────────┤  .yaml   ├─ Classify (labels)       <synthesis>/{weekly}/
+Calendar ──────┤          ├─ Concepts (LLM)          <wiki>/concepts/
+RSS/Atom ──────┤          ├─ Render (templates)      <wiki>/documents/
+Manual inbox ──┘          ├─ Wiki index (catalog)    <wiki>/index.md
+                          └─ Graph (lint, stale,     <wiki>/AGENTS.md
                                cluster, backlinks)
 ```
 
@@ -47,7 +47,7 @@ cargo fmt                          # format
 cargo nextest run --workspace      # tests
 lore validate                      # verify config.yaml + source params
 lore ingest ai-news                # run a single source
-lore schema                        # generate wiki/AGENTS.md
+lore schema                        # generate <wiki>/AGENTS.md
 lore wiki concepts                 # list all concept pages
 lore graph lint                    # structural health check
 ```
@@ -60,12 +60,13 @@ Auto-discovered: `./config.yaml` → `~/.config/lorekeeper/config.yaml`.
 
 ## Cross-cutting invariants
 
-- **Source ID = vault directory**: the key under `sources:` becomes `daily/{id}/`. Must not contain `/` or `\`, and must not be `.` or `..`.
+- **Source ID = vault directory**: the key under `sources:` becomes `<daily>/{id}/`. Must not contain `/` or `\`, and must not be `.` or `..`.
+- **Vault directories configurable**: all top-level vault paths (`<daily>`, `<personal>`, `<synthesis>`, `<wiki>`) are set via `vault.dirs.*` in config.yaml. Code uses `VaultPath` builders, never hardcoded strings.
 - **Date derivation**: `timestamp.to_zoned(vault.timezone()).date()` — always via configured timezone, never UTC.
-- **Multi-date batches**: events spanning several dates produce one `daily/` page per date.
+- **Multi-date batches**: events spanning several dates produce one `<daily>/` page per date.
 - **Atomic ingest** (5 phases): plan → write daily/concept → work-log → flush LLM queue → commit dedup. Each source's dedup commits only after its own writes + flush succeed.
 - **Domain logic single-sourced in lk-core**: slugify (NFKC), frontmatter, wikilink, text normalization. Zero duplicate implementations across crates.
-- **i18n single source of truth**: `vault.locale` (ko/en) switches all labels. Templates use `{{ i18n.* }}`. `lore schema` generates `wiki/AGENTS.md` from the i18n bundle. Source content is never translated.
+- **i18n single source of truth**: `vault.locale` (ko/en) switches all labels. Templates use `{{ i18n.* }}`. `lore schema` generates `<wiki>/AGENTS.md` from the i18n bundle. Source content is never translated.
 - **`--dry-run` is side-effect-free**: no vault writes, no dedup, no log.
 
 ## Source types

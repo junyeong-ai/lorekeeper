@@ -177,7 +177,7 @@ fn is_valid_source(path: &Path, dirs: &VaultDirs) -> bool {
 /// True iff this vault-relative path is a `{wiki}/concepts/<name>.md` page. Concept
 /// pages live one directory deep under `{wiki}/concepts/`, so we anchor on the prefix
 /// and require an `.md` extension. Cross-platform `\` is normalised before matching.
-fn is_concept_page(path: &Path, dirs: &VaultDirs) -> bool {
+pub(crate) fn is_concept_page(path: &Path, dirs: &VaultDirs) -> bool {
     let s = path.to_string_lossy().replace('\\', "/");
     s.starts_with(&format!("{}/concepts/", dirs.wiki))
         && path.extension().is_some_and(|ext| ext == "md")
@@ -186,7 +186,7 @@ fn is_concept_page(path: &Path, dirs: &VaultDirs) -> bool {
 /// Extract `[[…]]` targets from the existing `## <heading>` section, in their
 /// on-disk order. Used only to compute the diff (added/removed) — the rewritten
 /// body is canonicalised through [`render_sources_body`].
-fn parse_existing_sources(content: &str, heading: &str) -> Vec<String> {
+pub(crate) fn parse_existing_sources(content: &str, heading: &str) -> Vec<String> {
     let target = format!("## {heading}");
     let lines: Vec<&str> = content.split_inclusive('\n').collect();
 
@@ -238,7 +238,7 @@ fn parse_existing_sources(content: &str, heading: &str) -> Vec<String> {
 /// Render the sources list to the same shape `concept.md.jinja` produces:
 /// `- [[id]]` per line, newline-separated, no trailing newline (the section
 /// helper owns separators).
-fn render_sources_body(sources: &[String]) -> String {
+pub(crate) fn render_sources_body(sources: &[String]) -> String {
     sources
         .iter()
         .map(|s| format!("- [[{s}]]"))

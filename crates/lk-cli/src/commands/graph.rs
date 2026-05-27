@@ -2,7 +2,9 @@ use std::path::{Path, PathBuf};
 
 use lk_core::config::{GraphConfig, VaultDirs};
 use lk_core::i18n::Locale;
-use lk_graph::{backlinks, cache, cluster, export, graph, index, normalize, output, scan, stale};
+use lk_graph::{
+    backlinks, cache, cluster, export, graph, index, normalize, output, relations, scan, stale,
+};
 
 use super::GlobalOpts;
 
@@ -73,6 +75,12 @@ pub enum GraphCmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Rewrite each concept page's `## <Related>` section from community detection
+    RelationsSync {
+        /// Report what would change without writing
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 /// Returns exit code: 0 = ok/no findings, 1 = findings, 2 = runtime error.
@@ -105,15 +113,17 @@ fn run_inner(
     root_override: Option<PathBuf>,
     incremental: bool,
 ) -> Result<bool, String> {
-    // `stale` and `backlinks-sync` need timezone/locale from the full config —
-    // and don't use the WikiGraph at all — so dispatch them up front before paying
-    // the graph-build cost.
+    // `stale`, `backlinks-sync`, and `relations-sync` need timezone/locale from
+    // the full config — dispatch them up front before paying the graph-build cost.
     match cmd {
         GraphCmd::Stale { days } => {
             return run_stale(opts, root_override, json, days, incremental);
         }
         GraphCmd::BacklinksSync { dry_run } => {
             return run_backlinks_sync(opts, root_override, json, dry_run, incremental);
+        }
+        GraphCmd::RelationsSync { dry_run } => {
+            return run_relations_sync(opts, root_override, json, dry_run, incremental);
         }
         _ => {}
     }
@@ -336,7 +346,9 @@ fn run_inner(
         }
         // Dispatched at the top of `run_inner` because they need timezone/locale
         // from the full config and don't touch the WikiGraph.
-        GraphCmd::Stale { .. } | GraphCmd::BacklinksSync { .. } => unreachable!(),
+        GraphCmd::Stale { .. }
+        | GraphCmd::BacklinksSync { .. }
+        | GraphCmd::RelationsSync { .. } => unreachable!(),
     };
 
     // Persist the mtime cache after a successful scan so the next `--incremental`
@@ -442,7 +454,62 @@ fn run_backlinks_sync(
         output::print_backlinks_sync(&report);
     }
 
+    if incremental && !dry_run {
+        save_cache_best_effort(&rc.root, &rc.graph);
+    }
+
+    Ok(false)
+}
+
+fn run_relations_sync(
+    opts: &GlobalOpts,
+    root_override: Option<PathBuf>,
+    json: bool,
+    dry_run: bool,
+    incremental: bool,
+) -> Result<bool, String> {
+    let mut rc = resolve_config_full(opts, root_override)?;
+
+    rc.graph.scope.dirs = vault_page_dirs(&rc.root, &rc.vault_dirs);
+
     if incremental {
+        let cp = cache::cache_path(&rc.root);
+        if let Some(cached) = cache::load(&cp) {
+            let dirty = cache::is_dirty(
+                &rc.root,
+                &rc.graph.scope.dirs,
+                rc.graph.scope.follow_links,
+                &cached,
+            )
+            .map_err(|e| format!("{e}"))?;
+            if !dirty {
+                eprintln!("No changes since last scan");
+                return Ok(false);
+            }
+        }
+    }
+
+    let pages = scan::scan_vault(&rc.root, &rc.graph).map_err(|e| format!("{e}"))?;
+
+    let sync = relations::sync_concept_relations(
+        &pages,
+        &rc.root,
+        rc.locale,
+        dry_run,
+        &rc.vault_dirs,
+        &rc.graph,
+    )
+    .map_err(|e| format!("{e}"))?;
+    let changed = sync.updated.len();
+    let report = output::RelationsSyncReport { sync, changed };
+
+    if json {
+        output::print_json(&report)?;
+    } else {
+        output::print_relations_sync(&report);
+    }
+
+    if incremental && !dry_run {
         save_cache_best_effort(&rc.root, &rc.graph);
     }
 

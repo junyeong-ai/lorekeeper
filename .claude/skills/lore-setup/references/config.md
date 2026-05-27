@@ -15,7 +15,7 @@ identity:                            # personal 분리·성과 추적의 기준
   slack_id: "U0..."                  # 내 Slack 메시지 → work-log
   jira_id: ""
 
-sources:                             # 키 = 소스 id = daily/{id}/ 디렉토리명
+sources:                             # 키 = 소스 id = <daily>/{id}/ 디렉토리명
   <id>:
     type: gmail | google-calendar | google-drive | slack-channel | slack-search | jira
     enabled: true

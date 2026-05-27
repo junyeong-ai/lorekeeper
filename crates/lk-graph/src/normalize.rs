@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use lk_core::concept::slugify;
+use lk_core::vault_path::RESERVED_WIKI_FILES;
 use lk_core::wikilink::{self, WIKILINK_RE};
 
 use crate::GraphError;
@@ -26,6 +27,14 @@ pub fn scan(pages: &[Page]) -> Vec<Rename> {
     let mut claimed_slugs: HashSet<String> = HashSet::new();
 
     for page in pages {
+        if let Some(filename) = page.path.file_name().and_then(|f| f.to_str())
+            && RESERVED_WIKI_FILES
+                .iter()
+                .any(|r| r.eq_ignore_ascii_case(filename))
+        {
+            continue;
+        }
+
         let Some(stem) = page.path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
@@ -222,5 +231,17 @@ mod tests {
         let content = "See [[Other Page]] here.";
         let updated = normalize_wikilinks(content, &slugs);
         assert_eq!(updated, content);
+    }
+
+    #[test]
+    fn reserved_files_skipped() {
+        let pages = vec![
+            make_page("wiki/AGENTS.md", &[]),
+            make_page("wiki/index.md", &[]),
+            make_page("wiki/Bad_Name.md", &[]),
+        ];
+        let renames = scan(&pages);
+        assert_eq!(renames.len(), 1);
+        assert_eq!(renames[0].old_slug, "Bad_Name");
     }
 }
