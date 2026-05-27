@@ -12,8 +12,10 @@ allowed-tools: |
   Bash(gws *)
   Bash(lore validate)
   Bash(lore ingest --dry-run *)
-  Bash(cat *)
   Bash(ls *)
+  Read
+  Edit
+  Write
 ---
 
 # lore-setup — Interactive config builder

@@ -58,6 +58,16 @@ User settings in `config.yaml` (gitignored); copy `config.example.yaml`.
 Auto-discovered: `./config.yaml` → `~/.config/lorekeeper/config.yaml`.
 `vault.root` resolves relative to the config file's directory, not the CWD.
 
+## Cross-cutting invariants
+
+- **Source ID = vault directory**: the key under `sources:` becomes `daily/{id}/`. Must not contain `/`, `\`, `.`, or `..`.
+- **Date derivation**: `timestamp.to_zoned(vault.timezone()).date()` — always via configured timezone, never UTC.
+- **Multi-date batches**: events spanning several dates produce one `daily/` page per date.
+- **Atomic ingest** (5 phases): plan → write daily/concept → work-log → flush LLM queue → commit dedup. Each source's dedup commits only after its own writes + flush succeed.
+- **Domain logic single-sourced in lk-core**: slugify (NFKC), frontmatter, wikilink, text normalization. Zero duplicate implementations across crates.
+- **i18n single source of truth**: `vault.locale` (ko/en) switches all labels. Templates use `{{ i18n.* }}`. `lore schema` generates `wiki/AGENTS.md` from the i18n bundle. Source content is never translated.
+- **`--dry-run` is side-effect-free**: no vault writes, no dedup, no log.
+
 ## Source types
 
 | Type | Adapter | Use for |

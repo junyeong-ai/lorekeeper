@@ -1,0 +1,29 @@
+---
+id: {{ slug }}
+title: {{ title | tojson }}
+aliases: [{{ title | tojson }}]
+created: {{ created }}
+updated: {{ updated }}
+tags: {{ tags | tojson }}
+grounded_concepts: {{ grounded_concepts | tojson }}
+grounded_documents: {{ grounded_documents | tojson }}
+---
+
+# {{ title }}
+
+## {{ i18n.exploration_question }}
+
+
+
+## {{ i18n.exploration_synthesis }}
+
+
+
+## {{ i18n.exploration_grounding }}
+
+{% for c in grounded_concepts -%}
+- [[{{ c }}]]
+{% endfor -%}
+{% for d in grounded_documents -%}
+- [[{{ d }}]]
+{% endfor %}

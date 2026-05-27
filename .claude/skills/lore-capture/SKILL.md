@@ -109,7 +109,7 @@ For each technology, pattern, or constraint:
 
 1. Slugify: NFKC → lowercase → non-alnum to hyphen → collapse → trim
 2. Check existing concepts from step 2
-3. New → create with 1-2 sentence synthesis in `## 핵심`
+3. New → create with 1-2 sentence synthesis in the Synthesis section (heading from AGENTS.md)
 4. Existing → update `updated`, append source, increment `source_count`
 5. Assign category from config.yaml `concepts.categories`
 

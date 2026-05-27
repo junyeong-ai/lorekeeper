@@ -219,17 +219,17 @@ locate key — never hardcode headings per `target.kind`.
         category: {category-id}
         source_count: {N}
         sources: ["daily/{source-id}/{date}", ...]
-        tags: ["concept"]
+        tags: ["{category-id}"]
         ---
         ```
         Do NOT add any keys beyond those listed above.
 
-        **When creating a new concept page**, fill the `## 핵심` (Synthesis)
-        section with a 1-2 sentence definition/context of the concept based
-        on the source text. Don't leave it empty — even a first-appearance
-        concept benefits from a brief grounding. On merge (concept already
-        exists), update the synthesis if the new source adds meaningful
-        context; otherwise leave it.
+        **When creating a new concept page**, fill the Synthesis section
+        (heading from AGENTS.md) with a 1-2 sentence definition/context of
+        the concept based on the source text. Don't leave it empty — even a
+        first-appearance concept benefits from a brief grounding. On merge
+        (concept already exists), update the synthesis if the new source adds
+        meaningful context; otherwise leave it.
 
    c. **Edit the target page** — the markdown file at `target.vault_path`,
       using the Edit tool (section replace). Every task carries

@@ -191,7 +191,10 @@ impl ConceptDraft {
             "last_seen": self.last_seen.to_string(),
             "source_count": self.source_count,
             "sources": self.sources,
-            "tags": ["concept"],
+            "tags": match self.category.as_deref().filter(|c| !c.is_empty()) {
+                Some(cat) => vec![cat],
+                None => Vec::<&str>::new(),
+            },
             "i18n": locale.strings(),
         });
 

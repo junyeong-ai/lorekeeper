@@ -1,6 +1,6 @@
 //! `wiki/index.md` builder — a deterministic, hierarchical catalog of every vault page.
 //!
-//! Walks the vault directories (`wiki/concepts/`, `wiki/documents/`, `daily/{source}/`,
+//! Walks the vault directories (`wiki/concepts/`, `wiki/documents/`, `wiki/explorations/`, `daily/{source}/`,
 //! `me/work-log/`, plus the four synthesis tiers), parses each markdown file's
 //! frontmatter via [`lk_core::frontmatter::parse_page`], extracts a one-line summary
 //! from the page body, groups entries by category, and renders a single markdown
@@ -46,7 +46,8 @@ pub fn build_index(
     let strings = locale.strings();
 
     let concepts = collect_dir(vault_root, Path::new("wiki/concepts"));
-    let documents = collect_dir(vault_root, Path::new("wiki/documents"));
+    let documents = collect_dir_grouped(vault_root, Path::new("wiki/documents"), "source_project");
+    let explorations = collect_dir(vault_root, Path::new("wiki/explorations"));
 
     // daily/ holds one sub-directory per source ID. We keep them as separate groups so
     // the index shows pages-per-source counts and stable ordering.
@@ -64,7 +65,7 @@ pub fn build_index(
         sub_dirs.sort_by(|a, b| a.0.cmp(&b.0));
         for (source_id, dir) in sub_dirs {
             let rel = Path::new("daily").join(&source_id);
-            let entries = collect_files(&rel, &dir);
+            let entries = collect_files(&rel, &dir, "category");
             if !entries.is_empty() {
                 daily_groups.insert(source_id, entries);
             }
@@ -90,6 +91,7 @@ pub fn build_index(
 
     let total = concepts.len()
         + documents.len()
+        + explorations.len()
         + daily_groups.values().map(Vec::len).sum::<usize>()
         + worklog.len()
         + synthesis.len();
@@ -107,120 +109,94 @@ pub fn build_index(
 
     let mut sub_pages: Vec<(String, String)> = Vec::new();
 
+    let should_split = |count: usize| index_split_threshold > 0 && count >= index_split_threshold;
+
     if !concepts.is_empty() {
         let heading = strings.concept_synthesis;
-        let mut by_category: BTreeMap<String, Vec<&Entry>> = BTreeMap::new();
-        let mut uncategorized: Vec<&Entry> = Vec::new();
-        for entry in &concepts {
-            match &entry.category {
-                Some(cat) => by_category.entry(cat.clone()).or_default().push(entry),
-                None => uncategorized.push(entry),
-            }
-        }
-
-        let split = index_split_threshold > 0 && concepts.len() >= index_split_threshold;
-
-        writeln!(out).unwrap();
-        writeln!(out, "## {} ({})", strings.index_concepts, concepts.len()).unwrap();
-
-        if split {
-            writeln!(out).unwrap();
-            for (cat, entries) in &by_category {
-                writeln!(
-                    out,
-                    "- [[wiki/index/{cat}|{cat}]] ({} concepts)",
-                    entries.len()
-                )
-                .unwrap();
-
-                let mut page = String::new();
-                writeln!(page, "# {cat}").unwrap();
-                writeln!(page).unwrap();
-                writeln!(page, "> {} concepts", entries.len()).unwrap();
-                writeln!(page).unwrap();
-                for entry in entries {
-                    let summary =
-                        first_line_under_heading(&entry.body, heading).unwrap_or_default();
-                    if summary.is_empty() {
-                        writeln!(page, "- [[{}]]", entry.link_target).unwrap();
-                    } else {
-                        writeln!(page, "- [[{}]] — {}", entry.link_target, summary).unwrap();
-                    }
-                }
-                sub_pages.push((format!("wiki/index/{cat}.md"), page));
-            }
-            if !uncategorized.is_empty() {
-                writeln!(
-                    out,
-                    "- [[wiki/index/uncategorized|미분류]] ({} concepts)",
-                    uncategorized.len()
-                )
-                .unwrap();
-                let mut page = String::new();
-                writeln!(page, "# 미분류").unwrap();
-                writeln!(page).unwrap();
-                for entry in &uncategorized {
-                    let summary =
-                        first_line_under_heading(&entry.body, heading).unwrap_or_default();
-                    if summary.is_empty() {
-                        writeln!(page, "- [[{}]]", entry.link_target).unwrap();
-                    } else {
-                        writeln!(page, "- [[{}]] — {}", entry.link_target, summary).unwrap();
-                    }
-                }
-                sub_pages.push(("wiki/index/uncategorized.md".into(), page));
-            }
-        } else {
-            for (cat, entries) in &by_category {
-                writeln!(out).unwrap();
-                writeln!(out, "### {cat} ({})", entries.len()).unwrap();
-                writeln!(out).unwrap();
-                for entry in entries {
-                    let summary =
-                        first_line_under_heading(&entry.body, heading).unwrap_or_default();
-                    if summary.is_empty() {
-                        writeln!(out, "- [[{}]]", entry.link_target).unwrap();
-                    } else {
-                        writeln!(out, "- [[{}]] — {}", entry.link_target, summary).unwrap();
-                    }
-                }
-            }
-
-            if !uncategorized.is_empty() {
-                writeln!(out).unwrap();
-                writeln!(out, "### 미분류 ({})", uncategorized.len()).unwrap();
-                writeln!(out).unwrap();
-                for entry in &uncategorized {
-                    let summary =
-                        first_line_under_heading(&entry.body, heading).unwrap_or_default();
-                    if summary.is_empty() {
-                        writeln!(out, "- [[{}]]", entry.link_target).unwrap();
-                    } else {
-                        writeln!(out, "- [[{}]] — {}", entry.link_target, summary).unwrap();
-                    }
-                }
-            }
-        }
+        render_grouped_section(
+            &mut out,
+            &mut sub_pages,
+            &concepts,
+            |body| first_line_under_heading(body, heading),
+            &GroupedSectionOpts {
+                section_title: strings.index_concepts,
+                sub_page_prefix: "",
+                uncategorized_label: strings.uncategorized,
+                split: should_split(concepts.len()),
+            },
+        );
     }
 
     if !documents.is_empty() {
         let heading = strings.summary;
+        render_grouped_section(
+            &mut out,
+            &mut sub_pages,
+            &documents,
+            |body| first_line_under_heading(body, heading),
+            &GroupedSectionOpts {
+                section_title: strings.index_documents,
+                sub_page_prefix: "doc-",
+                uncategorized_label: strings.uncategorized,
+                split: should_split(documents.len()),
+            },
+        );
+    }
+
+    if !explorations.is_empty() {
+        let heading = strings.exploration_question;
         render_group(
             &mut out,
-            strings.index_documents,
-            documents.len(),
-            &documents,
+            strings.index_explorations,
+            explorations.len(),
+            &explorations,
             |body| first_line_under_heading(body, heading),
         );
     }
 
-    for (source_id, entries) in &daily_groups {
-        let summary_heading = strings.summary;
-        let title = format!("{} — {}", strings.index_daily, source_id);
-        render_group(&mut out, &title, entries.len(), entries, |body| {
-            first_bullet_under_heading(body, summary_heading)
-                .or_else(|| first_line_under_heading(body, summary_heading))
-        });
+    let total_daily: usize = daily_groups.values().map(Vec::len).sum();
+    let daily_split = should_split(total_daily);
+
+    if daily_split {
+        writeln!(out).unwrap();
+        writeln!(out, "## {} ({total_daily})", strings.index_daily).unwrap();
+        writeln!(out).unwrap();
+        for (source_id, entries) in &daily_groups {
+            let slug = format!("daily-{source_id}");
+            writeln!(
+                out,
+                "- [[wiki/index/{slug}|{source_id}]] ({})",
+                entries.len()
+            )
+            .unwrap();
+
+            let summary_heading = strings.summary;
+            let mut page = String::new();
+            writeln!(page, "# {} — {source_id}", strings.index_daily).unwrap();
+            writeln!(page).unwrap();
+            writeln!(page, "> {}", entries.len()).unwrap();
+            writeln!(page).unwrap();
+            for entry in entries.iter() {
+                let summary = first_bullet_under_heading(&entry.body, summary_heading)
+                    .or_else(|| first_line_under_heading(&entry.body, summary_heading))
+                    .unwrap_or_default();
+                if summary.is_empty() {
+                    writeln!(page, "- [[{}]]", entry.link_target).unwrap();
+                } else {
+                    writeln!(page, "- [[{}]] — {}", entry.link_target, summary).unwrap();
+                }
+            }
+            sub_pages.push((format!("wiki/index/{slug}.md"), page));
+        }
+    } else {
+        for (source_id, entries) in &daily_groups {
+            let summary_heading = strings.summary;
+            let title = format!("{} — {}", strings.index_daily, source_id);
+            render_group(&mut out, &title, entries.len(), entries, |body| {
+                first_bullet_under_heading(body, summary_heading)
+                    .or_else(|| first_line_under_heading(body, summary_heading))
+            });
+        }
     }
 
     if !worklog.is_empty() {
@@ -263,6 +239,8 @@ pub async fn write_index(
     let wiki_dir = vault_root.join("wiki");
     tokio::fs::create_dir_all(&wiki_dir).await?;
 
+    let index_dir = wiki_dir.join("index");
+
     for (rel_path, content) in &output.sub_pages {
         let abs = vault_root.join(rel_path);
         if let Some(parent) = abs.parent() {
@@ -286,6 +264,23 @@ pub async fn write_index(
         let _ = tokio::fs::remove_file(&tmp_path).await;
         return Err(e.into());
     }
+
+    if index_dir.is_dir() {
+        let current: std::collections::HashSet<String> = output
+            .sub_pages
+            .iter()
+            .filter_map(|(p, _)| std::path::Path::new(p).file_name()?.to_str().map(String::from))
+            .collect();
+        let mut entries = tokio::fs::read_dir(&index_dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.ends_with(".md") && !current.contains(name.as_ref()) {
+                let _ = tokio::fs::remove_file(entry.path()).await;
+            }
+        }
+    }
+
     Ok(final_path)
 }
 
@@ -293,23 +288,27 @@ pub async fn write_index(
 /// raw page body (used to extract a per-category one-liner at render time).
 struct Entry {
     rel_path: String,
-    /// Slug for the wikilink target. Daily/work-log/synthesis pages use the full
-    /// vault-relative path (without `.md`) so the link is unambiguous; concepts use
-    /// the page title or filename stem.
+    /// Wikilink target. Daily/work-log/synthesis pages use the full vault-relative
+    /// path (without `.md`); concepts use `slug|title` pipe format for correct
+    /// resolution by filename while preserving readable display in Obsidian.
     link_target: String,
     body: String,
     category: Option<String>,
 }
 
 fn collect_dir(vault_root: &Path, rel: &Path) -> Vec<Entry> {
+    collect_dir_grouped(vault_root, rel, "category")
+}
+
+fn collect_dir_grouped(vault_root: &Path, rel: &Path, group_field: &str) -> Vec<Entry> {
     let abs = vault_root.join(rel);
     if !abs.is_dir() {
         return Vec::new();
     }
-    collect_files(rel, &abs)
+    collect_files(rel, &abs, group_field)
 }
 
-fn collect_files(rel_dir: &Path, abs_dir: &Path) -> Vec<Entry> {
+fn collect_files(rel_dir: &Path, abs_dir: &Path, group_field: &str) -> Vec<Entry> {
     let mut entries: Vec<Entry> = Vec::new();
     for w in WalkDir::new(abs_dir).follow_links(false) {
         let w = match w {
@@ -363,23 +362,23 @@ fn collect_files(rel_dir: &Path, abs_dir: &Path) -> Vec<Entry> {
         let rel_path = rel_path.to_string_lossy().replace('\\', "/");
         let rel_dir_str = rel_dir.to_string_lossy().replace('\\', "/");
 
-        // Concepts wikilink by title/stem; everything else wikilinks by vault path so
-        // identically-named daily pages across sources stay distinct.
         let link_target = if rel_dir_str == "wiki/concepts" {
-            page.frontmatter
+            let title = page
+                .frontmatter
                 .get("title")
                 .and_then(|v| v.as_str())
-                .map(str::to_string)
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| stem.clone())
+                .filter(|s| !s.is_empty() && *s != stem);
+            match title {
+                Some(t) => format!("{stem}|{t}"),
+                None => stem.clone(),
+            }
         } else {
-            let no_ext = format!("{rel_dir_str}/{stem}");
-            no_ext
+            format!("{rel_dir_str}/{stem}")
         };
 
         let category = page
             .frontmatter
-            .get("category")
+            .get(group_field)
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(String::from);
@@ -411,6 +410,115 @@ fn render_group(
             writeln!(out, "- [[{}]]", entry.link_target).unwrap();
         } else {
             writeln!(out, "- [[{}]] — {summary}", entry.link_target).unwrap();
+        }
+    }
+}
+
+struct GroupedSectionOpts<'a> {
+    section_title: &'a str,
+    sub_page_prefix: &'a str,
+    uncategorized_label: &'a str,
+    split: bool,
+}
+
+fn render_grouped_section(
+    out: &mut String,
+    sub_pages: &mut Vec<(String, String)>,
+    entries: &[Entry],
+    extract: impl Fn(&str) -> Option<String>,
+    opts: &GroupedSectionOpts<'_>,
+) {
+    let GroupedSectionOpts {
+        section_title,
+        sub_page_prefix,
+        uncategorized_label,
+        split,
+    } = opts;
+    let mut by_group: BTreeMap<String, Vec<&Entry>> = BTreeMap::new();
+    let mut ungrouped: Vec<&Entry> = Vec::new();
+    for entry in entries {
+        match &entry.category {
+            Some(g) => by_group.entry(g.clone()).or_default().push(entry),
+            None => ungrouped.push(entry),
+        }
+    }
+
+    writeln!(out).unwrap();
+    writeln!(out, "## {section_title} ({})", entries.len()).unwrap();
+
+    if *split {
+        writeln!(out).unwrap();
+        for (group, group_entries) in &by_group {
+            let slug = format!("{sub_page_prefix}{group}");
+            writeln!(
+                out,
+                "- [[wiki/index/{slug}|{group}]] ({})",
+                group_entries.len()
+            )
+            .unwrap();
+
+            let mut page = String::new();
+            writeln!(page, "# {group}").unwrap();
+            writeln!(page).unwrap();
+            writeln!(page, "> {}", group_entries.len()).unwrap();
+            writeln!(page).unwrap();
+            for entry in group_entries {
+                let summary = extract(&entry.body).unwrap_or_default();
+                if summary.is_empty() {
+                    writeln!(page, "- [[{}]]", entry.link_target).unwrap();
+                } else {
+                    writeln!(page, "- [[{}]] — {}", entry.link_target, summary).unwrap();
+                }
+            }
+            sub_pages.push((format!("wiki/index/{slug}.md"), page));
+        }
+        if !ungrouped.is_empty() {
+            let slug = format!("{sub_page_prefix}uncategorized");
+            writeln!(
+                out,
+                "- [[wiki/index/{slug}|{uncategorized_label}]] ({})",
+                ungrouped.len()
+            )
+            .unwrap();
+            let mut page = String::new();
+            writeln!(page, "# {uncategorized_label}").unwrap();
+            writeln!(page).unwrap();
+            for entry in &ungrouped {
+                let summary = extract(&entry.body).unwrap_or_default();
+                if summary.is_empty() {
+                    writeln!(page, "- [[{}]]", entry.link_target).unwrap();
+                } else {
+                    writeln!(page, "- [[{}]] — {}", entry.link_target, summary).unwrap();
+                }
+            }
+            sub_pages.push((format!("wiki/index/{slug}.md"), page));
+        }
+    } else {
+        for (group, group_entries) in &by_group {
+            writeln!(out).unwrap();
+            writeln!(out, "### {group} ({})", group_entries.len()).unwrap();
+            writeln!(out).unwrap();
+            for entry in group_entries {
+                let summary = extract(&entry.body).unwrap_or_default();
+                if summary.is_empty() {
+                    writeln!(out, "- [[{}]]", entry.link_target).unwrap();
+                } else {
+                    writeln!(out, "- [[{}]] — {}", entry.link_target, summary).unwrap();
+                }
+            }
+        }
+        if !ungrouped.is_empty() {
+            writeln!(out).unwrap();
+            writeln!(out, "### {uncategorized_label} ({})", ungrouped.len()).unwrap();
+            writeln!(out).unwrap();
+            for entry in &ungrouped {
+                let summary = extract(&entry.body).unwrap_or_default();
+                if summary.is_empty() {
+                    writeln!(out, "- [[{}]]", entry.link_target).unwrap();
+                } else {
+                    writeln!(out, "- [[{}]] — {}", entry.link_target, summary).unwrap();
+                }
+            }
         }
     }
 }
@@ -559,7 +667,7 @@ mod tests {
         );
         let out = build_index(tmp.path(), Locale::Ko, 0).unwrap().main;
         assert!(out.contains("## 개념 (1)"));
-        assert!(out.contains("[[Agentic AI]]"));
+        assert!(out.contains("[[agentic-ai|Agentic AI]]"));
         assert!(out.contains("자율적으로 도구를 사용하는 AI 에이전트 패러다임."));
     }
 
@@ -612,6 +720,21 @@ mod tests {
     }
 
     #[test]
+    fn exploration_section_uses_question_heading() {
+        let tmp = TempDir::new().unwrap();
+        write_file(
+            tmp.path(),
+            "wiki/explorations/api-replay.md",
+            "---\nid: api-replay\ntitle: \"API Replay\"\n---\n\n# API Replay\n\n\
+             ## 질문\n\nAPI 호출만으로 자동화 가능한가?\n\n## 종합\n\n가능하다.\n\n## 근거\n",
+        );
+        let out = build_index(tmp.path(), Locale::Ko, 0).unwrap().main;
+        assert!(out.contains("## 탐구 (1)"));
+        assert!(out.contains("[[wiki/explorations/api-replay]]"));
+        assert!(out.contains("API 호출만으로 자동화 가능한가?"));
+    }
+
+    #[test]
     fn synthesis_section_merges_all_tiers() {
         let tmp = TempDir::new().unwrap();
         write_file(
@@ -646,7 +769,7 @@ mod tests {
         let out = build_index(tmp.path(), Locale::Ko, 0).unwrap().main;
         // Only the frontmatter-bearing page should show up.
         assert!(out.contains("## 개념 (1)"));
-        assert!(out.contains("[[X]] — Kept."));
+        assert!(out.contains("[[with-front|X]] — Kept."));
         assert!(!out.contains("no-front"));
     }
 
@@ -672,7 +795,7 @@ mod tests {
         let out = build_index(tmp.path(), Locale::Ko, 0).unwrap().main;
         assert!(!out.contains("Old body"));
         assert!(!out.contains("[[Agents]]"));
-        assert!(out.contains("[[X]]"));
+        assert!(out.contains("[[x|X]]"));
     }
 
     #[test]
@@ -734,7 +857,7 @@ mod tests {
         let path = write_index(tmp.path(), Locale::Ko, 0).await.unwrap();
         assert!(path.ends_with("wiki/index.md"));
         let content = tokio::fs::read_to_string(&path).await.unwrap();
-        assert!(content.contains("[[X]]"));
+        assert!(content.contains("[[x|X]]"));
 
         // Ensure no `.index.md.*` temp leftovers in wiki/.
         let mut entries = tokio::fs::read_dir(tmp.path().join("wiki")).await.unwrap();

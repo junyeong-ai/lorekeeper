@@ -112,6 +112,7 @@ fn page_schemas() -> Vec<PageSchema> {
                 "created",
                 "updated",
                 "document_type",
+                "source_project",
                 "source_url",
                 "source_file",
                 "tags",
@@ -127,6 +128,37 @@ fn page_schemas() -> Vec<PageSchema> {
                 s(
                     "Extracted Concepts",
                     |i| i.related_concepts.to_string(),
+                    Owner::Machine,
+                ),
+            ],
+        },
+        PageSchema {
+            type_name: "exploration",
+            path_pattern: "wiki/explorations/{slug}.md",
+            frontmatter: &[
+                "id",
+                "title",
+                "aliases",
+                "created",
+                "updated",
+                "tags",
+                "grounded_concepts",
+                "grounded_documents",
+            ],
+            sections: vec![
+                s(
+                    "Question",
+                    |i| i.exploration_question.to_string(),
+                    Owner::Llm,
+                ),
+                s(
+                    "Synthesis",
+                    |i| i.exploration_synthesis.to_string(),
+                    Owner::Llm,
+                ),
+                s(
+                    "Grounding",
+                    |i| i.exploration_grounding.to_string(),
                     Owner::Machine,
                 ),
             ],
@@ -346,6 +378,7 @@ mod tests {
             "daily",
             "work-log",
             "document",
+            "exploration",
             "weekly-synthesis",
             "weekly-personal",
             "monthly-summary",
@@ -370,5 +403,10 @@ mod tests {
         assert!(en.contains("`## Synthesis`"));
         assert!(!ko.contains("`## Synthesis`"));
         assert!(!en.contains("`## 핵심`"));
+        // exploration Question section differs
+        assert!(ko.contains("`## 질문`"));
+        assert!(en.contains("`## Question`"));
+        assert!(!ko.contains("`## Question`"));
+        assert!(!en.contains("`## 질문`"));
     }
 }

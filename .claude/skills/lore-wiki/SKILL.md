@@ -3,16 +3,13 @@ name: lore-wiki
 description: Semantic wiki operations for the Lorekeeper vault. Add sources, query with compounding, audit structural and semantic health. Reads wiki/AGENTS.md for page formats and section vocabulary — never hardcodes headings. Pairs with `lore` (the deterministic binary) for graph analysis and queue processing.
 when_to_use: |
   wiki query, knowledge search, ask wiki, search vault,
-  wiki add, add to wiki, ingest document, add source,
+  wiki add, add to wiki, ingest from URL, ingest from file,
   wiki audit, lint wiki, check wiki health, wiki status
 argument-hint: "<command> [args]"
 allowed-tools: |
   Bash(lore *)
   Bash(ls *)
-  Bash(cat *)
   Bash(wc *)
-  Bash(head *)
-  Bash(jq *)
   Bash(find *)
   Bash(grep *)
   Read
@@ -45,10 +42,10 @@ each as an independent source, and report the aggregate results.
 3. For each source: extract every named entity, technology, and topic as
    concepts (not a lone summary — typically several per source).
 4. For each concept: create or merge a concept page following AGENTS.md's
-   concept format exactly (frontmatter + four sections). Machine sections are
-   filled; LLM sections (synthesis, related) are filled by the model.
-   **When creating a new concept**, fill the `## 핵심` section with a 1-2
-   sentence definition rather than leaving it empty.
+   concept format exactly (frontmatter + sections per ownership). Machine
+   sections are filled; LLM sections (synthesis, related) are filled by the
+   model. **When creating a new concept**, fill the Synthesis section with a
+   1-2 sentence definition rather than leaving it empty.
 5. Report what was created/updated, grouped by source file.
 
 ### `/lore-wiki query <question>`
@@ -61,12 +58,15 @@ Answer a question grounded in vault content, with compounding.
 2. Synthesize an answer grounded in vault content. Cite sources using
    `[[wikilink]]` format.
 3. **Concept enrichment.** If the answer reveals connections between concepts
-   that aren't currently wikilinked in their `## 관련` sections, note
-   these as suggested edits (but do NOT auto-apply).
+   that aren't currently wikilinked in their Related sections (heading from
+   AGENTS.md), note these as suggested edits (but do NOT auto-apply).
 4. **Compounding judgment** — after answering, judge reusability:
-   - **Reusable** (synthesis, comparison, multi-source analysis) → write to
-     `wiki/explorations/{slug}.md`, wikilink cited concepts/sources, tell the
-     user where it landed.
+   - **Reusable** (synthesis, comparison, multi-source analysis) → write an
+     **exploration** page to `wiki/explorations/{slug}.md`. Read `wiki/AGENTS.md`
+     for the exploration page format (frontmatter keys, section headings, ownership).
+     Use slug-only values (no `[[…]]` wikilinks) in the `grounded_concepts` and
+     `grounded_documents` frontmatter arrays; wikilinks belong in the body's
+     Grounding section. Tell the user where it landed.
    - **Ephemeral** (single-fact, navigational lookup) → do not file.
 
    The judgment is per-answer by the model. No frequency rule, no
@@ -74,8 +74,9 @@ Answer a question grounded in vault content, with compounding.
 
 ### `/lore-wiki audit`
 
-Three-layer health check. Surface findings for human review — never
-auto-resolve.
+Five-layer health check. Surface findings for human review — never
+auto-resolve. Read `wiki/AGENTS.md` to resolve section headings before
+inspecting pages.
 
 1. **Structural** — run `lore graph --json lint`, report findings (orphans,
    broken links, hubs).
@@ -83,15 +84,14 @@ auto-resolve.
    confirm topical relatedness before proposing a link. Community grounding +
    LLM confirmation = double gate against false positives.
 3. **Contradictions** — scoped to one concept page at a time whose `sources`
-   cite conflicting claims. Add a review note under `## 핵심`. Never choose
-   a side. One page at a time to avoid combinatorial blow-up.
-4. **Frontiers — data gaps + new directions** (the 4th lint dimension Karpathy
-   identified as the highest-leverage long-term concern). Report:
+   cite conflicting claims. Add a review note under the Synthesis section.
+   Never choose a side. One page at a time to avoid combinatorial blow-up.
+4. **Frontiers — data gaps + new directions**. Report:
    - Concepts mentioned in daily pages but missing a dedicated wiki page
      (cross-check `[[...]]` wikilinks vs files under `wiki/concepts/`).
    - Topics with high cross-source activity (3+ sources in a week) but shallow
-     concept coverage (placeholder `## 핵심` or single source listed).
-   - Stale concept syntheses — `updated` recent but `## 핵심` was written
+     concept coverage (placeholder Synthesis or single source listed).
+   - Stale concept syntheses — `updated` recent but Synthesis was written
      long before the recent reference burst.
    This layer is LLM judgment, not a deterministic check. Surface as questions
    for human review, never auto-create pages.
@@ -101,8 +101,7 @@ auto-resolve.
      (grep for `[[{title}]]` or `[[{slug}]]` in `daily/`).
    - If truly stale (no recent references, low source_count), suggest adding
      `status: archived` to frontmatter. Do NOT auto-archive.
-   - If referenced recently but `updated` is old, flag for synthesis refresh
-     (the `## 핵심` section may be outdated).
+   - If referenced recently but `updated` is old, flag for synthesis refresh.
 
 ### `/lore-wiki status`
 

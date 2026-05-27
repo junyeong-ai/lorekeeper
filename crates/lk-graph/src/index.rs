@@ -37,15 +37,26 @@ pub fn diff(
         };
     };
 
-    // `build_index` catalogs every vault page: concepts by filename
-    // (`[[Agentic AI]]`) and daily/me/synthesis pages by path
-    // (`[[daily/email-digest/2026-05-19]]`). Resolve both forms via
-    // `resolve_wikilink_target` so a path entry isn't collapsed to a bogus slug.
+    // `build_index` catalogs every vault page: concepts by `[[slug|title]]`
+    // and daily/me/synthesis pages by path (`[[daily/email-digest/2026-05-19]]`).
+    // Resolve both forms via `resolve_wikilink_target`.
     let mut index_links = HashSet::new();
     for page in wikilink::extract_wikilinks(&content) {
         let slug = resolve_wikilink_target(&page);
         if !slug.is_empty() {
             index_links.insert(slug);
+        }
+    }
+
+    let index_dir = root.join(&config.scope.dirs[0]).join("index");
+    if index_dir.is_dir() {
+        for sub_content in read_sub_page_contents(&index_dir) {
+            for page in wikilink::extract_wikilinks(&sub_content) {
+                let slug = resolve_wikilink_target(&page);
+                if !slug.is_empty() {
+                    index_links.insert(slug);
+                }
+            }
         }
     }
 
@@ -80,9 +91,8 @@ pub fn diff(
             if exclude.contains(id) {
                 return false;
             }
-            // The index links concepts by filename (`[[Agentic AI]]`) but other
-            // wiki pages (e.g. `wiki/documents/*`) by path (`[[wiki/documents/x]]`).
-            // Accept either form so path-linked pages aren't false "missing".
+            // The index links concepts by slug (`[[slug|title]]`) and other
+            // wiki pages by path (`[[wiki/documents/x]]`). Accept either form.
             let filename = id.rsplit('/').next().unwrap_or(id);
             !index_links.contains(filename) && !index_links.contains(id)
         })
@@ -131,6 +141,17 @@ pub fn fix(drift: &IndexDrift, root: &Path, config: &GraphConfig) -> Result<usiz
         .map_err(|e| GraphError::Io(format!("failed to write {}: {e}", index_path.display())))?;
 
     Ok(added)
+}
+
+fn read_sub_page_contents(dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("md"))
+        .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+        .collect()
 }
 
 #[cfg(test)]

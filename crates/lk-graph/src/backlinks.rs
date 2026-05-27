@@ -172,6 +172,7 @@ fn is_valid_source(path: &Path) -> bool {
         || s.starts_with("quarterly/")
         || s.starts_with("annually/")
         || s.starts_with("wiki/documents/")
+        || s.starts_with("wiki/explorations/")
 }
 
 /// True iff this vault-relative path is a `wiki/concepts/<name>.md` page. Concept

@@ -34,6 +34,7 @@ pub struct StalePage {
 pub enum Category {
     WikiConcepts,
     WikiDocuments,
+    WikiExplorations,
     Daily,
     MeWorkLog,
     Weekly,
@@ -52,6 +53,7 @@ impl Category {
         for (prefix, cat) in [
             ("wiki/concepts/", Category::WikiConcepts),
             ("wiki/documents/", Category::WikiDocuments),
+            ("wiki/explorations/", Category::WikiExplorations),
             ("daily/", Category::Daily),
             ("me/work-log/", Category::MeWorkLog),
             ("weekly/", Category::Weekly),
@@ -71,6 +73,7 @@ impl Category {
         match self {
             Category::WikiConcepts => "wiki/concepts",
             Category::WikiDocuments => "wiki/documents",
+            Category::WikiExplorations => "wiki/explorations",
             Category::Daily => "daily",
             Category::MeWorkLog => "me/work-log",
             Category::Weekly => "weekly",
@@ -247,6 +250,10 @@ mod tests {
         assert_eq!(
             Category::from_path(Path::new("wiki/documents/x.md")),
             Category::WikiDocuments
+        );
+        assert_eq!(
+            Category::from_path(Path::new("wiki/explorations/x.md")),
+            Category::WikiExplorations
         );
         assert_eq!(
             Category::from_path(Path::new("daily/ai-news/2026-05-23.md")),

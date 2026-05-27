@@ -75,6 +75,7 @@ concept_mapping:         # project tag → vault category id
 extracted:               # per-document tracking (written by run)
   - source: "docs/decisions/some-adr.md"
     vault_page: "wiki/documents/proj-some-adr.md"
+    domain: cloud-platform
     extracted_at: <ISO-date>
     transferability: T1
 ```
@@ -173,12 +174,18 @@ Extract knowledge using the manifest. Requires a prior scan.
       updated: {today}
       document_type: project-knowledge | engineering-guide
       source_project: {project-name}
-      source_file: "{repo-name}/{path}[, {repo-name}/{path}, ...]"
+      source_file:
+        - {path-within-repo}
+        - {path-within-repo}
       tags: [{technology}, {domain}]
       concepts: [{concept-slugs}]
       ```
 
    h. Create/merge concept pages per standard protocol.
+      Concept `sources` uses the vault document page id (not file paths):
+      ```yaml
+      sources: ["{project}-{slug}"]
+      ```
 
    i. **Update manifest** `extracted` list with the new entry.
 
@@ -210,7 +217,7 @@ git log --all --format="%H %s" --grep="<keyword>" | head -30
 ```
 
 Keywords from manifest `domains`. Significant commits (reverts,
-multi-paragraph bodies) extracted with `source_file: "git:{sha}"`.
+multi-paragraph bodies) extracted with `source_file: ["git:{sha}"]`.
 
 ## Transferability levels
 

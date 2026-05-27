@@ -85,6 +85,14 @@ impl VaultPath {
         )
     }
 
+    pub fn exploration(dirs: &VaultDirs, slug: &str) -> Self {
+        Self(
+            PathBuf::from(&dirs.wiki)
+                .join("explorations")
+                .join(format!("{slug}.md")),
+        )
+    }
+
     pub fn resolve(&self, vault_root: &Path) -> PathBuf {
         vault_root.join(&self.0)
     }
@@ -154,6 +162,16 @@ mod tests {
         assert_eq!(
             path.to_string(),
             "wiki/documents/cloud-sql-extensions-report.md"
+        );
+    }
+
+    #[test]
+    fn exploration_path() {
+        let dirs = VaultDirs::default();
+        let path = VaultPath::exploration(&dirs, "api-replay-checklist");
+        assert_eq!(
+            path.to_string(),
+            "wiki/explorations/api-replay-checklist.md"
         );
     }
 
