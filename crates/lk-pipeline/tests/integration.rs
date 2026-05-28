@@ -8,8 +8,8 @@ use lk_core::config::{
     VaultConfig, VaultDirs,
 };
 use lk_core::event::RawItem;
-use lk_queue::{LlmClient, MockLlmClient, NoopLlmClient};
 use lk_pipeline::{IngestOptions, Pipeline, PipelineContext, Synthesizer};
+use lk_queue::{LlmClient, MockLlmClient, NoopLlmClient};
 
 fn base_config(vault_root: &std::path::Path) -> Config {
     let mut sources = std::collections::BTreeMap::new();
