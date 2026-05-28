@@ -74,12 +74,9 @@ Templates are embedded in the binary. Override with `--template-dir`.
 | Google (Gmail/Drive/Calendar) | `LORE_GOOGLE_CLIENT_ID`, `LORE_GOOGLE_CLIENT_SECRET`, `LORE_GOOGLE_REFRESH_TOKEN` |
 | Slack | `LORE_SLACK_TOKEN` |
 | Jira | `LORE_JIRA_URL`, `LORE_JIRA_EMAIL`, `LORE_JIRA_TOKEN` |
-| LLM (optional) | `ANTHROPIC_API_KEY` |
 
-`provider: anthropic` with missing `ANTHROPIC_API_KEY` is a hard error.
-Only `provider: noop` explicitly selects `NoopLlmClient` (no
-summarisation/concepts). Default provider is `queue` (buffers tasks
-to JSONL for `/lore-process`).
+Default provider is `queue` (buffers tasks to JSONL for `/lore-process`).
+`provider: noop` selects `NoopLlmClient` (no summarisation/concepts).
 
 ## Atomic ingest flow
 

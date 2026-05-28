@@ -60,19 +60,13 @@ pub fn load_config(path: &Path) -> miette::Result<lk_core::config::Config> {
 pub fn build_llm_client(
     config: &lk_core::config::Config,
     vault_root: &Path,
-) -> miette::Result<Arc<dyn lk_llm::LlmClient>> {
+) -> miette::Result<Arc<dyn lk_queue::LlmClient>> {
     match config.llm.provider {
-        lk_core::config::LlmProvider::Anthropic => {
-            let c = lk_llm::AnthropicClient::new(&config.llm).map_err(|e| {
-                miette::miette!("provider: anthropic requires ANTHROPIC_API_KEY: {e}")
-            })?;
-            Ok(Arc::new(c))
-        }
         lk_core::config::LlmProvider::Queue => {
             let queue_dir = vault_root.join(".lorekeeper").join("queue");
-            Ok(Arc::new(lk_llm::QueueLlmClient::new(queue_dir)))
+            Ok(Arc::new(lk_queue::QueueLlmClient::new(queue_dir)))
         }
-        lk_core::config::LlmProvider::Noop => Ok(Arc::new(lk_llm::NoopLlmClient)),
+        lk_core::config::LlmProvider::Noop => Ok(Arc::new(lk_queue::NoopLlmClient)),
     }
 }
 

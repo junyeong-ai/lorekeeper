@@ -327,13 +327,8 @@ concepts:
 #               Code's native LLM session — no API key, no separate billing.
 #               Workflow: `lore ingest` writes structural pages + queue; then run
 #               `/lore-process` in Claude Code to fill summaries and concepts.
+#               For unattended cron: `lore ingest && claude -p "/lore-process"`
 #   noop      — no LLM work; daily pages render without summary/concept content.
 #               Useful for development, CI, or vault-only sources.
-#   anthropic — direct Anthropic Messages API (requires ANTHROPIC_API_KEY).
-#               Unattended-friendly: cron runs end-to-end without human/UI.
-#               Choose this for headless servers or fully-autonomous overnight
-#               pipelines where opening Claude Code is not an option.
 llm:
   provider: queue
-  model: claude-sonnet-4-6
-  max_tokens: 4096

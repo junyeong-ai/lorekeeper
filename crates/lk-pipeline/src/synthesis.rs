@@ -49,19 +49,19 @@ impl Synthesizer {
         text: String,
         max_sentences: usize,
         vault_path: String,
-        kind: lk_llm::TargetKind,
+        kind: lk_queue::TargetKind,
         anchor: String,
         what: &str,
     ) -> Result<Option<String>, PipelineError> {
         match self
             .ctx
             .llm
-            .summarize(lk_llm::SummarizeRequest {
+            .summarize(lk_queue::SummarizeRequest {
                 text,
                 max_sentences,
                 focus: None,
                 locale: self.ctx.locale.tag().to_string(),
-                target: lk_llm::TaskTarget {
+                target: lk_queue::TaskTarget {
                     vault_path,
                     kind,
                     anchor,
@@ -129,12 +129,12 @@ impl Synthesizer {
         let themes = match self
             .ctx
             .llm
-            .identify_themes(lk_llm::ThemeRequest {
+            .identify_themes(lk_queue::ThemeRequest {
                 text: combined,
                 max_themes: 5,
-                target: lk_llm::TaskTarget {
+                target: lk_queue::TaskTarget {
                     vault_path: path.to_string(),
-                    kind: lk_llm::TargetKind::WeeklySynthesisNarrative,
+                    kind: lk_queue::TargetKind::WeeklySynthesisNarrative,
                     anchor: format!("## {}", self.ctx.locale.strings().key_themes_this_week),
                 },
             })
@@ -196,7 +196,7 @@ impl Synthesizer {
                 ),
                 10,
                 path.to_string(),
-                lk_llm::TargetKind::WeeklyPersonalNarrative,
+                lk_queue::TargetKind::WeeklyPersonalNarrative,
                 format!("## {}", self.ctx.locale.strings().key_summary),
                 "weekly personal",
             )
@@ -249,7 +249,7 @@ impl Synthesizer {
                 ),
                 15,
                 path.to_string(),
-                lk_llm::TargetKind::MonthlyPersonalNarrative,
+                lk_queue::TargetKind::MonthlyPersonalNarrative,
                 format!("## {}", self.ctx.locale.strings().key_summary),
                 "monthly",
             )
@@ -327,7 +327,7 @@ impl Synthesizer {
                 ),
                 20,
                 path.to_string(),
-                lk_llm::TargetKind::QuarterlyPersonalNarrative,
+                lk_queue::TargetKind::QuarterlyPersonalNarrative,
                 format!("## {}", self.ctx.locale.strings().top_achievements),
                 "quarterly",
             )
@@ -424,7 +424,7 @@ impl Synthesizer {
                 ),
                 25,
                 path.to_string(),
-                lk_llm::TargetKind::AnnualPersonalNarrative,
+                lk_queue::TargetKind::AnnualPersonalNarrative,
                 format!("## {}", strings.overall_summary),
                 "annual",
             )

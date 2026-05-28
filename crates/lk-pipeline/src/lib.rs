@@ -42,7 +42,7 @@ pub enum PipelineError {
     #[error(transparent)]
     Vault(#[from] lk_vault::VaultError),
     #[error(transparent)]
-    Llm(#[from] lk_llm::LlmError),
+    Llm(#[from] lk_queue::LlmError),
 }
 
 pub struct IngestResult {
@@ -203,14 +203,14 @@ impl Pipeline {
             let summary = match self
                 .ctx
                 .llm
-                .summarize(lk_llm::SummarizeRequest {
+                .summarize(lk_queue::SummarizeRequest {
                     text: combined.clone(),
                     max_sentences: 5,
                     focus: focus.clone(),
                     locale: self.ctx.locale.tag().to_string(),
-                    target: lk_llm::TaskTarget {
+                    target: lk_queue::TaskTarget {
                         vault_path: daily_path.clone(),
-                        kind: lk_llm::TargetKind::DailySummary,
+                        kind: lk_queue::TargetKind::DailySummary,
                         anchor: format!("## {}", self.ctx.locale.strings().summary),
                     },
                 })
@@ -236,14 +236,14 @@ impl Pipeline {
             if let Err(e) = self
                 .ctx
                 .llm
-                .summarize(lk_llm::SummarizeRequest {
+                .summarize(lk_queue::SummarizeRequest {
                     text: combined.clone(),
                     max_sentences: day_events.len().min(20),
                     focus: focus.clone(),
                     locale: self.ctx.locale.tag().to_string(),
-                    target: lk_llm::TaskTarget {
+                    target: lk_queue::TaskTarget {
                         vault_path: daily_path.clone(),
-                        kind: lk_llm::TargetKind::DailyRefineEvents,
+                        kind: lk_queue::TargetKind::DailyRefineEvents,
                         anchor: events_anchor,
                     },
                 })
@@ -259,14 +259,14 @@ impl Pipeline {
                 match self
                     .ctx
                     .llm
-                    .extract_concepts(lk_llm::ExtractConceptsRequest {
+                    .extract_concepts(lk_queue::ExtractConceptsRequest {
                         text: combined.clone(),
                         source_id: source_id.to_string(),
                         date: *date,
                         focus: focus.clone(),
-                        target: lk_llm::TaskTarget {
+                        target: lk_queue::TaskTarget {
                             vault_path: daily_path,
-                            kind: lk_llm::TargetKind::DailyConcepts,
+                            kind: lk_queue::TargetKind::DailyConcepts,
                             anchor: format!("## {}", self.ctx.locale.strings().related_concepts),
                         },
                         existing_concepts: existing_concepts.clone(),
@@ -440,14 +440,14 @@ impl Pipeline {
             let summary = match self
                 .ctx
                 .llm
-                .summarize(lk_llm::SummarizeRequest {
+                .summarize(lk_queue::SummarizeRequest {
                     text: format!("{}\n{}", event.title, event.body),
                     max_sentences: 5,
                     focus: focus.clone(),
                     locale: self.ctx.locale.tag().to_string(),
-                    target: lk_llm::TaskTarget {
+                    target: lk_queue::TaskTarget {
                         vault_path: vault_path.clone(),
-                        kind: lk_llm::TargetKind::DocumentSummary,
+                        kind: lk_queue::TargetKind::DocumentSummary,
                         anchor: format!("## {}", self.ctx.locale.strings().summary),
                     },
                 })
@@ -470,14 +470,14 @@ impl Pipeline {
                 match self
                     .ctx
                     .llm
-                    .extract_concepts(lk_llm::ExtractConceptsRequest {
+                    .extract_concepts(lk_queue::ExtractConceptsRequest {
                         text: format!("{}\n{}", event.title, event.body),
                         source_id: source_id.to_string(),
                         date: event.date,
                         focus: focus.clone(),
-                        target: lk_llm::TaskTarget {
+                        target: lk_queue::TaskTarget {
                             vault_path: vault_path.clone(),
-                            kind: lk_llm::TargetKind::DocumentConcepts,
+                            kind: lk_queue::TargetKind::DocumentConcepts,
                             anchor: format!("## {}", self.ctx.locale.strings().related_concepts),
                         },
                         existing_concepts: existing_concepts.clone(),
@@ -573,7 +573,7 @@ impl Pipeline {
         })
     }
 
-    async fn load_existing_concept_refs(&self) -> Vec<lk_llm::ExistingConceptRef> {
+    async fn load_existing_concept_refs(&self) -> Vec<lk_queue::ExistingConceptRef> {
         let concept_dir = std::path::Path::new(&self.ctx.dirs.wiki).join("concepts");
         let files = match self.reader.list_markdown(&concept_dir).await {
             Ok(f) => f,
@@ -594,7 +594,7 @@ impl Pipeline {
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
                 if !slug.is_empty() && !name.is_empty() {
-                    refs.push(lk_llm::ExistingConceptRef {
+                    refs.push(lk_queue::ExistingConceptRef {
                         slug: slug.to_string(),
                         name: name.to_string(),
                     });
@@ -605,7 +605,7 @@ impl Pipeline {
         let drafts = self.concept_drafts.lock().await;
         for (slug, name) in drafts.known_slugs_and_names() {
             if !refs.iter().any(|r| r.slug == slug) {
-                refs.push(lk_llm::ExistingConceptRef { slug, name });
+                refs.push(lk_queue::ExistingConceptRef { slug, name });
             }
         }
 

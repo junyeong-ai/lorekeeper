@@ -32,7 +32,7 @@ crates/
   lk-vault/     Obsidian vault I/O: atomic write, templates (embedded), ingest log
   lk-source/    Source adapters + factory, markdown normalization (ADF/HTML/Slack→MD)
   lk-pipeline/  Pipeline (per-source plan/commit), dedup, classify, concepts, synthesis
-  lk-llm/       LlmClient trait + providers: anthropic, queue, noop (+ mock for tests)
+  lk-queue/     Semantic task queue: LlmClient trait, QueueLlmClient (JSONL), noop (+ mock for tests)
   lk-graph/     Wikilink graph analysis: lint, hubs, cluster, suggest-links (no HTTP/async)
   lk-cli/       Binary `lore` — one module per subcommand under commands/
 templates/      Jinja2 markdown templates (.md.jinja), compiled into the binary

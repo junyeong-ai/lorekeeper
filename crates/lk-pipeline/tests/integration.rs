@@ -8,7 +8,7 @@ use lk_core::config::{
     VaultConfig, VaultDirs,
 };
 use lk_core::event::RawItem;
-use lk_llm::{LlmClient, MockLlmClient, NoopLlmClient};
+use lk_queue::{LlmClient, MockLlmClient, NoopLlmClient};
 use lk_pipeline::{IngestOptions, Pipeline, PipelineContext, Synthesizer};
 
 fn base_config(vault_root: &std::path::Path) -> Config {
@@ -593,7 +593,7 @@ async fn force_bypasses_dedup() {
 
 #[tokio::test]
 async fn queue_mode_emits_jsonl_tasks_with_targets() {
-    use lk_llm::QueueLlmClient;
+    use lk_queue::QueueLlmClient;
 
     let dir = TempDir::new().unwrap();
     let vault = dir.path();

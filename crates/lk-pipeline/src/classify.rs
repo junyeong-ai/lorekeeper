@@ -130,14 +130,13 @@ pub fn classify_by_keywords(events: &mut [Event], rules: &[lk_core::config::Clas
 
 /// LLM fallback for events that remain unclassified after keyword matching.
 /// Sends each unclassified event to the LLM with the full category list; the LLM
-/// picks the best category or returns `None`. Only effective when the provider supports
-/// synchronous inference (anthropic); queue and noop modes return `None` and the event
-/// stays unclassified — a safe degradation, since the daily page renders it in the
-/// general section and the work-log routes it to `uncategorized`.
+/// picks the best category or returns `None`. Queue and noop modes return `None`
+/// and the event stays unclassified — a safe degradation, since the daily page
+/// renders it in the general section and the work-log routes it to `uncategorized`.
 pub async fn classify_with_llm(
     events: &mut [Event],
     rules: &[lk_core::config::ClassifyRule],
-    llm: &std::sync::Arc<dyn lk_llm::LlmClient>,
+    llm: &std::sync::Arc<dyn lk_queue::LlmClient>,
 ) {
     if rules.is_empty() {
         return;
@@ -157,7 +156,7 @@ pub async fn classify_with_llm(
         };
 
         match llm
-            .classify(lk_llm::ClassifyRequest {
+            .classify(lk_queue::ClassifyRequest {
                 title: event.title.clone(),
                 excerpt: excerpt.to_string(),
                 categories: categories.clone(),

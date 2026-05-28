@@ -12,15 +12,14 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   (no repo) work. There is no `config.example.yaml` fallback — running with the example's
   placeholder values silently is a footgun. A vault-relative config can't be auto-found
   (the vault path lives *inside* the config).
-- **`build_llm_client`** maps `llm.provider` to a client; returns `miette::Result` so
-  `anthropic` with a missing `ANTHROPIC_API_KEY` is a hard error (no silent degradation).
+- **`build_llm_client`** maps `llm.provider` to a client (`queue` or `noop`).
 - **`lore ingest`** owns the 5-phase flow and the exit code: any source/extract/pipeline
   failure (`had_failure`) or write/flush failure returns non-zero — including under
   `--dry-run`. Dry-run uses `Pipeline::new_dry_run`, skips the tmp sweep, and does not
   write the ingest log, so it leaves the vault untouched.
-- **`lore ingest` startup** sweeps stale `*.jsonl.tmp` (>1h) from crashed runs and, in
-  queue mode, warns if pending queue files exist (run `/lore-process` first to avoid
-  duplicate LLM work). In `anthropic` mode, pending queue files are a hard error.
+- **`lore ingest` startup** sweeps stale `*.jsonl.tmp` (>1h) from crashed runs and
+  warns if pending queue files exist (run `/lore-process` first to avoid duplicate
+  LLM work).
 - **`lore maintenance`** prunes the ingest log, dedup cache, and drained `queue/processed/`
   files past the 90-day retention; it must not overlap a running `lore ingest` (redb
   single-writer). It never touches live `*.jsonl.tmp` — the ingest startup sweep does.

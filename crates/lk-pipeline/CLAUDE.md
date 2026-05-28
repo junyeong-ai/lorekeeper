@@ -30,8 +30,8 @@ concept_categories) with the `Synthesizer`.
   `SourceConfig.classify` (ordered `Vec<ClassifyRule>`, first match wins) and uses
   `contains_bounded` (token-boundary match) — prevents substring false positives
   while remaining correct for CJK keywords. When `classify_with_llm` is true,
-  unclassified events are sent to the LLM as a fallback (synchronous in `anthropic`
-  mode; no-op in `queue` mode).
+  unclassified events are sent to the LLM as a fallback (deferred in `queue` mode;
+  no-op in `noop` mode).
 - **Concept merge** reads existing `created`/`updated` frontmatter (the keys actually
   written), preserves the original title and category (established identity), and
   dedupes `sources`/`source_count`. Before extraction, `load_existing_concept_refs()`

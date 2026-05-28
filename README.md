@@ -122,11 +122,11 @@ Claude Code Skills        Semantic Plane             (same vault)
 |------|:-------:|---------|
 | `queue` | ✓ | Daily Claude Code users. Pipeline emits JSONL tasks to `<vault>/.lorekeeper/queue/`; `/lore-process` drains them using Claude Code's native LLM session — no API key, no separate billing. |
 | `noop` |  | Development, CI, or vault-only sources where you only need Rust templating without semantic enrichment. |
-| `anthropic` |  | Unattended cron on headless servers (no Claude Code session available). Requires `ANTHROPIC_API_KEY`; pipeline does end-to-end work in one process. |
 
-Workflow in `queue` mode:
+Workflow:
 1. `lore ingest` (cron-scheduled) — fetches sources, dedups, writes structural pages, queues semantic tasks
 2. `/lore-process` (run in Claude Code) — drains the queue, fills summaries, creates/merges concept pages
+3. For unattended cron: `lore ingest && claude -p "/lore-process"`
 
 The skill is **fully idempotent**: re-running on a partially-processed queue file is safe because vault edits replace section content rather than append, and concept page merging preserves accumulated state.
 
@@ -161,7 +161,7 @@ crates/
   lk-vault/     Obsidian vault I/O: read, write, frontmatter, templates, log
   lk-source/    Source adapters: Gmail, Drive, Slack, Jira, Calendar, RSS, Manual
   lk-pipeline/  Transform stages: normalize, dedup, classify, render, synthesis
-  lk-llm/       LlmClient trait + providers (anthropic, queue, noop) and a test mock
+  lk-queue/     Semantic task queue: LlmClient trait, JSONL queue, noop, test mock
   lk-graph/     Wikilink graph analysis (lint, hubs, cluster, suggest-links)
   lk-cli/       Binary entry point (lore)
 
@@ -215,7 +215,6 @@ Two ways to provide credentials, env vars take precedence over file:
 - `LORE_GOOGLE_CLIENT_ID`, `LORE_GOOGLE_CLIENT_SECRET`, `LORE_GOOGLE_REFRESH_TOKEN`
 - `LORE_SLACK_TOKEN`
 - `LORE_JIRA_URL`, `LORE_JIRA_EMAIL`, `LORE_JIRA_TOKEN`
-- `ANTHROPIC_API_KEY` (only for `llm.provider: anthropic`; if missing in that mode, the run degrades to the no-op LLM with a warning. Not needed for the default `queue` mode.)
 
 **Interactive wizard** (easiest): `lore init credentials` prompts for each provider
 (skip the ones you don't use), masks secret entry, and writes

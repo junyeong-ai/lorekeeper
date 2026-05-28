@@ -19,8 +19,8 @@ pub async fn run(
     // queue files at the start of pipeline.plan() — well before the CLI's write
     // suppression logic kicks in — so we force NoopLlmClient for dry-run regardless
     // of the configured provider.
-    let llm: std::sync::Arc<dyn lk_llm::LlmClient> = if dry_run {
-        std::sync::Arc::new(lk_llm::NoopLlmClient)
+    let llm: std::sync::Arc<dyn lk_queue::LlmClient> = if dry_run {
+        std::sync::Arc::new(lk_queue::NoopLlmClient)
     } else {
         build_llm_client(&config, &vault_root)?
     };
@@ -31,14 +31,6 @@ pub async fn run(
     // permanently stranding them with empty semantic sections.
     let pending = pending_queue_count(&vault_root)?;
     match config.llm.provider {
-        lk_core::config::LlmProvider::Anthropic if pending > 0 => {
-            return Err(miette::miette!(
-                "{pending} pending queue file(s) under {}/.lorekeeper/queue/. Drain via \
-                 /lore-process (or switch back to provider: queue) before running with \
-                 provider: anthropic.",
-                vault_root.display(),
-            ));
-        }
         lk_core::config::LlmProvider::Queue if pending > 0 => {
             // Not an error in queue mode — re-running just emits a new file that
             // /lore-process will drain alongside the existing ones. Warn so the user

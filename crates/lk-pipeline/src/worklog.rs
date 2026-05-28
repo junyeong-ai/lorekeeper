@@ -5,7 +5,7 @@ use lk_core::config::{PerformanceConfig, VaultDirs};
 use lk_core::event::Event;
 use lk_core::i18n::Locale;
 use lk_core::vault_path::VaultPath;
-use lk_llm::LlmClient;
+use lk_queue::LlmClient;
 use lk_vault::TemplateEngine;
 
 use crate::PipelineError;
@@ -77,14 +77,14 @@ pub async fn render_work_log(
         let vault_path = path.to_string();
 
         match llm
-            .summarize(lk_llm::SummarizeRequest {
+            .summarize(lk_queue::SummarizeRequest {
                 text: synthesis_input,
                 max_sentences: 10,
                 focus: None,
                 locale: locale.tag().to_string(),
-                target: lk_llm::TaskTarget {
+                target: lk_queue::TaskTarget {
                     vault_path,
-                    kind: lk_llm::TargetKind::WorkLogSynthesis,
+                    kind: lk_queue::TargetKind::WorkLogSynthesis,
                     anchor,
                 },
             })

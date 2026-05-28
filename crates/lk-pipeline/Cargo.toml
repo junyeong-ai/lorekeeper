@@ -9,7 +9,7 @@ publish = false
 [dependencies]
 lk-core = { workspace = true }
 lk-vault = { workspace = true }
-lk-llm = { workspace = true }
+lk-queue = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

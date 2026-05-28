@@ -30,7 +30,7 @@ dedup: {cascade: [event-id, url, title], title_threshold: 0.85}
 labels: {categories: [...]}
 performance: {...}                   # 성과 카테고리 매핑 (config.example 참고)
 synthesis: {weekly: {...}, monthly: {...}, quarterly: {...}, annual: {...}}
-llm: {provider: queue, model: claude-sonnet-4-6, max_tokens: 4096}
+llm: {provider: queue}
 ```
 
 ## 위치 / 검증

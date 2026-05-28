@@ -12,7 +12,7 @@ lk-core = { path = "crates/lk-core" }
 lk-vault = { path = "crates/lk-vault" }
 lk-source = { path = "crates/lk-source" }
 lk-pipeline = { path = "crates/lk-pipeline" }
-lk-llm = { path = "crates/lk-llm" }
+lk-queue = { path = "crates/lk-queue" }
 lk-graph = { path = "crates/lk-graph" }
 
 tokio = { version = "1", features = ["full"] }

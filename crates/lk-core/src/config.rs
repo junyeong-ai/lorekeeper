@@ -115,12 +115,6 @@ impl Config {
             ));
         }
 
-        if self.llm.model.trim().is_empty() {
-            return Err(ConfigError::Validation(
-                "llm.model must not be empty".into(),
-            ));
-        }
-
         self.vault.dirs.validate()?;
 
         if let Some(tz_name) = self.vault.timezone.as_deref()
@@ -497,8 +491,8 @@ pub struct SourceConfig {
     #[serde(default)]
     pub classify: Vec<ClassifyRule>,
     /// When true, events that remain unclassified after keyword matching are sent to
-    /// the LLM for semantic classification. Only effective when `llm.provider` is
-    /// `anthropic` (synchronous); in `queue` mode the call gracefully returns `None`.
+    /// the LLM for semantic classification. In `queue` mode the call returns `None`
+    /// (classification deferred to the `/lore-process` skill).
     #[serde(default)]
     pub classify_with_llm: bool,
     #[serde(default)]
@@ -762,16 +756,12 @@ impl Default for PersonalReviewSynthesisConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct LlmConfig {
     pub provider: LlmProvider,
-    pub model: String,
-    pub max_tokens: u32,
 }
 
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
             provider: LlmProvider::Queue,
-            model: "claude-sonnet-4-6".into(),
-            max_tokens: 4096,
         }
     }
 }
@@ -779,8 +769,6 @@ impl Default for LlmConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum LlmProvider {
-    /// Direct Anthropic Messages API. Requires `ANTHROPIC_API_KEY`. Unattended-friendly.
-    Anthropic,
     /// Emit JSONL queue tasks under `<vault>/.lorekeeper/queue/`. A Claude Code skill
     /// (`/lore-process`) consumes the queue and edits target pages via Obsidian MCP using
     /// Claude Code's native LLM session (no API key, no separate billing).
