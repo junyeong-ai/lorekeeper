@@ -299,6 +299,7 @@ impl Synthesizer {
         let Some(narrative) = section.narrative else {
             return Ok(None);
         };
+        let category_stats = self.aggregate_category_stats(start, end).await?;
         let context = serde_json::json!({
             "year": year,
             "week": week,
@@ -306,7 +307,7 @@ impl Synthesizer {
             "end_date": end.to_string(),
             "narrative": narrative,
             "days_logged": pages.len(),
-            "categories": self.ctx.perf.work_categories,
+            "category_stats": category_stats,
         });
 
         let content = self.render_section(
@@ -360,6 +361,7 @@ impl Synthesizer {
         let Some(narrative) = section.narrative else {
             return Ok(None);
         };
+        let category_stats = self.aggregate_category_stats(start, end).await?;
         let context = serde_json::json!({
             "year": year,
             "month": month,
@@ -368,7 +370,7 @@ impl Synthesizer {
             "end_date": end.to_string(),
             "narrative": narrative,
             "days_logged": pages.len(),
-            "categories": self.ctx.perf.work_categories,
+            "category_stats": category_stats,
         });
 
         let content = self.render_section(
@@ -545,13 +547,19 @@ impl Synthesizer {
             return Ok(None);
         };
 
+        let category_stats = self
+            .aggregate_category_stats(
+                jiff::civil::date(year, 1, 1),
+                jiff::civil::date(year, 12, 31),
+            )
+            .await?;
         let context = serde_json::json!({
             "year": year,
             "title": self.ctx.locale.annual_title(year),
             "narrative": narrative,
             "breakdown_heading": breakdown_heading,
             "period_summaries": period_summaries,
-            "categories": self.ctx.perf.work_categories,
+            "category_stats": category_stats,
         });
 
         let content = self.render_section(

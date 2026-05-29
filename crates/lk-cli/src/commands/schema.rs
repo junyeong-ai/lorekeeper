@@ -184,8 +184,8 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs) -> Vec<PageSchema> {
                 s("Period", |i| i.period.to_string(), Owner::Machine),
                 s("Summary", |i| i.key_summary.to_string(), Owner::Llm),
                 s(
-                    "Categories",
-                    |i| i.work_categories.to_string(),
+                    "Category Distribution",
+                    |i| i.category_distribution.to_string(),
                     Owner::Machine,
                 ),
             ],
@@ -198,8 +198,8 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs) -> Vec<PageSchema> {
                 s("Period", |i| i.period.to_string(), Owner::Machine),
                 s("Summary", |i| i.key_summary.to_string(), Owner::Llm),
                 s(
-                    "Categories",
-                    |i| i.work_categories.to_string(),
+                    "Category Distribution",
+                    |i| i.category_distribution.to_string(),
                     Owner::Machine,
                 ),
             ],
@@ -235,8 +235,8 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs) -> Vec<PageSchema> {
                     Owner::Machine,
                 ),
                 s(
-                    "Categories",
-                    |i| i.work_categories.to_string(),
+                    "Category Distribution",
+                    |i| i.category_distribution.to_string(),
                     Owner::Machine,
                 ),
             ],

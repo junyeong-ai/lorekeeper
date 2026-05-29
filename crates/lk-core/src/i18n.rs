@@ -94,7 +94,6 @@ pub struct Strings {
     pub meeting_followup: &'static str,
     // Personal / synthesis sections
     pub key_summary: &'static str,
-    pub work_categories: &'static str,
     pub key_themes_this_week: &'static str,
     pub overall_summary: &'static str,
     pub quarterly_breakdown: &'static str,
@@ -167,7 +166,6 @@ static KO: Strings = Strings {
     knowledge_sharing: "지식 공유",
     meeting_followup: "미팅 후속",
     key_summary: "핵심 요약",
-    work_categories: "업무 카테고리",
     key_themes_this_week: "이번 주 핵심 주제",
     overall_summary: "종합 요약",
     quarterly_breakdown: "분기별 요약",
@@ -229,7 +227,6 @@ static EN: Strings = Strings {
     knowledge_sharing: "Knowledge Sharing",
     meeting_followup: "Meeting Follow-up",
     key_summary: "Summary",
-    work_categories: "Work Categories",
     key_themes_this_week: "Key Themes This Week",
     overall_summary: "Overview",
     quarterly_breakdown: "By Quarter",

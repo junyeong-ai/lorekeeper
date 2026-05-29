@@ -19,8 +19,10 @@ llm_inputs:
 
 {{ narrative }}
 
-## {{ i18n.work_categories }}
+## {{ i18n.category_distribution }}
 
-{% for c in categories %}
-- {{ c }}
+| {{ i18n.col_category }} | {{ i18n.col_count }} | {{ i18n.col_ratio }} |
+|---|---|---|
+{% for cat in category_stats -%}
+| {{ cat.name }} | {{ cat.count }} | {{ cat.percent }}% |
 {% endfor %}
