@@ -182,13 +182,17 @@ fn run_inner(
                 CONCEPT_NEAR_DUPLICATE_THRESHOLD,
             )
             .map_err(|e| format!("{e}"))?;
+            let unresolved_conflicts =
+                concepts::unresolved_conflicts(&rc.root, &rc.vault_dirs.wiki)
+                    .map_err(|e| format!("{e}"))?;
 
             let findings = orphans.len()
                 + broken.len()
                 + drift.missing_from_index.len()
                 + drift.missing_from_disk.len()
                 + invalid_categories.len()
-                + near_duplicate_concepts.len();
+                + near_duplicate_concepts.len()
+                + unresolved_conflicts.len();
 
             let report = output::LintReport {
                 pages: g.node_count(),
@@ -204,6 +208,7 @@ fn run_inner(
                 },
                 invalid_categories,
                 near_duplicate_concepts,
+                unresolved_conflicts,
                 findings,
             };
             if json {

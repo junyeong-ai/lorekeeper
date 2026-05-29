@@ -85,8 +85,15 @@ inspecting pages.
    confirm topical relatedness before proposing a link. Community grounding +
    LLM confirmation = double gate against false positives.
 3. **Contradictions** — scoped to one concept page at a time whose `sources`
-   cite conflicting claims. Add a review note under the Synthesis section.
-   Never choose a side. One page at a time to avoid combinatorial blow-up.
+   cite conflicting claims. Only flag a genuine, unambiguous contradiction (two
+   sources asserting incompatible facts) — never a difference in emphasis or a
+   gap; uncertainty means do not flag. When one is found, add a callout under
+   the Synthesis section stating both sides and citing each source:
+   `> [!conflict] <one-line summary of the disagreement>`. Never choose a side.
+   The callout lives in the LLM-owned Synthesis body, so ingest re-render
+   preserves it, and `lore graph lint` reports it as an unresolved conflict
+   until a human resolves the contradiction and deletes the callout. One page
+   at a time to avoid combinatorial blow-up.
 4. **Frontiers — data gaps + new directions**. Report:
    - Concepts mentioned in daily pages but missing a dedicated wiki page
      (cross-check `[[...]]` wikilinks vs concept files from `lore wiki concepts`).

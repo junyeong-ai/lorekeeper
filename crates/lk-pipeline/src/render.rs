@@ -216,11 +216,6 @@ pub fn render_document_page(
     let mut tags = vec!["document".to_string()];
     tags.extend(event.labels.iter().cloned());
 
-    let concept_slugs: Vec<String> = concepts
-        .iter()
-        .filter_map(|name| lk_core::concept::slugify(name))
-        .collect();
-
     let llm_inputs_json = llm_inputs_map(&[
         (TargetKind::DocumentSummary, Some(llm_inputs.summary)),
         (TargetKind::DocumentConcepts, llm_inputs.concepts),
@@ -235,7 +230,6 @@ pub fn render_document_page(
         "source_url": event.url,
         "source_file": source_file,
         "tags": tags,
-        "concept_slugs": concept_slugs,
         "summary": summary,
         "content": event.body,
         "concepts": concepts,

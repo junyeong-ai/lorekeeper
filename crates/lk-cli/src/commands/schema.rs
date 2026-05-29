@@ -113,7 +113,6 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs) -> Vec<PageSchema> {
                 "source_url",
                 "source_file",
                 "tags",
-                "concepts",
             ],
             sections: vec![
                 s("Summary", |i| i.summary.to_string(), Owner::Llm),
@@ -248,10 +247,7 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs) -> Vec<PageSchema> {
 /// Render the AGENTS.md content for a given locale and directory layout.
 pub fn render_agents_md(locale: Locale, dirs: &lk_core::config::VaultDirs) -> String {
     let strings = locale.strings();
-    let locale_tag = match locale {
-        Locale::Ko => "ko",
-        Locale::En => "en",
-    };
+    let locale_tag = locale.tag();
 
     let mut out = String::new();
     writeln!(out, "# Lorekeeper Page Formats").unwrap();

@@ -70,3 +70,14 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
   duplicates (`vector-db` ~ `vector-database`) the LLM dedup hint missed. Read-only
   merge candidates surfaced in `graph lint`; a human decides. The slug filename is
   the canonical identity (no frontmatter parse). Distinct slugs (~0.1) never fire.
+- **`concepts::unresolved_conflicts`**: reports concept pages whose body carries an
+  unresolved `> [!conflict]` callout — a contradiction `/lore-wiki audit` flagged
+  between cited sources. The marker lives in the LLM-owned synthesis body (NOT
+  frontmatter, which ingest re-render regenerates from the template), so it survives
+  re-ingest via `preserved_synthesis`. The scan is fence-aware (a callout quoted in a
+  code block is content, not a marker) and matches the callout type `conflict`
+  exactly — `[!note]`/`[!warning]` never fire. Read-only continuous tracking: the
+  lint surfaces it until a human resolves the contradiction and deletes the callout.
+  This is the only contradiction mechanism — there is no automatic contradiction
+  *detection* (it would false-positive on emphasis differences); flagging is an
+  explicit LLM/human judgment in the audit skill.

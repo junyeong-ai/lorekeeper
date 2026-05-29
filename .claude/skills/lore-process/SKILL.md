@@ -218,38 +218,12 @@ frontmatter matches before writing — see "Stale-task guard" below.
         `"en"` → English). If absent, default to Korean.
         Aim for `input.max_sentences` substantive points. No preamble.
 
-        **Source-type-aware synthesis.** `input.source_type` carries the
-        adapter type verbatim from config (the source's `type:` field) —
-        never guess it from the vault path. Adapt the synthesis strategy to
-        it. When `source_type` is absent (cross-source syntheses such as the
-        work-log), apply the generic guidance below without a type bias.
-
-        **`slack-channel`, `slack-search`:**
-        - Extract key decisions, action items with owners
-        - Ignore repetitive agreement messages (ok, +1, sounds good)
-        - Structure as: decision/outcome → action items → context
-        - Preserve technical details, project names, and links
-
-        **`gmail`:**
-        - Extract the core ask or decision from each email
-        - Identify action items with owners and deadlines
-        - Skip signatures, disclaimers, forwarded-chain noise
-        - For email chains, focus on the most recent exchange
-
-        **`rss`:**
-        - Focus on key findings, announcements, techniques
-        - For technical articles: what it is, why it matters, key numbers
-        - Skip author bios, CTAs, navigation artifacts
-
-        **`google-calendar`:**
-        - Highlight meeting outcomes and decisions if notes are present
-
-        **`jira`:**
-        - Summarize key task status changes and deliverables
-
-        **`google-drive`, `manual`:**
-        - Treat as curated documents: preserve the author's structure,
-          distill to the core argument and supporting detail
+        **Source-type-aware synthesis.** Adapt the strategy to
+        `input.source_type` (the adapter type verbatim from config; never
+        guess it from the vault path). When `source_type` is absent
+        (cross-source syntheses such as the work-log), apply the generic
+        guidance without a type bias. Per-type strategy:
+        see `references/source-types.md`.
 
         For all types: produce genuine knowledge, not just headlines.
         Not too short (meaningless one-liners) nor too verbose (raw dump).
@@ -294,12 +268,9 @@ frontmatter matches before writing — see "Stale-task guard" below.
         source_count, append source ref). Use the concept path pattern
         from AGENTS.md.
 
-        `input.source_type` carries the originating adapter type (the same
-        variants listed under `kind: summarize` above). Use it to scope what
-        counts as a concept: extract decisions/projects/people from
-        `slack-channel`/`slack-search` and `gmail`; techniques/products/
-        announcements from `rss`; issues/epics from `jira`; document subject
-        matter from `google-drive`/`manual`. Never invent it from the path.
+        `input.source_type` carries the originating adapter type; use it to
+        scope what counts as a concept (per-type scoping:
+        see `references/source-types.md`). Never invent it from the path.
 
         **Concept dedup.** Before creating any concept page, check for
         duplicates against the concept registry:
@@ -314,10 +285,16 @@ frontmatter matches before writing — see "Stale-task guard" below.
         4. Slug normalization: NFKC → lowercase → non-alphanumeric to
            hyphen → collapse runs → trim. Same as `lk_core::slugify`.
 
-        **Source reference format.** The `## 출처` (Sources) `- [[…]]` entries MUST
-        use vault-relative paths matching the daily page pattern from AGENTS.md.
-        Derive from the task's `input.source_id` and `input.date`.
-        NEVER use bare source IDs like `"email-digest"`.
+        **Source reference format.** Each `## 출처` (Sources) `- [[…]]` entry MUST
+        cite the page the concept was extracted from: the task's
+        `target.vault_path` with the `.md` extension stripped. That path is the
+        correct origin page for EVERY source type — a daily page
+        (`<daily>/{source-id}/{date}`) for stream sources, a document page
+        (`<wiki>/documents/{slug}`) for `manual`/`google-drive`. Never rebuild the
+        path from `source_id`/`date` (that assumes a daily page and dangles for
+        document sources), and never use a bare source ID like `"email-digest"`.
+        This matches what `lore graph backlinks-sync` re-derives from the
+        wikilink graph, so the citation is correct from the first write.
 
         **Category assignment.** Hard constraint: the `category` value MUST
         be one of the IDs in `input.categories` (verbatim string match) or

@@ -11,7 +11,6 @@ source_url: {{ source_url | tojson }}
 source_file: {{ source_file | tojson }}
 {% endif -%}
 tags: {{ tags | tojson }}
-concepts: {{ concept_slugs | tojson }}
 llm_inputs:
   summary: {{ llm_inputs.summary | tojson }}
 {%- if llm_inputs.concepts %}

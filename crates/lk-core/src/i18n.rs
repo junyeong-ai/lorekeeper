@@ -17,12 +17,25 @@ impl Locale {
     /// since-changed `vault.locale`) iterates this instead of hardcoding the list.
     pub const ALL: &'static [Locale] = &[Locale::Ko, Locale::En];
 
-    /// Parse a BCP-47-ish tag (`ko`, `ko-KR`, `en`, `en-US`); unknown/absent → `Ko`.
+    /// Parse a BCP-47-ish tag by its primary language subtag (`ko`, `ko-KR`,
+    /// `en`, `en-US`). Matches against `tag()` over `ALL`, so a new language is
+    /// recognized the moment its `Locale` arm exists — no separate parse table.
+    /// `None` for an unrecognized tag; callers that need a total mapping use
+    /// `from_tag`, and `Config::validate` rejects an unrecognized `vault.locale`.
+    pub fn try_from_tag(tag: &str) -> Option<Self> {
+        let primary = tag
+            .split(['-', '_'])
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        Locale::ALL.iter().copied().find(|l| l.tag() == primary)
+    }
+
+    /// Total tag parse: an unrecognized or absent tag falls back to the default
+    /// locale. `vault.locale` is validated at config load, so in practice the
+    /// fallback only applies when the field is entirely absent.
     pub fn from_tag(tag: Option<&str>) -> Self {
-        match tag.map(str::to_ascii_lowercase).as_deref() {
-            Some(t) if t.starts_with("en") => Locale::En,
-            _ => Locale::Ko,
-        }
+        tag.and_then(Self::try_from_tag).unwrap_or_default()
     }
 
     pub fn tag(self) -> &'static str {
@@ -281,6 +294,16 @@ mod tests {
         assert_eq!(Locale::from_tag(Some("ko-KR")), Locale::Ko);
         assert_eq!(Locale::from_tag(None), Locale::Ko);
         assert_eq!(Locale::from_tag(Some("fr")), Locale::Ko); // unknown → default
+    }
+
+    #[test]
+    fn try_from_tag_recognizes_only_known_primary_subtags() {
+        assert_eq!(Locale::try_from_tag("ko"), Some(Locale::Ko));
+        assert_eq!(Locale::try_from_tag("EN-us"), Some(Locale::En)); // case-insensitive
+        assert_eq!(Locale::try_from_tag("ko_KR"), Some(Locale::Ko)); // underscore subtag
+        assert_eq!(Locale::try_from_tag("english"), None); // not a primary subtag
+        assert_eq!(Locale::try_from_tag("fr"), None);
+        assert_eq!(Locale::try_from_tag(""), None);
     }
 
     #[test]

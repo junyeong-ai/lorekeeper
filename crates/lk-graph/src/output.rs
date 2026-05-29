@@ -3,7 +3,7 @@ use serde::Serialize;
 
 use crate::backlinks::{ConceptUpdate, SyncReport};
 use crate::cluster::{ClusterResult, LinkSuggestion};
-use crate::concepts::{InvalidCategoryConcept, NearDuplicateConcept};
+use crate::concepts::{InvalidCategoryConcept, NearDuplicateConcept, UnresolvedConflict};
 use crate::export::GraphExport;
 use crate::graph::{BrokenLink, HubEntry};
 use crate::stale::{Category, StalePage};
@@ -70,6 +70,7 @@ pub struct LintReport {
     pub index: IndexSyncReport,
     pub invalid_categories: Vec<InvalidCategoryConcept>,
     pub near_duplicate_concepts: Vec<NearDuplicateConcept>,
+    pub unresolved_conflicts: Vec<UnresolvedConflict>,
     pub findings: usize,
 }
 
@@ -251,6 +252,20 @@ pub fn print_lint(r: &LintReport) {
         );
         for d in &r.near_duplicate_concepts {
             println!("  {} ~ {}  ({:.2})", d.a, d.b, d.similarity);
+        }
+    }
+
+    if !r.unresolved_conflicts.is_empty() {
+        println!(
+            "\nUnresolved concept conflicts ({}):",
+            r.unresolved_conflicts.len()
+        );
+        for c in &r.unresolved_conflicts {
+            if c.note.is_empty() {
+                println!("  {}  ({})", c.slug, c.path.display());
+            } else {
+                println!("  {}  {}  ({})", c.slug, c.note, c.path.display());
+            }
         }
     }
 

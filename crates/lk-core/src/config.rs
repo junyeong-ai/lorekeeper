@@ -124,6 +124,16 @@ impl Config {
                 .map_err(|_| ConfigError::Validation(format!("invalid timezone: '{tz_name}'")))?;
         }
 
+        if let Some(tag) = self.vault.locale.as_deref()
+            && crate::i18n::Locale::try_from_tag(tag).is_none()
+        {
+            let supported: Vec<&str> = crate::i18n::Locale::ALL.iter().map(|l| l.tag()).collect();
+            return Err(ConfigError::Validation(format!(
+                "unsupported vault.locale: '{tag}' (supported: {})",
+                supported.join(", ")
+            )));
+        }
+
         if self.dedup.cascade.is_empty() {
             return Err(ConfigError::Validation(
                 "dedup.cascade must contain at least one strategy".into(),
@@ -346,7 +356,8 @@ pub struct VaultConfig {
     #[serde(default)]
     pub timezone: Option<String>,
     /// Output language for the labels/headers Lorekeeper *adds* (e.g. "ko", "en").
-    /// Source content (mail/Slack/Jira bodies) is never translated. Absent/unknown → Ko.
+    /// Source content (mail/Slack/Jira bodies) is never translated. Absent → Ko;
+    /// an unrecognized tag is rejected at load (see `Config::validate`).
     #[serde(default)]
     pub locale: Option<String>,
 }
@@ -1049,6 +1060,24 @@ sources:
 "#;
         let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_unrecognized_locale() {
+        let yaml = r#"
+vault:
+  root: /tmp/vault
+  locale: fr
+identity:
+  name: test
+  email: test@test.com
+sources:
+  s1:
+    type: gmail
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("vault.locale"));
     }
 
     #[test]
