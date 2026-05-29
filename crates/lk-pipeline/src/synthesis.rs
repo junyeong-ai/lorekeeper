@@ -5,7 +5,7 @@ use std::sync::Arc;
 use lk_core::config::Config;
 use lk_core::vault_path::VaultPath;
 use lk_queue::TargetKind;
-use lk_vault::{Page, VaultReader};
+use lk_vault::{Page, VaultReader, section_body};
 
 use crate::PipelineError;
 use crate::context::PipelineContext;
@@ -395,6 +395,10 @@ impl Synthesizer {
         let (start, end) = quarter_range(year, quarter)?;
         let months: Vec<u8> = ((quarter - 1) * 3 + 1..=quarter * 3).collect();
 
+        // A child review's narrative section only (`## key_summary`) — never its whole
+        // body, which would drag the child's own distribution table and metadata
+        // headings into the parent, producing duplicate tables and nested headings.
+        let summary_heading = self.ctx.locale.strings().key_summary;
         let monthly_dir = PathBuf::from(&self.ctx.dirs.personal).join(&self.ctx.dirs.monthly);
         let mut monthly_summaries: Vec<serde_json::Value> = Vec::new();
         let mut combined = String::new();
@@ -402,12 +406,13 @@ impl Synthesizer {
         for m in &months {
             let file = monthly_dir.join(format!("{year}-{:02}.md", m));
             if let Some(page) = self.reader.read_page(&file).await? {
+                let narrative = child_narrative(&page, summary_heading);
                 monthly_summaries.push(serde_json::json!({
                     "month": format!("{year}-{:02}", m),
-                    "summary": &page.body,
+                    "summary": narrative,
                 }));
                 combined.push_str(&format!("=== {year}-{:02} ===\n", m));
-                combined.push_str(&page.body);
+                combined.push_str(narrative);
                 combined.push_str("\n\n");
             }
         }
@@ -421,7 +426,7 @@ impl Synthesizer {
                 let file = weekly_dir.join(format!("{wy}-W{ww:02}.md"));
                 if let Some(page) = self.reader.read_page(&file).await? {
                     combined.push_str(&format!("=== {wy}-W{ww:02} ===\n"));
-                    combined.push_str(&page.body);
+                    combined.push_str(child_narrative(&page, summary_heading));
                     combined.push_str("\n\n");
                 }
             }
@@ -486,15 +491,17 @@ impl Synthesizer {
         let mut combined = String::new();
         let strings = self.ctx.locale.strings();
 
+        let summary_heading = strings.key_summary;
         for q in 1..=4u8 {
             let file = quarterly_dir.join(format!("{year}-Q{q}.md"));
             if let Some(page) = self.reader.read_page(&file).await? {
+                let narrative = child_narrative(&page, summary_heading);
                 period_summaries.push(serde_json::json!({
                     "label": format!("Q{q}"),
-                    "summary": &page.body,
+                    "summary": narrative,
                 }));
                 combined.push_str(&format!("=== {year}-Q{q} ===\n"));
-                combined.push_str(&page.body);
+                combined.push_str(narrative);
                 combined.push_str("\n\n");
             }
         }
@@ -509,12 +516,13 @@ impl Synthesizer {
             for m in 1..=12u8 {
                 let file = monthly_dir.join(format!("{year}-{m:02}.md"));
                 if let Some(page) = self.reader.read_page(&file).await? {
+                    let narrative = child_narrative(&page, summary_heading);
                     period_summaries.push(serde_json::json!({
                         "label": format!("{year}-{m:02}"),
-                        "summary": &page.body,
+                        "summary": narrative,
                     }));
                     combined.push_str(&format!("=== {year}-{m:02} ===\n"));
-                    combined.push_str(&page.body);
+                    combined.push_str(narrative);
                     combined.push_str("\n\n");
                 }
             }
@@ -646,6 +654,18 @@ impl Synthesizer {
         }
         Ok(pages)
     }
+}
+
+/// A child review page's narrative-section body (`## <summary_heading>`) only,
+/// falling back to the whole body if that section is absent or empty. Quarterly and
+/// annual rollups embed this rather than the child's full body, so the parent never
+/// inherits the child's own distribution table or metadata headings (which would
+/// otherwise render as duplicated tables and nested `##` headings on the parent page).
+fn child_narrative<'a>(page: &'a Page, summary_heading: &str) -> &'a str {
+    section_body(&page.body, summary_heading)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| page.body.trim())
 }
 
 fn iso_year_week(date: jiff::civil::Date) -> (i16, u8) {
