@@ -9,10 +9,56 @@ concept_categories) with the `Synthesizer`.
   cross-source aggregate, rendered ONCE via `render_concept_pages()` after all sources
   are planned — never per source (that would let a later source's write clobber an
   earlier one). `commit()` records dedup and must run only after writes + flush succeed.
+- **Materialized-view render**: a daily page is two layers. The **structural** layer
+  (frontmatter, raw event list, all `## ` headings) is re-rendered every ingest from
+  the template. The **semantic** layer (summary body, refined event bodies, concept
+  wiki-links) is owned by the LLM via the queue and **preserved across re-renders**.
+  `Pipeline::plan`, `worklog`, and `synthesis` all implement this with:
+  1. Compute `Request::cache_hash()` for every LLM task that would fire.
+  2. Look up the previous render via `VaultReader` and ask `llm_cache::lookup` whether
+     the same hash + a filled section body already exist on disk. If yes, skip the
+     LLM enqueue and stash the existing body as `preserved_body`.
+  3. Render the fresh template (heading is always emitted; the body is empty when the
+     LLM hasn't produced it).
+  4. `render::splice_preserved_sections` replaces each fresh empty body with its
+     `preserved_body` so the on-disk page round-trips unchanged when nothing changed.
+  5. The fresh frontmatter records the hash in `llm_inputs.<key>` regardless of whether
+     the task was enqueued, so the cache is self-perpetuating.
+  The pattern applies uniformly to daily, document, work-log, AND synthesis pages —
+  every page with an LLM-owned section is a materialized view. `TargetKind::llm_inputs_key`
+  is the single source of truth mapping a task kind to its frontmatter key.
+  Manual override: a vault editor deleting either the section body or the
+  `llm_inputs.<key>` line invalidates the cache for the next run — no flag, no
+  skill argument, no out-of-band invalidation API.
+  **Two cache shapes (`TargetKind::cache_shape`).** `FillEmpty` kinds (summary,
+  concepts, narratives) follow steps 1–5 exactly: the section starts empty, so a
+  non-empty body is the completion signal and the pipeline pre-stamps the hash. The
+  daily event list is the sole `InPlace` rewrite: its section is non-empty from the
+  first render (the raw event list is structural), so completion is tracked by a
+  SECOND frontmatter field. The pipeline still pre-stamps `llm_inputs.refine_events`
+  with the current-input hash (the stale-task reference point — `llm_inputs.<key>`
+  always equals the current input for every kind), and `/lore-process` writes
+  `llm_inputs.refine_events_done` once it has rewritten the bodies.
+  `llm_cache::lookup_in_place` returns cached only when `refine_events_done` equals
+  that current hash. Because `refine_events` is always current, a queued refine task
+  whose `cache_hash` differs is unambiguously stale and dropped; a first run, a crash
+  before flush, an unprocessed page, OR a changed-input re-ingest all converge (the
+  matching task processes, stale ones drop). Force a re-run by deleting the
+  `refine_events_done` line.
+- **Cache identity vs queue payload**: `Request::cache_identity()` in `lk-queue` is the
+  hashable subset that shapes the LLM's output; `Request::task_input()` is the queue
+  payload (identity PLUS registry hints like `existing_concepts`). `cache_hash()`
+  BLAKE3-128s the identity. `existing_concepts` is excluded from the identity so adding
+  a concept anywhere in the vault never invalidates unrelated cache entries; `categories`
+  is sorted before hashing so config field order can't perturb the cache.
 - **`new_dry_run`** opens the dedup cache read-only (no file creation).
-- **DedupCache**: cascade is `event-id → content-hash → url → title` (first match =
-  duplicate). Persisted-table lookups are gated on the cache being present, but the
-  intra-batch (seen-id/url + novel-title) checks ALWAYS run — so a dry-run with no
+- **DedupCache**: default cascade is `event-id → content-hash → url` (first match =
+  duplicate); `title` (fuzzy Sørensen-Dice) is **opt-in** — it can merge distinct
+  same-title observations, so recurring-title feeds keep it off. `deduplicate` returns
+  `{novel, duplicates}`; `commit` records novel AND re-records duplicates (upsert) to
+  refresh `seen_at`, so a steady-state re-arrival never ages past retention and
+  re-emits as new. Persisted-table lookups are gated on the cache being present, but
+  the intra-batch (seen-id/url) checks ALWAYS run — so a dry-run with no
   cache still matches a real run. URLs are canonicalised before lookup and storage:
   http→https, host lowercase, trailing slash removal, auth stripping, tracking-param
   removal (`utm_*`, `fbclid`, `gclid`, `msclkid`, `ttclid`, `twclid`, `wbraid`,
@@ -24,22 +70,34 @@ concept_categories) with the `Synthesizer`.
   the stale file is renamed to `*.redb.backup.{timestamp}-pid{pid}` (not deleted),
   preserving dedup history for manual recovery.
 - **classify**: `flag_personal` matches identity tokens with `contains_bounded`
-  (alphanumeric/`._%+-` word boundary) to avoid name/email substring false positives
-  (`kim`⊄`kimberly`, `test@x.com`⊄`test@x.com.au`); `@` is intentionally excluded so
-  Slack `<@U…>` mentions still match. `classify_by_keywords` reads
+  (**ASCII**-alphanumeric/`._%+-` token boundary) to avoid Latin substring false
+  positives (`kim`⊄`kimberly`, `test@x.com`⊄`test@x.com.au`); `@` is intentionally
+  excluded so Slack `<@U…>` mentions still match. CJK scripts are NOT boundary chars,
+  so a Korean needle matches across attached particles/honorifics (`검토`→`검토를`,
+  `이준영`→`이준영님`) — agglutinative text has no Latin-style token gaps. `classify_by_keywords` reads
   `SourceConfig.classify` (ordered `Vec<ClassifyRule>`, first match wins) and uses
-  `contains_bounded` (token-boundary match) — prevents substring false positives
-  while remaining correct for CJK keywords. When `classify_with_llm` is true,
-  unclassified events are sent to the LLM as a fallback (deferred in `queue` mode;
-  no-op in `noop` mode).
+  `contains_bounded` (token-boundary match) — prevents substring false positives.
+  Classification is purely deterministic (keyword rules); an event no rule matches
+  stays uncategorized (rendered in the general section, routed to `uncategorized` in
+  the work-log) — a safe, predictable default with no nondeterministic LLM step.
 - **Concept merge** reads existing `created`/`updated` frontmatter (the keys actually
-  written), preserves the original title and category (established identity), and
-  dedupes `sources`/`source_count`. Before extraction, `load_existing_concept_refs()`
-  scans the vault's concept directory + in-memory drafts and passes them as
-  `existing_concepts` in the LLM request, preventing duplicate concept creation.
-- **Synthesizer** methods are `try_weekly_synthesis` + `try_*_personal`; they share
-  `summarize_or_warn` (propagates only fatal LLM errors). `try_weekly_synthesis` uses
-  `identify_themes` for structured JSON theme extraction. Every `TaskTarget` carries
+  written), preserves the original title and category (established identity = first
+  writer wins). A re-extraction whose category DISAGREES with the established one is a
+  genuine conflict — kept established, but `tracing::warn`ed so a possibly-wrong day-1
+  assignment doesn't silently calcify (the one conflict signal detectable at merge
+  time; post-hoc lints can't see it). Citations are NOT stored in concept frontmatter:
+  the `## 출처` body (re-derived by `backlinks-sync`) is the single source-of-truth,
+  and `source_count` is an ingest approximation that `backlinks-sync` re-derives
+  exactly. Before extraction, `load_existing_concept_refs()` scans the vault's concept
+  directory + in-memory drafts and passes them as `existing_concepts` in the LLM
+  request, preventing duplicate concept creation.
+- **Synthesizer** methods are `try_weekly_synthesis` + `try_*_personal`. Each is a
+  materialized view like a daily page: `summarize_section` (or, for weekly themes,
+  an inlined `identify_themes` path) computes `cache_hash`, looks up the existing
+  page via `lookup`, gates the LLM call on `decision.enqueue()`, and `render_section`
+  stamps `llm_inputs.<key>` + splices the preserved body on a cache hit. A transient
+  LLM failure yields `SynthesisSection::failed()` (`narrative: None`) so the caller
+  skips the page rather than stamping an empty hash. Every `TaskTarget` carries
   `anchor` — the exact `## …` heading resolved from i18n at construction time — so
   the skill never needs a hardcoded kind→heading table.
 - **Synthesis fallback cascade**: quarterly reads monthly → weekly-personal → None;

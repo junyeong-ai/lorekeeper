@@ -25,20 +25,21 @@ pub async fn run(
         build_llm_client(&config, &vault_root)?
     };
 
-    // Guard against silent data loss when provider is switched away from `queue`
-    // while pending queue files exist. Without this check, the new run would dedup
-    // events whose previous queue tasks were never drained by `/lore-process`,
-    // permanently stranding them with empty semantic sections.
+    // Surface pending (undrained) queue files — never silently ignore them. The risk
+    // differs by provider, so the message does too:
+    //   - queue mode: re-running just emits another file that `/lore-process` drains
+    //     alongside the existing ones; warn so the user can drain first to avoid
+    //     duplicate LLM work on the same target pages.
+    //   - any non-queue provider (e.g. noop): this run marks events seen in dedup but
+    //     produces no tasks to fill the empty sections, so the pending tasks are
+    //     stranded — a stronger warning, since draining means switching back to queue.
     let pending = pending_queue_count(&vault_root)?;
-    match config.llm.provider {
-        lk_core::config::LlmProvider::Queue if pending > 0 => {
-            // Not an error in queue mode — re-running just emits a new file that
-            // /lore-process will drain alongside the existing ones. Warn so the user
-            // can run /lore-process first if they want to avoid duplicate LLM work,
-            // since each pending file already has a target page on disk.
+    if pending > 0 {
+        let queue_dir = vault_root.join(".lorekeeper").join("queue");
+        if config.llm.provider == lk_core::config::LlmProvider::Queue {
             tracing::warn!(
                 pending,
-                queue_dir = %vault_root.join(".lorekeeper").join("queue").display(),
+                queue_dir = %queue_dir.display(),
                 "pending queue files exist; run /lore-process first to avoid duplicate LLM work",
             );
             eprintln!(
@@ -46,8 +47,20 @@ pub async fn run(
                  /lore-process first to avoid duplicate LLM work on the same target pages.",
                 vault_root.display(),
             );
+        } else {
+            tracing::warn!(
+                pending,
+                provider = ?config.llm.provider,
+                queue_dir = %queue_dir.display(),
+                "pending queue files exist but provider is not `queue`; their tasks will be stranded",
+            );
+            eprintln!(
+                "! {pending} pending queue file(s) under {}/.lorekeeper/queue/ will be STRANDED: \
+                 provider is not `queue`, so this run creates no tasks to fill their target pages. \
+                 Switch to `llm.provider: queue` and run /lore-process to drain them first.",
+                vault_root.display(),
+            );
         }
-        _ => {}
     }
 
     // Sweep stranded `.jsonl.tmp` files from previous crashed runs. The queue
@@ -328,7 +341,7 @@ pub async fn run(
             lk_vault::LogStatus::Failed
         } else {
             pipeline
-                .commit(&p.result.events)
+                .commit(&p.result.events, &p.result.duplicates)
                 .map_err(|e| miette::miette!("dedup commit for {}: {e}", p.id))?;
             lk_vault::LogStatus::Success
         };

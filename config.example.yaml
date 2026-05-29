@@ -240,7 +240,10 @@ sources:
 
 # ─── 중복 제거 ────────────────────────────────────────────
 dedup:
-  cascade: [event-id, content-hash, url, title]
+  # 증거 기반 단계만 기본 사용: 같은 event-id / 동일 본문 / 동일 canonical URL.
+  # `title`(퍼지 제목 매칭)은 opt-in — 재발 제목("주간 회의" 등 반복 항목)을
+  # 서로 다른 관측으로 보존하려면 넣지 않습니다. 제목이 고유 식별자인 소스에만 추가.
+  cascade: [event-id, content-hash, url]
   title_threshold: 0.85
 
 # ─── 성과 추적 ───────────────────────────────────────────

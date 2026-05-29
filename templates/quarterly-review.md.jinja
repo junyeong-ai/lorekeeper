@@ -4,6 +4,8 @@ title: "{{ title }}"
 created: {{ date }}
 labels: ["personal", "strategy"]
 period: "{{ year }}-Q{{ quarter }}"
+llm_inputs:
+  narrative: {{ llm_inputs.narrative | tojson }}
 ---
 
 # {{ title }}
@@ -20,12 +22,11 @@ period: "{{ year }}-Q{{ quarter }}"
 | {{ cat.name }} | {{ cat.count }} | {{ cat.percent }}% |
 {% endfor %}
 
-## {{ i18n.top_achievements }}
+## {{ i18n.key_summary }}
 
-{% for a in achievements %}
-{{ loop.index }}. {{ a }}
-{% endfor %}
+{{ narrative }}
 
+{% if monthly_summaries %}
 ## {{ i18n.monthly_breakdown }}
 
 {% for m in monthly_summaries %}
@@ -34,15 +35,4 @@ period: "{{ year }}-Q{{ quarter }}"
 {{ m.summary }}
 
 {% endfor %}
-
-## {{ i18n.team_contribution }}
-
-{{ team_contribution }}
-
-## {{ i18n.growth_areas }}
-
-{{ growth_areas }}
-
-## {{ i18n.next_quarter }}
-
-{{ next_direction }}
+{% endif %}

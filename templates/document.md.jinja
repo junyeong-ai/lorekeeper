@@ -1,7 +1,6 @@
 ---
 id: {{ slug }}
 title: {{ title | tojson }}
-aliases: {{ aliases | tojson }}
 created: {{ created }}
 updated: {{ updated }}
 document_type: {{ document_type }}
@@ -13,6 +12,11 @@ source_file: {{ source_file | tojson }}
 {% endif -%}
 tags: {{ tags | tojson }}
 concepts: {{ concept_slugs | tojson }}
+llm_inputs:
+  summary: {{ llm_inputs.summary | tojson }}
+{%- if llm_inputs.concepts %}
+  concepts: {{ llm_inputs.concepts | tojson }}
+{%- endif %}
 ---
 
 # {{ title }}
@@ -25,8 +29,10 @@ concepts: {{ concept_slugs | tojson }}
 
 {{ content }}
 
+{% if extract_concepts %}
 ## {{ i18n.related_concepts }}
 
 {% for c in concepts -%}
 - [[{{ c }}]]
 {% endfor %}
+{% endif %}

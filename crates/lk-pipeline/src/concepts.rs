@@ -4,7 +4,7 @@ use lk_core::concept::{ExtractedConcept, slugify};
 use lk_core::config::VaultDirs;
 use lk_core::i18n::Locale;
 use lk_core::vault_path::VaultPath;
-use lk_vault::{TemplateEngine, VaultReader};
+use lk_vault::{TemplateEngine, VaultReader, replace_section, section_body};
 
 use crate::PipelineError;
 use crate::render::RenderOutput;
@@ -30,6 +30,16 @@ struct ConceptDraft {
     last_seen: jiff::civil::Date,
     source_count: u64,
     sources: Vec<String>,
+    /// Bodies of LLM-authored or graph-maintained sections, captured from the
+    /// existing concept page so a re-render can splice them back. Concept pages
+    /// have no `llm_inputs` hash because their semantic content is monotonically
+    /// additive — the skill writes `## 핵심` on creation, `lore graph
+    /// backlinks-sync` derives `## 출처` from real incoming citations, and `## 관련`
+    /// is curated via `lore-wiki audit` (community-grounded, LLM-confirmed links).
+    /// None of those should ever be wiped by an ingest re-render.
+    preserved_synthesis: Option<String>,
+    preserved_sources: Option<String>,
+    preserved_related: Option<String>,
 }
 
 impl ConceptDrafts {
@@ -56,6 +66,11 @@ impl ConceptDrafts {
 
         if let Some(draft) = self.drafts.get_mut(&safe_slug) {
             draft.add_reference(source_ref, date);
+            warn_category_conflict(
+                &safe_slug,
+                draft.category.as_deref(),
+                concept.category.as_deref(),
+            );
             if draft.category.is_none() {
                 draft.category = concept.category.clone();
             }
@@ -72,16 +87,6 @@ impl ConceptDrafts {
                     .get("source_count")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
-                let sources: Vec<String> = page
-                    .frontmatter
-                    .get("sources")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|s| s.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default();
                 // The persisted page stores these as `created`/`updated` (the keys the
                 // template and fallback write). Reading `first_seen`/`last_seen` would
                 // always miss and reset the origin date to today on every re-ingest.
@@ -105,13 +110,18 @@ impl ConceptDrafts {
                     .and_then(|v| v.as_str())
                     .map(String::from)
                     .unwrap_or_else(|| concept.name.clone());
-                let category = page
+                let existing_category = page
                     .frontmatter
                     .get("category")
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.is_empty())
-                    .map(String::from)
-                    .or_else(|| concept.category.clone());
+                    .map(String::from);
+                warn_category_conflict(
+                    &safe_slug,
+                    existing_category.as_deref(),
+                    concept.category.as_deref(),
+                );
+                let category = existing_category.or_else(|| concept.category.clone());
 
                 ConceptDraft {
                     slug: safe_slug.clone(),
@@ -120,7 +130,14 @@ impl ConceptDrafts {
                     first_seen,
                     last_seen,
                     source_count,
-                    sources,
+                    // The `## 출처` body (re-derived by backlinks-sync) is the single
+                    // source-of-truth for citations; the in-memory `sources` set only
+                    // dedups within this run. `source_count` here is an approximation
+                    // that `lore graph backlinks-sync` re-derives exactly.
+                    sources: Vec::new(),
+                    preserved_synthesis: capture_section(&page.body, |s| s.concept_synthesis),
+                    preserved_sources: capture_section(&page.body, |s| s.concept_sources),
+                    preserved_related: capture_section(&page.body, |s| s.related),
                 }
             }
             None => ConceptDraft {
@@ -131,6 +148,9 @@ impl ConceptDrafts {
                 last_seen: date,
                 source_count: 0,
                 sources: vec![],
+                preserved_synthesis: None,
+                preserved_sources: None,
+                preserved_related: None,
             },
         };
 
@@ -182,6 +202,7 @@ impl ConceptDraft {
         locale: Locale,
     ) -> Result<RenderOutput, PipelineError> {
         let path = VaultPath::concept(dirs, &self.slug);
+        let strings = locale.strings();
 
         let context = serde_json::json!({
             "slug": self.slug,
@@ -190,25 +211,87 @@ impl ConceptDraft {
             "first_seen": self.first_seen.to_string(),
             "last_seen": self.last_seen.to_string(),
             "source_count": self.source_count,
-            "sources": self.sources,
+            // Tag with the category id when set, else the literal "concept" — the same
+            // invariant `/lore-process` writes, so every concept page carries at least
+            // one tag for Obsidian filtering.
             "tags": match self.category.as_deref().filter(|c| !c.is_empty()) {
                 Some(cat) => vec![cat],
-                None => Vec::<&str>::new(),
+                None => vec!["concept"],
             },
-            "i18n": locale.strings(),
+            "i18n": strings,
         });
 
         // concept.md.jinja is embedded, so it always resolves.
-        let content = engine
+        let mut content = engine
             .render("concept.md.jinja", &context)
             .map_err(|e| PipelineError::Render(e.to_string()))?;
+
+        // Splice the previously-captured bodies back into the freshly rendered
+        // page. These sections are owned by other writers (`/lore-process` for
+        // synthesis, `lore graph backlinks-sync` for `## 출처`, `lore-wiki audit`
+        // for `## 관련`) and re-rendering must NEVER wipe them.
+        for (heading, body) in [
+            (strings.concept_synthesis, &self.preserved_synthesis),
+            (strings.concept_sources, &self.preserved_sources),
+            (strings.related, &self.preserved_related),
+        ] {
+            if let Some(body) = body {
+                content = replace_section(&content, heading, body);
+            }
+        }
 
         Ok(RenderOutput { path, content })
     }
 }
 
+/// Capture the body of a logical concept section from an existing page so a
+/// re-render can splice it back in. `section` selects the heading from a locale's
+/// `Strings` (e.g. `|s| s.concept_synthesis`); the page is searched under EVERY
+/// locale's heading for that section, so a page authored before a `vault.locale`
+/// switch is still found — body content is never translated (i18n invariant), only
+/// the structural heading changes. Returns the body verbatim (trimmed of section
+/// framing newlines) for the first locale heading that yields non-empty content.
+fn capture_section(
+    body: &str,
+    section: fn(&lk_core::i18n::Strings) -> &'static str,
+) -> Option<String> {
+    let mut tried: Vec<&str> = Vec::new();
+    for locale in Locale::ALL {
+        let heading = section(locale.strings());
+        if tried.contains(&heading) {
+            continue;
+        }
+        tried.push(heading);
+        if let Some(raw) = section_body(body, heading) {
+            let trimmed = raw.trim_matches('\n');
+            if !trimmed.trim().is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
 pub(crate) fn canonical_slug(provided: &str, name: &str) -> Option<String> {
     slugify(provided).or_else(|| slugify(name))
+}
+
+/// Surface a genuine category conflict — an established category that a fresh
+/// extraction disagrees with. Identity is first-writer (the established one is kept),
+/// but a silent divergence would calcify a possibly-wrong assignment, so make it
+/// observable. Fires only when both sides are present and differ. Used for BOTH the
+/// in-memory-draft and on-disk merge paths so a same-run conflict isn't missed.
+fn warn_category_conflict(slug: &str, established: Option<&str>, incoming: Option<&str>) {
+    if let (Some(established), Some(incoming)) = (established, incoming)
+        && established != incoming
+    {
+        tracing::warn!(
+            concept = %slug,
+            established = %established,
+            extracted = %incoming,
+            "concept category conflict; keeping established category"
+        );
+    }
 }
 
 /// Filter that callers use to drop concepts whose slug would be empty before threading
@@ -224,6 +307,31 @@ pub(crate) fn strip_md_extension(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_section_finds_body_under_any_locale_heading() {
+        // A page authored under Ko has `## 핵심`. After a locale switch to En the
+        // capture must still find it (searched across all locale headings), so the
+        // LLM-authored body is preserved rather than silently wiped.
+        let ko_page = "# RAG\n\n## 핵심\n\nKorean-authored synthesis body.\n\n## 출처\n";
+        let captured = capture_section(ko_page, |s| s.concept_synthesis);
+        assert_eq!(
+            captured.as_deref(),
+            Some("Korean-authored synthesis body."),
+            "synthesis body authored under Ko must be found regardless of current locale"
+        );
+
+        // And the En heading on an En-authored page is found too.
+        let en_page = "# RAG\n\n## Synthesis\n\nEnglish body.\n\n## Sources\n";
+        assert_eq!(
+            capture_section(en_page, |s| s.concept_synthesis).as_deref(),
+            Some("English body.")
+        );
+
+        // Empty section → None (so a re-render doesn't splice a blank body).
+        let empty = "# RAG\n\n## 핵심\n\n\n## 출처\n";
+        assert!(capture_section(empty, |s| s.concept_synthesis).is_none());
+    }
 
     #[test]
     fn slug_with_slashes_is_normalized() {
@@ -245,6 +353,9 @@ mod tests {
             last_seen: jiff::civil::date(2026, 5, 1),
             source_count: 1,
             sources: vec!["daily/x/2026-05-01".into()],
+            preserved_synthesis: None,
+            preserved_sources: None,
+            preserved_related: None,
         };
         let engine = TemplateEngine::new(None).unwrap();
         let page = draft
@@ -259,8 +370,47 @@ mod tests {
             page.content
         );
         assert!(
-            page.content.contains("category: ai-ml"),
-            "category should appear in frontmatter:\n{}",
+            page.content.contains(r#"category: "ai-ml""#),
+            "category should appear in frontmatter as a JSON-quoted string:\n{}",
+            page.content
+        );
+    }
+
+    #[test]
+    fn preserved_sections_are_spliced_back_into_rendered_page() {
+        let draft = ConceptDraft {
+            slug: "rag".into(),
+            name: "RAG".into(),
+            category: Some("ai-ml".into()),
+            first_seen: jiff::civil::date(2026, 5, 1),
+            last_seen: jiff::civil::date(2026, 5, 1),
+            source_count: 1,
+            sources: vec!["daily/x/2026-05-01".into()],
+            preserved_synthesis: Some(
+                "Retrieval-Augmented Generation enriches an LLM prompt with retrieved context."
+                    .into(),
+            ),
+            preserved_sources: Some("- [[daily/x/2026-05-01]]\n- [[daily/x/2026-05-02]]".into()),
+            preserved_related: Some("- [[vector-search]]".into()),
+        };
+        let engine = TemplateEngine::new(None).unwrap();
+        let page = draft
+            .render(&engine, &VaultDirs::default(), Locale::Ko)
+            .unwrap();
+        assert!(
+            page.content
+                .contains("Retrieval-Augmented Generation enriches an LLM prompt"),
+            "synthesis body must survive re-render:\n{}",
+            page.content
+        );
+        assert!(
+            page.content.contains("- [[daily/x/2026-05-02]]"),
+            "sources body must survive re-render:\n{}",
+            page.content
+        );
+        assert!(
+            page.content.contains("- [[vector-search]]"),
+            "related body must survive re-render:\n{}",
             page.content
         );
     }
@@ -275,6 +425,9 @@ mod tests {
             last_seen: jiff::civil::date(2026, 5, 1),
             source_count: 0,
             sources: vec![],
+            preserved_synthesis: None,
+            preserved_sources: None,
+            preserved_related: None,
         };
         let engine = TemplateEngine::new(None).unwrap();
         let page = draft

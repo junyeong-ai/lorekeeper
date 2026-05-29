@@ -2,7 +2,6 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::path::Path;
 
-use lk_core::concept::slugify;
 use lk_core::wikilink;
 
 use crate::GraphError;
@@ -27,14 +26,21 @@ pub fn diff(
     root: &Path,
     wiki_dir: &Path,
     orphan_exclude: &[String],
-) -> IndexDrift {
+) -> Result<IndexDrift, GraphError> {
     let index_path = root.join(wiki_dir).join("index.md");
 
-    let Ok(content) = std::fs::read_to_string(&index_path) else {
-        return IndexDrift {
-            missing_from_index: vec![],
-            missing_from_disk: vec![],
-        };
+    // A MISSING index is a legitimate "not built yet" state → treat as empty so every
+    // page reports missing-from-index (prompting `lore wiki index`). A real read error
+    // (permissions, corruption) must NOT masquerade as "in sync" — propagate it.
+    let content = match std::fs::read_to_string(&index_path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            return Err(GraphError::Io(format!(
+                "read {}: {e}",
+                index_path.display()
+            )));
+        }
     };
 
     // `build_index` catalogs every vault page: concepts by `[[slug|title]]`
@@ -50,7 +56,7 @@ pub fn diff(
 
     let index_dir = root.join(wiki_dir).join("index");
     if index_dir.is_dir() {
-        for sub_content in read_sub_page_contents(&index_dir) {
+        for sub_content in read_sub_page_contents(&index_dir)? {
             for page in wikilink::extract_wikilinks(&sub_content) {
                 let slug = resolve_wikilink_target(&page);
                 if !slug.is_empty() {
@@ -62,9 +68,10 @@ pub fn diff(
 
     let exclude: HashSet<&str> = orphan_exclude.iter().map(String::as_str).collect();
 
-    let index_dir_slug =
-        slugify(&wiki_dir.to_string_lossy().replace('\\', "/")).unwrap_or_default();
-    let index_dir_prefix = format!("{index_dir_slug}/");
+    // Per-segment slug that PRESERVES path structure (`knowledge/wiki`, not
+    // `knowledge-wiki`) so the prefix matches the page ids the scanner produces —
+    // a nested `vault.dirs.wiki` must not silently drop pages from the drift check.
+    let index_dir_prefix = format!("{}/", scan::path_slug(wiki_dir));
 
     // The index catalog and AGENTS.md schema are reserved meta pages, never
     // cataloged (same exclusion the index builder applies).
@@ -104,10 +111,10 @@ pub fn diff(
         .collect();
     missing_from_disk.sort();
 
-    IndexDrift {
+    Ok(IndexDrift {
         missing_from_index,
         missing_from_disk,
-    }
+    })
 }
 
 pub fn fix(drift: &IndexDrift, root: &Path, wiki_dir: &Path) -> Result<usize, GraphError> {
@@ -121,8 +128,9 @@ pub fn fix(drift: &IndexDrift, root: &Path, wiki_dir: &Path) -> Result<usize, Gr
 
     let mut added = 0;
     for page_id in &drift.missing_from_index {
-        let name = page_id.rsplit('/').next().unwrap_or(page_id);
-        let _ = write!(content, "\n- [[{name}]]");
+        // Link by full page id, not the bare stem: two nested pages can share a
+        // filename, and a bare `[[stem]]` would resolve ambiguously (first match).
+        let _ = write!(content, "\n- [[{page_id}]]");
         added += 1;
     }
 
@@ -136,15 +144,22 @@ pub fn fix(drift: &IndexDrift, root: &Path, wiki_dir: &Path) -> Result<usize, Gr
     Ok(added)
 }
 
-fn read_sub_page_contents(dir: &Path) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("md"))
-        .filter_map(|e| std::fs::read_to_string(e.path()).ok())
-        .collect()
+fn read_sub_page_contents(dir: &Path) -> Result<Vec<String>, GraphError> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir)
+        .map_err(|e| GraphError::Io(format!("read dir {}: {e}", dir.display())))?
+    {
+        let entry =
+            entry.map_err(|e| GraphError::Io(format!("read entry in {}: {e}", dir.display())))?;
+        let path = entry.path();
+        if path.extension().and_then(|x| x.to_str()) == Some("md") {
+            out.push(
+                std::fs::read_to_string(&path)
+                    .map_err(|e| GraphError::Io(format!("read {}: {e}", path.display())))?,
+            );
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -187,7 +202,7 @@ mod tests {
 
         let graph = WikiGraph::build(&pages);
         let existence = VaultExistence::from_pages(&pages);
-        let drift = diff(&graph, &existence, tmp.path(), Path::new("wiki"), &[]);
+        let drift = diff(&graph, &existence, tmp.path(), Path::new("wiki"), &[]).unwrap();
 
         assert!(drift.missing_from_index.contains(&"wiki/gamma".to_owned()));
         assert!(drift.missing_from_disk.is_empty());
@@ -211,7 +226,7 @@ mod tests {
 
         let graph = WikiGraph::build(&pages);
         let existence = VaultExistence::from_pages(&pages);
-        let drift = diff(&graph, &existence, tmp.path(), Path::new("wiki"), &[]);
+        let drift = diff(&graph, &existence, tmp.path(), Path::new("wiki"), &[]).unwrap();
 
         assert!(drift.missing_from_disk.contains(&"nonexistent".to_owned()));
     }
@@ -229,12 +244,16 @@ mod tests {
         let added = fix(&drift, tmp.path(), Path::new("wiki")).unwrap();
         assert_eq!(added, 1);
 
+        // Full page id (not bare stem) so nested same-filename pages can't collide.
         let content = std::fs::read_to_string(tmp.path().join("wiki/index.md")).unwrap();
-        assert!(content.contains("[[gamma]]"));
+        assert!(content.contains("[[wiki/gamma]]"));
     }
 
     #[test]
-    fn missing_index_returns_empty_drift() {
+    fn missing_index_reports_all_pages_missing_not_in_sync() {
+        // A not-yet-built index must NOT read as "in sync" (that would hide that the
+        // catalog is absent). Every wiki page is reported missing-from-index so the
+        // user is prompted to run `lore wiki index`.
         let tmp = TempDir::new().unwrap();
         let wiki = tmp.path().join("wiki");
         std::fs::create_dir_all(&wiki).unwrap();
@@ -243,9 +262,11 @@ mod tests {
 
         let graph = WikiGraph::build(&pages);
         let existence = VaultExistence::from_pages(&pages);
-        let drift = diff(&graph, &existence, tmp.path(), Path::new("wiki"), &[]);
+        let drift = diff(&graph, &existence, tmp.path(), Path::new("wiki"), &[]).unwrap();
 
-        assert!(drift.is_in_sync());
+        assert!(!drift.is_in_sync());
+        assert!(drift.missing_from_index.contains(&"wiki/alpha".to_owned()));
+        assert!(drift.missing_from_index.contains(&"wiki/beta".to_owned()));
     }
 
     #[test]

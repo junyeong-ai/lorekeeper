@@ -1,12 +1,18 @@
 use std::path::{Path, PathBuf};
 
-use lk_core::config::{GraphConfig, VaultDirs};
+use lk_core::config::{ConceptCategory, GraphConfig, VaultDirs};
 use lk_core::i18n::Locale;
 use lk_graph::{
-    backlinks, cache, cluster, export, graph, index, normalize, output, relations, scan, stale,
+    backlinks, cache, cluster, concepts, export, graph, index, normalize, output, scan, stale,
 };
 
 use super::GlobalOpts;
+
+/// Sørensen-Dice slug-similarity at/above which two concept pages are reported as
+/// near-duplicate merge candidates in `graph lint`. 0.6 flags real variant spellings
+/// (`vector-db` ~ `vector-database` ≈ 0.64) while leaving unrelated slugs (~0.1)
+/// untouched. Read-only advisory, so recall is favored — a human vets each pair.
+const CONCEPT_NEAR_DUPLICATE_THRESHOLD: f64 = 0.6;
 
 struct ResolvedConfig {
     root: PathBuf,
@@ -14,6 +20,7 @@ struct ResolvedConfig {
     tz: jiff::tz::TimeZone,
     locale: Locale,
     vault_dirs: VaultDirs,
+    concept_categories: Vec<ConceptCategory>,
 }
 
 #[derive(clap::Subcommand)]
@@ -75,12 +82,6 @@ pub enum GraphCmd {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Rewrite each concept page's `## <Related>` section from community detection
-    RelationsSync {
-        /// Report what would change without writing
-        #[arg(long)]
-        dry_run: bool,
-    },
 }
 
 /// Returns exit code: 0 = ok/no findings, 1 = findings, 2 = runtime error.
@@ -113,17 +114,14 @@ fn run_inner(
     root_override: Option<PathBuf>,
     incremental: bool,
 ) -> Result<bool, String> {
-    // `stale`, `backlinks-sync`, and `relations-sync` need timezone/locale from
-    // the full config — dispatch them up front before paying the graph-build cost.
+    // `stale` and `backlinks-sync` need timezone/locale from the full config —
+    // dispatch them up front before paying the graph-build cost.
     match cmd {
         GraphCmd::Stale { days } => {
             return run_stale(opts, root_override, json, days, incremental);
         }
         GraphCmd::BacklinksSync { dry_run } => {
             return run_backlinks_sync(opts, root_override, json, dry_run, incremental);
-        }
-        GraphCmd::RelationsSync { dry_run } => {
-            return run_relations_sync(opts, root_override, json, dry_run, incremental);
         }
         _ => {}
     }
@@ -173,12 +171,24 @@ fn run_inner(
                 &rc.root,
                 Path::new(&rc.vault_dirs.wiki),
                 &rc.graph.graph.orphan_exclude,
-            );
+            )
+            .map_err(|e| format!("{e}"))?;
+            let invalid_categories =
+                concepts::invalid_categories(&rc.root, &rc.vault_dirs.wiki, &rc.concept_categories)
+                    .map_err(|e| format!("{e}"))?;
+            let near_duplicate_concepts = concepts::near_duplicate_concepts(
+                &rc.root,
+                &rc.vault_dirs.wiki,
+                CONCEPT_NEAR_DUPLICATE_THRESHOLD,
+            )
+            .map_err(|e| format!("{e}"))?;
 
             let findings = orphans.len()
                 + broken.len()
                 + drift.missing_from_index.len()
-                + drift.missing_from_disk.len();
+                + drift.missing_from_disk.len()
+                + invalid_categories.len()
+                + near_duplicate_concepts.len();
 
             let report = output::LintReport {
                 pages: g.node_count(),
@@ -192,6 +202,8 @@ fn run_inner(
                     missing_from_disk: drift.missing_from_disk,
                     fixed: None,
                 },
+                invalid_categories,
+                near_duplicate_concepts,
                 findings,
             };
             if json {
@@ -278,7 +290,8 @@ fn run_inner(
                 &rc.root,
                 Path::new(&rc.vault_dirs.wiki),
                 &rc.graph.graph.orphan_exclude,
-            );
+            )
+            .map_err(|e| format!("{e}"))?;
             let has = !drift.is_in_sync();
             let has_unfixable = !drift.missing_from_disk.is_empty();
             let fixed = if fix && !drift.missing_from_index.is_empty() {
@@ -346,9 +359,7 @@ fn run_inner(
         }
         // Dispatched at the top of `run_inner` because they need timezone/locale
         // from the full config and don't touch the WikiGraph.
-        GraphCmd::Stale { .. }
-        | GraphCmd::BacklinksSync { .. }
-        | GraphCmd::RelationsSync { .. } => unreachable!(),
+        GraphCmd::Stale { .. } | GraphCmd::BacklinksSync { .. } => unreachable!(),
     };
 
     // Persist the mtime cache after a successful scan so the next `--incremental`
@@ -461,61 +472,6 @@ fn run_backlinks_sync(
     Ok(false)
 }
 
-fn run_relations_sync(
-    opts: &GlobalOpts,
-    root_override: Option<PathBuf>,
-    json: bool,
-    dry_run: bool,
-    incremental: bool,
-) -> Result<bool, String> {
-    let mut rc = resolve_config_full(opts, root_override)?;
-
-    rc.graph.scope.dirs = vault_page_dirs(&rc.root, &rc.vault_dirs);
-
-    if incremental {
-        let cp = cache::cache_path(&rc.root);
-        if let Some(cached) = cache::load(&cp) {
-            let dirty = cache::is_dirty(
-                &rc.root,
-                &rc.graph.scope.dirs,
-                rc.graph.scope.follow_links,
-                &cached,
-            )
-            .map_err(|e| format!("{e}"))?;
-            if !dirty {
-                eprintln!("No changes since last scan");
-                return Ok(false);
-            }
-        }
-    }
-
-    let pages = scan::scan_vault(&rc.root, &rc.graph).map_err(|e| format!("{e}"))?;
-
-    let sync = relations::sync_concept_relations(
-        &pages,
-        &rc.root,
-        rc.locale,
-        dry_run,
-        &rc.vault_dirs,
-        &rc.graph,
-    )
-    .map_err(|e| format!("{e}"))?;
-    let changed = sync.updated.len();
-    let report = output::RelationsSyncReport { sync, changed };
-
-    if json {
-        output::print_json(&report)?;
-    } else {
-        output::print_relations_sync(&report);
-    }
-
-    if incremental && !dry_run {
-        save_cache_best_effort(&rc.root, &rc.graph);
-    }
-
-    Ok(false)
-}
-
 /// Best-effort cache save: build a fresh mtime snapshot and persist it. Warnings
 /// are printed to stderr but errors are not propagated — a failed cache save must
 /// not turn a successful graph command into a failure.
@@ -573,6 +529,7 @@ fn resolve_config_full(
             tz: jiff::tz::TimeZone::system(),
             locale: Locale::default(),
             vault_dirs,
+            concept_categories: Vec::new(),
         });
     }
 
@@ -584,5 +541,6 @@ fn resolve_config_full(
         locale: config.vault.locale(),
         vault_dirs: config.vault.dirs.clone(),
         graph: config.graph,
+        concept_categories: config.concepts.categories,
     })
 }

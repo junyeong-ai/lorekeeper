@@ -1,13 +1,11 @@
-//! Keep concept page `## <Sources>` sections in sync with the actual
-//! wikilink graph.
-//!
-//! During ingestion the concept renderer writes the `sources:` frontmatter and the
-//! body listing from the same in-memory state, so they agree at write time. But
-//! either side can drift after the fact: a daily page is manually edited to add
-//! or remove a `[[concept]]` link, or the page is regenerated under a different
-//! pipeline. This module re-derives the sources list deterministically — every
-//! daily/work-log/etc. page that wikilinks the concept becomes a `- [[…]]` entry
-//! — and rewrites the section if the disk copy differs.
+//! Re-derive each concept page's `## <Sources>` body AND its frontmatter
+//! `source_count` from the actual wikilink graph — this module is the single
+//! source-of-truth for both. Ingest writes neither the body (it renders the heading
+//! empty) nor an exact count (it only approximates `source_count`), so this sync is
+//! what makes them correct: every daily/work-log/etc. page that wikilinks the concept
+//! becomes a `- [[…]]` entry, and the count is that entry total. Manual edits (a daily
+//! page gains/loses a `[[concept]]` link) and source-page deletions are reflected on
+//! the next run.
 //!
 //! Pure set comparison: no heuristics, no LLM, no per-source rules. A page is in
 //! the sources list iff it has an outgoing wikilink whose target resolves to that
@@ -18,8 +16,9 @@ use std::path::{Path, PathBuf};
 
 use lk_core::concept::slugify;
 use lk_core::config::VaultDirs;
+use lk_core::frontmatter;
 use lk_core::i18n::Locale;
-use lk_vault::{VaultWriter, replace_section};
+use lk_vault::{VaultWriter, replace_section, section_body};
 use serde::Serialize;
 
 use crate::GraphError;
@@ -81,7 +80,6 @@ pub fn sync_concept_backlinks(
         }
     }
 
-    let heading = locale.strings().concept_sources;
     let writer = VaultWriter::new(vault_root);
     let mut report = SyncReport {
         dry_run,
@@ -121,11 +119,30 @@ pub fn sync_concept_backlinks(
         let raw = std::fs::read_to_string(&full_path)
             .map_err(|e| GraphError::Io(format!("failed to read {}: {e}", full_path.display())))?;
 
+        // Find the existing Sources heading under ANY locale (a page authored before a
+        // `vault.locale` switch keeps its old-language heading), then rewrite under it —
+        // mirrors the pipeline's all-locale `capture_section`. New pages with no such
+        // section fall back to the current locale's heading.
+        let heading = Locale::ALL
+            .iter()
+            .map(|l| l.strings().concept_sources)
+            .find(|h| section_body(&raw, h).is_some())
+            .unwrap_or_else(|| locale.strings().concept_sources);
+
         let existing = parse_existing_sources(&raw, heading);
         let existing_set: BTreeSet<&str> = existing.iter().map(String::as_str).collect();
         let desired_set: BTreeSet<&str> = sources.iter().map(String::as_str).collect();
 
-        if existing_set == desired_set {
+        // `source_count` frontmatter is re-derived here too (ingest only approximates
+        // it): the authoritative count is the number of incoming citations, the same
+        // set that drives the `## 출처` body.
+        let existing_count = frontmatter::parse_page(&raw)
+            .ok()
+            .and_then(|p| p.frontmatter.get("source_count").and_then(|v| v.as_u64()))
+            .unwrap_or(0);
+        let desired_count = sources.len() as u64;
+
+        if existing_set == desired_set && existing_count == desired_count {
             report.unchanged += 1;
             continue;
         }
@@ -140,7 +157,8 @@ pub fn sync_concept_backlinks(
             .collect();
 
         let new_body = render_sources_body(&sources);
-        let updated_content = replace_section(&raw, heading, &new_body);
+        let updated_content =
+            set_source_count(&replace_section(&raw, heading, &new_body), desired_count);
 
         if !dry_run && updated_content != raw {
             writer
@@ -235,6 +253,58 @@ pub(crate) fn parse_existing_sources(content: &str, heading: &str) -> Vec<String
     out
 }
 
+/// Set the frontmatter `source_count` field to `count`, operating ONLY inside the
+/// frontmatter block (between the first two `---` lines) so a `source_count:` in body
+/// prose/code is never mutated. If the field is absent it is inserted before the
+/// closing `---`, so a later run sees it and is idempotent. A page with no frontmatter
+/// block is returned unchanged.
+fn set_source_count(content: &str, count: u64) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut in_frontmatter = false;
+    let mut seen_open = false;
+    let mut done = false;
+    let mut first_line = true;
+    for line in content.split_inclusive('\n') {
+        let is_fence = line.strip_suffix('\n').unwrap_or(line).trim_end() == "---";
+        // The opening fence must be the document's FIRST line — same rule as
+        // `frontmatter::parse_page`. This prevents a body thematic break (`---`) in a
+        // page that has no frontmatter from being mistaken for a frontmatter opener.
+        let was_first = first_line;
+        first_line = false;
+        if is_fence && !seen_open && was_first {
+            seen_open = true;
+            in_frontmatter = true;
+            out.push_str(line);
+            continue;
+        }
+        if is_fence && in_frontmatter {
+            // Closing fence: if the field was never seen, insert it now.
+            if !done {
+                out.push_str("source_count: ");
+                out.push_str(&count.to_string());
+                out.push('\n');
+                done = true;
+            }
+            in_frontmatter = false;
+            out.push_str(line);
+            continue;
+        }
+        if in_frontmatter && !done && line.trim_start().starts_with("source_count:") {
+            let indent = &line[..line.len() - line.trim_start().len()];
+            out.push_str(indent);
+            out.push_str("source_count: ");
+            out.push_str(&count.to_string());
+            if line.ends_with('\n') {
+                out.push('\n');
+            }
+            done = true;
+        } else {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
 /// Render the sources list to the same shape `concept.md.jinja` produces:
 /// `- [[id]]` per line, newline-separated, no trailing newline (the section
 /// helper owns separators).
@@ -263,12 +333,15 @@ mod tests {
     fn write_concept(dir: &TempDir, stem: &str, sources: &[&str]) {
         let path = dir.path().join("wiki/concepts").join(format!("{stem}.md"));
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let count = sources.len();
         let body = if sources.is_empty() {
-            format!("---\nid: {stem}\n---\n\n# {stem}\n\n## 출처\n\n\n## 메타\n\n- key: value\n")
+            format!(
+                "---\nid: {stem}\nsource_count: {count}\n---\n\n# {stem}\n\n## 출처\n\n\n## 메타\n\n- key: value\n"
+            )
         } else {
             let lines: Vec<String> = sources.iter().map(|s| format!("- [[{s}]]")).collect();
             format!(
-                "---\nid: {stem}\n---\n\n# {stem}\n\n## 출처\n\n{}\n\n## 메타\n\n- key: value\n",
+                "---\nid: {stem}\nsource_count: {count}\n---\n\n# {stem}\n\n## 출처\n\n{}\n\n## 메타\n\n- key: value\n",
                 lines.join("\n")
             )
         };

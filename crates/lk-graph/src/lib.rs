@@ -8,12 +8,12 @@
 pub mod backlinks;
 pub mod cache;
 pub mod cluster;
+pub mod concepts;
 pub mod export;
 pub mod graph;
 pub mod index;
 pub mod normalize;
 pub mod output;
-pub mod relations;
 pub mod scan;
 pub mod stale;
 

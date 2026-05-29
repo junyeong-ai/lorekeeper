@@ -5,6 +5,8 @@ created: {{ date }}
 labels: {{ labels | tojson }}
 period: "{{ year }}-W{{ "%02d" | format(week) }}"
 sources_covered: {{ sources | tojson }}
+llm_inputs:
+  themes: {{ llm_inputs.themes | tojson }}
 ---
 
 # {{ i18n.weekly_synthesis_title }} {{ year }}-W{{ "%02d" | format(week) }}
@@ -16,10 +18,4 @@ sources_covered: {{ sources | tojson }}
 
 {{ theme.description }}
 
-{% endfor %}
-
-## {{ i18n.new_concepts }}
-
-{% for concept in new_concepts %}
-- [[{{ concept }}]]
 {% endfor %}

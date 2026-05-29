@@ -2,7 +2,7 @@
 
 Wikilink graph analysis. Pure deterministic — no HTTP, no LLM. The only vault
 writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
-`backlinks-sync`/`relations-sync` without `--dry-run`) and the mtime scan cache
+`backlinks-sync` without `--dry-run`) and the mtime scan cache
 (`<vault>/.lorekeeper/graph-cache.json`, atomic temp+rename).
 
 - **deps**: `lk-core` (slugify, frontmatter, wikilink) + `petgraph` + `rayon` +
@@ -45,10 +45,28 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
   pages qualify as sources (concept-to-concept links belong in `## 관련`).
   Note: the actual heading text (`출처`/`Sources`, `관련`/`Related`) is resolved
   from `locale.strings()` at runtime — the Korean/English forms shown here are
-  examples for both locales, not hardcoded literals.
-- **`relations::sync_concept_relations`**: rewrites `## 관련`/`## Related` on
-  each concept page based on Louvain community co-membership. Uses full-vault
-  scope (same as `backlinks-sync`) so `<daily>`/`<personal>` pages contribute
-  to community structure. Two concepts are related iff they are in the same
-  community. Pure deterministic, no LLM. Same idempotent diff-based pattern
-  as `backlinks-sync`.
+  examples for both locales, not hardcoded literals. It ALSO re-derives the
+  frontmatter `source_count` (= number of incoming citations) so the count reflects
+  source deletions; ingest only approximates it. The `## 출처` body is the single
+  source-of-truth for citations — concept frontmatter carries no `sources` array.
+- **`## 관련`/`## Related` is NOT machine-written.** Louvain communities encode
+  "co-cited together" (the graph is dominated by daily/document→concept edges), not
+  topical relatedness, so auto-writing community co-membership as `[[related]]` edges
+  manufactures co-occurrence noise and self-reinforcing cliques. Related links are
+  instead curated via `lore-wiki audit`: `suggest_links` proposes candidates and an
+  LLM confirms genuine relationships before any edge is written. `## 출처`
+  (citation-derived, `backlinks-sync`) is the only machine-maintained concept relation.
+- **`concepts::invalid_categories`**: surfaces concept pages whose `category`
+  frontmatter value is not in `config.concepts.categories[].id`. The ingest
+  pipeline strips invalid categories synchronously, but queue-mode concept
+  page creation is done by `/lore-process` which can emit a category the
+  skill invented. Lint reports them so `graph lint` exits non-zero and the
+  drift is observable; nothing is mutated automatically. Empty configured
+  list (categorisation off) suppresses every finding. Pages without a
+  `category` field are not flagged — that is the documented uncategorised
+  state.
+- **`concepts::near_duplicate_concepts`**: reports concept-slug pairs whose
+  Sørensen-Dice similarity ≥ threshold (CLI default 0.6) — variant-spelling
+  duplicates (`vector-db` ~ `vector-database`) the LLM dedup hint missed. Read-only
+  merge candidates surfaced in `graph lint`; a human decides. The slug filename is
+  the canonical identity (no frontmatter parse). Distinct slugs (~0.1) never fire.

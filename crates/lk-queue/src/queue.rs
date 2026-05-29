@@ -32,6 +32,21 @@ pub struct QueueTask {
     pub task_id: String,
     pub kind: TaskKind,
     pub created_at: jiff::Timestamp,
+    /// BLAKE3-128 of the request's `cache_identity()` — see `cache_hash`.
+    /// Identical to the `llm_inputs.<key>` value the pipeline stamped into
+    /// `target.vault_path` at queue time. `/lore-process` MUST compare this
+    /// against the page's current frontmatter before writing; a mismatch means
+    /// the task is stale (the page was re-rendered between enqueue and
+    /// processing) and must be dropped without modifying the page. Without this
+    /// guard a stale task would overwrite the section with content keyed to an
+    /// older input, and the next ingest's cache lookup would freeze that
+    /// mismatch forever.
+    ///
+    /// Note this hashes `cache_identity()`, NOT the `input` field below — `input`
+    /// carries extra task hints (the `existing_concepts` dedup registry and the
+    /// originating `source_type`) that intentionally do not participate in cache
+    /// identity.
+    pub cache_hash: String,
     pub input: serde_json::Value,
     pub target: TaskTarget,
 }
@@ -49,11 +64,14 @@ impl QueueLlmClient {
     pub fn new(queue_dir: PathBuf) -> Self {
         // Wall-clock second + PID separates distinct CLI invocations; a process-global
         // sequence additionally separates two clients constructed in the same process and
-        // second, so their flushes never rename onto the same final path.
+        // second, so their flushes never rename onto the same final path. The timestamp
+        // is UTC — filenames are sortable across machines and timezones.
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let run_id = format!(
             "{}-pid{}-{}",
-            jiff::Zoned::now().strftime("%Y-%m-%dT%H-%M-%SZ"),
+            jiff::Timestamp::now()
+                .to_zoned(jiff::tz::TimeZone::UTC)
+                .strftime("%Y-%m-%dT%H-%M-%SZ"),
             std::process::id(),
             SEQ.fetch_add(1, Ordering::Relaxed),
         );
@@ -86,28 +104,22 @@ impl QueueLlmClient {
 #[async_trait]
 impl LlmClient for QueueLlmClient {
     async fn summarize(&self, req: SummarizeRequest) -> Result<String, LlmError> {
-        let mut input = serde_json::json!({
-            "text": req.text,
-            "max_sentences": req.max_sentences,
-            "locale": req.locale,
-        });
-        if let Some(focus) = &req.focus {
-            input["focus"] = serde_json::Value::String(focus.clone());
-        }
         let kind = if req.target.kind == crate::TargetKind::DailyRefineEvents {
             TaskKind::RefineEvents
         } else {
             TaskKind::Summarize
         };
+        let prefix = if kind == TaskKind::RefineEvents {
+            "ref"
+        } else {
+            "sum"
+        };
         let task = QueueTask {
-            task_id: self.next_id(if kind == TaskKind::RefineEvents {
-                "ref"
-            } else {
-                "sum"
-            }),
+            task_id: self.next_id(prefix),
             kind,
             created_at: jiff::Timestamp::now(),
-            input,
+            cache_hash: req.cache_hash(),
+            input: req.task_input(),
             target: req.target,
         };
         self.enqueue(task).await;
@@ -118,26 +130,12 @@ impl LlmClient for QueueLlmClient {
         &self,
         req: ExtractConceptsRequest,
     ) -> Result<Vec<ExtractedConcept>, LlmError> {
-        let mut input = serde_json::json!({
-            "text": req.text,
-            "source_id": req.source_id,
-            "date": req.date.to_string(),
-        });
-        if let Some(focus) = &req.focus {
-            input["focus"] = serde_json::Value::String(focus.clone());
-        }
-        if !req.existing_concepts.is_empty() {
-            input["existing_concepts"] =
-                serde_json::to_value(&req.existing_concepts).expect("serializable");
-        }
-        if !req.categories.is_empty() {
-            input["categories"] = serde_json::to_value(&req.categories).expect("serializable");
-        }
         let task = QueueTask {
             task_id: self.next_id("ext"),
             kind: TaskKind::ExtractConcepts,
             created_at: jiff::Timestamp::now(),
-            input,
+            cache_hash: req.cache_hash(),
+            input: req.task_input(),
             target: req.target,
         };
         self.enqueue(task).await;
@@ -145,15 +143,12 @@ impl LlmClient for QueueLlmClient {
     }
 
     async fn identify_themes(&self, req: ThemeRequest) -> Result<Vec<Theme>, LlmError> {
-        let input = serde_json::json!({
-            "text": req.text,
-            "max_themes": req.max_themes,
-        });
         let task = QueueTask {
             task_id: self.next_id("thm"),
             kind: TaskKind::IdentifyThemes,
             created_at: jiff::Timestamp::now(),
-            input,
+            cache_hash: req.cache_hash(),
+            input: req.task_input(),
             target: req.target,
         };
         self.enqueue(task).await;
@@ -229,6 +224,7 @@ mod tests {
             text: "Some content".into(),
             max_sentences: 5,
             locale: "ko".into(),
+            source_type: None,
             focus: None,
             target: TaskTarget {
                 vault_path: "daily/test/2026-05-23.md".into(),
@@ -266,6 +262,7 @@ mod tests {
                 text: "x".into(),
                 max_sentences: 5,
                 locale: "ko".into(),
+                source_type: None,
                 focus: None,
                 target: TaskTarget {
                     vault_path: "p".into(),
@@ -291,6 +288,7 @@ mod tests {
         let req = ExtractConceptsRequest {
             text: "Anthropic releases Opus 4.7".into(),
             source_id: "ai-news".into(),
+            source_type: lk_core::config::SourceType::Gmail,
             date: jiff::civil::date(2026, 5, 23),
             focus: None,
             target: TaskTarget {
@@ -322,6 +320,7 @@ mod tests {
             .extract_concepts(ExtractConceptsRequest {
                 text: "mixed feed".into(),
                 source_id: "tech-news".into(),
+                source_type: lk_core::config::SourceType::Gmail,
                 date: jiff::civil::date(2026, 5, 23),
                 focus: Some("software engineering and AI/ML only".into()),
                 target: TaskTarget {
@@ -372,6 +371,7 @@ mod tests {
             text: "x".into(),
             max_sentences: 5,
             locale: "ko".into(),
+            source_type: None,
             focus: None,
             target: TaskTarget {
                 vault_path: "p".into(),
@@ -391,6 +391,164 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cache_hash_is_stable_across_field_order() {
+        // The cache identity must produce the same hash regardless of the order
+        // existing_concepts and categories arrive in — categories are sorted before
+        // hashing and existing_concepts is excluded from the identity entirely.
+        use crate::{CategoryRef, ExistingConceptRef};
+        let date = jiff::civil::date(2026, 5, 23);
+        let a = ExtractConceptsRequest {
+            text: "x".into(),
+            source_id: "ai-news".into(),
+            source_type: lk_core::config::SourceType::Gmail,
+            date,
+            focus: None,
+            target: TaskTarget {
+                vault_path: "p".into(),
+                kind: TargetKind::DailyConcepts,
+                anchor: "## c".into(),
+            },
+            existing_concepts: vec![
+                ExistingConceptRef {
+                    slug: "alpha".into(),
+                    name: "Alpha".into(),
+                },
+                ExistingConceptRef {
+                    slug: "beta".into(),
+                    name: "Beta".into(),
+                },
+            ],
+            categories: vec![
+                CategoryRef {
+                    id: "ai-ml".into(),
+                    label: "AI/ML".into(),
+                },
+                CategoryRef {
+                    id: "infra".into(),
+                    label: "Infra".into(),
+                },
+            ],
+        };
+        let mut b = a.clone();
+        b.existing_concepts.reverse();
+        b.categories.reverse();
+        assert_eq!(a.cache_hash(), b.cache_hash());
+    }
+
+    #[tokio::test]
+    async fn cache_hash_changes_when_input_text_changes() {
+        let target = TaskTarget {
+            vault_path: "p".into(),
+            kind: TargetKind::DailySummary,
+            anchor: "## s".into(),
+        };
+        let a = SummarizeRequest {
+            text: "v1".into(),
+            max_sentences: 5,
+            locale: "ko".into(),
+            source_type: None,
+            focus: None,
+            target: target.clone(),
+        };
+        let b = SummarizeRequest {
+            text: "v2".into(),
+            ..a.clone()
+        };
+        assert_ne!(a.cache_hash(), b.cache_hash());
+    }
+
+    #[tokio::test]
+    async fn cache_hash_ignores_target() {
+        // target.vault_path is the OUTPUT location — it must not perturb the input
+        // hash, otherwise renaming a daily file path would invalidate every cache.
+        let a = SummarizeRequest {
+            text: "x".into(),
+            max_sentences: 5,
+            locale: "ko".into(),
+            source_type: None,
+            focus: None,
+            target: TaskTarget {
+                vault_path: "daily/a.md".into(),
+                kind: TargetKind::DailySummary,
+                anchor: "## s".into(),
+            },
+        };
+        let b = SummarizeRequest {
+            target: TaskTarget {
+                vault_path: "daily/b.md".into(),
+                kind: TargetKind::DailySummary,
+                anchor: "## s".into(),
+            },
+            ..a.clone()
+        };
+        assert_eq!(a.cache_hash(), b.cache_hash());
+    }
+
+    #[tokio::test]
+    async fn theme_cache_hash_changes_when_locale_changes() {
+        // Theme titles/descriptions are prose written into a localized synthesis page,
+        // so a vault.locale flip MUST invalidate the cache — otherwise the stale-task
+        // guard would freeze wrong-language themes under a matching hash.
+        let target = TaskTarget {
+            vault_path: "synthesis/weekly/2026-W01.md".into(),
+            kind: TargetKind::WeeklySynthesisNarrative,
+            anchor: "## Themes".into(),
+        };
+        let ko = ThemeRequest {
+            text: "combined source text".into(),
+            max_themes: 5,
+            locale: "ko".into(),
+            target: target.clone(),
+        };
+        let en = ThemeRequest {
+            locale: "en".into(),
+            ..ko.clone()
+        };
+        assert_ne!(ko.cache_hash(), en.cache_hash());
+    }
+
+    #[tokio::test]
+    async fn run_id_timestamp_is_utc() {
+        // The run_id prefix is `YYYY-MM-DDTHH-MM-SSZ`; the literal `Z` must reflect
+        // actual UTC, not local time. Verify by reparsing as UTC and confirming the
+        // delta from `Timestamp::now()` is small.
+        let dir = TempDir::new().unwrap();
+        let before = jiff::Timestamp::now();
+        let client = QueueLlmClient::new(dir.path().to_path_buf());
+        let after = jiff::Timestamp::now();
+
+        let ts_str = client
+            .run_id()
+            .split("-pid")
+            .next()
+            .expect("run_id has -pid separator");
+        // Convert `YYYY-MM-DDTHH-MM-SSZ` back to RFC3339 by turning the last three
+        // hyphens (the time-component separators) into colons. The first two
+        // hyphens (date separators) stay.
+        let mut rfc = String::with_capacity(ts_str.len());
+        let mut dash_count = 0;
+        for b in ts_str.bytes() {
+            if b == b'-' {
+                dash_count += 1;
+                if dash_count > 2 {
+                    rfc.push(':');
+                    continue;
+                }
+            }
+            rfc.push(b as char);
+        }
+        let parsed: jiff::Timestamp = rfc.parse().expect("run_id timestamp must parse as UTC");
+
+        // The run_id is truncated to seconds; allow a 2-second window around now.
+        let lower = before.duration_since(parsed);
+        let upper = parsed.duration_since(after);
+        assert!(
+            lower.as_secs().abs() <= 2 && upper.as_secs().abs() <= 2,
+            "run_id timestamp {parsed} is not close to now [{before}, {after}]",
+        );
+    }
+
+    #[tokio::test]
     async fn flush_rename_failure_leaves_no_tmp() {
         // Force the atomic rename to fail by occupying the final path with a directory,
         // then assert flush errors AND the temp file is cleaned up (no partial .jsonl,
@@ -402,6 +560,7 @@ mod tests {
                 text: "x".into(),
                 max_sentences: 5,
                 locale: "ko".into(),
+                source_type: None,
                 focus: None,
                 target: TaskTarget {
                     vault_path: "p".into(),

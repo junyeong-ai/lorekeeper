@@ -12,6 +12,11 @@ pub enum Locale {
 }
 
 impl Locale {
+    /// Every locale variant. The single place to enumerate locales — code that needs
+    /// to consider all of them (e.g. finding a section heading authored under a
+    /// since-changed `vault.locale`) iterates this instead of hardcoding the list.
+    pub const ALL: &'static [Locale] = &[Locale::Ko, Locale::En];
+
     /// Parse a BCP-47-ish tag (`ko`, `ko-KR`, `en`, `en-US`); unknown/absent → `Ko`.
     pub fn from_tag(tag: Option<&str>) -> Self {
         match tag.map(str::to_ascii_lowercase).as_deref() {
@@ -78,15 +83,10 @@ pub struct Strings {
     pub key_summary: &'static str,
     pub work_categories: &'static str,
     pub key_themes_this_week: &'static str,
-    pub new_concepts: &'static str,
     pub overall_summary: &'static str,
     pub quarterly_breakdown: &'static str,
     pub monthly_breakdown: &'static str,
     pub category_distribution: &'static str,
-    pub top_achievements: &'static str,
-    pub team_contribution: &'static str,
-    pub growth_areas: &'static str,
-    pub next_quarter: &'static str,
     // Quarterly table columns
     pub col_category: &'static str,
     pub col_count: &'static str,
@@ -111,6 +111,9 @@ pub struct Strings {
     /// Thread-reply marker; used as `--- {thread_replies} {n} ---`.
     pub thread_replies: &'static str,
     pub uncategorized: &'static str,
+    /// Placeholder title for a source item that arrives without one (a calendar
+    /// event with no summary, a Jira issue with no summary).
+    pub untitled: &'static str,
     // Page-title labels (dynamic date/number appended by the caller/template)
     pub gmail_title: &'static str,
     pub calendar_title: &'static str,
@@ -154,15 +157,10 @@ static KO: Strings = Strings {
     key_summary: "핵심 요약",
     work_categories: "업무 카테고리",
     key_themes_this_week: "이번 주 핵심 주제",
-    new_concepts: "새로 등장한 개념",
     overall_summary: "종합 요약",
     quarterly_breakdown: "분기별 요약",
     monthly_breakdown: "월별 요약",
     category_distribution: "업무 카테고리 분포",
-    top_achievements: "주요 성과 Top 5",
-    team_contribution: "팀 내 기여도",
-    growth_areas: "성장 영역",
-    next_quarter: "다음 분기 방향",
     col_category: "카테고리",
     col_count: "건수",
     col_ratio: "비중",
@@ -183,6 +181,7 @@ static KO: Strings = Strings {
     original_link: "원본",
     thread_replies: "쓰레드 답글",
     uncategorized: "기타",
+    untitled: "(제목 없음)",
     gmail_title: "이메일 다이제스트",
     calendar_title: "내 일정",
     drive_title: "문서 브리핑",
@@ -221,15 +220,10 @@ static EN: Strings = Strings {
     key_summary: "Summary",
     work_categories: "Work Categories",
     key_themes_this_week: "Key Themes This Week",
-    new_concepts: "New Concepts",
     overall_summary: "Overview",
     quarterly_breakdown: "By Quarter",
     monthly_breakdown: "By Month",
     category_distribution: "Category Distribution",
-    top_achievements: "Top 5 Achievements",
-    team_contribution: "Team Contribution",
-    growth_areas: "Growth Areas",
-    next_quarter: "Next Quarter",
     col_category: "Category",
     col_count: "Count",
     col_ratio: "Share",
@@ -250,6 +244,7 @@ static EN: Strings = Strings {
     original_link: "Source",
     thread_replies: "thread replies",
     uncategorized: "Other",
+    untitled: "(untitled)",
     gmail_title: "Email Digest",
     calendar_title: "My Schedule",
     drive_title: "Document Briefing",

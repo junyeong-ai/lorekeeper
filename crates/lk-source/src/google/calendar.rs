@@ -211,7 +211,9 @@ impl Source for CalendarSource {
             let Some(id) = ev.id else {
                 continue;
             };
-            let summary = ev.summary.unwrap_or_else(|| "(no title)".into());
+            let summary = ev
+                .summary
+                .unwrap_or_else(|| ctx.locale.strings().untitled.to_string());
 
             // Timed events carry an RFC3339 `dateTime`; all-day events carry only a
             // `date` (YYYY-MM-DD), parsed as a civil date anchored to the configured

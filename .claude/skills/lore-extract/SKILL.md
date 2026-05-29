@@ -174,11 +174,10 @@ Extract knowledge using the manifest. Requires a prior scan.
       # Example (illustrative — see AGENTS.md for canonical format)
       id: {project}-{slug}
       title: "{Generalised Title}"
-      aliases: ["{Title}"]
       created: {today}
       updated: {today}
       document_type: project-knowledge | engineering-guide
-      source_project: {project-name}
+      source_url: {repo-url}
       source_file:
         - {path-within-repo}
         - {path-within-repo}
@@ -187,10 +186,9 @@ Extract knowledge using the manifest. Requires a prior scan.
       ```
 
    h. Create/merge concept pages per standard protocol.
-      Concept `sources` uses the vault document page id (not file paths):
-      ```yaml
-      sources: ["{project}-{slug}"]
-      ```
+      Concept citations go in the `## 출처` (Sources) body as
+      `- [[{project}-{slug}]]` (the vault document page id) — NOT in
+      frontmatter. `backlinks-sync` re-derives the body and `source_count`.
 
    i. **Update manifest** `extracted` list with the new entry.
 

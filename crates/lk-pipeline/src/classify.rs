@@ -62,21 +62,26 @@ pub fn flag_personal(events: &mut [Event], identity: &Identity) {
 }
 
 /// A character that can be part of the same identifier token (name, email, Slack/
-/// Jira id) as a matched needle. Includes alphanumerics (Hangul/CJK included via
-/// `is_alphanumeric`) plus the punctuation that appears *inside* emails and
-/// usernames. `@` is deliberately excluded: it is part of an email but also a
-/// mention sigil (`<@U123>`), and `.` alone already blocks the only false positive
-/// it guarded (`test@example.com` inside `test@example.com.au`), so excluding it
-/// avoids a false negative on `@`-prefixed identifiers without reintroducing that.
+/// Jira id) as a matched needle. **ASCII only** — alphanumerics plus the punctuation
+/// that appears *inside* emails and usernames. CJK scripts are deliberately NOT
+/// identifier characters: unlike space-delimited Latin text, agglutinative Korean
+/// writes content morphemes with no separator (the particle in "검토를", the honorific
+/// in "이준영님"), so treating an adjacent Hangul syllable as "same token" would make
+/// every particle/honorific suppress a real match. Excluding CJK means a CJK needle
+/// matches as a substring (correct for morpheme-joined text) while ASCII keeps strict
+/// token boundaries. `@` is excluded so a Slack `<@U123>` mention still matches a user
+/// id; `.` already blocks the `test@example.com` vs `...com.au` case.
 fn is_identifier_char(c: char) -> bool {
-    c.is_alphanumeric() || matches!(c, '.' | '_' | '%' | '+' | '-')
+    c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '%' | '+' | '-')
 }
 
-/// Substring match that requires the needle to NOT be flanked by identifier
-/// characters on either side — a language-agnostic token boundary. Prevents the
-/// false positives a plain `contains` produces: name "kim" matching "kimberly",
-/// "이준영" matching "이준영팀" (that person's *team*), or email
-/// "test@example.com" matching "test@example.com.au" (a different domain).
+/// Substring match that requires the needle to NOT be flanked by ASCII identifier
+/// characters on either side. Prevents the false positives a plain `contains`
+/// produces in Latin text — name "kim" matching "kimberly", keyword "AI" matching
+/// "FAIR", email "test@example.com" matching "test@example.com.au" — while a CJK
+/// needle (no ASCII boundary chars around it) matches as a substring, so Korean
+/// keywords/names match across attached particles ("검토" in "검토를", "이준영" in
+/// "이준영님").
 fn contains_bounded(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return false;
@@ -123,56 +128,6 @@ pub fn classify_by_keywords(events: &mut [Event], rules: &[lk_core::config::Clas
             if matched {
                 event.work_category = Some(rule.category.clone());
                 break;
-            }
-        }
-    }
-}
-
-/// LLM fallback for events that remain unclassified after keyword matching.
-/// Sends each unclassified event to the LLM with the full category list; the LLM
-/// picks the best category or returns `None`. Queue and noop modes return `None`
-/// and the event stays unclassified — a safe degradation, since the daily page
-/// renders it in the general section and the work-log routes it to `uncategorized`.
-pub async fn classify_with_llm(
-    events: &mut [Event],
-    rules: &[lk_core::config::ClassifyRule],
-    llm: &std::sync::Arc<dyn lk_queue::LlmClient>,
-) {
-    if rules.is_empty() {
-        return;
-    }
-
-    let categories: Vec<String> = rules.iter().map(|r| r.category.clone()).collect();
-
-    for event in events.iter_mut() {
-        if event.work_category.is_some() {
-            continue;
-        }
-
-        let excerpt = if event.body.len() > 500 {
-            &event.body[..event.body.floor_char_boundary(500)]
-        } else {
-            &event.body
-        };
-
-        match llm
-            .classify(lk_queue::ClassifyRequest {
-                title: event.title.clone(),
-                excerpt: excerpt.to_string(),
-                categories: categories.clone(),
-            })
-            .await
-        {
-            Ok(Some(cat)) => {
-                event.work_category = Some(cat);
-            }
-            Ok(None) => {}
-            Err(e) if e.is_fatal() => {
-                tracing::error!(error = %e, event_id = %event.id, "fatal LLM classify error");
-                return;
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, event_id = %event.id, "LLM classify failed; skipping");
             }
         }
     }
@@ -276,21 +231,45 @@ mod tests {
     }
 
     #[test]
-    fn cjk_name_does_not_match_team_suffix() {
+    fn cjk_name_matches_across_attached_particles() {
         let identity = Identity {
             name: "이준영".into(),
             email: "e@x.com".into(),
             slack_id: None,
             jira_id: None,
         };
-        // "이준영팀" (Lee Junyeong's *team*) is not the person's own work.
-        let mut events = vec![make_event("회의", Some("이준영팀"))];
-        flag_personal(&mut events, &identity);
-        assert!(!events[0].is_personal);
+        // Korean attaches honorifics/particles with no separator; the name must still
+        // match (the ASCII token-boundary model would wrongly miss these).
+        for author in ["이준영", "이준영님", "이준영님께", "이준영이", "이준영의"]
+        {
+            let mut events = vec![make_event("회의", Some(author))];
+            flag_personal(&mut events, &identity);
+            assert!(events[0].is_personal, "name must match in {author:?}");
+        }
+        // A different name that does not contain the identity name must not match.
+        let mut other = vec![make_event("회의", Some("박서준 보고"))];
+        flag_personal(&mut other, &identity);
+        assert!(!other[0].is_personal);
+    }
 
-        let mut events2 = vec![make_event("회의", Some("이준영"))];
-        flag_personal(&mut events2, &identity);
-        assert!(events2[0].is_personal);
+    #[test]
+    fn cjk_keyword_matches_across_attached_particles() {
+        let rules = vec![lk_core::config::ClassifyRule {
+            category: "action_required".into(),
+            keywords: vec!["검토".into()],
+        }];
+        // "검토" must classify "검토를"/"재검토"/"검토중" — the particle/affix is part
+        // of a different morpheme, not the same Latin-style token.
+        for title in ["검토를 부탁드립니다", "재검토가 필요합니다", "검토중입니다"]
+        {
+            let mut events = vec![make_event(title, None)];
+            classify_by_keywords(&mut events, &rules);
+            assert_eq!(
+                events[0].work_category.as_deref(),
+                Some("action_required"),
+                "keyword must match in {title:?}"
+            );
+        }
     }
 
     #[test]

@@ -5,6 +5,8 @@ created: {{ date }}
 labels: ["personal"]
 categories: {{ categories | tojson }}
 sources: {{ sources | tojson }}
+llm_inputs:
+  topic_summary: {{ llm_inputs.topic_summary | tojson }}
 ---
 
 # {{ i18n.work_log_title }} {{ date }}
@@ -14,5 +16,5 @@ sources: {{ sources | tojson }}
 ## {{ i18n.concept_sources }}
 
 {% for source in sources %}
-- [[daily/{{ source }}/{{ date }}]]
+- [[{{ daily_dir }}/{{ source }}/{{ date }}]]
 {% endfor %}

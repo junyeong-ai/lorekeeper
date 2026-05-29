@@ -5,6 +5,8 @@ created: {{ end_date }}
 labels: ["personal"]
 period: "{{ year }}-{{ "%02d" | format(month) }}"
 days_logged: {{ days_logged }}
+llm_inputs:
+  narrative: {{ llm_inputs.narrative | tojson }}
 ---
 
 # {{ title }}

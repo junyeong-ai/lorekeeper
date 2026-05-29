@@ -9,6 +9,8 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
+use crate::markdown::FenceState;
+
 /// Matches `[[target]]` and `[[target|display]]`. Capture group 1 is the raw target
 /// (everything before an optional `|` and the closing `]]`).
 pub static WIKILINK_RE: LazyLock<Regex> =
@@ -34,22 +36,18 @@ pub fn split_wikilink_target(target: &str) -> (&str, &str) {
 /// appearance; duplicates are preserved (callers dedup when they need to).
 pub fn extract_wikilinks(body: &str) -> Vec<String> {
     let mut targets = Vec::new();
-    let mut fence: Option<FenceMarker> = None;
+    // Block-fence tracking is shared with the rest of the workspace via `FenceState`
+    // (CommonMark-correct: ≤3-space indent, marker char+length match to close, no
+    // closing info string, backtick fences reject backtick-bearing info strings).
+    // Only the inline code-span scan below is wikilink-specific.
+    let mut fence = FenceState::new();
 
     for line in body.split_inclusive('\n') {
-        if let Some(open_fence) = fence {
-            if let Some(close_fence) = fence_marker(line)
-                && close_fence.is_closing
-                && close_fence.marker == open_fence.marker
-                && close_fence.len >= open_fence.len
-            {
-                fence = None;
-            }
-            continue;
-        }
-
-        if let Some(open_fence) = fence_marker(line) {
-            fence = Some(open_fence);
+        let stripped = line.strip_suffix('\n').unwrap_or(line);
+        // Skip a line that opens/closes a fence OR sits inside an open block — only
+        // un-fenced lines carry document-level wikilinks.
+        let is_marker = fence.apply(stripped);
+        if is_marker || !fence.is_closed() {
             continue;
         }
 
@@ -57,35 +55,6 @@ pub fn extract_wikilinks(body: &str) -> Vec<String> {
     }
 
     targets
-}
-
-#[derive(Clone, Copy)]
-struct FenceMarker {
-    marker: u8,
-    len: usize,
-    is_closing: bool,
-}
-
-fn fence_marker(line: &str) -> Option<FenceMarker> {
-    let trimmed = line.trim_start();
-    let marker = *trimmed.as_bytes().first()?;
-    if marker != b'`' && marker != b'~' {
-        return None;
-    }
-
-    let len = count_repeated(trimmed.as_bytes(), 0, marker);
-    if len < 3 {
-        return None;
-    }
-
-    let after = trimmed[len..].trim();
-    let is_closing = after.is_empty();
-
-    Some(FenceMarker {
-        marker,
-        len,
-        is_closing,
-    })
 }
 
 fn extract_line_wikilinks(line: &str, targets: &mut Vec<String>) {
@@ -236,6 +205,31 @@ Text `[[Inline]]` and [[Middle|display]].
 ";
         let targets = extract_wikilinks(text);
         assert_eq!(targets, vec!["Outside"]);
+    }
+
+    #[test]
+    fn backtick_fence_with_backtick_in_info_is_not_a_fence() {
+        // CommonMark: a backtick fence's info string must not contain a backtick, so
+        // this opens no block — the following wikilink is document content.
+        // (The previous bespoke parser treated it as a fence and dropped the link.)
+        let text = "```not`a`fence\n[[Live]]\n";
+        assert_eq!(extract_wikilinks(text), vec!["Live"]);
+    }
+
+    #[test]
+    fn over_indented_fence_is_not_a_fence() {
+        // 4+ leading spaces is an indented code block, not a fence opener — the marker
+        // line and the following line are both treated as content.
+        let text = "    ```\n[[Live]]\n";
+        assert_eq!(extract_wikilinks(text), vec!["Live"]);
+    }
+
+    #[test]
+    fn tab_indented_fence_is_not_a_fence() {
+        // Leading tab (not a space) is not the ≤3-space fence indent CommonMark allows,
+        // so this is not a fence opener.
+        let text = "\t```\n[[Live]]\n";
+        assert_eq!(extract_wikilinks(text), vec!["Live"]);
     }
 
     #[test]

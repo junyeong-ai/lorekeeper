@@ -1,9 +1,58 @@
-//! Replace the body of a `## <heading>` section in a markdown page.
+//! Operate on the body of a `## <heading>` section in a markdown page.
 //!
 //! Used by structural maintenance commands (e.g. `lore graph backlinks-sync`) that
-//! need to rewrite one section of a page in place without touching others. The
-//! "body" of a section is everything between its `## <heading>` line and the next
-//! `## ` heading (or end of file).
+//! need to rewrite one section of a page in place without touching others, and by
+//! the pipeline's two-phase render that preserves LLM-filled sections across
+//! re-ingests. The "body" of a section is everything between its `## <heading>`
+//! line and the next `## ` heading (or end of file).
+//!
+//! Both operations (`replace_section`, `section_body`)
+//! share `find_section`, which tracks fenced-code state via
+//! `lk_core::markdown::FenceState` — a `## ` line inside an open fence is quoted
+//! content, not document structure. Heading lines are trimmed of trailing
+//! whitespace before matching.
+
+use lk_core::markdown::FenceState;
+
+/// Locate the H2 section whose heading line is exactly `## {heading}`. Returns
+/// `(heading_line_idx, section_end_idx)` over the line array — `heading_line_idx`
+/// points at the `## {heading}` line itself; `section_end_idx` is the first line
+/// outside the section (the next `## ` heading or `lines.len()`).
+///
+/// Tracks fenced-code state so a `## ` line inside a code fence (e.g. a quoted
+/// four-backtick block containing a three-backtick snippet) is not mistaken for a
+/// section boundary.
+fn find_section(lines: &[&str], heading: &str) -> Option<(usize, usize)> {
+    let target = format!("## {heading}");
+    let mut fence = FenceState::new();
+
+    let mut start_idx = None;
+    for (i, line) in lines.iter().enumerate() {
+        let stripped = line.strip_suffix('\n').unwrap_or(line);
+        if fence.apply(stripped) {
+            continue;
+        }
+        if fence.is_closed() && stripped.trim_end() == target {
+            start_idx = Some(i);
+            break;
+        }
+    }
+    let start_idx = start_idx?;
+
+    let mut end_idx = lines.len();
+    for (rel, line) in lines[start_idx + 1..].iter().enumerate() {
+        let stripped = line.strip_suffix('\n').unwrap_or(line);
+        if fence.apply(stripped) {
+            continue;
+        }
+        if fence.is_closed() && stripped.trim_end().starts_with("## ") {
+            end_idx = rel + start_idx + 1;
+            break;
+        }
+    }
+
+    Some((start_idx, end_idx))
+}
 
 /// Replace the body of the H2 section whose heading line is exactly `## {heading}`
 /// with `new_body`. The heading line itself, and the rest of the document around
@@ -17,48 +66,10 @@
 /// If no line matches `## {heading}`, the document is returned unchanged. This is
 /// the documented contract so callers can run the function unconditionally.
 pub fn replace_section(content: &str, heading: &str, new_body: &str) -> String {
-    let target = format!("## {heading}");
     let lines: Vec<&str> = content.split_inclusive('\n').collect();
-
-    // Walk lines while tracking fenced-code state (``` or ~~~ blocks). Headings
-    // that appear inside a fenced block are quoted code, not document structure,
-    // and must not be treated as section boundaries.
-    let mut in_fence = false;
-    let mut start_idx = None;
-    for (i, line) in lines.iter().enumerate() {
-        let stripped = line.strip_suffix('\n').unwrap_or(line);
-        let heading_line = stripped.trim_end();
-        let trimmed = stripped.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            in_fence = !in_fence;
-            continue;
-        }
-        if !in_fence && heading_line == target {
-            start_idx = Some(i);
-            break;
-        }
-    }
-    let Some(start_idx) = start_idx else {
+    let Some((start_idx, end_idx)) = find_section(&lines, heading) else {
         return content.to_string();
     };
-
-    // End of section = the next live H2 (a "## " line outside any fenced block).
-    // End of file counts as a section terminator too.
-    let mut in_fence = false;
-    let mut end_idx = lines.len();
-    for (rel, line) in lines[start_idx + 1..].iter().enumerate() {
-        let stripped = line.strip_suffix('\n').unwrap_or(line);
-        let heading_line = stripped.trim_end();
-        let trimmed = stripped.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            in_fence = !in_fence;
-            continue;
-        }
-        if !in_fence && heading_line.starts_with("## ") {
-            end_idx = rel + start_idx + 1;
-            break;
-        }
-    }
 
     let mut out = String::with_capacity(content.len());
     for line in &lines[..=start_idx] {
@@ -86,8 +97,30 @@ pub fn replace_section(content: &str, heading: &str, new_body: &str) -> String {
     out
 }
 
+/// Read the body of the H2 section whose heading line is exactly `## {heading}`.
+/// Returns the substring between the heading line and the next `## ` (or EOF),
+/// or `None` if the heading is missing. The body includes leading/trailing
+/// whitespace verbatim — callers usually `.trim()`.
+pub fn section_body<'a>(content: &'a str, heading: &str) -> Option<&'a str> {
+    let lines: Vec<&str> = content.split_inclusive('\n').collect();
+    let (start_idx, end_idx) = find_section(&lines, heading)?;
+
+    // Slice indices into the original string by accumulating line lengths. The
+    // body starts after the heading line and ends at end_idx's line start.
+    let body_start: usize = lines[..=start_idx].iter().map(|l| l.len()).sum();
+    let body_end: usize = lines[..end_idx].iter().map(|l| l.len()).sum();
+    Some(&content[body_start..body_end])
+}
+
 #[cfg(test)]
 mod tests {
+    /// Test-only mirror of the pipeline's "is this section filled?" check
+    /// (`llm_cache` owns the production form). Kept here so the fence/heading
+    /// boundary cases below stay expressed in terms of a filled-section predicate.
+    fn section_is_filled(content: &str, heading: &str) -> bool {
+        super::section_body(content, heading).is_some_and(|b| !b.trim().is_empty())
+    }
+
     use super::*;
 
     #[test]
@@ -185,5 +218,115 @@ mod tests {
         let doc = "## Sources\n\n- [[a]]\n- [[b]]\n\n## Meta\n";
         let out = replace_section(doc, "Sources", "- [[a]]\n- [[b]]");
         assert_eq!(out, doc);
+    }
+
+    #[test]
+    fn is_filled_true_for_real_content() {
+        let doc = "## Summary\n\nReal content here.\n\n## Meta\n";
+        assert!(section_is_filled(doc, "Summary"));
+    }
+
+    #[test]
+    fn is_filled_false_for_missing_heading() {
+        let doc = "## Other\n\nbody\n";
+        assert!(!section_is_filled(doc, "Summary"));
+    }
+
+    #[test]
+    fn is_filled_false_for_empty_body() {
+        let doc = "## Summary\n\n## Meta\n";
+        assert!(!section_is_filled(doc, "Summary"));
+    }
+
+    #[test]
+    fn is_filled_false_for_whitespace_only_body() {
+        let doc = "## Summary\n\n   \n\t\n\n## Meta\n";
+        assert!(!section_is_filled(doc, "Summary"));
+    }
+
+    #[test]
+    fn is_filled_false_when_heading_is_inside_fenced_code() {
+        // The only `## Summary` is quoted code — there is no real section.
+        let doc = "```\n## Summary\nquoted body\n```\n";
+        assert!(!section_is_filled(doc, "Summary"));
+    }
+
+    #[test]
+    fn is_filled_true_when_real_heading_follows_a_quoted_one() {
+        let doc = "```\n## Summary\nquoted\n```\n\n## Summary\n\nreal body\n";
+        assert!(section_is_filled(doc, "Summary"));
+    }
+
+    #[test]
+    fn is_filled_true_at_end_of_file() {
+        let doc = "# Title\n\n## Summary\n\nbody at EOF\n";
+        assert!(section_is_filled(doc, "Summary"));
+    }
+
+    #[test]
+    fn body_returns_text_between_heading_and_next_h2() {
+        let doc = "# Title\n\n## Summary\n\nfirst line\nsecond line\n\n## Meta\n\n- k: v\n";
+        assert_eq!(
+            section_body(doc, "Summary"),
+            Some("\nfirst line\nsecond line\n\n")
+        );
+    }
+
+    #[test]
+    fn outer_quad_fence_with_inner_triple_fence_does_not_desync() {
+        // Four-backtick OPEN, three-backtick line inside is content (not a closing
+        // fence), four-backtick CLOSE. The `## Meta` after the outer fence is a real
+        // section boundary; the `## Inner` line inside the quad fence must NOT be
+        // recognized as the section start.
+        let doc =
+            "## Sources\n\n````\n## Inner\n```\nnested\n```\n````\n\n## Meta\n\n- key: value\n";
+        let out = replace_section(doc, "Sources", "- [[new]]");
+        assert_eq!(
+            out, "## Sources\n\n- [[new]]\n\n## Meta\n\n- key: value\n",
+            "outer quad fence content must be replaced wholesale, not split by inner triple"
+        );
+        // And `## Inner` must not be findable as a real section.
+        assert!(!section_is_filled(doc, "Inner"));
+    }
+
+    #[test]
+    fn tilde_fence_inside_backtick_fence_does_not_toggle() {
+        // Mismatched marker characters must not close the open fence.
+        let doc = "## Sources\n\n```\n~~~\n## Trap\n~~~\n```\n\n## Meta\n\n- v\n";
+        let out = replace_section(doc, "Sources", "- [[new]]");
+        assert!(out.contains("## Sources\n\n- [[new]]\n\n## Meta\n"));
+        assert!(!section_is_filled(doc, "Trap"));
+    }
+
+    #[test]
+    fn backtick_line_with_inline_backtick_is_not_a_fence() {
+        // A backtick-fence info string can't contain a backtick (CommonMark), so this
+        // line never opens a fence — and the `## B` after it stays a real section
+        // boundary rather than being swallowed as fenced content.
+        let doc = "## A\n\nintro\n\n```not`a`fence\n\n## B\n\nbody B\n";
+        assert!(
+            section_is_filled(doc, "B"),
+            "## B must be a real section, not swallowed by a fake fence"
+        );
+        // Replacing A leaves B intact, proving the boundary held.
+        let out = replace_section(doc, "A", "new A");
+        assert!(out.contains("## A\n\nnew A\n\n## B\n\nbody B\n"));
+    }
+
+    #[test]
+    fn closing_fence_with_info_string_does_not_close() {
+        // CommonMark says the closing fence must have no info string. A line that
+        // looks like a fence but carries text after the markers is content, not a
+        // close — so a `## Heading` further down should still be inside the fence.
+        let doc = "## Sources\n\n```\nopen\n``` info string\n## Not a heading\n```\n\n## Meta\n";
+        let out = replace_section(doc, "Sources", "- [[new]]");
+        assert!(out.contains("## Sources\n\n- [[new]]\n\n## Meta\n"));
+        assert!(!section_is_filled(doc, "Not a heading"));
+    }
+
+    #[test]
+    fn body_returns_none_for_missing_heading() {
+        let doc = "## Other\n\nbody\n";
+        assert!(section_body(doc, "Summary").is_none());
     }
 }

@@ -27,7 +27,8 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   (`Vec<ConceptCategory>`, each with `id` + `label`). Validated: no empty ids, no
   empty labels, no duplicate ids. Empty list = no categorization (concepts get no
   `category` field). `ExtractedConcept` carries an optional `category` assigned by
-  the LLM from this list; the pipeline silently drops unknown category IDs.
+  the LLM from this list; the pipeline drops unknown category IDs and `tracing::warn`s
+  the drop (observable parity with the queue-path `graph lint`).
   `index_split_threshold` (default 100) controls when `lore wiki index` splits
   concepts into per-category sub-pages (`<wiki>/index/{category}.md`).
 - **`LlmConfig` defaults to `provider: queue`** (matches docs/example). Uses

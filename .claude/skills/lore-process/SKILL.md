@@ -35,6 +35,27 @@ your own session, edit the target pages' sections in place (each page is a
 plain markdown file at `target.vault_path`), then move the processed queue file
 to `.lorekeeper/queue/processed/`.
 
+## Materialized-view contract
+
+Daily pages are materialized views with two kinds of fields:
+
+- **Structural** (frontmatter, raw event list, headings) — owned by the Rust
+  pipeline, re-rendered on every ingest.
+- **Semantic** (summary body, refined event bodies, concept wiki-links) — owned
+  by this skill, preserved across re-renders, and invalidated only when the
+  underlying LLM input changes.
+
+The pipeline records a BLAKE3-128 hash of each LLM task's cache identity under
+the target page's `llm_inputs.<key>` frontmatter at render time. On a re-ingest,
+the pipeline compares the new hash against the cached one: if they match and
+the section is non-empty, the task is **not** enqueued at all. This is the
+designed self-healing path — a successful previous run never triggers redundant
+LLM work, regardless of `--force`.
+
+That cache rests on the contract that this skill writes only LLM-produced
+content into the target sections, never structural artifacts. The hash key for
+each task kind is documented under [Per-kind processing](#per-kind-processing).
+
 ### Queue file lifecycle
 
 ```
@@ -75,9 +96,11 @@ never construct them manually; use the path patterns from AGENTS.md.
   "task_id": "sum-2026-05-23T07-00-00Z-000",
   "kind": "summarize",
   "created_at": "2026-05-23T07:00:00Z",
+  "cache_hash": "0123456789abcdef0123456789abcdef",
   "input": {
     "text": "<events concatenated for summarization>",
-    "max_sentences": 5
+    "max_sentences": 5,
+    "source_type": "rss"
   },
   "target": {
     "vault_path": "<daily>/ai-news/2026-05-23.md",
@@ -96,6 +119,12 @@ never construct them manually; use the path patterns from AGENTS.md.
 `target.anchor`: the exact section heading (e.g. `"## Summary"` or `"## 요약"`)
 the pipeline wrote, resolved from i18n at queue time. Always use this as the
 locate key — never hardcode headings per `target.kind`.
+
+`cache_hash` is BLAKE3-128 (32 hex chars) of the cache-identity subset of
+`input` (excludes registry hints like `existing_concepts`). It equals the
+value the pipeline wrote into `target.vault_path`'s `llm_inputs.<key>`
+frontmatter at queue time. The skill MUST verify the page's current
+frontmatter matches before writing — see "Stale-task guard" below.
 
 ## Processing protocol
 
@@ -116,6 +145,65 @@ locate key — never hardcode headings per `target.kind`.
 
    b. **For each task** (in file order):
 
+      **Stale-task guard.** Before doing any LLM work, open `target.vault_path`
+      and read its `llm_inputs.<key>` frontmatter, where `<key>` is the task
+      key for this `target.kind`:
+
+      | target.kind                                                            | frontmatter key   |
+      |------------------------------------------------------------------------|-------------------|
+      | `daily-summary`, `document-summary`                                    | `summary`         |
+      | `daily-refine-events`                                                  | `refine_events`   |
+      | `daily-concepts`, `document-concepts`                                  | `concepts`        |
+      | `work-log-synthesis`                                                   | `topic_summary`   |
+      | `weekly-synthesis-narrative`                                           | `themes`          |
+      | `weekly-/monthly-/quarterly-/annual-personal-narrative`                | `narrative`       |
+
+      The three outcomes below are keyed on `llm_inputs.<key>` (the stale
+      reference point) for EVERY kind. They differ only in the *completion*
+      signal: most kinds use a non-empty section body; `daily-refine-events`
+      uses a second frontmatter field (see its contract after the outcomes).
+
+      Three outcomes, in order:
+
+      1. **Stale task (page rewrote with a different input):**
+         `page.llm_inputs.<key>` is present but ≠ `task.cache_hash`. A later
+         ingest superseded this task — writing now would inject content keyed
+         to an older input under the newer hash, freezing the mismatch
+         forever. **Drop the task as successful without modifying the page.**
+
+      2. **Cache hit (work already done):**
+         `page.llm_inputs.<key>` = `task.cache_hash` AND the body under
+         `target.anchor` is non-empty. The Rust pipeline normally prevents
+         such tasks from being enqueued; if you see one, it usually means the
+         page was hand-edited between ingest and process. **Treat as
+         successful, no edit.**
+
+      3. **Process normally:**
+         `page.llm_inputs.<key>` = `task.cache_hash` AND the section body is
+         empty. This is the standard case. Do the LLM work and edit the page.
+
+      A missing `llm_inputs.<key>` field with `task.cache_hash` set means the
+      page is in an inconsistent state (template/pipeline drift); fail the
+      task and report it.
+
+      **Refine-events completion contract.** `daily-refine-events` rewrites the
+      raw event bodies *in place*, so the events section is non-empty from the
+      first render (the raw event list is structural) — emptiness can't signal
+      "done." The pipeline pre-stamps `llm_inputs.refine_events` with the
+      current-input hash (the stale reference point, exactly like every other
+      kind), and completion is tracked by a SECOND field,
+      `llm_inputs.refine_events_done`, which **you own.** Resolve the three
+      outcomes like this:
+
+      - `task.cache_hash` ≠ `page.refine_events` → a newer ingest re-rendered the
+        page → **drop** as stale, no edit. *(outcome 1)*
+      - `task.cache_hash` = `page.refine_events` AND
+        `page.refine_events_done` = `page.refine_events` → already refined for
+        this exact input → **skip**, no edit. *(outcome 2)*
+      - `task.cache_hash` = `page.refine_events` AND `refine_events_done` is
+        absent or ≠ `refine_events` → **process** (see `kind: refine-events`
+        below), then set `llm_inputs.refine_events_done` = `task.cache_hash`. *(outcome 3)*
+
       **Relevance focus.** If `input.focus` is present, it is the source's
       natural-language relevance criterion. Treat everything outside that focus
       as off-topic and exclude it: for `summarize`, cover only matching content;
@@ -130,32 +218,38 @@ locate key — never hardcode headings per `target.kind`.
         `"en"` → English). If absent, default to Korean.
         Aim for `input.max_sentences` substantive points. No preamble.
 
-        **Source-type-aware synthesis.** Infer the source type from
-        `target.vault_path` (e.g. `<daily>/team-slack/`, `<daily>/ai-news/`)
-        and adapt the synthesis strategy:
+        **Source-type-aware synthesis.** `input.source_type` carries the
+        adapter type verbatim from config (the source's `type:` field) —
+        never guess it from the vault path. Adapt the synthesis strategy to
+        it. When `source_type` is absent (cross-source syntheses such as the
+        work-log), apply the generic guidance below without a type bias.
 
-        **Slack sources** (`team-slack`, `*-slack`):
+        **`slack-channel`, `slack-search`:**
         - Extract key decisions, action items with owners
         - Ignore repetitive agreement messages (ok, +1, sounds good)
         - Structure as: decision/outcome → action items → context
         - Preserve technical details, project names, and links
 
-        **Email sources** (`email-digest`, `*-email`):
+        **`gmail`:**
         - Extract the core ask or decision from each email
         - Identify action items with owners and deadlines
         - Skip signatures, disclaimers, forwarded-chain noise
         - For email chains, focus on the most recent exchange
 
-        **RSS/news sources** (`ai-news`, `tech-news`):
+        **`rss`:**
         - Focus on key findings, announcements, techniques
         - For technical articles: what it is, why it matters, key numbers
         - Skip author bios, CTAs, navigation artifacts
 
-        **Calendar sources** (`my-schedule`):
+        **`google-calendar`:**
         - Highlight meeting outcomes and decisions if notes are present
 
-        **Jira sources** (`my-tasks`):
+        **`jira`:**
         - Summarize key task status changes and deliverables
+
+        **`google-drive`, `manual`:**
+        - Treat as curated documents: preserve the author's structure,
+          distill to the core argument and supporting detail
 
         For all types: produce genuine knowledge, not just headlines.
         Not too short (meaningless one-liners) nor too verbose (raw dump).
@@ -176,10 +270,21 @@ locate key — never hardcode headings per `target.kind`.
         The `### heading` lines themselves must be preserved — only
         replace the body text between headings.
 
+        **After refining, stamp completion** (this kind only): set the page's
+        `llm_inputs.refine_events_done` frontmatter to `task.cache_hash`, copied
+        verbatim (a 32-char hex string). Leave `llm_inputs.refine_events`
+        untouched (the pipeline owns it). The `_done` stamp is what marks the
+        refinement complete so the next ingest preserves your rewrite instead of
+        re-enqueuing it. Do not compute or alter the value — copy
+        `task.cache_hash` exactly.
+
       - **`kind: identify-themes`** — extract structured themes from
         the combined multi-source text. Identify the top N themes
         (`input.max_themes`). Write each theme as a numbered subsection
         (`### 1. Theme Title\n\nDescription`) under `target.anchor`.
+        Write the titles and descriptions in `input.locale` language
+        (e.g. `"ko"` → Korean, `"en"` → English); default to Korean if
+        absent.
 
       - **`kind: extract-concepts`** — identify the key named entities,
         topics, and concepts (whatever the source's domain — the focus,
@@ -188,6 +293,13 @@ locate key — never hardcode headings per `target.kind`.
         a concept page (create if missing, merge if exists — increment
         source_count, append source ref). Use the concept path pattern
         from AGENTS.md.
+
+        `input.source_type` carries the originating adapter type (the same
+        variants listed under `kind: summarize` above). Use it to scope what
+        counts as a concept: extract decisions/projects/people from
+        `slack-channel`/`slack-search` and `gmail`; techniques/products/
+        announcements from `rss`; issues/epics from `jira`; document subject
+        matter from `google-drive`/`manual`. Never invent it from the path.
 
         **Concept dedup.** Before creating any concept page, check for
         duplicates against the concept registry:
@@ -202,14 +314,23 @@ locate key — never hardcode headings per `target.kind`.
         4. Slug normalization: NFKC → lowercase → non-alphanumeric to
            hyphen → collapse runs → trim. Same as `lk_core::slugify`.
 
-        **Source reference format.** The `sources` array entries MUST use
-        vault-relative paths matching the daily page pattern from AGENTS.md.
+        **Source reference format.** The `## 출처` (Sources) `- [[…]]` entries MUST
+        use vault-relative paths matching the daily page pattern from AGENTS.md.
         Derive from the task's `input.source_id` and `input.date`.
         NEVER use bare source IDs like `"email-digest"`.
 
-        **Category assignment.** If `input.categories` is present, assign
-        exactly one category ID from that list to each concept. Include
-        `category: {id}` in frontmatter. If absent, omit the field.
+        **Category assignment.** Hard constraint: the `category` value MUST
+        be one of the IDs in `input.categories` (verbatim string match) or
+        the field MUST be omitted entirely. Never invent a new category, never
+        substitute a synonym, never abbreviate. If no listed category fits the
+        concept, leave the `category` field off — `lore graph lint` surfaces
+        unknown categories as findings, so an invented category is observable
+        drift that breaks the index. When `input.categories` is absent or
+        empty, omit the field unconditionally.
+
+        Same rule for the `tags` array: when a category is assigned, include
+        that category ID as the page's sole tag (`tags: ["{category-id}"]`).
+        When no category is assigned, use `tags: ["concept"]`.
 
         **Concept page format.** Use exactly these frontmatter keys:
         ```yaml
@@ -221,11 +342,14 @@ locate key — never hardcode headings per `target.kind`.
         updated: {YYYY-MM-DD}
         category: {category-id}
         source_count: {N}
-        sources: ["<daily>/{source-id}/{date}", ...]
         tags: ["{category-id}"]
         ---
         ```
-        Do NOT add any keys beyond those listed above.
+        Do NOT add any keys beyond those listed above. Citations live in the
+        `## 출처` (Sources) body as `- [[<daily>/{source-id}/{date}]]` entries —
+        NOT in frontmatter. `source_count` is the number of those entries;
+        `lore graph backlinks-sync` re-derives both exactly from the wikilink graph,
+        so it self-corrects if your count drifts.
 
         **When creating a new concept page**, fill the Synthesis section
         (heading from AGENTS.md) with a 1-2 sentence definition/context of
@@ -249,6 +373,12 @@ locate key — never hardcode headings per `target.kind`.
         4. Preserve frontmatter and every other section unchanged
 
       Additional per-kind notes:
+
+      - **`daily-refine-events`** target: in addition to replacing the
+        section body, set `llm_inputs.refine_events_done` in the frontmatter to
+        `task.cache_hash` (verbatim), leaving `llm_inputs.refine_events` as is.
+        This is the one task kind that edits frontmatter — every other kind
+        leaves it untouched.
 
       - **`daily-concepts`** target: replace the section body with
         `- [[Concept Name 1]]\n- [[Concept Name 2]]\n...`.
@@ -312,9 +442,9 @@ succeeded. Failure rules:
   - Daily summary/concept edits replace the section body — repeating the
     edit produces identical content. No drift.
   - Concept page merging preserves original `created` and dedupes the
-    `sources` array — re-adding the same source ref is a no-op.
-  - `source_count` is only incremented when a genuinely new source
-    ref is appended.
+    `## 출처` body — re-adding the same `- [[ref]]` is a no-op.
+  - `source_count` is only incremented when a genuinely new `## 출처`
+    entry is appended (and `backlinks-sync` re-derives it exactly).
 - **Never partially-commit progress** to the queue file itself
   (no `processed.jsonl` sidecar): the source-of-truth is the vault edits,
   which are themselves idempotent.
@@ -325,10 +455,21 @@ succeeded. Failure rules:
   vault pages are written and before it commits dedup, so a concurrent
   ingest cannot produce a partial `.jsonl` you might consume mid-write.
   There is no append-while-reading hazard. You may still want to wait so
-  the user
-  sees the new pages before they get edited.
-- Don't manually edit the queue-targeted sections between ingest and
-  process — your edits will be overwritten.
+  the user sees the new pages before they get edited.
+
+## Forcing a re-run
+
+To regenerate a section that was already filled, then run `lore ingest --force`
+for the same date. The pipeline sees the cache miss, re-queues the task, and
+`/lore-process` fills it on the next run. No flag, no skill argument — the page
+itself is the cache key. How to invalidate depends on the section's cache shape:
+
+- **Fill-empty sections** (summary, concepts, narratives): delete the body OR
+  the `llm_inputs.<key>` line.
+- **In-place rewrite** (`daily-refine-events`): delete the
+  `llm_inputs.refine_events_done` line. Emptying the event body does NOT force a
+  re-run — the event list is structural and the pipeline re-renders it, so
+  completion is tracked only by `refine_events_done`.
 
 ## Example session
 

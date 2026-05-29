@@ -1,15 +1,17 @@
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use lk_core::config::{PerformanceConfig, VaultDirs};
 use lk_core::event::Event;
 use lk_core::i18n::Locale;
 use lk_core::vault_path::VaultPath;
-use lk_queue::LlmClient;
-use lk_vault::TemplateEngine;
+use lk_queue::{LlmClient, SummarizeRequest, TargetKind, TaskTarget};
+use lk_vault::{TemplateEngine, VaultReader};
 
 use crate::PipelineError;
-use crate::render::RenderOutput;
+use crate::llm_cache::{self, SectionDecision};
+use crate::render::{RenderOutput, llm_inputs_map, splice_preserved_sections};
 
 pub async fn render_work_log(
     events: &[Event],
@@ -18,6 +20,7 @@ pub async fn render_work_log(
     dirs: &VaultDirs,
     locale: Locale,
     llm: &Arc<dyn LlmClient>,
+    reader: &VaultReader,
 ) -> Result<Vec<RenderOutput>, PipelineError> {
     // The work-log is the performance subsystem; `performance.enabled` gates it at the
     // mechanism boundary so no caller can produce one while the subsystem is off.
@@ -29,6 +32,8 @@ pub async fn render_work_log(
     for event in events {
         by_date.entry(event.date).or_default().push(event.clone());
     }
+
+    let topic_heading = locale.strings().topic_summary;
 
     let mut outputs = Vec::new();
     for (date, day_events) in by_date {
@@ -46,60 +51,70 @@ pub async fn render_work_log(
         let categories: Vec<String> = groups.iter().map(|g| g.category.clone()).collect();
 
         let path = VaultPath::work_log(dirs, date);
+        let vault_path = path.to_string();
 
-        let context = serde_json::json!({
-            "date": date.to_string(),
-            "categories": categories,
-            "sources": sources,
-            "i18n": locale.strings(),
-        });
-
-        // The work-log template is embedded, so it always resolves.
-        let content = engine
-            .render("work-log.md.jinja", &context)
-            .map_err(|e| PipelineError::Render(e.to_string()))?;
-
-        outputs.push(RenderOutput {
-            path: path.clone(),
-            content,
-        });
-
-        // Emit a queue task for the LLM to fill the topic summary section with
-        // cross-source correlation. The input concatenates every personal event's
-        // title, body, and source_id so the LLM can group by topic across sources.
         let synthesis_input: String = day_events
             .iter()
             .map(|e| format!("[{}] {}\n{}", e.source_id, e.title, e.body))
             .collect::<Vec<_>>()
             .join("\n---\n");
 
-        let anchor = format!("## {}", locale.strings().topic_summary);
-        let vault_path = path.to_string();
+        let req = SummarizeRequest {
+            text: synthesis_input,
+            max_sentences: 10,
+            focus: None,
+            locale: locale.tag().to_string(),
+            // Work-log topic synthesis is cross-source by design (it groups personal
+            // events from many sources), so no single source_type applies.
+            source_type: None,
+            target: TaskTarget {
+                vault_path: vault_path.clone(),
+                kind: TargetKind::WorkLogSynthesis,
+                anchor: format!("## {topic_heading}"),
+            },
+        };
+        let hash = req.cache_hash();
+        let kind = req.target.kind;
 
-        match llm
-            .summarize(lk_queue::SummarizeRequest {
-                text: synthesis_input,
-                max_sentences: 10,
-                focus: None,
-                locale: locale.tag().to_string(),
-                target: lk_queue::TaskTarget {
-                    vault_path,
-                    kind: lk_queue::TargetKind::WorkLogSynthesis,
-                    anchor,
-                },
-            })
-            .await
-        {
-            Ok(_) => {}
-            Err(e) if e.is_fatal() => return Err(PipelineError::Llm(e)),
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    date = %date,
-                    "work-log synthesis task failed; continuing without topic summary"
-                );
+        let existing = reader.read_page(Path::new(&vault_path)).await?;
+        let decision: SectionDecision = llm_cache::lookup(
+            existing.as_ref(),
+            kind.llm_inputs_key(),
+            topic_heading,
+            hash.clone(),
+        );
+
+        if decision.enqueue() {
+            match llm.summarize(req).await {
+                Ok(_) => {}
+                Err(e) if e.is_fatal() => return Err(PipelineError::Llm(e)),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        date = %date,
+                        "work-log synthesis task failed; continuing without topic summary"
+                    );
+                }
             }
         }
+
+        let context = serde_json::json!({
+            "date": date.to_string(),
+            "categories": categories,
+            "sources": sources,
+            "daily_dir": dirs.daily,
+            "i18n": locale.strings(),
+            "llm_inputs": llm_inputs_map(&[(kind, Some(&hash))]),
+        });
+
+        // The work-log template is embedded, so it always resolves.
+        let fresh = engine
+            .render("work-log.md.jinja", &context)
+            .map_err(|e| PipelineError::Render(e.to_string()))?;
+
+        let content = splice_preserved_sections(fresh, std::iter::once((topic_heading, &decision)));
+
+        outputs.push(RenderOutput { path, content });
     }
 
     Ok(outputs)

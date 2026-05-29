@@ -4,6 +4,8 @@ title: "{{ title }}"
 created: {{ year }}-12-31
 labels: ["personal", "strategy"]
 period: "{{ year }}"
+llm_inputs:
+  narrative: {{ llm_inputs.narrative | tojson }}
 ---
 
 # {{ title }}

@@ -177,7 +177,11 @@ impl Source for JiraSource {
         let items = issues
             .into_iter()
             .filter_map(|issue| {
-                let summary = issue.fields.summary.as_deref().unwrap_or("(no summary)");
+                let summary = issue
+                    .fields
+                    .summary
+                    .as_deref()
+                    .unwrap_or(ctx.locale.strings().untitled);
 
                 let Some(ts) = issue
                     .fields

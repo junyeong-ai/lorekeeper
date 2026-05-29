@@ -42,7 +42,7 @@ templates/      Jinja2 markdown templates (.md.jinja), compiled into the binary
 
 ```bash
 cargo check                        # type check
-cargo clippy -- -D warnings        # lint (must be clean)
+cargo clippy --workspace --all-targets -- -D warnings  # lint (must be clean; --all-targets covers tests)
 cargo fmt                          # format
 cargo nextest run --workspace      # tests
 lore validate                      # verify config.yaml + source params
@@ -65,6 +65,7 @@ Auto-discovered: `./config.yaml` → `~/.config/lorekeeper/config.yaml`.
 - **Date derivation**: `timestamp.to_zoned(vault.timezone()).date()` — always via configured timezone, never UTC.
 - **Multi-date batches**: events spanning several dates produce one `<daily>/` page per date.
 - **Atomic ingest** (5 phases): plan → write daily/concept → work-log → flush LLM queue → commit dedup. Each source's dedup commits only after its own writes + flush succeed.
+- **Daily pages are materialized views**: structural fields (frontmatter, raw event list, headings) are re-rendered every ingest; semantic fields (summary, refined events, concept wiki-links) are LLM-owned, preserved across re-renders, and invalidated by a BLAKE3-128 hash in the page's `llm_inputs` frontmatter. Re-ingesting unchanged data enqueues zero LLM tasks. Every section's `llm_inputs.<key>` is pre-stamped by the pipeline with the current-input hash (the stale-task reference point). Completion detection has two shapes (`TargetKind::cache_shape`): fill-empty sections (summary, concepts) signal done by a non-empty body — force a re-run by deleting the body or the `llm_inputs.<key>` line; the one in-place rewrite (`refine-events`, whose section is structurally non-empty) is marked done by a second key, `refine_events_done`, that `/lore-process` stamps after refining — so raw-but-unrefined events never look "done" and a changed input always re-refines. Force an in-place re-run by deleting the `refine_events_done` line (emptying the event body does not re-run it).
 - **Domain logic single-sourced in lk-core**: slugify (NFKC), frontmatter, wikilink, text normalization. Zero duplicate implementations across crates.
 - **i18n single source of truth**: `vault.locale` (ko/en) switches all labels. Templates use `{{ i18n.* }}`. `lore schema` generates `<wiki>/AGENTS.md` from the i18n bundle. Source content is never translated.
 - **`--dry-run` is side-effect-free**: no vault writes, no dedup, no log.

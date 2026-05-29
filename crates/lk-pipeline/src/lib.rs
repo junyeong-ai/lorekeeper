@@ -2,6 +2,7 @@ mod classify;
 mod concepts;
 mod context;
 mod dedup;
+mod llm_cache;
 mod normalize;
 pub mod render;
 mod synthesis;
@@ -48,6 +49,9 @@ pub enum PipelineError {
 pub struct IngestResult {
     pub source_id: String,
     pub events: Vec<Event>,
+    /// Events recognized as duplicates this run. Carried so `commit` can refresh
+    /// their dedup timestamps (not rendered).
+    pub duplicates: Vec<Event>,
     pub concepts: Vec<ExtractedConcept>,
     pub daily_pages: Vec<RenderOutput>,
     pub document_pages: Vec<RenderOutput>,
@@ -145,16 +149,23 @@ impl Pipeline {
         }
 
         if events.is_empty() {
-            return Ok(empty_result(source_id));
+            return Ok(empty_result(source_id, vec![]));
         }
 
-        if !options.force {
-            events = self.dedup.deduplicate(events, &self.dedup_config.cascade)?;
+        // Duplicates are retained (not just dropped) so `commit` can refresh their
+        // `seen_at` — a recurring item recognized as a duplicate must not age out of
+        // the retention window and re-emit as new. `--force` skips dedup entirely.
+        let duplicates = if !options.force {
+            let result = self.dedup.deduplicate(events, &self.dedup_config.cascade)?;
+            events = result.novel;
             tracing::info!(source = source_id, novel = events.len(), "dedup");
-        }
+            result.duplicates
+        } else {
+            Vec::new()
+        };
 
         if events.is_empty() {
-            return Ok(empty_result(source_id));
+            return Ok(empty_result(source_id, duplicates));
         }
 
         classify::assign_static_labels(&mut events, &config.labels);
@@ -162,13 +173,10 @@ impl Pipeline {
             classify::flag_personal(&mut events, &self.ctx.identity);
         }
         classify::classify_by_keywords(&mut events, &config.classify);
-        if config.classify_with_llm && !options.dry_run {
-            classify::classify_with_llm(&mut events, &config.classify, &self.ctx.llm).await;
-        }
 
         if config.source_type == SourceType::Manual {
             return self
-                .plan_documents(source_id, config, events, options)
+                .plan_documents(source_id, config, events, duplicates, options)
                 .await;
         }
 
@@ -184,10 +192,15 @@ impl Pipeline {
         let focus = config.normalized_focus();
 
         let existing_concepts = if config.extract_concepts {
-            self.load_existing_concept_refs().await
+            self.load_existing_concept_refs().await?
         } else {
             vec![]
         };
+
+        let strings = self.ctx.locale.strings();
+        let summary_heading = strings.summary;
+        let events_heading = config.source_type.events_heading(strings);
+        let concepts_heading = strings.related_concepts;
 
         for (date, day_indices) in &by_date {
             let day_events: Vec<&Event> = day_indices.iter().map(|&i| &events[i]).collect();
@@ -200,112 +213,136 @@ impl Pipeline {
             let daily_path =
                 lk_core::vault_path::VaultPath::daily(&self.ctx.dirs, source_id, *date).to_string();
 
-            let summary = match self
-                .ctx
-                .llm
-                .summarize(lk_queue::SummarizeRequest {
-                    text: combined.clone(),
-                    max_sentences: 5,
-                    focus: focus.clone(),
-                    locale: self.ctx.locale.tag().to_string(),
-                    target: lk_queue::TaskTarget {
-                        vault_path: daily_path.clone(),
-                        kind: lk_queue::TargetKind::DailySummary,
-                        anchor: format!("## {}", self.ctx.locale.strings().summary),
-                    },
-                })
-                .await
-            {
-                Ok(s) => s,
-                Err(e) if e.is_fatal() => return Err(PipelineError::Llm(e)),
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        source = source_id,
-                        date = %date,
-                        "summarize failed; continuing without summary"
-                    );
-                    String::new()
+            // Read the existing page ONCE per date so all three section decisions
+            // share the same view; the new render plus splice produces the final bytes.
+            // `read_page` already maps NotFound to Ok(None); only real I/O or YAML
+            // errors propagate. Silently degrading those to "cache miss" would let
+            // a transient failure overwrite LLM-owned bodies — abort instead.
+            let existing = self.reader.read_page(Path::new(&daily_path)).await?;
+
+            let summary_req = lk_queue::SummarizeRequest {
+                text: combined.clone(),
+                max_sentences: 5,
+                focus: focus.clone(),
+                locale: self.ctx.locale.tag().to_string(),
+                source_type: Some(config.source_type),
+                target: lk_queue::TaskTarget {
+                    vault_path: daily_path.clone(),
+                    kind: lk_queue::TargetKind::DailySummary,
+                    anchor: format!("## {summary_heading}"),
+                },
+            };
+            let summary_decision = llm_cache::lookup(
+                existing.as_ref(),
+                summary_req.target.kind.llm_inputs_key(),
+                summary_heading,
+                summary_req.cache_hash(),
+            );
+
+            let refine_req = lk_queue::SummarizeRequest {
+                text: combined.clone(),
+                // Refine rewrites each event body in place (2–5 sentences per event,
+                // per the skill); it does not emit a flat N-sentence summary. This is a
+                // loose upper bound, NOT coupled to the event count — coupling it would
+                // churn the cache hash every time a same-day source gains an event.
+                max_sentences: 20,
+                focus: focus.clone(),
+                locale: self.ctx.locale.tag().to_string(),
+                source_type: Some(config.source_type),
+                target: lk_queue::TaskTarget {
+                    vault_path: daily_path.clone(),
+                    kind: lk_queue::TargetKind::DailyRefineEvents,
+                    anchor: format!("## {events_heading}"),
+                },
+            };
+            // The event list is an in-place rewrite: the render populates it, so
+            // completion is tracked by a separate frontmatter key the skill stamps,
+            // not by the section being non-empty.
+            let refine_completion_key = match refine_req.target.kind.cache_shape() {
+                lk_queue::CacheShape::InPlace { completion_key } => completion_key,
+                lk_queue::CacheShape::FillEmpty => {
+                    unreachable!("DailyRefineEvents is an in-place rewrite")
                 }
             };
-
-            let events_anchor = format!(
-                "## {}",
-                config.source_type.events_heading(self.ctx.locale.strings())
+            let refine_decision = llm_cache::lookup_in_place(
+                existing.as_ref(),
+                refine_completion_key,
+                events_heading,
+                refine_req.cache_hash(),
             );
-            if let Err(e) = self
-                .ctx
-                .llm
-                .summarize(lk_queue::SummarizeRequest {
-                    text: combined.clone(),
-                    max_sentences: day_events.len().min(20),
-                    focus: focus.clone(),
-                    locale: self.ctx.locale.tag().to_string(),
-                    target: lk_queue::TaskTarget {
-                        vault_path: daily_path.clone(),
-                        kind: lk_queue::TargetKind::DailyRefineEvents,
-                        anchor: events_anchor,
-                    },
-                })
-                .await
-            {
-                if e.is_fatal() {
-                    return Err(PipelineError::Llm(e));
-                }
-                tracing::warn!(error = %e, "refine-events task failed; events stay as raw");
-            }
 
-            let day_concepts: Vec<ExtractedConcept> = if config.extract_concepts {
-                match self
-                    .ctx
-                    .llm
-                    .extract_concepts(lk_queue::ExtractConceptsRequest {
-                        text: combined.clone(),
-                        source_id: source_id.to_string(),
-                        date: *date,
-                        focus: focus.clone(),
-                        target: lk_queue::TaskTarget {
-                            vault_path: daily_path,
-                            kind: lk_queue::TargetKind::DailyConcepts,
-                            anchor: format!("## {}", self.ctx.locale.strings().related_concepts),
-                        },
-                        existing_concepts: existing_concepts.clone(),
-                        categories: self.ctx.concept_categories.clone(),
-                    })
-                    .await
-                {
-                    Ok(c) => {
-                        let valid_cat_ids: Vec<&str> = self
-                            .ctx
-                            .concept_categories
-                            .iter()
-                            .map(|c| c.id.as_str())
-                            .collect();
-                        c.into_iter()
-                            .filter(concepts::is_valid)
-                            .map(|mut ec| {
-                                if let Some(ref cat) = ec.category
-                                    && !valid_cat_ids.contains(&cat.as_str())
-                                {
-                                    ec.category = None;
-                                }
-                                ec
-                            })
-                            .collect()
-                    }
+            let summary = if summary_decision.enqueue() {
+                match self.ctx.llm.summarize(summary_req).await {
+                    Ok(s) => s,
                     Err(e) if e.is_fatal() => return Err(PipelineError::Llm(e)),
                     Err(e) => {
                         tracing::warn!(
                             error = %e,
                             source = source_id,
                             date = %date,
-                            "concept extraction failed; continuing without concepts"
+                            "summarize failed; continuing without summary"
                         );
-                        vec![]
+                        String::new()
                     }
                 }
             } else {
-                vec![]
+                tracing::debug!(source = source_id, date = %date, "summary cached; skipping enqueue");
+                String::new()
+            };
+
+            if refine_decision.enqueue()
+                && let Err(e) = self.ctx.llm.summarize(refine_req).await
+            {
+                if e.is_fatal() {
+                    return Err(PipelineError::Llm(e));
+                }
+                tracing::warn!(error = %e, "refine-events task failed; events stay as raw");
+            } else if !refine_decision.enqueue() {
+                tracing::debug!(source = source_id, date = %date, "refine-events cached; skipping enqueue");
+            }
+
+            let (concepts_decision, day_concepts) = if config.extract_concepts {
+                let concepts_req = lk_queue::ExtractConceptsRequest {
+                    text: combined.clone(),
+                    source_id: source_id.to_string(),
+                    source_type: config.source_type,
+                    date: *date,
+                    focus: focus.clone(),
+                    target: lk_queue::TaskTarget {
+                        vault_path: daily_path.clone(),
+                        kind: lk_queue::TargetKind::DailyConcepts,
+                        anchor: format!("## {concepts_heading}"),
+                    },
+                    existing_concepts: existing_concepts.clone(),
+                    categories: self.ctx.concept_categories.clone(),
+                };
+                let decision = llm_cache::lookup(
+                    existing.as_ref(),
+                    concepts_req.target.kind.llm_inputs_key(),
+                    concepts_heading,
+                    concepts_req.cache_hash(),
+                );
+                let extracted = if decision.enqueue() {
+                    match self.ctx.llm.extract_concepts(concepts_req).await {
+                        Ok(c) => filter_valid_concepts(c, &self.ctx.concept_categories),
+                        Err(e) if e.is_fatal() => return Err(PipelineError::Llm(e)),
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                source = source_id,
+                                date = %date,
+                                "concept extraction failed; continuing without concepts"
+                            );
+                            vec![]
+                        }
+                    }
+                } else {
+                    tracing::debug!(source = source_id, date = %date, "concepts cached; skipping enqueue");
+                    vec![]
+                };
+                (Some(decision), extracted)
+            } else {
+                (None, vec![])
             };
 
             let concept_names: Vec<String> = day_concepts.iter().map(|c| c.name.clone()).collect();
@@ -318,7 +355,20 @@ impl Pipeline {
                 set.into_iter().collect()
             };
 
-            let output = render::render_daily_page(
+            // `refine_events` is pre-stamped with the current-input hash (the
+            // stale-task reference point, like summary); `refine_events_done` is the
+            // skill-owned completion stamp, passed through from disk.
+            let refine_done_stamp =
+                llm_cache::stored_hash(existing.as_ref(), refine_completion_key);
+
+            let llm_inputs = render::LlmInputHashes {
+                summary: &summary_decision.hash,
+                refine_events: &refine_decision.hash,
+                refine_events_done: refine_done_stamp,
+                concepts: concepts_decision.as_ref().map(|d| d.hash.as_str()),
+            };
+
+            let fresh = render::render_daily_page(
                 &render::RenderContext {
                     source_id,
                     source_type: config.source_type,
@@ -329,11 +379,25 @@ impl Pipeline {
                     concepts: &concept_names,
                     extract_concepts: config.extract_concepts,
                     locale: self.ctx.locale,
+                    llm_inputs,
                 },
                 &self.ctx.engine,
                 &self.ctx.dirs,
             )?;
-            daily_pages.push(output);
+
+            let mut splices: Vec<(&str, &llm_cache::SectionDecision)> = vec![
+                (summary_heading, &summary_decision),
+                (events_heading, &refine_decision),
+            ];
+            if let Some(d) = concepts_decision.as_ref() {
+                splices.push((concepts_heading, d));
+            }
+            let content = render::splice_preserved_sections(fresh.content, splices);
+
+            daily_pages.push(render::RenderOutput {
+                path: fresh.path,
+                content,
+            });
 
             // Merge into the run-level accumulator (shared across all sources) so a
             // concept mentioned by multiple sources aggregates into one page.
@@ -358,6 +422,7 @@ impl Pipeline {
         Ok(IngestResult {
             source_id: source_id.into(),
             events,
+            duplicates,
             concepts: all_concepts,
             daily_pages,
             document_pages: vec![],
@@ -371,10 +436,14 @@ impl Pipeline {
         drafts.render_pages(&self.ctx.engine, &self.ctx.dirs, self.ctx.locale)
     }
 
-    /// Mark events as processed. Call AFTER vault writes succeed to avoid losing pages
-    /// when a write fails midway.
-    pub fn commit(&self, events: &[Event]) -> Result<(), PipelineError> {
-        self.dedup.record(events)
+    /// Mark this run's events as processed. Call AFTER vault writes succeed to avoid
+    /// losing pages when a write fails midway. Records the `novel` events (first sight)
+    /// AND refreshes the `duplicates`' timestamps (re-seen) so steady-state re-arrivals
+    /// never age out of the retention window and re-emit as new.
+    pub fn commit(&self, novel: &[Event], duplicates: &[Event]) -> Result<(), PipelineError> {
+        self.dedup.record(novel)?;
+        self.dedup.record(duplicates)?;
+        Ok(())
     }
 
     pub async fn render_work_log(
@@ -388,6 +457,7 @@ impl Pipeline {
             &self.ctx.dirs,
             self.ctx.locale,
             &self.ctx.llm,
+            &self.reader,
         )
         .await
     }
@@ -397,15 +467,20 @@ impl Pipeline {
         source_id: &str,
         config: &SourceConfig,
         events: Vec<Event>,
+        duplicates: Vec<Event>,
         _options: &IngestOptions,
     ) -> Result<IngestResult, PipelineError> {
         let focus = config.normalized_focus();
 
         let existing_concepts = if config.extract_concepts {
-            self.load_existing_concept_refs().await
+            self.load_existing_concept_refs().await?
         } else {
             vec![]
         };
+
+        let strings = self.ctx.locale.strings();
+        let summary_heading = strings.summary;
+        let concepts_heading = strings.related_concepts;
 
         let mut document_pages: Vec<RenderOutput> = Vec::new();
         let mut all_concepts: Vec<lk_core::concept::ExtractedConcept> = Vec::new();
@@ -437,91 +512,100 @@ impl Pipeline {
             let vault_path =
                 lk_core::vault_path::VaultPath::document(&self.ctx.dirs, &slug).to_string();
 
-            let summary = match self
-                .ctx
-                .llm
-                .summarize(lk_queue::SummarizeRequest {
-                    text: format!("{}\n{}", event.title, event.body),
-                    max_sentences: 5,
-                    focus: focus.clone(),
-                    locale: self.ctx.locale.tag().to_string(),
-                    target: lk_queue::TaskTarget {
-                        vault_path: vault_path.clone(),
-                        kind: lk_queue::TargetKind::DocumentSummary,
-                        anchor: format!("## {}", self.ctx.locale.strings().summary),
-                    },
-                })
-                .await
-            {
-                Ok(s) => s,
-                Err(e) if e.is_fatal() => return Err(PipelineError::Llm(e)),
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        source = source_id,
-                        slug = %slug,
-                        "document summarize failed; continuing without summary"
-                    );
-                    String::new()
-                }
-            };
+            let existing = self.reader.read_page(Path::new(&vault_path)).await?;
 
-            let doc_concepts: Vec<lk_core::concept::ExtractedConcept> = if config.extract_concepts {
-                match self
-                    .ctx
-                    .llm
-                    .extract_concepts(lk_queue::ExtractConceptsRequest {
-                        text: format!("{}\n{}", event.title, event.body),
-                        source_id: source_id.to_string(),
-                        date: event.date,
-                        focus: focus.clone(),
-                        target: lk_queue::TaskTarget {
-                            vault_path: vault_path.clone(),
-                            kind: lk_queue::TargetKind::DocumentConcepts,
-                            anchor: format!("## {}", self.ctx.locale.strings().related_concepts),
-                        },
-                        existing_concepts: existing_concepts.clone(),
-                        categories: self.ctx.concept_categories.clone(),
-                    })
-                    .await
-                {
-                    Ok(c) => {
-                        let valid_cat_ids: Vec<&str> = self
-                            .ctx
-                            .concept_categories
-                            .iter()
-                            .map(|c| c.id.as_str())
-                            .collect();
-                        c.into_iter()
-                            .filter(concepts::is_valid)
-                            .map(|mut ec| {
-                                if let Some(ref cat) = ec.category
-                                    && !valid_cat_ids.contains(&cat.as_str())
-                                {
-                                    ec.category = None;
-                                }
-                                ec
-                            })
-                            .collect()
-                    }
+            let combined = format!("{}\n{}", event.title, event.body);
+
+            let summary_req = lk_queue::SummarizeRequest {
+                text: combined.clone(),
+                max_sentences: 5,
+                focus: focus.clone(),
+                locale: self.ctx.locale.tag().to_string(),
+                source_type: Some(config.source_type),
+                target: lk_queue::TaskTarget {
+                    vault_path: vault_path.clone(),
+                    kind: lk_queue::TargetKind::DocumentSummary,
+                    anchor: format!("## {summary_heading}"),
+                },
+            };
+            let summary_decision = llm_cache::lookup(
+                existing.as_ref(),
+                summary_req.target.kind.llm_inputs_key(),
+                summary_heading,
+                summary_req.cache_hash(),
+            );
+
+            let summary = if summary_decision.enqueue() {
+                match self.ctx.llm.summarize(summary_req).await {
+                    Ok(s) => s,
                     Err(e) if e.is_fatal() => return Err(PipelineError::Llm(e)),
                     Err(e) => {
                         tracing::warn!(
                             error = %e,
                             source = source_id,
                             slug = %slug,
-                            "document concept extraction failed; continuing without concepts"
+                            "document summarize failed; continuing without summary"
                         );
-                        vec![]
+                        String::new()
                     }
                 }
             } else {
-                vec![]
+                tracing::debug!(source = source_id, slug = %slug, "document summary cached; skipping enqueue");
+                String::new()
+            };
+
+            let (concepts_decision, doc_concepts) = if config.extract_concepts {
+                let concepts_req = lk_queue::ExtractConceptsRequest {
+                    text: combined.clone(),
+                    source_id: source_id.to_string(),
+                    source_type: config.source_type,
+                    date: event.date,
+                    focus: focus.clone(),
+                    target: lk_queue::TaskTarget {
+                        vault_path: vault_path.clone(),
+                        kind: lk_queue::TargetKind::DocumentConcepts,
+                        anchor: format!("## {concepts_heading}"),
+                    },
+                    existing_concepts: existing_concepts.clone(),
+                    categories: self.ctx.concept_categories.clone(),
+                };
+                let decision = llm_cache::lookup(
+                    existing.as_ref(),
+                    concepts_req.target.kind.llm_inputs_key(),
+                    concepts_heading,
+                    concepts_req.cache_hash(),
+                );
+                let extracted = if decision.enqueue() {
+                    match self.ctx.llm.extract_concepts(concepts_req).await {
+                        Ok(c) => filter_valid_concepts(c, &self.ctx.concept_categories),
+                        Err(e) if e.is_fatal() => return Err(PipelineError::Llm(e)),
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                source = source_id,
+                                slug = %slug,
+                                "document concept extraction failed; continuing without concepts"
+                            );
+                            vec![]
+                        }
+                    }
+                } else {
+                    tracing::debug!(source = source_id, slug = %slug, "document concepts cached; skipping enqueue");
+                    vec![]
+                };
+                (Some(decision), extracted)
+            } else {
+                (None, vec![])
             };
 
             let concept_names: Vec<String> = doc_concepts.iter().map(|c| c.name.clone()).collect();
 
-            match render::render_document_page(
+            let llm_inputs = render::DocumentLlmInputHashes {
+                summary: &summary_decision.hash,
+                concepts: concepts_decision.as_ref().map(|d| d.hash.as_str()),
+            };
+
+            let fresh = match render::render_document_page(
                 &render::DocumentRenderContext {
                     slug: &slug,
                     event,
@@ -529,11 +613,12 @@ impl Pipeline {
                     concepts: &concept_names,
                     extract_concepts: config.extract_concepts,
                     locale: self.ctx.locale,
+                    llm_inputs,
                 },
                 &self.ctx.engine,
                 &self.ctx.dirs,
             ) {
-                Ok(output) => document_pages.push(output),
+                Ok(output) => output,
                 Err(e) => {
                     tracing::warn!(
                         error = %e,
@@ -543,7 +628,19 @@ impl Pipeline {
                     );
                     continue;
                 }
+            };
+
+            let mut splices: Vec<(&str, &llm_cache::SectionDecision)> =
+                vec![(summary_heading, &summary_decision)];
+            if let Some(d) = concepts_decision.as_ref() {
+                splices.push((concepts_heading, d));
             }
+            let content = render::splice_preserved_sections(fresh.content, splices);
+
+            document_pages.push(render::RenderOutput {
+                path: fresh.path,
+                content,
+            });
 
             // Merge concepts into run-level accumulator.
             {
@@ -567,38 +664,44 @@ impl Pipeline {
         Ok(IngestResult {
             source_id: source_id.into(),
             events,
+            duplicates,
             concepts: all_concepts,
             daily_pages: vec![],
             document_pages,
         })
     }
 
-    async fn load_existing_concept_refs(&self) -> Vec<lk_queue::ExistingConceptRef> {
+    async fn load_existing_concept_refs(
+        &self,
+    ) -> Result<Vec<lk_queue::ExistingConceptRef>, PipelineError> {
         let concept_dir = std::path::Path::new(&self.ctx.dirs.wiki).join("concepts");
-        let files = match self.reader.list_markdown(&concept_dir).await {
-            Ok(f) => f,
-            Err(_) => return vec![],
-        };
+        // Missing concepts directory is the legitimate "no concepts yet" state, not
+        // an error. `list_markdown` already returns Ok(vec![]) in that case, so any
+        // error returned here is a real I/O or permission failure worth surfacing.
+        let files = self.reader.list_markdown(&concept_dir).await?;
 
         let mut refs = Vec::with_capacity(files.len());
         for file in &files {
-            if let Ok(Some(page)) = self.reader.read_page(file).await {
-                let slug = page
-                    .frontmatter
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default();
-                let name = page
-                    .frontmatter
-                    .get("title")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default();
-                if !slug.is_empty() && !name.is_empty() {
-                    refs.push(lk_queue::ExistingConceptRef {
-                        slug: slug.to_string(),
-                        name: name.to_string(),
-                    });
-                }
+            let Some(page) = self.reader.read_page(file).await? else {
+                // Race: file appeared in listing but vanished before we could read it.
+                // Skip rather than fail the whole ingest.
+                continue;
+            };
+            let slug = page
+                .frontmatter
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let name = page
+                .frontmatter
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if !slug.is_empty() && !name.is_empty() {
+                refs.push(lk_queue::ExistingConceptRef {
+                    slug: slug.to_string(),
+                    name: name.to_string(),
+                });
             }
         }
 
@@ -609,16 +712,47 @@ impl Pipeline {
             }
         }
 
-        refs
+        Ok(refs)
     }
 }
 
-fn empty_result(source_id: &str) -> IngestResult {
+fn empty_result(source_id: &str, duplicates: Vec<Event>) -> IngestResult {
     IngestResult {
         source_id: source_id.into(),
         events: vec![],
+        duplicates,
         concepts: vec![],
         daily_pages: vec![],
         document_pages: vec![],
     }
+}
+
+/// Drop concepts the model invented outside the configured slate. The pipeline
+/// already accepts free-text categories from the skill side; here we strip any
+/// `category` field that names an unknown id, so the rest of the system never
+/// sees a non-existent category.
+fn filter_valid_concepts(
+    raw: Vec<ExtractedConcept>,
+    categories: &[lk_queue::CategoryRef],
+) -> Vec<ExtractedConcept> {
+    let valid_cat_ids: Vec<&str> = categories.iter().map(|c| c.id.as_str()).collect();
+    raw.into_iter()
+        .filter(concepts::is_valid)
+        .map(|mut ec| {
+            if let Some(ref cat) = ec.category
+                && !valid_cat_ids.contains(&cat.as_str())
+            {
+                // Observable parity with the queue-path `graph lint`: a category the
+                // LLM invented (or a config id that was renamed) is dropped, but never
+                // silently — otherwise ingest-path drift is invisible.
+                tracing::warn!(
+                    concept = %ec.name,
+                    category = %cat,
+                    "dropping concept category not in configured slate"
+                );
+                ec.category = None;
+            }
+            ec
+        })
+        .collect()
 }

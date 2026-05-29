@@ -3,9 +3,9 @@ use serde::Serialize;
 
 use crate::backlinks::{ConceptUpdate, SyncReport};
 use crate::cluster::{ClusterResult, LinkSuggestion};
+use crate::concepts::{InvalidCategoryConcept, NearDuplicateConcept};
 use crate::export::GraphExport;
 use crate::graph::{BrokenLink, HubEntry};
-use crate::relations::{self, RelationUpdate};
 use crate::stale::{Category, StalePage};
 
 #[derive(Debug, Serialize)]
@@ -68,6 +68,8 @@ pub struct LintReport {
     pub orphans: Vec<String>,
     pub broken: Vec<BrokenLink>,
     pub index: IndexSyncReport,
+    pub invalid_categories: Vec<InvalidCategoryConcept>,
+    pub near_duplicate_concepts: Vec<NearDuplicateConcept>,
     pub findings: usize,
 }
 
@@ -227,6 +229,31 @@ pub fn print_lint(r: &LintReport) {
         }
     }
 
+    if !r.invalid_categories.is_empty() {
+        println!(
+            "\nInvalid concept categories ({}):",
+            r.invalid_categories.len()
+        );
+        for c in &r.invalid_categories {
+            println!(
+                "  {}  category={}  ({})",
+                c.slug,
+                c.category,
+                c.path.display()
+            );
+        }
+    }
+
+    if !r.near_duplicate_concepts.is_empty() {
+        println!(
+            "\nNear-duplicate concepts ({}):",
+            r.near_duplicate_concepts.len()
+        );
+        for d in &r.near_duplicate_concepts {
+            println!("  {} ~ {}  ({:.2})", d.a, d.b, d.similarity);
+        }
+    }
+
     if r.findings == 0 {
         println!("\nNo issues found");
     } else {
@@ -320,47 +347,6 @@ fn format_diff(update: &ConceptUpdate) -> String {
     }
     if !update.removed.is_empty() {
         parts.push(format!("-{} source(s)", update.removed.len()));
-    }
-    if parts.is_empty() {
-        String::new()
-    } else {
-        format!("  ({})", parts.join(", "))
-    }
-}
-
-#[derive(Debug, Serialize)]
-pub struct RelationsSyncReport {
-    #[serde(flatten)]
-    pub sync: relations::SyncReport,
-    pub changed: usize,
-}
-
-pub fn print_relations_sync(r: &RelationsSyncReport) {
-    println!("=== Relations sync ===");
-
-    if r.sync.dry_run {
-        println!("(dry-run: no files written)");
-    }
-
-    if r.sync.updated.is_empty() {
-        println!("\nAll {} concept page(s) in sync.", r.sync.unchanged);
-        return;
-    }
-
-    println!("\nUpdated: {} concept page(s)", r.sync.updated.len());
-    for entry in &r.sync.updated {
-        println!("  {}{}", entry.path.display(), format_relation_diff(entry));
-    }
-    println!("Unchanged: {} concept page(s)", r.sync.unchanged);
-}
-
-fn format_relation_diff(update: &RelationUpdate) -> String {
-    let mut parts = Vec::new();
-    if !update.added.is_empty() {
-        parts.push(format!("+{} relation(s)", update.added.len()));
-    }
-    if !update.removed.is_empty() {
-        parts.push(format!("-{} relation(s)", update.removed.len()));
     }
     if parts.is_empty() {
         String::new()

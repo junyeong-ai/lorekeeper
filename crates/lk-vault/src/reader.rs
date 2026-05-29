@@ -27,12 +27,15 @@ impl VaultReader {
 
     pub async fn list_markdown(&self, rel_dir: &Path) -> Result<Vec<PathBuf>, VaultError> {
         let full = self.root.join(rel_dir);
-        if !tokio::fs::metadata(&full)
-            .await
-            .map(|m| m.is_dir())
-            .unwrap_or(false)
-        {
-            return Ok(vec![]);
+        // A missing directory is the legitimate "nothing here yet" state → empty list.
+        // A permission/I/O failure on the metadata probe is a real error and must
+        // propagate, not masquerade as "directory absent" — otherwise a transient
+        // failure silently degrades callers (e.g. an empty concept registry).
+        match tokio::fs::metadata(&full).await {
+            Ok(m) if m.is_dir() => {}
+            Ok(_) => return Ok(vec![]), // path exists but isn't a directory
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+            Err(e) => return Err(e.into()),
         }
 
         let mut entries = tokio::fs::read_dir(&full).await?;

@@ -17,7 +17,7 @@ const TITLES: TableDefinition<&str, u64> = TableDefinition::new("titles");
 /// vendor-tracking parameters whose presence varies by attribution path but
 /// never carry resource-identifying information.
 const TRACKING_QUERY_EXACT_KEYS: &[&str] = &[
-    "fbclid", "gclid", "mc_cid", "mc_eid", "_hsenc", "_hsmi", "ref", "msclkid", "ttclid", "twclid",
+    "fbclid", "gclid", "mc_cid", "mc_eid", "_hsenc", "_hsmi", "msclkid", "ttclid", "twclid",
     "wbraid", "gbraid",
 ];
 
@@ -105,6 +105,16 @@ fn is_schema_mismatch(e: &redb::TableError) -> bool {
             | redb::TableError::TableIsMultimap(_)
             | redb::TableError::TableIsNotMultimap(_)
     )
+}
+
+/// Outcome of a `deduplicate` pass: the `novel` events to ingest, and the
+/// `duplicates` that matched a prior observation. `duplicates` is retained so the
+/// commit can refresh their `seen_at` timestamps — a steady-state re-arrival (an
+/// evergreen RSS item, a recurring Jira issue) must not age past the retention
+/// window and re-emit as new just because it kept being recognized as a duplicate.
+pub struct DedupResult {
+    pub novel: Vec<Event>,
+    pub duplicates: Vec<Event>,
 }
 
 pub struct DedupCache {
@@ -219,7 +229,7 @@ impl DedupCache {
         &self,
         events: Vec<Event>,
         cascade: &[DedupStrategy],
-    ) -> Result<Vec<Event>, PipelineError> {
+    ) -> Result<DedupResult, PipelineError> {
         // Persisted tables exist only when a real (writable) cache is open. In read-only/
         // empty mode (dry-run, no file) they're absent, but intra-batch dedup must STILL
         // run so a dry-run preview matches what a real run would actually write.
@@ -244,6 +254,7 @@ impl DedupCache {
         });
 
         let mut novel: Vec<Event> = Vec::with_capacity(events.len());
+        let mut duplicates: Vec<Event> = Vec::new();
         // Per-run sets so two identical events in the SAME input batch don't both pass
         // as novel — the persisted tables only reflect prior committed runs.
         let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -336,12 +347,18 @@ impl DedupCache {
                     seen_urls.insert(normalize_url(url));
                 }
                 novel.push(event);
+            } else {
+                duplicates.push(event);
             }
         }
 
-        Ok(novel)
+        Ok(DedupResult { novel, duplicates })
     }
 
+    /// Upsert every event's keys with the current time. Used for BOTH novel events
+    /// (first record) and re-seen duplicates (timestamp refresh) — redb `insert` is an
+    /// upsert, so re-recording a duplicate slides its `seen_at` forward and keeps it
+    /// out of the prune window.
     pub fn record(&self, events: &[Event]) -> Result<(), PipelineError> {
         // A read-only/empty cache never persists — dry-run never commits anyway.
         let Some(db) = &self.db else {
@@ -484,9 +501,20 @@ mod tests {
     fn normalize_url_strips_all_tracking_variants() {
         assert_eq!(
             normalize_url(
-                "https://example.com/page?utm_source=x&utm_medium=y&utm_campaign=z&utm_term=a&utm_content=b&fbclid=abc&gclid=def&mc_cid=ghi&mc_eid=jkl&_hsenc=mno&_hsmi=pqr&ref=stu"
+                "https://example.com/page?utm_source=x&utm_medium=y&utm_campaign=z&utm_term=a&utm_content=b&fbclid=abc&gclid=def&mc_cid=ghi&mc_eid=jkl&_hsenc=mno&_hsmi=pqr"
             ),
             "https://example.com/page"
+        );
+    }
+
+    #[test]
+    fn normalize_url_preserves_ref_as_resource_identifier() {
+        // `ref` identifies a branch/revision/view in many doc & code URLs (GitHub,
+        // GitLab, docs sites) — resource-identifying, not tracking. It must survive
+        // canonicalization so distinct revisions aren't merged as one resource.
+        assert_eq!(
+            normalize_url("https://github.com/o/r/blob/x.rs?ref=v2"),
+            "https://github.com/o/r/blob/x.rs?ref=v2"
         );
     }
 
@@ -581,13 +609,33 @@ mod tests {
         let cascade = vec![DedupStrategy::EventId];
         let events = vec![ev("a", "A", None), ev("b", "B", None)];
 
-        let novel = cache.deduplicate(events.clone(), &cascade).unwrap();
+        let novel = cache.deduplicate(events.clone(), &cascade).unwrap().novel;
         assert_eq!(novel.len(), 2);
 
         cache.record(&events).unwrap();
 
-        let novel2 = cache.deduplicate(events, &cascade).unwrap();
+        let novel2 = cache.deduplicate(events, &cascade).unwrap().novel;
         assert_eq!(novel2.len(), 0);
+    }
+
+    #[test]
+    fn re_seen_events_are_returned_as_duplicates_for_timestamp_refresh() {
+        // A recurring item recognized as a duplicate must be surfaced (not silently
+        // dropped) so `commit` can refresh its `seen_at` and it never ages out of the
+        // retention window to re-emit as new.
+        let dir = TempDir::new().unwrap();
+        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85).unwrap();
+        let cascade = vec![DedupStrategy::EventId];
+        let events = vec![ev("a", "A", None)];
+        cache.record(&events).unwrap();
+
+        let result = cache.deduplicate(events, &cascade).unwrap();
+        assert!(result.novel.is_empty());
+        assert_eq!(
+            result.duplicates.len(),
+            1,
+            "re-seen event must be returned so commit can refresh its timestamp"
+        );
     }
 
     #[test]
@@ -610,15 +658,18 @@ mod tests {
             "Totally different",
             Some("https://example.com/a"),
         )];
-        assert_eq!(cache.deduplicate(by_url, &cascade).unwrap().len(), 0);
+        assert_eq!(cache.deduplicate(by_url, &cascade).unwrap().novel.len(), 0);
 
         // Matches via Title only (different id, no url).
         let by_title = vec![ev("other2", "Seeded Title", None)];
-        assert_eq!(cache.deduplicate(by_title, &cascade).unwrap().len(), 0);
+        assert_eq!(
+            cache.deduplicate(by_title, &cascade).unwrap().novel.len(),
+            0
+        );
 
         // Matches nothing in the cascade → novel.
         let novel = vec![ev("fresh", "Brand New", Some("https://example.com/z"))];
-        assert_eq!(cache.deduplicate(novel, &cascade).unwrap().len(), 1);
+        assert_eq!(cache.deduplicate(novel, &cascade).unwrap().novel.len(), 1);
     }
 
     #[test]
@@ -630,7 +681,7 @@ mod tests {
         let cascade = vec![DedupStrategy::ContentHash];
         let a = ev("from-rss", "Anthropic releases Opus 4.7", None);
         let b = ev("from-mail", "Anthropic releases Opus 4.7", None);
-        let novel = cache.deduplicate(vec![a, b], &cascade).unwrap();
+        let novel = cache.deduplicate(vec![a, b], &cascade).unwrap().novel;
         assert_eq!(novel.len(), 1);
     }
 
@@ -642,7 +693,7 @@ mod tests {
         let cache = DedupCache::open_read_only(&dir.path().join("absent.redb"), 0.85).unwrap();
         let cascade = vec![DedupStrategy::EventId];
         let batch = vec![ev("a", "A", None), ev("a", "A", None)];
-        let novel = cache.deduplicate(batch, &cascade).unwrap();
+        let novel = cache.deduplicate(batch, &cascade).unwrap().novel;
         assert_eq!(
             novel.len(),
             1,
@@ -663,7 +714,7 @@ mod tests {
             ev("a", "A", Some("http://x")),
             ev("a", "A", Some("http://x")),
         ];
-        let novel = cache.deduplicate(batch, &cascade).unwrap();
+        let novel = cache.deduplicate(batch, &cascade).unwrap().novel;
         assert_eq!(
             novel.len(),
             1,
@@ -683,11 +734,11 @@ mod tests {
 
         // Same URL, different event-id and title → still a duplicate via the URL strategy.
         let dup = vec![ev("b", "Reposted", Some("https://example.com/post"))];
-        assert_eq!(cache.deduplicate(dup, &cascade).unwrap().len(), 0);
+        assert_eq!(cache.deduplicate(dup, &cascade).unwrap().novel.len(), 0);
 
         // Different URL is novel.
         let novel = vec![ev("c", "Other", Some("https://example.com/other"))];
-        assert_eq!(cache.deduplicate(novel, &cascade).unwrap().len(), 1);
+        assert_eq!(cache.deduplicate(novel, &cascade).unwrap().novel.len(), 1);
     }
 
     #[test]
@@ -705,7 +756,7 @@ mod tests {
             .unwrap();
 
         let dup = vec![ev("b", "Reposted", Some("https://example.com/post"))];
-        assert_eq!(cache.deduplicate(dup, &cascade).unwrap().len(), 0);
+        assert_eq!(cache.deduplicate(dup, &cascade).unwrap().novel.len(), 0);
     }
 
     #[test]
@@ -728,7 +779,7 @@ mod tests {
             "Video B",
             Some("https://www.youtube.com/watch?v=bbb"),
         )];
-        assert_eq!(cache.deduplicate(novel, &cascade).unwrap().len(), 1);
+        assert_eq!(cache.deduplicate(novel, &cascade).unwrap().novel.len(), 1);
 
         // Same resource param with extra tracking is still a duplicate.
         let dup = vec![ev(
@@ -736,7 +787,7 @@ mod tests {
             "Video A reshared",
             Some("https://www.youtube.com/watch?v=aaa&utm_source=twitter"),
         )];
-        assert_eq!(cache.deduplicate(dup, &cascade).unwrap().len(), 0);
+        assert_eq!(cache.deduplicate(dup, &cascade).unwrap().novel.len(), 0);
     }
 
     #[test]
@@ -752,7 +803,10 @@ mod tests {
 
         // A near-identical title on the same date is a duplicate.
         let same_day = vec![ev("b", "Anthropic releases Opus 4.7!", None)];
-        assert_eq!(cache.deduplicate(same_day, &cascade).unwrap().len(), 0);
+        assert_eq!(
+            cache.deduplicate(same_day, &cascade).unwrap().novel.len(),
+            0
+        );
 
         // The same title on a different date is also a duplicate.
         let other_day = Event {
@@ -760,7 +814,11 @@ mod tests {
             ..ev("c", "Anthropic releases Opus 4.7", None)
         };
         assert_eq!(
-            cache.deduplicate(vec![other_day], &cascade).unwrap().len(),
+            cache
+                .deduplicate(vec![other_day], &cascade)
+                .unwrap()
+                .novel
+                .len(),
             0
         );
     }

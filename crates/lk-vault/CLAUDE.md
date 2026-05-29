@@ -18,10 +18,12 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   skipped, not silently dropped — corruption stays observable without blanking history.
 - Frontmatter values derived from LLM output (e.g. concept `title`) are emitted as JSON
   strings (`serde_json::to_string` / `| tojson`) so quotes/colons can't break the YAML.
-- **`section::replace_section`** rewrites the body of one `## <heading>` section,
-  preserving everything else. Tracks fenced-code state so `## ` lines inside
-  ``` blocks are not treated as section boundaries. Trims trailing whitespace from
-  heading lines before matching to prevent silent replacement failures.
+- **`section::{replace_section, section_body}`** operate on the body of a
+  `## <heading>` section. `replace_section` rewrites it, `section_body` reads it
+  as a `&str`. Both share `find_section`, which tracks fenced-code state so `## `
+  lines inside ``` blocks are quoted content, not section boundaries, and trims
+  trailing whitespace from heading lines. (The pipeline's "is this section filled?"
+  predicate lives in `lk_pipeline::llm_cache`, built on `section_body`.)
 - **`index::build_index`** generates `{wiki}/index.md` — a hierarchical page catalog
   grouped by category (concepts, documents, daily sources, work-log, synthesis).
   One-liner summaries are extracted from each page's primary heading.

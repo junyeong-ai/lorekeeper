@@ -104,7 +104,7 @@ fn index_sync_detects_drift() {
     let pages = scan::scan_vault(&root, &config).unwrap();
     let g = graph::WikiGraph::build(&pages);
     let existence = scan::VaultExistence::from_pages(&pages);
-    let drift = index::diff(&g, &existence, &root, Path::new("wiki"), &[]);
+    let drift = index::diff(&g, &existence, &root, Path::new("wiki"), &[]).unwrap();
     // concept-c and orphan-page are missing from index.md
     assert!(!drift.is_in_sync());
 }
@@ -124,20 +124,20 @@ fn index_sync_fix_mutates_and_idempotent() {
 
     // Before fix.
     let existence = scan::VaultExistence::from_pages(&pages);
-    let drift = index::diff(&g, &existence, tmp.path(), Path::new("wiki"), &[]);
+    let drift = index::diff(&g, &existence, tmp.path(), Path::new("wiki"), &[]).unwrap();
     assert!(!drift.is_in_sync());
 
     // Fix.
     let added = index::fix(&drift, tmp.path(), Path::new("wiki")).unwrap();
     assert_eq!(added, 1);
     let content = std::fs::read_to_string(wiki.join("index.md")).unwrap();
-    assert!(content.contains("[[beta]]"));
+    assert!(content.contains("[[wiki/beta]]"));
 
     // After fix, re-scan to pick up potentially changed pages.
     let pages2 = scan::scan_vault(tmp.path(), &config).unwrap();
     let g2 = graph::WikiGraph::build(&pages2);
     let existence2 = scan::VaultExistence::from_pages(&pages2);
-    let drift2 = index::diff(&g2, &existence2, tmp.path(), Path::new("wiki"), &[]);
+    let drift2 = index::diff(&g2, &existence2, tmp.path(), Path::new("wiki"), &[]).unwrap();
     assert!(drift2.is_in_sync());
 }
 
@@ -225,7 +225,7 @@ fn lint_combined_report() {
     let orphans = g.orphans(&config.graph.orphan_exclude, Path::new("wiki"));
     let broken = g.broken_links().to_vec();
     let existence = scan::VaultExistence::from_pages(&pages);
-    let drift = index::diff(&g, &existence, &root, Path::new("wiki"), &[]);
+    let drift = index::diff(&g, &existence, &root, Path::new("wiki"), &[]).unwrap();
 
     let findings = orphans.len()
         + broken.len()
@@ -244,6 +244,8 @@ fn lint_combined_report() {
             missing_from_disk: drift.missing_from_disk,
             fixed: None,
         },
+        invalid_categories: Vec::new(),
+        near_duplicate_concepts: Vec::new(),
         findings,
     };
 
@@ -255,6 +257,7 @@ fn lint_combined_report() {
     assert!(json["orphans"].is_array());
     assert!(json["broken"].is_array());
     assert!(json["findings"].as_u64().unwrap() > 0);
+    assert!(json["invalid_categories"].is_array());
 }
 
 // --- Suggest links ---

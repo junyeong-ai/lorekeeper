@@ -1151,6 +1151,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "strsim",
  "tempfile",
  "thiserror",
  "walkdir",
@@ -1181,6 +1182,7 @@ name = "lk-queue"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "blake3",
  "jiff",
  "lk-core",
  "serde",

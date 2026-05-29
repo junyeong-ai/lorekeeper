@@ -4,16 +4,57 @@ use std::sync::Arc;
 
 use lk_core::config::Config;
 use lk_core::vault_path::VaultPath;
+use lk_queue::TargetKind;
 use lk_vault::{Page, VaultReader};
 
 use crate::PipelineError;
 use crate::context::PipelineContext;
-use crate::render::RenderOutput;
+use crate::llm_cache::{self, SectionDecision};
+use crate::render::{RenderOutput, llm_inputs_map, splice_preserved_sections};
 
 pub struct Synthesizer {
     ctx: Arc<PipelineContext>,
     reader: VaultReader,
     sources: Vec<String>,
+}
+
+/// Outcome of resolving a synthesis page's LLM-owned section.
+struct SynthesisSection {
+    /// Cache decision — carries the hash to stamp into frontmatter and the
+    /// preserved body to splice on a cache hit.
+    decision: SectionDecision,
+    /// The narrative text to feed the template. Empty on a cache hit (the body is
+    /// spliced in afterward, not re-rendered) and in queue mode (the skill fills it
+    /// later). `None` only when a transient LLM failure means the page should be
+    /// skipped entirely.
+    narrative: Option<String>,
+}
+
+impl SynthesisSection {
+    fn cached(decision: SectionDecision) -> Self {
+        Self {
+            decision,
+            narrative: Some(String::new()),
+        }
+    }
+
+    fn fresh(decision: SectionDecision, narrative: String) -> Self {
+        Self {
+            decision,
+            narrative: Some(narrative),
+        }
+    }
+
+    fn failed() -> Self {
+        Self {
+            decision: SectionDecision {
+                hash: String::new(),
+                cached: false,
+                preserved_body: None,
+            },
+            narrative: None,
+        }
+    }
 }
 
 impl Synthesizer {
@@ -40,58 +81,100 @@ impl Synthesizer {
         self.ctx.perf.enabled
     }
 
-    /// Run a summarize task, propagating only fatal (persistence) errors. A transient
-    /// LLM failure returns `None` so callers skip page generation rather than producing
-    /// an empty-content page that looks authoritative. Centralizes the fatal/non-fatal
-    /// split every period shares.
-    async fn summarize_or_warn(
+    /// A synthesis page is a materialized view exactly like a daily page: its one
+    /// LLM-owned section (narrative or themes) is preserved across re-renders and
+    /// re-computed only when the source input changes. This is the shared lookup:
+    /// build the request, hash its `cache_identity()`, and compare against the
+    /// existing page's `llm_inputs.<key>` frontmatter. On a hit the LLM call is
+    /// skipped and the existing body is spliced back; on a miss the task runs (or
+    /// enqueues, in queue mode).
+    async fn summarize_section(
         &self,
         text: String,
         max_sentences: usize,
-        vault_path: String,
-        kind: lk_queue::TargetKind,
-        anchor: String,
+        path: &VaultPath,
+        kind: TargetKind,
+        heading: &str,
         what: &str,
-    ) -> Result<Option<String>, PipelineError> {
-        match self
-            .ctx
-            .llm
-            .summarize(lk_queue::SummarizeRequest {
-                text,
-                max_sentences,
-                focus: None,
-                locale: self.ctx.locale.tag().to_string(),
-                target: lk_queue::TaskTarget {
-                    vault_path,
-                    kind,
-                    anchor,
-                },
-            })
-            .await
-        {
-            Ok(s) => Ok(Some(s)),
+    ) -> Result<SynthesisSection, PipelineError> {
+        let req = lk_queue::SummarizeRequest {
+            text,
+            max_sentences,
+            focus: None,
+            locale: self.ctx.locale.tag().to_string(),
+            // Period synthesis rolls up pre-summarized pages across sources/time;
+            // no single source_type applies.
+            source_type: None,
+            target: lk_queue::TaskTarget {
+                vault_path: path.to_string(),
+                kind,
+                anchor: format!("## {heading}"),
+            },
+        };
+        let decision = self.lookup(path, kind, heading, req.cache_hash()).await?;
+        if !decision.enqueue() {
+            return Ok(SynthesisSection::cached(decision));
+        }
+        match self.ctx.llm.summarize(req).await {
+            Ok(narrative) => Ok(SynthesisSection::fresh(decision, narrative)),
             Err(e) if e.is_fatal() => Err(PipelineError::Llm(e)),
             Err(e) => {
                 tracing::warn!(error = %e, what, "synthesis summarize failed; skipping page");
-                Ok(None)
+                Ok(SynthesisSection::failed())
             }
         }
     }
 
-    /// Render a synthesis/personal template, injecting localized labels as `i18n.*`.
-    /// Every period template is embedded, so this always resolves; a user template dir
-    /// merely overrides.
-    fn render(&self, template: &str, context: &serde_json::Value) -> Result<String, PipelineError> {
-        let mut ctx = context.clone();
+    /// Cache lookup for one synthesis page's LLM-owned section. The frontmatter key
+    /// is derived from the task kind (single source of truth), so the page and the
+    /// queue task agree by construction.
+    async fn lookup(
+        &self,
+        path: &VaultPath,
+        kind: TargetKind,
+        heading: &str,
+        hash: String,
+    ) -> Result<SectionDecision, PipelineError> {
+        let existing = self.reader.read_page(path.as_ref()).await?;
+        Ok(llm_cache::lookup(
+            existing.as_ref(),
+            kind.llm_inputs_key(),
+            heading,
+            hash,
+        ))
+    }
+
+    /// Render a synthesis/personal template, injecting localized labels as `i18n.*`
+    /// and the `llm_inputs.<key>` cache hash, then splice the preserved LLM-owned
+    /// section body back when the lookup was a cache hit. Every period template is
+    /// embedded, so this always resolves; a user template dir merely overrides.
+    fn render_section(
+        &self,
+        template: &str,
+        kind: TargetKind,
+        heading: &str,
+        decision: &SectionDecision,
+        context: serde_json::Value,
+    ) -> Result<String, PipelineError> {
+        let mut ctx = context;
         if let Some(map) = ctx.as_object_mut() {
             let i18n = serde_json::to_value(self.ctx.locale.strings())
                 .map_err(|e| PipelineError::Render(e.to_string()))?;
             map.insert("i18n".to_string(), i18n);
+            map.insert(
+                "llm_inputs".to_string(),
+                serde_json::Value::Object(llm_inputs_map(&[(kind, Some(&decision.hash))])),
+            );
         }
-        self.ctx
+        let rendered = self
+            .ctx
             .engine
             .render(template, &ctx)
-            .map_err(|e| PipelineError::Render(e.to_string()))
+            .map_err(|e| PipelineError::Render(e.to_string()))?;
+        Ok(splice_preserved_sections(
+            rendered,
+            std::iter::once((heading, decision)),
+        ))
     }
 
     pub async fn try_weekly_synthesis(
@@ -126,26 +209,31 @@ impl Synthesizer {
         }
 
         let path = VaultPath::weekly_synthesis(&self.ctx.dirs, year, week);
-        let themes = match self
-            .ctx
-            .llm
-            .identify_themes(lk_queue::ThemeRequest {
-                text: combined,
-                max_themes: 5,
-                target: lk_queue::TaskTarget {
-                    vault_path: path.to_string(),
-                    kind: lk_queue::TargetKind::WeeklySynthesisNarrative,
-                    anchor: format!("## {}", self.ctx.locale.strings().key_themes_this_week),
-                },
-            })
-            .await
-        {
-            Ok(t) => t,
-            Err(e) if e.is_fatal() => return Err(PipelineError::Llm(e)),
-            Err(e) => {
-                tracing::warn!(error = %e, "weekly theme extraction failed; skipping page");
-                return Ok(None);
+        let kind = TargetKind::WeeklySynthesisNarrative;
+        let heading = self.ctx.locale.strings().key_themes_this_week;
+
+        let req = lk_queue::ThemeRequest {
+            text: combined,
+            max_themes: 5,
+            locale: self.ctx.locale.tag().to_string(),
+            target: lk_queue::TaskTarget {
+                vault_path: path.to_string(),
+                kind,
+                anchor: format!("## {heading}"),
+            },
+        };
+        let decision = self.lookup(&path, kind, heading, req.cache_hash()).await?;
+        let themes = if decision.enqueue() {
+            match self.ctx.llm.identify_themes(req).await {
+                Ok(t) => t,
+                Err(e) if e.is_fatal() => return Err(PipelineError::Llm(e)),
+                Err(e) => {
+                    tracing::warn!(error = %e, "weekly theme extraction failed; skipping page");
+                    return Ok(None);
+                }
             }
+        } else {
+            Vec::new()
         };
 
         // Weekly synthesis observes concepts already materialized during daily ingest;
@@ -157,10 +245,15 @@ impl Synthesizer {
             "labels": ["synthesis"],
             "sources": covered_sources,
             "themes": themes,
-            "new_concepts": Vec::<String>::new(),
         });
 
-        let content = self.render("weekly-synthesis.md.jinja", &context)?;
+        let content = self.render_section(
+            "weekly-synthesis.md.jinja",
+            kind,
+            heading,
+            &decision,
+            context,
+        )?;
 
         Ok(Some(RenderOutput { path, content }))
     }
@@ -189,19 +282,21 @@ impl Synthesizer {
             .join("\n\n---\n\n");
 
         let path = VaultPath::weekly_personal(&self.ctx.dirs, year, week);
-        let Some(narrative) = self
-            .summarize_or_warn(
+        let kind = TargetKind::WeeklyPersonalNarrative;
+        let heading = self.ctx.locale.strings().key_summary;
+        let section = self
+            .summarize_section(
                 format!(
                     "Summarize this week's personal work into key accomplishments by category:\n\n{combined}"
                 ),
                 10,
-                path.to_string(),
-                lk_queue::TargetKind::WeeklyPersonalNarrative,
-                format!("## {}", self.ctx.locale.strings().key_summary),
+                &path,
+                kind,
+                heading,
                 "weekly personal",
             )
-            .await?
-        else {
+            .await?;
+        let Some(narrative) = section.narrative else {
             return Ok(None);
         };
         let context = serde_json::json!({
@@ -214,7 +309,13 @@ impl Synthesizer {
             "categories": self.ctx.perf.work_categories,
         });
 
-        let content = self.render("weekly-personal.md.jinja", &context)?;
+        let content = self.render_section(
+            "weekly-personal.md.jinja",
+            kind,
+            heading,
+            &section.decision,
+            context,
+        )?;
 
         Ok(Some(RenderOutput { path, content }))
     }
@@ -242,19 +343,21 @@ impl Synthesizer {
             .join("\n\n---\n\n");
 
         let path = VaultPath::monthly_personal(&self.ctx.dirs, year, month);
-        let Some(narrative) = self
-            .summarize_or_warn(
+        let kind = TargetKind::MonthlyPersonalNarrative;
+        let heading = self.ctx.locale.strings().key_summary;
+        let section = self
+            .summarize_section(
                 format!(
                     "Generate a monthly work summary with key achievements and category distribution:\n\n{combined}"
                 ),
                 15,
-                path.to_string(),
-                lk_queue::TargetKind::MonthlyPersonalNarrative,
-                format!("## {}", self.ctx.locale.strings().key_summary),
+                &path,
+                kind,
+                heading,
                 "monthly",
             )
-            .await?
-        else {
+            .await?;
+        let Some(narrative) = section.narrative else {
             return Ok(None);
         };
         let context = serde_json::json!({
@@ -268,7 +371,13 @@ impl Synthesizer {
             "categories": self.ctx.perf.work_categories,
         });
 
-        let content = self.render("monthly-summary.md.jinja", &context)?;
+        let content = self.render_section(
+            "monthly-summary.md.jinja",
+            kind,
+            heading,
+            &section.decision,
+            context,
+        )?;
 
         Ok(Some(RenderOutput { path, content }))
     }
@@ -320,19 +429,21 @@ impl Synthesizer {
         }
 
         let path = VaultPath::quarterly_personal(&self.ctx.dirs, year, quarter);
-        let Some(narrative) = self
-            .summarize_or_warn(
+        let kind = TargetKind::QuarterlyPersonalNarrative;
+        let heading = self.ctx.locale.strings().key_summary;
+        let section = self
+            .summarize_section(
                 format!(
                     "Generate a quarterly performance review: top 5 achievements, category breakdown, growth areas, next direction:\n\n{combined}"
                 ),
                 20,
-                path.to_string(),
-                lk_queue::TargetKind::QuarterlyPersonalNarrative,
-                format!("## {}", self.ctx.locale.strings().top_achievements),
+                &path,
+                kind,
+                heading,
                 "quarterly",
             )
-            .await?
-        else {
+            .await?;
+        let Some(narrative) = section.narrative else {
             return Ok(None);
         };
 
@@ -346,18 +457,17 @@ impl Synthesizer {
             "start_date": start.to_string(),
             "end_date": end.to_string(),
             "category_stats": category_stats,
-            "achievements": split_into_lines(&narrative)
-                .into_iter()
-                .take(5)
-                .collect::<Vec<_>>(),
             "monthly_summaries": monthly_summaries,
             "narrative": narrative,
-            "team_contribution": "",
-            "growth_areas": "",
-            "next_direction": "",
         });
 
-        let content = self.render("quarterly-review.md.jinja", &context)?;
+        let content = self.render_section(
+            "quarterly-review.md.jinja",
+            kind,
+            heading,
+            &section.decision,
+            context,
+        )?;
 
         Ok(Some(RenderOutput { path, content }))
     }
@@ -417,19 +527,21 @@ impl Synthesizer {
         }
 
         let path = VaultPath::annual_personal(&self.ctx.dirs, year);
-        let Some(narrative) = self
-            .summarize_or_warn(
+        let kind = TargetKind::AnnualPersonalNarrative;
+        let heading = strings.overall_summary;
+        let section = self
+            .summarize_section(
                 format!(
                     "Generate a comprehensive annual performance review based on {prompt_context}:\n\n{combined}"
                 ),
                 25,
-                path.to_string(),
-                lk_queue::TargetKind::AnnualPersonalNarrative,
-                format!("## {}", strings.overall_summary),
+                &path,
+                kind,
+                heading,
                 "annual",
             )
-            .await?
-        else {
+            .await?;
+        let Some(narrative) = section.narrative else {
             return Ok(None);
         };
 
@@ -442,7 +554,13 @@ impl Synthesizer {
             "categories": self.ctx.perf.work_categories,
         });
 
-        let content = self.render("annual-review.md.jinja", &context)?;
+        let content = self.render_section(
+            "annual-review.md.jinja",
+            kind,
+            heading,
+            &section.decision,
+            context,
+        )?;
 
         Ok(Some(RenderOutput { path, content }))
     }
@@ -590,27 +708,6 @@ fn quarter_range(
     let (start, _) = month_range(year, start_month)?;
     let (_, end) = month_range(year, end_month)?;
     Ok((start, end))
-}
-
-fn split_into_lines(text: &str) -> Vec<String> {
-    text.lines()
-        .filter_map(|l| {
-            let trimmed = l.trim();
-            if trimmed.is_empty() {
-                return None;
-            }
-            let cleaned = trimmed
-                .trim_start_matches(['-', '*', '•'])
-                .trim_start_matches(char::is_numeric)
-                .trim_start_matches('.')
-                .trim();
-            if cleaned.is_empty() {
-                None
-            } else {
-                Some(cleaned.to_string())
-            }
-        })
-        .collect()
 }
 
 #[cfg(test)]

@@ -5,16 +5,23 @@ created: {{ date }}
 labels: {{ labels | tojson }}
 source: {{ source_id }}
 events_count: {{ events | length }}
+llm_inputs:
+  summary: {{ llm_inputs.summary | tojson }}
+  refine_events: {{ llm_inputs.refine_events | tojson }}
+{%- if llm_inputs.refine_events_done %}
+  refine_events_done: {{ llm_inputs.refine_events_done | tojson }}
+{%- endif %}
+{%- if llm_inputs.concepts %}
+  concepts: {{ llm_inputs.concepts | tojson }}
+{%- endif %}
 ---
 
 # {{ i18n.jira_title }} {{ date }}
 
-{% if summary %}
 ## {{ i18n.summary }}
 
 {{ summary }}
 
-{% endif %}
 ## {{ i18n.key_events }}
 
 {% for event in events %}

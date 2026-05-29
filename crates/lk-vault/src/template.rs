@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use minijinja::Environment;
 
@@ -39,10 +39,6 @@ const EMBEDDED: &[(&str, &str)] = &[
     (
         "jira.md.jinja",
         include_str!("../../../templates/jira.md.jinja"),
-    ),
-    (
-        "manual.md.jinja",
-        include_str!("../../../templates/manual.md.jinja"),
     ),
     (
         "monthly-summary.md.jinja",
@@ -87,6 +83,7 @@ fn embedded(name: &str) -> Option<String> {
 
 pub struct TemplateEngine {
     env: Environment<'static>,
+    user_dir: Option<PathBuf>,
 }
 
 impl TemplateEngine {
@@ -95,7 +92,8 @@ impl TemplateEngine {
     /// the embedded copies are the source of truth.
     pub fn new(user_dir: Option<&Path>) -> Result<Self, VaultError> {
         let mut env = Environment::new();
-        let dir = user_dir.map(Path::to_path_buf);
+        let user_dir = user_dir.map(Path::to_path_buf);
+        let dir = user_dir.clone();
         env.set_loader(move |name| {
             if let Some(d) = &dir {
                 match std::fs::read_to_string(d.join(name)) {
@@ -111,7 +109,7 @@ impl TemplateEngine {
             }
             Ok(embedded(name))
         });
-        Ok(Self { env })
+        Ok(Self { env, user_dir })
     }
 
     pub fn render(
@@ -124,13 +122,22 @@ impl TemplateEngine {
         Ok(lk_core::text::collapse_blank_lines(&rendered))
     }
 
-    /// `Ok(true)` if the template exists (user dir or embedded) and parses, `Ok(false)`
-    /// if simply not present, `Err` if it exists but fails to load/parse. Used to check
-    /// for an optional per-source override; the per-type template is always embedded.
-    pub fn available(&self, name: &str) -> Result<bool, VaultError> {
+    /// `Ok(true)` only if `name` exists as a USER-provided override file (not an
+    /// embedded default) and parses; `Ok(false)` if there is no such user file; `Err`
+    /// if the user file exists but fails to parse. A per-source daily override must
+    /// come from the user dir — an embedded template basename (e.g. `manual.md.jinja`)
+    /// is selected explicitly by type, never matched as a `{source_id}.md.jinja`
+    /// override, so a source id colliding with a built-in name can't hijack rendering.
+    pub fn has_user_override(&self, name: &str) -> Result<bool, VaultError> {
+        let Some(dir) = &self.user_dir else {
+            return Ok(false);
+        };
+        if !dir.join(name).is_file() {
+            return Ok(false);
+        }
+        // Present as a user file — surface a parse error rather than silently ignoring it.
         match self.env.get_template(name) {
             Ok(_) => Ok(true),
-            Err(e) if e.kind() == minijinja::ErrorKind::TemplateNotFound => Ok(false),
             Err(e) => Err(e.into()),
         }
     }

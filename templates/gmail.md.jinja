@@ -6,16 +6,23 @@ labels: {{ labels | tojson }}
 source: {{ source_id }}
 events_count: {{ events | length }}
 action_required: {{ action_count }}
+llm_inputs:
+  summary: {{ llm_inputs.summary | tojson }}
+  refine_events: {{ llm_inputs.refine_events | tojson }}
+{%- if llm_inputs.refine_events_done %}
+  refine_events_done: {{ llm_inputs.refine_events_done | tojson }}
+{%- endif %}
+{%- if llm_inputs.concepts %}
+  concepts: {{ llm_inputs.concepts | tojson }}
+{%- endif %}
 ---
 
 # {{ i18n.gmail_title }} {{ date }}
 
-{% if summary %}
 ## {{ i18n.summary }}
 
 {{ summary }}
 
-{% endif %}
 {% if action_required_items %}
 ## {{ i18n.action_required }}
 

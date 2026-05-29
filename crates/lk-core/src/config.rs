@@ -144,6 +144,25 @@ impl Config {
             )));
         }
 
+        // Count thresholds whose `0` value is degenerate (everything-is-a-hub /
+        // no-community-filter / split-every-category). Rejected up front so the
+        // "out-of-range thresholds" guard holds for the integer knobs too.
+        if self.graph.graph.min_hub_degree == 0 {
+            return Err(ConfigError::Validation(
+                "graph.graph.min_hub_degree must be >= 1".into(),
+            ));
+        }
+        if self.graph.cluster.min_community_size == 0 {
+            return Err(ConfigError::Validation(
+                "graph.cluster.min_community_size must be >= 1".into(),
+            ));
+        }
+        if self.concepts.index_split_threshold == 0 {
+            return Err(ConfigError::Validation(
+                "concepts.index_split_threshold must be >= 1".into(),
+            ));
+        }
+
         for src_id in &self.synthesis.weekly.include_sources {
             if !self.sources.contains_key(src_id) {
                 return Err(ConfigError::Validation(format!(
@@ -490,11 +509,6 @@ pub struct SourceConfig {
     /// First matching rule wins; order is preserved.
     #[serde(default)]
     pub classify: Vec<ClassifyRule>,
-    /// When true, events that remain unclassified after keyword matching are sent to
-    /// the LLM for semantic classification. In `queue` mode the call returns `None`
-    /// (classification deferred to the `/lore-process` skill).
-    #[serde(default)]
-    pub classify_with_llm: bool,
     #[serde(default)]
     pub labels: Vec<String>,
     #[serde(default)]
@@ -567,7 +581,7 @@ impl SourceType {
             SourceType::SlackSearch => "slack-search.md.jinja",
             SourceType::Jira => "jira.md.jinja",
             SourceType::Rss => "rss.md.jinja",
-            SourceType::Manual => "manual.md.jinja",
+            SourceType::Manual => "document.md.jinja",
         }
     }
 }
@@ -592,11 +606,16 @@ pub struct DedupConfig {
 impl Default for DedupConfig {
     fn default() -> Self {
         Self {
+            // Default to evidence-based stages only: a shared event-id, identical body
+            // content, or the same canonical URL each prove "same observation". Fuzzy
+            // `Title` is NOT default — recurring titles ("Weekly Sync", repeated Jira
+            // summaries, release notes) are distinct observations, and a full-table
+            // fuzzy match would silently merge and drop them. A source that genuinely
+            // benefits from title dedup opts in explicitly.
             cascade: vec![
                 DedupStrategy::EventId,
                 DedupStrategy::ContentHash,
                 DedupStrategy::Url,
-                DedupStrategy::Title,
             ],
             title_threshold: 0.85,
         }
@@ -609,6 +628,9 @@ pub enum DedupStrategy {
     EventId,
     ContentHash,
     Url,
+    /// Fuzzy (Sørensen-Dice) title match across the whole table. Opt-in only: it can
+    /// merge distinct same-title observations. Use for sources where titles are stable
+    /// unique identifiers, not for recurring-title feeds.
     Title,
 }
 
@@ -907,7 +929,6 @@ mod tests {
             params: empty_object(),
             classify: vec![],
             labels: vec![],
-            classify_with_llm: false,
             extract_concepts: true,
             focus: f.map(str::to_owned),
             track_personal: false,

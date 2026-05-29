@@ -66,7 +66,6 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs) -> Vec<PageSchema> {
                 "updated",
                 "category",
                 "source_count",
-                "sources",
                 "tags",
             ],
             sections: vec![
@@ -108,11 +107,9 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs) -> Vec<PageSchema> {
             frontmatter: &[
                 "id",
                 "title",
-                "aliases",
                 "created",
                 "updated",
                 "document_type",
-                "source_project",
                 "source_url",
                 "source_file",
                 "tags",
@@ -174,18 +171,11 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs) -> Vec<PageSchema> {
                 "period",
                 "sources_covered",
             ],
-            sections: vec![
-                s(
-                    "Key Themes",
-                    |i| i.key_themes_this_week.to_string(),
-                    Owner::Llm,
-                ),
-                s(
-                    "New Concepts",
-                    |i| i.new_concepts.to_string(),
-                    Owner::Machine,
-                ),
-            ],
+            sections: vec![s(
+                "Key Themes",
+                |i| i.key_themes_this_week.to_string(),
+                Owner::Llm,
+            )],
         },
         PageSchema {
             type_name: "weekly-personal",
@@ -226,23 +216,12 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs) -> Vec<PageSchema> {
                     |i| i.category_distribution.to_string(),
                     Owner::Machine,
                 ),
-                s(
-                    "Top Achievements",
-                    |i| i.top_achievements.to_string(),
-                    Owner::Llm,
-                ),
+                s("Summary", |i| i.key_summary.to_string(), Owner::Llm),
                 s(
                     "Monthly Breakdown",
                     |i| i.monthly_breakdown.to_string(),
                     Owner::Machine,
                 ),
-                s(
-                    "Team Contribution",
-                    |i| i.team_contribution.to_string(),
-                    Owner::Llm,
-                ),
-                s("Growth Areas", |i| i.growth_areas.to_string(), Owner::Llm),
-                s("Next Quarter", |i| i.next_quarter.to_string(), Owner::Llm),
             ],
         },
         PageSchema {

@@ -1,8 +1,7 @@
 ---
 title: Concept A
 created: 2024-01-15
-sources:
-  - https://example.com/a
+source_count: 1
 tags: [ai, ml]
 ---
 
