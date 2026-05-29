@@ -98,7 +98,7 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs) -> Vec<PageSchema> {
             frontmatter: &["id", "title", "created", "labels", "categories", "sources"],
             sections: vec![
                 s("Topic Summary", |i| i.topic_summary.to_string(), Owner::Llm),
-                s("Details", |i| i.details.to_string(), Owner::Machine),
+                s("Sources", |i| i.concept_sources.to_string(), Owner::Machine),
             ],
         },
         PageSchema {

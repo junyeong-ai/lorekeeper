@@ -141,7 +141,6 @@ pub struct Strings {
     pub weekly_personal_title: &'static str,
     // Work-log sections
     pub topic_summary: &'static str,
-    pub details: &'static str,
     // Document page sections
     pub document_content: &'static str,
     // Exploration page sections
@@ -207,7 +206,6 @@ static KO: Strings = Strings {
     weekly_synthesis_title: "주간 종합",
     weekly_personal_title: "내 주간 업무",
     topic_summary: "주제별 요약",
-    details: "상세",
     document_content: "내용",
     exploration_question: "질문",
     exploration_synthesis: "종합",
@@ -270,7 +268,6 @@ static EN: Strings = Strings {
     weekly_synthesis_title: "Weekly Synthesis",
     weekly_personal_title: "My Week",
     topic_summary: "Topics",
-    details: "Details",
     document_content: "Content",
     exploration_question: "Question",
     exploration_synthesis: "Synthesis",
