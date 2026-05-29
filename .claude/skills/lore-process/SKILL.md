@@ -264,9 +264,10 @@ frontmatter matches before writing — see "Stale-task guard" below.
         topics, and concepts (whatever the source's domain — the focus,
         if present, names it). Output a list of concept names
         (in the source language). Each concept should also produce a
-        a concept page (create if missing, merge if exists — increment
-        source_count, append source ref). Use the concept path pattern
-        from AGENTS.md.
+        a concept page (create if missing, merge if exists). Fill the origin
+        page's `## 관련 개념` with a `[[concept]]` forward link — the single source
+        of truth `backlinks-sync` reads; leave the concept's `## 출처` /
+        `source_count` to it. Use the concept path pattern from AGENTS.md.
 
         `input.source_type` carries the originating adapter type; use it to
         scope what counts as a concept (per-type scoping:
@@ -285,16 +286,17 @@ frontmatter matches before writing — see "Stale-task guard" below.
         4. Slug normalization: NFKC → lowercase → non-alphanumeric to
            hyphen → collapse runs → trim. Same as `lk_core::slugify`.
 
-        **Source reference format.** Each `## 출처` (Sources) `- [[…]]` entry MUST
-        cite the page the concept was extracted from: the task's
-        `target.vault_path` with the `.md` extension stripped. That path is the
-        correct origin page for EVERY source type — a daily page
-        (`<daily>/{source-id}/{date}`) for stream sources, a document page
-        (`<wiki>/documents/{slug}`) for `manual`/`google-drive`. Never rebuild the
-        path from `source_id`/`date` (that assumes a daily page and dangles for
-        document sources), and never use a bare source ID like `"email-digest"`.
-        This matches what `lore graph backlinks-sync` re-derives from the
-        wikilink graph, so the citation is correct from the first write.
+        **Source references are machine-owned — do NOT hand-write them.** Leave the
+        concept's `## 출처` (Sources) body EMPTY and `source_count: 0`. Record the
+        citation instead as a forward `[[wikilink]]` in the ORIGIN page's
+        related-concepts section (the `## 관련 개념` of `target.vault_path`, which you
+        fill anyway). `lore graph backlinks-sync` re-derives every concept's `## 출처`
+        + `source_count` from those forward links — so a concept cited by several
+        pages in one batch (e.g. the same topic on two daily pages) is counted
+        correctly, whereas hand-writing one ref per task undercounts it. This is
+        identical to how lore-capture / lore-wiki / lore-extract treat concept
+        sources: the wikilink graph is the single source of truth. Run
+        `lore graph backlinks-sync` in Finalize (the daily-ingest flow already does).
 
         **Category assignment.** Hard constraint: the `category` value MUST
         be one of the IDs in `input.categories` (verbatim string match) or
@@ -318,15 +320,14 @@ frontmatter matches before writing — see "Stale-task guard" below.
         created: {YYYY-MM-DD}
         updated: {YYYY-MM-DD}
         category: {category-id}
-        source_count: {N}
+        source_count: 0
         tags: ["{category-id}"]
         ---
         ```
-        Do NOT add any keys beyond those listed above. Citations live in the
-        `## 출처` (Sources) body as `- [[<daily>/{source-id}/{date}]]` entries —
-        NOT in frontmatter. `source_count` is the number of those entries;
-        `lore graph backlinks-sync` re-derives both exactly from the wikilink graph,
-        so it self-corrects if your count drifts.
+        Do NOT add any keys beyond those listed above. Leave the `## 출처` (Sources)
+        body EMPTY and `source_count: 0` at write time — both are machine-owned and
+        re-derived by `lore graph backlinks-sync` from the origin pages' forward
+        `[[wikilink]]`s. Never hand-write citations, in the body or in frontmatter.
 
         **When creating a new concept page**, fill the Synthesis section
         (heading from AGENTS.md) with a 1-2 sentence definition/context of
@@ -402,7 +403,16 @@ frontmatter matches before writing — see "Stale-task guard" below.
    mv "$file" "$VAULT/.lorekeeper/queue/processed/"
    ```
 
-5. **Report** to the user:
+5. **Finalize** — concept `## 출처` / `source_count` were left empty on purpose;
+   reconcile them from the wikilink graph (a concept cited by several pages in the
+   batch is counted correctly here, never undercounted), then refresh the catalog:
+   ```bash
+   lore graph backlinks-sync   # re-derive every concept's ## 출처 + source_count
+   lore wiki index             # refresh the catalog
+   ```
+   The daily-ingest flow already runs both; do this after a standalone /lore-process.
+
+6. **Report** to the user:
    - On full success: number of files processed and tasks completed.
    - On any failure: which file was left in place and the failed
      `task_id`s with their error messages. Exit non-zero.
