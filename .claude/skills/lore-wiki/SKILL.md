@@ -38,16 +38,20 @@ Manual ad-hoc ingest of a URL, file, **folder**, or pasted text. When given a
 folder path, scan it recursively for `.md`, `.txt`, and `.pdf` files, process
 each as an independent source, and report the aggregate results.
 
-1. Read AGENTS.md for the concept page format.
+1. Read AGENTS.md for the document AND concept page formats.
 2. If `<source>` is a folder, list all readable files and process each below.
-3. For each source: extract every named entity, technology, and topic as
-   concepts (not a lone summary — typically several per source).
-4. For each concept: create or merge a concept page following AGENTS.md's
-   concept format exactly (frontmatter + sections per ownership). Machine
-   sections are filled; LLM sections (synthesis, related) are filled by the
-   model. **When creating a new concept**, fill the Synthesis section with a
-   1-2 sentence definition rather than leaving it empty.
-5. Report what was created/updated, grouped by source file.
+3. For EACH source, create a **document page** (per AGENTS.md): preserve the
+   original content, set `document_type` from the format vocabulary
+   (`note`|`report`|`data`; the source's nature goes in `tags`), and link the
+   extracted concepts as `[[wikilinks]]` in the related-concepts section.
+4. Extract every named entity, technology, and topic as concepts (typically
+   several per source). For each, create or merge a concept page per AGENTS.md
+   and fill the Synthesis section with a 1-2 sentence definition for a new
+   concept. Leave `## 출처`/`source_count` for `backlinks-sync` — the document's
+   forward `[[wikilink]]` from step 3 is the source of truth, never hand-edited.
+5. **Finalize**: `lore graph backlinks-sync`, then `lore wiki index`, then
+   `lore graph lint` to confirm the vault is clean (exit 0, no findings).
+6. Report what was created/updated, grouped by source file.
 
 ### `/lore-wiki query <question>`
 

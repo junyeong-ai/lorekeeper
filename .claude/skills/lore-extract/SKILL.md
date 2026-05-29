@@ -75,11 +75,16 @@ concept_mapping:         # project tag → vault category id
 
 extracted:               # per-document tracking (written by run)
   - source: "docs/decisions/some-adr.md"
-    vault_page: "<wiki>/documents/proj-some-adr.md"
+    vault_page: "wiki/documents/proj-some-adr.md"   # vault-relative (configured wiki dir)
     domain: cloud-platform
     extracted_at: <ISO-date>
     transferability: T1
 ```
+
+One source can feed several documents and several sources can fold into
+one (theme-driven extraction, not 1:1). When the mapping is many-to-many,
+record it with a `coverage_note` on the affected `extracted` entries rather
+than forcing a single `source`/`vault_page` pair.
 
 ## Phase 1: Scan
 
@@ -176,14 +181,17 @@ Extract knowledge using the manifest. Requires a prior scan.
       title: "{Generalised Title}"
       created: {today}
       updated: {today}
-      document_type: project-knowledge | engineering-guide
+      document_type: note          # FORMAT only (note|report|data); the knowledge's
+                                   # nature (project-knowledge, guide, ADR) goes in tags
       source_url: {repo-url}
       source_file:
         - {path-within-repo}
         - {path-within-repo}
       tags: [{technology}, {domain}]
-      concepts: [{concept-slugs}]
       ```
+
+      Concept links live in the document's related-concepts body section
+      (`[[wikilinks]]`), NOT in a frontmatter `concepts` array.
 
    h. Create/merge concept pages per standard protocol.
       Concept citations go in the `## 출처` (Sources) body as
@@ -193,7 +201,13 @@ Extract knowledge using the manifest. Requires a prior scan.
    i. **Update manifest** `extracted` list with the new entry.
 
 6. Persist updated manifest.
-7. Run `lore graph lint`.
+7. **Finalize** — reconcile the graph so machine-owned fields are
+   authoritative and health checks pass:
+   ```bash
+   lore graph backlinks-sync   # re-derive every concept's ## 출처 + source_count
+   lore wiki index             # rebuild the catalog (lint flags index drift until this runs)
+   lore graph lint             # clean once the index exists
+   ```
 8. Report created/merged/skipped counts.
 
 ## Phase 3: Audit

@@ -230,23 +230,28 @@ fn split_title(body: &str, path: &Path) -> (String, String) {
     (stem, body.to_string())
 }
 
-/// Move consumed files into `<inbox>/archived/{date}/` after the pipeline has
-/// committed daily pages and dedup. Called by the pipeline's post-commit hook
-/// so a mid-pipeline failure leaves the inbox intact for safe retry.
+/// Move every consumed inbox file — both the novel events and the deduplicated
+/// duplicates — into `<inbox>/archived/{date}/` after the pipeline has committed
+/// daily pages and dedup. Duplicates are archived too: their content is already in
+/// the vault (dedup matched it), so leaving them in the inbox would re-scan and
+/// re-dedup them on every run, growing the inbox without bound. Called by the
+/// pipeline's post-commit hook so a mid-pipeline failure leaves the inbox intact
+/// for safe retry.
 pub fn post_commit_archive(
     params: &serde_json::Value,
-    events: &[lk_core::event::Event],
+    novel: &[lk_core::event::Event],
+    duplicates: &[lk_core::event::Event],
     date: jiff::civil::Date,
 ) -> Result<(), SourceError> {
     let p: ManualParams = serde_json::from_value(params.clone())
         .map_err(|e| SourceError::InvalidParams(e.to_string()))?;
-    if !p.archive_after_ingest || events.is_empty() {
+    if !p.archive_after_ingest || (novel.is_empty() && duplicates.is_empty()) {
         return Ok(());
     }
     let archive_dir = p.inbox_dir.join("archived").join(date.to_string());
     std::fs::create_dir_all(&archive_dir)
         .map_err(|e| SourceError::Parse(format!("create archive dir: {e}")))?;
-    for event in events {
+    for event in novel.iter().chain(duplicates) {
         let Some(src_str) = event.metadata.get("source_file").and_then(|v| v.as_str()) else {
             continue;
         };
@@ -352,9 +357,58 @@ mod tests {
             })
             .collect();
 
-        post_commit_archive(&params, &events, ctx.target_date).unwrap();
+        post_commit_archive(&params, &events, &[], ctx.target_date).unwrap();
         assert!(!tmp.path().join("a.md").exists());
         assert!(tmp.path().join("archived/2026-05-24/a.md").exists());
+    }
+
+    #[tokio::test]
+    async fn archives_deduplicated_files_too_not_just_novel() {
+        // A duplicate file's content is already in the vault, so it must be archived
+        // alongside novel files — otherwise it lingers in the inbox and is re-scanned
+        // and re-deduplicated on every run.
+        let tmp = TempDir::new().unwrap();
+        write(&tmp.path().join("novel.md"), "# Novel\n\nx");
+        write(&tmp.path().join("dup.md"), "# Dup\n\ny");
+        let src = ManualSource::new();
+        let params = serde_json::json!({
+            "inbox_dir": tmp.path(),
+            "archive_after_ingest": true,
+        });
+        let ctx = ExtractContext {
+            target_date: jiff::civil::date(2026, 5, 24),
+            timezone: jiff::tz::TimeZone::UTC,
+            locale: lk_core::i18n::Locale::default(),
+        };
+        let items = src.extract(&params, &ctx).await.unwrap();
+        let mut events: Vec<lk_core::event::Event> = items
+            .iter()
+            .map(|item| lk_core::event::Event {
+                id: lk_core::event::EventId::new("manual", ctx.target_date, &item.title),
+                source_id: "manual".into(),
+                source_type: lk_core::config::SourceType::Manual,
+                date: ctx.target_date,
+                title: item.title.clone(),
+                body: item.body.clone(),
+                url: None,
+                author: None,
+                labels: vec![],
+                work_category: None,
+                is_personal: false,
+                content_hash: String::new(),
+                metadata: item.metadata.clone(),
+            })
+            .collect();
+        // One arbitrary item is treated as a duplicate, the rest as novel.
+        let dup = vec![events.pop().unwrap()];
+        post_commit_archive(&params, &events, &dup, ctx.target_date).unwrap();
+
+        // Both the novel and the duplicate file are gone from the inbox top level
+        // and present under archived/ — nothing lingers to be re-scanned.
+        assert!(!tmp.path().join("novel.md").exists());
+        assert!(!tmp.path().join("dup.md").exists());
+        assert!(tmp.path().join("archived/2026-05-24/novel.md").exists());
+        assert!(tmp.path().join("archived/2026-05-24/dup.md").exists());
     }
 
     #[test]

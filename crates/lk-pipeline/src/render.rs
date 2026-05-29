@@ -205,11 +205,9 @@ pub fn render_document_page(
         .get("source_file")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let document_type = match source_file.rsplit('.').next().unwrap_or("") {
-        "html" | "htm" => "report",
-        "json" => "data",
-        _ => "note", // md, txt, markdown, and everything else
-    };
+    let document_type = lk_core::document::document_type_for_extension(
+        source_file.rsplit('.').next().unwrap_or(""),
+    );
 
     let date = event.date;
 

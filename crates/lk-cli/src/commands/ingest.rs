@@ -189,6 +189,10 @@ pub async fn run(
             }
         };
 
+        if !result.duplicates.is_empty() {
+            eprintln!("  deduplicated: {} (already seen)", result.duplicates.len());
+        }
+
         if result.is_empty() {
             eprintln!("  — skipped (no new events)");
             if !dry_run {
@@ -368,8 +372,12 @@ pub async fn run(
             let sc = sources.iter().find(|(id, _)| id == &p.id).map(|(_, sc)| sc);
             if let Some(sc) = sc
                 && sc.source_type == lk_core::config::SourceType::Manual
-                && let Err(e) =
-                    lk_source::post_commit_archive(&sc.params, &p.result.events, extract_target)
+                && let Err(e) = lk_source::post_commit_archive(
+                    &sc.params,
+                    &p.result.events,
+                    &p.result.duplicates,
+                    extract_target,
+                )
             {
                 tracing::warn!(source = %p.id, error = %e, "post-commit archive failed");
             }

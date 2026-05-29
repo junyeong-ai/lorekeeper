@@ -82,7 +82,15 @@ consistent with batch extractions from `/lore-extract`.
 
 Write to the document path pattern from AGENTS.md. Use the vault's
 configured locale for all section headings and frontmatter fields —
-AGENTS.md is the authoritative source for both.
+AGENTS.md is the authoritative source for both. Link the relevant
+concepts as `[[wikilink]]`s in the document's related-concepts section
+(heading from AGENTS.md) — these forward links are what `backlinks-sync`
+reads to derive each concept's `## 출처` in step 6.
+
+`document_type` is a FORMAT value from the AGENTS.md vocabulary
+(`note` for prose/markdown, `report` for HTML, `data` for structured) —
+the insight's nature (troubleshooting, constraint, pattern) belongs in
+`tags`, never in `document_type`.
 
 ### 5. Create/merge concepts
 
@@ -90,11 +98,27 @@ For each technology, pattern, or constraint:
 
 1. Slugify: NFKC → lowercase → non-alnum to hyphen → collapse → trim
 2. Check existing concepts from step 2
-3. New → create with 1-2 sentence synthesis in the Synthesis section (heading from AGENTS.md)
-4. Existing → update `updated`, append source, increment `source_count`
+3. New → create with a 1-2 sentence synthesis in the Synthesis section
+   (heading from AGENTS.md). Leave `## 출처` empty and `source_count: 0` —
+   they are machine-owned and filled by `backlinks-sync` in step 6.
+4. Existing → update `updated` and enrich the synthesis if warranted.
+   Do NOT hand-edit `## 출처` or `source_count` — `backlinks-sync`
+   re-derives both from the wikilink graph (the document's forward link
+   from step 4 is the source of truth).
 5. Assign category from config.yaml `concepts.categories`
 
-### 6. Report
+### 6. Finalize
+
+Reconcile the graph so machine-owned fields are authoritative and health
+checks pass:
+
+```bash
+lore graph backlinks-sync   # re-derive every concept's ## 출처 + source_count
+lore wiki index             # rebuild the catalog so `lore graph lint` is clean
+lore graph lint             # confirm the vault is clean (exit 0, no findings)
+```
+
+### 7. Report
 
 Show created/merged paths, concept count, and transferability level.
 

@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::collections::hash_map::Entry;
 use std::path::Path;
 
-use crate::scan::{Page, VaultExistence, stem_slug};
+use crate::scan::{Page, VaultExistence, is_concept_path, stem_slug};
 
 pub struct WikiGraph {
     graph: DiGraph<NodeData, ()>,
@@ -62,7 +62,12 @@ impl WikiGraph {
     pub fn build_with_existence(pages: &[Page], existence: &VaultExistence) -> Self {
         let mut graph = DiGraph::new();
         let mut id_to_node = HashMap::with_capacity(pages.len());
-        let mut name_to_node: HashMap<String, NodeIndex> = HashMap::with_capacity(pages.len());
+        // Maps a bare-target filename slug to its node, tagging whether the owner is
+        // a concept page. A bare `[[name]]` is a knowledge-node reference, so a
+        // concept claims the slug over a same-named non-concept (deterministic, no
+        // warning); only a same-class collision is a genuine ambiguity worth warning.
+        let mut name_to_node: HashMap<String, (NodeIndex, bool)> =
+            HashMap::with_capacity(pages.len());
 
         for page in pages {
             let node = graph.add_node(NodeData {
@@ -73,18 +78,27 @@ impl WikiGraph {
 
             let slug = stem_slug(&page.path);
             if !slug.is_empty() {
+                let is_concept = is_concept_path(&page.path);
                 match name_to_node.entry(slug) {
                     Entry::Vacant(e) => {
-                        e.insert(node);
+                        e.insert((node, is_concept));
                     }
-                    Entry::Occupied(e) => {
-                        let existing_id = &graph[*e.get()].id;
-                        eprintln!(
-                            "warning: ambiguous slug '{}': {} shadows {}",
-                            e.key(),
-                            existing_id,
-                            page.id
-                        );
+                    Entry::Occupied(mut e) => {
+                        let (existing_node, existing_is_concept) = *e.get();
+                        if is_concept && !existing_is_concept {
+                            // Concept claims the bare slug from a non-concept — intended.
+                            e.insert((node, true));
+                        } else if is_concept == existing_is_concept {
+                            // Same class (two documents in different dirs, etc.) — a real
+                            // ambiguity. Keep the first; warn. (A non-concept losing to an
+                            // already-claimed concept is silent: it's cited by path form.)
+                            eprintln!(
+                                "warning: ambiguous slug '{}': {} shadows {}",
+                                e.key(),
+                                graph[existing_node].id,
+                                page.id
+                            );
+                        }
                     }
                 }
             }
@@ -100,8 +114,8 @@ impl WikiGraph {
                 // page id — the two forms `resolve_wikilink_target` produces.
                 let in_scope = name_to_node
                     .get(target.as_str())
-                    .or_else(|| id_to_node.get(target.as_str()))
-                    .copied();
+                    .map(|(node, _)| *node)
+                    .or_else(|| id_to_node.get(target.as_str()).copied());
                 if let Some(target_idx) = in_scope {
                     if source_idx != target_idx {
                         graph.add_edge(source_idx, target_idx, ());
@@ -385,6 +399,30 @@ mod tests {
         assert_eq!(
             edges,
             vec![("wiki/linker".to_owned(), "wiki/alpha".to_owned())]
+        );
+        assert!(g.broken_links().is_empty());
+    }
+
+    #[test]
+    fn concept_owns_bare_slug_over_same_named_document() {
+        // A document and a concept legitimately share the name `x`. A bare `[[x]]`
+        // is a knowledge-node reference, so it resolves to the CONCEPT — regardless
+        // of scan order (the document is listed first here) and with no ambiguity
+        // warning. The document is reached only by its path form `[[wiki/documents/x]]`.
+        let pages = vec![
+            make_page("wiki/documents/x", &[]),
+            make_page("wiki/concepts/x", &[]),
+            make_page("wiki/linker", &["x"]),
+        ];
+        let g = WikiGraph::build(&pages);
+        let edges: Vec<(String, String)> = g
+            .edge_pairs()
+            .map(|(s, t)| (g.node_id(s).to_owned(), g.node_id(t).to_owned()))
+            .collect();
+        assert_eq!(
+            edges,
+            vec![("wiki/linker".to_owned(), "wiki/concepts/x".to_owned())],
+            "bare [[x]] must resolve to the concept, not the same-named document"
         );
         assert!(g.broken_links().is_empty());
     }

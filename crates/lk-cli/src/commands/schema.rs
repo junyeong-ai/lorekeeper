@@ -288,6 +288,19 @@ pub fn render_agents_md(locale: Locale, dirs: &lk_core::config::VaultDirs) -> St
                 .join(", ")
         )
         .unwrap();
+
+        if schema.type_name == "document" {
+            writeln!(
+                out,
+                "\n`document_type` values: {} (FORMAT only; subject-matter goes in `tags`).",
+                lk_core::document::DOCUMENT_TYPES
+                    .iter()
+                    .map(|t| format!("`{t}`"))
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            )
+            .unwrap();
+        }
     }
 
     out

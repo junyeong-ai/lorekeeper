@@ -141,9 +141,11 @@ fn extract_first_heading(body: &str) -> Option<String> {
 /// scope. Built from a full-vault scan ([`scan_vault`] with all page dirs).
 #[derive(Debug, Clone, Default)]
 pub struct VaultExistence {
-    /// Filename slug → page id, first insertion winning on duplicates (mirrors
-    /// the ambiguous-slug shadowing in [`crate::graph::WikiGraph`], so the two
-    /// resolve a bare `[[name]]` to the same page).
+    /// Filename slug → page id. A bare `[[name]]` targets the knowledge node, so a
+    /// concept page claims its slug ahead of a same-named non-concept (documents are
+    /// referenced by their path form); within a class, first insertion wins. Mirrors
+    /// the precedence in [`crate::graph::WikiGraph`] so the two resolve a bare
+    /// `[[name]]` to the same page, deterministically regardless of scan order.
     by_filename: HashMap<String, String>,
     /// Every page id — the form a path-style `[[dir/sub/name]]` link resolves to.
     ids: HashSet<String>,
@@ -162,9 +164,20 @@ impl VaultExistence {
         let mut ids = HashSet::with_capacity(pages.len());
         for page in pages {
             ids.insert(page.id.clone());
-            let slug = stem_slug(&page.path);
-            if !slug.is_empty() {
-                by_filename.entry(slug).or_insert_with(|| page.id.clone());
+        }
+        // Concept pages claim their filename slug first (a bare `[[name]]` is a
+        // knowledge-node reference), then non-concepts fill any still-vacant slug —
+        // so a concept deterministically owns the bare slug over a same-named
+        // document, independent of scan order.
+        for concept_pass in [true, false] {
+            for page in pages {
+                if is_concept_path(&page.path) != concept_pass {
+                    continue;
+                }
+                let slug = stem_slug(&page.path);
+                if !slug.is_empty() {
+                    by_filename.entry(slug).or_insert_with(|| page.id.clone());
+                }
             }
         }
 
@@ -203,6 +216,18 @@ impl VaultExistence {
     pub fn is_linked(&self, page_id: &str) -> bool {
         self.linked.contains(page_id)
     }
+}
+
+/// Whether a page lives directly under a `concepts/` directory — i.e. it is a
+/// concept page (`{wiki}/concepts/{slug}.md`). A bare `[[name]]` wikilink targets
+/// the knowledge node, so a concept owns its filename slug over a same-named
+/// document or other page (which is always cited by its path form). `concepts` is
+/// the fixed vault-layout segment (see `lk_core::vault_path`).
+pub fn is_concept_path(path: &Path) -> bool {
+    path.parent()
+        .and_then(|p| p.file_name())
+        .and_then(|s| s.to_str())
+        == Some("concepts")
 }
 
 /// Stem-slug of a page path: slugify the file stem (the resolution key used
