@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use lk_core::config::GraphConfig;
+use lk_core::config::{GraphConfig, VaultDirs};
 use lk_graph::{cluster, export, graph, index, normalize, output, scan};
 
 fn fixture_root() -> PathBuf {
@@ -22,7 +22,7 @@ fn build_correct_page_count() {
     let root = fixture_root();
     let config = default_config();
     let pages = scan::scan_vault(&root, &config).unwrap();
-    let g = graph::WikiGraph::build(&pages);
+    let g = graph::WikiGraph::build(&pages, &VaultDirs::default());
     assert_eq!(g.node_count(), 5);
     assert!(g.edge_count() > 0);
     assert!(g.component_count() > 0);
@@ -33,7 +33,7 @@ fn build_report_serialises_as_json() {
     let root = fixture_root();
     let config = default_config();
     let pages = scan::scan_vault(&root, &config).unwrap();
-    let g = graph::WikiGraph::build(&pages);
+    let g = graph::WikiGraph::build(&pages, &VaultDirs::default());
     let report = output::BuildReport {
         pages: g.node_count(),
         wikilinks: g.edge_count(),
@@ -50,7 +50,7 @@ fn hubs_returns_results() {
     let root = fixture_root();
     let config = default_config();
     let pages = scan::scan_vault(&root, &config).unwrap();
-    let g = graph::WikiGraph::build(&pages);
+    let g = graph::WikiGraph::build(&pages, &VaultDirs::default());
     let hubs = g.hubs(3, 1);
     assert!(!hubs.is_empty());
 }
@@ -62,7 +62,7 @@ fn orphans_detected() {
     let root = fixture_root();
     let config = default_config();
     let pages = scan::scan_vault(&root, &config).unwrap();
-    let g = graph::WikiGraph::build(&pages);
+    let g = graph::WikiGraph::build(&pages, &VaultDirs::default());
     let orphans = g.orphans(&config.graph.orphan_exclude, Path::new("wiki"));
     assert!(!orphans.is_empty(), "fixture has orphan-page.md");
 }
@@ -74,7 +74,7 @@ fn broken_links_detected() {
     let root = fixture_root();
     let config = default_config();
     let pages = scan::scan_vault(&root, &config).unwrap();
-    let g = graph::WikiGraph::build(&pages);
+    let g = graph::WikiGraph::build(&pages, &VaultDirs::default());
     let broken = g.broken_links();
     assert!(!broken.is_empty(), "fixture has nonexistent-page link");
     assert!(broken.iter().any(|b| b.target.contains("nonexistent")));
@@ -85,7 +85,7 @@ fn broken_json_has_count() {
     let root = fixture_root();
     let config = default_config();
     let pages = scan::scan_vault(&root, &config).unwrap();
-    let g = graph::WikiGraph::build(&pages);
+    let g = graph::WikiGraph::build(&pages, &VaultDirs::default());
     let report = output::BrokenReport {
         broken: g.broken_links().to_vec(),
         count: g.broken_links().len(),
@@ -102,8 +102,8 @@ fn index_sync_detects_drift() {
     let root = fixture_root();
     let config = default_config();
     let pages = scan::scan_vault(&root, &config).unwrap();
-    let g = graph::WikiGraph::build(&pages);
-    let existence = scan::VaultExistence::from_pages(&pages);
+    let g = graph::WikiGraph::build(&pages, &VaultDirs::default());
+    let existence = scan::VaultExistence::from_pages(&pages, &VaultDirs::default());
     let drift = index::diff(&g, &existence, &root, Path::new("wiki"), &[]).unwrap();
     // concept-c and orphan-page are missing from index.md
     assert!(!drift.is_in_sync());
@@ -120,10 +120,10 @@ fn index_sync_fix_mutates_and_idempotent() {
 
     let config = default_config();
     let pages = scan::scan_vault(tmp.path(), &config).unwrap();
-    let g = graph::WikiGraph::build(&pages);
+    let g = graph::WikiGraph::build(&pages, &VaultDirs::default());
 
     // Before fix.
-    let existence = scan::VaultExistence::from_pages(&pages);
+    let existence = scan::VaultExistence::from_pages(&pages, &VaultDirs::default());
     let drift = index::diff(&g, &existence, tmp.path(), Path::new("wiki"), &[]).unwrap();
     assert!(!drift.is_in_sync());
 
@@ -135,8 +135,8 @@ fn index_sync_fix_mutates_and_idempotent() {
 
     // After fix, re-scan to pick up potentially changed pages.
     let pages2 = scan::scan_vault(tmp.path(), &config).unwrap();
-    let g2 = graph::WikiGraph::build(&pages2);
-    let existence2 = scan::VaultExistence::from_pages(&pages2);
+    let g2 = graph::WikiGraph::build(&pages2, &VaultDirs::default());
+    let existence2 = scan::VaultExistence::from_pages(&pages2, &VaultDirs::default());
     let drift2 = index::diff(&g2, &existence2, tmp.path(), Path::new("wiki"), &[]).unwrap();
     assert!(drift2.is_in_sync());
 }
@@ -181,7 +181,7 @@ fn cluster_json_has_communities() {
     let root = fixture_root();
     let config = default_config();
     let pages = scan::scan_vault(&root, &config).unwrap();
-    let g = graph::WikiGraph::build(&pages);
+    let g = graph::WikiGraph::build(&pages, &VaultDirs::default());
     let mut result = cluster::detect_communities(&g, &config);
     cluster::label_communities(&g, &mut result.communities);
 
@@ -203,7 +203,7 @@ fn export_json_with_clusters() {
     let root = fixture_root();
     let config = default_config();
     let pages = scan::scan_vault(&root, &config).unwrap();
-    let g = graph::WikiGraph::build(&pages);
+    let g = graph::WikiGraph::build(&pages, &VaultDirs::default());
     let cluster_result = cluster::detect_communities(&g, &config);
     let graph_export = export::export(&g, Some(&cluster_result));
 
@@ -219,12 +219,12 @@ fn lint_combined_report() {
     let root = fixture_root();
     let config = default_config();
     let pages = scan::scan_vault(&root, &config).unwrap();
-    let g = graph::WikiGraph::build(&pages);
+    let g = graph::WikiGraph::build(&pages, &VaultDirs::default());
 
     let hubs = g.hubs(10, config.graph.min_hub_degree);
     let orphans = g.orphans(&config.graph.orphan_exclude, Path::new("wiki"));
     let broken = g.broken_links().to_vec();
-    let existence = scan::VaultExistence::from_pages(&pages);
+    let existence = scan::VaultExistence::from_pages(&pages, &VaultDirs::default());
     let drift = index::diff(&g, &existence, &root, Path::new("wiki"), &[]).unwrap();
 
     let findings = orphans.len()
@@ -268,7 +268,7 @@ fn suggest_links_from_fixture() {
     let root = fixture_root();
     let config = default_config();
     let pages = scan::scan_vault(&root, &config).unwrap();
-    let g = graph::WikiGraph::build(&pages);
+    let g = graph::WikiGraph::build(&pages, &VaultDirs::default());
     let clusters = cluster::detect_communities(&g, &config);
     let result = cluster::suggest_links(&g, &clusters);
     // Just verify it's well-formed — the fixture may or may not produce suggestions.

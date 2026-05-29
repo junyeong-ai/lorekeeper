@@ -50,7 +50,9 @@ each as an independent source, and report the aggregate results.
    concept. Leave `## 출처`/`source_count` for `backlinks-sync` — the document's
    forward `[[wikilink]]` from step 3 is the source of truth, never hand-edited.
 5. **Finalize**: `lore graph backlinks-sync`, then `lore wiki index`, then
-   `lore graph lint` to confirm the vault is clean (exit 0, no findings).
+   `lore graph lint` to confirm no structural drift (index/broken links).
+   Pre-existing review items (uncategorized, near-dup, open conflicts) may
+   legitimately remain — they are not introduced by this add.
 6. Report what was created/updated, grouped by source file.
 
 ### `/lore-wiki query <question>`

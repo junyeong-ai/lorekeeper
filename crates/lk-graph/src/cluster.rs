@@ -319,6 +319,7 @@ fn shared_count(a: &[usize], b: &[usize]) -> usize {
 mod tests {
     use super::*;
     use crate::scan::Page;
+    use lk_core::config::VaultDirs;
     use std::path::PathBuf;
 
     fn make_page(id: &str, outgoing: &[&str]) -> Page {
@@ -334,7 +335,7 @@ mod tests {
     #[test]
     fn empty_graph_returns_empty() {
         let config = GraphConfig::default();
-        let graph = WikiGraph::build(&[]);
+        let graph = WikiGraph::build(&[], &VaultDirs::default());
         let result = detect_communities(&graph, &config);
         assert!(result.communities.is_empty());
         assert_eq!(result.modularity, 0.0);
@@ -349,7 +350,7 @@ mod tests {
             make_page("c", &["d"]),
             make_page("d", &["c"]),
         ];
-        let graph = WikiGraph::build(&pages);
+        let graph = WikiGraph::build(&pages, &VaultDirs::default());
         let result = detect_communities(&graph, &config);
         assert_eq!(result.communities.len(), 2);
         for c in &result.communities {
@@ -366,7 +367,7 @@ mod tests {
             make_page("c", &["a", "b", "d"]),
             make_page("d", &["a", "b", "c"]),
         ];
-        let graph = WikiGraph::build(&pages);
+        let graph = WikiGraph::build(&pages, &VaultDirs::default());
         let result = detect_communities(&graph, &config);
         assert_eq!(result.communities.len(), 1);
         assert_eq!(result.communities[0].size, 4);
@@ -383,7 +384,7 @@ mod tests {
             make_page("d", &["c", "e"]),
             make_page("e", &["c", "d"]),
         ];
-        let graph = WikiGraph::build(&pages);
+        let graph = WikiGraph::build(&pages, &VaultDirs::default());
         let result = detect_communities(&graph, &config);
         assert_eq!(result.communities.len(), 1);
         assert_eq!(result.communities[0].size, 3);
@@ -397,7 +398,7 @@ mod tests {
             make_page("b", &["a"]),
             make_page("c", &["a"]),
         ];
-        let graph = WikiGraph::build(&pages);
+        let graph = WikiGraph::build(&pages, &VaultDirs::default());
         let result = detect_communities(&graph, &config);
         assert!(result.communities.iter().all(|c| c.label.is_none()));
     }
@@ -411,7 +412,7 @@ mod tests {
             make_page("leaf-2", &["hub"]),
             make_page("leaf-3", &["hub"]),
         ];
-        let graph = WikiGraph::build(&pages);
+        let graph = WikiGraph::build(&pages, &VaultDirs::default());
         let mut result = detect_communities(&graph, &config);
         label_communities(&graph, &mut result.communities);
         assert_eq!(result.communities.len(), 1);
@@ -428,7 +429,7 @@ mod tests {
             make_page("x", &["y"]),
             make_page("y", &["x"]),
         ];
-        let graph = WikiGraph::build(&pages);
+        let graph = WikiGraph::build(&pages, &VaultDirs::default());
         let result = detect_communities(&graph, &config);
         assert_eq!(result.communities.len(), 2);
         assert!(result.communities[0].size >= result.communities[1].size);
@@ -448,7 +449,7 @@ mod tests {
             make_page("b2", &["b1", "b3"]),
             make_page("b3", &["b1", "b2"]),
         ];
-        let graph = WikiGraph::build(&pages);
+        let graph = WikiGraph::build(&pages, &VaultDirs::default());
         let result = detect_communities(&graph, &config);
         assert!(result.modularity > 0.0);
     }
@@ -463,7 +464,7 @@ mod tests {
             make_page("b", &["a"]),
             make_page("c", &["a"]),
         ];
-        let graph = WikiGraph::build(&pages);
+        let graph = WikiGraph::build(&pages, &VaultDirs::default());
         let cluster = detect_communities(&graph, &config);
         let result = suggest_links(&graph, &cluster);
         assert_eq!(result.pairs.len(), 1);
@@ -481,7 +482,7 @@ mod tests {
             make_page("b", &["a", "c"]),
             make_page("c", &["a", "b"]),
         ];
-        let graph = WikiGraph::build(&pages);
+        let graph = WikiGraph::build(&pages, &VaultDirs::default());
         let cluster = detect_communities(&graph, &config);
         let result = suggest_links(&graph, &cluster);
         assert!(result.pairs.is_empty());
@@ -499,7 +500,7 @@ mod tests {
             make_page("y", &["hub1", "hub2"]),
             make_page("z", &["hub1", "hub2"]),
         ];
-        let graph = WikiGraph::build(&pages);
+        let graph = WikiGraph::build(&pages, &VaultDirs::default());
         let cluster = detect_communities(&graph, &config);
         let result = suggest_links(&graph, &cluster);
         assert!(!result.pairs.is_empty());

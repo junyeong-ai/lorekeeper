@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use lk_core::concept::slugify;
-use lk_core::config::GraphConfig;
+use lk_core::config::{GraphConfig, VaultDirs};
 use lk_core::frontmatter::{self, Frontmatter};
 use lk_core::wikilink;
 use rayon::prelude::*;
@@ -159,7 +159,7 @@ pub struct VaultExistence {
 impl VaultExistence {
     /// Derive the universe from a full-vault page scan. Resolution is done up
     /// front so `linked` holds resolved page ids, not raw target slugs.
-    pub fn from_pages(pages: &[Page]) -> Self {
+    pub fn from_pages(pages: &[Page], dirs: &VaultDirs) -> Self {
         let mut by_filename: HashMap<String, String> = HashMap::with_capacity(pages.len());
         let mut ids = HashSet::with_capacity(pages.len());
         for page in pages {
@@ -171,7 +171,7 @@ impl VaultExistence {
         // document, independent of scan order.
         for concept_pass in [true, false] {
             for page in pages {
-                if is_concept_path(&page.path) != concept_pass {
+                if is_concept_page(&page.path, dirs) != concept_pass {
                     continue;
                 }
                 let slug = stem_slug(&page.path);
@@ -218,16 +218,16 @@ impl VaultExistence {
     }
 }
 
-/// Whether a page lives directly under a `concepts/` directory — i.e. it is a
-/// concept page (`{wiki}/concepts/{slug}.md`). A bare `[[name]]` wikilink targets
-/// the knowledge node, so a concept owns its filename slug over a same-named
-/// document or other page (which is always cited by its path form). `concepts` is
-/// the fixed vault-layout segment (see `lk_core::vault_path`).
-pub fn is_concept_path(path: &Path) -> bool {
-    path.parent()
-        .and_then(|p| p.file_name())
-        .and_then(|s| s.to_str())
-        == Some("concepts")
+/// Whether a page is a concept page (`{dirs.wiki}/concepts/{slug}.md`). A bare
+/// `[[name]]` wikilink targets the knowledge node, so a concept owns its filename
+/// slug over a same-named document or other page (which is always cited by its path
+/// form). Anchored to the configured `dirs.wiki` — never a hardcoded path segment —
+/// and is the single definition shared by the resolver (`from_pages`, `WikiGraph`)
+/// and `backlinks`.
+pub(crate) fn is_concept_page(path: &Path, dirs: &VaultDirs) -> bool {
+    let s = path.to_string_lossy().replace('\\', "/");
+    s.starts_with(&format!("{}/concepts/", dirs.wiki))
+        && path.extension().is_some_and(|ext| ext == "md")
 }
 
 /// Stem-slug of a page path: slugify the file stem (the resolution key used
@@ -345,7 +345,7 @@ mod tests {
                 outgoing: vec![],
             },
         ];
-        let ex = VaultExistence::from_pages(&pages);
+        let ex = VaultExistence::from_pages(&pages, &VaultDirs::default());
         // Both forms resolve: path id and bare filename.
         assert!(ex.resolves("daily/team-slack/2026-05-22"));
         assert!(ex.resolves("2026-05-22"));

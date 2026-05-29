@@ -6,7 +6,9 @@ use std::collections::HashSet;
 use std::collections::hash_map::Entry;
 use std::path::Path;
 
-use crate::scan::{Page, VaultExistence, is_concept_path, stem_slug};
+use lk_core::config::VaultDirs;
+
+use crate::scan::{Page, VaultExistence, is_concept_page, stem_slug};
 
 pub struct WikiGraph {
     graph: DiGraph<NodeData, ()>,
@@ -45,8 +47,8 @@ impl WikiGraph {
     /// no edges is an orphan. The right model when the scope *is* the vault (and
     /// the convenient default for tests); for a narrowed scope whose links reach
     /// pages outside it, use [`Self::build_with_existence`].
-    pub fn build(pages: &[Page]) -> Self {
-        Self::build_with_existence(pages, &VaultExistence::from_pages(pages))
+    pub fn build(pages: &[Page], dirs: &VaultDirs) -> Self {
+        Self::build_with_existence(pages, &VaultExistence::from_pages(pages, dirs), dirs)
     }
 
     /// Build the analysis graph over `pages` (the scope) while resolving
@@ -59,7 +61,11 @@ impl WikiGraph {
     ///   target does not exist anywhere in the vault.
     /// - **orphans**: a scope page is exempt when it links to, or is linked from,
     ///   any page in the vault (tracked in `cross_scope_connected`).
-    pub fn build_with_existence(pages: &[Page], existence: &VaultExistence) -> Self {
+    pub fn build_with_existence(
+        pages: &[Page],
+        existence: &VaultExistence,
+        dirs: &VaultDirs,
+    ) -> Self {
         let mut graph = DiGraph::new();
         let mut id_to_node = HashMap::with_capacity(pages.len());
         // Maps a bare-target filename slug to its node, tagging whether the owner is
@@ -78,7 +84,7 @@ impl WikiGraph {
 
             let slug = stem_slug(&page.path);
             if !slug.is_empty() {
-                let is_concept = is_concept_path(&page.path);
+                let is_concept = is_concept_page(&page.path, dirs);
                 match name_to_node.entry(slug) {
                     Entry::Vacant(e) => {
                         e.insert((node, is_concept));
@@ -294,7 +300,7 @@ mod tests {
             make_page("wiki/beta", &["alpha"]),
             make_page("wiki/gamma", &[]),
         ];
-        let g = WikiGraph::build(&pages);
+        let g = WikiGraph::build(&pages, &VaultDirs::default());
 
         assert_eq!(g.node_count(), 3);
         assert_eq!(g.edge_count(), 2);
@@ -307,7 +313,7 @@ mod tests {
             make_page("wiki/alpha", &["nonexistent"]),
             make_page("wiki/beta", &[]),
         ];
-        let g = WikiGraph::build(&pages);
+        let g = WikiGraph::build(&pages, &VaultDirs::default());
 
         assert_eq!(g.broken_links().len(), 1);
         assert_eq!(g.broken_links()[0].source, "wiki/alpha");
@@ -322,7 +328,7 @@ mod tests {
             make_page("wiki/b", &["hub"]),
             make_page("wiki/c", &[]),
         ];
-        let g = WikiGraph::build(&pages);
+        let g = WikiGraph::build(&pages, &VaultDirs::default());
 
         let hubs = g.hubs(10, 1);
         assert!(!hubs.is_empty());
@@ -338,7 +344,7 @@ mod tests {
             make_page("wiki/other", &[]),
             make_page("wiki/orphan", &[]),
         ];
-        let g = WikiGraph::build(&pages);
+        let g = WikiGraph::build(&pages, &VaultDirs::default());
 
         let orphans = g.orphans(&config.graph.orphan_exclude, Path::new("wiki"));
         assert_eq!(orphans, vec!["wiki/orphan"]);
@@ -354,7 +360,7 @@ mod tests {
             make_page("wiki/other", &[]),
             make_page("wiki/orphan", &[]),
         ];
-        let g = WikiGraph::build(&pages);
+        let g = WikiGraph::build(&pages, &VaultDirs::default());
 
         let orphans = g.orphans(&config.graph.orphan_exclude, Path::new("wiki"));
         assert!(orphans.is_empty());
@@ -363,7 +369,7 @@ mod tests {
     #[test]
     fn self_links_excluded() {
         let pages = vec![make_page("wiki/self", &["self"])];
-        let g = WikiGraph::build(&pages);
+        let g = WikiGraph::build(&pages, &VaultDirs::default());
 
         assert_eq!(g.edge_count(), 0);
     }
@@ -374,7 +380,7 @@ mod tests {
             make_page("wiki/concept-a", &["concept-b"]),
             make_page("wiki/concept-b", &[]),
         ];
-        let g = WikiGraph::build(&pages);
+        let g = WikiGraph::build(&pages, &VaultDirs::default());
 
         assert_eq!(g.edge_count(), 1);
         assert!(g.broken_links().is_empty());
@@ -389,7 +395,7 @@ mod tests {
             make_page("docs/alpha", &[]),
             make_page("wiki/linker", &["alpha"]),
         ];
-        let g = WikiGraph::build(&pages);
+        let g = WikiGraph::build(&pages, &VaultDirs::default());
 
         assert_eq!(g.node_count(), 3);
         let edges: Vec<(String, String)> = g
@@ -414,7 +420,7 @@ mod tests {
             make_page("wiki/concepts/x", &[]),
             make_page("wiki/linker", &["x"]),
         ];
-        let g = WikiGraph::build(&pages);
+        let g = WikiGraph::build(&pages, &VaultDirs::default());
         let edges: Vec<(String, String)> = g
             .edge_pairs()
             .map(|(s, t)| (g.node_id(s).to_owned(), g.node_id(t).to_owned()))
@@ -435,7 +441,7 @@ mod tests {
             make_page("wiki/a", &["wiki/sub/b"]),
             make_page("wiki/sub/b", &[]),
         ];
-        let g = WikiGraph::build(&pages);
+        let g = WikiGraph::build(&pages, &VaultDirs::default());
 
         assert_eq!(g.edge_count(), 1);
         assert!(g.broken_links().is_empty());
@@ -455,11 +461,11 @@ mod tests {
             make_page("daily/team-slack/2026-05-22", &[]),
         ];
 
-        let legacy = WikiGraph::build(&scope);
+        let legacy = WikiGraph::build(&scope, &VaultDirs::default());
         assert_eq!(legacy.broken_links().len(), 1);
 
-        let existence = VaultExistence::from_pages(&full);
-        let g = WikiGraph::build_with_existence(&scope, &existence);
+        let existence = VaultExistence::from_pages(&full, &VaultDirs::default());
+        let g = WikiGraph::build_with_existence(&scope, &existence, &VaultDirs::default());
         assert!(g.broken_links().is_empty());
     }
 
@@ -474,14 +480,14 @@ mod tests {
             make_page("daily/team-slack/2026-05-22", &["bar"]),
         ];
 
-        let legacy = WikiGraph::build(&scope);
+        let legacy = WikiGraph::build(&scope, &VaultDirs::default());
         assert_eq!(
             legacy.orphans(&config.graph.orphan_exclude, Path::new("wiki")),
             vec!["wiki/concepts/bar"]
         );
 
-        let existence = VaultExistence::from_pages(&full);
-        let g = WikiGraph::build_with_existence(&scope, &existence);
+        let existence = VaultExistence::from_pages(&full, &VaultDirs::default());
+        let g = WikiGraph::build_with_existence(&scope, &existence, &VaultDirs::default());
         assert!(
             g.orphans(&config.graph.orphan_exclude, Path::new("wiki"))
                 .is_empty()
@@ -502,8 +508,8 @@ mod tests {
             make_page("daily/team-slack/2026-05-22", &[]),
         ];
 
-        let existence = VaultExistence::from_pages(&full);
-        let g = WikiGraph::build_with_existence(&scope, &existence);
+        let existence = VaultExistence::from_pages(&full, &VaultDirs::default());
+        let g = WikiGraph::build_with_existence(&scope, &existence, &VaultDirs::default());
         assert!(
             g.orphans(&config.graph.orphan_exclude, Path::new("wiki"))
                 .is_empty()
@@ -516,7 +522,7 @@ mod tests {
         // self-reference must not exempt it from orphan status.
         let config = GraphConfig::default();
         let pages = vec![make_page("wiki/lonely", &["lonely"])];
-        let g = WikiGraph::build(&pages);
+        let g = WikiGraph::build(&pages, &VaultDirs::default());
 
         assert_eq!(
             g.orphans(&config.graph.orphan_exclude, Path::new("wiki")),
@@ -535,7 +541,7 @@ mod tests {
             make_page("wiki/b/dup", &[]),
             make_page("wiki/linker", &["dup"]),
         ];
-        let g = WikiGraph::build(&pages);
+        let g = WikiGraph::build(&pages, &VaultDirs::default());
 
         assert_eq!(
             g.orphans(&config.graph.orphan_exclude, Path::new("wiki")),
@@ -553,8 +559,8 @@ mod tests {
             make_page("wiki/other", &[]),
             make_page("wiki/lonely", &[]),
         ];
-        let existence = VaultExistence::from_pages(&scope);
-        let g = WikiGraph::build_with_existence(&scope, &existence);
+        let existence = VaultExistence::from_pages(&scope, &VaultDirs::default());
+        let g = WikiGraph::build_with_existence(&scope, &existence, &VaultDirs::default());
 
         assert_eq!(
             g.orphans(&config.graph.orphan_exclude, Path::new("wiki")),

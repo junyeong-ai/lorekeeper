@@ -73,7 +73,7 @@ mod tests {
     use super::*;
     use crate::cluster::detect_communities;
     use crate::scan::Page;
-    use lk_core::config::GraphConfig;
+    use lk_core::config::{GraphConfig, VaultDirs};
     use std::path::PathBuf;
 
     fn make_page(id: &str, outgoing: &[&str]) -> Page {
@@ -93,7 +93,7 @@ mod tests {
             make_page("a", &["b"]),
             make_page("b", &["c"]),
         ];
-        let graph = WikiGraph::build(&pages);
+        let graph = WikiGraph::build(&pages, &VaultDirs::default());
         let export = export(&graph, None);
         assert_eq!(export.nodes.len(), 3);
         assert_eq!(export.edges.len(), 3);
@@ -117,7 +117,7 @@ mod tests {
             make_page("c", &["d"]),
             make_page("d", &["c"]),
         ];
-        let graph = WikiGraph::build(&pages);
+        let graph = WikiGraph::build(&pages, &VaultDirs::default());
         let cluster = detect_communities(&graph, &config);
         let export = export(&graph, Some(&cluster));
         assert!(export.nodes.iter().all(|n| n.community.is_some()));

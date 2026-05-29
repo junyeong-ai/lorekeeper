@@ -166,6 +166,7 @@ fn read_sub_page_contents(dir: &Path) -> Result<Vec<String>, GraphError> {
 mod tests {
     use super::*;
     use crate::scan::Page;
+    use lk_core::config::VaultDirs;
     use std::path::PathBuf;
     use tempfile::TempDir;
 
@@ -200,8 +201,8 @@ mod tests {
             make_page("wiki/gamma", &[]),
         ];
 
-        let graph = WikiGraph::build(&pages);
-        let existence = VaultExistence::from_pages(&pages);
+        let graph = WikiGraph::build(&pages, &VaultDirs::default());
+        let existence = VaultExistence::from_pages(&pages, &VaultDirs::default());
         let drift = diff(&graph, &existence, tmp.path(), Path::new("wiki"), &[]).unwrap();
 
         assert!(drift.missing_from_index.contains(&"wiki/gamma".to_owned()));
@@ -224,8 +225,8 @@ mod tests {
             make_page("wiki/alpha", &[]),
         ];
 
-        let graph = WikiGraph::build(&pages);
-        let existence = VaultExistence::from_pages(&pages);
+        let graph = WikiGraph::build(&pages, &VaultDirs::default());
+        let existence = VaultExistence::from_pages(&pages, &VaultDirs::default());
         let drift = diff(&graph, &existence, tmp.path(), Path::new("wiki"), &[]).unwrap();
 
         assert!(drift.missing_from_disk.contains(&"nonexistent".to_owned()));
@@ -260,8 +261,8 @@ mod tests {
 
         let pages = vec![make_page("wiki/alpha", &[]), make_page("wiki/beta", &[])];
 
-        let graph = WikiGraph::build(&pages);
-        let existence = VaultExistence::from_pages(&pages);
+        let graph = WikiGraph::build(&pages, &VaultDirs::default());
+        let existence = VaultExistence::from_pages(&pages, &VaultDirs::default());
         let drift = diff(&graph, &existence, tmp.path(), Path::new("wiki"), &[]).unwrap();
 
         assert!(!drift.is_in_sync());

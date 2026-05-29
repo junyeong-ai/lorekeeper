@@ -22,7 +22,7 @@ use lk_vault::{VaultWriter, replace_section, section_body};
 use serde::Serialize;
 
 use crate::GraphError;
-use crate::scan::Page;
+use crate::scan::{Page, is_concept_page};
 
 /// Outcome of one concept page's reconciliation.
 #[derive(Debug, Clone, Serialize)]
@@ -190,15 +190,6 @@ fn is_valid_source(path: &Path, dirs: &VaultDirs) -> bool {
         || s.starts_with(&format!("{}/", dirs.synthesis))
         || s.starts_with(&format!("{}/documents/", dirs.wiki))
         || s.starts_with(&format!("{}/explorations/", dirs.wiki))
-}
-
-/// True iff this vault-relative path is a `{wiki}/concepts/<name>.md` page. Concept
-/// pages live one directory deep under `{wiki}/concepts/`, so we anchor on the prefix
-/// and require an `.md` extension. Cross-platform `\` is normalised before matching.
-pub(crate) fn is_concept_page(path: &Path, dirs: &VaultDirs) -> bool {
-    let s = path.to_string_lossy().replace('\\', "/");
-    s.starts_with(&format!("{}/concepts/", dirs.wiki))
-        && path.extension().is_some_and(|ext| ext == "md")
 }
 
 /// Extract `[[…]]` targets from the existing `## <heading>` section, in their

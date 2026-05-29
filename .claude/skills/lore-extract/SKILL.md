@@ -190,13 +190,17 @@ Extract knowledge using the manifest. Requires a prior scan.
       tags: [{technology}, {domain}]
       ```
 
-      Concept links live in the document's related-concepts body section
-      (`[[wikilinks]]`), NOT in a frontmatter `concepts` array.
+      Link the extracted concepts as `[[wikilinks]]` in the document's
+      related-concepts body section (heading per AGENTS.md), NOT in a
+      frontmatter `concepts` array. These forward links are what the Finalize
+      `backlinks-sync` reads to populate each concept's `## 출처`.
 
-   h. Create/merge concept pages per standard protocol.
-      Concept citations go in the `## 출처` (Sources) body as
-      `- [[{project}-{slug}]]` (the vault document page id) — NOT in
-      frontmatter. `backlinks-sync` re-derives the body and `source_count`.
+   h. Create/merge concept pages per AGENTS.md: fill the Synthesis section.
+      Leave `## 출처` empty and `source_count: 0` — they are machine-owned and
+      re-derived by the Finalize `backlinks-sync` from the document's forward
+      `[[wikilink]]` (step g), the single source of truth. Never hand-write
+      citations: `backlinks-sync` replaces `## 출처` wholesale, so an entry not
+      backed by a forward link is wiped.
 
    i. **Update manifest** `extracted` list with the new entry.
 
@@ -206,7 +210,7 @@ Extract knowledge using the manifest. Requires a prior scan.
    ```bash
    lore graph backlinks-sync   # re-derive every concept's ## 출처 + source_count
    lore wiki index             # rebuild the catalog (lint flags index drift until this runs)
-   lore graph lint             # clean once the index exists
+   lore graph lint             # confirm no structural drift; pre-existing review items may remain
    ```
 8. Report created/merged/skipped counts.
 

@@ -115,7 +115,7 @@ checks pass:
 ```bash
 lore graph backlinks-sync   # re-derive every concept's ## 출처 + source_count
 lore wiki index             # rebuild the catalog so `lore graph lint` is clean
-lore graph lint             # confirm the vault is clean (exit 0, no findings)
+lore graph lint             # confirm no structural drift (index/broken links); pre-existing review items (uncategorized, near-dup, open conflicts) may legitimately remain
 ```
 
 ### 7. Report

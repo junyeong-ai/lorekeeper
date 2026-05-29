@@ -48,7 +48,10 @@ map to `RawItem`.
 - **Manual source** (`manual.rs`): watches an inbox directory for user-dropped files
   (`.md`, `.txt`, `.markdown`, `.json` by default). Files are read into `RawItem` with `external_id =
   "manual:{filename}"`. Symlinks are rejected. Archive-after-ingest defaults to
-  false (extract runs before dedup commit; archive would break safe retry).
+  **true**, but archival is deferred to `post_commit_archive` (run only after the
+  dedup commit), so a mid-pipeline failure leaves the inbox intact for retry. It
+  archives BOTH novel and deduplicated files — a duplicate left in the inbox would
+  be re-scanned and re-deduplicated on every run.
 - `Source` has no `source_type()` accessor — the factory selects by the input enum.
 - `markdown` module normalizes rich text to Markdown, loss-aversely (unmapped constructs
   degrade to their text): `adf_to_markdown`, `html_to_markdown` (via `htmd`),

@@ -153,9 +153,9 @@ fn run_inner(
     ) {
         build_vault_existence(&rc.root, &rc.graph, &rc.vault_dirs)?
     } else {
-        scan::VaultExistence::from_pages(&pages)
+        scan::VaultExistence::from_pages(&pages, &rc.vault_dirs)
     };
-    let g = graph::WikiGraph::build_with_existence(&pages, &existence);
+    let g = graph::WikiGraph::build_with_existence(&pages, &existence, &rc.vault_dirs);
 
     let has_findings = match cmd {
         GraphCmd::Lint => {
@@ -503,7 +503,7 @@ fn build_vault_existence(
     let mut full = config.clone();
     full.scope.dirs = vault_page_dirs(root, vault_dirs);
     let pages = scan::scan_vault(root, &full).map_err(|e| format!("{e}"))?;
-    Ok(scan::VaultExistence::from_pages(&pages))
+    Ok(scan::VaultExistence::from_pages(&pages, vault_dirs))
 }
 
 /// Every vault-relative page directory that exists on disk — anything that can
