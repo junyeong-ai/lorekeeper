@@ -15,10 +15,30 @@ const TITLES: TableDefinition<&str, u64> = TableDefinition::new("titles");
 
 /// Exact query-parameter keys stripped during URL canonicalisation. These are
 /// vendor-tracking parameters whose presence varies by attribution path but
-/// never carry resource-identifying information.
+/// never carry resource-identifying information. (Bare `ref` is deliberately NOT
+/// here — GitHub/GitLab use it as a revision selector; only `ref_src` is tracking.)
 const TRACKING_QUERY_EXACT_KEYS: &[&str] = &[
-    "fbclid", "gclid", "mc_cid", "mc_eid", "_hsenc", "_hsmi", "msclkid", "ttclid", "twclid",
-    "wbraid", "gbraid",
+    "fbclid",
+    "gclid",
+    "mc_cid",
+    "mc_eid",
+    "_hsenc",
+    "_hsmi",
+    "msclkid",
+    "ttclid",
+    "twclid",
+    "wbraid",
+    "gbraid",
+    "igshid",
+    "ref_src",
+    "spm",
+    "vero_id",
+    "vero_conv",
+    "oly_enc_id",
+    "oly_anon_id",
+    "cmpid",
+    "ncid",
+    "mkt_tok",
 ];
 
 /// Query-key prefixes stripped during URL canonicalisation. Only genuine
@@ -26,14 +46,22 @@ const TRACKING_QUERY_EXACT_KEYS: &[&str] = &[
 /// utm_medium, utm_campaign, utm_term, utm_content).
 const TRACKING_QUERY_PREFIXES: &[&str] = &["utm_"];
 
-fn is_tracking_param(key: &str) -> bool {
+/// A tracking key per the built-in set OR a user-supplied `extra` entry. An extra
+/// entry ending in `*` matches a prefix; otherwise it must match the key exactly.
+/// Entries are trimmed so they agree with config validation (which trims before
+/// checking) regardless of incidental surrounding whitespace.
+fn is_tracking_param(key: &str, extra: &[String]) -> bool {
     TRACKING_QUERY_EXACT_KEYS.contains(&key)
         || TRACKING_QUERY_PREFIXES
             .iter()
             .any(|prefix| key.starts_with(prefix))
+        || extra.iter().any(|p| match p.trim().strip_suffix('*') {
+            Some(prefix) => key.starts_with(prefix),
+            None => key == p.trim(),
+        })
 }
 
-pub(crate) fn normalize_url(raw: &str) -> String {
+pub(crate) fn normalize_url(raw: &str, extra_tracking: &[String]) -> String {
     let Ok(mut url) = url::Url::parse(raw) else {
         return raw.to_string();
     };
@@ -75,7 +103,7 @@ pub(crate) fn normalize_url(raw: &str) -> String {
     // keys. Remaining pairs are sorted for canonical ordering.
     let mut pairs: Vec<(String, String)> = url
         .query_pairs()
-        .filter(|(k, _)| !is_tracking_param(k))
+        .filter(|(k, _)| !is_tracking_param(k, extra_tracking))
         .map(|(k, v)| (k.into_owned(), v.into_owned()))
         .collect();
     pairs.sort();
@@ -122,10 +150,17 @@ pub struct DedupCache {
     /// writes a file, treats every event as novel, and no-ops on record/prune.
     db: Option<Database>,
     title_threshold: f64,
+    /// User-configured extra tracking-param keys, merged with the built-ins during
+    /// URL canonicalisation.
+    extra_tracking: Vec<String>,
 }
 
 impl DedupCache {
-    pub fn open(path: &Path, title_threshold: f64) -> Result<Self, PipelineError> {
+    pub fn open(
+        path: &Path,
+        title_threshold: f64,
+        extra_tracking: Vec<String>,
+    ) -> Result<Self, PipelineError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| PipelineError::Dedup(format!("create dir: {e}")))?;
@@ -136,6 +171,7 @@ impl DedupCache {
         Ok(Self {
             db: Some(db),
             title_threshold,
+            extra_tracking,
         })
     }
 
@@ -143,7 +179,11 @@ impl DedupCache {
     /// If the cache file exists it is opened for reading so the preview reflects real
     /// dedup state; if it doesn't, every event is reported novel (as a real first run
     /// would also see), and no file is created.
-    pub fn open_read_only(path: &Path, title_threshold: f64) -> Result<Self, PipelineError> {
+    pub fn open_read_only(
+        path: &Path,
+        title_threshold: f64,
+        extra_tracking: Vec<String>,
+    ) -> Result<Self, PipelineError> {
         let db = if path.exists() {
             match Database::open(path) {
                 Ok(db) => Some(db),
@@ -161,6 +201,7 @@ impl DedupCache {
         Ok(Self {
             db,
             title_threshold,
+            extra_tracking,
         })
     }
 
@@ -295,7 +336,7 @@ impl DedupCache {
                     }
                     DedupStrategy::Url => {
                         if let Some(ref url) = event.url {
-                            let url = normalize_url(url);
+                            let url = normalize_url(url, &self.extra_tracking);
                             let in_cache = match &tables {
                                 Some((_, _, urls, _)) => urls
                                     .get(url.as_str())
@@ -344,7 +385,7 @@ impl DedupCache {
                 seen_ids.insert(event.id.as_str().to_string());
                 seen_hashes.insert(event.content_hash.clone());
                 if let Some(ref url) = event.url {
-                    seen_urls.insert(normalize_url(url));
+                    seen_urls.insert(normalize_url(url, &self.extra_tracking));
                 }
                 novel.push(event);
             } else {
@@ -391,7 +432,7 @@ impl DedupCache {
                     .map_err(|e| PipelineError::Dedup(e.to_string()))?;
 
                 if let Some(ref url) = event.url {
-                    let url = normalize_url(url);
+                    let url = normalize_url(url, &self.extra_tracking);
                     urls.insert(url.as_str(), now)
                         .map_err(|e| PipelineError::Dedup(e.to_string()))?;
                 }
@@ -462,6 +503,12 @@ mod tests {
     use lk_core::event::{Event, EventId};
     use tempfile::TempDir;
 
+    /// Canonicalise with the built-in tracking set only (no config extras) — what
+    /// the default cascade uses. Shadows the two-arg `super::normalize_url`.
+    fn normalize_url(raw: &str) -> String {
+        super::normalize_url(raw, &[])
+    }
+
     fn ev(id_suffix: &str, title: &str, url: Option<&str>) -> Event {
         let date = jiff::civil::date(2026, 5, 23);
         Event {
@@ -474,7 +521,9 @@ mod tests {
             url: url.map(String::from),
             author: None,
             labels: vec![],
-            work_category: None,
+            classification: None,
+            performance_category: None,
+            is_self: false,
             is_personal: false,
             content_hash: lk_core::event::content_hash(title, ""),
             metadata: serde_json::Value::Null,
@@ -515,6 +564,45 @@ mod tests {
         assert_eq!(
             normalize_url("https://github.com/o/r/blob/x.rs?ref=v2"),
             "https://github.com/o/r/blob/x.rs?ref=v2"
+        );
+    }
+
+    #[test]
+    fn normalize_url_strips_unambiguous_social_tracking_params() {
+        // Instagram `igshid` and Twitter `ref_src` are unambiguous attribution tokens
+        // and come off. Single-letter ambiguous params (e.g. `si`) are deliberately NOT
+        // in the built-in set — they can be a resource selector on some hosts, so
+        // stripping them globally would merge distinct pages. Opt in via
+        // `dedup.extra_tracking_params` if a specific source needs it.
+        assert_eq!(
+            super::normalize_url(
+                "https://example.com/post?igshid=xyz&ref_src=twsrc&id=42",
+                &[],
+            ),
+            "https://example.com/post?id=42"
+        );
+        // `si` survives by default (resource-identifying on non-YouTube hosts).
+        assert_eq!(
+            super::normalize_url("https://example.com/track?si=keepme", &[]),
+            "https://example.com/track?si=keepme"
+        );
+    }
+
+    #[test]
+    fn normalize_url_strips_config_extra_params_exact_and_prefix() {
+        let extra = vec!["pk_*".to_string(), "myref".to_string()];
+        // Exact `myref` and prefix `pk_*` come off; the resource `id` stays.
+        assert_eq!(
+            super::normalize_url(
+                "https://example.com/p?pk_campaign=c&pk_kwd=k&myref=r&id=9",
+                &extra,
+            ),
+            "https://example.com/p?id=9"
+        );
+        // Without the config, those same params are preserved (sorted).
+        assert_eq!(
+            super::normalize_url("https://example.com/p?myref=r&id=9", &[]),
+            "https://example.com/p?id=9&myref=r"
         );
     }
 
@@ -604,7 +692,7 @@ mod tests {
     #[test]
     fn dedup_filters_seen_events() {
         let dir = TempDir::new().unwrap();
-        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85).unwrap();
+        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85, vec![]).unwrap();
 
         let cascade = vec![DedupStrategy::EventId];
         let events = vec![ev("a", "A", None), ev("b", "B", None)];
@@ -624,7 +712,7 @@ mod tests {
         // dropped) so `commit` can refresh its `seen_at` and it never ages out of the
         // retention window to re-emit as new.
         let dir = TempDir::new().unwrap();
-        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85).unwrap();
+        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85, vec![]).unwrap();
         let cascade = vec![DedupStrategy::EventId];
         let events = vec![ev("a", "A", None)];
         cache.record(&events).unwrap();
@@ -641,7 +729,7 @@ mod tests {
     #[test]
     fn cascade_tries_each_strategy_in_order() {
         let dir = TempDir::new().unwrap();
-        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85).unwrap();
+        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85, vec![]).unwrap();
         let cascade = vec![
             DedupStrategy::EventId,
             DedupStrategy::Url,
@@ -677,7 +765,7 @@ mod tests {
         // The same article ingested via two sources (different event IDs and URLs)
         // collapses to one event when content-hash is in the cascade.
         let dir = TempDir::new().unwrap();
-        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85).unwrap();
+        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85, vec![]).unwrap();
         let cascade = vec![DedupStrategy::ContentHash];
         let a = ev("from-rss", "Anthropic releases Opus 4.7", None);
         let b = ev("from-mail", "Anthropic releases Opus 4.7", None);
@@ -690,7 +778,8 @@ mod tests {
         // Dry-run with no existing cache (open_read_only → None) must still drop
         // intra-batch duplicates so the preview matches a real run.
         let dir = TempDir::new().unwrap();
-        let cache = DedupCache::open_read_only(&dir.path().join("absent.redb"), 0.85).unwrap();
+        let cache =
+            DedupCache::open_read_only(&dir.path().join("absent.redb"), 0.85, vec![]).unwrap();
         let cascade = vec![DedupStrategy::EventId];
         let batch = vec![ev("a", "A", None), ev("a", "A", None)];
         let novel = cache.deduplicate(batch, &cascade).unwrap().novel;
@@ -706,7 +795,7 @@ mod tests {
     #[test]
     fn intra_batch_duplicates_are_filtered() {
         let dir = TempDir::new().unwrap();
-        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85).unwrap();
+        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85, vec![]).unwrap();
         let cascade = vec![DedupStrategy::EventId, DedupStrategy::Url];
 
         // Two events with the same id in ONE batch (nothing committed yet).
@@ -725,7 +814,7 @@ mod tests {
     #[test]
     fn url_dedup_filters_same_url_different_id() {
         let dir = TempDir::new().unwrap();
-        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85).unwrap();
+        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85, vec![]).unwrap();
         let cascade = vec![DedupStrategy::Url];
 
         cache
@@ -744,7 +833,7 @@ mod tests {
     #[test]
     fn url_dedup_matches_normalized_urls() {
         let dir = TempDir::new().unwrap();
-        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85).unwrap();
+        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85, vec![]).unwrap();
         let cascade = vec![DedupStrategy::Url];
 
         cache
@@ -762,7 +851,7 @@ mod tests {
     #[test]
     fn url_dedup_distinguishes_different_resource_params() {
         let dir = TempDir::new().unwrap();
-        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85).unwrap();
+        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85, vec![]).unwrap();
         let cascade = vec![DedupStrategy::Url];
 
         cache
@@ -793,7 +882,7 @@ mod tests {
     #[test]
     fn title_dedup_matches_across_dates() {
         let dir = TempDir::new().unwrap();
-        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85).unwrap();
+        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85, vec![]).unwrap();
 
         cache
             .record(&[ev("a", "Anthropic releases Opus 4.7", None)])
@@ -826,7 +915,7 @@ mod tests {
     #[test]
     fn prune_removes_old_entries() {
         let dir = TempDir::new().unwrap();
-        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85).unwrap();
+        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85, vec![]).unwrap();
 
         cache.record(&[ev("a", "A", Some("http://x"))]).unwrap();
 

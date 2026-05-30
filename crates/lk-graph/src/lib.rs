@@ -12,6 +12,7 @@ pub mod concepts;
 pub mod export;
 pub mod graph;
 pub mod index;
+pub mod merge;
 pub mod normalize;
 pub mod output;
 pub mod scan;

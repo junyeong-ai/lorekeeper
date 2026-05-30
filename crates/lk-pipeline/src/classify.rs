@@ -1,7 +1,6 @@
-use lk_core::config::Identity;
 use lk_core::event::Event;
 
-pub fn assign_static_labels(events: &mut [Event], labels: &[String]) {
+pub fn assign_labels(events: &mut [Event], labels: &[String]) {
     for event in events {
         for label in labels {
             if !event.labels.contains(label) {
@@ -11,77 +10,43 @@ pub fn assign_static_labels(events: &mut [Event], labels: &[String]) {
     }
 }
 
-pub fn flag_personal(events: &mut [Event], identity: &Identity) {
-    // Empty/whitespace identity tokens would make matching degenerate (a blank or
-    // all-space needle), flagging unrelated events as personal. Drop them up front.
-    let nonblank = |s: String| if s.trim().is_empty() { None } else { Some(s) };
-    let email = nonblank(identity.email.to_lowercase());
-    let name = nonblank(identity.name.to_lowercase());
-    let slack_id = identity
-        .slack_id
-        .as_deref()
-        .map(str::to_lowercase)
-        .and_then(nonblank);
-    let jira_id = identity
-        .jira_id
-        .as_deref()
-        .map(str::to_lowercase)
-        .and_then(nonblank);
-
+/// Promote the adapter's authorship signal to a tracked personal event. Ownership
+/// is decided at the source (where the structured author/assignee/organizer fields
+/// live) and carried on `Event::is_self`; here it is gated by the source's
+/// `track_personal` so only opted-in sources feed the work-log and performance
+/// reviews. No text matching — a recipient, CC, or mention is never the author.
+pub fn mark_personal(events: &mut [Event], track_personal: bool) {
+    if !track_personal {
+        return;
+    }
     for event in events {
-        let is_self = event
-            .metadata
-            .get("is_self")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        let author = event.author.as_deref().unwrap_or_default().to_lowercase();
-        let meta = event.metadata.to_string().to_lowercase();
-
-        let matched = is_self
-            || email
-                .as_deref()
-                .is_some_and(|e| contains_bounded(&author, e) || contains_bounded(&meta, e))
-            || name
-                .as_deref()
-                .is_some_and(|n| contains_bounded(&author, n))
-            || slack_id
-                .as_deref()
-                .is_some_and(|sid| contains_bounded(&author, sid) || contains_bounded(&meta, sid))
-            || jira_id
-                .as_deref()
-                .is_some_and(|jid| contains_bounded(&author, jid) || contains_bounded(&meta, jid));
-
-        if matched {
+        if event.is_self {
             event.is_personal = true;
-            if !event.labels.contains(&"personal".to_string()) {
+            if !event.labels.iter().any(|l| l == "personal") {
                 event.labels.push("personal".into());
             }
         }
     }
 }
 
-/// A character that can be part of the same identifier token (name, email, Slack/
-/// Jira id) as a matched needle. **ASCII only** — alphanumerics plus the punctuation
-/// that appears *inside* emails and usernames. CJK scripts are deliberately NOT
-/// identifier characters: unlike space-delimited Latin text, agglutinative Korean
-/// writes content morphemes with no separator (the particle in "검토를", the honorific
-/// in "이준영님"), so treating an adjacent Hangul syllable as "same token" would make
-/// every particle/honorific suppress a real match. Excluding CJK means a CJK needle
-/// matches as a substring (correct for morpheme-joined text) while ASCII keeps strict
-/// token boundaries. `@` is excluded so a Slack `<@U123>` mention still matches a user
-/// id; `.` already blocks the `test@example.com` vs `...com.au` case.
+/// A character that can be part of the same keyword token as a matched needle.
+/// **ASCII only** — alphanumerics plus the punctuation that appears inside the
+/// kinds of tokens classification keywords target. CJK scripts are deliberately
+/// NOT identifier characters: unlike space-delimited Latin text, agglutinative
+/// Korean writes content morphemes with no separator (the particle in "검토를"),
+/// so treating an adjacent Hangul syllable as "same token" would make every
+/// particle/affix suppress a real keyword match. Excluding CJK means a CJK
+/// keyword matches as a substring (correct for morpheme-joined text) while ASCII
+/// keeps strict token boundaries.
 fn is_identifier_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '%' | '+' | '-')
 }
 
 /// Substring match that requires the needle to NOT be flanked by ASCII identifier
 /// characters on either side. Prevents the false positives a plain `contains`
-/// produces in Latin text — name "kim" matching "kimberly", keyword "AI" matching
-/// "FAIR", email "test@example.com" matching "test@example.com.au" — while a CJK
-/// needle (no ASCII boundary chars around it) matches as a substring, so Korean
-/// keywords/names match across attached particles ("검토" in "검토를", "이준영" in
-/// "이준영님").
+/// produces in Latin text — keyword "AI" matching "FAIR" — while a CJK needle (no
+/// ASCII boundary chars around it) matches as a substring, so Korean keywords
+/// match across attached particles ("검토" in "검토를", "재검토").
 fn contains_bounded(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return false;
@@ -112,7 +77,7 @@ pub fn classify_by_keywords(events: &mut [Event], rules: &[lk_core::config::Clas
     }
 
     for event in events {
-        if event.work_category.is_some() {
+        if event.classification.is_some() {
             continue;
         }
 
@@ -126,7 +91,13 @@ pub fn classify_by_keywords(events: &mut [Event], rules: &[lk_core::config::Clas
                 .any(|kw| contains_bounded(&text, &kw.to_lowercase()));
 
             if matched {
-                event.work_category = Some(rule.category.clone());
+                event.classification = Some(rule.category.clone());
+                // A rule may also bridge to the performance taxonomy. Only set it
+                // when the rule opts in; otherwise leave it None so `resolve_category`
+                // falls back to the per-source-type map.
+                if let Some(wc) = &rule.work_category {
+                    event.performance_category = Some(wc.clone());
+                }
                 break;
             }
         }
@@ -139,7 +110,7 @@ mod tests {
     use lk_core::config::SourceType;
     use lk_core::event::EventId;
 
-    fn make_event(title: &str, author: Option<&str>) -> Event {
+    fn make_event(title: &str) -> Event {
         Event {
             id: EventId::new("test", jiff::civil::date(2026, 5, 23), title),
             source_id: "test".into(),
@@ -148,9 +119,11 @@ mod tests {
             title: title.into(),
             body: String::new(),
             url: None,
-            author: author.map(String::from),
+            author: None,
             labels: vec![],
-            work_category: None,
+            classification: None,
+            performance_category: None,
+            is_self: false,
             is_personal: false,
             content_hash: lk_core::event::content_hash(title, ""),
             metadata: serde_json::Value::Null,
@@ -159,133 +132,29 @@ mod tests {
 
     #[test]
     fn static_labels() {
-        let mut events = vec![make_event("Test", None)];
-        assign_static_labels(&mut events, &["ai-industry".into()]);
+        let mut events = vec![make_event("Test")];
+        assign_labels(&mut events, &["ai-industry".into()]);
         assert_eq!(events[0].labels, vec!["ai-industry"]);
     }
 
     #[test]
-    fn personal_by_email() {
-        let identity = Identity {
-            name: "Test User".into(),
-            email: "test@example.com".into(),
-            slack_id: None,
-            jira_id: None,
-        };
-        let mut events = vec![make_event("Hello", Some("test@example.com"))];
-        flag_personal(&mut events, &identity);
+    fn personal_follows_adapter_ownership_when_tracked() {
+        let mut events = vec![make_event("Mine"), make_event("Theirs")];
+        events[0].is_self = true;
+        mark_personal(&mut events, true);
         assert!(events[0].is_personal);
+        assert!(events[0].labels.iter().any(|l| l == "personal"));
+        assert!(!events[1].is_personal);
+        assert!(events[1].labels.is_empty());
     }
 
     #[test]
-    fn name_substring_does_not_false_positive() {
-        let identity = Identity {
-            name: "Kim".into(),
-            email: "kim@example.com".into(),
-            slack_id: None,
-            jira_id: None,
-        };
-        // "Kimberly" must NOT be flagged as Kim's personal work.
-        let mut events = vec![make_event("Status", Some("Kimberly Park"))];
-        flag_personal(&mut events, &identity);
+    fn personal_not_marked_when_tracking_off() {
+        let mut events = vec![make_event("Mine")];
+        events[0].is_self = true;
+        mark_personal(&mut events, false);
         assert!(!events[0].is_personal);
-
-        // Standalone "Kim" as a whole token must still match.
-        let mut events2 = vec![make_event("Status", Some("Kim"))];
-        flag_personal(&mut events2, &identity);
-        assert!(events2[0].is_personal);
-    }
-
-    #[test]
-    fn slack_id_matches_next_to_sigil() {
-        let identity = Identity {
-            name: "X".into(),
-            email: "x@y.com".into(),
-            slack_id: Some("U0123456789".into()),
-            jira_id: None,
-        };
-        // A Slack user id adjacent to the `@` mention sigil must still match — `@`
-        // is not treated as part of the identifier token.
-        let mut events = vec![make_event("hi", Some("<@U0123456789>"))];
-        flag_personal(&mut events, &identity);
-        assert!(events[0].is_personal);
-    }
-
-    #[test]
-    fn email_does_not_match_longer_domain() {
-        let identity = Identity {
-            name: "X".into(),
-            email: "test@example.com".into(),
-            slack_id: None,
-            jira_id: None,
-        };
-        // A different address that merely starts with the identity email.
-        let mut events = vec![make_event("Msg", Some("test@example.com.au"))];
-        flag_personal(&mut events, &identity);
-        assert!(!events[0].is_personal);
-
-        // The exact address (delimited by angle brackets) still matches.
-        let mut events2 = vec![make_event("Msg", Some("Foo <test@example.com>"))];
-        flag_personal(&mut events2, &identity);
-        assert!(events2[0].is_personal);
-    }
-
-    #[test]
-    fn cjk_name_matches_across_attached_particles() {
-        let identity = Identity {
-            name: "이준영".into(),
-            email: "e@x.com".into(),
-            slack_id: None,
-            jira_id: None,
-        };
-        // Korean attaches honorifics/particles with no separator; the name must still
-        // match (the ASCII token-boundary model would wrongly miss these).
-        for author in ["이준영", "이준영님", "이준영님께", "이준영이", "이준영의"]
-        {
-            let mut events = vec![make_event("회의", Some(author))];
-            flag_personal(&mut events, &identity);
-            assert!(events[0].is_personal, "name must match in {author:?}");
-        }
-        // A different name that does not contain the identity name must not match.
-        let mut other = vec![make_event("회의", Some("박서준 보고"))];
-        flag_personal(&mut other, &identity);
-        assert!(!other[0].is_personal);
-    }
-
-    #[test]
-    fn cjk_keyword_matches_across_attached_particles() {
-        let rules = vec![lk_core::config::ClassifyRule {
-            category: "action_required".into(),
-            keywords: vec!["검토".into()],
-        }];
-        // "검토" must classify "검토를"/"재검토"/"검토중" — the particle/affix is part
-        // of a different morpheme, not the same Latin-style token.
-        for title in ["검토를 부탁드립니다", "재검토가 필요합니다", "검토중입니다"]
-        {
-            let mut events = vec![make_event(title, None)];
-            classify_by_keywords(&mut events, &rules);
-            assert_eq!(
-                events[0].work_category.as_deref(),
-                Some("action_required"),
-                "keyword must match in {title:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn empty_identity_does_not_flag_everything() {
-        let identity = Identity {
-            name: String::new(),
-            email: String::new(),
-            slack_id: Some(String::new()),
-            jira_id: None,
-        };
-        let mut events = vec![make_event("Random news", Some("someone@else.com"))];
-        flag_personal(&mut events, &identity);
-        assert!(
-            !events[0].is_personal,
-            "blank identity tokens must not match every event"
-        );
+        assert!(events[0].labels.is_empty());
     }
 
     #[test]
@@ -294,15 +163,55 @@ mod tests {
             lk_core::config::ClassifyRule {
                 category: "action_required".into(),
                 keywords: vec!["please review".into(), "검토 요청".into()],
+                work_category: None,
             },
             lk_core::config::ClassifyRule {
                 category: "decisions".into(),
                 keywords: vec!["approved".into()],
+                work_category: None,
             },
         ];
-        let mut events = vec![make_event("Please review this PR", None)];
+        let mut events = vec![make_event("Please review this PR")];
         classify_by_keywords(&mut events, &rules);
-        assert_eq!(events[0].work_category.as_deref(), Some("action_required"));
+        assert_eq!(events[0].classification.as_deref(), Some("action_required"));
+    }
+
+    #[test]
+    fn classification_and_performance_bridge_are_separate_axes() {
+        // A rule with a work_category bridge sets BOTH the daily-grouping
+        // `classification` and the performance `performance_category`; a rule
+        // without the bridge sets only `classification`.
+        let rules = vec![
+            lk_core::config::ClassifyRule {
+                category: "decisions".into(),
+                keywords: vec!["approved".into()],
+                work_category: Some("technical-leadership".into()),
+            },
+            lk_core::config::ClassifyRule {
+                category: "knowledge_sharing".into(),
+                keywords: vec!["fyi".into()],
+                work_category: None,
+            },
+        ];
+        let mut bridged = vec![make_event("Change approved")];
+        classify_by_keywords(&mut bridged, &rules);
+        assert_eq!(bridged[0].classification.as_deref(), Some("decisions"));
+        assert_eq!(
+            bridged[0].performance_category.as_deref(),
+            Some("technical-leadership"),
+            "an opted-in rule bridges to the performance taxonomy"
+        );
+
+        let mut grouping_only = vec![make_event("FYI: new doc")];
+        classify_by_keywords(&mut grouping_only, &rules);
+        assert_eq!(
+            grouping_only[0].classification.as_deref(),
+            Some("knowledge_sharing")
+        );
+        assert!(
+            grouping_only[0].performance_category.is_none(),
+            "a grouping-only rule leaves performance_category for the source-type fallback"
+        );
     }
 
     #[test]
@@ -310,26 +219,48 @@ mod tests {
         let rules = vec![lk_core::config::ClassifyRule {
             category: "ai_topic".into(),
             keywords: vec!["AI".into()],
+            work_category: None,
         }];
 
         // "FAIR" and "MAIL" contain "AI" as a substring but not as a token.
         let mut events = vec![
-            make_event("FAIR conference recap", None),
-            make_event("Check your MAIL inbox", None),
+            make_event("FAIR conference recap"),
+            make_event("Check your MAIL inbox"),
         ];
         classify_by_keywords(&mut events, &rules);
         assert!(
-            events[0].work_category.is_none(),
+            events[0].classification.is_none(),
             "FAIR must not match keyword AI"
         );
         assert!(
-            events[1].work_category.is_none(),
+            events[1].classification.is_none(),
             "MAIL must not match keyword AI"
         );
 
         // Standalone "AI" as a whole token matches.
-        let mut events2 = vec![make_event("AI research update", None)];
+        let mut events2 = vec![make_event("AI research update")];
         classify_by_keywords(&mut events2, &rules);
-        assert_eq!(events2[0].work_category.as_deref(), Some("ai_topic"));
+        assert_eq!(events2[0].classification.as_deref(), Some("ai_topic"));
+    }
+
+    #[test]
+    fn cjk_keyword_matches_across_attached_particles() {
+        let rules = vec![lk_core::config::ClassifyRule {
+            category: "action_required".into(),
+            keywords: vec!["검토".into()],
+            work_category: None,
+        }];
+        // "검토" must classify "검토를"/"재검토"/"검토중" — the particle/affix is part
+        // of a different morpheme, not the same Latin-style token.
+        for title in ["검토를 부탁드립니다", "재검토가 필요합니다", "검토중입니다"]
+        {
+            let mut events = vec![make_event(title)];
+            classify_by_keywords(&mut events, &rules);
+            assert_eq!(
+                events[0].classification.as_deref(),
+                Some("action_required"),
+                "keyword must match in {title:?}"
+            );
+        }
     }
 }

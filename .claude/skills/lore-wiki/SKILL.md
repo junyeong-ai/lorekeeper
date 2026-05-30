@@ -47,7 +47,7 @@ each as an independent source, and report the aggregate results.
 4. Extract every named entity, technology, and topic as concepts (typically
    several per source). For each, create or merge a concept page per AGENTS.md
    and fill the Synthesis section with a 1-2 sentence definition for a new
-   concept. Leave `## 출처`/`source_count` for `backlinks-sync` — the document's
+   concept. Leave `## Sources`/`source_count` for `backlinks-sync` — the document's
    forward `[[wikilink]]` from step 3 is the source of truth, never hand-edited.
 5. **Finalize**: `lore graph backlinks-sync`, then `lore wiki index`, then
    `lore graph lint` to confirm no structural drift (index/broken links).
@@ -85,11 +85,17 @@ Five-layer health check. Surface findings for human review — never
 auto-resolve. Read AGENTS.md to resolve section headings before
 inspecting pages.
 
-1. **Structural** — run `lore graph --json lint`, report findings (orphans,
-   broken links, hubs).
-2. **Missing cross-references** — run `lore graph --json suggest-links`, then
-   confirm topical relatedness before proposing a link. Community grounding +
-   LLM confirmation = double gate against false positives.
+1. **Structural** — run `lore graph --json lint`. ONE pass returns ALL of:
+   `orphans`, `broken`, `hubs`, `invalid_categories`, `near_duplicate_concepts`,
+   `unresolved_conflicts`, and index drift (`missing_from_index`/`_from_disk`).
+   Surface every non-empty list. NOTE: a clean lint (`findings: 0`) means no
+   structural FAULTS — it does NOT mean the wiki is well-connected. Empty
+   `## Related` sections are never a lint finding; only `suggest-links` (layer 2)
+   reveals that gap, so never equate "lint clean" with "healthy".
+2. **Missing cross-references** — run `lore graph --json suggest-links` (never
+   exits non-zero — always inspect the pairs), then confirm topical relatedness
+   before proposing a link. Community grounding + LLM confirmation = double gate
+   against false positives.
 3. **Contradictions** — scoped to one concept page at a time whose `sources`
    cite conflicting claims. Only flag a genuine, unambiguous contradiction (two
    sources asserting incompatible facts) — never a difference in emphasis or a
@@ -109,13 +115,18 @@ inspecting pages.
      long before the recent reference burst.
    This layer is LLM judgment, not a deterministic check. Surface as questions
    for human review, never auto-create pages.
-5. **Concept lifecycle** — run `lore graph stale --days 90` and filter for
-   concept entries. For each stale concept:
-   - Check if it has been referenced in any daily page in the last 90 days
-     (grep for `[[{title}]]` or `[[{slug}]]` in daily pages).
-   - If truly stale (no recent references, low source_count), suggest adding
-     `status: archived` to frontmatter. Do NOT auto-archive.
-   - If referenced recently but `updated` is old, flag for synthesis refresh.
+5. **Concept lifecycle** — two parts:
+   - **Near-duplicates** from layer 1's `near_duplicate_concepts`: for a true
+     variant-spelling pair (`vector-db` ~ `vector-database`), merge with
+     `lore graph merge <from> <into>` then `lore graph backlinks-sync` (the merge
+     rewires every wikilink and deletes the `from` page; it refuses if `from` has
+     authored prose unless `--force`, so salvage first). Leave deliberate
+     model-version siblings (`gpt-4`/`gpt-5`) split — they are distinct concepts.
+   - **Staleness**: run `lore graph stale --days 90`, filter concept entries.
+     Check if each has been referenced in any daily page in the last 90 days
+     (grep `[[{title}]]`/`[[{slug}]]`). If truly stale (no recent refs, low
+     source_count), suggest `status: archived` in frontmatter — do NOT auto-archive.
+     If referenced recently but `updated` is old, flag for synthesis refresh.
 
 ### `/lore-wiki status`
 

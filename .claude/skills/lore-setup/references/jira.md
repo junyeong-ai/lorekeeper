@@ -1,40 +1,44 @@
-# Jira 설정값 조회 (`atlassian-cli`)
+# Looking up Jira values (`atlassian-cli`)
 
-> 주의: `atlassian-cli`는 자체 OAuth 계정을 쓴다. Lorekeeper는 `credentials.json`의
-> Jira 계정(email+token)을 쓰므로, 둘이 다른 인스턴스면 결과가 다를 수 있다. 최종
-> 확인은 `lore ingest --dry-run`으로 Lorekeeper 계정 기준 검증한다.
+> Note: `atlassian-cli` uses its own OAuth account. Lorekeeper uses the Jira account
+> (email+token) in `credentials.json`, so if the two point at different instances the
+> results can differ. Always confirm with `lore ingest --dry-run`, which validates
+> against Lorekeeper's account.
 
-## 내 이슈 / 프로젝트 키
+## My issues / project key
 ```bash
 atlassian-cli jira search "assignee = currentUser() ORDER BY updated DESC" \
   --limit 5 --fields summary,project,duedate
 ```
-`project.key`(예: `OYAI`)를 JQL에 쓴다.
+Use the `project.key` (e.g. `OYAI`) in the JQL.
 
-## 시작일 custom-field id 찾기
-Jira의 "Start date"는 인스턴스별 custom-field(흔히 `customfield_10015`). 한 이슈를
-받아 날짜 필드를 확인:
+## Find the start-date custom-field id
+Jira's "Start date" is a per-instance custom field (commonly `customfield_10015`). Fetch
+one issue and inspect its date fields:
 ```bash
-atlassian-cli jira get <ISSUE-KEY> --fields "*all" | grep -i -A2 "start date"
+atlassian-cli jira get <ISSUE-KEY> | grep -i -A2 "start date"
 ```
-찾은 id를 `start_date_field`에 넣는다. 없으면 생략(시작일 표시 안 함).
+(`jira get` returns all fields by default — there is no `--fields` flag on `get`.)
+Put the id you find in `start_date_field`. Omit it if there is none (the start date just
+won't be shown).
 
-## config 블록
+## config block
 ```yaml
 my-tasks:
   type: jira
   enabled: true
   schedule: "0 9 * * 1-5"
   params:
-    # 그날 변경된(=작업한) 이슈만 = 작업 이력 스냅샷. 마감/시작일로 검색하지 않는다.
+    # Only issues changed that day (= worked on) = a work-history snapshot. Do NOT search by due/start date.
     jql: >
       project = OYAI AND assignee = currentUser()
       AND updated >= -1d
       ORDER BY updated DESC
     max_results: 50
-    start_date_field: customfield_10015   # 선택: 시작일 표시
+    start_date_field: customfield_10015   # optional: show the start date
   labels: [personal]
   extract_concepts: false
   track_personal: true
 ```
-description은 ADF→Markdown으로, 상태·기간은 그날 시점 스냅샷 헤더로 자동 렌더된다.
+The description is rendered ADF→Markdown, and status/period render as an as-of-that-day
+snapshot header.

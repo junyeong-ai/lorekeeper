@@ -7,7 +7,7 @@
 #   2. ./config.yaml                       (running from a repo checkout)
 #   3. ~/.config/lorekeeper/config.yaml     (binary-only install)
 
-# ─── Vault 경로 ───────────────────────────────────────────
+# ─── Vault paths ──────────────────────────────────────────
 vault:
   root: ~/Documents/Obsidian Vault
   timezone: system          # IANA name (e.g., "Asia/Seoul") or "system"
@@ -18,25 +18,26 @@ vault:
     weekly: weekly
     monthly: monthly
     quarterly: quarterly
-    annual: annually
+    annual: annual
     personal: me
     synthesis: synthesis
     wiki: wiki
 
-# ─── 사용자 식별 ──────────────────────────────────────────
+# ─── Identity ─────────────────────────────────────────────
 identity:
   name: "홍길동"
   email: "gildong.hong@company.com"
+  # Slack user id — attributes your own channel posts to your work-log.
+  # (Jira needs nothing here: ownership is derived from the authenticated account.)
   slack_id: "U0123456789"
-  jira_id: "gildong.hong"
 
-# ─── 소스 정의 ────────────────────────────────────────────
-# 키 = 소스 ID = daily/ 하위 디렉토리명
-# 같은 type으로 여러 소스를 정의할 수 있습니다.
+# ─── Source definitions ───────────────────────────────────
+# key = source ID = subdirectory name under daily/
+# You can define several sources of the same type.
 sources:
 
-  # ── Intelligence (외부 동향) ──
-  # google-drive: 공유 Drive 폴더에 큐레이션된 문서(브리핑 등)를 파일 단위로 수집.
+  # ── Intelligence (external trends) ──
+  # google-drive: collect curated docs (briefings, etc.) from a shared Drive folder, file by file.
   drive-briefings:
     type: google-drive
     enabled: false
@@ -48,32 +49,34 @@ sources:
     extract_concepts: true
     track_personal: false
 
-  # ── Team (팀 관찰) ──
-  # 채널 전체 = 팀 업무 현황. 내가 쓴 메시지는 work-log로 자동 분리(track_personal +
-  # identity.slack_id). 대화 대부분이 쓰레드라 include_threads로 답글 맥락까지 모읍니다.
+  # ── Team (team observation) ──
+  # The whole channel = team activity. Messages you authored are split into the work-log
+  # automatically (track_personal + identity.slack_id). Most conversation is threaded, so
+  # include_threads pulls reply context too.
   team-slack:
     type: slack-channel
     enabled: true
     schedule: "0 9 * * 1-5"
     params:
-      # 단일 channel 또는 channels: ["C0123…", "#name"] (복수, id/이름 혼용 가능)
+      # a single `channel`, or channels: ["C0123…", "#name"] (multiple, ids and names mixed)
       channels: ["#aix-team-digest"]
       lookback_hours: 24
-      include_threads: true     # 쓰레드 답글까지 맥락 포함
-      exclude_bots: true        # 봇/통합 메시지 제외 (기본 true)
-      # watch_users: ["U0123…"] # (선택) 특정 사용자가 쓰거나 멘션된 쓰레드만; 비우면 전체
+      include_threads: true     # include thread replies as context
+      exclude_bots: true        # drop bot/integration messages (default true)
+      # watch_users: ["U0123…"] # (optional) only threads a given user authored or was mentioned in; empty = all
     labels: [team-ops]
     extract_concepts: true
     track_personal: true
 
-  # ── Personal (내 활동 — 직접 수집) ──
+  # ── Personal (my activity — collected directly) ──
   my-tasks:
     type: jira
     enabled: true
     schedule: "0 9 * * 1-5"
     params:
-      # 그날 변경된(=작업한) 이슈 = 작업 이력 스냅샷. 마감/시작일은 그날 시점 값으로
-      # 페이지에 표시되지만, 검색 기준은 updated (날짜 변경에 의한 과거 오염 방지).
+      # Issues changed (= worked on) that day = a work-history snapshot. Due/start dates are
+      # shown on the page as their values as-of that day, but the search key is `updated`
+      # (so a later date change doesn't retroactively pollute past pages).
       jql: >
         assignee = currentUser()
         AND updated >= -1d
@@ -91,7 +94,7 @@ sources:
       calendar_id: primary
       lookback_hours: 24
       lookahead_hours: 24
-      fetch_meeting_notes: true  # Google Drive 링크의 회의록 자동 추출
+      fetch_meeting_notes: true  # auto-extract meeting notes from Google Drive links
     labels: [personal]
     extract_concepts: true
     track_personal: true
@@ -102,8 +105,8 @@ sources:
     schedule: "30 8 * * 1-5"
     params:
       lookback_hours: 24
-      # 업무 메일만. `-label:ai-news`로 뉴스레터를 work-log에서 분리 — 아래
-      # ai-newsletters 소스가 `label:ai-news`를 전담하므로 두 스트림은 상호배타.
+      # Work mail only. `-label:ai-news` splits newsletters out of the work-log — the
+      # ai-newsletters source below owns `label:ai-news`, so the two streams are mutually exclusive.
       include_queries:
         - "is:unread -category:promotions -category:social -category:updates -label:ai-news"
         - "from:@oliveyoung.co.kr is:unread -label:ai-news"
@@ -111,8 +114,8 @@ sources:
       exclude:
         subjects: ["[Automated]", "noreply", "no-reply"]
         senders: ["notifications@", "mailer-daemon@", "calendar-notification@"]
-        calendar_invites: true  # text/calendar 첨부(초대/수락/거절) 자동 제외 (기본 true)
-    # 키워드 → 분류 (소스 레벨, params와 분리). 순서대로 매칭; 첫 번째 매칭 규칙이 적용.
+        calendar_invites: true  # auto-exclude text/calendar attachments (invites/accepts/declines) (default true)
+    # keyword → classification (source level, kept separate from params). Matched in order; first match wins.
     classify:
       - category: action_required
         keywords: ["action required", "please review", "검토 요청", "확인 부탁"]
@@ -128,7 +131,7 @@ sources:
     extract_concepts: true
     track_personal: true
 
-  # ── Trends (트렌드 분석) ──
+  # ── Trends (trend analysis) ──
   slack-trends:
     type: slack-search
     enabled: true
@@ -144,12 +147,13 @@ sources:
     extract_concepts: true
     track_personal: false
 
-  # ── Knowledge (지식 자산화) ──
-  # 외부 AI/테크 소식을 wiki/concepts에 누적해 지식 그래프로 축적. track_personal:false라
-  # work-log/성과 리뷰는 오염되지 않음. classify를 비워 키워드 오분류를 피하고, 구조화는
-  # 개념 추출 + `lore graph cluster`/`suggest-links`에 맡긴다.
+  # ── Knowledge (knowledge accumulation) ──
+  # Accumulate external AI/tech news into wiki/concepts as a growing knowledge graph.
+  # track_personal:false keeps the work-log/performance reviews clean. Leave classify empty
+  # to avoid keyword misclassification; structuring is left to concept extraction +
+  # `lore graph cluster`/`suggest-links`.
 
-  # RSS/Atom 피드 — 인증 없이 벤더 블로그·애그리게이터를 폴링. 한 소스가 여러 피드 처리.
+  # RSS/Atom feeds — poll vendor blogs and aggregators with no auth. One source handles many feeds.
   ai-news:
     type: rss
     enabled: false
@@ -158,34 +162,34 @@ sources:
       lookback_hours: 24
       max_items_per_feed: 50
       feeds:
-        # 벤더 — 대부분 RSS에 전체 본문 포함, fetch_full_text 불필요
+        # Vendors — most include the full body in RSS, so fetch_full_text isn't needed
         - { id: openai,            url: "https://openai.com/news/rss.xml" }
         - { id: deepmind,          url: "https://deepmind.google/blog/rss.xml" }
         - { id: google-ai,         url: "https://blog.google/technology/ai/rss/" }
         - { id: hf-blog,           url: "https://huggingface.co/blog/feed.xml" }
-        # 클라우드 / 응용 / 연구소
+        # Cloud / applied / labs
         - { id: aws-ml,            url: "https://aws.amazon.com/blogs/machine-learning/feed/" }
         - { id: ms-research,       url: "https://www.microsoft.com/en-us/research/feed/" }
         - { id: bair,              url: "https://bair.berkeley.edu/blog/feed.xml" }
-        # 실무자 / 심층 분석 — 발췌만 제공하는 피드는 fetch_full_text로 원문 추출
+        # Practitioners / deep dives — feeds that ship only excerpts use fetch_full_text to pull the article
         - { id: sebastian-raschka, url: "https://magazine.sebastianraschka.com/feed", fetch_full_text: true }
         - { id: simon-willison,    url: "https://simonwillison.net/atom/everything/", fetch_full_text: true }
-        # 애그리게이터 / 뉴스레터(RSS) — 발췌만 제공, 원문 추출 권장
+        # Aggregators / newsletters (RSS) — excerpt-only, full-text extraction recommended
         - { id: import-ai,         url: "https://importai.substack.com/feed", fetch_full_text: true }
         - { id: latent-space,      url: "https://www.latent.space/feed", fetch_full_text: true }
         - { id: the-gradient,      url: "https://thegradient.pub/rss/" }
-        # 한글 AI
+        # Korean-language AI
         - { id: aitimes,           url: "https://www.aitimes.com/rss/allArticle.xml" }
-        # 옵션(고볼륨 연구 firehose — 활성화 시 max_items_per_feed를 작게):
+        # Optional (high-volume research firehose — keep max_items_per_feed small if enabled):
         # - { id: arxiv-cs-lg,     url: "http://export.arxiv.org/rss/cs.LG" }
     labels: [ai-tech]
     extract_concepts: true
     focus: "AI/ML 모델·기법·아키텍처·인프라·도구·연구 등 AI 기술 주제."
     track_personal: false
 
-  # 폭넓은 테크 동향 + 한글 — 애그리게이터(HN/긱뉴스) + 국내 엔지니어링 블로그.
-  # 애그리게이터는 비-기술 노이즈(인물/정치/생활)가 섞이므로 focus(LLM 관련성 필터)로
-  # 기술 주제만 개념화 — 노이즈는 그래프에 쌓이지 않음.
+  # Broad tech trends + Korean — aggregators (HN/GeekNews) + domestic engineering blogs.
+  # Aggregators mix in non-technical noise (obituaries/politics/lifestyle), so the focus
+  # filter (an LLM relevance gate) conceptualizes only technical topics — noise never piles up in the graph.
   tech-news:
     type: rss
     enabled: false
@@ -194,10 +198,10 @@ sources:
       lookback_hours: 24
       max_items_per_feed: 25
       feeds:
-        # 애그리게이터 (영문/한글)
+        # Aggregators (English/Korean)
         - { id: hacker-news, url: "https://hnrss.org/frontpage?points=100" }
         - { id: geeknews,    url: "https://news.hada.io/rss/news" }
-        # 국내 엔지니어링 블로그 (심층)
+        # Domestic engineering blogs (in-depth)
         - { id: naver-d2,    url: "https://d2.naver.com/d2.atom" }
         - { id: kakao-tech,  url: "https://tech.kakao.com/feed/" }
         - { id: woowahan,    url: "https://techblog.woowahan.com/feed/" }
@@ -208,8 +212,8 @@ sources:
     focus: "소프트웨어 엔지니어링·AI/ML·시스템·개발 도구·인프라 등 기술 주제만. 인물 부고·생활·정치·일반 시사 등 비기술 항목은 개념화하지 말 것."
     track_personal: false
 
-  # 이메일 뉴스레터(RSS 없는 구독) — Gmail에서 `ai-news` 라벨로 라우팅(필터 1회 설정).
-  # email-digest는 `-label:ai-news`로 같은 메일을 배제하므로 이중 수집되지 않음.
+  # Email newsletters (subscriptions with no RSS) — routed in Gmail by the `ai-news` label (set the filter once).
+  # email-digest excludes the same mail via `-label:ai-news`, so they aren't ingested twice.
   ai-newsletters:
     type: gmail
     enabled: false
@@ -222,11 +226,11 @@ sources:
     extract_concepts: true
     track_personal: false
 
-  # 수동 큐레이션 — <vault>/inbox/ 디렉토리에 파일을 떨어뜨리면
-  # wiki/documents/{slug}.md 개별 문서 페이지로 생성. LLM 요약 + 컨셉 추출 포함.
-  # HTML은 readability 크레이트로 본문 추출 후 마크다운 변환.
-  # content-hash dedup으로 같은 파일을 두 번 넣어도 중복 등록되지 않음.
-  # 처리 완료 후 inbox/archived/{date}/로 이동 (post-commit, 안전).
+  # Manual curation — drop files into the <vault>/inbox/ directory and they become
+  # individual wiki/documents/{slug}.md document pages (LLM summary + concept extraction included).
+  # HTML is run through the readability crate to extract the body, then converted to Markdown.
+  # content-hash dedup means the same file added twice is not registered twice.
+  # After processing, files move to inbox/archived/{date}/ (post-commit, safe).
   manual-inbox:
     type: manual
     enabled: false
@@ -234,19 +238,24 @@ sources:
     params:
       inbox_dir: ~/Documents/Obsidian Vault/inbox
       extensions: [md, txt, markdown, json, html, htm]
-      archive_after_ingest: true  # 처리 후 자동 아카이빙 (기본 true)
+      archive_after_ingest: true  # auto-archive after processing (default true)
     labels: [knowledge]
     extract_concepts: true
 
-# ─── 중복 제거 ────────────────────────────────────────────
+# ─── Deduplication ────────────────────────────────────────
 dedup:
-  # 증거 기반 단계만 기본 사용: 같은 event-id / 동일 본문 / 동일 canonical URL.
-  # `title`(퍼지 제목 매칭)은 opt-in — 재발 제목("주간 회의" 등 반복 항목)을
-  # 서로 다른 관측으로 보존하려면 넣지 않습니다. 제목이 고유 식별자인 소스에만 추가.
+  # Evidence-based stages only by default: same event-id / identical body / same canonical URL.
+  # `title` (fuzzy title matching) is opt-in — leave it out to preserve recurring titles
+  # ("Weekly Sync" and the like) as distinct observations. Add it only for sources whose title
+  # is a unique identifier.
   cascade: [event-id, content-hash, url]
   title_threshold: 0.85
+  # Extra query keys to strip during URL canonicalisation, beyond the built-in tracking set
+  # (utm_*, fbclid, gclid, igshid, ref_src …). A trailing `*` is a prefix match (e.g. `pk_*`).
+  # Never add a resource-identifying key — distinct pages would be merged into one.
+  extra_tracking_params: []
 
-# ─── 성과 추적 ───────────────────────────────────────────
+# ─── Performance tracking ─────────────────────────────────
 performance:
   # Master switch for the work-log/performance subsystem (work-log generation +
   # weekly/monthly/quarterly/annual personal reviews). Off → none are produced, even
@@ -267,17 +276,18 @@ performance:
     jira: project-delivery
     google-calendar: team-contribution
 
-# ─── 종합 보고 ───────────────────────────────────────────
-# weekly는 두 갈래: (1) include_sources의 소스 횡단 "주간 테마" 페이지(opt-in),
-# (2) me/work-log 기반 개인 주간 요약(me/weekly/). (2)와 me/monthly/, me/quarterly/, me/annually/는 모두 work-log
-# (1)의 팀 종합은 synthesis/weekly/ 에 기록됨.
-# 기반 개인 성과 리뷰로 performance.enabled로 함께 켜고 끈다 — 지식/뉴스 소스는 무관.
+# ─── Synthesis reports ────────────────────────────────────
+# weekly has two tracks: (1) a cross-source "weekly themes" page over include_sources (opt-in),
+# written to synthesis/weekly/; (2) a personal weekly summary from me/work-log (me/weekly/).
+# (2) plus me/monthly/, me/quarterly/, me/annual/ are all work-log-based personal performance
+# reviews, toggled together by performance.enabled — knowledge/news sources are irrelevant to them.
 synthesis:
   weekly:
     enabled: true
     schedule: "0 8 * * 1"           # Monday 08:00
-    # 업무/소통 소스만 — 주간 테마 회고가 가치 있는 맥락. 뉴스/RSS 같은 지식 피드는
-    # 넣지 않는다(개념 그래프에 이미 연속 누적되므로 주간 다이제스트가 중복).
+    # Work/communication sources only — the context where a weekly theme retro is valuable. Don't
+    # include knowledge feeds like news/RSS (they already accumulate continuously in the concept
+    # graph, so a weekly digest would be redundant).
     include_sources: [team-slack, slack-trends]
   monthly:
     enabled: true
@@ -289,7 +299,7 @@ synthesis:
     enabled: true
     schedule: "0 8 1 1 *"           # Jan 1st 08:00
 
-# ─── 개념 분류 ──────────────────────────────────────────
+# ─── Concept categorization ───────────────────────────────
 # Concept categorization for wiki/concepts/ pages.
 # Categories give the LLM a fixed vocabulary when assigning topics.
 # Omit the entire block to skip categorization.
@@ -305,9 +315,9 @@ concepts:
       label: "제품/서비스"
     - id: organization
       label: "조직/이벤트"
-  index_split_threshold: 100  # 컨셉이 이 수를 넘으면 카테고리별 서브페이지 자동 생성
+  index_split_threshold: 100  # when concepts exceed this count, auto-split into per-category sub-pages
 
-# ─── 그래프 분석 ─────────────────────────────────────────
+# ─── Graph analysis ───────────────────────────────────────
 # Wikilink graph analysis (lore graph lint/cluster/suggest-links).
 # Fully optional — omit the entire block to use defaults.
 # graph:
@@ -318,6 +328,7 @@ concepts:
 #   graph:
 #     min_hub_degree: 5              # minimum total degree to flag as hub in lint
 #     orphan_exclude: []             # page ids excluded from orphan reports
+#     concept_near_duplicate_threshold: 0.6  # slug similarity to flag as near-dup merge candidate
 #   cluster:
 #     resolution: 1.0                # Louvain resolution (higher = more, smaller communities)
 #     max_iterations: 100            # max local-moving passes

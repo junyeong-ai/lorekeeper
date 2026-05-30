@@ -149,7 +149,7 @@ fn group_by_category(
         let category = perf.resolve_category(
             &event.source_id,
             event.source_type,
-            event.work_category.as_deref(),
+            event.performance_category.as_deref(),
         );
 
         let idx = match category {

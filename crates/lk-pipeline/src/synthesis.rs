@@ -5,7 +5,7 @@ use std::sync::Arc;
 use lk_core::config::Config;
 use lk_core::vault_path::VaultPath;
 use lk_queue::TargetKind;
-use lk_vault::{Page, VaultReader, section_body};
+use lk_vault::{VaultPage, VaultReader, section_body};
 
 use crate::PipelineError;
 use crate::context::PipelineContext;
@@ -399,40 +399,32 @@ impl Synthesizer {
         // body, which would drag the child's own distribution table and metadata
         // headings into the parent, producing duplicate tables and nested headings.
         let summary_heading = self.ctx.locale.strings().key_summary;
-        let monthly_dir = PathBuf::from(&self.ctx.dirs.personal).join(&self.ctx.dirs.monthly);
         let mut monthly_summaries: Vec<serde_json::Value> = Vec::new();
         let mut combined = String::new();
+        // Per-month fallback: a month without its own monthly review drops to its
+        // weekly reviews, so a quarter whose latest month isn't summarized yet still
+        // includes that month rather than silently omitting it.
+        let mut used_weeks: Vec<(i16, u8)> = Vec::new();
 
         for m in &months {
-            let file = monthly_dir.join(format!("{year}-{:02}.md", m));
-            if let Some(page) = self.reader.read_page(&file).await? {
-                let narrative = child_narrative(&page, summary_heading);
-                monthly_summaries.push(serde_json::json!({
-                    "month": format!("{year}-{:02}", m),
-                    "summary": narrative,
-                }));
-                combined.push_str(&format!("=== {year}-{:02} ===\n", m));
-                combined.push_str(narrative);
-                combined.push_str("\n\n");
-            }
+            let Some(narrative) = self
+                .month_child_narrative(year, *m, summary_heading, &mut used_weeks)
+                .await?
+            else {
+                continue;
+            };
+            let label = format!("{year}-{m:02}");
+            combined.push_str(&format!("=== {label} ===\n"));
+            combined.push_str(&narrative);
+            combined.push_str("\n\n");
+            monthly_summaries.push(serde_json::json!({
+                "month": label,
+                "summary": narrative,
+            }));
         }
 
-        // No monthly summaries yet → fall back to the weekly personal narratives that
-        // overlap the quarter. Those are already LLM-summarized, so the quarterly review
-        // synthesizes from condensed input rather than raw daily work-log.
-        if monthly_summaries.is_empty() {
-            let weekly_dir = PathBuf::from(&self.ctx.dirs.personal).join(&self.ctx.dirs.weekly);
-            for (wy, ww) in iso_weeks_in_range(start, end)? {
-                let file = weekly_dir.join(format!("{wy}-W{ww:02}.md"));
-                if let Some(page) = self.reader.read_page(&file).await? {
-                    combined.push_str(&format!("=== {wy}-W{ww:02} ===\n"));
-                    combined.push_str(child_narrative(&page, summary_heading));
-                    combined.push_str("\n\n");
-                }
-            }
-            if combined.is_empty() {
-                return Ok(None);
-            }
+        if combined.is_empty() {
+            return Ok(None);
         }
 
         let path = VaultPath::quarterly_personal(&self.ctx.dirs, year, quarter);
@@ -486,55 +478,36 @@ impl Synthesizer {
         if !self.performance_enabled() {
             return Ok(None);
         }
-        let quarterly_dir = PathBuf::from(&self.ctx.dirs.personal).join(&self.ctx.dirs.quarterly);
         let mut period_summaries: Vec<serde_json::Value> = Vec::new();
         let mut combined = String::new();
         let strings = self.ctx.locale.strings();
-
         let summary_heading = strings.key_summary;
+        // Per-quarter fallback: a quarter without its own review drops to its months
+        // (each of which drops to weeks), so a year missing its latest quarter still
+        // includes that quarter rather than omitting it.
+        let mut used_weeks: Vec<(i16, u8)> = Vec::new();
+
         for q in 1..=4u8 {
-            let file = quarterly_dir.join(format!("{year}-Q{q}.md"));
-            if let Some(page) = self.reader.read_page(&file).await? {
-                let narrative = child_narrative(&page, summary_heading);
-                period_summaries.push(serde_json::json!({
-                    "label": format!("Q{q}"),
-                    "summary": narrative,
-                }));
-                combined.push_str(&format!("=== {year}-Q{q} ===\n"));
-                combined.push_str(narrative);
-                combined.push_str("\n\n");
-            }
+            let Some(narrative) = self
+                .quarter_child_narrative(year, q, summary_heading, &mut used_weeks)
+                .await?
+            else {
+                continue;
+            };
+            combined.push_str(&format!("=== {year}-Q{q} ===\n"));
+            combined.push_str(&narrative);
+            combined.push_str("\n\n");
+            period_summaries.push(serde_json::json!({
+                "label": format!("Q{q}"),
+                "summary": narrative,
+            }));
         }
 
-        // Track which tier provided the input so the prompt and template adapt.
-        let breakdown_heading;
-        let prompt_context;
-
-        if period_summaries.is_empty() {
-            // No quarterly reviews → fall back to monthly summaries.
-            let monthly_dir = PathBuf::from(&self.ctx.dirs.personal).join(&self.ctx.dirs.monthly);
-            for m in 1..=12u8 {
-                let file = monthly_dir.join(format!("{year}-{m:02}.md"));
-                if let Some(page) = self.reader.read_page(&file).await? {
-                    let narrative = child_narrative(&page, summary_heading);
-                    period_summaries.push(serde_json::json!({
-                        "label": format!("{year}-{m:02}"),
-                        "summary": narrative,
-                    }));
-                    combined.push_str(&format!("=== {year}-{m:02} ===\n"));
-                    combined.push_str(narrative);
-                    combined.push_str("\n\n");
-                }
-            }
-            if combined.is_empty() {
-                return Ok(None);
-            }
-            breakdown_heading = strings.monthly_breakdown;
-            prompt_context = "monthly summaries";
-        } else {
-            breakdown_heading = strings.quarterly_breakdown;
-            prompt_context = "quarterly summaries";
+        if combined.is_empty() {
+            return Ok(None);
         }
+
+        let breakdown_heading = strings.quarterly_breakdown;
 
         let path = VaultPath::annual_personal(&self.ctx.dirs, year);
         let kind = TargetKind::AnnualPersonalNarrative;
@@ -542,7 +515,7 @@ impl Synthesizer {
         let section = self
             .summarize_section(
                 format!(
-                    "Generate a comprehensive annual performance review based on {prompt_context}:\n\n{combined}"
+                    "Generate a comprehensive annual performance review based on quarterly summaries:\n\n{combined}"
                 ),
                 25,
                 &path,
@@ -579,6 +552,73 @@ impl Synthesizer {
         )?;
 
         Ok(Some(RenderOutput { path, content }))
+    }
+
+    /// Narrative standing in for one month of a quarterly/annual rollup: the monthly
+    /// review if it exists, otherwise the month's weekly reviews concatenated. Each
+    /// level reads only pre-summarized child pages — never raw work-log. `used_weeks`
+    /// dedups a boundary ISO week shared by two adjacent *fallback* months so no weekly
+    /// review is counted twice. A month with its own monthly review returns early and
+    /// does NOT claim its weeks — so if a neighbouring month falls back, the shared
+    /// boundary week appears in both that month's monthly summary and the neighbour's
+    /// weekly fallback. That is deliberate: for a narrative rollup, including a boundary
+    /// week's work in both is harmless, whereas dropping it would lose real activity.
+    /// (The numeric category table is computed separately from raw work-log over the
+    /// exact date range, so counts are never double-tallied.)
+    async fn month_child_narrative(
+        &self,
+        year: i16,
+        month: u8,
+        summary_heading: &str,
+        used_weeks: &mut Vec<(i16, u8)>,
+    ) -> Result<Option<String>, PipelineError> {
+        let monthly_dir = PathBuf::from(&self.ctx.dirs.personal).join(&self.ctx.dirs.monthly);
+        let file = monthly_dir.join(format!("{year}-{month:02}.md"));
+        if let Some(page) = self.reader.read_page(&file).await? {
+            return Ok(Some(child_narrative(&page, summary_heading).to_string()));
+        }
+
+        let (start, end) = month_range(year, month)?;
+        let weekly_dir = PathBuf::from(&self.ctx.dirs.personal).join(&self.ctx.dirs.weekly);
+        let mut parts = Vec::new();
+        for (wy, ww) in iso_weeks_in_range(start, end)? {
+            if used_weeks.contains(&(wy, ww)) {
+                continue;
+            }
+            let file = weekly_dir.join(format!("{wy}-W{ww:02}.md"));
+            if let Some(page) = self.reader.read_page(&file).await? {
+                used_weeks.push((wy, ww));
+                parts.push(child_narrative(&page, summary_heading).to_string());
+            }
+        }
+        Ok((!parts.is_empty()).then(|| parts.join("\n\n")))
+    }
+
+    /// Narrative standing in for one quarter of the annual rollup: the quarterly
+    /// review if it exists, otherwise its three months (each falling back to weeks).
+    async fn quarter_child_narrative(
+        &self,
+        year: i16,
+        quarter: u8,
+        summary_heading: &str,
+        used_weeks: &mut Vec<(i16, u8)>,
+    ) -> Result<Option<String>, PipelineError> {
+        let quarterly_dir = PathBuf::from(&self.ctx.dirs.personal).join(&self.ctx.dirs.quarterly);
+        let file = quarterly_dir.join(format!("{year}-Q{quarter}.md"));
+        if let Some(page) = self.reader.read_page(&file).await? {
+            return Ok(Some(child_narrative(&page, summary_heading).to_string()));
+        }
+
+        let mut parts = Vec::new();
+        for month in (quarter - 1) * 3 + 1..=quarter * 3 {
+            if let Some(narrative) = self
+                .month_child_narrative(year, month, summary_heading, used_weeks)
+                .await?
+            {
+                parts.push(narrative);
+            }
+        }
+        Ok((!parts.is_empty()).then(|| parts.join("\n\n")))
     }
 
     async fn aggregate_category_stats(
@@ -640,7 +680,7 @@ impl Synthesizer {
         dir: &Path,
         start: jiff::civil::Date,
         end: jiff::civil::Date,
-    ) -> Result<Vec<Page>, PipelineError> {
+    ) -> Result<Vec<VaultPage>, PipelineError> {
         let mut pages = Vec::new();
         let mut date = start;
         while date <= end {
@@ -661,7 +701,7 @@ impl Synthesizer {
 /// annual rollups embed this rather than the child's full body, so the parent never
 /// inherits the child's own distribution table or metadata headings (which would
 /// otherwise render as duplicated tables and nested `##` headings on the parent page).
-fn child_narrative<'a>(page: &'a Page, summary_heading: &str) -> &'a str {
+fn child_narrative<'a>(page: &'a VaultPage, summary_heading: &str) -> &'a str {
     section_body(&page.body, summary_heading)
         .map(str::trim)
         .filter(|s| !s.is_empty())

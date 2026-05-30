@@ -123,8 +123,19 @@ pub fn fix(drift: &IndexDrift, root: &Path, wiki_dir: &Path) -> Result<usize, Gr
     }
 
     let index_path = root.join(wiki_dir).join("index.md");
-    let mut content = std::fs::read_to_string(&index_path)
-        .map_err(|e| GraphError::Io(format!("failed to read {}: {e}", index_path.display())))?;
+    // A missing index.md is treated as empty (consistent with `diff`): `--fix` then
+    // writes a fresh index containing every drifted entry. "Fix" means "make it
+    // correct" whether the catalog exists yet or not.
+    let mut content = match std::fs::read_to_string(&index_path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            return Err(GraphError::Io(format!(
+                "failed to read {}: {e}",
+                index_path.display()
+            )));
+        }
+    };
 
     let mut added = 0;
     for page_id in &drift.missing_from_index {
@@ -138,6 +149,10 @@ pub fn fix(drift: &IndexDrift, root: &Path, wiki_dir: &Path) -> Result<usize, Gr
         content.push('\n');
     }
 
+    if let Some(parent) = index_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| GraphError::Io(format!("create {}: {e}", parent.display())))?;
+    }
     std::fs::write(&index_path, &content)
         .map_err(|e| GraphError::Io(format!("failed to write {}: {e}", index_path.display())))?;
 
@@ -165,13 +180,13 @@ fn read_sub_page_contents(dir: &Path) -> Result<Vec<String>, GraphError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scan::Page;
+    use crate::scan::ScannedPage;
     use lk_core::config::VaultDirs;
     use std::path::PathBuf;
     use tempfile::TempDir;
 
-    fn make_page(id: &str, outgoing: &[&str]) -> Page {
-        Page {
+    fn make_page(id: &str, outgoing: &[&str]) -> ScannedPage {
+        ScannedPage {
             id: id.to_owned(),
             path: PathBuf::from(format!("{id}.md")),
             title: id.rsplit('/').next().unwrap_or(id).to_owned(),
@@ -248,6 +263,27 @@ mod tests {
         // Full page id (not bare stem) so nested same-filename pages can't collide.
         let content = std::fs::read_to_string(tmp.path().join("wiki/index.md")).unwrap();
         assert!(content.contains("[[wiki/gamma]]"));
+    }
+
+    #[test]
+    fn fix_creates_index_when_absent() {
+        // `--fix` on a vault that has no index.md yet must CREATE it with the missing
+        // entries — consistent with `diff` (which treats absence as all-drift), not
+        // error out. "Fix" means make it correct whether the catalog exists or not.
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("wiki")).unwrap();
+        assert!(!tmp.path().join("wiki/index.md").exists());
+
+        let drift = IndexDrift {
+            missing_from_index: vec!["wiki/alpha".to_owned(), "wiki/beta".to_owned()],
+            missing_from_disk: vec![],
+        };
+        let added = fix(&drift, tmp.path(), Path::new("wiki")).unwrap();
+        assert_eq!(added, 2);
+
+        let content = std::fs::read_to_string(tmp.path().join("wiki/index.md")).unwrap();
+        assert!(content.contains("[[wiki/alpha]]"));
+        assert!(content.contains("[[wiki/beta]]"));
     }
 
     #[test]

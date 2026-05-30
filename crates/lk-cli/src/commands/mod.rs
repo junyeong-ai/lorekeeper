@@ -7,6 +7,7 @@ pub mod ingest;
 pub mod init;
 pub mod maintenance;
 pub mod performance;
+pub mod queue;
 pub mod schedule;
 pub mod schema;
 pub mod status;

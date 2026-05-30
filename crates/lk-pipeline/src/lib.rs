@@ -31,7 +31,11 @@ pub fn dedup_cache_for_maintenance(
     path: &Path,
     config: &Config,
 ) -> Result<DedupCache, PipelineError> {
-    DedupCache::open(path, config.dedup.title_threshold)
+    DedupCache::open(
+        path,
+        config.dedup.title_threshold,
+        config.dedup.extra_tracking_params.clone(),
+    )
 }
 
 #[derive(Debug, Error)]
@@ -89,7 +93,11 @@ impl Pipeline {
         config: &Config,
     ) -> Result<Self, PipelineError> {
         let dedup_path = vault_root.join(".lorekeeper").join("dedup.redb");
-        let dedup = DedupCache::open(&dedup_path, config.dedup.title_threshold)?;
+        let dedup = DedupCache::open(
+            &dedup_path,
+            config.dedup.title_threshold,
+            config.dedup.extra_tracking_params.clone(),
+        )?;
         Ok(Self::with_dedup(ctx, dedup, config, vault_root))
     }
 
@@ -102,7 +110,11 @@ impl Pipeline {
         config: &Config,
     ) -> Result<Self, PipelineError> {
         let dedup_path = vault_root.join(".lorekeeper").join("dedup.redb");
-        let dedup = DedupCache::open_read_only(&dedup_path, config.dedup.title_threshold)?;
+        let dedup = DedupCache::open_read_only(
+            &dedup_path,
+            config.dedup.title_threshold,
+            config.dedup.extra_tracking_params.clone(),
+        )?;
         Ok(Self::with_dedup(ctx, dedup, config, vault_root))
     }
 
@@ -154,8 +166,23 @@ impl Pipeline {
 
         // Duplicates are retained (not just dropped) so `commit` can refresh their
         // `seen_at` — a recurring item recognized as a duplicate must not age out of
-        // the retention window and re-emit as new. `--force` skips dedup entirely.
-        let duplicates = if !options.force {
+        // the retention window and re-emit as new.
+        //
+        // Mutable source types (Jira/Calendar) re-render with the latest upstream
+        // state every run: their items change after first sight (status, assignee,
+        // scheduled→actual), so dedup-by-event-id would freeze the first snapshot.
+        // They bypass dedup ENTIRELY for themselves — every strategy, not just
+        // event-id — because a re-render is the intended behaviour: matching a prior
+        // snapshot by content-hash/url would suppress the very update we want, and a
+        // cross-source content collision (a Jira issue whose text happens to equal a
+        // mail body) must NOT drop the distinct issue from its own daily page. This is
+        // the per-source equivalent of `--force`, which is why the daily job needs no
+        // blanket flag. Records still land in the cache via `commit` below (as novel),
+        // so cache growth/retention is unaffected; unchanged content still skips LLM
+        // work via the materialized-view cache, so the re-render is cheap.
+        // Append-only types keep full dedup: re-seeing an item is a true duplicate.
+        let bypass_dedup = options.force || config.source_type.is_mutable();
+        let duplicates = if !bypass_dedup {
             let result = self.dedup.deduplicate(events, &self.dedup_config.cascade)?;
             events = result.novel;
             tracing::info!(source = source_id, novel = events.len(), "dedup");
@@ -168,10 +195,8 @@ impl Pipeline {
             return Ok(empty_result(source_id, duplicates));
         }
 
-        classify::assign_static_labels(&mut events, &config.labels);
-        if config.track_personal {
-            classify::flag_personal(&mut events, &self.ctx.identity);
-        }
+        classify::assign_labels(&mut events, &config.labels);
+        classify::mark_personal(&mut events, config.track_personal);
         classify::classify_by_keywords(&mut events, &config.classify);
 
         if config.source_type == SourceType::Manual {
@@ -402,17 +427,10 @@ impl Pipeline {
             // Merge into the run-level accumulator (shared across all sources) so a
             // concept mentioned by multiple sources aggregates into one page.
             {
-                let source = concepts::ConceptSource {
-                    ref_path: concepts::strip_md_extension(
-                        &lk_core::vault_path::VaultPath::daily(&self.ctx.dirs, source_id, *date)
-                            .to_string(),
-                    ),
-                    date: *date,
-                };
                 let mut drafts = self.concept_drafts.lock().await;
                 for concept in &day_concepts {
                     drafts
-                        .merge(concept, &source, &self.reader, &self.ctx.dirs)
+                        .merge(concept, *date, &self.reader, &self.ctx.dirs)
                         .await?;
                 }
             }
@@ -644,17 +662,10 @@ impl Pipeline {
 
             // Merge concepts into run-level accumulator.
             {
-                let source = concepts::ConceptSource {
-                    ref_path: concepts::strip_md_extension(
-                        &lk_core::vault_path::VaultPath::document(&self.ctx.dirs, &slug)
-                            .to_string(),
-                    ),
-                    date: event.date,
-                };
                 let mut drafts = self.concept_drafts.lock().await;
                 for concept in &doc_concepts {
                     drafts
-                        .merge(concept, &source, &self.reader, &self.ctx.dirs)
+                        .merge(concept, event.date, &self.reader, &self.ctx.dirs)
                         .await?;
                 }
             }

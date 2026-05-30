@@ -29,12 +29,15 @@ knows about; provider choice is config-driven (`build_llm_client` in lk-cli).
     `/lore-process` needs to do its work, including dedup/registry hints
     (`existing_concepts`).
   - `cache_identity()` — the subset hashed for caching. Restricted to fields that
-    actually shape the LLM's output (`text`, `focus`, `locale`/`max_*`,
-    `categories`). Hints that help the LLM phrase its answer but don't change
-    semantic correctness are excluded, so adding a concept anywhere in the vault
-    does NOT invalidate every other concept-extraction cache entry. `categories`
-    is sorted by `id` so configuration field order can't perturb the hash.
-    `target` is excluded — it describes where the result lands, not the prompt.
+    actually shape the LLM's output: `summarize` hashes `text` + `max_sentences` +
+    `locale` + `focus`; `extract-concepts` hashes `text` + `source_id` + `date` + `focus`
+    + `categories` (`source_id`/`date` scope a concept extraction to one source+day).
+    Hints that help the LLM phrase its answer but don't change semantic correctness are
+    excluded — `existing_concepts` and `source_type` are in `task_input` but NOT the
+    identity, so adding a concept anywhere in the vault does NOT invalidate every other
+    concept-extraction cache entry. `categories` is sorted by `id` so configuration field
+    order can't perturb the hash. `target` is excluded — it describes where the result
+    lands, not the prompt.
 - **`Request::cache_hash()`** (BLAKE3-128, 32 hex of `cache_identity()`) is
   stamped into `QueueTask.cache_hash` at enqueue time and pre-recorded by the
   pipeline in the page's `llm_inputs.<key>` frontmatter — for EVERY kind, so
@@ -43,9 +46,11 @@ knows about; provider choice is config-driven (`build_llm_client` in lk-cli).
   the task is stale (page was re-rendered between enqueue and processing) and
   must be dropped. Without that guard a stale task overwrites the section with
   content keyed to an older input and the next ingest's cache lookup freezes
-  the mismatch forever. This guard is a **consumer contract** documented in the
-  skill, not a Rust-enforced mechanism — the queue stamps the hash but does not
-  itself police consumers.
+  the mismatch forever. The comparison is computed in tested Rust by
+  **`lore queue status`** (`commands::queue::classify_task`), which reads each
+  pending task's target page and classifies it `current` / `stale` / `missing-target`;
+  `/lore-process` consults that classification and processes only `current` tasks
+  rather than re-deriving the hash check in prose.
 - **`TargetKind::llm_inputs_key`** is the single source of truth mapping each task
   kind to its `llm_inputs.<key>` frontmatter field; **`TargetKind::cache_shape`** is
   the companion source for HOW completion is detected: `FillEmpty` (non-empty body)

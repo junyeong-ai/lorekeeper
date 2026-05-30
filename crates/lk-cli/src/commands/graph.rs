@@ -3,16 +3,11 @@ use std::path::{Path, PathBuf};
 use lk_core::config::{ConceptCategory, GraphConfig, VaultDirs};
 use lk_core::i18n::Locale;
 use lk_graph::{
-    backlinks, cache, cluster, concepts, export, graph, index, normalize, output, scan, stale,
+    backlinks, cache, cluster, concepts, export, graph, index, merge, normalize, output, scan,
+    stale,
 };
 
 use super::GlobalOpts;
-
-/// Sørensen-Dice slug-similarity at/above which two concept pages are reported as
-/// near-duplicate merge candidates in `graph lint`. 0.6 flags real variant spellings
-/// (`vector-db` ~ `vector-database` ≈ 0.64) while leaving unrelated slugs (~0.1)
-/// untouched. Read-only advisory, so recall is favored — a human vets each pair.
-const CONCEPT_NEAR_DUPLICATE_THRESHOLD: f64 = 0.6;
 
 struct ResolvedConfig {
     root: PathBuf,
@@ -82,6 +77,22 @@ pub enum GraphCmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Merge a duplicate concept into a canonical one: rewrite every wikilink from
+    /// `<from>` to `<into>`, then delete the `<from>` page. Run `backlinks-sync`
+    /// afterward to re-derive the merged `## Sources` + `source_count`.
+    Merge {
+        /// Slug of the duplicate concept to fold in (its page is deleted)
+        from: String,
+        /// Slug of the canonical concept to keep
+        into: String,
+        /// Report what would change without writing or deleting
+        #[arg(long)]
+        dry_run: bool,
+        /// Proceed even when `<from>` has authored body content that the merge would
+        /// discard (default: abort so you can salvage the prose into `<into>` first)
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 /// Returns exit code: 0 = ok/no findings, 1 = findings, 2 = runtime error.
@@ -123,21 +134,37 @@ fn run_inner(
         GraphCmd::BacklinksSync { dry_run } => {
             return run_backlinks_sync(opts, root_override, json, dry_run, incremental);
         }
+        GraphCmd::Merge {
+            ref from,
+            ref into,
+            dry_run,
+            force,
+        } => {
+            return run_merge(opts, root_override, json, from, into, dry_run, force);
+        }
         _ => {}
     }
 
     let mut rc = resolve_config_full(opts, root_override)?;
 
+    // The SINGLE definition of what this command reads — the `--incremental` cache
+    // watches and rebuilds exactly this set, so a change anywhere it reads (e.g. a
+    // `<daily>/` page that flips an orphan/broken-link result) is never missed.
+    let integrity = matches!(
+        cmd,
+        GraphCmd::Lint | GraphCmd::Broken | GraphCmd::Orphans | GraphCmd::IndexSync { .. }
+    );
+    let scan_dirs = command_scan_dirs(
+        integrity,
+        &rc.graph.scope.dirs,
+        vault_page_dirs(&rc.root, &rc.vault_dirs),
+    );
+
     if incremental {
         let cp = cache::cache_path(&rc.root);
         if let Some(cached) = cache::load(&cp) {
-            let dirty = cache::is_dirty(
-                &rc.root,
-                &rc.graph.scope.dirs,
-                rc.graph.scope.follow_links,
-                &cached,
-            )
-            .map_err(|e| format!("{e}"))?;
+            let dirty = cache::is_dirty(&rc.root, &scan_dirs, rc.graph.scope.follow_links, &cached)
+                .map_err(|e| format!("{e}"))?;
             if !dirty {
                 eprintln!("No changes since last scan");
                 return Ok(false);
@@ -145,15 +172,20 @@ fn run_inner(
         }
     }
 
-    let pages = scan::scan_vault(&rc.root, &rc.graph).map_err(|e| format!("{e}"))?;
-
-    let existence = if matches!(
-        cmd,
-        GraphCmd::Lint | GraphCmd::Broken | GraphCmd::Orphans | GraphCmd::IndexSync { .. }
-    ) {
-        build_vault_existence(&rc.root, &rc.graph, &rc.vault_dirs)?
+    // One scan over `scan_dirs`. Integrity commands derive the full-vault existence
+    // universe from it and the scope-subset graph nodes by filtering (no second walk);
+    // analysis commands use the scan as-is.
+    let mut scan_cfg = rc.graph.clone();
+    scan_cfg.scope.dirs = scan_dirs.clone();
+    let scanned = scan::scan_vault(&rc.root, &scan_cfg).map_err(|e| format!("{e}"))?;
+    let existence = scan::VaultExistence::from_pages(&scanned, &rc.vault_dirs);
+    let pages: Vec<scan::ScannedPage> = if integrity {
+        scanned
+            .into_iter()
+            .filter(|p| rc.graph.scope.dirs.iter().any(|d| p.path.starts_with(d)))
+            .collect()
     } else {
-        scan::VaultExistence::from_pages(&pages, &rc.vault_dirs)
+        scanned
     };
     let g = graph::WikiGraph::build_with_existence(&pages, &existence, &rc.vault_dirs);
 
@@ -173,18 +205,17 @@ fn run_inner(
                 &rc.graph.graph.orphan_exclude,
             )
             .map_err(|e| format!("{e}"))?;
+            // Read the concept pages once; the three concept lints are pure functions
+            // over the result rather than each re-walking `{wiki}/concepts/`.
+            let concept_pages = concepts::scan_concept_pages(&rc.root, &rc.vault_dirs.wiki)
+                .map_err(|e| format!("{e}"))?;
             let invalid_categories =
-                concepts::invalid_categories(&rc.root, &rc.vault_dirs.wiki, &rc.concept_categories)
-                    .map_err(|e| format!("{e}"))?;
+                concepts::invalid_categories(&concept_pages, &rc.concept_categories);
             let near_duplicate_concepts = concepts::near_duplicate_concepts(
-                &rc.root,
-                &rc.vault_dirs.wiki,
-                CONCEPT_NEAR_DUPLICATE_THRESHOLD,
-            )
-            .map_err(|e| format!("{e}"))?;
-            let unresolved_conflicts =
-                concepts::unresolved_conflicts(&rc.root, &rc.vault_dirs.wiki)
-                    .map_err(|e| format!("{e}"))?;
+                &concept_pages,
+                rc.graph.graph.concept_near_duplicate_threshold,
+            );
+            let unresolved_conflicts = concepts::unresolved_conflicts(&concept_pages);
 
             let findings = orphans.len()
                 + broken.len()
@@ -362,15 +393,17 @@ fn run_inner(
             }
             false
         }
-        // Dispatched at the top of `run_inner` because they need timezone/locale
-        // from the full config and don't touch the WikiGraph.
-        GraphCmd::Stale { .. } | GraphCmd::BacklinksSync { .. } => unreachable!(),
+        // Dispatched at the top of `run_inner` because they need full-vault scope
+        // and/or config that doesn't touch the in-scope WikiGraph.
+        GraphCmd::Stale { .. } | GraphCmd::BacklinksSync { .. } | GraphCmd::Merge { .. } => {
+            unreachable!()
+        }
     };
 
-    // Persist the mtime cache after a successful scan so the next `--incremental`
-    // run can skip the rescan if nothing changed.
+    // Persist the mtime cache over the SAME set we scanned so the next `--incremental`
+    // run's dirty-check is consistent with what this command reads.
     if incremental {
-        save_cache_best_effort(&rc.root, &rc.graph);
+        save_cache_best_effort(&rc.root, &scan_dirs, rc.graph.scope.follow_links);
     }
 
     Ok(has_findings)
@@ -422,7 +455,7 @@ fn run_stale(
     }
 
     if incremental {
-        save_cache_best_effort(&rc.root, &rc.graph);
+        save_cache_best_effort(&rc.root, &rc.graph.scope.dirs, rc.graph.scope.follow_links);
     }
 
     Ok(count > 0)
@@ -471,17 +504,52 @@ fn run_backlinks_sync(
     }
 
     if incremental && !dry_run {
-        save_cache_best_effort(&rc.root, &rc.graph);
+        save_cache_best_effort(&rc.root, &rc.graph.scope.dirs, rc.graph.scope.follow_links);
     }
 
+    Ok(false)
+}
+
+fn run_merge(
+    opts: &GlobalOpts,
+    root_override: Option<PathBuf>,
+    json: bool,
+    from: &str,
+    into: &str,
+    dry_run: bool,
+    force: bool,
+) -> Result<bool, String> {
+    let mut rc = resolve_config_full(opts, root_override)?;
+    // Merge rewrites links across the whole vault, so scan every page dir, not just
+    // the analysis scope — the same full-vault view backlinks-sync uses.
+    rc.graph.scope.dirs = vault_page_dirs(&rc.root, &rc.vault_dirs);
+
+    let pages = scan::scan_vault(&rc.root, &rc.graph).map_err(|e| format!("{e}"))?;
+    let result = merge::merge_concepts(
+        &pages,
+        &rc.root,
+        &rc.vault_dirs.wiki,
+        from,
+        into,
+        dry_run,
+        force,
+    )
+    .map_err(|e| format!("{e}"))?;
+
+    if json {
+        output::print_json(&result)?;
+    } else {
+        output::print_merge(&result);
+    }
+    // Never a "findings" exit — a successful merge is exit 0.
     Ok(false)
 }
 
 /// Best-effort cache save: build a fresh mtime snapshot and persist it. Warnings
 /// are printed to stderr but errors are not propagated — a failed cache save must
 /// not turn a successful graph command into a failure.
-fn save_cache_best_effort(root: &std::path::Path, config: &GraphConfig) {
-    if let Ok(fresh) = cache::build(root, &config.scope.dirs, config.scope.follow_links) {
+fn save_cache_best_effort(root: &std::path::Path, scan_dirs: &[PathBuf], follow_links: bool) {
+    if let Ok(fresh) = cache::build(root, scan_dirs, follow_links) {
         let cp = cache::cache_path(root);
         if let Err(e) = cache::save(&cp, &fresh) {
             eprintln!("warning: failed to save graph cache: {e}");
@@ -489,21 +557,26 @@ fn save_cache_best_effort(root: &std::path::Path, config: &GraphConfig) {
     }
 }
 
-/// Resolve vault root, graph config, timezone, locale, and directory layout.
-/// A `--root` override uses system timezone + default locale + default dirs.
-/// Scan the full vault into a [`scan::VaultExistence`] for integrity checks.
-/// Reuses the analysis `config` (exclude globs, follow_links) but widens the
-/// scope to every page directory, so broken-link and orphan detection reason
-/// about pages outside `graph.scope.dirs`.
-fn build_vault_existence(
-    root: &std::path::Path,
-    config: &GraphConfig,
-    vault_dirs: &VaultDirs,
-) -> Result<scan::VaultExistence, String> {
-    let mut full = config.clone();
-    full.scope.dirs = vault_page_dirs(root, vault_dirs);
-    let pages = scan::scan_vault(root, &full).map_err(|e| format!("{e}"))?;
-    Ok(scan::VaultExistence::from_pages(&pages, vault_dirs))
+/// The directories a graph command reads — the single source of truth shared by the
+/// scan, the `--incremental` cache watch set, and the cache rebuild. Integrity
+/// commands (lint/broken/orphans/index-sync) resolve links against the full-vault
+/// existence universe, so they read `scope.dirs` ∪ every page dir; analysis commands
+/// (hubs/cluster/…) read `scope.dirs` only. `page_dirs` already in scope are not
+/// duplicated, preserving scope-first order.
+fn command_scan_dirs(
+    integrity: bool,
+    scope_dirs: &[PathBuf],
+    page_dirs: Vec<PathBuf>,
+) -> Vec<PathBuf> {
+    let mut dirs = scope_dirs.to_vec();
+    if integrity {
+        for d in page_dirs {
+            if !dirs.contains(&d) {
+                dirs.push(d);
+            }
+        }
+    }
+    dirs
 }
 
 /// Every vault-relative page directory that exists on disk — anything that can
@@ -548,4 +621,39 @@ fn resolve_config_full(
         graph: config.graph,
         concept_categories: config.concepts.categories,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::command_scan_dirs;
+    use std::path::PathBuf;
+
+    fn p(s: &str) -> PathBuf {
+        PathBuf::from(s)
+    }
+
+    #[test]
+    fn analysis_commands_read_scope_only() {
+        // Non-integrity commands ignore page dirs entirely.
+        let dirs = command_scan_dirs(false, &[p("wiki")], vec![p("wiki"), p("daily"), p("me")]);
+        assert_eq!(dirs, vec![p("wiki")]);
+    }
+
+    #[test]
+    fn integrity_commands_union_scope_with_page_dirs_scope_first() {
+        // Integrity commands add every page dir not already in scope, scope-first.
+        let dirs = command_scan_dirs(
+            true,
+            &[p("wiki")],
+            vec![p("wiki"), p("daily"), p("me"), p("syn")],
+        );
+        assert_eq!(dirs, vec![p("wiki"), p("daily"), p("me"), p("syn")]);
+    }
+
+    #[test]
+    fn integrity_does_not_duplicate_scope_dirs_already_listed() {
+        // A page dir already in scope is not appended twice.
+        let dirs = command_scan_dirs(true, &[p("daily"), p("wiki")], vec![p("wiki"), p("daily")]);
+        assert_eq!(dirs, vec![p("daily"), p("wiki")]);
+    }
 }

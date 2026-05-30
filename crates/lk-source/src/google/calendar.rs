@@ -308,6 +308,19 @@ impl Source for CalendarSource {
 
             let body = body_parts.join("\n\n");
 
+            let me = ctx.identity.email.trim();
+            let is_self = !me.is_empty()
+                && (ev
+                    .organizer
+                    .as_ref()
+                    .and_then(|p| p.email.as_deref())
+                    .is_some_and(|e| e.eq_ignore_ascii_case(me))
+                    || ev.attendees.as_ref().is_some_and(|a| {
+                        a.iter()
+                            .filter_map(|p| p.email.as_deref())
+                            .any(|e| e.eq_ignore_ascii_case(me))
+                    }));
+
             items.push(RawItem {
                 external_id: Some(id),
                 title: summary,
@@ -315,6 +328,7 @@ impl Source for CalendarSource {
                 url: ev.html_link,
                 author: ev.organizer.and_then(|o| o.display_name.or(o.email)),
                 timestamp: ts,
+                is_self,
                 metadata: serde_json::json!({
                     "status": ev.status,
                     "attendees": attendee_names,

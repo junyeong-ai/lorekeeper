@@ -60,6 +60,19 @@ pub enum TaskKind {
     RefineEvents,
 }
 
+impl TaskKind {
+    /// The kebab-case wire name, matching the `#[serde(rename_all = "kebab-case")]`
+    /// JSONL encoding. The single source of truth for the textual kind label.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TaskKind::Summarize => "summarize",
+            TaskKind::ExtractConcepts => "extract-concepts",
+            TaskKind::IdentifyThemes => "identify-themes",
+            TaskKind::RefineEvents => "refine-events",
+        }
+    }
+}
+
 impl QueueLlmClient {
     pub fn new(queue_dir: PathBuf) -> Self {
         // Wall-clock second + PID separates distinct CLI invocations; a process-global

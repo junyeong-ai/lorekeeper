@@ -39,7 +39,6 @@ fn base_config(vault_root: &std::path::Path) -> Config {
             name: "Test User".into(),
             email: "test@example.com".into(),
             slack_id: None,
-            jira_id: None,
         },
         sources,
         dedup: DedupConfig::default(),
@@ -59,6 +58,7 @@ fn raw_item(title: &str, body: &str, external_id: &str, when: jiff::Timestamp) -
         url: Some(format!("https://example.com/{external_id}")),
         author: Some("alice@example.com".into()),
         timestamp: when,
+        is_self: false,
         metadata: serde_json::Value::Null,
     }
 }
@@ -149,8 +149,9 @@ async fn concept_pages_written_with_merge() {
         .unwrap();
 
     assert!(
-        concept_output2.content.contains("source_count: 2"),
-        "expected merged count 2, content was:\n{}",
+        concept_output2.content.contains("source_count: 0"),
+        "ingest never counts citations — backlinks-sync is the sole owner of \
+         source_count and re-derives it from the wikilink graph:\n{}",
         concept_output2.content
     );
     assert!(
@@ -288,8 +289,7 @@ async fn multi_date_events_produce_multiple_daily_pages() {
 #[tokio::test]
 async fn concept_accumulates_across_sources_in_one_run() {
     // Two different sources mention the same concept in a single run. The concept page
-    // must merge into ONE page with source_count 2 and both source refs — not be
-    // overwritten by whichever source is written last.
+    // must merge into ONE page — not be overwritten by whichever source is written last.
     let dir = TempDir::new().unwrap();
     let vault = dir.path();
     let mut config = base_config(vault);
@@ -346,12 +346,12 @@ async fn concept_accumulates_across_sources_in_one_run() {
         1,
         "concept must be a single merged page, not one per source"
     );
-    // Citations accumulate as the count here; the `## 출처` ref list itself is
-    // re-derived from the wikilink graph by `backlinks-sync` (covered in lk-graph),
-    // not written into concept frontmatter at ingest.
+    // Citation counting belongs to `backlinks-sync` (covered in lk-graph), which
+    // re-derives both `source_count` and the `## 출처` ref list from the wikilink
+    // graph. Ingest writes neither — the merged page leaves the count at 0.
     assert!(
-        shared.content.contains("source_count: 2"),
-        "both sources must accumulate into the count:\n{}",
+        shared.content.contains("source_count: 0"),
+        "ingest must not count citations; backlinks-sync owns source_count:\n{}",
         shared.content
     );
 }
@@ -834,6 +834,60 @@ async fn synthesis_page_is_a_materialized_view() {
 }
 
 #[tokio::test]
+async fn quarterly_review_includes_latest_unsummarized_month_via_weekly_fallback() {
+    use lk_queue::QueueLlmClient;
+
+    // Q2 2026 = Apr/May/Jun. Apr and May have monthly reviews; Jun does NOT (it's the
+    // current month, not yet summarized) but has a weekly personal review. The per-month
+    // fallback must pull June from its weekly review — a whole-quarter fallback would
+    // silently omit June because monthly reviews already exist for the other two months.
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let config = base_config(vault);
+    let summary = lk_core::i18n::Locale::Ko.strings().key_summary;
+
+    let monthly = vault.join("me").join("monthly");
+    std::fs::create_dir_all(&monthly).unwrap();
+    for (m, marker) in [("04", "APR-MONTHLY"), ("05", "MAY-MONTHLY")] {
+        std::fs::write(
+            monthly.join(format!("2026-{m}.md")),
+            format!("---\nid: m-2026-{m}\n---\n\n## {summary}\n\n{marker}\n"),
+        )
+        .unwrap();
+    }
+
+    // A weekly review inside June (ISO week of Jun 15, 2026).
+    let jun = jiff::civil::date(2026, 6, 15).iso_week_date();
+    let weekly = vault.join("me").join("weekly");
+    std::fs::create_dir_all(&weekly).unwrap();
+    std::fs::write(
+        weekly.join(format!("{}-W{:02}.md", jun.year(), jun.week())),
+        format!("---\nid: w\n---\n\n## {summary}\n\nJUNE-WEEKLY-MARKER\n"),
+    )
+    .unwrap();
+
+    let llm: Arc<dyn LlmClient> =
+        Arc::new(QueueLlmClient::new(vault.join(".lorekeeper").join("queue")));
+    let synth = Synthesizer::new(vault, make_ctx(&config, llm), &config);
+    let out = synth
+        .try_quarterly_personal(2026, 2)
+        .await
+        .unwrap()
+        .expect("quarterly review produced");
+
+    assert!(
+        out.content.contains("### 2026-06"),
+        "June must appear in the quarterly breakdown via weekly fallback:\n{}",
+        out.content
+    );
+    assert!(
+        out.content.contains("JUNE-WEEKLY-MARKER"),
+        "June's weekly narrative must be the fallback content:\n{}",
+        out.content
+    );
+}
+
+#[tokio::test]
 async fn work_log_generation_is_gated_by_performance_enabled() {
     let dir = TempDir::new().unwrap();
     let vault = dir.path();
@@ -848,7 +902,9 @@ async fn work_log_generation_is_gated_by_performance_enabled() {
         url: None,
         author: None,
         labels: vec!["personal".into()],
-        work_category: None,
+        classification: None,
+        performance_category: None,
+        is_self: true,
         is_personal: true,
         content_hash: lk_core::event::content_hash("did a thing", "details"),
         metadata: serde_json::Value::Null,

@@ -25,8 +25,9 @@ impl Owner {
 struct Section {
     /// English semantic name shown in the "Section" column.
     name: &'static str,
-    /// Closure that resolves the localized heading from `Strings`.
-    heading: Box<dyn Fn(&Strings) -> String>,
+    /// Resolves the localized heading from `Strings`. A plain `fn` pointer — every
+    /// resolver is a non-capturing closure, so no boxed trait object is needed.
+    heading: fn(&Strings) -> String,
     owner: Owner,
 }
 
@@ -41,14 +42,10 @@ struct PageSchema {
     sections: Vec<Section>,
 }
 
-fn s(
-    name: &'static str,
-    heading_fn: impl Fn(&Strings) -> String + 'static,
-    owner: Owner,
-) -> Section {
+fn s(name: &'static str, heading: fn(&Strings) -> String, owner: Owner) -> Section {
     Section {
         name,
-        heading: Box::new(heading_fn),
+        heading,
         owner,
     }
 }
@@ -256,6 +253,15 @@ pub fn render_agents_md(locale: Locale, dirs: &lk_core::config::VaultDirs) -> St
     writeln!(
         out,
         "> Regenerate after changing `vault.locale`: `lore schema`"
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "Pages with an LLM-owned section also carry a machine-managed `llm_inputs` \
+         frontmatter block (per-section input hashes for the materialized-view cache). \
+         It is written by `lore ingest` and `/lore-process`; never hand-author it — a \
+         page you create directly simply omits it."
     )
     .unwrap();
 

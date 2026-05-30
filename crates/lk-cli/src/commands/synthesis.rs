@@ -2,21 +2,42 @@ use std::sync::Arc;
 
 use super::{build_llm_client, find_config, load_config, parse_date};
 
+/// Synthesis periods. This is the SINGLE clap surface for `lore synthesis <period>` —
+/// there is no parallel CLI enum to keep in sync. `--date`/`--year` and `--previous`
+/// are mutually exclusive (a period is targeted either by an explicit date or as
+/// "the just-completed one", never both).
+#[derive(clap::Subcommand)]
 pub enum Period {
+    /// Cross-source themes + personal weekly review
     Weekly {
+        #[arg(long, conflicts_with = "previous")]
         date: Option<String>,
+        /// Synthesize the just-completed period (last week)
+        #[arg(long)]
         previous: bool,
     },
+    /// Personal monthly performance review
     Monthly {
+        #[arg(long, conflicts_with = "previous")]
         date: Option<String>,
+        /// Synthesize the just-completed period (last month)
+        #[arg(long)]
         previous: bool,
     },
+    /// Personal quarterly performance review
     Quarterly {
+        #[arg(long, conflicts_with = "previous")]
         date: Option<String>,
+        /// Synthesize the just-completed period (last quarter)
+        #[arg(long)]
         previous: bool,
     },
+    /// Personal annual performance review
     Annual {
+        #[arg(long, conflicts_with = "previous")]
         year: Option<i32>,
+        /// Synthesize the just-completed period (last year)
+        #[arg(long)]
         previous: bool,
     },
 }

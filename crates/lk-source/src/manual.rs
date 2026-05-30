@@ -207,6 +207,7 @@ fn read_item(path: &Path) -> Result<RawItem, SourceError> {
         url: None,
         author: None,
         timestamp: mtime,
+        is_self: false,
         metadata: serde_json::json!({
             "source_file": path.display().to_string(),
         }),
@@ -293,6 +294,7 @@ mod tests {
             target_date: jiff::civil::date(2026, 5, 24),
             timezone: jiff::tz::TimeZone::UTC,
             locale: lk_core::i18n::Locale::default(),
+            identity: lk_core::config::Identity::default(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
         assert_eq!(items.len(), 1);
@@ -313,6 +315,7 @@ mod tests {
             target_date: jiff::civil::date(2026, 5, 24),
             timezone: jiff::tz::TimeZone::UTC,
             locale: lk_core::i18n::Locale::default(),
+            identity: lk_core::config::Identity::default(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
         assert_eq!(items.len(), 1);
@@ -332,6 +335,7 @@ mod tests {
             target_date: jiff::civil::date(2026, 5, 24),
             timezone: jiff::tz::TimeZone::UTC,
             locale: lk_core::i18n::Locale::default(),
+            identity: lk_core::config::Identity::default(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
         // After extract(), file is still in inbox (archival is deferred).
@@ -350,7 +354,9 @@ mod tests {
                 url: None,
                 author: None,
                 labels: vec![],
-                work_category: None,
+                classification: None,
+                performance_category: None,
+                is_self: false,
                 is_personal: false,
                 content_hash: String::new(),
                 metadata: item.metadata.clone(),
@@ -379,6 +385,7 @@ mod tests {
             target_date: jiff::civil::date(2026, 5, 24),
             timezone: jiff::tz::TimeZone::UTC,
             locale: lk_core::i18n::Locale::default(),
+            identity: lk_core::config::Identity::default(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
         let mut events: Vec<lk_core::event::Event> = items
@@ -393,7 +400,9 @@ mod tests {
                 url: None,
                 author: None,
                 labels: vec![],
-                work_category: None,
+                classification: None,
+                performance_category: None,
+                is_self: false,
                 is_personal: false,
                 content_hash: String::new(),
                 metadata: item.metadata.clone(),

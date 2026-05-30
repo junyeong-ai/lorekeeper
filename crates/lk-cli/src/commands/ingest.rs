@@ -135,6 +135,7 @@ pub async fn run(
         target_date: extract_target,
         timezone: tz,
         locale: config.vault.locale(),
+        identity: config.identity.clone(),
     };
 
     // Phase 1: Plan all sources (no commits, no writes yet).

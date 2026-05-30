@@ -75,7 +75,9 @@ pub fn normalize(
                 url: item.url,
                 author: item.author,
                 labels: vec![],
-                work_category: None,
+                classification: None,
+                performance_category: None,
+                is_self: item.is_self,
                 is_personal: false,
                 content_hash: ch,
                 metadata: item.metadata,
@@ -97,6 +99,7 @@ mod tests {
             url: None,
             author: None,
             timestamp: jiff::Timestamp::now(),
+            is_self: false,
             metadata: serde_json::Value::Null,
         }];
 
@@ -117,6 +120,7 @@ mod tests {
             url: None,
             author: None,
             timestamp: ts,
+            is_self: false,
             metadata: serde_json::Value::Null,
         };
         // "ab"+"c" must not hash to the same id as "a"+"bc".
@@ -135,6 +139,7 @@ mod tests {
             url: None,
             author: None,
             timestamp: ts,
+            is_self: false,
             metadata: serde_json::Value::Null,
         };
 
@@ -156,6 +161,7 @@ mod tests {
             url: None,
             author: None,
             timestamp: jiff::Timestamp::now(),
+            is_self: false,
             metadata: serde_json::Value::Null,
         };
         let events = normalize("my-tasks", SourceType::Jira, vec![item], &tz);
@@ -182,6 +188,7 @@ mod tests {
             url: None,
             author: None,
             timestamp: ts,
+            is_self: false,
             metadata: serde_json::Value::Null,
         };
 

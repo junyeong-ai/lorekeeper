@@ -12,7 +12,7 @@ use lk_core::vault_path::RESERVED_WIKI_FILES;
 use lk_core::wikilink::{self, WIKILINK_RE};
 
 use crate::GraphError;
-use crate::scan::Page;
+use crate::scan::ScannedPage;
 
 #[derive(Debug, Clone)]
 pub struct Rename {
@@ -22,7 +22,7 @@ pub struct Rename {
     pub new_slug: String,
 }
 
-pub fn scan(pages: &[Page]) -> Vec<Rename> {
+pub fn scan(pages: &[ScannedPage]) -> Vec<Rename> {
     let mut renames = Vec::new();
     let mut claimed_slugs: HashSet<String> = HashSet::new();
 
@@ -67,7 +67,7 @@ pub fn scan(pages: &[Page]) -> Vec<Rename> {
     renames
 }
 
-pub fn apply(renames: &[Rename], pages: &[Page], root: &Path) -> Result<usize, GraphError> {
+pub fn apply(renames: &[Rename], pages: &[ScannedPage], root: &Path) -> Result<usize, GraphError> {
     if renames.is_empty() {
         return Ok(0);
     }
@@ -129,22 +129,19 @@ pub fn apply(renames: &[Rename], pages: &[Page], root: &Path) -> Result<usize, G
 fn normalize_wikilinks(content: &str, renamed_slugs: &HashSet<String>) -> String {
     WIKILINK_RE
         .replace_all(content, |caps: &regex::Captures| {
-            let raw = &caps[1];
-            let (page_raw, anchor) = wikilink::split_wikilink_target(raw);
+            let full = &caps[0];
+            // One decomposition path for the whole workspace: page / anchor / alias,
+            // each preserved exactly once on rewrite. (`[[`/`]]` are ASCII — byte-safe.)
+            let (page_raw, anchor, alias) =
+                wikilink::split_wikilink_parts(&full[2..full.len() - 2]);
             let Some(normalized) = slugify(page_raw) else {
-                return caps[0].to_owned();
+                return full.to_owned();
             };
 
             if renamed_slugs.contains(&normalized) && page_raw.trim() != normalized {
-                let full = caps.get(0).unwrap().as_str();
-                if let Some(pipe_pos) = full.find('|') {
-                    let display = &full[pipe_pos..full.len() - 2];
-                    format!("[[{normalized}{anchor}{display}]]")
-                } else {
-                    format!("[[{normalized}{anchor}]]")
-                }
+                format!("[[{normalized}{anchor}{alias}]]")
             } else {
-                caps[0].to_owned()
+                full.to_owned()
             }
         })
         .into_owned()
@@ -155,9 +152,9 @@ mod tests {
     use super::*;
     use crate::scan;
 
-    fn make_page(path: &str, outgoing: &[&str]) -> Page {
+    fn make_page(path: &str, outgoing: &[&str]) -> ScannedPage {
         let rel = PathBuf::from(path);
-        Page {
+        ScannedPage {
             id: scan::path_slug(&rel),
             path: rel,
             title: "test".to_owned(),
@@ -228,7 +225,7 @@ mod tests {
     #[test]
     fn non_renamed_wikilinks_unchanged() {
         let slugs: HashSet<String> = ["concept-a".to_owned()].into();
-        let content = "See [[Other Page]] here.";
+        let content = "See [[Other Node]] here.";
         let updated = normalize_wikilinks(content, &slugs);
         assert_eq!(updated, content);
     }

@@ -155,14 +155,21 @@ impl Source for SlackSearchSource {
                     .and_then(|c| c.name.as_deref())
                     .unwrap_or(channel_name);
 
-                // Preserve raw user id for identity matching (flag_personal
-                // inspects metadata), then resolve to display name for the page.
+                // Keep the raw user id (for the page metadata) before resolving it
+                // to a display name.
                 let author_id = m.user.clone();
                 let author = m
                     .user
                     .as_ref()
                     .and_then(|uid| users.get(uid).cloned())
                     .or(m.user);
+
+                let is_self = ctx
+                    .identity
+                    .slack_id
+                    .as_deref()
+                    .filter(|me| !me.trim().is_empty())
+                    .is_some_and(|me| author_id.as_deref() == Some(me));
 
                 // Use the API permalink if available, otherwise construct one.
                 let url = m.permalink.or_else(|| {
@@ -182,6 +189,7 @@ impl Source for SlackSearchSource {
                     url,
                     author,
                     timestamp: ts,
+                    is_self,
                     metadata: serde_json::json!({
                         "channel": ch,
                         "keywords": spec.keywords,

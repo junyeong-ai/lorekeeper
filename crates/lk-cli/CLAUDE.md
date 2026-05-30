@@ -2,7 +2,7 @@
 
 The `lore` binary. `main.rs` defines the clap surface; `commands/` has one module per
 subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`,
-`build_llm_client`, `resolve_template_dir`, `parse_date`).
+`build_llm_client`, `parse_date`).
 
 - **Global flags** `--config`/`LORE_CONFIG` and `--template-dir`/`LORE_TEMPLATE_DIR` are
   injected into the cron lines `lore schedule` generates, so scheduled runs don't depend on
@@ -25,6 +25,11 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   single-writer). It never touches live `*.jsonl.tmp` — the ingest startup sweep does.
 - **`lore synthesis <period>`** rejects `--date`/`--year` together with `--previous`
   (clap `conflicts_with`), and flushes the LLM queue after writing its pages.
+- **`lore queue status`** (`commands/queue.rs`) is the authoritative stale-task guard:
+  for each pending queue task it reads the target page's `llm_inputs.<key>` and classifies
+  the task `current` / `stale` / `missing-target` by comparing against `task.cache_hash`.
+  `/lore-process` consumes `--json` from it and processes only `current` tasks — the hash
+  check lives here in tested Rust, never re-derived in skill prose.
 - **`lore init credentials`** (in `init.rs`) is the interactive credential wizard. UX
   (dialoguer prompts, masked secrets, TTY guard) lives here; the JSON shape + atomic
   `0600` write live in `lk_source::credentials` (`from_file`/`save`). The Google branch

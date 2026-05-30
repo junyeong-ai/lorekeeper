@@ -45,6 +45,9 @@ pub struct ExtractContext {
     pub timezone: jiff::tz::TimeZone,
     /// Output language for labels adapters add (status/period, thread marker, …).
     pub locale: lk_core::i18n::Locale,
+    /// The configured user. Adapters compare their structured authorship fields
+    /// against it to set `RawItem::is_self`.
+    pub identity: lk_core::config::Identity,
 }
 
 impl ExtractContext {
@@ -196,6 +199,7 @@ mod tests {
             target_date: date.parse().unwrap(),
             timezone: jiff::tz::TimeZone::get(tz).unwrap(),
             locale: lk_core::i18n::Locale::default(),
+            identity: lk_core::config::Identity::default(),
         }
     }
 

@@ -166,7 +166,7 @@ mod tests {
     fn annual_personal_path() {
         let dirs = VaultDirs::default();
         let path = VaultPath::annual_personal(&dirs, 2026);
-        assert_eq!(path.to_string(), "me/annually/2026.md");
+        assert_eq!(path.to_string(), "me/annual/2026.md");
     }
 
     #[test]

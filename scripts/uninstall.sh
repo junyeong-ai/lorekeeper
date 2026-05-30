@@ -118,6 +118,17 @@ for skill in "${SKILL_NAMES[@]}"; do
     fi
 done
 
+# Scheduled task (user-level only — installed alongside the skills).
+sched_task="$HOME/.claude/scheduled-tasks/lore-daily-ingest"
+if [ -d "$sched_task" ]; then
+    if prompt_yesno "Remove scheduled task $sched_task?"; then
+        render_step "Removing $sched_task"
+        rm -rf "$sched_task"
+        log_ok "Scheduled task removed: lore-daily-ingest"
+        removed=$((removed + 1))
+    fi
+fi
+
 if [ "$removed" -eq 0 ]; then
     printf '\n%sNothing to uninstall.%s\n' "$C_DIM" "$C_RESET"
 else

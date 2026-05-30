@@ -1,8 +1,8 @@
-//! Vault scan: walk markdown files and build [`Page`] records.
+//! Vault scan: walk markdown files and build [`ScannedPage`] records.
 //!
 //! slug normalization, frontmatter parsing, and wikilink extraction — now live in
 //! `lk-core` (`slugify`, `frontmatter::parse_page`, `wikilink`). This module keeps only
-//! the I/O concerns: filesystem walking (walkdir + rayon) and assembling [`Page`]s.
+//! the I/O concerns: filesystem walking (walkdir + rayon) and assembling [`ScannedPage`]s.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -20,7 +20,7 @@ use crate::GraphError;
 /// A scanned vault page: its slug id, vault-relative path, display title, and the
 /// slugified targets of its outgoing wikilinks (deduped, first-appearance order).
 #[derive(Debug, Clone)]
-pub struct Page {
+pub struct ScannedPage {
     pub id: String,
     pub path: PathBuf,
     pub title: String,
@@ -28,7 +28,7 @@ pub struct Page {
 }
 
 /// Walk the configured scope directories under `root` and parse every `.md` file.
-pub fn scan_vault(root: &Path, config: &GraphConfig) -> Result<Vec<Page>, GraphError> {
+pub fn scan_vault(root: &Path, config: &GraphConfig) -> Result<Vec<ScannedPage>, GraphError> {
     let exclude = build_exclude_set(&config.scope.exclude)?;
     let mut file_paths: Vec<PathBuf> = Vec::new();
 
@@ -64,7 +64,7 @@ pub fn scan_vault(root: &Path, config: &GraphConfig) -> Result<Vec<Page>, GraphE
     file_paths.sort();
     file_paths.dedup();
 
-    let mut pages: Vec<Page> = file_paths
+    let mut pages: Vec<ScannedPage> = file_paths
         .par_iter()
         .filter_map(|path| match parse_file(path, root) {
             Ok(page) => Some(page),
@@ -79,7 +79,7 @@ pub fn scan_vault(root: &Path, config: &GraphConfig) -> Result<Vec<Page>, GraphE
     Ok(pages)
 }
 
-fn parse_file(path: &Path, root: &Path) -> Result<Page, String> {
+fn parse_file(path: &Path, root: &Path) -> Result<ScannedPage, String> {
     let raw = std::fs::read_to_string(path)
         .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
 
@@ -106,7 +106,7 @@ fn parse_file(path: &Path, root: &Path) -> Result<Page, String> {
         }
     }
 
-    Ok(Page {
+    Ok(ScannedPage {
         id,
         path: rel.to_path_buf(),
         title,
@@ -159,7 +159,7 @@ pub struct VaultExistence {
 impl VaultExistence {
     /// Derive the universe from a full-vault page scan. Resolution is done up
     /// front so `linked` holds resolved page ids, not raw target slugs.
-    pub fn from_pages(pages: &[Page], dirs: &VaultDirs) -> Self {
+    pub fn from_pages(pages: &[ScannedPage], dirs: &VaultDirs) -> Self {
         let mut by_filename: HashMap<String, String> = HashMap::with_capacity(pages.len());
         let mut ids = HashSet::with_capacity(pages.len());
         for page in pages {
@@ -247,7 +247,7 @@ pub fn stem_slug(path: &Path) -> String {
 /// `\` → `/`). A **bare** target (e.g. `Confluence Cloud`) is slugified whole,
 /// matching a filename slug. Without the path branch, `[[daily/x/y]]` would
 /// collapse to `daily-x-y` and resolve to neither form — every cross-folder link
-/// (e.g. a concept's `## 출처` backlinks) would read as broken.
+/// (e.g. a concept's `## Sources` backlinks) would read as broken.
 pub fn resolve_wikilink_target(raw: &str) -> String {
     if raw.contains(['/', '\\']) {
         raw.split(['/', '\\'])
@@ -332,13 +332,13 @@ mod tests {
     #[test]
     fn vault_existence_indexes_both_forms() {
         let pages = vec![
-            Page {
+            ScannedPage {
                 id: "daily/team-slack/2026-05-22".to_owned(),
                 path: PathBuf::from("daily/team-slack/2026-05-22.md"),
                 title: "t".to_owned(),
                 outgoing: vec!["confluence-cloud".to_owned()],
             },
-            Page {
+            ScannedPage {
                 id: "wiki/concepts/confluence-cloud".to_owned(),
                 path: PathBuf::from("wiki/concepts/confluence-cloud.md"),
                 title: "Confluence Cloud".to_owned(),

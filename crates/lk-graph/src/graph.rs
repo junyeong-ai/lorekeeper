@@ -8,7 +8,7 @@ use std::path::Path;
 
 use lk_core::config::VaultDirs;
 
-use crate::scan::{Page, VaultExistence, is_concept_page, stem_slug};
+use crate::scan::{ScannedPage, VaultExistence, is_concept_page, stem_slug};
 
 pub struct WikiGraph {
     graph: DiGraph<NodeData, ()>,
@@ -47,7 +47,7 @@ impl WikiGraph {
     /// no edges is an orphan. The right model when the scope *is* the vault (and
     /// the convenient default for tests); for a narrowed scope whose links reach
     /// pages outside it, use [`Self::build_with_existence`].
-    pub fn build(pages: &[Page], dirs: &VaultDirs) -> Self {
+    pub fn build(pages: &[ScannedPage], dirs: &VaultDirs) -> Self {
         Self::build_with_existence(pages, &VaultExistence::from_pages(pages, dirs), dirs)
     }
 
@@ -62,7 +62,7 @@ impl WikiGraph {
     /// - **orphans**: a scope page is exempt when it links to, or is linked from,
     ///   any page in the vault (tracked in `cross_scope_connected`).
     pub fn build_with_existence(
-        pages: &[Page],
+        pages: &[ScannedPage],
         existence: &VaultExistence,
         dirs: &VaultDirs,
     ) -> Self {
@@ -279,13 +279,13 @@ impl WikiGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scan::{Page, VaultExistence};
+    use crate::scan::{ScannedPage, VaultExistence};
     use lk_core::config::GraphConfig;
     use std::path::PathBuf;
 
-    fn make_page(id: &str, outgoing: &[&str]) -> Page {
+    fn make_page(id: &str, outgoing: &[&str]) -> ScannedPage {
         let name = id.rsplit('/').next().unwrap_or(id);
-        Page {
+        ScannedPage {
             id: id.to_owned(),
             path: PathBuf::from(format!("{id}.md")),
             title: name.to_owned(),

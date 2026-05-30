@@ -1,7 +1,7 @@
 # lk-pipeline
 
 Deterministic transform stages between `lk-source` and `lk-vault`. Shares an
-`Arc<PipelineContext>` (engine, llm, dirs, perf, identity, timezone, locale,
+`Arc<PipelineContext>` (engine, llm, dirs, perf, timezone, locale,
 concept_categories) with the `Synthesizer`.
 
 - **`Pipeline::plan` is per-source**; it returns that source's daily pages and merges
@@ -61,34 +61,37 @@ concept_categories) with the `Synthesizer`.
   the intra-batch (seen-id/url) checks ALWAYS run — so a dry-run with no
   cache still matches a real run. URLs are canonicalised before lookup and storage:
   http→https, host lowercase, trailing slash removal, auth stripping, tracking-param
-  removal (`utm_*`, `fbclid`, `gclid`, `msclkid`, `ttclid`, `twclid`, `wbraid`,
-  `gbraid`, …) with resource-identifying params preserved and sorted. Titles are
+  removal (built-in `utm_*`, `fbclid`, `gclid`, `igshid`, `ref_src`, … — single-letter
+  ambiguous params like `si` are deliberately kept (host-specific resource selectors) PLUS
+  `dedup.extra_tracking_params` from config, where a trailing `*` is a prefix match)
+  with resource-identifying params preserved and sorted. Titles are
   compared case-insensitively (both sides lowercased) and scanned across the
   full table (no date partition). The cache is recreated only on a recoverable mismatch — a schema-type
   change or an outdated on-disk format after a redb major upgrade
   (`DatabaseError::UpgradeRequired`) — never on I/O/corruption errors. On recreation
   the stale file is renamed to `*.redb.backup.{timestamp}-pid{pid}` (not deleted),
   preserving dedup history for manual recovery.
-- **classify**: `flag_personal` matches identity tokens with `contains_bounded`
-  (**ASCII**-alphanumeric/`._%+-` token boundary) to avoid Latin substring false
-  positives (`kim`⊄`kimberly`, `test@x.com`⊄`test@x.com.au`); `@` is intentionally
-  excluded so Slack `<@U…>` mentions still match. CJK scripts are NOT boundary chars,
-  so a Korean needle matches across attached particles/honorifics (`검토`→`검토를`,
-  `이준영`→`이준영님`) — agglutinative text has no Latin-style token gaps. `classify_by_keywords` reads
-  `SourceConfig.classify` (ordered `Vec<ClassifyRule>`, first match wins) and uses
-  `contains_bounded` (token-boundary match) — prevents substring false positives.
-  Classification is purely deterministic (keyword rules); an event no rule matches
-  stays uncategorized (rendered in the general section, routed to `uncategorized` in
-  the work-log) — a safe, predictable default with no nondeterministic LLM step.
+- **classify**: ownership is decided at the source. Each adapter sets `RawItem::is_self`
+  by comparing its structured authorship field (`From` address, message author id,
+  issue assignee account, calendar organizer/attendee) to `ExtractContext::identity` —
+  exact match, no text heuristics. `normalize` carries it to `Event::is_self`, and
+  `mark_personal(events, track_personal)` sets `is_personal` + the `personal` label
+  only when the source opts into `track_personal`. A recipient/CC/mention is never the
+  author, so it is never personal. `classify_by_keywords` reads `SourceConfig.classify`
+  (ordered `Vec<ClassifyRule>`, first match wins) and uses `contains_bounded`
+  (ASCII-alphanumeric/`._%+-` token boundary; CJK matches across attached particles so
+  `검토`→`검토를`/`재검토`) — keyword classification only. Classification is purely
+  deterministic; an event no rule matches stays uncategorized (general section /
+  `uncategorized` work-log) — a safe default with no LLM step.
 - **Concept merge** reads existing `created`/`updated` frontmatter (the keys actually
   written), preserves the original title and category (established identity = first
   writer wins). A re-extraction whose category DISAGREES with the established one is a
   genuine conflict — kept established, but `tracing::warn`ed so a possibly-wrong day-1
-  assignment doesn't silently calcify (the one conflict signal detectable at merge
-  time; post-hoc lints can't see it). Citations are NOT stored in concept frontmatter:
-  the `## 출처` body (re-derived by `backlinks-sync`) is the single source-of-truth,
-  and `source_count` is an ingest approximation that `backlinks-sync` re-derives
-  exactly. Before extraction, `load_existing_concept_refs()` scans the vault's concept
+  assignment doesn't silently calcify. `merge` only widens the `first_seen`/`last_seen`
+  window (`observe`); it does NOT count citations. `source_count` is written as `0` by
+  the template and owned solely by `lore graph backlinks-sync`, which re-derives it
+  exactly from the wikilink graph — so a crash or `--force` re-ingest can never inflate
+  it. Before extraction, `load_existing_concept_refs()` scans the vault's concept
   directory + in-memory drafts and passes them as `existing_concepts` in the LLM
   request, preventing duplicate concept creation.
 - **Synthesizer** methods are `try_weekly_synthesis` + `try_*_personal`. Each is a
@@ -100,9 +103,14 @@ concept_categories) with the `Synthesizer`.
   skips the page rather than stamping an empty hash. Every `TaskTarget` carries
   `anchor` — the exact `## …` heading resolved from i18n at construction time — so
   the skill never needs a hardcoded kind→heading table.
-- **Synthesis fallback cascade**: quarterly reads monthly → weekly-personal → None;
-  annual reads quarterly → monthly → None. Raw daily work-log is never fed directly
-  to a higher-level synthesis (each level reads only pre-summarized pages).
+- **Synthesis fallback cascade** is **per-missing-child**, not all-or-nothing: each
+  month of a quarter independently falls back to its weekly reviews when its monthly
+  review is absent (`month_child_narrative`), and each quarter of a year falls back to
+  its months — then weeks — when its quarterly review is absent (`quarter_child_narrative`).
+  So a quarter whose latest month isn't summarized yet still includes that month rather
+  than omitting it. A `used_weeks` set dedups a boundary week shared by two adjacent
+  fallback months. Raw daily work-log is never fed to a higher-level synthesis (each
+  level reads only pre-summarized pages).
 - Fallback renderers must emit the same `##` anchors the templates use (so `/lore-process`
   can find the section) and the same frontmatter keys synthesis reads (e.g. work-log
   `categories`).

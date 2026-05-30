@@ -12,7 +12,7 @@ Data Sources              lore (Rust CLI)            Obsidian Vault (vault.dirs.
 ────────────              ───────────────            ──────────────────────────────
 Google Drive ──┐          ┌─ Extract (per-source)    <daily>/{source-id}/
 Gmail ─────────┤          ├─ Normalize → Event       <personal>/work-log/
-Slack ─────────┼─ config ─┤  Deduplicate (cascade)   <personal>/{weekly,monthly,quarterly,annually}/
+Slack ─────────┼─ config ─┤  Deduplicate (cascade)   <personal>/{weekly,monthly,quarterly,annual}/
 Jira ──────────┤  .yaml   ├─ Classify (labels)       <synthesis>/{weekly}/
 Calendar ──────┤          ├─ Concepts (LLM)          <wiki>/concepts/
 RSS/Atom ──────┤          ├─ Render (templates)      <wiki>/documents/
@@ -50,6 +50,7 @@ lore ingest ai-news                # run a single source
 lore schema                        # generate <wiki>/AGENTS.md
 lore wiki concepts                 # list all concept pages
 lore graph lint                    # structural health check
+lore queue status                  # classify pending LLM tasks (current/stale/missing)
 ```
 
 ## Config
@@ -64,9 +65,12 @@ Auto-discovered: `./config.yaml` → `~/.config/lorekeeper/config.yaml`.
 - **Vault directories configurable**: all top-level vault paths (`<daily>`, `<personal>`, `<synthesis>`, `<wiki>`) are set via `vault.dirs.*` in config.yaml. Code uses `VaultPath` builders, never hardcoded strings.
 - **Date derivation**: `timestamp.to_zoned(vault.timezone()).date()` — always via configured timezone, never UTC.
 - **Multi-date batches**: events spanning several dates produce one `<daily>/` page per date.
+- **Ownership decided by the adapter**: each source sets `RawItem::is_self` by exact-matching its structured authorship field against the user — Gmail `From`/Calendar organizer-or-attendee vs `identity.email`, Slack author vs `identity.slack_id`, Jira assignee vs the authenticated `/myself` account. `is_personal` = `is_self && track_personal`. The pipeline never infers ownership from free-form text, so recipients/CCs/mentions never pollute the personal work-log or reviews.
+- **`source_count` owned by `backlinks-sync`**: ingest writes `0`; `lore graph backlinks-sync` re-derives the exact citation count from the wikilink graph.
+- **Stale LLM tasks are caught deterministically**: `lore queue status` classifies each pending task `current`/`stale`/`missing-target` against its target page in tested Rust; `/lore-process` processes only `current` tasks.
 - **Atomic ingest** (5 phases): plan → write daily/concept → work-log → flush LLM queue → commit dedup. Each source's dedup commits only after its own writes + flush succeed.
 - **Daily pages are materialized views**: structural fields (frontmatter, raw event list, headings) are re-rendered every ingest; semantic fields (summary, refined events, concept wiki-links) are LLM-owned, preserved across re-renders, and invalidated by a BLAKE3-128 hash in the page's `llm_inputs` frontmatter. Re-ingesting unchanged data enqueues zero LLM tasks. Every section's `llm_inputs.<key>` is pre-stamped by the pipeline with the current-input hash (the stale-task reference point). Completion detection has two shapes (`TargetKind::cache_shape`): fill-empty sections (summary, concepts) signal done by a non-empty body — force a re-run by deleting the body or the `llm_inputs.<key>` line; the one in-place rewrite (`refine-events`, whose section is structurally non-empty) is marked done by a second key, `refine_events_done`, that `/lore-process` stamps after refining — so raw-but-unrefined events never look "done" and a changed input always re-refines. Force an in-place re-run by deleting the `refine_events_done` line (emptying the event body does not re-run it).
-- **Domain logic single-sourced in lk-core**: slugify (NFKC), frontmatter, wikilink, text normalization. Zero duplicate implementations across crates.
+- **Domain logic single-sourced in lk-core**: slugify (NFKC), frontmatter, wikilink, blank-line collapsing. Zero duplicate implementations across crates. (Rich-text→Markdown conversion — ADF/HTML/Slack — is single-sourced separately in `lk-source::markdown`.)
 - **i18n single source of truth**: `vault.locale` (ko/en) switches all labels. Templates use `{{ i18n.* }}`. `lore schema` generates `<wiki>/AGENTS.md` from the i18n bundle. Source content is never translated.
 - **`--dry-run` is side-effect-free**: no vault writes, no dedup, no log.
 
@@ -81,5 +85,5 @@ Auto-discovered: `./config.yaml` → `~/.config/lorekeeper/config.yaml`.
 | `jira` | Jira REST API | Issue tracking (ADF→Markdown, status/period snapshot) |
 | `google-calendar` | Calendar API | Schedule tracking (HTML→Markdown) |
 | `rss` | RSS/Atom (`feed-rs`) | External knowledge feeds (vendor blogs, news) → concepts; no auth, multi-feed, per-feed error isolation |
-| `manual` | Local inbox | User-curated files dropped in `inbox/` (md/txt/markdown/json by default; opt-in archive) |
+| `manual` | Local inbox | User-curated files dropped in `inbox/` (md/txt/markdown/json/html/htm by default; auto-archives after a successful commit) |
 

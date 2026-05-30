@@ -1,12 +1,12 @@
-# Google (Calendar / Gmail) 설정값 조회 (`gws`)
+# Looking up Google (Calendar / Gmail) values (`gws`)
 
-> `gws`는 출력을 stdout(JSON), 진단을 stderr로 낸다 — 파싱 시 `2>/dev/null`.
+> `gws` prints output to stdout (JSON) and diagnostics to stderr — use `2>/dev/null` when parsing.
 
-## Calendar — 캘린더 id
+## Calendar — calendar id
 ```bash
 gws calendar calendarList list 2>/dev/null
 ```
-보통 `primary`(본인 기본 캘린더). 공유/팀 캘린더는 그 id를 쓴다.
+Usually `primary` (your own default calendar). For a shared/team calendar, use its id.
 ```yaml
 my-schedule:
   type: google-calendar
@@ -17,10 +17,10 @@ my-schedule:
   extract_concepts: false
   track_personal: true
 ```
-일정 description은 HTML→Markdown으로 자동 변환된다.
+Event descriptions are converted HTML→Markdown automatically.
 
-## Gmail — 어떤 메일을 수집할지
-안 읽은 메일의 카테고리 분포를 보고 노이즈를 가늠:
+## Gmail — which mail to collect
+Inspect the category distribution of unread mail to gauge the noise:
 ```bash
 for c in primary promotions updates social forums; do
   n=$(gws gmail users messages list --params "{\"userId\":\"me\",\"q\":\"is:unread category:$c\",\"maxResults\":1}" 2>/dev/null \
@@ -28,7 +28,7 @@ for c in primary promotions updates social forums; do
   echo "$c: $n"
 done
 ```
-대개 `category:primary`만 업무 메일이고 나머지는 봇/마케팅. 권장:
+Usually only `category:primary` is work mail; the rest is bots/marketing. Recommended:
 ```yaml
 email-digest:
   type: gmail
@@ -36,8 +36,9 @@ email-digest:
   schedule: "30 8 * * 1-5"
   params:
     lookback_hours: 24
-    include_queries: ["category:primary"]   # 봇/알림(GitHub 등) 제외, 업무 메일만
-  classify:                                   # 선택: 키워드→분류 섹션
+    include_queries: ["category:primary"]   # exclude bots/notifications (GitHub etc.), work mail only
+  classify:                                   # optional: keyword→category section
+    # keyword values may be in any language — they match the source body verbatim
     action_required: ["검토 요청", "확인 부탁", "please review"]
     decisions: ["승인", "결재 완료", "approved"]
   labels: [personal]
@@ -45,5 +46,5 @@ email-digest:
   track_personal: true
 ```
 
-## refresh token이 없을 때
-`lore init credentials`로 브라우저 OAuth 발급(Desktop-app 클라이언트, 읽기 전용 스코프).
+## When there is no refresh token
+Use `lore init credentials` for browser OAuth issuance (Desktop-app client, read-only scopes).

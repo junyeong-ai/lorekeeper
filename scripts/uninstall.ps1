@@ -80,6 +80,17 @@ foreach ($skillName in $SkillNames) {
     }
 }
 
+# Scheduled task (user-level only — installed alongside the skills).
+$schedTask = Join-Path $env:USERPROFILE '.claude\scheduled-tasks\lore-daily-ingest'
+if (Test-Path $schedTask) {
+    if (Prompt-YesNo "Remove scheduled task $schedTask?") {
+        Write-Step "Removing $schedTask"
+        Remove-Item -Recurse -Force $schedTask
+        Write-Ok 'Scheduled task removed: lore-daily-ingest'
+        $removed++
+    }
+}
+
 Write-Host ''
 if ($removed -eq 0) {
     Write-Host 'Nothing to uninstall.' -ForegroundColor DarkGray

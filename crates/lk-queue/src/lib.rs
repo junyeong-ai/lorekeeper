@@ -4,7 +4,7 @@ mod queue;
 
 pub use mock::MockLlmClient;
 pub use noop::NoopLlmClient;
-pub use queue::QueueLlmClient;
+pub use queue::{QueueLlmClient, QueueTask, TaskKind};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

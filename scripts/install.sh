@@ -340,6 +340,47 @@ install_skill() {
     log_ok "Skill installed"
 }
 
+# The autonomous daily-ingest scheduled task: a Claude Code agent definition that
+# chains `lore ingest` → /lore-process → graph reconcile (→ Monday weekly synthesis).
+# It is a user-level agent (always under ~/.claude/scheduled-tasks/, never project),
+# and it drives the skills, so it is installed only alongside them (skill_level != none).
+# The scheduler that fires it is the user's own cron / remote-agent runner — this just
+# places the definition where the runner looks for it.
+install_scheduled_task() {
+    [ "$1" = "none" ] && return
+    local name="lore-daily-ingest"
+    local src=""
+    if [ -n "$repo_dir" ] && [ -f "$repo_dir/scripts/${name}.md" ]; then
+        src="$repo_dir/scripts/${name}.md"
+    else
+        local url="${RELEASE_BASE}/v${version}/${name}.md"
+        if curl -fsSL --retry 3 --retry-delay 2 -o "${TMP_DIR}/${name}.md" "$url" 2>/dev/null; then
+            src="${TMP_DIR}/${name}.md"
+        else
+            log_warn "Scheduled-task template unavailable at $url; skipping"
+            return
+        fi
+    fi
+
+    local target="$HOME/.claude/scheduled-tasks/${name}/SKILL.md"
+    render_step "Installing scheduled task → $target"
+    if [ -f "$target" ]; then
+        local existing new
+        existing="$(skill_sha256 "$target")"
+        new="$(skill_sha256 "$src")"
+        if [ -n "$existing" ] && [ "$existing" = "$new" ]; then
+            if [ "$LORE_INSTALL_FORCE" != "1" ] && ! prompt_yesno "Scheduled task is already current. Reinstall?" "N"; then
+                log_info "Scheduled task kept"
+                return
+            fi
+        fi
+        backup_path "$(dirname "$target")"
+    fi
+    mkdir -p "$(dirname "$target")"
+    cp "$src" "$target"
+    log_ok "Scheduled task installed (register it with your cron / agent runner)"
+}
+
 # ═════════════════════════════ ORCHESTRATION ═══════════════════════════════
 
 print_usage() {
@@ -412,6 +453,8 @@ render_review() {
         project) printf '  %sskills%s    ./.claude/skills/lore-*\n' "$C_DIM" "$C_RESET" ;;
         none)    printf '  %sskill%s     (skipped)\n' "$C_DIM" "$C_RESET" ;;
     esac
+    [ "$skill_level" != "none" ] && \
+        printf '  %sschedule%s  ~/.claude/scheduled-tasks/lore-daily-ingest\n' "$C_DIM" "$C_RESET"
 }
 
 check_path() {
@@ -582,6 +625,8 @@ main() {
                 SKILL_NAME="$skill" install_skill "$skill_level" "$skill_src"
             fi
         done
+        # The daily-ingest scheduled task drives the skills, so install it with them.
+        install_scheduled_task "$skill_level"
     fi
 
     printf '\n'

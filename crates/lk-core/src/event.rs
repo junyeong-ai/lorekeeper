@@ -13,7 +13,26 @@ pub struct Event {
     pub url: Option<String>,
     pub author: Option<String>,
     pub labels: Vec<String>,
-    pub work_category: Option<String>,
+    /// Daily-page grouping bucket assigned by `classify_by_keywords` from the
+    /// source's `classify` rules (e.g. `action_required`, `decisions`). A
+    /// presentation axis only — it groups events into sections on the rendered
+    /// daily page. Deliberately SEPARATE from `performance_category`: "what kind of
+    /// communication is this" is orthogonal to "what kind of contribution is this".
+    /// A rule may set both, but they never share a value space.
+    pub classification: Option<String>,
+    /// Personal-performance contribution bucket (e.g. `project-delivery`), used only
+    /// for work-log / review category distribution. Set from a `classify` rule's
+    /// optional `work_category` field — the single EXPLICIT bridge from a content
+    /// signal to the performance taxonomy. `None` lets `resolve_category` fall back
+    /// to the coarse per-source-type map. Never inferred from free-form text.
+    pub performance_category: Option<String>,
+    /// Authored by the configured identity, as determined by the source adapter
+    /// from its structured authorship fields (email From, message author id,
+    /// issue assignee, calendar organizer/attendee). The deterministic ownership
+    /// signal — never inferred downstream from free-form text.
+    pub is_self: bool,
+    /// `is_self` gated by the source's `track_personal`: the event counts toward
+    /// the user's personal work-log and performance reviews.
     pub is_personal: bool,
     /// Source-agnostic hash of title+body. Used by the `content-hash` dedup
     /// strategy to catch the same content arriving via multiple sources or
@@ -71,5 +90,9 @@ pub struct RawItem {
     pub url: Option<String>,
     pub author: Option<String>,
     pub timestamp: jiff::Timestamp,
+    /// Authored by the configured identity. The adapter sets this from its
+    /// structured authorship fields; the pipeline never re-derives ownership
+    /// from free-form text.
+    pub is_self: bool,
     pub metadata: serde_json::Value,
 }

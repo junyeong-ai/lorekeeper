@@ -267,6 +267,9 @@ impl Source for GmailSource {
                 continue;
             };
 
+            let me = ctx.identity.email.trim();
+            let is_self = !me.is_empty() && header_email(from).eq_ignore_ascii_case(me);
+
             items.push(RawItem {
                 external_id: Some(msg.id.clone()),
                 title: subject.to_string(),
@@ -277,6 +280,7 @@ impl Source for GmailSource {
                 )),
                 author: Some(from.to_string()),
                 timestamp: ts,
+                is_self,
                 metadata: serde_json::json!({
                     "to": Self::header(&msg, "To"),
                     "labels": msg.label_ids,
@@ -290,6 +294,16 @@ impl Source for GmailSource {
             "gmail: extraction complete"
         );
         Ok(items)
+    }
+}
+
+/// The bare address from a `From`/`To` header: `"Name" <addr@x>` → `addr@x`,
+/// a bare `addr@x` → itself. Compared case-insensitively against the identity.
+/// Trims surrounding whitespace inside the angle brackets too (`< addr >`).
+fn header_email(raw: &str) -> &str {
+    match raw.rsplit_once('<') {
+        Some((_, rest)) => rest.trim().trim_end_matches('>').trim(),
+        None => raw.trim(),
     }
 }
 
@@ -371,4 +385,30 @@ fn decode_base64url(data: &str) -> String {
         .ok()
         .and_then(|bytes| String::from_utf8(bytes).ok())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::header_email;
+
+    #[test]
+    fn header_email_extracts_bare_address() {
+        assert_eq!(header_email("\"Gildong Hong\" <me@x.com>"), "me@x.com");
+        assert_eq!(header_email("me@x.com"), "me@x.com");
+        assert_eq!(header_email("Me <me@x.com>"), "me@x.com");
+        // Whitespace inside the brackets and around the header is trimmed.
+        assert_eq!(header_email("Me < me@x.com > "), "me@x.com");
+    }
+
+    #[test]
+    fn ownership_match_is_exact_sender_not_substring() {
+        // The From sender matches the identity (case-insensitive) → self-authored.
+        let me = "me@x.com";
+        assert!(header_email("\"Me\" <ME@X.com>").eq_ignore_ascii_case(me));
+        // A different sender does NOT match, even if the identity address appears
+        // elsewhere in the raw header text (e.g. the user is in a reply-to display).
+        assert!(!header_email("\"me@x.com via list\" <list@x.com>").eq_ignore_ascii_case(me));
+        // A look-alike longer domain must not match.
+        assert!(!header_email("<me@x.com.evil.com>").eq_ignore_ascii_case(me));
+    }
 }

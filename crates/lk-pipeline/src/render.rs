@@ -51,7 +51,7 @@ pub struct RenderContext<'a> {
     pub labels: &'a [String],
     pub summary: &'a str,
     pub concepts: &'a [String],
-    /// Whether this source extracts concepts. Templates render the `## 관련 개념`
+    /// Whether this source extracts concepts. Templates render the `## Related Concepts`
     /// section only when true, so a source that opts out (`extract_concepts: false`,
     /// e.g. a personal work-log feed) doesn't carry a permanently-empty section.
     pub extract_concepts: bool,
@@ -93,7 +93,7 @@ pub fn render_daily_page(
                 "body": e.body,
                 "author": e.author,
                 "url": e.url,
-                "work_category": e.work_category,
+                "classification": e.classification,
                 "labels": e.labels,
                 "is_personal": e.is_personal,
                 "subject": e.title,
@@ -264,7 +264,7 @@ where
 fn filter_by_class(events: &[&Event], class: &str) -> Vec<serde_json::Value> {
     events
         .iter()
-        .filter(|e| e.work_category.as_deref() == Some(class))
+        .filter(|e| e.classification.as_deref() == Some(class))
         .map(|e| {
             serde_json::json!({
                 "subject": e.title,

@@ -243,6 +243,7 @@ impl Source for JiraSource {
                     url: Some(format!("{base}/browse/{}", issue.key)),
                     author,
                     timestamp: ts,
+                    is_self: is_me,
                     metadata: serde_json::json!({
                         "status": status,
                         "priority": issue.fields.priority.and_then(|p| p.name),
@@ -250,7 +251,6 @@ impl Source for JiraSource {
                         "duedate": issue.fields.duedate,
                         "start_date": start_date,
                         "assignee_account_id": assignee_account_id,
-                        "is_self": is_me,
                     }),
                 })
             })

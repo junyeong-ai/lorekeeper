@@ -6,6 +6,7 @@ use crate::cluster::{ClusterResult, LinkSuggestion};
 use crate::concepts::{InvalidCategoryConcept, NearDuplicateConcept, UnresolvedConflict};
 use crate::export::GraphExport;
 use crate::graph::{BrokenLink, HubEntry};
+use crate::merge::MergeResult;
 use crate::stale::{Category, StalePage};
 
 #[derive(Debug, Serialize)]
@@ -334,6 +335,44 @@ pub struct BacklinksSyncReport {
     #[serde(flatten)]
     pub sync: SyncReport,
     pub changed: usize,
+}
+
+pub fn print_merge(result: &MergeResult) {
+    let mode = if result.dry_run { " (dry-run)" } else { "" };
+    let total: usize = result.rewritten.iter().map(|r| r.links).sum();
+    println!(
+        "Merge{mode}: [[{}]] → [[{}]] — {total} link(s) across {} page(s)",
+        result.from_slug,
+        result.into_slug,
+        result.rewritten.len()
+    );
+    for r in &result.rewritten {
+        println!("  {} ({} link(s))", r.path.display(), r.links);
+    }
+    if result.deleted {
+        let verb = if result.dry_run {
+            "would delete"
+        } else {
+            "deleted"
+        };
+        println!("  {verb} concept page: {}", result.from_slug);
+    }
+    if result.from_had_body {
+        if result.dry_run {
+            println!(
+                "  ! '{}' has authored body content a merge would discard — salvage it \
+                 into '{}', then re-run with --force.",
+                result.from_slug, result.into_slug
+            );
+        } else {
+            println!(
+                "  ! '{}' had authored body content; it was discarded (--force). \
+                 Confirm '{}' captured anything worth keeping.",
+                result.from_slug, result.into_slug
+            );
+        }
+    }
+    println!("  next: run `lore graph backlinks-sync` to re-derive sources + source_count");
 }
 
 pub fn print_backlinks_sync(r: &BacklinksSyncReport) {

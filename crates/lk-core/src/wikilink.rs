@@ -19,6 +19,11 @@ pub static WIKILINK_RE: LazyLock<Regex> =
 /// Split a raw wikilink target into `(page, anchor)`, where `anchor` is a `#heading`
 /// or `^block` suffix (including its leading marker) or the empty string. A target that
 /// is anchor-only (e.g. `#section`) yields an empty page.
+///
+/// The target must be alias-free — [`WIKILINK_RE`] capture group 1 already excludes
+/// the `|alias`, so this is correct for that caller. Any code that decomposes the
+/// FULL inner text (`page#anchor|alias`) and then *reconstructs* the link must use
+/// [`split_wikilink_parts`] so the anchor and alias are never conflated.
 pub fn split_wikilink_target(target: &str) -> (&str, &str) {
     if let Some(pos) = target.find('#') {
         (&target[..pos], &target[pos..])
@@ -27,6 +32,24 @@ pub fn split_wikilink_target(target: &str) -> (&str, &str) {
     } else {
         (target, "")
     }
+}
+
+/// Decompose a wikilink's full inner text into `(page, anchor, alias)`, where `anchor`
+/// keeps its leading `#`/`^` and `alias` keeps its leading `|` (both empty when
+/// absent). Obsidian's grammar is `page[#anchor][|alias]` with the alias always last,
+/// so the alias is split off FIRST and the anchor taken from the remainder — the only
+/// correct way to rebuild a link without duplicating or dropping a component.
+///
+/// `Page#Sec|Label` → `("Page", "#Sec", "|Label")`, `Page|Label` →
+/// `("Page", "", "|Label")`, `Page#Sec` → `("Page", "#Sec", "")`, `Page` →
+/// `("Page", "", "")`.
+pub fn split_wikilink_parts(inner: &str) -> (&str, &str, &str) {
+    let (link, alias) = match inner.find('|') {
+        Some(idx) => (&inner[..idx], &inner[idx..]),
+        None => (inner, ""),
+    };
+    let (page, anchor) = split_wikilink_target(link);
+    (page, anchor, alias)
 }
 
 /// Extract the page portion of every `[[wikilink]]` in `body`, with anchors stripped.
@@ -267,5 +290,18 @@ Text `[[Inline]]` and [[Middle|display]].
             split_wikilink_target("#heading-only"),
             ("", "#heading-only")
         );
+    }
+    #[test]
+    fn split_parts_separates_page_anchor_alias() {
+        assert_eq!(split_wikilink_parts("Page"), ("Page", "", ""));
+        assert_eq!(
+            split_wikilink_parts("Page#Sec|My Alias"),
+            ("Page", "#Sec", "|My Alias")
+        );
+        assert_eq!(
+            split_wikilink_parts("Page^blk|My Alias"),
+            ("Page", "^blk", "|My Alias")
+        );
+        assert_eq!(split_wikilink_parts("Page|Label"), ("Page", "", "|Label"));
     }
 }

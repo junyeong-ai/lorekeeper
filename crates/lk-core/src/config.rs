@@ -7,8 +7,20 @@ use crate::error::ConfigError;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ClassifyRule {
+    /// Daily-page grouping bucket assigned to a matching event (e.g.
+    /// `action_required`). A presentation axis — it controls which section the
+    /// event renders under on the daily page.
     pub category: String,
     pub keywords: Vec<String>,
+    /// Optional EXPLICIT bridge to the performance taxonomy: when set, a matching
+    /// event also gets this `performance_category`, contributing to the work-log /
+    /// review distribution. Must be one of `performance.work_categories` (validated
+    /// at load). Omitted = this rule is grouping-only and the event's performance
+    /// category falls back to the per-source-type map. This keeps the two
+    /// taxonomies orthogonal while making the content→performance link visible and
+    /// opt-in per rule, rather than a fragile string coincidence.
+    #[serde(default)]
+    pub work_category: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -97,6 +109,18 @@ impl Config {
                         rule.category
                     )));
                 }
+                // The performance bridge must target a real performance category, or
+                // the work-log distribution would silently drop the rule's events into
+                // "uncategorized" — the same fail-fast contract as the source maps.
+                if let Some(wc) = &rule.work_category
+                    && !self.performance.work_categories.contains(wc)
+                {
+                    return Err(ConfigError::Validation(format!(
+                        "sources.{id}.classify: rule '{}' work_category '{wc}' is not in \
+                         performance.work_categories",
+                        rule.category
+                    )));
+                }
             }
         }
 
@@ -147,6 +171,23 @@ impl Config {
             )));
         }
 
+        for param in &self.dedup.extra_tracking_params {
+            // An entry is a literal key, optionally ending in a single `*` for a prefix
+            // match. Reject anything that leaves no literal prefix (blank, whitespace,
+            // bare `*`/`**` — which would strip EVERY query param and silently merge
+            // distinct resources) or that embeds a `*` mid-key (unsupported syntax that
+            // would never match and is almost certainly a mistake).
+            let trimmed = param.trim();
+            let prefix = trimmed.strip_suffix('*').unwrap_or(trimmed);
+            if prefix.is_empty() || prefix.contains('*') {
+                return Err(ConfigError::Validation(format!(
+                    "dedup.extra_tracking_params entry {param:?} is invalid: \
+                     give a key (optionally ending in a single `*` for a prefix), \
+                     not a bare/empty wildcard"
+                )));
+            }
+        }
+
         if !(0.1..=5.0).contains(&self.graph.cluster.resolution) {
             return Err(ConfigError::Validation(format!(
                 "graph.cluster.resolution must be in [0.1, 5.0], got {}",
@@ -161,6 +202,12 @@ impl Config {
             return Err(ConfigError::Validation(
                 "graph.graph.min_hub_degree must be >= 1".into(),
             ));
+        }
+        if !(0.0..=1.0).contains(&self.graph.graph.concept_near_duplicate_threshold) {
+            return Err(ConfigError::Validation(format!(
+                "graph.graph.concept_near_duplicate_threshold must be in [0.0, 1.0], got {}",
+                self.graph.graph.concept_near_duplicate_threshold
+            )));
         }
         if self.graph.cluster.min_community_size == 0 {
             return Err(ConfigError::Validation(
@@ -417,7 +464,7 @@ impl Default for VaultDirs {
             weekly: "weekly".into(),
             monthly: "monthly".into(),
             quarterly: "quarterly".into(),
-            annual: "annually".into(),
+            annual: "annual".into(),
             personal: "me".into(),
             synthesis: "synthesis".into(),
             wiki: "wiki".into(),
@@ -494,14 +541,15 @@ fn validate_vault_dir(field: &str, value: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct Identity {
     pub name: String,
     pub email: String,
+    /// Slack user id (`U…`), matched against message authors to attribute the user's
+    /// own posts. Jira ownership needs no config: the adapter compares against the
+    /// authenticated account from `/myself`.
     #[serde(default)]
     pub slack_id: Option<String>,
-    #[serde(default)]
-    pub jira_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -573,6 +621,26 @@ pub enum SourceType {
 }
 
 impl SourceType {
+    /// Whether a source's items can change *after* their date — so re-ingesting the
+    /// same day must re-render with the latest upstream state rather than dedup the
+    /// item away as already-seen.
+    ///
+    /// Jira issues change status/assignee and Calendar events move (scheduled→actual)
+    /// on the same day they were first seen; their `event-id` (issue key / event id)
+    /// is stable, so the `event-id` dedup stage would otherwise freeze the first
+    /// snapshot. Mutable sources therefore bypass dedup per-run — equivalent to a
+    /// scoped `--force`, so the daily scheduled job needs no blanket `--force`.
+    ///
+    /// This is NOT wasteful: the materialized-view re-render is structural only, the
+    /// LLM cache (BLAKE3 `llm_inputs`) still skips unchanged content, and an unchanged
+    /// page round-trips byte-identical. Only a genuine state change produces a diff.
+    ///
+    /// Append-only sources (mail, chat, RSS, drive, manual) keep full dedup: their
+    /// items don't mutate after publication, so re-seeing one is a true duplicate.
+    pub fn is_mutable(self) -> bool {
+        matches!(self, SourceType::Jira | SourceType::GoogleCalendar)
+    }
+
     pub fn events_heading(self, strings: &crate::i18n::Strings) -> &'static str {
         match self {
             SourceType::SlackChannel | SourceType::SlackSearch => strings.key_messages,
@@ -612,6 +680,11 @@ impl std::fmt::Display for SourceType {
 pub struct DedupConfig {
     pub cascade: Vec<DedupStrategy>,
     pub title_threshold: f64,
+    /// Additional query-parameter keys to strip during URL canonicalisation, on top
+    /// of the built-in vendor-tracking set. For attribution parameters a site adds
+    /// that aren't yet built in — never resource-identifying keys, which would merge
+    /// distinct pages. Exact keys; a trailing `*` matches a prefix (e.g. `pk_*`).
+    pub extra_tracking_params: Vec<String>,
 }
 
 impl Default for DedupConfig {
@@ -629,6 +702,7 @@ impl Default for DedupConfig {
                 DedupStrategy::Url,
             ],
             title_threshold: 0.85,
+            extra_tracking_params: Vec::new(),
         }
     }
 }
@@ -667,24 +741,31 @@ impl PerformanceConfig {
             .unwrap_or(locale.strings().uncategorized)
     }
 
-    /// Resolve the work category for an event, checking source-ID map, then source-type map,
-    /// then work_category, falling back to `None`.
+    /// Resolve the performance category for an event. Precedence, most to least
+    /// specific:
+    /// 1. `source_category_map[source_id]` — an explicit per-source intent.
+    /// 2. `performance_category` — the event's own content signal, set by a
+    ///    `classify` rule's `work_category` bridge. This OUTRANKS the per-type map
+    ///    so a genuine content signal (e.g. a Jira issue whose body marks it as
+    ///    `innovation`) wins over the coarse "all Jira = project-delivery" default.
+    /// 3. `source_type_category_map[source_type]` — the coarse fallback.
+    ///
+    /// All three already draw from `work_categories` (the rule bridge and the maps
+    /// are validated against it at load), so no membership re-check is needed here.
     pub fn resolve_category(
         &self,
         source_id: &str,
         source_type: SourceType,
-        work_category: Option<&str>,
+        performance_category: Option<&str>,
     ) -> Option<String> {
         if let Some(c) = self.source_category_map.get(source_id) {
             return Some(c.clone());
         }
+        if let Some(c) = performance_category {
+            return Some(c.to_string());
+        }
         if let Some(c) = self.source_type_category_map.get(&source_type) {
             return Some(c.clone());
-        }
-        if let Some(cls) = work_category
-            && self.work_categories.iter().any(|c| c == cls)
-        {
-            return Some(cls.to_string());
         }
         None
     }
@@ -876,6 +957,10 @@ pub struct GraphMetricsConfig {
     pub min_hub_degree: usize,
     /// Page ids never reported as orphans (e.g. index/MOC pages).
     pub orphan_exclude: Vec<String>,
+    /// Sørensen-Dice similarity (on separator-stripped slugs) at or above which two
+    /// concept slugs are reported as near-duplicate merge candidates by `lint`.
+    /// Higher = fewer, higher-confidence pairs.
+    pub concept_near_duplicate_threshold: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -894,6 +979,12 @@ impl Default for GraphMetricsConfig {
         Self {
             min_hub_degree: 5,
             orphan_exclude: Vec::new(),
+            // 0.6 catches genuine spelling variants (`vector-db` ~ `vector-database`
+            // = 0.6) that fragment the graph. Version families (`gpt-4`/`gpt-4o`) are
+            // excluded separately by `is_version_variant`, so this can favor recall
+            // without the model-version false positives that would otherwise need a
+            // higher cutoff.
+            concept_near_duplicate_threshold: 0.6,
         }
     }
 }
@@ -999,6 +1090,57 @@ sources:
 "#;
         let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(config.validate().is_err(), "'..' segment must be rejected");
+    }
+
+    fn config_with_extra_tracking(entries: &str) -> Config {
+        let yaml = format!(
+            r#"
+vault:
+  root: /tmp/vault
+identity:
+  name: test
+  email: test@test.com
+sources:
+  s1:
+    type: gmail
+dedup:
+  extra_tracking_params: {entries}
+"#
+        );
+        serde_yaml_ng::from_str(&yaml).unwrap()
+    }
+
+    #[test]
+    fn near_duplicate_threshold_default_catches_real_spelling_variants() {
+        // 0.6 is deliberate: `vector-db` ~ `vector-database` scores exactly 0.6, and
+        // version families are excluded separately by `is_version_variant`, so the
+        // default favors recall without model-version false positives. A bump to 0.7
+        // would silently stop catching that canonical variant — trip this test first.
+        assert_eq!(
+            GraphMetricsConfig::default().concept_near_duplicate_threshold,
+            0.6
+        );
+    }
+
+    #[test]
+    fn validate_rejects_bare_wildcard_tracking_param() {
+        // A bare `*` would strip every query param and silently merge distinct resources.
+        for bad in ["[\"*\"]", "[\"\"]", "[\"  \"]", "[\"**\"]", "[\"a*b\"]"] {
+            assert!(
+                config_with_extra_tracking(bad).validate().is_err(),
+                "extra_tracking_params {bad} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_accepts_well_formed_tracking_params() {
+        // A literal key and a single trailing-`*` prefix are both valid.
+        assert!(
+            config_with_extra_tracking("[\"pk_campaign\", \"pk_*\"]")
+                .validate()
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1318,10 +1460,25 @@ performance:
     }
 
     #[test]
-    fn resolve_category_falls_back_to_work_category() {
-        let perf = PerformanceConfig::default();
-        let cat = perf.resolve_category("e", SourceType::Gmail, Some("technical-leadership"));
-        assert_eq!(cat.as_deref(), Some("technical-leadership"));
+    fn resolve_category_content_signal_outranks_source_type_map() {
+        // A `performance_category` from a classify-rule bridge must win over the
+        // coarse per-source-type default: a Jira issue the content marks as
+        // `innovation` is innovation, not the blanket "all Jira = project-delivery".
+        let mut perf = PerformanceConfig::default();
+        perf.source_type_category_map
+            .insert(SourceType::Jira, "project-delivery".into());
+        assert_eq!(
+            perf.resolve_category("any", SourceType::Jira, Some("innovation"))
+                .as_deref(),
+            Some("innovation"),
+            "content signal must outrank the per-source-type fallback"
+        );
+        assert_eq!(
+            perf.resolve_category("any", SourceType::Jira, None)
+                .as_deref(),
+            Some("project-delivery"),
+            "with no content signal the per-source-type default applies"
+        );
     }
 
     #[test]

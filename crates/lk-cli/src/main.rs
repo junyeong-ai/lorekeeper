@@ -43,7 +43,7 @@ enum Command {
     /// Generate synthesis reports
     Synthesis {
         #[command(subcommand)]
-        period: SynthesisPeriod,
+        period: commands::synthesis::Period,
     },
     /// Show last ingest time per source
     Status,
@@ -90,6 +90,11 @@ enum Command {
         #[command(subcommand)]
         cmd: commands::wiki::WikiCmd,
     },
+    /// Inspect the LLM work queue (`/lore-process` consumes this)
+    Queue {
+        #[command(subcommand)]
+        command: commands::queue::QueueCmd,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -105,38 +110,6 @@ enum InitTarget {
         /// Vault root override (default: vault.root from config)
         #[arg(long)]
         root: Option<PathBuf>,
-    },
-}
-
-#[derive(clap::Subcommand)]
-enum SynthesisPeriod {
-    Weekly {
-        #[arg(long, conflicts_with = "previous")]
-        date: Option<String>,
-        /// Synthesize the just-completed period (last week)
-        #[arg(long)]
-        previous: bool,
-    },
-    Monthly {
-        #[arg(long, conflicts_with = "previous")]
-        date: Option<String>,
-        /// Synthesize the just-completed period (last month)
-        #[arg(long)]
-        previous: bool,
-    },
-    Quarterly {
-        #[arg(long, conflicts_with = "previous")]
-        date: Option<String>,
-        /// Synthesize the just-completed period (last quarter)
-        #[arg(long)]
-        previous: bool,
-    },
-    Annual {
-        #[arg(long, conflicts_with = "previous")]
-        year: Option<i32>,
-        /// Synthesize the just-completed period (last year)
-        #[arg(long)]
-        previous: bool,
     },
 }
 
@@ -179,24 +152,13 @@ async fn main() -> miette::Result<()> {
             dry_run,
             force,
         } => commands::ingest::run(&opts, source, date, dry_run, force).await,
-        Command::Synthesis { period } => commands::synthesis::run(&opts, period.into()).await,
+        Command::Synthesis { period } => commands::synthesis::run(&opts, period).await,
         Command::Health { strict } => commands::health::run(&opts, strict).await,
         Command::Performance => commands::performance::run(&opts).await,
         Command::Schedule { bin } => commands::schedule::run(&opts, &bin).await,
         Command::Maintenance => commands::maintenance::run(&opts).await,
         Command::Graph { .. } => unreachable!(),
         Command::Wiki { cmd } => commands::wiki::run(&opts, cmd).await,
-    }
-}
-
-impl From<SynthesisPeriod> for commands::synthesis::Period {
-    fn from(p: SynthesisPeriod) -> Self {
-        use commands::synthesis::Period;
-        match p {
-            SynthesisPeriod::Weekly { date, previous } => Period::Weekly { date, previous },
-            SynthesisPeriod::Monthly { date, previous } => Period::Monthly { date, previous },
-            SynthesisPeriod::Quarterly { date, previous } => Period::Quarterly { date, previous },
-            SynthesisPeriod::Annual { year, previous } => Period::Annual { year, previous },
-        }
+        Command::Queue { command } => commands::queue::run(&opts, command).await,
     }
 }

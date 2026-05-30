@@ -145,6 +145,38 @@ function Install-Skill($level, $src, $skillName) {
     Write-Ok 'Skill installed'
 }
 
+# The autonomous daily-ingest scheduled task — a user-level Claude Code agent that
+# chains `lore ingest` -> /lore-process -> graph reconcile. Installed only with the
+# skills (it drives them); the firing scheduler is the user's own cron / agent runner.
+function Install-ScheduledTask($level, $version, $repoDir) {
+    if ($level -eq 'none') { return }
+    $name = 'lore-daily-ingest'
+    $src = $null
+    if ($repoDir -and (Test-Path (Join-Path $repoDir "scripts\$name.md"))) {
+        $src = Join-Path $repoDir "scripts\$name.md"
+    } else {
+        $url = "$ReleaseBase/v$version/$name.md"
+        $tmp = New-TemporaryFile
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $tmp.FullName -ErrorAction Stop
+            $src = $tmp.FullName
+        } catch {
+            Write-Warn "Scheduled-task template unavailable at $url; skipping"
+            return
+        }
+    }
+    $target = Join-Path $env:USERPROFILE ".claude\scheduled-tasks\$name\SKILL.md"
+    Write-Step "Installing scheduled task -> $target"
+    if (Test-Path $target) {
+        $backup = "$(Split-Path -Parent $target).backup_$(Get-Date -Format yyyyMMdd_HHmmss)"
+        Copy-Item -Path (Split-Path -Parent $target) -Destination $backup -Recurse -Force
+        Write-Host "  Backup: $backup" -ForegroundColor DarkGray
+    }
+    New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
+    Copy-Item -Path $src -Destination $target -Force
+    Write-Ok 'Scheduled task installed (register it with your scheduler)'
+}
+
 # ── main ─────────────────────────────────────────────────────────────────
 
 $repoDir = $null
@@ -180,6 +212,9 @@ switch ($Skill) {
     'user'    { Write-Host "  skills    $env:USERPROFILE\.claude\skills\{lore-ingest,lore-process,lore-setup,lore-wiki,lore-capture,lore-extract}" }
     'project' { Write-Host "  skills    .\.claude\skills\{lore-ingest,lore-process,lore-setup,lore-wiki,lore-capture,lore-extract}" }
     'none'    { Write-Host '  skills    (skipped)' }
+}
+if ($Skill -ne 'none') {
+    Write-Host "  schedule  $env:USERPROFILE\.claude\scheduled-tasks\lore-daily-ingest"
 }
 
 if ($DryRun) { Write-Host ''; Write-Warn '(dry-run) Not executing'; exit 0 }
@@ -222,6 +257,7 @@ if ($Skill -ne 'none') {
         if ($skillSrc) { Install-Skill $Skill $skillSrc $skillName }
         else { Write-Warn "Skill '$skillName' unavailable; skipping" }
     }
+    Install-ScheduledTask $Skill $version $repoDir
 }
 
 Write-Host ''

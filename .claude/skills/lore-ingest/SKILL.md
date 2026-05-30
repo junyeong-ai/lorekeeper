@@ -2,11 +2,10 @@
 name: lore-ingest
 description: Daily knowledge ingestion pipeline — collects from Gmail, Google Drive, Google Calendar, Slack, Jira, and RSS into an Obsidian vault. Deduplicates, classifies, extracts concepts, writes structured pages. Tracks personal work for performance reviews. Atomic 5-phase ingest with no-data-loss guarantee.
 when_to_use: |
-  ingest, collect, daily ingest, weekly summary, monthly summary,
-  quarterly review, annual review, performance review,
-  health check, check status, schedule generation, cron,
-  ai news, team digest, work log, concept extraction,
-  vault ingest, dedup pruning, log rotation
+  ingest, collect, daily ingest, run ingest, ingest sources,
+  ingest status, source health, generate cron, schedule ingest,
+  ai news, team digest, vault ingest, dedup pruning, log rotation,
+  run synthesis, synthesis report
 argument-hint: "<subcommand> [args]"
 disable-model-invocation: true
 allowed-tools: |
@@ -30,9 +29,9 @@ an Obsidian vault. All commands accept `--config <path>` to override.
 | `lore ingest --date YYYY-MM-DD` | Backfill events for a specific date |
 | `lore ingest --force` | Skip dedup, re-process everything |
 | `lore synthesis weekly [--previous]` | Weekly synthesis + personal summary |
-| `lore synthesis monthly` | Monthly performance summary |
-| `lore synthesis quarterly` | Quarterly review with category stats |
-| `lore synthesis annual` | Annual review from quarterly summaries |
+| `lore synthesis monthly [--previous]` | Monthly performance summary |
+| `lore synthesis quarterly [--previous]` | Quarterly review with category stats |
+| `lore synthesis annual [--previous]` | Annual review from quarterly summaries |
 | `lore status` | Last successful ingest per source |
 | `lore health [--strict]` | Warn if any source stale (>48h) |
 | `lore performance` | Work category distribution |
@@ -46,6 +45,7 @@ an Obsidian vault. All commands accept `--config <path>` to override.
 - "weekly summary" → `lore synthesis weekly --previous`
 - "monthly review" → `lore synthesis monthly --previous`
 - "quarterly review" → `lore synthesis quarterly --previous`
+- "annual review" → `lore synthesis annual --previous`
 - "show performance" → `lore performance`
 - "check status" → `lore status`
 - "health check" → `lore health`
@@ -83,12 +83,25 @@ Default provider is `queue` (buffers tasks to JSONL for `/lore-process`).
 Five phases, all-or-nothing per run:
 
 1. **Plan** — fetch, normalize, dedup-check, classify
-2. **Write daily + concept pages** — atomic per-file (tmp + rename)
-3. **Write work-log** — aggregate personal events across sources
+2. **Write page bodies** — atomic per-file (tmp + rename). Time-windowed
+   sources (Gmail/Slack/Jira/Calendar/RSS) write `<daily>/{source-id}/DATE.md`;
+   the `manual` source writes `<wiki>/documents/{slug}.md` instead (curated
+   documents, not a dated feed). Concept pages are a cross-source aggregate,
+   rendered once after all sources plan.
+3. **Write work-log** — aggregate personal events across sources (only events a
+   source-adapter marked `is_self`; `manual`/RSS/Drive have no authorship, so
+   they never produce work-log entries even with `track_personal: true`).
 4. **Flush LLM queue** — atomic JSONL task file (queue mode)
 5. **Commit dedup** — only if all writes + flush succeeded
 
 Crash between flush and commit → next run re-processes (no data loss).
+
+In **queue mode** (the default), phases 1–5 leave summary/concept/work-log
+sections empty and emit JSONL tasks. They are NOT knowledge yet — run
+**`/lore-process`** afterward to drain the queue (fill summaries, create/merge
+concept pages, work-log topic synthesis), then `lore graph backlinks-sync` +
+`lore wiki index` to reconcile the graph. A daily run is `lore ingest` →
+`/lore-process` → graph sync, not `lore ingest` alone.
 
 ## Safety notes
 

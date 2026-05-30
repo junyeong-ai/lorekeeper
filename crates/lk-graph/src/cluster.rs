@@ -318,13 +318,13 @@ fn shared_count(a: &[usize], b: &[usize]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scan::Page;
+    use crate::scan::ScannedPage;
     use lk_core::config::VaultDirs;
     use std::path::PathBuf;
 
-    fn make_page(id: &str, outgoing: &[&str]) -> Page {
+    fn make_page(id: &str, outgoing: &[&str]) -> ScannedPage {
         let name = id.rsplit('/').next().unwrap_or(id);
-        Page {
+        ScannedPage {
             id: id.to_owned(),
             path: PathBuf::from(format!("{id}.md")),
             title: name.to_owned(),

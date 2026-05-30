@@ -12,7 +12,7 @@ use lk_core::frontmatter::{self, Frontmatter};
 use serde::Serialize;
 
 use crate::GraphError;
-use crate::scan::Page;
+use crate::scan::ScannedPage;
 
 /// A vault page that exceeds the staleness threshold.
 #[derive(Debug, Clone, Serialize)]
@@ -41,7 +41,7 @@ pub enum Category {
     Weekly,
     Monthly,
     Quarterly,
-    Annually,
+    Annual,
     Other,
 }
 
@@ -78,7 +78,7 @@ impl Category {
             ),
             (
                 format!("{}/{}/", dirs.personal, dirs.annual),
-                Category::Annually,
+                Category::Annual,
             ),
         ];
         for (prefix, cat) in &prefixes {
@@ -100,7 +100,7 @@ impl Category {
             Category::Weekly => dirs.weekly.clone(),
             Category::Monthly => format!("{}/{}", dirs.personal, dirs.monthly),
             Category::Quarterly => format!("{}/{}", dirs.personal, dirs.quarterly),
-            Category::Annually => format!("{}/{}", dirs.personal, dirs.annual),
+            Category::Annual => format!("{}/{}", dirs.personal, dirs.annual),
             Category::Other => "other".to_string(),
         }
     }
@@ -113,7 +113,7 @@ impl Category {
 /// caller is responsible for grouping by category (the [`StalePage::category`]
 /// field is precomputed for that).
 pub fn find_stale(
-    pages: &[Page],
+    pages: &[ScannedPage],
     vault_root: &Path,
     today: jiff::civil::Date,
     threshold_days: u32,
@@ -179,8 +179,8 @@ mod tests {
         std::fs::write(&path, body).unwrap();
     }
 
-    fn page(id: &str, rel: &str) -> Page {
-        Page {
+    fn page(id: &str, rel: &str) -> ScannedPage {
+        ScannedPage {
             id: id.to_owned(),
             path: PathBuf::from(rel),
             title: id.to_owned(),
@@ -307,8 +307,8 @@ mod tests {
             Category::Quarterly
         );
         assert_eq!(
-            Category::from_path(Path::new("me/annually/2026.md"), &dirs),
-            Category::Annually
+            Category::from_path(Path::new("me/annual/2026.md"), &dirs),
+            Category::Annual
         );
         // Anything outside the known prefixes → Other.
         assert_eq!(
@@ -342,8 +342,8 @@ mod tests {
             Category::Weekly
         );
         assert_eq!(
-            Category::from_path(Path::new("my-logs/annually/2026.md"), &dirs),
-            Category::Annually
+            Category::from_path(Path::new("my-logs/annual/2026.md"), &dirs),
+            Category::Annual
         );
         // Old default paths should NOT match with custom dirs.
         assert_eq!(

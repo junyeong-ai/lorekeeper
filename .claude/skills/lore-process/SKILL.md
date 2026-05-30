@@ -2,9 +2,9 @@
 name: lore-process
 description: Consume Lorekeeper LLM work queue. When `lore ingest` runs in queue mode (config `llm.provider: queue`), the Rust pipeline writes JSONL task files under `<vault>/.lorekeeper/queue/`. This skill drains those queues — running summarize and concept extraction using Claude Code's native LLM (no API key needed) and editing the target vault pages (plain markdown files) in place. Idempotent — partial progress is resumable; processed files move to `.lorekeeper/queue/processed/`. Run after each `lore ingest` (or daily) to enrich pages that were written with empty summary/concept sections.
 when_to_use: |
-  lore-process, queue process, drain queue, fill summaries,
+  queue process, drain queue, fill summaries,
   concept extraction run, enrich daily pages, post-ingest
-argument-hint: "[--vault path] [--limit N]"
+argument-hint: "[--vault path]"
 allowed-tools: |
   Bash(ls *)
   Bash(cat *)
@@ -116,8 +116,8 @@ never construct them manually; use the path patterns from AGENTS.md.
 `weekly-synthesis-narrative` | `weekly-personal-narrative` |
 `monthly-personal-narrative` | `quarterly-personal-narrative` |
 `annual-personal-narrative` | `work-log-synthesis`
-`target.anchor`: the exact section heading (e.g. `"## Summary"` or `"## 요약"`)
-the pipeline wrote, resolved from i18n at queue time. Always use this as the
+`target.anchor`: the exact section heading (e.g. `"## Summary"`, or its localized
+form per AGENTS.md) the pipeline wrote, resolved from i18n at queue time. Always use this as the
 locate key — never hardcode headings per `target.kind`.
 
 `cache_hash` is BLAKE3-128 (32 hex chars) of the cache-identity subset of
@@ -143,11 +143,24 @@ frontmatter matches before writing — see "Stale-task guard" below.
 
    a. Read all tasks: `cat <file> | jq -c '.'`
 
-   b. **For each task** (in file order):
+   b. **Stale-task guard (authoritative).** Run
 
-      **Stale-task guard.** Before doing any LLM work, open `target.vault_path`
-      and read its `llm_inputs.<key>` frontmatter, where `<key>` is the task
-      key for this `target.kind`:
+      ```bash
+      lore queue status --json
+      ```
+
+      It classifies every pending task as `current`, `stale`, or
+      `missing-target` by comparing each `task.cache_hash` against its target
+      page's `llm_inputs.<key>` — the same check, computed in tested Rust.
+      **Process only `current` tasks; skip `stale` and `missing-target`
+      without editing their pages.** Match tasks by `task_id`. This is the
+      source of truth for the guard; the per-kind frontmatter detail below
+      explains the same logic and the completion signals you still write.
+
+   c. **For each `current` task** (in file order):
+
+      Open `target.vault_path` and read its `llm_inputs.<key>` frontmatter,
+      where `<key>` is the task key for this `target.kind`:
 
       | target.kind                                                            | frontmatter key   |
       |------------------------------------------------------------------------|-------------------|
@@ -230,7 +243,7 @@ frontmatter matches before writing — see "Stale-task guard" below.
         Always preserve source URLs/links for traceability.
 
       - **`kind: refine-events`** — rewrite the raw event bodies under
-        `target.anchor` (e.g. `## 주요 이벤트` or `## 주요 메시지`)
+        `target.anchor` (e.g. `## Key Events` or `## Key Messages`, localized per AGENTS.md)
         into refined knowledge in `input.locale` language.
 
         For EACH `### event heading` in the section:
@@ -265,9 +278,18 @@ frontmatter matches before writing — see "Stale-task guard" below.
         if present, names it). Output a list of concept names
         (in the source language). Each concept should also produce a
         a concept page (create if missing, merge if exists). Fill the origin
-        page's `## 관련 개념` with a `[[concept]]` forward link — the single source
-        of truth `backlinks-sync` reads; leave the concept's `## 출처` /
+        page's `## Related Concepts` with a `[[concept]]` forward link — the single source
+        of truth `backlinks-sync` reads; leave the concept's `## Sources` /
         `source_count` to it. Use the concept path pattern from AGENTS.md.
+
+        **What counts as a concept** (keep the graph high-signal, not noisy):
+        extract durable, reusable knowledge nodes — technologies, named methods,
+        architectures, patterns, standards, organizations. Do NOT mint concepts for
+        transient specifics, generic English words, dates/numbers, one-off phrasings,
+        or anything that would never plausibly be cited by a second source. When in
+        doubt, prefer the established broader concept over a narrow variant. A good
+        rule: a concept earns a page only if a future unrelated source could
+        independently link to it. Fewer, load-bearing concepts beat many shallow ones.
 
         `input.source_type` carries the originating adapter type; use it to
         scope what counts as a concept (per-type scoping:
@@ -287,16 +309,17 @@ frontmatter matches before writing — see "Stale-task guard" below.
            hyphen → collapse runs → trim. Same as `lk_core::slugify`.
 
         **Source references are machine-owned — do NOT hand-write them.** Leave the
-        concept's `## 출처` (Sources) body EMPTY and `source_count: 0`. Record the
+        concept's `## Sources` body EMPTY and `source_count: 0`. Record the
         citation instead as a forward `[[wikilink]]` in the ORIGIN page's
-        related-concepts section (the `## 관련 개념` of `target.vault_path`, which you
-        fill anyway). `lore graph backlinks-sync` re-derives every concept's `## 출처`
+        related-concepts section (the `## Related Concepts` of `target.vault_path`, which you
+        fill anyway). `lore graph backlinks-sync` re-derives every concept's `## Sources`
         + `source_count` from those forward links — so a concept cited by several
         pages in one batch (e.g. the same topic on two daily pages) is counted
         correctly, whereas hand-writing one ref per task undercounts it. This is
         identical to how lore-capture / lore-wiki / lore-extract treat concept
         sources: the wikilink graph is the single source of truth. Run
-        `lore graph backlinks-sync` in Finalize (the daily-ingest flow already does).
+        `lore graph backlinks-sync` in Finalize (step 5) — `lore ingest` does NOT
+        run it; the `lore-daily-ingest` scheduled task chains it after this skill.
 
         **Category assignment.** Hard constraint: the `category` value MUST
         be one of the IDs in `input.categories` (verbatim string match) or
@@ -324,7 +347,7 @@ frontmatter matches before writing — see "Stale-task guard" below.
         tags: ["{category-id}"]
         ---
         ```
-        Do NOT add any keys beyond those listed above. Leave the `## 출처` (Sources)
+        Do NOT add any keys beyond those listed above. Leave the `## Sources`
         body EMPTY and `source_count: 0` at write time — both are machine-owned and
         re-derived by `lore graph backlinks-sync` from the origin pages' forward
         `[[wikilink]]`s. Never hand-write citations, in the body or in frontmatter.
@@ -336,11 +359,11 @@ frontmatter matches before writing — see "Stale-task guard" below.
         (concept already exists), update the synthesis if the new source adds
         meaningful context; otherwise leave it.
 
-   c. **Edit the target page** — the markdown file at `target.vault_path`,
+   d. **Edit the target page** — the markdown file at `target.vault_path`,
       using the Edit tool (section replace). Every task carries
       `target.anchor` — the exact `## …` heading the pipeline wrote,
-      resolved from i18n at queue time (e.g. `"## Summary"` for English
-      or `"## 요약"` for Korean). Use it as the locate key for all task
+      resolved from i18n at queue time (e.g. `"## Summary"`, or its localized
+      form per AGENTS.md). Use it as the locate key for all task
       types — never hardcode headings per `target.kind`.
 
       For each task:
@@ -390,7 +413,7 @@ frontmatter matches before writing — see "Stale-task guard" below.
         etc.) — only the one matching `target.anchor` is replaced.
         Leave all other headings untouched.
 
-   d. **On task failure** (page not found, edit error, malformed task):
+   e. **On task failure** (page not found, edit error, malformed task):
       record the failed `task_id` and the reason. **Abort processing
       of this queue file** — do not attempt the remaining tasks. The
       queue file stays on disk so the next `/lore-process` run replays
@@ -403,14 +426,16 @@ frontmatter matches before writing — see "Stale-task guard" below.
    mv "$file" "$VAULT/.lorekeeper/queue/processed/"
    ```
 
-5. **Finalize** — concept `## 출처` / `source_count` were left empty on purpose;
+5. **Finalize** — concept `## Sources` / `source_count` were left empty on purpose;
    reconcile them from the wikilink graph (a concept cited by several pages in the
    batch is counted correctly here, never undercounted), then refresh the catalog:
    ```bash
-   lore graph backlinks-sync   # re-derive every concept's ## 출처 + source_count
+   lore graph backlinks-sync   # re-derive every concept's ## Sources + source_count
    lore wiki index             # refresh the catalog
    ```
-   The daily-ingest flow already runs both; do this after a standalone /lore-process.
+   `lore ingest` does NOT run these — always run them yourself after `/lore-process`.
+   (The `lore-daily-ingest` scheduled task chains ingest → /lore-process → these for
+   an automated daily run.)
 
 6. **Report** to the user:
    - On full success: number of files processed and tasks completed.
@@ -429,9 +454,10 @@ succeeded. Failure rules:
   - Daily summary/concept edits replace the section body — repeating the
     edit produces identical content. No drift.
   - Concept page merging preserves original `created` and dedupes the
-    `## 출처` body — re-adding the same `- [[ref]]` is a no-op.
-  - `source_count` is only incremented when a genuinely new `## 출처`
-    entry is appended (and `backlinks-sync` re-derives it exactly).
+    `## Sources` body — re-adding the same `- [[ref]]` is a no-op.
+  - `source_count` is never written by processing — new pages start at `0`,
+    ingest preserves the existing value, and only `lore graph backlinks-sync`
+    computes the authoritative count from the wikilink graph.
 - **Never partially-commit progress** to the queue file itself
   (no `processed.jsonl` sidecar): the source-of-truth is the vault edits,
   which are themselves idempotent.

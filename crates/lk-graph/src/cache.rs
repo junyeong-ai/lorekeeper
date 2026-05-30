@@ -221,6 +221,28 @@ mod tests {
     }
 
     #[test]
+    fn is_dirty_detects_change_in_secondary_watched_dir() {
+        // Integrity commands watch more than one dir (e.g. `wiki` ∪ `daily`). A change
+        // in a NON-first watched dir must be detected — otherwise `--incremental` could
+        // serve stale orphan/broken-link results after a `daily/` page changes.
+        let tmp = tempfile::tempdir().unwrap();
+        let wiki = tmp.path().join("wiki");
+        let daily = tmp.path().join("daily");
+        std::fs::create_dir_all(&wiki).unwrap();
+        std::fs::create_dir_all(&daily).unwrap();
+        std::fs::write(wiki.join("a.md"), "# A\n").unwrap();
+        std::fs::write(daily.join("d.md"), "# D\n").unwrap();
+
+        let watched = [PathBuf::from("wiki"), PathBuf::from("daily")];
+        let cache = build(tmp.path(), &watched, false).unwrap();
+        assert!(!is_dirty(tmp.path(), &watched, false, &cache).unwrap());
+
+        // A new file in the secondary dir is a change.
+        std::fs::write(daily.join("e.md"), "# E\n").unwrap();
+        assert!(is_dirty(tmp.path(), &watched, false, &cache).unwrap());
+    }
+
+    #[test]
     fn is_dirty_detects_deleted_file() {
         let tmp = tempfile::tempdir().unwrap();
         let wiki = tmp.path().join("wiki");

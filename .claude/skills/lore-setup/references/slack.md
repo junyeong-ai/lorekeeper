@@ -1,43 +1,43 @@
-# Slack 설정값 조회 (`slack-cli`)
+# Looking up Slack values (`slack-cli`)
 
-## 채널 ID 찾기
+## Find a channel ID
 ```bash
-slack-cli channels "<이름 일부>" --expand name,id,members -j
+slack-cli channels "<name fragment>" --expand name,id,members -j
 ```
-`id`(예: `C0A7G194EH0`)를 `channels`에 넣는다. 이름(`#name`)도 되지만 id가 안정적
-(rename에 영향 없음). 여러 채널은 부분검색을 반복.
+Put the `id` (e.g. `C0A7G194EH0`) in `channels`. A name (`#name`) also works, but the id
+is stable (unaffected by renames). Repeat the partial search for multiple channels.
 
-## 내 user id (personal 분리용)
+## My user id (for the personal split)
 ```bash
-slack-cli auth status            # workspace 확인
-slack-cli users "<내 이름>" -j   # id 예: U0AN3404QB0 → identity.slack_id
+slack-cli auth status            # confirm workspace
+slack-cli users "<your name>" -j   # id e.g. U0AN3404QB0 → identity.slack_id
 ```
 
-## 채널 성격 파악 (선택)
+## Gauge a channel's character (optional)
 ```bash
 slack-cli messages <CHANNEL_ID> --limit 30 --exclude-bots --expand reply_users_count,user_name -j
 ```
-쓰레드 비율이 높으면 `include_threads: true`가 중요(답글에 실제 논의가 있다).
+A high thread ratio means `include_threads: true` matters (the real discussion is in replies).
 
-## config 블록
+## config block
 ```yaml
 team-slack:
   type: slack-channel
   enabled: true
   schedule: "0 9 * * 1-5"
   params:
-    channels: ["C0A7G194EH0", "C0A8A0XC5BJ"]   # 팀 채널 (전체 = 팀 현황)
+    channels: ["C0A7G194EH0", "C0A8A0XC5BJ"]   # team channels (whole channel = team activity)
     lookback_hours: 24
-    include_threads: true     # 쓰레드 답글 맥락 포함
-    exclude_bots: true        # 봇/통합 제외 (기본 true)
-    # watch_users: ["U0AN3404QB0"]   # 특정인 작성/멘션만; 비우면 채널 전체
+    include_threads: true     # include thread-reply context
+    exclude_bots: true        # drop bots/integrations (default true)
+    # watch_users: ["U0AN3404QB0"]   # only threads a user authored/was mentioned in; empty = whole channel
   labels: [team-ops, personal]
   extract_concepts: true
-  track_personal: true        # identity.slack_id가 쓴 메시지 → work-log로 분리
+  track_personal: true        # messages authored by identity.slack_id → split into the work-log
 ```
-키워드 트렌드가 필요하면 `slack-search` 타입(아래)을 별도 소스로:
+For keyword trends, add a separate `slack-search` source (below):
 ```yaml
-  type: slack-search   # user token(xoxp) 필요 — search.messages는 봇 토큰 불가
+  type: slack-search   # needs a user token (xoxp) — search.messages rejects bot tokens
   params:
     queries:
       - {channel: "#ai-general", keywords: [AI, LLM, RAG]}

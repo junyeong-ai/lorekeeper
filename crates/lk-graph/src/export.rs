@@ -72,13 +72,13 @@ pub fn export(graph: &WikiGraph, cluster: Option<&ClusterResult>) -> GraphExport
 mod tests {
     use super::*;
     use crate::cluster::detect_communities;
-    use crate::scan::Page;
+    use crate::scan::ScannedPage;
     use lk_core::config::{GraphConfig, VaultDirs};
     use std::path::PathBuf;
 
-    fn make_page(id: &str, outgoing: &[&str]) -> Page {
+    fn make_page(id: &str, outgoing: &[&str]) -> ScannedPage {
         let name = id.rsplit('/').next().unwrap_or(id);
-        Page {
+        ScannedPage {
             id: id.to_owned(),
             path: PathBuf::from(format!("{id}.md")),
             title: name.to_owned(),

@@ -35,7 +35,7 @@
 //! the `completion_key` line (in-place) forces a re-enqueue on the next ingest. No
 //! `--force-llm` flag, no out-of-band cache invalidation API.
 
-use lk_core::frontmatter::Page;
+use lk_core::frontmatter::VaultPage;
 use lk_vault::section_body;
 
 /// Per-section cache decision. The pipeline computes one of these for every LLM
@@ -63,7 +63,7 @@ impl SectionDecision {
 
 /// The hash recorded in `existing`'s `llm_inputs.<key>` frontmatter, if any. The
 /// single reader of that frontmatter shape — every cache decision goes through here.
-pub fn stored_hash<'a>(existing: Option<&'a Page>, key: &str) -> Option<&'a str> {
+pub fn stored_hash<'a>(existing: Option<&'a VaultPage>, key: &str) -> Option<&'a str> {
     existing?
         .frontmatter
         .get("llm_inputs")
@@ -75,7 +75,12 @@ pub fn stored_hash<'a>(existing: Option<&'a Page>, key: &str) -> Option<&'a str>
 /// because the existing page already carries an identical hash and a filled body.
 /// `heading` is the text after `## ` — the same form `lk_vault::section` functions
 /// accept everywhere.
-pub fn lookup(existing: Option<&Page>, key: &str, heading: &str, hash: String) -> SectionDecision {
+pub fn lookup(
+    existing: Option<&VaultPage>,
+    key: &str,
+    heading: &str,
+    hash: String,
+) -> SectionDecision {
     let Some(page) = existing else {
         return SectionDecision {
             hash,
@@ -123,7 +128,7 @@ pub fn lookup(existing: Option<&Page>, key: &str, heading: &str, hash: String) -
 /// `hash`. On a hit the current (already-rewritten) body is preserved and spliced
 /// back over the fresh render.
 pub fn lookup_in_place(
-    existing: Option<&Page>,
+    existing: Option<&VaultPage>,
     completion_key: &str,
     heading: &str,
     hash: String,
@@ -157,7 +162,7 @@ mod tests {
     use super::*;
     use lk_core::frontmatter::parse_page;
 
-    fn page_with(frontmatter: &str, body: &str) -> Page {
+    fn page_with(frontmatter: &str, body: &str) -> VaultPage {
         let content = format!("---\n{frontmatter}---\n\n{body}");
         parse_page(&content).expect("test fixture parses")
     }

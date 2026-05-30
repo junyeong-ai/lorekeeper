@@ -314,6 +314,13 @@ impl Source for SlackChannelSource {
                     .and_then(|uid| users.get(uid).cloned())
                     .or(root.user.clone());
 
+                let is_self = ctx
+                    .identity
+                    .slack_id
+                    .as_deref()
+                    .filter(|me| !me.trim().is_empty())
+                    .is_some_and(|me| root.user.as_deref() == Some(me));
+
                 items.push(RawItem {
                     external_id: Some(format!("{channel_id}/{}", root.ts)),
                     title,
@@ -321,6 +328,7 @@ impl Source for SlackChannelSource {
                     url: Some(permalink),
                     author,
                     timestamp: ts,
+                    is_self,
                     metadata: serde_json::json!({
                         "channel": channel_name,
                         "reply_count": root.reply_count,

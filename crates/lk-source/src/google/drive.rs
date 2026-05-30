@@ -185,6 +185,7 @@ impl Source for DriveSource {
                 url: Some(format!("https://drive.google.com/file/d/{}/view", file.id)),
                 author: None,
                 timestamp: ts,
+                is_self: false,
                 metadata: serde_json::json!({
                     "mime_type": file.mime_type,
                 }),

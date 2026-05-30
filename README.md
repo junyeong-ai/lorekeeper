@@ -70,7 +70,7 @@ Data Sources              lore (Rust CLI)            Obsidian Vault
 ────────────              ───────────────            ──────────────
 Google Drive ──┐          ┌─ Extract (per-source)    daily/{source-id}/
 Gmail ─────────┤          ├─ Normalize → Event       me/work-log/
-Slack ─────────┼─ config ─┤  Deduplicate (cascade)   me/{weekly,monthly,quarterly,annually}/
+Slack ─────────┼─ config ─┤  Deduplicate (cascade)   me/{weekly,monthly,quarterly,annual}/
 Jira ──────────┤  .yaml   ├─ Classify (labels)       synthesis/{weekly}/
 Calendar ──────┤          ├─ Concepts (LLM)          wiki/concepts/
 RSS/Atom ──────┤          ├─ Render (templates)      wiki/documents/
@@ -110,9 +110,15 @@ Claude Code Skills        Semantic Plane             (same vault)
 | `lore schedule --bin /full/path/lore` | Override bin path in cron lines |
 | `lore maintenance` | Prune ingest log, dedup cache, and drained queue files older than 90 days |
 | `lore schema` | Generate `wiki/AGENTS.md` (page format schema from locale) |
-| `lore graph lint` | Structural health: orphans, broken links, hubs |
+| `lore graph lint` | Structural health: orphans, broken links, hubs, invalid categories, near-duplicates, unresolved conflicts, index drift |
 | `lore graph suggest-links` | Community-based cross-reference suggestions |
 | `lore graph cluster` | Topic communities via Louvain modularity |
+| `lore graph backlinks-sync` | Re-derive each concept's `## Sources` + `source_count` from the wikilink graph |
+| `lore graph merge <from> <into>` | Fold a duplicate concept into a canonical one (rewires wikilinks, deletes `from`) |
+| `lore graph stale --days N` | Report pages not updated within N days |
+| `lore wiki index` | Rebuild `wiki/index.md` catalog from disk |
+| `lore wiki concepts` | List all concept pages |
+| `lore queue status` | Classify pending LLM tasks: current / stale / missing-target |
 
 ## LLM provider modes
 
@@ -127,6 +133,12 @@ Workflow:
 1. `lore ingest` (cron-scheduled) — fetches sources, dedups, writes structural pages, queues semantic tasks
 2. `/lore-process` (run in Claude Code) — drains the queue, fills summaries, creates/merges concept pages
 3. For unattended cron: `lore ingest && claude -p "/lore-process"`
+
+For a single autonomous agent that chains ingest → `/lore-process` → graph reconcile
+(→ Monday weekly synthesis), the installer ships the **`lore-daily-ingest`** scheduled
+task to `~/.claude/scheduled-tasks/lore-daily-ingest/SKILL.md` (alongside the skills).
+Point your cron or remote-agent runner at it; the source template is
+[`scripts/lore-daily-ingest.md`](scripts/lore-daily-ingest.md).
 
 The skill is **fully idempotent**: re-running on a partially-processed queue file is safe because vault edits replace section content rather than append, and concept page merging preserves accumulated state.
 
@@ -147,7 +159,7 @@ Six skills provide the Claude Code integration surface. All follow the `lore-{ve
 - **capture**: one insight at a time, during active work (high urgency, low volume)
 - **extract**: entire documentation corpus, planned batch operation (low urgency, high volume)
 
-Both write to `wiki/documents/` and `wiki/concepts/`, sharing the same concept dedup and graph infrastructure as daily ingestion.
+Both write to `wiki/documents/` and `wiki/concepts/` (paths resolved from AGENTS.md), sharing the same concept dedup and graph infrastructure as daily ingestion.
 
 ### Extraction manifest
 
@@ -178,8 +190,9 @@ templates/      Jinja2 markdown templates (.md.jinja, embedded in the binary)
 - `me/weekly/YYYY-W{nn}.md` — personal weekly summary
 - `me/monthly/YYYY-MM.md` — monthly work summary
 - `me/quarterly/YYYY-Q{n}.md` — quarterly performance review
-- `me/annually/YYYY.md` — annual performance review
-- `wiki/concepts/{slug}.md` — extracted concepts (merge-on-rewrite: `source_count` and `sources` accumulate)
+- `me/annual/YYYY.md` — annual performance review
+- `wiki/concepts/{slug}.md` — extracted concepts; re-extraction merges in place (keeps `created`, title, and category; widens first/last-seen). `source_count` and the `## Sources` body are re-derived from the wikilink graph by `lore graph backlinks-sync` — there is no `sources` frontmatter array
+- `wiki/explorations/{slug}.md` — reusable Q&A syntheses filed by `/lore-wiki query`
 
 ## Templates
 
@@ -261,10 +274,10 @@ the refresh token to renew access tokens unattended.
 ## Development
 
 ```bash
-cargo check                  # Type check
-cargo test                   # Run all tests
-cargo clippy -- -D warnings  # Lint (must be clean)
-cargo fmt                    # Format
+cargo check                                            # Type check
+cargo nextest run --workspace                          # Run all tests
+cargo clippy --workspace --all-targets -- -D warnings  # Lint (must be clean)
+cargo fmt                                              # Format
 ```
 
 ## Dependencies

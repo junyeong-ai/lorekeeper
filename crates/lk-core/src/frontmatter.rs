@@ -15,7 +15,7 @@ impl Frontmatter {
 }
 
 #[derive(Debug, Clone)]
-pub struct Page {
+pub struct VaultPage {
     pub frontmatter: Frontmatter,
     pub body: String,
 }
@@ -27,13 +27,13 @@ pub struct Page {
 /// This avoids two false detections a substring scan would make: a body that merely
 /// begins with whitespace then `---`, and a `---` appearing inside a YAML value or a
 /// `---not-a-delimiter` line. CRLF is normalized to LF up front.
-pub fn parse_page(content: &str) -> Result<Page, String> {
+pub fn parse_page(content: &str) -> Result<VaultPage, String> {
     // Strip a leading UTF-8 BOM so a BOM-prefixed file's frontmatter is still recognized.
     let content = content.strip_prefix('\u{feff}').unwrap_or(content);
     let normalized = content.replace("\r\n", "\n");
 
     let Some(rest) = normalized.strip_prefix("---\n") else {
-        return Ok(Page {
+        return Ok(VaultPage {
             frontmatter: Frontmatter::default(),
             body: normalized,
         });
@@ -64,7 +64,7 @@ pub fn parse_page(content: &str) -> Result<Page, String> {
     let fields: BTreeMap<String, serde_json::Value> =
         serde_yaml_ng::from_str(yaml_str).map_err(|e| format!("invalid frontmatter YAML: {e}"))?;
 
-    Ok(Page {
+    Ok(VaultPage {
         frontmatter: Frontmatter { fields },
         body: body.to_string(),
     })

@@ -5,7 +5,7 @@ when_to_use: |
   lore extract, batch extract, extract project knowledge,
   docs to vault, extract ADRs, extract learnings, repo knowledge,
   project knowledge extraction, harvest docs, scan project
-argument-hint: "scan|run|audit <repo-path> [--domain <name>]"
+argument-hint: "scan|run|audit <repo-path> [--domain <name>] [--include-git]"
 allowed-tools: |
   Bash(lore *)
   Bash(ls *)
@@ -17,6 +17,7 @@ allowed-tools: |
   Bash(wc *)
   Bash(jq *)
   Bash(date *)
+  Bash(mkdir *)
   Read
   Edit
   Write
@@ -36,6 +37,15 @@ Run `lore validate` to find the vault root and AGENTS.md path.
 Read AGENTS.md before creating pages — it defines path patterns,
 frontmatter, and section headings. If missing, run `lore schema`.
 
+This skill writes COMPLETE pages directly — no ingest pipeline runs over
+them. AGENTS.md's `Owner` column describes the *automated* pipeline
+(`machine`/`LLM` = filled by `lore ingest` / `/lore-process`); since this
+skill is the author, you fill EVERY section yourself, including ones marked
+`machine` (a document's `## Content` and related-concepts section). The sole
+exception is each concept's `## Sources` + `source_count`, re-derived by the
+Finalize `backlinks-sync`. Omit the `llm_inputs` frontmatter block — it is
+the pipeline's cache, not part of a directly-authored page.
+
 ## Extraction manifest
 
 The manifest lives in the vault (not the project repo):
@@ -54,10 +64,10 @@ project:
   name: <project-name>
   repo_path: <absolute-path>
   last_scan: <ISO-date>
-  git_head_at_scan: <short-sha>
+  git_head_at_scan: <short-sha>   # null when the repo is not under git (mtime fallback)
 
 discovered_sources:
-  - path: "docs/decisions/*.md"
+  - path: "docs/adr/*.md"
     kind: adr           # adr | learning | rule | guide | spec | other
     count: 61
     transferability_default: T1
@@ -74,11 +84,15 @@ concept_mapping:         # project tag → vault category id
   oauth: auth-identity
 
 extracted:               # per-document tracking (written by run)
-  - source: "docs/decisions/some-adr.md"
+  - source: "docs/adr/some-adr.md"
     vault_page: "wiki/documents/proj-some-adr.md"   # vault-relative (configured wiki dir)
     domain: cloud-platform
     extracted_at: <ISO-date>
     transferability: T1
+  - source: "README.md"     # a T4 skip is recorded too, so audit coverage is complete
+    vault_page: null
+    transferability: T4
+    coverage_note: "Skipped — project-specific, no transferable knowledge."
 ```
 
 One source can feed several documents and several sources can fold into
@@ -92,25 +106,37 @@ than forcing a single `source`/`vault_page` pair.
 
 Discover knowledge sources and persist a manifest.
 
-1. Verify the path is a Git repository.
+1. Detect version control. `git -C <path> rev-parse --short HEAD` →
+   `git_head_at_scan`. If the path is not a Git repo, set
+   `git_head_at_scan: null` and use file mtime everywhere git history would
+   otherwise drive re-scan diffing (step 2) and staleness (Phase 3). Git is
+   preferred, not required — a non-git project is fully supported.
 2. Check for existing manifest at
-   `<vault>/.lorekeeper/extracts/<project>/manifest.yaml`.
+   `<vault>/.lorekeeper/extracts/<project>/manifest.yaml`
+   (`mkdir -p` the directory first if absent).
    - **First scan**: full discovery.
-   - **Re-scan**: load previous manifest, compute `git diff` since
-     `git_head_at_scan`, present incremental changes. Preserve
-     previous `strip_patterns`, `concept_mapping`, user overrides.
+   - **Re-scan**: load previous manifest. With git, compute `git diff` since
+     `git_head_at_scan`; without git, compare source mtimes against
+     `last_scan`. Present incremental changes. Preserve previous
+     `strip_patterns`, `concept_mapping`, user overrides.
 
 3. Discover sources in priority order:
 
    | Priority | Patterns |
    |----------|----------|
-   | 1 | `docs/decisions/*.md`, `docs/learnings/*.md` |
+   | 1 | `docs/adr/*.md`, `docs/decisions/*.md`, `docs/learnings/*.md` |
    | 2 | `docs/guides/*.md`, `docs/operators/*.md`, `.claude/rules/*.md` |
    | 3 | `specs/*/spec.md`, `specs/*/plan.md` |
    | 4 | `**/CLAUDE.md`, `deploy/**/*.tf` |
 
    Adapt to the repo's actual structure. Look for analogous paths
-   (`adr/`, `architecture/`, `notes/`, `terraform/`, `infra/`).
+   (`architecture/`, `notes/`, `rfcs/`, `terraform/`, `infra/`).
+
+   Record each `discovered_sources.path` EXACTLY as `find`/`ls` reports it
+   (verbatim relative path), never derived from the document's title or heading.
+   The re-scan diff (step 2) and the Phase-3 audit compare manifest paths against
+   the filesystem; a title-derived path that doesn't exist makes every source look
+   deleted-then-re-added on the next scan, corrupting incremental tracking.
 
 4. For each source, classify transferability (T1–T4):
    - **T1**: "constraint", "workaround", "gotcha", cloud platforms
@@ -146,16 +172,21 @@ Extract knowledge using the manifest. Requires a prior scan.
 
 5. For each discovered source (filtered by `--domain` / `--transferability`):
 
-   a. **Skip if already extracted** and source unchanged
-      (compare `extracted_at` with source file mtime or git log).
+   a. **Skip if already extracted** and source unchanged: compare
+      `extracted_at` with `git log` (when under git) or source file mtime
+      (when not). A T4 skip is recorded in `extracted` with `vault_page: null`
+      and a `coverage_note`, so the Phase 3 coverage check stays complete.
 
    b. Read the full source document.
 
    c. Final T-level judgment. Skip T4.
 
-   d. **Transform** source → knowledge document:
+   d. **Transform** source → knowledge document. The document's top-level headings are
+      ONLY those AGENTS.md defines (`## Summary`, `## Content`, `## Related Concepts`) —
+      never invent new `##` sections. The labels below are `###` sub-sections nested
+      under `## Content`; map each source part to its sub-section:
 
-      | Source kind | Section mapping |
+      | Source kind | `### sub-section under ## Content` |
       |------------|----------------|
       | ADR Context | → Background & Constraints |
       | ADR Decision | → Key Findings |
@@ -193,13 +224,13 @@ Extract knowledge using the manifest. Requires a prior scan.
       Link the extracted concepts as `[[wikilinks]]` in the document's
       related-concepts body section (heading per AGENTS.md), NOT in a
       frontmatter `concepts` array. These forward links are what the Finalize
-      `backlinks-sync` reads to populate each concept's `## 출처`.
+      `backlinks-sync` reads to populate each concept's `## Sources`.
 
    h. Create/merge concept pages per AGENTS.md: fill the Synthesis section.
-      Leave `## 출처` empty and `source_count: 0` — they are machine-owned and
+      Leave `## Sources` empty and `source_count: 0` — they are machine-owned and
       re-derived by the Finalize `backlinks-sync` from the document's forward
       `[[wikilink]]` (step g), the single source of truth. Never hand-write
-      citations: `backlinks-sync` replaces `## 출처` wholesale, so an entry not
+      citations: `backlinks-sync` replaces `## Sources` wholesale, so an entry not
       backed by a forward link is wiped.
 
    i. **Update manifest** `extracted` list with the new entry.
@@ -208,7 +239,7 @@ Extract knowledge using the manifest. Requires a prior scan.
 7. **Finalize** — reconcile the graph so machine-owned fields are
    authoritative and health checks pass:
    ```bash
-   lore graph backlinks-sync   # re-derive every concept's ## 출처 + source_count
+   lore graph backlinks-sync   # re-derive every concept's ## Sources + source_count
    lore wiki index             # rebuild the catalog (lint flags index drift until this runs)
    lore graph lint             # confirm no structural drift; pre-existing review items may remain
    ```
@@ -226,7 +257,8 @@ Verify extraction quality and coverage.
    leaked project identifiers (grep for `strip_patterns` in vault).
 3. **Cross-project** — concepts appearing in multiple project
    manifests. Suggest synthesis enrichment.
-4. **Staleness** — `git log --since=<extracted_at>` on each source.
+4. **Staleness** — under git, `git log --since=<extracted_at>` on each
+   source; without git, compare source mtime against `extracted_at`.
    Flag for re-extraction if changed.
 
 ## Git history mining

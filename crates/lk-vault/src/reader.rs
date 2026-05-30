@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use lk_core::frontmatter::{self, Page};
+use lk_core::frontmatter::{self, VaultPage};
 
 use crate::VaultError;
 
@@ -13,7 +13,7 @@ impl VaultReader {
         Self { root: root.into() }
     }
 
-    pub async fn read_page(&self, rel_path: &Path) -> Result<Option<Page>, VaultError> {
+    pub async fn read_page(&self, rel_path: &Path) -> Result<Option<VaultPage>, VaultError> {
         let full = self.root.join(rel_path);
         match tokio::fs::read_to_string(&full).await {
             Ok(content) => {

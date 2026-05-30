@@ -9,13 +9,6 @@ use lk_vault::{TemplateEngine, VaultReader, replace_section, section_body};
 use crate::PipelineError;
 use crate::render::RenderOutput;
 
-/// Identifies where a concept was mentioned — the vault page path and the date
-/// it was observed. Bundled so callers always pass the pair together.
-pub struct ConceptSource {
-    pub ref_path: String,
-    pub date: jiff::civil::Date,
-}
-
 /// In-memory aggregator for concept page state across multiple dates in a single run.
 /// Reads existing vault pages on first encounter, then merges further mentions.
 pub struct ConceptDrafts {
@@ -28,13 +21,17 @@ struct ConceptDraft {
     category: Option<String>,
     first_seen: jiff::civil::Date,
     last_seen: jiff::civil::Date,
+    /// Last `source_count` written to the page, preserved verbatim across this
+    /// ingest re-render. `lore graph backlinks-sync` is the sole *computer* of the
+    /// citation count; ingest must not reset it to 0 (that would blank an
+    /// established count until the next sync), so it carries the on-disk value
+    /// through unchanged. A brand-new page starts at 0.
     source_count: u64,
-    sources: Vec<String>,
     /// Bodies of LLM-authored or graph-maintained sections, captured from the
     /// existing concept page so a re-render can splice them back. Concept pages
     /// have no `llm_inputs` hash because their semantic content is monotonically
-    /// additive — the skill writes `## 핵심` on creation, `lore graph
-    /// backlinks-sync` derives `## 출처` from real incoming citations, and `## 관련`
+    /// additive — the skill writes `## Synthesis` on creation, `lore graph
+    /// backlinks-sync` derives `## Sources` from real incoming citations, and `## Related`
     /// is curated via `lore-wiki audit` (community-grounded, LLM-confirmed links).
     /// None of those should ever be wiped by an ingest re-render.
     preserved_synthesis: Option<String>,
@@ -52,7 +49,7 @@ impl ConceptDrafts {
     pub async fn merge(
         &mut self,
         concept: &ExtractedConcept,
-        source: &ConceptSource,
+        date: jiff::civil::Date,
         reader: &VaultReader,
         dirs: &VaultDirs,
     ) -> Result<(), PipelineError> {
@@ -61,11 +58,8 @@ impl ConceptDrafts {
             return Ok(());
         };
 
-        let source_ref = source.ref_path.clone();
-        let date = source.date;
-
         if let Some(draft) = self.drafts.get_mut(&safe_slug) {
-            draft.add_reference(source_ref, date);
+            draft.observe(date);
             warn_category_conflict(
                 &safe_slug,
                 draft.category.as_deref(),
@@ -82,11 +76,6 @@ impl ConceptDrafts {
 
         let mut draft = match existing.as_ref() {
             Some(page) => {
-                let source_count = page
-                    .frontmatter
-                    .get("source_count")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
                 // The persisted page stores these as `created`/`updated` (the keys the
                 // template and fallback write). Reading `first_seen`/`last_seen` would
                 // always miss and reset the origin date to today on every re-ingest.
@@ -122,6 +111,11 @@ impl ConceptDrafts {
                     concept.category.as_deref(),
                 );
                 let category = existing_category.or_else(|| concept.category.clone());
+                let source_count = page
+                    .frontmatter
+                    .get("source_count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
 
                 ConceptDraft {
                     slug: safe_slug.clone(),
@@ -130,11 +124,6 @@ impl ConceptDrafts {
                     first_seen,
                     last_seen,
                     source_count,
-                    // The `## 출처` body (re-derived by backlinks-sync) is the single
-                    // source-of-truth for citations; the in-memory `sources` set only
-                    // dedups within this run. `source_count` here is an approximation
-                    // that `lore graph backlinks-sync` re-derives exactly.
-                    sources: Vec::new(),
                     preserved_synthesis: capture_section(&page.body, |s| s.concept_synthesis),
                     preserved_sources: capture_section(&page.body, |s| s.concept_sources),
                     preserved_related: capture_section(&page.body, |s| s.related),
@@ -147,14 +136,13 @@ impl ConceptDrafts {
                 first_seen: date,
                 last_seen: date,
                 source_count: 0,
-                sources: vec![],
                 preserved_synthesis: None,
                 preserved_sources: None,
                 preserved_related: None,
             },
         };
 
-        draft.add_reference(source_ref, date);
+        draft.observe(date);
         self.drafts.insert(safe_slug, draft);
         Ok(())
     }
@@ -186,11 +174,10 @@ impl Default for ConceptDrafts {
 }
 
 impl ConceptDraft {
-    fn add_reference(&mut self, source_ref: String, date: jiff::civil::Date) {
-        if !self.sources.contains(&source_ref) {
-            self.sources.push(source_ref);
-            self.source_count += 1;
-        }
+    /// Widen the observed [first_seen, last_seen] window. Citation counting is not
+    /// done here — `lore graph backlinks-sync` is the sole owner of `source_count`,
+    /// re-deriving it exactly from the wikilink graph.
+    fn observe(&mut self, date: jiff::civil::Date) {
         self.first_seen = self.first_seen.min(date);
         self.last_seen = self.last_seen.max(date);
     }
@@ -210,6 +197,8 @@ impl ConceptDraft {
             "category": self.category.as_deref().unwrap_or(""),
             "first_seen": self.first_seen.to_string(),
             "last_seen": self.last_seen.to_string(),
+            // Preserved verbatim — backlinks-sync owns the real count; ingest never
+            // recomputes or resets it (new pages start at 0).
             "source_count": self.source_count,
             // Tag with the category id when set, else the literal "concept" — the same
             // invariant `/lore-process` writes, so every concept page carries at least
@@ -228,8 +217,8 @@ impl ConceptDraft {
 
         // Splice the previously-captured bodies back into the freshly rendered
         // page. These sections are owned by other writers (`/lore-process` for
-        // synthesis, `lore graph backlinks-sync` for `## 출처`, `lore-wiki audit`
-        // for `## 관련`) and re-rendering must NEVER wipe them.
+        // synthesis, `lore graph backlinks-sync` for `## Sources`, `lore-wiki audit`
+        // for `## Related`) and re-rendering must NEVER wipe them.
         for (heading, body) in [
             (strings.concept_synthesis, &self.preserved_synthesis),
             (strings.concept_sources, &self.preserved_sources),
@@ -300,10 +289,6 @@ pub fn is_valid(concept: &ExtractedConcept) -> bool {
     canonical_slug(&concept.slug, &concept.name).is_some()
 }
 
-pub(crate) fn strip_md_extension(s: &str) -> String {
-    s.strip_suffix(".md").unwrap_or(s).to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,8 +336,7 @@ mod tests {
             category: Some("ai-ml".into()),
             first_seen: jiff::civil::date(2026, 5, 1),
             last_seen: jiff::civil::date(2026, 5, 1),
-            source_count: 1,
-            sources: vec!["daily/x/2026-05-01".into()],
+            source_count: 0,
             preserved_synthesis: None,
             preserved_sources: None,
             preserved_related: None,
@@ -384,8 +368,7 @@ mod tests {
             category: Some("ai-ml".into()),
             first_seen: jiff::civil::date(2026, 5, 1),
             last_seen: jiff::civil::date(2026, 5, 1),
-            source_count: 1,
-            sources: vec!["daily/x/2026-05-01".into()],
+            source_count: 3,
             preserved_synthesis: Some(
                 "Retrieval-Augmented Generation enriches an LLM prompt with retrieved context."
                     .into(),
@@ -413,6 +396,12 @@ mod tests {
             "related body must survive re-render:\n{}",
             page.content
         );
+        assert!(
+            page.content.contains("source_count: 3"),
+            "an established source_count must survive ingest re-render, not reset to 0 \
+             (backlinks-sync owns the value):\n{}",
+            page.content
+        );
     }
 
     #[test]
@@ -424,7 +413,6 @@ mod tests {
             first_seen: jiff::civil::date(2026, 5, 1),
             last_seen: jiff::civil::date(2026, 5, 1),
             source_count: 0,
-            sources: vec![],
             preserved_synthesis: None,
             preserved_sources: None,
             preserved_related: None,

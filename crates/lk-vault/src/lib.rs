@@ -5,9 +5,9 @@ mod section;
 mod template;
 mod writer;
 
-// Frontmatter parsing is pure and lives in lk-core; re-exported here so existing
-// `lk_vault::{Frontmatter, Page}` call sites keep working.
-pub use lk_core::frontmatter::{Frontmatter, Page, parse_page};
+// Frontmatter parsing is pure and lives in lk-core; re-exported so the vault crate's
+// public surface exposes the page types alongside the I/O that produces them.
+pub use lk_core::frontmatter::{Frontmatter, VaultPage, parse_page};
 
 pub use self::index::{IndexOutput, build_index, first_line_under_heading, write_index};
 pub use self::log::{IngestLog, LogEntry, LogStatus};

@@ -82,10 +82,21 @@ consistent with batch extractions from `/lore-extract`.
 
 Write to the document path pattern from AGENTS.md. Use the vault's
 configured locale for all section headings and frontmatter fields —
-AGENTS.md is the authoritative source for both. Link the relevant
-concepts as `[[wikilink]]`s in the document's related-concepts section
-(heading from AGENTS.md) — these forward links are what `backlinks-sync`
-reads to derive each concept's `## 출처` in step 6.
+AGENTS.md is the authoritative source for both.
+
+This skill writes a COMPLETE page directly — no ingest pipeline runs
+afterward. AGENTS.md's `Owner` column describes the *automated* pipeline
+(`machine` = filled by `lore ingest`, `LLM` = filled by `/lore-process`);
+for a hand-authored capture there is no such later pass, so you fill EVERY
+section yourself, including the ones marked `machine` (`## Content`, the
+related-concepts section). The only exception is each concept's `## Sources`
++ `source_count`, which `backlinks-sync` re-derives in step 6 (leave empty).
+Omit the `llm_inputs` frontmatter block entirely — it belongs to the
+pipeline cache, not to directly-authored pages.
+
+Link the relevant concepts as `[[wikilink]]`s in the document's
+related-concepts section (heading from AGENTS.md) — these forward links are
+what `backlinks-sync` reads to derive each concept's `## Sources` in step 6.
 
 `document_type` is a FORMAT value from the AGENTS.md vocabulary
 (`note` for prose/markdown, `report` for HTML, `data` for structured) —
@@ -99,10 +110,10 @@ For each technology, pattern, or constraint:
 1. Slugify: NFKC → lowercase → non-alnum to hyphen → collapse → trim
 2. Check existing concepts from step 2
 3. New → create with a 1-2 sentence synthesis in the Synthesis section
-   (heading from AGENTS.md). Leave `## 출처` empty and `source_count: 0` —
+   (heading from AGENTS.md). Leave `## Sources` empty and `source_count: 0` —
    they are machine-owned and filled by `backlinks-sync` in step 6.
 4. Existing → update `updated` and enrich the synthesis if warranted.
-   Do NOT hand-edit `## 출처` or `source_count` — `backlinks-sync`
+   Do NOT hand-edit `## Sources` or `source_count` — `backlinks-sync`
    re-derives both from the wikilink graph (the document's forward link
    from step 4 is the source of truth).
 5. Assign category from config.yaml `concepts.categories`
@@ -113,7 +124,7 @@ Reconcile the graph so machine-owned fields are authoritative and health
 checks pass:
 
 ```bash
-lore graph backlinks-sync   # re-derive every concept's ## 출처 + source_count
+lore graph backlinks-sync   # re-derive every concept's ## Sources + source_count
 lore wiki index             # rebuild the catalog so `lore graph lint` is clean
 lore graph lint             # confirm no structural drift (index/broken links); pre-existing review items (uncategorized, near-dup, open conflicts) may legitimately remain
 ```
