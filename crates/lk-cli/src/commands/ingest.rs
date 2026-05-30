@@ -194,7 +194,12 @@ pub async fn run(
             eprintln!("  deduplicated: {} (already seen)", result.duplicates.len());
         }
 
-        if result.is_empty() {
+        // Skip ONLY when there is truly nothing to do — no pages AND no duplicates. A
+        // pure-duplicate run still has work: Phase 5 must refresh its dedup timestamps and
+        // Phase 6 must archive a manual source's inbox files, so a duplicate never lingers
+        // and re-arrives every run. Falling through to `planned` drives both; with no pages
+        // the write phase is a no-op.
+        if result.is_empty() && result.duplicates.is_empty() {
             eprintln!("  — skipped (no new events)");
             if !dry_run {
                 log.record(&lk_vault::LogEntry {

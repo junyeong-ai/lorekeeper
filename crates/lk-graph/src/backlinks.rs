@@ -11,18 +11,18 @@
 //! the sources list iff it has an outgoing wikilink whose target resolves to that
 //! concept's filename.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use lk_core::concept::slugify;
 use lk_core::config::VaultDirs;
 use lk_core::frontmatter;
 use lk_core::i18n::Locale;
-use lk_vault::{VaultWriter, replace_section, section_body};
+use lk_vault::{VaultWriter, replace_section, section_body, set_frontmatter_field};
 use serde::Serialize;
 
 use crate::GraphError;
-use crate::scan::{ScannedPage, is_concept_page};
+use crate::scan::{ScannedPage, is_concept_page, is_valid_source};
 
 /// Outcome of one concept page's reconciliation.
 #[derive(Debug, Clone, Serialize)]
@@ -67,16 +67,57 @@ pub fn sync_concept_backlinks(
     // Only event/document pages are considered sources — concept-to-concept links
     // belong in `## Related`, not `## Sources`, and navigation pages
     // (`wiki/index.md`, `wiki/AGENTS.md`) shouldn't appear as sources at all.
+    // Map each concept's declared alias slugs to its canonical filename slug so a bare
+    // `[[synonym]]` citation is credited to the concept — keeping `source_count` and
+    // `## Sources` consistent with the wikilink graph's alias resolution. The exclusion
+    // set is EVERY real page's filename slug (not just concepts): an alias that collides
+    // with any real page is inert because the real page wins in `VaultExistence` /
+    // `WikiGraph`, so crediting it here would diverge from the graph. The first concept
+    // to claim a free alias wins (same precedence as `VaultExistence`).
+    let real_slugs: HashSet<String> = pages
+        .iter()
+        .filter_map(|p| {
+            p.path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(slugify)
+        })
+        .collect();
+    let mut alias_to_stem: HashMap<String, String> = HashMap::new();
+    for page in pages {
+        if !is_concept_page(&page.path, dirs) {
+            continue;
+        }
+        let Some(stem) = page
+            .path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(slugify)
+        else {
+            continue;
+        };
+        for alias in &page.aliases {
+            if real_slugs.contains(alias) {
+                continue;
+            }
+            alias_to_stem
+                .entry(alias.clone())
+                .or_insert_with(|| stem.clone());
+        }
+    }
+
     let mut incoming: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for page in pages {
         if !is_valid_source(&page.path, dirs) {
             continue;
         }
         for target in &page.outgoing {
-            incoming
-                .entry(target.clone())
-                .or_default()
-                .insert(page.id.clone());
+            // Credit an alias citation to the concept's canonical slug.
+            let key = alias_to_stem
+                .get(target)
+                .cloned()
+                .unwrap_or_else(|| target.clone());
+            incoming.entry(key).or_default().insert(page.id.clone());
         }
     }
 
@@ -178,20 +219,6 @@ pub fn sync_concept_backlinks(
     Ok(report)
 }
 
-/// True iff this vault-relative path can act as a backlink *source* — an event
-/// or document page where a concept appearance is meaningful provenance.
-/// Concept-to-concept links and navigation pages (`wiki/index.md`,
-/// `wiki/AGENTS.md`) are excluded: cross-references between concepts belong in
-/// `## Related`, not in `## Sources`.
-fn is_valid_source(path: &Path, dirs: &VaultDirs) -> bool {
-    let s = path.to_string_lossy().replace('\\', "/");
-    s.starts_with(&format!("{}/", dirs.daily))
-        || s.starts_with(&format!("{}/", dirs.personal))
-        || s.starts_with(&format!("{}/", dirs.synthesis))
-        || s.starts_with(&format!("{}/documents/", dirs.wiki))
-        || s.starts_with(&format!("{}/explorations/", dirs.wiki))
-}
-
 /// Extract `[[…]]` targets from the existing `## <heading>` section, in their
 /// on-disk order. Used only to compute the diff (added/removed) — the rewritten
 /// body is canonicalised through [`render_sources_body`].
@@ -236,56 +263,10 @@ pub(crate) fn parse_existing_sources(content: &str, heading: &str) -> Vec<String
     out
 }
 
-/// Set the frontmatter `source_count` field to `count`, operating ONLY inside the
-/// frontmatter block (between the first two `---` lines) so a `source_count:` in body
-/// prose/code is never mutated. If the field is absent it is inserted before the
-/// closing `---`, so a later run sees it and is idempotent. A page with no frontmatter
-/// block is returned unchanged.
+/// Set the frontmatter `source_count` — a thin wrapper over the single-sourced
+/// `set_frontmatter_field` so backlinks and the audit marker share one writer.
 fn set_source_count(content: &str, count: u64) -> String {
-    let mut out = String::with_capacity(content.len());
-    let mut in_frontmatter = false;
-    let mut seen_open = false;
-    let mut done = false;
-    let mut first_line = true;
-    for line in content.split_inclusive('\n') {
-        let is_fence = line.strip_suffix('\n').unwrap_or(line).trim_end() == "---";
-        // The opening fence must be the document's FIRST line — same rule as
-        // `frontmatter::parse_page`. This prevents a body thematic break (`---`) in a
-        // page that has no frontmatter from being mistaken for a frontmatter opener.
-        let was_first = first_line;
-        first_line = false;
-        if is_fence && !seen_open && was_first {
-            seen_open = true;
-            in_frontmatter = true;
-            out.push_str(line);
-            continue;
-        }
-        if is_fence && in_frontmatter {
-            // Closing fence: if the field was never seen, insert it now.
-            if !done {
-                out.push_str("source_count: ");
-                out.push_str(&count.to_string());
-                out.push('\n');
-                done = true;
-            }
-            in_frontmatter = false;
-            out.push_str(line);
-            continue;
-        }
-        if in_frontmatter && !done && line.trim_start().starts_with("source_count:") {
-            let indent = &line[..line.len() - line.trim_start().len()];
-            out.push_str(indent);
-            out.push_str("source_count: ");
-            out.push_str(&count.to_string());
-            if line.ends_with('\n') {
-                out.push('\n');
-            }
-            done = true;
-        } else {
-            out.push_str(line);
-        }
-    }
-    out
+    set_frontmatter_field(content, "source_count", &count.to_string())
 }
 
 /// Render the sources list to the same shape `concept.md.jinja` produces:
@@ -310,6 +291,7 @@ mod tests {
             path: PathBuf::from(rel),
             title: id.to_owned(),
             outgoing: outgoing.iter().map(|s| (*s).to_string()).collect(),
+            aliases: Vec::new(),
         }
     }
 
@@ -356,6 +338,65 @@ mod tests {
 
         let content = std::fs::read_to_string(dir.path().join("wiki/concepts/oy365.md")).unwrap();
         assert!(content.contains("## 출처\n\n- [[daily/slack/2026-05-20]]\n\n## 메타"));
+    }
+
+    #[test]
+    fn alias_citation_is_credited_to_the_concept() {
+        // A daily page citing `[[k8s]]` (an alias of the kubernetes concept) must be
+        // listed under that concept's `## Sources` and counted, exactly as a citation
+        // by its canonical slug would — keeping source_count consistent with the graph.
+        let dir = TempDir::new().unwrap();
+        write_concept(&dir, "kubernetes", &[]);
+        let pages = vec![
+            ScannedPage {
+                id: "wiki/concepts/kubernetes".to_owned(),
+                path: PathBuf::from("wiki/concepts/kubernetes.md"),
+                title: "kubernetes".to_owned(),
+                outgoing: vec![],
+                aliases: vec!["k8s".to_owned()],
+            },
+            make_page("daily/x/2026-05-20", "daily/x/2026-05-20.md", &["k8s"]),
+        ];
+        let report =
+            sync_concept_backlinks(&pages, dir.path(), Locale::Ko, false, &VaultDirs::default())
+                .unwrap();
+        assert_eq!(report.updated.len(), 1);
+        assert_eq!(report.updated[0].added, vec!["daily/x/2026-05-20"]);
+        let content =
+            std::fs::read_to_string(dir.path().join("wiki/concepts/kubernetes.md")).unwrap();
+        assert!(content.contains("## 출처\n\n- [[daily/x/2026-05-20]]"));
+        assert!(content.contains("source_count: 1"));
+    }
+
+    #[test]
+    fn alias_colliding_with_a_real_page_slug_is_not_credited() {
+        // `kubernetes` declares the alias `helm`, but a real `helm` document exists.
+        // A bare `[[helm]]` resolves to the document in the graph (a real page beats an
+        // alias), so backlinks must NOT credit it to kubernetes — otherwise source_count
+        // would diverge from the wikilink graph.
+        let dir = TempDir::new().unwrap();
+        write_concept(&dir, "kubernetes", &[]);
+        let pages = vec![
+            ScannedPage {
+                id: "wiki/concepts/kubernetes".to_owned(),
+                path: PathBuf::from("wiki/concepts/kubernetes.md"),
+                title: "kubernetes".to_owned(),
+                outgoing: vec![],
+                aliases: vec!["helm".to_owned()],
+            },
+            make_page("wiki/documents/helm", "wiki/documents/helm.md", &[]),
+            make_page("daily/x/2026-05-20", "daily/x/2026-05-20.md", &["helm"]),
+        ];
+        let report =
+            sync_concept_backlinks(&pages, dir.path(), Locale::Ko, false, &VaultDirs::default())
+                .unwrap();
+        // kubernetes is already in sync with zero sources — the `[[helm]]` citation is
+        // not credited to it.
+        assert!(
+            report.updated.is_empty(),
+            "alias colliding with a real page slug must not be credited: {report:?}"
+        );
+        assert_eq!(report.unchanged, 1);
     }
 
     #[test]

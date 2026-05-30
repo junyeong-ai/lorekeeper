@@ -52,7 +52,7 @@ pub async fn run(opts: &super::GlobalOpts) -> miette::Result<()> {
     eprintln!("Recent {} work-logs — category distribution:", recent.len());
     let max_count = counts.values().copied().max().unwrap_or(1);
     for (cat, count) in &counts {
-        let pct = (*count as f64 / total as f64 * 100.0).round() as u32;
+        let pct = lk_core::math::round_percent(*count, total);
         let bar_len = (count * 30 / max_count).max(1);
         let bar = "█".repeat(bar_len);
         eprintln!("  {cat:30} {bar} {count} ({pct}%)");

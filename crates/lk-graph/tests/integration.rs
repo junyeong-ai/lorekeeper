@@ -247,6 +247,7 @@ fn lint_combined_report() {
         invalid_categories: Vec::new(),
         near_duplicate_concepts: Vec::new(),
         unresolved_conflicts: Vec::new(),
+        alias_conflicts: Vec::new(),
         findings,
     };
 

@@ -16,6 +16,13 @@ pub enum WikiCmd {
         #[arg(long)]
         root: Option<PathBuf>,
     },
+    /// Generate `<vault>/<wiki>/log.md` — reverse-chronological knowledge timeline
+    /// (when each concept/document/exploration entered or was last refreshed)
+    Log {
+        /// Vault root override (default: vault.root from config)
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
     /// List all concept pages in the vault
     Concepts {
         /// Output as JSON array
@@ -27,8 +34,25 @@ pub enum WikiCmd {
 pub async fn run(opts: &super::GlobalOpts, cmd: WikiCmd) -> miette::Result<()> {
     match cmd {
         WikiCmd::Index { root } => run_index(opts, root).await,
+        WikiCmd::Log { root } => run_log(opts, root).await,
         WikiCmd::Concepts { json } => run_concepts(opts, json).await,
     }
+}
+
+pub async fn run_log(
+    opts: &super::GlobalOpts,
+    root_override: Option<PathBuf>,
+) -> miette::Result<()> {
+    let (vault_root, _locale, _threshold, dirs) =
+        resolve_vault_with_threshold(opts, root_override)?;
+
+    tracing::info!(vault = %vault_root.display(), "building wiki knowledge log");
+
+    let path = lk_vault::write_timeline(&vault_root, &dirs)
+        .map_err(|e| miette::miette!("write log.md: {e}"))?;
+
+    eprintln!("Wrote {}", path.display());
+    Ok(())
 }
 
 pub async fn run_index(

@@ -1,9 +1,11 @@
 use lk_core::config::VaultDirs;
 use serde::Serialize;
 
+use crate::alias::{AliasConflict, AliasConflictKind};
+use crate::audit::AuditCandidate;
 use crate::backlinks::{ConceptUpdate, SyncReport};
 use crate::cluster::{ClusterResult, LinkSuggestion};
-use crate::concepts::{InvalidCategoryConcept, NearDuplicateConcept, UnresolvedConflict};
+use crate::concept_lint::{InvalidCategoryConcept, NearDuplicateConcept, UnresolvedConflict};
 use crate::export::GraphExport;
 use crate::graph::{BrokenLink, HubEntry};
 use crate::merge::MergeResult;
@@ -72,6 +74,7 @@ pub struct LintReport {
     pub invalid_categories: Vec<InvalidCategoryConcept>,
     pub near_duplicate_concepts: Vec<NearDuplicateConcept>,
     pub unresolved_conflicts: Vec<UnresolvedConflict>,
+    pub alias_conflicts: Vec<AliasConflict>,
     pub findings: usize,
 }
 
@@ -270,6 +273,24 @@ pub fn print_lint(r: &LintReport) {
         }
     }
 
+    if !r.alias_conflicts.is_empty() {
+        println!("\nAlias conflicts ({}):", r.alias_conflicts.len());
+        for c in &r.alias_conflicts {
+            match c.kind {
+                AliasConflictKind::Duplicate => println!(
+                    "  [[{}]] claimed by {} — resolves to only one",
+                    c.alias,
+                    c.claimants.join(", ")
+                ),
+                AliasConflictKind::ShadowsRealPage => println!(
+                    "  [[{}]] on {} is inert — a real page already owns that slug",
+                    c.alias,
+                    c.claimants.join(", ")
+                ),
+            }
+        }
+    }
+
     if r.findings == 0 {
         println!("\nNo issues found");
     } else {
@@ -289,6 +310,29 @@ pub fn print_suggest_links(r: &SuggestLinksReport) {
         );
     }
     println!("{} suggestion(s)", r.count);
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuditCandidatesReport {
+    pub candidates: Vec<AuditCandidate>,
+    pub count: usize,
+}
+
+pub fn print_audit_candidates(r: &AuditCandidatesReport) {
+    println!("=== Concepts due for contradiction audit ===");
+    if r.candidates.is_empty() {
+        println!("\nNothing to audit.");
+        return;
+    }
+    for c in &r.candidates {
+        println!(
+            "  {}  ({} source(s), set changed since last audit)  {}",
+            c.slug,
+            c.source_count,
+            c.path.display()
+        );
+    }
+    println!("\n{} concept(s) to audit", r.count);
 }
 
 #[derive(Debug, Serialize)]

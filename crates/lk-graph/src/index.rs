@@ -191,6 +191,7 @@ mod tests {
             path: PathBuf::from(format!("{id}.md")),
             title: id.rsplit('/').next().unwrap_or(id).to_owned(),
             outgoing: outgoing.iter().map(|s| (*s).to_string()).collect(),
+            aliases: Vec::new(),
         }
     }
 

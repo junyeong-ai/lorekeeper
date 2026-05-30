@@ -249,6 +249,7 @@ mod tests {
             path: PathBuf::from(rel),
             title: id.to_owned(),
             outgoing: outgoing.iter().map(|s| (*s).to_string()).collect(),
+            aliases: Vec::new(),
         }
     }
 

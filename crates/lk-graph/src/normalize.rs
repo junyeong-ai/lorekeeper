@@ -159,6 +159,7 @@ mod tests {
             path: rel,
             title: "test".to_owned(),
             outgoing: outgoing.iter().map(|s| (*s).to_string()).collect(),
+            aliases: Vec::new(),
         }
     }
 

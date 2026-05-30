@@ -19,6 +19,16 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
   a path target (`[[<daily>/team-slack/2026-05-22]]`) matches that page id
   (per-segment slugified, `/` preserved — *not* collapsed to `daily-…`). Anchors
   (`#heading`, `^block`) stripped before resolution.
+- **Alias resolution** (lowest precedence: id → filename → alias). A concept's
+  `aliases` frontmatter (slugified into `ScannedPage::aliases`, self-slug dropped)
+  lets a bare `[[synonym]]` resolve to it. Applied CONSISTENTLY in all three
+  resolvers — `VaultExistence` (`by_alias`), `WikiGraph` (`alias_to_node`), and
+  `backlinks` (`alias_to_stem`, so `source_count` matches the graph). An alias never
+  overrides a real id/filename, and the first concept to claim one wins. `alias::find_alias_conflicts`
+  surfaces the two ways this goes wrong (a `Duplicate` alias claimed by two concepts;
+  one that `ShadowsRealPage`) as a `graph lint` finding — so the deterministic first-wins
+  never calcifies silently. This is the deterministic, audit-friendly answer to synonyms
+  (no embeddings): the LLM/human registers the alias, the graph resolves it.
 - **Integrity checks vs analysis scope**: `hubs`/`cluster`/`suggest-links`
   operate on the `graph.scope.dirs` subgraph. But
   `broken`/`orphans`/`index-sync` resolve against a full-vault *existence
@@ -37,8 +47,24 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
 - **Mutations gated**: `index::fix()`, `normalize::apply()`, and
   `backlinks::sync_concept_backlinks` touch the filesystem — the first two only
   with `--fix`, backlinks only without `--dry-run`. All renames pre-checked.
-- **`stale::find_stale`**: reports pages whose `updated` (or `created` fallback)
-  frontmatter is older than a threshold. Groups by path prefix. Pure read.
+- **`stale::find_stale`**: reports pages that are **old AND dormant** — `updated`
+  (or `created` fallback) older than the threshold AND no incoming citation from a
+  page that is itself recent. Liveness is derived from the full-vault wikilink graph
+  (so a concept cited by this week's daily notes is live, not stale), which is why
+  the CLI scans every page dir but reports only the configured scope. Distinguishes
+  "old" from "actually dormant" deterministically — no heuristic. Groups by path
+  prefix. Pure read.
+- **`audit`** — the contradiction worklist. `find_audit_candidates` (`graph
+  audit-candidates`, pure read): a concept is a candidate iff `source_count >= 2` AND
+  the BLAKE3-128 hash of its canonical `## Sources` body differs from the
+  `audited_sources_hash` frontmatter marker. Hashing the source SET (not a count) is
+  what makes it robust: a source swap that keeps the count constant still changes the
+  hash and resurfaces the concept, while an unchanged set stays off the list — low-noise
+  by construction (the same hash-as-change-detector pattern as `llm_inputs`).
+  `mark_audited` (`graph audit-mark <slug>`) stamps the current hash via the
+  single-sourced `lk_vault::set_frontmatter_field`; `/lore-wiki audit` calls it after
+  reviewing. Deterministic selection in Rust; the contradiction *judgment* stays with
+  the LLM/human. Sorted by `source_count` desc, then slug.
 - **`backlinks::sync_concept_backlinks`**: rewrites the `## Sources` section on
   each concept page to match the wikilink graph. Uses full-vault scope (not
   `graph.scope.dirs`) so `<daily>`/`<personal>`/`<synthesis>` pages are included. Only event/document
@@ -69,12 +95,12 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
   instead curated via `lore-wiki audit`: `suggest_links` proposes candidates and an
   LLM confirms genuine relationships before any edge is written. `## Sources`
   (citation-derived, `backlinks-sync`) is the only machine-maintained concept relation.
-- **`concepts::scan_concept_pages`** reads `{wiki}/concepts/*.md` ONCE into `Vec<ConceptPage>`
+- **`concept_lint::scan_concept_pages`** reads `{wiki}/concepts/*.md` ONCE into `Vec<ConceptPage>`
   (slug = file stem, rel_path, category, body), sorted by slug. The three concept lints below
   are pure functions over `&[ConceptPage]` — `graph lint` walks the concepts dir a single
   time, not once per check. A page with malformed frontmatter still yields one (slug from file
   stem, no category, empty body) so slug-only checks see it while content checks skip it.
-- **`concepts::invalid_categories`**: surfaces concept pages whose `category`
+- **`concept_lint::invalid_categories`**: surfaces concept pages whose `category`
   frontmatter value is not in `config.concepts.categories[].id`. The ingest
   pipeline strips invalid categories synchronously, but queue-mode concept
   page creation is done by `/lore-process` which can emit a category the
@@ -83,15 +109,17 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
   list (categorisation off) suppresses every finding. Pages without a
   `category` field are not flagged — that is the documented uncategorised
   state.
-- **`concepts::near_duplicate_concepts`**: reports concept-slug pairs whose
+- **`concept_lint::near_duplicate_concepts`**: reports concept-slug pairs whose
   Sørensen-Dice similarity (on separator-stripped slugs) ≥
   `graph.graph.concept_near_duplicate_threshold` (default 0.6) — variant-spelling
   duplicates (`vector-db` ~ `vector-database` = 0.6) the LLM dedup hint missed. Digit-boundary
   version variants (`gpt-4`/`gpt-4o`, `claude-3`/`claude-3-5`) are deliberately distinct
   concepts and are skipped (`is_version_variant`) — that orthogonal exclusion is why the
-  threshold can favor recall at 0.6 without model-version false positives. Read-only merge
-  candidates surfaced in `graph lint`; a human decides.
-- **`concepts::unresolved_conflicts`**: reports concept pages whose body carries an
+  threshold can favor recall at 0.6 without model-version false positives. Pairs are found
+  via a **character-bigram inverted index** (only slugs sharing a bigram are scored), so the
+  scan is near-linear, not O(n²), as the vault grows — safe because Sørensen-Dice > 0 implies
+  a shared bigram. Read-only merge candidates surfaced in `graph lint`; a human decides.
+- **`concept_lint::unresolved_conflicts`**: reports concept pages whose body carries an
   unresolved `> [!conflict]` callout — a contradiction `/lore-wiki audit` flagged
   between cited sources. The marker lives in the LLM-owned synthesis body (NOT
   frontmatter, which ingest re-render regenerates from the template), so it survives

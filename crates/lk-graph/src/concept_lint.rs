@@ -11,6 +11,7 @@
 //! This module scans concept pages and surfaces those mismatches as a `graph lint`
 //! finding. Pure read; the lint reports, it does not repair.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use lk_core::config::ConceptCategory;
@@ -172,33 +173,77 @@ pub fn near_duplicate_concepts(pages: &[ConceptPage], threshold: f64) -> Vec<Nea
         return Vec::new();
     }
 
-    // `pages` is slug-sorted, so the (a, b) pairs come out lexicographically ordered.
+    // Score on separator-stripped slugs so the kebab `-` doesn't inflate bigram
+    // overlap between otherwise-different slugs.
+    let deslugged: Vec<String> = pages.iter().map(|p| deslug(&p.slug)).collect();
+
+    // Blocking via a character-bigram inverted index. Sørensen-Dice is bigram
+    // overlap, so two slugs can have non-zero similarity ONLY if they share at least
+    // one bigram. Indexing each slug's bigrams and scoring only co-bucketed pairs
+    // keeps the scan near-linear in the number of concepts instead of comparing all
+    // O(n²) pairs — the lint stays cheap as a vault grows to tens of thousands of
+    // concepts. Safe by construction: a pair sharing no bigram has similarity 0,
+    // below any positive `threshold`, so it could never be a finding.
+    let mut by_bigram: BTreeMap<(char, char), Vec<usize>> = BTreeMap::new();
+    // A string shorter than two chars has no bigram, so it would never co-bucket. Index
+    // those by their whole value too, so two distinct slugs that reduce to the same
+    // sub-bigram string (e.g. `a` and `a-` → `a`) are still compared.
+    let mut by_short: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (i, s) in deslugged.iter().enumerate() {
+        let chars: Vec<char> = s.chars().collect();
+        if chars.len() < 2 {
+            by_short.entry(s.as_str()).or_default().push(i);
+            continue;
+        }
+        let mut seen = BTreeSet::new();
+        for w in chars.windows(2) {
+            let bigram = (w[0], w[1]);
+            if seen.insert(bigram) {
+                by_bigram.entry(bigram).or_default().push(i);
+            }
+        }
+    }
+
+    // Candidate pairs: any two slugs that co-occur in a bigram bucket (or a short-string
+    // bucket). `pages` is slug-sorted and each bucket's indices are ascending, so `(i, j)`
+    // with `i < j` yields lexicographically-ordered `(a, b)` output without a re-sort.
+    let mut candidates: BTreeSet<(usize, usize)> = BTreeSet::new();
+    for indices in by_bigram.values().chain(by_short.values()) {
+        for a in 0..indices.len() {
+            for b in (a + 1)..indices.len() {
+                candidates.insert((indices[a], indices[b]));
+            }
+        }
+    }
+
     let mut findings = Vec::new();
-    for i in 0..pages.len() {
-        for j in (i + 1)..pages.len() {
-            // Version variants (`gpt-4`/`gpt-4o`, `claude-3`/`claude-3-5`) are
-            // intentionally distinct concepts, not spelling duplicates — skip them.
-            if is_version_variant(&pages[i].slug, &pages[j].slug) {
-                continue;
-            }
-            // Score on separator-stripped slugs so the kebab `-` doesn't inflate
-            // bigram overlap between otherwise-different slugs.
-            let similarity = sorensen_dice(&deslug(&pages[i].slug), &deslug(&pages[j].slug));
-            if similarity >= threshold {
-                findings.push(NearDuplicateConcept {
-                    a: pages[i].slug.clone(),
-                    b: pages[j].slug.clone(),
-                    similarity,
-                });
-            }
+    for (i, j) in candidates {
+        // Version variants (`gpt-4`/`gpt-4o`, `claude-3`/`claude-3-5`) are
+        // intentionally distinct concepts, not spelling duplicates — skip them.
+        if is_version_variant(&pages[i].slug, &pages[j].slug) {
+            continue;
+        }
+        let similarity = sorensen_dice(&deslugged[i], &deslugged[j]);
+        if similarity >= threshold {
+            findings.push(NearDuplicateConcept {
+                a: pages[i].slug.clone(),
+                b: pages[j].slug.clone(),
+                similarity,
+            });
         }
     }
     findings
 }
 
-/// Slug with separators removed, for similarity scoring (`vector-db` → `vectordb`).
+/// Slug with separators AND whitespace removed — the exact characters
+/// `strsim::sorensen_dice` scores on (it ignores whitespace internally). Used for
+/// BOTH the bigram blocking index and the similarity score so they always agree:
+/// `vector-db` → `vectordb`, and a hand-created `vector db.md` (whose stem keeps the
+/// space) → `vectordb` too, so a spaced variant can never slip past blocking.
 fn deslug(slug: &str) -> String {
-    slug.chars().filter(|c| *c != '-').collect()
+    slug.chars()
+        .filter(|c| *c != '-' && !c.is_whitespace())
+        .collect()
 }
 
 /// True when two slugs are the same model/version family that should stay split,
@@ -498,6 +543,52 @@ mod tests {
                 .any(|d| d.a == "kubernetes" || d.b == "kubernetes"),
             "an unrelated slug must not be flagged"
         );
+    }
+
+    #[test]
+    fn whitespace_in_stem_does_not_evade_blocking() {
+        // A hand-created `a i.md` and `ai.md`: strsim scores them 1.0 (it ignores
+        // whitespace internally), so the bigram index must too. `deslug` strips
+        // whitespace, so the pair co-buckets and is flagged rather than slipping past.
+        let tmp = TempDir::new().unwrap();
+        write_concept(tmp.path(), "a i", "id: a i");
+        write_concept(tmp.path(), "ai", "id: ai");
+        let result = near_duplicate_concepts(&scan(tmp.path()), 0.6);
+        assert!(
+            result
+                .iter()
+                .any(|d| (d.a == "a i" && d.b == "ai") || (d.a == "ai" && d.b == "a i")),
+            "a spaced-stem near-duplicate must still be flagged: {result:?}"
+        );
+    }
+
+    #[test]
+    fn bigram_blocking_finds_lone_near_dup_among_many_unrelated() {
+        // The bigram-blocked scan must still surface a real variant-spelling pair when
+        // it is buried among many concepts that share no bigram with it, and must not
+        // invent pairs between the unrelated ones. Guards the O(n²)→blocked rewrite.
+        let tmp = TempDir::new().unwrap();
+        for slug in [
+            "kubernetes",
+            "postgres",
+            "grafana",
+            "terraform",
+            "kafka",
+            "redis",
+            "observability",
+            "vector-database",
+            "vector-db",
+        ] {
+            write_concept(tmp.path(), slug, &format!("id: {slug}"));
+        }
+        let result = near_duplicate_concepts(&scan(tmp.path()), 0.6);
+        assert_eq!(
+            result.len(),
+            1,
+            "exactly one near-dup pair expected: {result:?}"
+        );
+        assert_eq!(result[0].a, "vector-database");
+        assert_eq!(result[0].b, "vector-db");
     }
 
     #[test]

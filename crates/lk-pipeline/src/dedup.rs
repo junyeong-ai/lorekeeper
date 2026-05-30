@@ -135,7 +135,7 @@ fn is_schema_mismatch(e: &redb::TableError) -> bool {
     )
 }
 
-/// Outcome of a `deduplicate` pass: the `novel` events to ingest, and the
+/// Outcome of a `dedup` pass: the `novel` events to ingest, and the
 /// `duplicates` that matched a prior observation. `duplicates` is retained so the
 /// commit can refresh their `seen_at` timestamps — a steady-state re-arrival (an
 /// evergreen RSS item, a recurring Jira issue) must not age past the retention
@@ -153,6 +153,11 @@ pub struct DedupCache {
     /// User-configured extra tracking-param keys, merged with the built-ins during
     /// URL canonicalisation.
     extra_tracking: Vec<String>,
+    /// True for the dry-run cache (`open_read_only`). A read-only cache legitimately
+    /// has no persisted tables (it never created them), so a missing-table fallback
+    /// is expected and silent; on a writable cache the same fallback is an anomaly
+    /// worth warning about.
+    read_only: bool,
 }
 
 impl DedupCache {
@@ -172,6 +177,7 @@ impl DedupCache {
             db: Some(db),
             title_threshold,
             extra_tracking,
+            read_only: false,
         })
     }
 
@@ -202,6 +208,7 @@ impl DedupCache {
             db,
             title_threshold,
             extra_tracking,
+            read_only: true,
         })
     }
 
@@ -266,7 +273,7 @@ impl DedupCache {
         Ok(())
     }
 
-    pub fn deduplicate(
+    pub fn dedup(
         &self,
         events: Vec<Event>,
         cascade: &[DedupStrategy],
@@ -281,18 +288,44 @@ impl DedupCache {
             ),
             None => None,
         };
-        // Open all persisted tables. If any table is missing (e.g. an older
-        // dedup.redb predates the content-hash column, or this is a read-only
-        // dry-run against a fresh DB), fall back to None — intra-batch dedup
-        // still runs via the in-memory seen_* sets.
-        let tables = read_txn.as_ref().and_then(|txn| {
-            Some((
-                txn.open_table(EVENT_IDS).ok()?,
-                txn.open_table(CONTENT_HASHES).ok()?,
-                txn.open_table(URLS).ok()?,
-                txn.open_table(TITLES).ok()?,
-            ))
-        });
+        // Open all persisted lookup tables. A table that simply does not exist yet
+        // (a fresh DB, or a read-only dry-run against an older cache predating a
+        // column) is the one benign reason to fall back to intra-batch-only dedup.
+        // Any OTHER table error — corruption, an unexpected schema state — must
+        // surface rather than silently disabling persisted dedup and re-emitting
+        // every prior event as novel.
+        let (tbl_ids, tbl_hashes, tbl_urls, tbl_titles) = match read_txn.as_ref() {
+            None => (None, None, None, None),
+            Some(txn) => {
+                let open = |def| match txn.open_table(def) {
+                    Ok(table) => Ok(Some(table)),
+                    Err(redb::TableError::TableDoesNotExist(_)) => Ok(None),
+                    Err(e) => Err(PipelineError::Dedup(e.to_string())),
+                };
+                let tables = (
+                    open(EVENT_IDS)?,
+                    open(CONTENT_HASHES)?,
+                    open(URLS)?,
+                    open(TITLES)?,
+                );
+                // A writable cache always has every table (created at open time), so a
+                // missing one is an anomaly worth surfacing. A read-only dry-run against an
+                // older cache legitimately lacks a newer column — keep each table's `Option`
+                // and consult whichever ARE present per strategy, rather than disabling all
+                // persisted dedup the moment one is absent.
+                if !self.read_only
+                    && (tables.0.is_none()
+                        || tables.1.is_none()
+                        || tables.2.is_none()
+                        || tables.3.is_none())
+                {
+                    tracing::warn!(
+                        "dedup cache missing lookup tables; persisted dedup degraded for this run"
+                    );
+                }
+                tables
+            }
+        };
 
         let mut novel: Vec<Event> = Vec::with_capacity(events.len());
         let mut duplicates: Vec<Event> = Vec::new();
@@ -308,8 +341,8 @@ impl DedupCache {
             for strategy in cascade {
                 match strategy {
                     DedupStrategy::EventId => {
-                        let in_cache = match &tables {
-                            Some((ids, _, _, _)) => ids
+                        let in_cache = match &tbl_ids {
+                            Some(ids) => ids
                                 .get(event.id.as_str())
                                 .map_err(|e| PipelineError::Dedup(e.to_string()))?
                                 .is_some(),
@@ -322,8 +355,8 @@ impl DedupCache {
                     }
                     DedupStrategy::ContentHash => {
                         let hash = event.content_hash.as_str();
-                        let in_cache = match &tables {
-                            Some((_, hashes, _, _)) => hashes
+                        let in_cache = match &tbl_hashes {
+                            Some(hashes) => hashes
                                 .get(hash)
                                 .map_err(|e| PipelineError::Dedup(e.to_string()))?
                                 .is_some(),
@@ -337,8 +370,8 @@ impl DedupCache {
                     DedupStrategy::Url => {
                         if let Some(ref url) = event.url {
                             let url = normalize_url(url, &self.extra_tracking);
-                            let in_cache = match &tables {
-                                Some((_, _, urls, _)) => urls
+                            let in_cache = match &tbl_urls {
+                                Some(urls) => urls
                                     .get(url.as_str())
                                     .map_err(|e| PipelineError::Dedup(e.to_string()))?
                                     .is_some(),
@@ -351,7 +384,7 @@ impl DedupCache {
                         }
                     }
                     DedupStrategy::Title => {
-                        if let Some((_, _, _, title_table)) = &tables {
+                        if let Some(title_table) = &tbl_titles {
                             let iter = title_table
                                 .iter()
                                 .map_err(|e| PipelineError::Dedup(e.to_string()))?;
@@ -697,12 +730,12 @@ mod tests {
         let cascade = vec![DedupStrategy::EventId];
         let events = vec![ev("a", "A", None), ev("b", "B", None)];
 
-        let novel = cache.deduplicate(events.clone(), &cascade).unwrap().novel;
+        let novel = cache.dedup(events.clone(), &cascade).unwrap().novel;
         assert_eq!(novel.len(), 2);
 
         cache.record(&events).unwrap();
 
-        let novel2 = cache.deduplicate(events, &cascade).unwrap().novel;
+        let novel2 = cache.dedup(events, &cascade).unwrap().novel;
         assert_eq!(novel2.len(), 0);
     }
 
@@ -717,7 +750,7 @@ mod tests {
         let events = vec![ev("a", "A", None)];
         cache.record(&events).unwrap();
 
-        let result = cache.deduplicate(events, &cascade).unwrap();
+        let result = cache.dedup(events, &cascade).unwrap();
         assert!(result.novel.is_empty());
         assert_eq!(
             result.duplicates.len(),
@@ -746,18 +779,15 @@ mod tests {
             "Totally different",
             Some("https://example.com/a"),
         )];
-        assert_eq!(cache.deduplicate(by_url, &cascade).unwrap().novel.len(), 0);
+        assert_eq!(cache.dedup(by_url, &cascade).unwrap().novel.len(), 0);
 
         // Matches via Title only (different id, no url).
         let by_title = vec![ev("other2", "Seeded Title", None)];
-        assert_eq!(
-            cache.deduplicate(by_title, &cascade).unwrap().novel.len(),
-            0
-        );
+        assert_eq!(cache.dedup(by_title, &cascade).unwrap().novel.len(), 0);
 
         // Matches nothing in the cascade → novel.
         let novel = vec![ev("fresh", "Brand New", Some("https://example.com/z"))];
-        assert_eq!(cache.deduplicate(novel, &cascade).unwrap().novel.len(), 1);
+        assert_eq!(cache.dedup(novel, &cascade).unwrap().novel.len(), 1);
     }
 
     #[test]
@@ -769,7 +799,7 @@ mod tests {
         let cascade = vec![DedupStrategy::ContentHash];
         let a = ev("from-rss", "Anthropic releases Opus 4.7", None);
         let b = ev("from-mail", "Anthropic releases Opus 4.7", None);
-        let novel = cache.deduplicate(vec![a, b], &cascade).unwrap().novel;
+        let novel = cache.dedup(vec![a, b], &cascade).unwrap().novel;
         assert_eq!(novel.len(), 1);
     }
 
@@ -782,7 +812,7 @@ mod tests {
             DedupCache::open_read_only(&dir.path().join("absent.redb"), 0.85, vec![]).unwrap();
         let cascade = vec![DedupStrategy::EventId];
         let batch = vec![ev("a", "A", None), ev("a", "A", None)];
-        let novel = cache.deduplicate(batch, &cascade).unwrap().novel;
+        let novel = cache.dedup(batch, &cascade).unwrap().novel;
         assert_eq!(
             novel.len(),
             1,
@@ -803,7 +833,7 @@ mod tests {
             ev("a", "A", Some("http://x")),
             ev("a", "A", Some("http://x")),
         ];
-        let novel = cache.deduplicate(batch, &cascade).unwrap().novel;
+        let novel = cache.dedup(batch, &cascade).unwrap().novel;
         assert_eq!(
             novel.len(),
             1,
@@ -823,11 +853,11 @@ mod tests {
 
         // Same URL, different event-id and title → still a duplicate via the URL strategy.
         let dup = vec![ev("b", "Reposted", Some("https://example.com/post"))];
-        assert_eq!(cache.deduplicate(dup, &cascade).unwrap().novel.len(), 0);
+        assert_eq!(cache.dedup(dup, &cascade).unwrap().novel.len(), 0);
 
         // Different URL is novel.
         let novel = vec![ev("c", "Other", Some("https://example.com/other"))];
-        assert_eq!(cache.deduplicate(novel, &cascade).unwrap().novel.len(), 1);
+        assert_eq!(cache.dedup(novel, &cascade).unwrap().novel.len(), 1);
     }
 
     #[test]
@@ -845,7 +875,7 @@ mod tests {
             .unwrap();
 
         let dup = vec![ev("b", "Reposted", Some("https://example.com/post"))];
-        assert_eq!(cache.deduplicate(dup, &cascade).unwrap().novel.len(), 0);
+        assert_eq!(cache.dedup(dup, &cascade).unwrap().novel.len(), 0);
     }
 
     #[test]
@@ -868,7 +898,7 @@ mod tests {
             "Video B",
             Some("https://www.youtube.com/watch?v=bbb"),
         )];
-        assert_eq!(cache.deduplicate(novel, &cascade).unwrap().novel.len(), 1);
+        assert_eq!(cache.dedup(novel, &cascade).unwrap().novel.len(), 1);
 
         // Same resource param with extra tracking is still a duplicate.
         let dup = vec![ev(
@@ -876,7 +906,7 @@ mod tests {
             "Video A reshared",
             Some("https://www.youtube.com/watch?v=aaa&utm_source=twitter"),
         )];
-        assert_eq!(cache.deduplicate(dup, &cascade).unwrap().novel.len(), 0);
+        assert_eq!(cache.dedup(dup, &cascade).unwrap().novel.len(), 0);
     }
 
     #[test]
@@ -892,10 +922,7 @@ mod tests {
 
         // A near-identical title on the same date is a duplicate.
         let same_day = vec![ev("b", "Anthropic releases Opus 4.7!", None)];
-        assert_eq!(
-            cache.deduplicate(same_day, &cascade).unwrap().novel.len(),
-            0
-        );
+        assert_eq!(cache.dedup(same_day, &cascade).unwrap().novel.len(), 0);
 
         // The same title on a different date is also a duplicate.
         let other_day = Event {
@@ -903,11 +930,7 @@ mod tests {
             ..ev("c", "Anthropic releases Opus 4.7", None)
         };
         assert_eq!(
-            cache
-                .deduplicate(vec![other_day], &cascade)
-                .unwrap()
-                .novel
-                .len(),
+            cache.dedup(vec![other_day], &cascade).unwrap().novel.len(),
             0
         );
     }

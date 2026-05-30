@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use lk_core::config::{ConceptCategory, GraphConfig, VaultDirs};
 use lk_core::i18n::Locale;
 use lk_graph::{
-    backlinks, cache, cluster, concepts, export, graph, index, merge, normalize, output, scan,
-    stale,
+    alias, audit, backlinks, cache, cluster, concept_lint, export, graph, index, merge, normalize,
+    output, scan, stale,
 };
 
 use super::GlobalOpts;
@@ -71,6 +71,16 @@ pub enum GraphCmd {
         #[arg(long, default_value_t = 90)]
         days: u32,
     },
+    /// List concept pages due for a contradiction (re-)audit: multiply-cited, with a
+    /// source set that changed since the last `/lore-wiki audit` (tracked by the
+    /// `audited_sources_hash` frontmatter marker)
+    AuditCandidates,
+    /// Mark a concept as audited — record its current source set so it leaves the
+    /// `audit-candidates` worklist until its sources change again
+    AuditMark {
+        /// Concept slug to mark as audited
+        slug: String,
+    },
     /// Rewrite each concept page's `## <Sources>` section from the graph
     BacklinksSync {
         /// Report what would change without writing
@@ -130,6 +140,12 @@ fn run_inner(
     match cmd {
         GraphCmd::Stale { days } => {
             return run_stale(opts, root_override, json, days, incremental);
+        }
+        GraphCmd::AuditCandidates => {
+            return run_audit_candidates(opts, root_override, json);
+        }
+        GraphCmd::AuditMark { ref slug } => {
+            return run_audit_mark(opts, root_override, json, slug);
         }
         GraphCmd::BacklinksSync { dry_run } => {
             return run_backlinks_sync(opts, root_override, json, dry_run, incremental);
@@ -207,15 +223,19 @@ fn run_inner(
             .map_err(|e| format!("{e}"))?;
             // Read the concept pages once; the three concept lints are pure functions
             // over the result rather than each re-walking `{wiki}/concepts/`.
-            let concept_pages = concepts::scan_concept_pages(&rc.root, &rc.vault_dirs.wiki)
+            let concept_pages = concept_lint::scan_concept_pages(&rc.root, &rc.vault_dirs.wiki)
                 .map_err(|e| format!("{e}"))?;
             let invalid_categories =
-                concepts::invalid_categories(&concept_pages, &rc.concept_categories);
-            let near_duplicate_concepts = concepts::near_duplicate_concepts(
+                concept_lint::invalid_categories(&concept_pages, &rc.concept_categories);
+            let near_duplicate_concepts = concept_lint::near_duplicate_concepts(
                 &concept_pages,
                 rc.graph.graph.concept_near_duplicate_threshold,
             );
-            let unresolved_conflicts = concepts::unresolved_conflicts(&concept_pages);
+            let unresolved_conflicts = concept_lint::unresolved_conflicts(&concept_pages);
+            // Alias conflicts read the scanned pages (which carry `aliases`), not the
+            // concept-lint page set — the two declaration failures a silent first-wins
+            // alias resolution would otherwise hide.
+            let alias_conflicts = alias::find_alias_conflicts(&pages, &existence, &rc.vault_dirs);
 
             let findings = orphans.len()
                 + broken.len()
@@ -223,7 +243,8 @@ fn run_inner(
                 + drift.missing_from_disk.len()
                 + invalid_categories.len()
                 + near_duplicate_concepts.len()
-                + unresolved_conflicts.len();
+                + unresolved_conflicts.len()
+                + alias_conflicts.len();
 
             let report = output::LintReport {
                 pages: g.node_count(),
@@ -240,6 +261,7 @@ fn run_inner(
                 invalid_categories,
                 near_duplicate_concepts,
                 unresolved_conflicts,
+                alias_conflicts,
                 findings,
             };
             if json {
@@ -395,7 +417,11 @@ fn run_inner(
         }
         // Dispatched at the top of `run_inner` because they need full-vault scope
         // and/or config that doesn't touch the in-scope WikiGraph.
-        GraphCmd::Stale { .. } | GraphCmd::BacklinksSync { .. } | GraphCmd::Merge { .. } => {
+        GraphCmd::Stale { .. }
+        | GraphCmd::AuditCandidates
+        | GraphCmd::AuditMark { .. }
+        | GraphCmd::BacklinksSync { .. }
+        | GraphCmd::Merge { .. } => {
             unreachable!()
         }
     };
@@ -416,7 +442,22 @@ fn run_stale(
     days: u32,
     incremental: bool,
 ) -> Result<bool, String> {
-    let rc = resolve_config_full(opts, root_override)?;
+    let mut rc = resolve_config_full(opts, root_override)?;
+
+    // Staleness is reported for the analysis scope (the evergreen wiki by default),
+    // but liveness — "is this page still cited by recent activity?" — is derived from
+    // the WHOLE vault, so a concept reinforced by this week's daily notes is not
+    // flagged. Scan every page dir (the full-vault view backlinks-sync uses) and
+    // filter the report set back down to the configured scope.
+    let report_scope = rc.graph.scope.dirs.clone();
+    // Liveness needs the whole vault, but a custom `scope.dirs` outside the standard
+    // page dirs must still be scanned and reported — union them (the same helper the
+    // integrity commands use), then filter the report back to `report_scope`.
+    rc.graph.scope.dirs = command_scan_dirs(
+        true,
+        &report_scope,
+        vault_page_dirs(&rc.root, &rc.vault_dirs),
+    );
 
     if incremental {
         let cp = cache::cache_path(&rc.root);
@@ -435,12 +476,24 @@ fn run_stale(
         }
     }
 
-    let pages = scan::scan_vault(&rc.root, &rc.graph).map_err(|e| format!("{e}"))?;
+    let all_pages = scan::scan_vault(&rc.root, &rc.graph).map_err(|e| format!("{e}"))?;
+    let candidates: Vec<scan::ScannedPage> = all_pages
+        .iter()
+        .filter(|p| report_scope.iter().any(|d| p.path.starts_with(d)))
+        .cloned()
+        .collect();
 
     let today = jiff::Timestamp::now().to_zoned(rc.tz).date();
 
-    let stale_pages = stale::find_stale(&pages, &rc.root, today, days, &rc.vault_dirs)
-        .map_err(|e| format!("{e}"))?;
+    let stale_pages = stale::find_stale(
+        &candidates,
+        &all_pages,
+        &rc.root,
+        today,
+        days,
+        &rc.vault_dirs,
+    )
+    .map_err(|e| format!("{e}"))?;
     let count = stale_pages.len();
     let report = output::StaleReport {
         threshold_days: days,
@@ -459,6 +512,43 @@ fn run_stale(
     }
 
     Ok(count > 0)
+}
+
+fn run_audit_candidates(
+    opts: &GlobalOpts,
+    root_override: Option<PathBuf>,
+    json: bool,
+) -> Result<bool, String> {
+    let rc = resolve_config_full(opts, root_override)?;
+    let candidates = audit::find_audit_candidates(&rc.root, &rc.vault_dirs.wiki, rc.locale)
+        .map_err(|e| format!("{e}"))?;
+    let count = candidates.len();
+    let report = output::AuditCandidatesReport { candidates, count };
+    if json {
+        output::print_json(&report)?;
+    } else {
+        output::print_audit_candidates(&report);
+    }
+    Ok(count > 0)
+}
+
+fn run_audit_mark(
+    opts: &GlobalOpts,
+    root_override: Option<PathBuf>,
+    json: bool,
+    slug: &str,
+) -> Result<bool, String> {
+    let rc = resolve_config_full(opts, root_override)?;
+    let changed = audit::mark_audited(&rc.root, &rc.vault_dirs.wiki, slug, rc.locale)
+        .map_err(|e| format!("{e}"))?;
+    if json {
+        output::print_json(&serde_json::json!({ "slug": slug, "changed": changed }))?;
+    } else if changed {
+        println!("Marked '{slug}' as audited.");
+    } else {
+        println!("'{slug}' was already up to date.");
+    }
+    Ok(false)
 }
 
 fn run_backlinks_sync(

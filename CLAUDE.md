@@ -16,9 +16,11 @@ Slack ─────────┼─ config ─┤  Deduplicate (cascade)   <
 Jira ──────────┤  .yaml   ├─ Classify (labels)       <synthesis>/{weekly}/
 Calendar ──────┤          ├─ Concepts (LLM)          <wiki>/concepts/
 RSS/Atom ──────┤          ├─ Render (templates)      <wiki>/documents/
-Manual inbox ──┘          ├─ Wiki index (catalog)    <wiki>/index.md
+Manual inbox ──┘          ├─ Wiki index (catalog)    <wiki>/index.md (by-topic)
+                          ├─ Wiki log (timeline)     <wiki>/log.md (by-time)
                           └─ Graph (lint, stale,     <wiki>/AGENTS.md
-                               cluster, backlinks)
+                               cluster, backlinks,
+                               alias, audit)
 ```
 
 ## Workspace

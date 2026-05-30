@@ -96,16 +96,21 @@ inspecting pages.
    exits non-zero — always inspect the pairs), then confirm topical relatedness
    before proposing a link. Community grounding + LLM confirmation = double gate
    against false positives.
-3. **Contradictions** — scoped to one concept page at a time whose `sources`
-   cite conflicting claims. Only flag a genuine, unambiguous contradiction (two
-   sources asserting incompatible facts) — never a difference in emphasis or a
-   gap; uncertainty means do not flag. When one is found, add a callout under
-   the Synthesis section stating both sides and citing each source:
-   `> [!conflict] <one-line summary of the disagreement>`. Never choose a side.
-   The callout lives in the LLM-owned Synthesis body, so ingest re-render
-   preserves it, and `lore graph lint` reports it as an unresolved conflict
-   until a human resolves the contradiction and deletes the callout. One page
-   at a time to avoid combinatorial blow-up.
+3. **Contradictions** — run `lore graph --json audit-candidates` for the
+   worklist: concepts with 2+ sources AND new sources since their last audit (the
+   `audited_source_count` marker), most-changed first. Work it one page at a time
+   (avoids combinatorial blow-up). For each, read its cited sources and only flag
+   a genuine, unambiguous contradiction (two sources asserting incompatible facts)
+   — never a difference in emphasis or a gap; uncertainty means do not flag. When
+   one is found, add a callout under the Synthesis section stating both sides and
+   citing each source: `> [!conflict] <one-line summary of the disagreement>`.
+   Never choose a side. The callout lives in the LLM-owned Synthesis body, so
+   ingest re-render preserves it, and `lore graph lint` reports it as an
+   unresolved conflict until a human resolves it and deletes the callout.
+   AFTER reviewing a candidate — whether or not you flagged a conflict — run
+   `lore graph audit-mark <slug>` to record its current source set, so it leaves
+   the worklist until its sources change again. This is what keeps the list
+   low-noise; skipping the mark makes every multi-source concept resurface.
 4. **Frontiers — data gaps + new directions**. Report:
    - Concepts mentioned in daily pages but missing a dedicated wiki page
      (cross-check `[[...]]` wikilinks vs concept files from `lore wiki concepts`).
@@ -123,10 +128,10 @@ inspecting pages.
      authored prose unless `--force`, so salvage first). Leave deliberate
      model-version siblings (`gpt-4`/`gpt-5`) split — they are distinct concepts.
    - **Staleness**: run `lore graph stale --days 90`, filter concept entries.
-     Check if each has been referenced in any daily page in the last 90 days
-     (grep `[[{title}]]`/`[[{slug}]]`). If truly stale (no recent refs, low
-     source_count), suggest `status: archived` in frontmatter — do NOT auto-archive.
-     If referenced recently but `updated` is old, flag for synthesis refresh.
+     `stale` already excludes concepts still cited by recent activity (liveness is
+     graph-derived), so an entry here is genuinely dormant — no manual recency grep
+     needed. For a dormant concept with low `source_count`, suggest
+     `status: archived` in frontmatter — do NOT auto-archive.
 
 ### `/lore-wiki status`
 

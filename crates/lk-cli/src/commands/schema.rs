@@ -63,6 +63,7 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs) -> Vec<PageSchema> {
                 "updated",
                 "category",
                 "source_count",
+                "audited_sources_hash",
                 "tags",
             ],
             sections: vec![

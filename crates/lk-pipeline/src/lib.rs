@@ -1,5 +1,5 @@
 mod classify;
-mod concepts;
+mod concept_draft;
 mod context;
 mod dedup;
 mod llm_cache;
@@ -24,7 +24,7 @@ use lk_core::config::{Config, DedupConfig, SourceConfig, SourceType};
 use lk_core::event::{Event, RawItem};
 use lk_vault::VaultReader;
 
-use concepts::ConceptDrafts;
+use concept_draft::ConceptDrafts;
 
 /// Helper for the `lore maintenance` CLI command: opens the dedup cache standalone.
 pub fn dedup_cache_for_maintenance(
@@ -183,7 +183,7 @@ impl Pipeline {
         // Append-only types keep full dedup: re-seeing an item is a true duplicate.
         let bypass_dedup = options.force || config.source_type.is_mutable();
         let duplicates = if !bypass_dedup {
-            let result = self.dedup.deduplicate(events, &self.dedup_config.cascade)?;
+            let result = self.dedup.dedup(events, &self.dedup_config.cascade)?;
             events = result.novel;
             tracing::info!(source = source_id, novel = events.len(), "dedup");
             result.duplicates
@@ -748,7 +748,7 @@ fn filter_valid_concepts(
 ) -> Vec<ExtractedConcept> {
     let valid_cat_ids: Vec<&str> = categories.iter().map(|c| c.id.as_str()).collect();
     raw.into_iter()
-        .filter(concepts::is_valid)
+        .filter(concept_draft::is_valid)
         .map(|mut ec| {
             if let Some(ref cat) = ec.category
                 && !valid_cat_ids.contains(&cat.as_str())

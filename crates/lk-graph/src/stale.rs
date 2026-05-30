@@ -5,6 +5,7 @@
 //! than `today - threshold_days`. Pages with neither field are skipped, never
 //! reported, because a missing date is a separate condition from "old".
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use lk_core::config::VaultDirs;
@@ -12,7 +13,7 @@ use lk_core::frontmatter::{self, Frontmatter};
 use serde::Serialize;
 
 use crate::GraphError;
-use crate::scan::ScannedPage;
+use crate::scan::{ScannedPage, VaultExistence, is_valid_source};
 
 /// A vault page that exceeds the staleness threshold.
 #[derive(Debug, Clone, Serialize)]
@@ -106,35 +107,89 @@ impl Category {
     }
 }
 
-/// Walk `pages` and return every page whose `updated` (or `created`) is more than
-/// `threshold_days` before `today`. Pages with neither field are skipped.
+/// Return every candidate in `pages` that is both **old** and **dormant**: its
+/// `updated` (or `created`) is more than `threshold_days` before `today`, AND it has
+/// no incoming citation from a page that is itself recent. Pages with neither date
+/// field are skipped.
+///
+/// `all_pages` is the full-vault universe used only to derive incoming-citation
+/// recency — a concept still cited by this week's daily notes is *live*, not stale,
+/// even when its own `updated` is old. This is the deterministic, graph-derived line
+/// between "old" and "actually dormant": no heuristic, no content inspection. Callers
+/// pass the report scope as `pages` and the whole vault as `all_pages` (a superset).
 ///
 /// Result ordering: by descending `days_old`, then by path for determinism. The
 /// caller is responsible for grouping by category (the [`StalePage::category`]
 /// field is precomputed for that).
 pub fn find_stale(
     pages: &[ScannedPage],
+    all_pages: &[ScannedPage],
     vault_root: &Path,
     today: jiff::civil::Date,
     threshold_days: u32,
     dirs: &VaultDirs,
 ) -> Result<Vec<StalePage>, GraphError> {
-    let mut stale = Vec::new();
-
-    for page in pages {
+    // Read every page's date once, keyed by page id. A page dated by neither
+    // `updated` nor `created` is absent from the map and contributes no recency.
+    let mut date_by_id: HashMap<&str, jiff::civil::Date> = HashMap::with_capacity(all_pages.len());
+    for page in all_pages {
         let full = vault_root.join(&page.path);
         let raw = std::fs::read_to_string(&full)
             .map_err(|e| GraphError::Io(format!("failed to read {}: {e}", full.display())))?;
         let parsed = frontmatter::parse_page(&raw)
             .map_err(|e| GraphError::Io(format!("frontmatter in {}: {e}", full.display())))?;
+        if let Some(date) = extract_date(&parsed.frontmatter) {
+            date_by_id.insert(page.id.as_str(), date);
+        }
+    }
 
-        let Some(date) = extract_date(&parsed.frontmatter) else {
+    // For each page, the freshest date among the pages that cite it. Built from the
+    // resolved wikilink graph over the full vault so a bare `[[concept]]` from a daily
+    // note counts toward that concept's liveness.
+    let existence = VaultExistence::from_pages(all_pages, dirs);
+    let mut inbound_fresh: HashMap<&str, jiff::civil::Date> = HashMap::new();
+    for page in all_pages {
+        // Only a real citation source (event/work-log/synthesis/document/exploration)
+        // reinforces liveness. A concept-to-concept `## Related` link is curated
+        // structure, not recent activity — it must not keep an otherwise-dormant concept
+        // off the stale report. Same `is_valid_source` definition backlinks uses.
+        if !is_valid_source(&page.path, dirs) {
+            continue;
+        }
+        let Some(&src_date) = date_by_id.get(page.id.as_str()) else {
             continue;
         };
+        for target in &page.outgoing {
+            if let Some(target_id) = existence.resolve(target)
+                && target_id != page.id.as_str()
+            {
+                inbound_fresh
+                    .entry(target_id)
+                    .and_modify(|d| {
+                        if src_date > *d {
+                            *d = src_date;
+                        }
+                    })
+                    .or_insert(src_date);
+            }
+        }
+    }
 
+    let mut stale = Vec::new();
+    for page in pages {
+        let Some(&date) = date_by_id.get(page.id.as_str()) else {
+            continue;
+        };
         let days_old = today.duration_since(date).as_secs() / 86_400;
         if days_old <= i64::from(threshold_days) {
             continue;
+        }
+        // A recent incoming citation keeps the page alive — exempt it.
+        if let Some(&inbound) = inbound_fresh.get(page.id.as_str()) {
+            let inbound_days_old = today.duration_since(inbound).as_secs() / 86_400;
+            if inbound_days_old <= i64::from(threshold_days) {
+                continue;
+            }
         }
 
         stale.push(StalePage {
@@ -185,6 +240,7 @@ mod tests {
             path: PathBuf::from(rel),
             title: id.to_owned(),
             outgoing: vec![],
+            aliases: Vec::new(),
         }
     }
 
@@ -203,7 +259,7 @@ mod tests {
             "---\nupdated: 2026-05-14\n---\n\nbody\n",
         );
         let pages = vec![page("wiki/concepts/fresh", "wiki/concepts/fresh.md")];
-        let stale = find_stale(&pages, dir.path(), today(), 90, &dirs).unwrap();
+        let stale = find_stale(&pages, &pages, dir.path(), today(), 90, &dirs).unwrap();
         assert!(stale.is_empty());
     }
 
@@ -227,7 +283,7 @@ mod tests {
             page("wiki/concepts/old", "wiki/concepts/old.md"),
             page("wiki/concepts/edge", "wiki/concepts/edge.md"),
         ];
-        let stale = find_stale(&pages, dir.path(), today(), 90, &dirs).unwrap();
+        let stale = find_stale(&pages, &pages, dir.path(), today(), 90, &dirs).unwrap();
         assert_eq!(stale.len(), 1);
         assert_eq!(stale[0].path, PathBuf::from("wiki/concepts/old.md"));
         assert_eq!(stale[0].days_old, 180);
@@ -244,7 +300,7 @@ mod tests {
             "---\ncreated: 2025-11-25\n---\n\nbody\n",
         );
         let pages = vec![page("wiki/concepts/c", "wiki/concepts/c.md")];
-        let stale = find_stale(&pages, dir.path(), today(), 90, &dirs).unwrap();
+        let stale = find_stale(&pages, &pages, dir.path(), today(), 90, &dirs).unwrap();
         assert_eq!(stale.len(), 1);
         assert_eq!(stale[0].updated, jiff::civil::date(2025, 11, 25));
     }
@@ -263,8 +319,105 @@ mod tests {
             page("wiki/concepts/n", "wiki/concepts/n.md"),
             page("wiki/concepts/o", "wiki/concepts/o.md"),
         ];
-        let stale = find_stale(&pages, dir.path(), today(), 90, &dirs).unwrap();
+        let stale = find_stale(&pages, &pages, dir.path(), today(), 90, &dirs).unwrap();
         assert!(stale.is_empty());
+    }
+
+    #[test]
+    fn old_page_cited_by_recent_note_is_not_stale() {
+        // An old concept reinforced by a recent incoming citation is live, not stale.
+        let dir = TempDir::new().unwrap();
+        let dirs = VaultDirs::default();
+        write(
+            &dir,
+            "wiki/concepts/rag.md",
+            "---\nupdated: 2025-11-25\n---\n\nbody\n",
+        );
+        write(
+            &dir,
+            "daily/ai-news/2026-05-19.md",
+            "---\nupdated: 2026-05-19\n---\n\nSee [[rag]].\n",
+        );
+        let concept = page("wiki/concepts/rag", "wiki/concepts/rag.md");
+        let daily = ScannedPage {
+            id: "daily/ai-news/2026-05-19".to_owned(),
+            path: PathBuf::from("daily/ai-news/2026-05-19.md"),
+            title: "d".to_owned(),
+            outgoing: vec!["rag".to_owned()],
+            aliases: Vec::new(),
+        };
+        let all = vec![concept.clone(), daily];
+        let stale = find_stale(&[concept], &all, dir.path(), today(), 90, &dirs).unwrap();
+        assert!(
+            stale.is_empty(),
+            "a concept cited by a recent page is live, not stale: {stale:?}"
+        );
+    }
+
+    #[test]
+    fn concept_kept_alive_only_by_another_concept_is_still_stale() {
+        // A `## Related` link from a recent CONCEPT is curated structure, not activity —
+        // it must not reinforce liveness (only valid sources do). The old concept stays stale.
+        let dir = TempDir::new().unwrap();
+        let dirs = VaultDirs::default();
+        write(
+            &dir,
+            "wiki/concepts/rag.md",
+            "---\nupdated: 2025-11-25\n---\n\nbody\n",
+        );
+        write(
+            &dir,
+            "wiki/concepts/vector-search.md",
+            "---\nupdated: 2026-05-20\n---\n\nSee [[rag]].\n",
+        );
+        let rag = page("wiki/concepts/rag", "wiki/concepts/rag.md");
+        let related = ScannedPage {
+            id: "wiki/concepts/vector-search".to_owned(),
+            path: PathBuf::from("wiki/concepts/vector-search.md"),
+            title: "vs".to_owned(),
+            outgoing: vec!["rag".to_owned()],
+            aliases: vec![],
+        };
+        let all = vec![rag.clone(), related];
+        let stale = find_stale(&[rag], &all, dir.path(), today(), 90, &dirs).unwrap();
+        assert_eq!(
+            stale.len(),
+            1,
+            "a concept reinforced only by another concept is still stale: {stale:?}"
+        );
+    }
+
+    #[test]
+    fn old_page_cited_only_by_old_notes_is_stale() {
+        // Citations that are themselves old don't keep a page alive — it stays dormant.
+        let dir = TempDir::new().unwrap();
+        let dirs = VaultDirs::default();
+        write(
+            &dir,
+            "wiki/concepts/rag.md",
+            "---\nupdated: 2025-11-25\n---\n\nbody\n",
+        );
+        write(
+            &dir,
+            "daily/ai-news/2025-11-20.md",
+            "---\nupdated: 2025-11-20\n---\n\nSee [[rag]].\n",
+        );
+        let concept = page("wiki/concepts/rag", "wiki/concepts/rag.md");
+        let daily = ScannedPage {
+            id: "daily/ai-news/2025-11-20".to_owned(),
+            path: PathBuf::from("daily/ai-news/2025-11-20.md"),
+            title: "d".to_owned(),
+            outgoing: vec!["rag".to_owned()],
+            aliases: Vec::new(),
+        };
+        let all = vec![concept.clone(), daily];
+        let stale = find_stale(&[concept], &all, dir.path(), today(), 90, &dirs).unwrap();
+        assert_eq!(
+            stale.len(),
+            1,
+            "a concept cited only by old notes stays stale: {stale:?}"
+        );
+        assert_eq!(stale[0].path, PathBuf::from("wiki/concepts/rag.md"));
     }
 
     #[test]

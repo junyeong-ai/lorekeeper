@@ -54,7 +54,7 @@ concept_categories) with the `Synthesizer`.
 - **`new_dry_run`** opens the dedup cache read-only (no file creation).
 - **DedupCache**: default cascade is `event-id → content-hash → url` (first match =
   duplicate); `title` (fuzzy Sørensen-Dice) is **opt-in** — it can merge distinct
-  same-title observations, so recurring-title feeds keep it off. `deduplicate` returns
+  same-title observations, so recurring-title feeds keep it off. `dedup` returns
   `{novel, duplicates}`; `commit` records novel AND re-records duplicates (upsert) to
   refresh `seen_at`, so a steady-state re-arrival never ages past retention and
   re-emits as new. Persisted-table lookups are gated on the cache being present, but

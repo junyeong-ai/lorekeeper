@@ -6,6 +6,7 @@ pub mod event;
 pub mod frontmatter;
 pub mod i18n;
 pub mod markdown;
+pub mod math;
 pub mod text;
 pub mod vault_path;
 pub mod wikilink;

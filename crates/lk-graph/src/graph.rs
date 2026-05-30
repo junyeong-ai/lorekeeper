@@ -110,6 +110,26 @@ impl WikiGraph {
             }
         }
 
+        // Aliases form the lowest-precedence resolution layer (after filename and id):
+        // a concept's declared `aliases` let a bare `[[synonym]]` link land on it, but
+        // never shadow a real page, and the first concept to claim an alias wins. Real-page
+        // membership comes from the full-vault `existence` (not just the in-scope nodes),
+        // so this precedence matches `VaultExistence`/`backlinks` exactly even when the
+        // analysis scope is a strict subset of the vault.
+        let mut alias_to_node: HashMap<String, NodeIndex> = HashMap::new();
+        for page in pages {
+            if !is_concept_page(&page.path, dirs) {
+                continue;
+            }
+            let node = id_to_node[&page.id];
+            for alias in &page.aliases {
+                if existence.is_real_page(alias) {
+                    continue;
+                }
+                alias_to_node.entry(alias.clone()).or_insert(node);
+            }
+        }
+
         let mut broken = Vec::new();
         let mut cross_scope_connected = HashSet::new();
 
@@ -121,7 +141,8 @@ impl WikiGraph {
                 let in_scope = name_to_node
                     .get(target.as_str())
                     .map(|(node, _)| *node)
-                    .or_else(|| id_to_node.get(target.as_str()).copied());
+                    .or_else(|| id_to_node.get(target.as_str()).copied())
+                    .or_else(|| alias_to_node.get(target.as_str()).copied());
                 if let Some(target_idx) = in_scope {
                     if source_idx != target_idx {
                         graph.add_edge(source_idx, target_idx, ());
@@ -290,6 +311,7 @@ mod tests {
             path: PathBuf::from(format!("{id}.md")),
             title: name.to_owned(),
             outgoing: outgoing.iter().map(|s| s.to_string()).collect(),
+            aliases: Vec::new(),
         }
     }
 
@@ -444,6 +466,29 @@ mod tests {
         let g = WikiGraph::build(&pages, &VaultDirs::default());
 
         assert_eq!(g.edge_count(), 1);
+        assert!(g.broken_links().is_empty());
+    }
+
+    #[test]
+    fn bare_alias_link_resolves_to_concept() {
+        // `[[k8s]]` where `k8s` is a declared alias of the kubernetes concept must
+        // form a real edge to that concept node (not a broken link).
+        let pages = vec![
+            ScannedPage {
+                id: "wiki/concepts/kubernetes".to_owned(),
+                path: PathBuf::from("wiki/concepts/kubernetes.md"),
+                title: "Kubernetes".to_owned(),
+                outgoing: vec![],
+                aliases: vec!["k8s".to_owned()],
+            },
+            make_page("wiki/linker", &["k8s"]),
+        ];
+        let g = WikiGraph::build(&pages, &VaultDirs::default());
+        assert_eq!(
+            g.edge_count(),
+            1,
+            "[[k8s]] must resolve to the kubernetes concept via its alias"
+        );
         assert!(g.broken_links().is_empty());
     }
 

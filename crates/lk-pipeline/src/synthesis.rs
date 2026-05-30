@@ -663,7 +663,7 @@ impl Synthesizer {
                 if count == 0 {
                     return None;
                 }
-                let percent = (count as f64 / total as f64 * 100.0).round() as u32;
+                let percent = lk_core::math::round_percent(count, total);
                 Some(serde_json::json!({
                     "name": cat,
                     "count": count,

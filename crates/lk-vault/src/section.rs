@@ -112,6 +112,70 @@ pub fn section_body<'a>(content: &'a str, heading: &str) -> Option<&'a str> {
     Some(&content[body_start..body_end])
 }
 
+/// Set a scalar `key: value` inside the frontmatter block ONLY (between the first two
+/// `---` lines). Matches only a TOP-LEVEL (column-0) key, so a `key:` in body prose, a
+/// code fence, or nested under a mapping (e.g. `summary:` under `llm_inputs:`) is never
+/// touched. If the field is absent it is inserted just before the closing `---`, so a
+/// later run sees it and the operation is idempotent. A page with no frontmatter block is
+/// returned unchanged. A leading BOM is recognized (mirroring `parse_page`) and preserved.
+/// The single source of truth for setting a frontmatter scalar — used by `backlinks-sync`
+/// (`source_count`) and the audit marker (`audited_sources_hash`).
+pub fn set_frontmatter_field(content: &str, key: &str, value: &str) -> String {
+    // Recognize a leading BOM the way `parse_page` does, then restore it so the page
+    // round-trips byte-faithfully.
+    let (bom, body) = content
+        .strip_prefix('\u{feff}')
+        .map_or(("", content), |rest| ("\u{feff}", rest));
+    let mut out = String::with_capacity(content.len());
+    out.push_str(bom);
+    let mut in_frontmatter = false;
+    let mut seen_open = false;
+    let mut done = false;
+    let mut first_line = true;
+    let field_prefix = format!("{key}:");
+    for line in body.split_inclusive('\n') {
+        let is_fence = line.strip_suffix('\n').unwrap_or(line).trim_end() == "---";
+        // The opening fence must be the document's FIRST line — same rule as
+        // `frontmatter::parse_page` — so a body thematic break (`---`) in a page with no
+        // frontmatter is never mistaken for a frontmatter opener.
+        let was_first = first_line;
+        first_line = false;
+        if is_fence && !seen_open && was_first {
+            seen_open = true;
+            in_frontmatter = true;
+            out.push_str(line);
+            continue;
+        }
+        if is_fence && in_frontmatter {
+            if !done {
+                out.push_str(key);
+                out.push_str(": ");
+                out.push_str(value);
+                out.push('\n');
+                done = true;
+            }
+            in_frontmatter = false;
+            out.push_str(line);
+            continue;
+        }
+        // Match ONLY a top-level key (no leading whitespace). An indented key nested under
+        // a mapping must be left alone — rewriting it would orphan the real top-level field
+        // and break idempotency.
+        if in_frontmatter && !done && line.starts_with(&field_prefix) {
+            out.push_str(key);
+            out.push_str(": ");
+            out.push_str(value);
+            if line.ends_with('\n') {
+                out.push('\n');
+            }
+            done = true;
+        } else {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     /// Test-only mirror of the pipeline's "is this section filled?" check
@@ -122,6 +186,76 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn set_frontmatter_field_inserts_when_absent() {
+        let doc = "---\nid: x\n---\n\n# X\n";
+        let out = set_frontmatter_field(doc, "source_count", "3");
+        assert_eq!(out, "---\nid: x\nsource_count: 3\n---\n\n# X\n");
+    }
+
+    #[test]
+    fn set_frontmatter_field_replaces_when_present() {
+        let doc = "---\nid: x\nsource_count: 1\n---\n\n# X\n";
+        let out = set_frontmatter_field(doc, "source_count", "9");
+        assert_eq!(out, "---\nid: x\nsource_count: 9\n---\n\n# X\n");
+    }
+
+    #[test]
+    fn set_frontmatter_field_is_idempotent() {
+        let doc = "---\nid: x\n---\n\n# X\n";
+        let once = set_frontmatter_field(doc, "h", "abc");
+        let twice = set_frontmatter_field(&once, "h", "abc");
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn set_frontmatter_field_ignores_body_occurrences() {
+        // A `source_count:` in the BODY (prose or a code fence) must never be mutated —
+        // only the frontmatter block between the first two `---` lines is touched.
+        let doc = "---\nid: x\nsource_count: 1\n---\n\n# X\n\n```\nsource_count: 999\n```\n";
+        let out = set_frontmatter_field(doc, "source_count", "2");
+        assert_eq!(
+            out,
+            "---\nid: x\nsource_count: 2\n---\n\n# X\n\n```\nsource_count: 999\n```\n"
+        );
+    }
+
+    #[test]
+    fn set_frontmatter_field_no_block_is_unchanged() {
+        // First line is not a `---` fence → no frontmatter; a later body `---` thematic
+        // break must not be mistaken for a frontmatter opener.
+        let doc = "# X\n\nbody\n\n---\n\nmore\n";
+        assert_eq!(set_frontmatter_field(doc, "k", "v"), doc);
+    }
+
+    #[test]
+    fn set_frontmatter_field_ignores_nested_keys() {
+        // An indented key nested under a mapping must NOT be matched; the top-level field
+        // is inserted independently (keeps the op idempotent on pages with nested YAML).
+        let doc = "---\nllm_inputs:\n  source_count: 5\n---\n";
+        let out = set_frontmatter_field(doc, "source_count", "2");
+        assert_eq!(
+            out,
+            "---\nllm_inputs:\n  source_count: 5\nsource_count: 2\n---\n"
+        );
+    }
+
+    #[test]
+    fn set_frontmatter_field_recognizes_and_preserves_bom() {
+        let doc = "\u{feff}---\nid: x\n---\n";
+        let out = set_frontmatter_field(doc, "source_count", "2");
+        assert_eq!(out, "\u{feff}---\nid: x\nsource_count: 2\n---\n");
+    }
+
+    #[test]
+    fn set_frontmatter_field_does_not_false_match_key_prefix() {
+        // Setting `source_count` must not touch a different key that merely shares a
+        // prefix — the trailing `:` anchors the match.
+        let doc = "---\nsource_count_extra: keep\nsource_count: 1\n---\n";
+        let out = set_frontmatter_field(doc, "source_count", "5");
+        assert_eq!(out, "---\nsource_count_extra: keep\nsource_count: 5\n---\n");
+    }
 
     #[test]
     fn replaces_body_between_headings() {

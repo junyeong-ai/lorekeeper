@@ -29,5 +29,18 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   One-liner summaries are extracted from each page's type-specific `## ` section body
   (concept synthesis, daily/document summary — heading resolved from the i18n bundle),
   not the H1 title. `write_index` handles the atomic write.
+- **`timeline::build_timeline`** generates `{wiki}/log.md` — a reverse-chronological
+  knowledge timeline (when each concept/document/exploration first entered the vault).
+  A materialized view like the index (regenerate → byte-identical), with three rules:
+  anchored on `created` ONLY (never `updated`, which churns on re-mention/machine work
+  and would inject fake "knowledge changed" events); durable knowledge nodes only
+  (daily/synthesis excluded — a principled split, not a fuzzy score); and bounded to a
+  rolling `TIMELINE_WINDOW_DAYS` (365) measured from the newest *entry* (not the wall
+  clock, to stay deterministic) so it can't grow unbounded as the vault ages. `log.md`
+  is in `RESERVED_WIKI_FILES`, so the graph never flags it as an orphan or index drift.
+- **`set_frontmatter_field`** sets a scalar inside the frontmatter block, matching ONLY a
+  top-level (column-0) key — never an indented key nested under a mapping (e.g. `summary:`
+  under `llm_inputs:`) — and recognizes a leading BOM. The single source of truth for
+  `backlinks-sync`'s `source_count` and the audit marker's `audited_sources_hash`.
 - **`VaultWriter::write_page_sync`** is a sync wrapper around the same
   atomic temp+rename flow. Used by graph commands (pure sync, no tokio runtime).
