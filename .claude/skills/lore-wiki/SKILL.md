@@ -97,8 +97,8 @@ inspecting pages.
    before proposing a link. Community grounding + LLM confirmation = double gate
    against false positives.
 3. **Contradictions** — run `lore graph --json audit-candidates` for the
-   worklist: concepts with 2+ sources AND new sources since their last audit (the
-   `audited_source_count` marker), most-changed first. Work it one page at a time
+   worklist: concepts with 2+ sources AND a source set that changed since their last
+   audit (the `audited_sources_hash` marker). Work it one page at a time
    (avoids combinatorial blow-up). For each, read its cited sources and only flag
    a genuine, unambiguous contradiction (two sources asserting incompatible facts)
    — never a difference in emphasis or a gap; uncertainty means do not flag. When

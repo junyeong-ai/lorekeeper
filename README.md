@@ -74,9 +74,11 @@ Slack ─────────┼─ config ─┤  Deduplicate (cascade)   m
 Jira ──────────┤  .yaml   ├─ Classify (labels)       synthesis/{weekly}/
 Calendar ──────┤          ├─ Concepts (LLM)          wiki/concepts/
 RSS/Atom ──────┤          ├─ Render (templates)      wiki/documents/
-Manual inbox ──┘          ├─ Wiki index (catalog)    wiki/index.md
+Manual inbox ──┘          ├─ Wiki index (catalog)    wiki/index.md (by-topic)
+                          ├─ Wiki log (timeline)     wiki/log.md (by-time)
                           └─ Graph (lint, stale,     wiki/AGENTS.md
-                               cluster, backlinks)
+                               cluster, backlinks,
+                               alias, audit)
 
 Claude Code Skills        Semantic Plane             (same vault)
 ──────────────────        ──────────────             ────────────
@@ -110,13 +112,16 @@ Claude Code Skills        Semantic Plane             (same vault)
 | `lore schedule --bin /full/path/lore` | Override bin path in cron lines |
 | `lore maintenance` | Prune ingest log, dedup cache, and drained queue files older than 90 days |
 | `lore schema` | Generate `wiki/AGENTS.md` (page format schema from locale) |
-| `lore graph lint` | Structural health: orphans, broken links, hubs, invalid categories, near-duplicates, unresolved conflicts, index drift |
+| `lore graph lint` | Structural health: orphans, broken links, hubs, invalid categories, near-duplicates, alias conflicts, unresolved conflicts, index drift |
 | `lore graph suggest-links` | Community-based cross-reference suggestions |
 | `lore graph cluster` | Topic communities via Louvain modularity |
-| `lore graph backlinks-sync` | Re-derive each concept's `## Sources` + `source_count` from the wikilink graph |
+| `lore graph backlinks-sync` | Re-derive each concept's `## Sources` + `source_count` from the wikilink graph (resolves `[[alias]]` citations to the canonical concept) |
 | `lore graph merge <from> <into>` | Fold a duplicate concept into a canonical one (rewires wikilinks, deletes `from`) |
-| `lore graph stale --days N` | Report pages not updated within N days |
-| `lore wiki index` | Rebuild `wiki/index.md` catalog from disk |
+| `lore graph stale --days N` | Report pages that are old AND no longer cited by recent activity (dormant, not just old) |
+| `lore graph audit-candidates` | Concepts whose source set changed since their last contradiction audit |
+| `lore graph audit-mark <slug>` | Record a concept as audited (drops it from `audit-candidates` until its sources change) |
+| `lore wiki index` | Rebuild `wiki/index.md` — by-topic catalog |
+| `lore wiki log` | Rebuild `wiki/log.md` — by-time knowledge timeline (recent window) |
 | `lore wiki concepts` | List all concept pages |
 | `lore queue status` | Classify pending LLM tasks: current / stale / missing-target |
 

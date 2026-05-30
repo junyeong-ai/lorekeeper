@@ -483,32 +483,3 @@ itself is the cache key. How to invalidate depends on the section's cache shape:
   `llm_inputs.refine_events_done` line. Emptying the event body does NOT force a
   re-run — the event list is structural and the pipeline re-renders it, so
   completion is tracked only by `refine_events_done`.
-
-## Example session
-
-```bash
-# After cron runs `lore ingest` at 07:00, a queue file exists:
-$ ls ~/Documents/Obsidian\ Vault/.lorekeeper/queue/
-2026-05-23T07-00-00Z-pid12345.jsonl
-
-$ wc -l ~/Documents/Obsidian\ Vault/.lorekeeper/queue/*.jsonl
-14 tasks pending
-
-# Run this skill:
-# /lore-process
-
-# Result: 14 tasks processed, daily pages now have summaries and concept
-# wiki-links, concept pages created/merged, queue file archived.
-```
-
-## Quick verification
-
-After running, the user can check:
-```bash
-# No pending queue files
-ls "$VAULT/.lorekeeper/queue/"*.jsonl 2>/dev/null
-# (empty)
-
-# Today's daily pages have summary content (path depends on vault.dirs.daily)
-head -30 "$VAULT/<daily>/ai-news/$(date +%Y-%m-%d).md"
-```
