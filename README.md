@@ -155,7 +155,7 @@ The skill is **fully idempotent**: re-running on a partially-processed queue fil
 
 ## Claude Code Skills
 
-Six skills provide the Claude Code integration surface. All follow the `lore-{verb}` naming convention and are written in English (AI-native design).
+These skills provide the Claude Code integration surface. All follow the `lore-{verb}` naming convention and are written in English (AI-native design).
 
 | Skill | Purpose | Model-invocable |
 |-------|---------|:---------------:|
