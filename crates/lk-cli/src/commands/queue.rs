@@ -50,13 +50,17 @@ struct TaskReport {
     status: TaskStatus,
 }
 
-pub async fn run(opts: &super::GlobalOpts, cmd: QueueCmd) -> miette::Result<()> {
+pub async fn run(opts: &super::GlobalOptions, cmd: QueueCmd) -> miette::Result<()> {
     match cmd {
         QueueCmd::Status { root, json } => status(opts, root, json).await,
     }
 }
 
-async fn status(opts: &super::GlobalOpts, root: Option<PathBuf>, json: bool) -> miette::Result<()> {
+async fn status(
+    opts: &super::GlobalOptions,
+    root: Option<PathBuf>,
+    json: bool,
+) -> miette::Result<()> {
     let vault_root = match root {
         Some(r) => r,
         None => load_config(&find_config(opts)?)?.vault.root_path(),

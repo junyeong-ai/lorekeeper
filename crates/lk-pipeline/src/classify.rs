@@ -138,7 +138,7 @@ mod tests {
             performance_category: None,
             is_self: false,
             is_personal: false,
-            content_hash: lk_core::event::content_hash(title, ""),
+            content_hash: lk_core::event::content_hash(jiff::civil::date(2026, 5, 23), title, ""),
             metadata: serde_json::Value::Null,
         }
     }

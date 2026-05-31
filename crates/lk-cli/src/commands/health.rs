@@ -1,12 +1,33 @@
 use super::{find_config, load_config};
 
-pub async fn run(opts: &super::GlobalOpts, strict: bool) -> miette::Result<()> {
+pub async fn run(opts: &super::GlobalOptions, strict: bool) -> miette::Result<()> {
     let config = load_config(&find_config(opts)?)?;
     let vault_root = config.vault.root_path();
+    let tz = config.vault.timezone();
     let log = lk_vault::IngestLog::new(vault_root.join(".lorekeeper").join("ingest.jsonl"));
 
     let now = jiff::Timestamp::now();
-    let stale_after_secs: i64 = 48 * 3600;
+    // A source is stale once TWO scheduled fires have come due since its last success
+    // (one missed run of grace) — anchored at `last_success`, NOT at `now`, so the window
+    // follows the real schedule sequence including weekend/off-day gaps. For `0 9 * * 1-5`
+    // a Friday-morning success is not stale over the weekend (the next fire is Monday);
+    // it only goes stale once Tuesday's fire has also passed unfilled. A source with no
+    // schedule (manual/on-demand) falls back to a flat 48h window.
+    const DEFAULT_STALE_AFTER_SECS: i64 = 48 * 3600;
+    let is_stale = |sc: &lk_core::config::SourceConfig, last: jiff::Timestamp| -> bool {
+        match sc.schedule.as_deref() {
+            Some(expr) => {
+                match lk_core::cron::next_fire_after(expr, last, &tz)
+                    .and_then(|first| lk_core::cron::next_fire_after(expr, first, &tz))
+                {
+                    Some(second_due) => now > second_due,
+                    // Unparseable schedule (shouldn't happen post-validation) → flat window.
+                    None => now.as_second() - last.as_second() > DEFAULT_STALE_AFTER_SECS,
+                }
+            }
+            None => now.as_second() - last.as_second() > DEFAULT_STALE_AFTER_SECS,
+        }
+    };
 
     let mut fresh = 0u32;
     let mut stale = 0u32;
@@ -19,9 +40,8 @@ pub async fn run(opts: &super::GlobalOpts, strict: bool) -> miette::Result<()> {
             .map_err(|e| miette::miette!("read ingest log: {e}"))?;
         match last {
             Some(entry) => {
-                let age_secs = now.as_second() - entry.timestamp.as_second();
-                let hours = age_secs / 3600;
-                if age_secs > stale_after_secs {
+                let hours = (now.as_second() - entry.timestamp.as_second()) / 3600;
+                if is_stale(sc, entry.timestamp) {
                     eprintln!("⚠ {id} ({}) — {}h ago, STALE", sc.source_type, hours);
                     stale += 1;
                 } else {

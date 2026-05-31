@@ -10,7 +10,7 @@ fn prune_cutoff_secs(now_secs: i64, retention_days: i64) -> i64 {
         .max(0)
 }
 
-pub async fn run(opts: &super::GlobalOpts) -> miette::Result<()> {
+pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
     let config = load_config(&find_config(opts)?)?;
     let vault_root = config.vault.root_path();
     let retention_days = config.maintenance.retention_days;

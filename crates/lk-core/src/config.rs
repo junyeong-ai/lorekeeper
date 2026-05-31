@@ -24,6 +24,7 @@ pub struct ClassifyRule {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub vault: VaultConfig,
     pub identity: Identity,
@@ -208,6 +209,11 @@ impl Config {
         if self.graph.cluster.min_community_size == 0 {
             return Err(ConfigError::Validation(
                 "graph.cluster.min_community_size must be >= 1".into(),
+            ));
+        }
+        if self.graph.cluster.suggest_min_shared_neighbors == 0 {
+            return Err(ConfigError::Validation(
+                "graph.cluster.suggest_min_shared_neighbors must be >= 1".into(),
             ));
         }
         if self.concepts.index_split_threshold == 0 {
@@ -398,6 +404,7 @@ fn validate_cron_field(field: &str, min: u8, max: u8) -> Result<(), String> {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VaultConfig {
     pub root: String,
     #[serde(default)]
@@ -447,7 +454,7 @@ impl VaultConfig {
 /// subdirectories within both `personal` (e.g. `me/weekly/`) and `synthesis`
 /// (e.g. `synthesis/weekly/`).
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct VaultDirs {
     pub daily: String,
     pub weekly: String,
@@ -544,6 +551,7 @@ fn validate_vault_dir(field: &str, value: &str) -> Result<(), ConfigError> {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Identity {
     pub name: String,
     pub email: String,
@@ -555,6 +563,7 @@ pub struct Identity {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SourceConfig {
     #[serde(rename = "type")]
     pub source_type: SourceType,
@@ -678,7 +687,7 @@ impl std::fmt::Display for SourceType {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct DedupConfig {
     pub cascade: Vec<DedupStrategy>,
     /// Additional query-parameter keys to strip during URL canonicalisation, on top
@@ -715,7 +724,7 @@ pub enum DedupStrategy {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct PerformanceConfig {
     pub enabled: bool,
     pub work_categories: Vec<String>,
@@ -988,6 +997,11 @@ pub struct GraphClusterConfig {
     pub max_iterations: usize,
     /// Communities smaller than this are dropped from results.
     pub min_community_size: usize,
+    /// `suggest-links` only proposes a pair sharing at least this many neighbors.
+    /// The graph is dominated by daily/document→concept edges, so a single shared
+    /// neighbor usually means "co-cited by one note", not a real relationship —
+    /// the default of 2 suppresses that co-citation noise.
+    pub suggest_min_shared_neighbors: usize,
 }
 
 impl Default for GraphMetricsConfig {
@@ -1011,6 +1025,7 @@ impl Default for GraphClusterConfig {
             resolution: 1.0,
             max_iterations: 100,
             min_community_size: 1,
+            suggest_min_shared_neighbors: 2,
         }
     }
 }

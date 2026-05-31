@@ -1,7 +1,7 @@
 use super::schema::render_agents_md;
 use super::{find_config, load_config};
 
-pub async fn run(opts: &super::GlobalOpts) -> miette::Result<()> {
+pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
     let path = find_config(opts)?;
     let config = load_config(&path)?;
 

@@ -63,7 +63,7 @@ pub fn normalize(
                 &collapse_blank_lines(&item.body),
                 BODY_HEADING_FLOOR,
             ));
-            let ch = content_hash(&title, &body);
+            let ch = content_hash(date, &title, &body);
 
             Event {
                 id,

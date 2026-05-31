@@ -25,15 +25,16 @@ pub struct StalePage {
     /// Days between `updated` and `today` (always positive — see filter in
     /// [`find_stale`]).
     pub days_old: i64,
-    /// Coarse vault category derived from the path prefix.
-    pub category: Category,
+    /// Coarse vault page kind derived from the path prefix.
+    pub kind: PageKind,
 }
 
-/// Coarse vault category used to group stale pages in the report. The order of
-/// variants is also the canonical display order.
+/// Coarse vault page kind used to group stale pages in the report. The order of
+/// variants is also the canonical display order. NOT a content category — this
+/// classifies a page by where it lives in the vault, not by its subject.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum Category {
+pub enum PageKind {
     WikiConcepts,
     WikiDocuments,
     WikiExplorations,
@@ -46,40 +47,40 @@ pub enum Category {
     Other,
 }
 
-impl Category {
-    /// Resolve the category from a vault-relative path. Path prefixes are matched
+impl PageKind {
+    /// Resolve the page kind from a vault-relative path. Path prefixes are matched
     /// in declaration order — `Other` is the catch-all.
     pub fn from_path(path: &Path, dirs: &VaultDirs) -> Self {
         let s = path.to_string_lossy().replace('\\', "/");
         // Order matters: more specific prefixes first.
-        let prefixes: [(String, Category); 10] = [
-            (format!("{}/concepts/", dirs.wiki), Category::WikiConcepts),
-            (format!("{}/documents/", dirs.wiki), Category::WikiDocuments),
+        let prefixes: [(String, PageKind); 10] = [
+            (format!("{}/concepts/", dirs.wiki), PageKind::WikiConcepts),
+            (format!("{}/documents/", dirs.wiki), PageKind::WikiDocuments),
             (
                 format!("{}/explorations/", dirs.wiki),
-                Category::WikiExplorations,
+                PageKind::WikiExplorations,
             ),
-            (format!("{}/", dirs.daily), Category::Daily),
-            (format!("{}/work-log/", dirs.personal), Category::MeWorkLog),
+            (format!("{}/", dirs.daily), PageKind::Daily),
+            (format!("{}/work-log/", dirs.personal), PageKind::MeWorkLog),
             (
                 format!("{}/{}/", dirs.personal, dirs.weekly),
-                Category::Weekly,
+                PageKind::Weekly,
             ),
             (
                 format!("{}/{}/", dirs.synthesis, dirs.weekly),
-                Category::Weekly,
+                PageKind::Weekly,
             ),
             (
                 format!("{}/{}/", dirs.personal, dirs.monthly),
-                Category::Monthly,
+                PageKind::Monthly,
             ),
             (
                 format!("{}/{}/", dirs.personal, dirs.quarterly),
-                Category::Quarterly,
+                PageKind::Quarterly,
             ),
             (
                 format!("{}/{}/", dirs.personal, dirs.annual),
-                Category::Annual,
+                PageKind::Annual,
             ),
         ];
         for (prefix, cat) in &prefixes {
@@ -87,22 +88,22 @@ impl Category {
                 return *cat;
             }
         }
-        Category::Other
+        PageKind::Other
     }
 
-    /// Display label for the category, built from the configured directory names.
+    /// Display label for the page kind, built from the configured directory names.
     pub fn label(self, dirs: &VaultDirs) -> String {
         match self {
-            Category::WikiConcepts => format!("{}/concepts", dirs.wiki),
-            Category::WikiDocuments => format!("{}/documents", dirs.wiki),
-            Category::WikiExplorations => format!("{}/explorations", dirs.wiki),
-            Category::Daily => dirs.daily.clone(),
-            Category::MeWorkLog => format!("{}/work-log", dirs.personal),
-            Category::Weekly => dirs.weekly.clone(),
-            Category::Monthly => format!("{}/{}", dirs.personal, dirs.monthly),
-            Category::Quarterly => format!("{}/{}", dirs.personal, dirs.quarterly),
-            Category::Annual => format!("{}/{}", dirs.personal, dirs.annual),
-            Category::Other => "other".to_string(),
+            PageKind::WikiConcepts => format!("{}/concepts", dirs.wiki),
+            PageKind::WikiDocuments => format!("{}/documents", dirs.wiki),
+            PageKind::WikiExplorations => format!("{}/explorations", dirs.wiki),
+            PageKind::Daily => dirs.daily.clone(),
+            PageKind::MeWorkLog => format!("{}/work-log", dirs.personal),
+            PageKind::Weekly => dirs.weekly.clone(),
+            PageKind::Monthly => format!("{}/{}", dirs.personal, dirs.monthly),
+            PageKind::Quarterly => format!("{}/{}", dirs.personal, dirs.quarterly),
+            PageKind::Annual => format!("{}/{}", dirs.personal, dirs.annual),
+            PageKind::Other => "other".to_string(),
         }
     }
 }
@@ -119,7 +120,7 @@ impl Category {
 /// pass the report scope as `pages` and the whole vault as `all_pages` (a superset).
 ///
 /// Result ordering: by descending `days_old`, then by path for determinism. The
-/// caller is responsible for grouping by category (the [`StalePage::category`]
+/// caller is responsible for grouping by page kind (the [`StalePage::kind`]
 /// field is precomputed for that).
 pub fn find_stale(
     pages: &[ScannedPage],
@@ -202,7 +203,7 @@ pub fn find_stale(
             path: page.path.clone(),
             updated: date,
             days_old,
-            category: Category::from_path(&page.path, dirs),
+            kind: PageKind::from_path(&page.path, dirs),
         });
     }
 
@@ -293,7 +294,7 @@ mod tests {
         assert_eq!(stale.len(), 1);
         assert_eq!(stale[0].path, PathBuf::from("wiki/concepts/old.md"));
         assert_eq!(stale[0].days_old, 180);
-        assert_eq!(stale[0].category, Category::WikiConcepts);
+        assert_eq!(stale[0].kind, PageKind::WikiConcepts);
     }
 
     #[test]
@@ -463,54 +464,54 @@ mod tests {
     fn groups_correctly_by_path_prefix() {
         let dirs = VaultDirs::default();
         assert_eq!(
-            Category::from_path(Path::new("wiki/concepts/x.md"), &dirs),
-            Category::WikiConcepts
+            PageKind::from_path(Path::new("wiki/concepts/x.md"), &dirs),
+            PageKind::WikiConcepts
         );
         assert_eq!(
-            Category::from_path(Path::new("wiki/documents/x.md"), &dirs),
-            Category::WikiDocuments
+            PageKind::from_path(Path::new("wiki/documents/x.md"), &dirs),
+            PageKind::WikiDocuments
         );
         assert_eq!(
-            Category::from_path(Path::new("wiki/explorations/x.md"), &dirs),
-            Category::WikiExplorations
+            PageKind::from_path(Path::new("wiki/explorations/x.md"), &dirs),
+            PageKind::WikiExplorations
         );
         assert_eq!(
-            Category::from_path(Path::new("daily/ai-news/2026-05-23.md"), &dirs),
-            Category::Daily
+            PageKind::from_path(Path::new("daily/ai-news/2026-05-23.md"), &dirs),
+            PageKind::Daily
         );
         assert_eq!(
-            Category::from_path(Path::new("me/work-log/2026-05-23.md"), &dirs),
-            Category::MeWorkLog
+            PageKind::from_path(Path::new("me/work-log/2026-05-23.md"), &dirs),
+            PageKind::MeWorkLog
         );
         assert_eq!(
-            Category::from_path(Path::new("synthesis/weekly/2026-W21.md"), &dirs),
-            Category::Weekly
+            PageKind::from_path(Path::new("synthesis/weekly/2026-W21.md"), &dirs),
+            PageKind::Weekly
         );
         assert_eq!(
-            Category::from_path(Path::new("me/weekly/2026-W21.md"), &dirs),
-            Category::Weekly
+            PageKind::from_path(Path::new("me/weekly/2026-W21.md"), &dirs),
+            PageKind::Weekly
         );
         assert_eq!(
-            Category::from_path(Path::new("me/monthly/2026-05.md"), &dirs),
-            Category::Monthly
+            PageKind::from_path(Path::new("me/monthly/2026-05.md"), &dirs),
+            PageKind::Monthly
         );
         assert_eq!(
-            Category::from_path(Path::new("me/quarterly/2026-Q2.md"), &dirs),
-            Category::Quarterly
+            PageKind::from_path(Path::new("me/quarterly/2026-Q2.md"), &dirs),
+            PageKind::Quarterly
         );
         assert_eq!(
-            Category::from_path(Path::new("me/annual/2026.md"), &dirs),
-            Category::Annual
+            PageKind::from_path(Path::new("me/annual/2026.md"), &dirs),
+            PageKind::Annual
         );
         // Anything outside the known prefixes → Other.
         assert_eq!(
-            Category::from_path(Path::new("notes/random.md"), &dirs),
-            Category::Other
+            PageKind::from_path(Path::new("notes/random.md"), &dirs),
+            PageKind::Other
         );
         // `me/` without a recognized subdirectory is not a recognised category.
         assert_eq!(
-            Category::from_path(Path::new("me/other.md"), &dirs),
-            Category::Other
+            PageKind::from_path(Path::new("me/other.md"), &dirs),
+            PageKind::Other
         );
     }
 
@@ -522,25 +523,25 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            Category::from_path(Path::new("my-logs/work-log/2026-05-23.md"), &dirs),
-            Category::MeWorkLog
+            PageKind::from_path(Path::new("my-logs/work-log/2026-05-23.md"), &dirs),
+            PageKind::MeWorkLog
         );
         assert_eq!(
-            Category::from_path(Path::new("my-logs/weekly/2026-W21.md"), &dirs),
-            Category::Weekly
+            PageKind::from_path(Path::new("my-logs/weekly/2026-W21.md"), &dirs),
+            PageKind::Weekly
         );
         assert_eq!(
-            Category::from_path(Path::new("team-synth/weekly/2026-W21.md"), &dirs),
-            Category::Weekly
+            PageKind::from_path(Path::new("team-synth/weekly/2026-W21.md"), &dirs),
+            PageKind::Weekly
         );
         assert_eq!(
-            Category::from_path(Path::new("my-logs/annual/2026.md"), &dirs),
-            Category::Annual
+            PageKind::from_path(Path::new("my-logs/annual/2026.md"), &dirs),
+            PageKind::Annual
         );
         // Old default paths should NOT match with custom dirs.
         assert_eq!(
-            Category::from_path(Path::new("me/weekly/2026-W21.md"), &dirs),
-            Category::Other
+            PageKind::from_path(Path::new("me/weekly/2026-W21.md"), &dirs),
+            PageKind::Other
         );
     }
 }

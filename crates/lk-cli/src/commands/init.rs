@@ -5,12 +5,15 @@ use dialoguer::{Confirm, Input, Password};
 use lk_source::credentials::{Credentials, GoogleCredentials, JiraCredentials, SlackCredentials};
 use lk_source::obtain_google_refresh_token;
 
-use super::{GlobalOpts, find_config, load_config};
+use super::{GlobalOptions, find_config, load_config};
 
 /// Interactive wizard that writes `<vault>/.lorekeeper/credentials.json`. Seeds defaults
 /// from any existing file so re-running edits in place; secrets can be kept by pressing
 /// enter. Refuses to run without a terminal (e.g. piped/CI) since it can't prompt.
-pub async fn credentials(opts: &GlobalOpts, vault_override: Option<PathBuf>) -> miette::Result<()> {
+pub async fn credentials(
+    opts: &GlobalOptions,
+    vault_override: Option<PathBuf>,
+) -> miette::Result<()> {
     if !std::io::stdin().is_terminal() {
         return Err(miette::miette!(
             "`lore init credentials` is interactive and needs a terminal.\n\

@@ -12,18 +12,13 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use lk_core::config::VaultDirs;
 use lk_core::frontmatter::parse_page;
 use lk_core::i18n::Locale;
 use walkdir::WalkDir;
 
-use crate::VaultError;
-
-/// Monotonic sequence counter for atomic temp file uniqueness (mirrors `TMP_SEQ` in
-/// `writer.rs` but scoped to index writes).
-static INDEX_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+use crate::{VaultError, VaultWriter};
 
 /// Output from `build_index`: the main index page plus optional per-category sub-pages
 /// when the concept count exceeds the split threshold.
@@ -123,7 +118,7 @@ pub fn build_index(
             &mut sub_pages,
             &concepts,
             |body| first_line_under_heading(body, heading),
-            &GroupedSectionOpts {
+            &GroupedSectionOptions {
                 section_title: strings.index_concepts,
                 sub_page_prefix: "",
                 uncategorized_label: strings.uncategorized,
@@ -140,7 +135,7 @@ pub fn build_index(
             &mut sub_pages,
             &documents,
             |body| first_line_under_heading(body, heading),
-            &GroupedSectionOpts {
+            &GroupedSectionOptions {
                 section_title: strings.index_documents,
                 sub_page_prefix: "doc-",
                 uncategorized_label: strings.uncategorized,
@@ -246,33 +241,19 @@ pub async fn write_index(
 ) -> Result<PathBuf, VaultError> {
     let output = build_index(vault_root, locale, index_split_threshold, dirs)?;
     let wiki_dir = vault_root.join(&dirs.wiki);
-    tokio::fs::create_dir_all(&wiki_dir).await?;
-
     let index_dir = wiki_dir.join("index");
 
+    // Every page — sub-pages and the main index alike — goes through the one atomic
+    // temp+rename writer, so a crash never leaves a truncated index page. Sub-pages are
+    // written before the main index so it never links a not-yet-written sub-page.
+    let writer = VaultWriter::new(vault_root);
     for (rel_path, content) in &output.sub_pages {
-        let abs = vault_root.join(rel_path);
-        if let Some(parent) = abs.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        tokio::fs::write(&abs, content).await?;
+        writer.write_page(Path::new(rel_path), content).await?;
     }
 
+    let main_rel = Path::new(&dirs.wiki).join("index.md");
+    writer.write_page(&main_rel, &output.main).await?;
     let final_path = wiki_dir.join("index.md");
-    let seq = INDEX_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp_path = wiki_dir.join(format!(".index.md.{}.{seq}.tmp", std::process::id()));
-
-    match tokio::fs::write(&tmp_path, &output.main).await {
-        Ok(()) => {}
-        Err(e) => {
-            let _ = tokio::fs::remove_file(&tmp_path).await;
-            return Err(e.into());
-        }
-    }
-    if let Err(e) = tokio::fs::rename(&tmp_path, &final_path).await {
-        let _ = tokio::fs::remove_file(&tmp_path).await;
-        return Err(e.into());
-    }
 
     if index_dir.is_dir() {
         let current: std::collections::HashSet<String> = output
@@ -450,7 +431,7 @@ fn render_group(
     }
 }
 
-struct GroupedSectionOpts<'a> {
+struct GroupedSectionOptions<'a> {
     section_title: &'a str,
     sub_page_prefix: &'a str,
     uncategorized_label: &'a str,
@@ -462,10 +443,10 @@ fn render_grouped_section(
     sub_pages: &mut Vec<(String, String)>,
     entries: &[Entry],
     extract: impl Fn(&str) -> Option<String>,
-    opts: &GroupedSectionOpts<'_>,
+    opts: &GroupedSectionOptions<'_>,
     dirs: &VaultDirs,
 ) {
-    let GroupedSectionOpts {
+    let GroupedSectionOptions {
         section_title,
         sub_page_prefix,
         uncategorized_label,

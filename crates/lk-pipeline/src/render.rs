@@ -3,7 +3,7 @@ use lk_core::event::Event;
 use lk_core::i18n::Locale;
 use lk_core::vault_path::VaultPath;
 use lk_queue::{CacheShape, TargetKind};
-use lk_vault::{TemplateEngine, replace_section};
+use lk_vault::{TemplateEngine, replace_section, section_body};
 
 use crate::PipelineError;
 use crate::llm_cache::SectionDecision;
@@ -255,6 +255,19 @@ where
     let mut out = content;
     for (heading, decision) in sections {
         if let Some(body) = &decision.preserved_body {
+            // This body was read from `heading` on the previous render, and the
+            // template just re-emitted that heading — so a miss here means the
+            // rendered heading drifted from the one we cached against (e.g. a custom
+            // `--template-dir` renamed the section). Splicing would silently DROP the
+            // preserved LLM body; surface it loudly and leave the page for re-fill.
+            if section_body(&out, heading).is_none() {
+                tracing::warn!(
+                    heading,
+                    "preserved LLM section not spliced: heading missing in rendered \
+                     template (custom-template heading drift?) — body left for re-fill"
+                );
+                continue;
+            }
             out = replace_section(&out, heading, body);
         }
     }

@@ -1,6 +1,6 @@
 use super::{find_config, load_config};
 
-pub async fn run(opts: &super::GlobalOpts, bin: &str) -> miette::Result<()> {
+pub async fn run(opts: &super::GlobalOptions, bin: &str) -> miette::Result<()> {
     let config_path = find_config(opts)?;
     let config = load_config(&config_path)?;
     let cwd = std::env::current_dir().unwrap_or_default();

@@ -59,6 +59,9 @@ concept_categories) with the `Synthesizer`.
   gets cited — irrecoverable in an accumulate-and-cite vault). Records that merely share
   a title/headline both survive; downstream concept-merge, `backlinks-sync`, and
   `near-duplicate-concepts` reconcile genuine overlap losslessly.
+  `content-hash` is `blake3(date + title + body)` — scoped by `date` so a recurring or
+  templated body (a daily digest, a newsletter with a constant subject) observed on a
+  DIFFERENT day is a distinct observation, not a silent cross-day merge.
   `dedup` returns `{novel, duplicates}`; `commit` records novel AND re-records duplicates (upsert) to
   refresh `seen_at`, so a steady-state re-arrival never ages past retention and
   re-emits as new. Persisted-table lookups are gated on the cache being present, but
@@ -68,7 +71,10 @@ concept_categories) with the `Synthesizer`.
   removal (built-in `utm_*`, `fbclid`, `gclid`, `igshid`, `ref_src`, … — single-letter
   ambiguous params like `si` are deliberately kept (host-specific resource selectors) PLUS
   `dedup.extra_tracking_params` from config, where a trailing `*` is a prefix match)
-  with resource-identifying params preserved and sorted. The cache is recreated only on a recoverable mismatch — a schema-type
+  with resource-identifying params preserved and sorted. Pure anchor fragments
+  (`#section`, `#L42`) are dropped, but hash-route fragments (`#/issues/1`, `#!/path`)
+  used by SPA routers are PRESERVED — they carry resource identity, so stripping them
+  would merge distinct pages. The cache is recreated only on a recoverable mismatch — a schema-type
   change or an outdated on-disk format after a redb major upgrade
   (`DatabaseError::UpgradeRequired`) — never on I/O/corruption errors. On recreation
   the stale file is renamed to `*.redb.backup.{timestamp}-pid{pid}` (not deleted),

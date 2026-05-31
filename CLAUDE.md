@@ -87,5 +87,5 @@ Auto-discovered: `./config.yaml` → `~/.config/lorekeeper/config.yaml`.
 | `jira` | Jira REST API | Issue tracking (ADF→Markdown, status/period snapshot) |
 | `google-calendar` | Calendar API | Schedule tracking (HTML→Markdown) |
 | `rss` | RSS/Atom (`feed-rs`) | External knowledge feeds (vendor blogs, news) → concepts; no auth, multi-feed, per-feed error isolation |
-| `manual` | Local inbox | User-curated files dropped in `inbox/` (md/txt/markdown/json/html/htm by default; auto-archives after a successful commit) |
+| `manual` | Local inbox | User-curated files dropped in `inbox/` (md/txt/markdown/html/htm by default; auto-archives after a successful commit) |
 

@@ -256,7 +256,7 @@ fn suggest_links_from_fixture() {
     let pages = scan::scan_vault(&root, &config).unwrap();
     let g = graph::WikiGraph::build(&pages, &VaultDirs::default());
     let clusters = cluster::detect_communities(&g, &config);
-    let result = cluster::suggest_links(&g, &clusters);
+    let result = cluster::suggest_links(&g, &clusters, 1);
     // Just verify it's well-formed — the fixture may or may not produce suggestions.
     for s in &result.pairs {
         assert!(!s.a.is_empty());

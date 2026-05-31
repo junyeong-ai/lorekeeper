@@ -7,7 +7,7 @@ use lk_graph::{
     output, scan, stale,
 };
 
-use super::GlobalOpts;
+use super::GlobalOptions;
 
 struct ResolvedConfig {
     root: PathBuf,
@@ -107,7 +107,7 @@ pub enum GraphCmd {
 
 /// Returns exit code: 0 = ok/no findings, 1 = findings, 2 = runtime error.
 pub fn run(
-    opts: &GlobalOpts,
+    opts: &GlobalOptions,
     cmd: GraphCmd,
     json: bool,
     root_override: Option<PathBuf>,
@@ -129,7 +129,7 @@ pub fn run(
 }
 
 fn run_inner(
-    opts: &GlobalOpts,
+    opts: &GlobalOptions,
     cmd: GraphCmd,
     json: bool,
     root_override: Option<PathBuf>,
@@ -402,7 +402,11 @@ fn run_inner(
                 rc.graph.cluster.min_community_size = size;
             }
             let clusters = cluster::detect_communities(&g, &rc.graph);
-            let result = cluster::suggest_links(&g, &clusters);
+            let result = cluster::suggest_links(
+                &g,
+                &clusters,
+                rc.graph.cluster.suggest_min_shared_neighbors,
+            );
             let count = result.pairs.len();
             let report = output::SuggestLinksReport {
                 pairs: result.pairs,
@@ -436,7 +440,7 @@ fn run_inner(
 }
 
 fn run_stale(
-    opts: &GlobalOpts,
+    opts: &GlobalOptions,
     root_override: Option<PathBuf>,
     json: bool,
     days: u32,
@@ -515,7 +519,7 @@ fn run_stale(
 }
 
 fn run_audit_candidates(
-    opts: &GlobalOpts,
+    opts: &GlobalOptions,
     root_override: Option<PathBuf>,
     json: bool,
 ) -> Result<bool, String> {
@@ -533,7 +537,7 @@ fn run_audit_candidates(
 }
 
 fn run_audit_mark(
-    opts: &GlobalOpts,
+    opts: &GlobalOptions,
     root_override: Option<PathBuf>,
     json: bool,
     slug: &str,
@@ -552,7 +556,7 @@ fn run_audit_mark(
 }
 
 fn run_backlinks_sync(
-    opts: &GlobalOpts,
+    opts: &GlobalOptions,
     root_override: Option<PathBuf>,
     json: bool,
     dry_run: bool,
@@ -601,7 +605,7 @@ fn run_backlinks_sync(
 }
 
 fn run_merge(
-    opts: &GlobalOpts,
+    opts: &GlobalOptions,
     root_override: Option<PathBuf>,
     json: bool,
     from: &str,
@@ -684,7 +688,7 @@ fn vault_page_dirs(root: &std::path::Path, dirs: &VaultDirs) -> Vec<PathBuf> {
 }
 
 fn resolve_config_full(
-    opts: &GlobalOpts,
+    opts: &GlobalOptions,
     root_override: Option<PathBuf>,
 ) -> Result<ResolvedConfig, String> {
     if let Some(root) = root_override {

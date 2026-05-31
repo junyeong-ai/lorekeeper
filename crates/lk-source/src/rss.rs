@@ -20,7 +20,7 @@ pub struct RssSource {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RssParams {
-    feeds: Vec<FeedConfig>,
+    feeds: Vec<FeedParams>,
     #[serde(default = "default_lookback")]
     lookback_hours: u32,
     /// Cap on items kept *per feed* (after the day-window filter), not a global
@@ -31,7 +31,7 @@ struct RssParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct FeedConfig {
+struct FeedParams {
     /// Stable provenance id surfaced in item metadata (e.g. `openai`, `hf-blog`).
     id: String,
     url: String,
@@ -108,11 +108,10 @@ impl RssSource {
         let html = resp.text().await?;
         let parsed_url = url::Url::parse(article_url)
             .map_err(|e| SourceError::Parse(format!("invalid article URL: {e}")))?;
-        let mut cursor = std::io::Cursor::new(html.as_bytes());
-        match readability::extractor::extract(&mut cursor, &parsed_url) {
-            Ok(product) => Ok(crate::markdown::html_to_markdown(&product.content)),
-            Err(_) => Ok(crate::markdown::html_to_markdown(&html)),
-        }
+        Ok(crate::markdown::readable_html_to_markdown(
+            &html,
+            &parsed_url,
+        ))
     }
 
     async fn fetch_feed(&self, url: &str) -> Result<feed_rs::model::Feed, SourceError> {
@@ -178,8 +177,20 @@ impl Source for RssSource {
                     && let Some(ref article_url) = item.url
                 {
                     match self.fetch_article(article_url).await {
-                        Ok(body) if !body.trim().is_empty() => item.body = body,
-                        Ok(_) => {}
+                        // Replace the feed summary only when the full-text extraction is
+                        // at least as substantial. Readability can mis-extract a short
+                        // wrong node from the article page, and the feed summary is
+                        // known-clean content we'd otherwise lose.
+                        Ok(full) if full.trim().len() >= item.body.trim().len() => {
+                            item.body = full;
+                        }
+                        Ok(_) => {
+                            tracing::warn!(
+                                feed = %feed_cfg.id,
+                                url = %article_url,
+                                "rss: full-text extraction shorter than feed summary; keeping summary"
+                            );
+                        }
                         Err(e) => {
                             tracing::warn!(
                                 feed = %feed_cfg.id,

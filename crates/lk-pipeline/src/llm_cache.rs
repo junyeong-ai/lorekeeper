@@ -146,14 +146,29 @@ pub fn lookup_in_place(
     // structurally non-empty), so — unlike a fill-empty section — clearing the body
     // does not force a re-run. The single re-run lever is deleting the completion
     // line, which drops the stamp and lands us in the uncached branch above.
-    let preserved = existing
-        .and_then(|p| section_body(&p.body, heading))
-        .map(|b| b.trim_matches('\n').to_string());
+    let Some(body) = existing.and_then(|p| section_body(&p.body, heading)) else {
+        // Stamp says done, but the section heading isn't present — the rendered
+        // heading drifted from the one the stamp was written against (e.g. a custom
+        // `--template-dir` renamed it). Reporting a hit would freeze the raw,
+        // unrefined event list forever (the task is never re-enqueued, and with no
+        // preserved body the splice-site drift warning never fires either). Force a
+        // re-run and surface it.
+        tracing::warn!(
+            completion_key,
+            heading,
+            "in-place section marked done but heading not found (custom-template drift?); re-enqueueing"
+        );
+        return SectionDecision {
+            hash,
+            cached: false,
+            preserved_body: None,
+        };
+    };
 
     SectionDecision {
         hash,
         cached: true,
-        preserved_body: preserved,
+        preserved_body: Some(body.trim_matches('\n').to_string()),
     }
 }
 
@@ -221,6 +236,59 @@ mod tests {
             "## 요약\n\n   \n  \n\n## 출처\n",
         );
         let d = lookup(Some(&page), "summary", "요약", "abc".into());
+        assert!(d.enqueue());
+    }
+
+    #[test]
+    fn in_place_matching_stamp_with_heading_hits_cache() {
+        let page = page_with(
+            "id: x\nllm_inputs:\n  refine_events: abc\n  refine_events_done: abc\n",
+            "## 주요 이벤트\n\n### A\n\nrefined body\n\n## 관련 개념\n",
+        );
+        let d = lookup_in_place(
+            Some(&page),
+            "refine_events_done",
+            "주요 이벤트",
+            "abc".into(),
+        );
+        assert!(!d.enqueue());
+        assert_eq!(d.preserved_body.as_deref(), Some("### A\n\nrefined body"));
+    }
+
+    #[test]
+    fn in_place_stamp_set_but_heading_missing_is_uncached() {
+        // Completion stamp matches, but the events heading drifted (e.g. a custom
+        // template renamed it). This must NOT count as cached — otherwise the raw
+        // event list would freeze and the refine task would never re-enqueue.
+        let page = page_with(
+            "id: x\nllm_inputs:\n  refine_events: abc\n  refine_events_done: abc\n",
+            "## Key Events\n\n### A\n\nbody\n",
+        );
+        let d = lookup_in_place(
+            Some(&page),
+            "refine_events_done",
+            "주요 이벤트",
+            "abc".into(),
+        );
+        assert!(
+            d.enqueue(),
+            "missing heading must force re-enqueue, not a silent hit"
+        );
+        assert!(d.preserved_body.is_none());
+    }
+
+    #[test]
+    fn in_place_missing_stamp_is_uncached() {
+        let page = page_with(
+            "id: x\nllm_inputs:\n  refine_events: abc\n",
+            "## 주요 이벤트\n\n### A\n\nbody\n",
+        );
+        let d = lookup_in_place(
+            Some(&page),
+            "refine_events_done",
+            "주요 이벤트",
+            "abc".into(),
+        );
         assert!(d.enqueue());
     }
 

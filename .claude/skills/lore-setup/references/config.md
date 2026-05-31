@@ -17,19 +17,31 @@ identity:                            # basis for personal split + performance tr
 
 sources:                             # key = source id = <daily>/{id}/ directory name
   <id>:
-    type: gmail | google-calendar | google-drive | slack-channel | slack-search | jira
+    type: gmail | google-calendar | google-drive | slack-channel | slack-search | jira | rss | manual
     enabled: true
     schedule: "0 9 * * 1-5"          # cron (used by `lore schedule`)
     params: { ... }                  # per-type (see each reference)
-    classify: { category: [keywords] }   # optional, gmail etc.
+    focus: "..."                     # optional natural-language relevance filter (LLM-applied)
+    classify:                        # optional ordered rules, first match wins
+      - keywords: [deploy, incident]
+        category: action_required    # daily-page grouping bucket
+        work_category: project-delivery   # optional → performance taxonomy
     labels: [ ... ]
     extract_concepts: true|false     # whether to run LLM concept extraction
     track_personal: true|false       # whether to count toward the work-log
 
-dedup: {cascade: [event-id, content-hash, url]}  # exact-match stages; dedup is lossless
+dedup: {cascade: [event-id, content-hash, url], extra_tracking_params: [...]}  # exact-match stages; lossless
 labels: {categories: [...]}
 performance: {...}                   # performance-category mapping (see config.example)
 synthesis: {weekly: {...}, monthly: {...}, quarterly: {...}, annual: {...}}
+concepts:                            # LLM concept-page taxonomy
+  categories: [{id: ..., label: ...}]
+  index_split_threshold: 100         # split index.md into per-category pages above this
+graph:                               # wikilink graph analysis (lore graph *)
+  scope: {dirs: [...]}               # defaults to vault.dirs.wiki
+  min_hub_degree: 5
+  cluster: {resolution: 1.0, min_community_size: 1, suggest_min_shared_neighbors: 2}
+  concept_near_duplicate_threshold: 0.6
 llm: {provider: queue}
 ```
 

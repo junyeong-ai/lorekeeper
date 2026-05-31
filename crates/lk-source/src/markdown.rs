@@ -28,6 +28,35 @@ pub fn html_to_markdown(html: &str) -> String {
         .unwrap_or_else(|_| html.trim().to_string())
 }
 
+/// Extract the readable article core from a full HTML page and convert it to
+/// Markdown, stripping boilerplate (nav, ads, footers) via `readability`.
+///
+/// Readability is heuristic and can mis-extract on non-article pages (a sidebar,
+/// a near-empty node). When extraction fails OR yields empty content, the
+/// full-page conversion is kept instead, and the degradation is `tracing::warn!`ed
+/// so pages that systematically need the fallback are observable rather than
+/// silently reduced to boilerplate. Callers that already hold a known-clean body
+/// (e.g. an RSS feed summary) should additionally guard on the returned length
+/// before replacing it — this helper has no prior body to compare against.
+pub fn readable_html_to_markdown(html: &str, base_url: &url::Url) -> String {
+    let mut cursor = std::io::Cursor::new(html.as_bytes());
+    match readability::extractor::extract(&mut cursor, base_url) {
+        Ok(product) => {
+            let extracted = html_to_markdown(&product.content);
+            if extracted.trim().is_empty() {
+                tracing::warn!(url = %base_url, "readability extracted empty content; keeping full-page markdown");
+                html_to_markdown(html)
+            } else {
+                extracted
+            }
+        }
+        Err(e) => {
+            tracing::warn!(url = %base_url, error = %e, "readability extraction failed; keeping full-page markdown");
+            html_to_markdown(html)
+        }
+    }
+}
+
 /// Convert an Atlassian Document Format node tree (Jira rich text) to Markdown.
 pub fn adf_to_markdown(node: &Value) -> String {
     let mut out = String::new();

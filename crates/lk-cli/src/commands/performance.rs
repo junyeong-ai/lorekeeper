@@ -1,6 +1,6 @@
 use super::{find_config, load_config};
 
-pub async fn run(opts: &super::GlobalOpts) -> miette::Result<()> {
+pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
     let config = load_config(&find_config(opts)?)?;
     if !config.performance.enabled {
         eprintln!("Performance subsystem is disabled (performance.enabled: false).");

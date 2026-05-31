@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 use lk_core::event::RawItem;
 
-use super::{resolve_channel_id, resolve_users, slack_post};
+use super::{ResponseMetadata, paginate, resolve_channel_id, resolve_users, split_first_line};
 use crate::markdown::slack_to_markdown;
 use crate::{ExtractContext, Source, SourceError};
 
@@ -73,12 +73,6 @@ fn default_exclude_bots() -> bool {
 }
 
 #[derive(Deserialize)]
-struct ResponseMetadata {
-    #[serde(default)]
-    next_cursor: String,
-}
-
-#[derive(Deserialize)]
 struct HistoryData {
     messages: Option<Vec<SlackMessage>>,
     #[serde(default)]
@@ -139,38 +133,21 @@ impl SlackChannelSource {
         root_ts: &str,
     ) -> Result<Vec<SlackMessage>, SourceError> {
         const MAX_REPLIES: usize = 200;
-        let mut all_messages: Vec<SlackMessage> = Vec::new();
-        let mut cursor = String::new();
-
-        loop {
-            let mut params: Vec<(&str, &str)> =
-                vec![("channel", channel_id), ("ts", root_ts), ("limit", "100")];
-            if !cursor.is_empty() {
-                params.push(("cursor", cursor.as_str()));
-            }
-
-            let data: HistoryData =
-                slack_post(&self.http, &self.token, "conversations.replies", &params).await?;
-
-            let page = data.messages.unwrap_or_default();
-            let page_empty = page.is_empty();
-            all_messages.extend(page);
-
-            if page_empty || all_messages.len() >= MAX_REPLIES {
-                all_messages.truncate(MAX_REPLIES);
-                break;
-            }
-
-            cursor = data
-                .response_metadata
-                .map(|r| r.next_cursor)
-                .unwrap_or_default();
-            if cursor.is_empty() || !data.has_more {
-                break;
-            }
-        }
-
-        Ok(all_messages)
+        paginate::<HistoryData, SlackMessage, _>(
+            &self.http,
+            &self.token,
+            "conversations.replies",
+            &[("channel", channel_id), ("ts", root_ts), ("limit", "100")],
+            MAX_REPLIES,
+            |data| {
+                (
+                    data.messages.unwrap_or_default(),
+                    ResponseMetadata::cursor(data.response_metadata),
+                    data.has_more,
+                )
+            },
+        )
+        .await
     }
 }
 
@@ -197,10 +174,11 @@ impl Source for SlackChannelSource {
 
             // Paginate through conversations.history; cap at 500 messages per channel.
             const MAX_HISTORY: usize = 500;
-            let mut messages: Vec<SlackMessage> = Vec::new();
-            let mut history_cursor = String::new();
-            loop {
-                let mut params: Vec<(&str, &str)> = vec![
+            let messages = paginate::<HistoryData, SlackMessage, _>(
+                &self.http,
+                &self.token,
+                "conversations.history",
+                &[
                     ("channel", channel_id.as_str()),
                     ("oldest", oldest_ts.as_str()),
                     ("latest", latest_ts.as_str()),
@@ -208,31 +186,17 @@ impl Source for SlackChannelSource {
                     // date filter still trims anything outside the target day.
                     ("inclusive", "true"),
                     ("limit", "100"),
-                ];
-                if !history_cursor.is_empty() {
-                    params.push(("cursor", history_cursor.as_str()));
-                }
-
-                let data: HistoryData =
-                    slack_post(&self.http, &self.token, "conversations.history", &params).await?;
-
-                let page = data.messages.unwrap_or_default();
-                let page_empty = page.is_empty();
-                messages.extend(page);
-
-                if page_empty || messages.len() >= MAX_HISTORY {
-                    messages.truncate(MAX_HISTORY);
-                    break;
-                }
-
-                history_cursor = data
-                    .response_metadata
-                    .map(|r| r.next_cursor)
-                    .unwrap_or_default();
-                if history_cursor.is_empty() || !data.has_more {
-                    break;
-                }
-            }
+                ],
+                MAX_HISTORY,
+                |data| {
+                    (
+                        data.messages.unwrap_or_default(),
+                        ResponseMetadata::cursor(data.response_metadata),
+                        data.has_more,
+                    )
+                },
+            )
+            .await?;
 
             for root in messages {
                 let text = root.text.clone().unwrap_or_default();
@@ -274,17 +238,10 @@ impl Source for SlackChannelSource {
                     continue;
                 }
 
-                let body = render_thread(&thread, ctx.locale.strings().thread_replies, &users);
+                let rendered = render_thread(&thread, ctx.locale.strings().thread_replies, &users);
                 // Title from the converted body so it shares the Markdown normalization
                 // (mentions/entities resolved) rather than showing raw Slack tokens.
-                let title = body.lines().next().unwrap_or_default().to_string();
-                // Strip the first line from body so it doesn't duplicate the heading.
-                let body = body
-                    .split_once('\n')
-                    .map(|x| x.1)
-                    .unwrap_or("")
-                    .trim_start()
-                    .to_string();
+                let (title, body) = split_first_line(&rendered);
 
                 let Some(ts) = root
                     .ts

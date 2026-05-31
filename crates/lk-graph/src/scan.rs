@@ -48,7 +48,7 @@ pub fn scan_vault(root: &Path, config: &GraphConfig) -> Result<Vec<ScannedPage>,
             let entry = match entry {
                 Ok(e) => e,
                 Err(e) => {
-                    eprintln!("warning: skipping unreadable path: {e}");
+                    tracing::warn!(error = %e, "skipping unreadable path");
                     continue;
                 }
             };
@@ -74,7 +74,7 @@ pub fn scan_vault(root: &Path, config: &GraphConfig) -> Result<Vec<ScannedPage>,
         .filter_map(|path| match parse_file(path, root) {
             Ok(page) => Some(page),
             Err(e) => {
-                eprintln!("warning: skipping {}: {e}", path.display());
+                tracing::warn!(path = %path.display(), error = %e, "skipping unparseable page");
                 None
             }
         })

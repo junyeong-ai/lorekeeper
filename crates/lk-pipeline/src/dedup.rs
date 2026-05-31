@@ -126,7 +126,15 @@ pub(crate) fn normalize_url(raw: &str, extra_tracking: &[String]) -> String {
         url.set_query(Some(&qs));
     }
 
-    url.set_fragment(None);
+    // Strip pure anchor fragments (`#section`, `#L42`) — they point within a
+    // single page, not at a distinct resource. PRESERVE hash-route fragments
+    // (`#/issues/1`, `#!/path`) used by SPA hash routers, where the fragment IS
+    // the resource identity — dropping it would merge two distinct pages and
+    // silently drop one observation.
+    match url.fragment() {
+        Some(frag) if frag.starts_with('/') || frag.starts_with("!/") => {}
+        _ => url.set_fragment(None),
+    }
 
     url.to_string()
 }
@@ -517,7 +525,7 @@ mod tests {
             performance_category: None,
             is_self: false,
             is_personal: false,
-            content_hash: lk_core::event::content_hash(title, ""),
+            content_hash: lk_core::event::content_hash(date, title, ""),
             metadata: serde_json::Value::Null,
         }
     }
@@ -656,10 +664,24 @@ mod tests {
     }
 
     #[test]
-    fn normalize_url_removes_fragment() {
+    fn normalize_url_removes_anchor_fragment() {
         assert_eq!(
             normalize_url("https://example.com/path#section"),
             "https://example.com/path"
+        );
+    }
+
+    #[test]
+    fn normalize_url_preserves_hash_route_fragment() {
+        // SPA hash routers encode resource identity in the fragment; two routes
+        // must stay distinct so neither observation is dropped as a duplicate.
+        assert_eq!(
+            normalize_url("https://app.example.com/#/issues/1"),
+            "https://app.example.com/#/issues/1"
+        );
+        assert_ne!(
+            normalize_url("https://app.example.com/#/issues/1"),
+            normalize_url("https://app.example.com/#/issues/2")
         );
     }
 
@@ -767,8 +789,10 @@ mod tests {
 
     #[test]
     fn content_hash_dedup_catches_same_content_different_source() {
-        // The same article ingested via two sources (different event IDs and URLs)
-        // collapses to one event when content-hash is in the cascade.
+        // The same article ingested via two sources ON THE SAME DAY (different event IDs
+        // and URLs) collapses to one event when content-hash is in the cascade. `ev`
+        // fixes the date, so this is the same-day cross-source case the date-scoped hash
+        // still merges.
         let dir = TempDir::new().unwrap();
         let cache = DedupCache::open(&dir.path().join("dedup.redb"), vec![]).unwrap();
         let cascade = vec![DedupStrategy::ContentHash];
@@ -776,6 +800,42 @@ mod tests {
         let b = ev("from-mail", "Anthropic releases Opus 4.7", None);
         let novel = cache.dedup(vec![a, b], &cascade).unwrap().novel;
         assert_eq!(novel.len(), 1);
+    }
+
+    #[test]
+    fn content_hash_does_not_merge_same_content_across_days() {
+        // A recurring/templated body with an identical title+body on two different days
+        // is a distinct observation — content-hash is date-scoped, so both survive rather
+        // than the later day silently collapsing into the earlier one.
+        let dir = TempDir::new().unwrap();
+        let cache = DedupCache::open(&dir.path().join("dedup.redb"), vec![]).unwrap();
+        let cascade = vec![DedupStrategy::ContentHash];
+        let title = "Daily status: all systems operational";
+        let mk = |date: jiff::civil::Date| Event {
+            id: EventId::new("digest", date, &date.to_string()),
+            source_id: "digest".into(),
+            source_type: SourceType::Gmail,
+            date,
+            title: title.into(),
+            body: String::new(),
+            url: None,
+            author: None,
+            labels: vec![],
+            classification: None,
+            performance_category: None,
+            is_self: false,
+            is_personal: false,
+            content_hash: lk_core::event::content_hash(date, title, ""),
+            metadata: serde_json::Value::Null,
+        };
+        let a = mk(jiff::civil::date(2026, 5, 23));
+        let b = mk(jiff::civil::date(2026, 5, 24));
+        let novel = cache.dedup(vec![a, b], &cascade).unwrap().novel;
+        assert_eq!(
+            novel.len(),
+            2,
+            "identical content on different days must both survive (date-scoped hash)"
+        );
     }
 
     #[test]

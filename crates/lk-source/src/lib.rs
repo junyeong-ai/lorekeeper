@@ -3,6 +3,7 @@ mod google;
 mod jira;
 mod manual;
 pub(crate) mod markdown;
+pub(crate) mod retry;
 mod rss;
 mod slack;
 
@@ -112,66 +113,76 @@ pub fn validate_params(
     }
 }
 
+/// Build the shared Google auth helper, or a configuration error naming the
+/// credentials to set. Shared by the three Google-backed source types.
+fn google_auth(
+    creds: &Credentials,
+    http: &reqwest::Client,
+) -> Result<Arc<GoogleAuth>, SourceError> {
+    let gc = creds.google.as_ref().ok_or_else(|| {
+        SourceError::Auth(
+            "Google credentials not configured. \
+             Set LORE_GOOGLE_CLIENT_ID, LORE_GOOGLE_CLIENT_SECRET, \
+             LORE_GOOGLE_REFRESH_TOKEN or add to .lorekeeper/credentials.json"
+                .into(),
+        )
+    })?;
+    Ok(Arc::new(GoogleAuth::new(http.clone(), gc.clone())))
+}
+
+/// Borrow the configured Slack credentials, or a configuration error. Shared by
+/// the two Slack-backed source types (each then selects the token it needs).
+fn slack_creds(creds: &Credentials) -> Result<&credentials::SlackCredentials, SourceError> {
+    creds.slack.as_ref().ok_or_else(|| {
+        SourceError::Auth(
+            "Slack credentials not configured. Set LORE_SLACK_TOKEN / \
+             LORE_SLACK_USER_TOKEN or add a slack block to credentials.json"
+                .into(),
+        )
+    })
+}
+
 pub fn create_source(
     source_type: SourceType,
     http: reqwest::Client,
     creds: &Credentials,
 ) -> Result<Box<dyn Source>, SourceError> {
     match source_type {
-        SourceType::Gmail | SourceType::GoogleDrive | SourceType::GoogleCalendar => {
-            let gc = creds.google.as_ref().ok_or_else(|| {
-                SourceError::Auth(
-                    "Google credentials not configured. \
-                     Set LORE_GOOGLE_CLIENT_ID, LORE_GOOGLE_CLIENT_SECRET, \
-                     LORE_GOOGLE_REFRESH_TOKEN or add to .lorekeeper/credentials.json"
-                        .into(),
-                )
-            })?;
-            let auth = Arc::new(GoogleAuth::new(http.clone(), gc.clone()));
-            match source_type {
-                SourceType::Gmail => Ok(Box::new(google::gmail::GmailSource::new(http, auth))),
-                SourceType::GoogleDrive => {
-                    Ok(Box::new(google::drive::DriveSource::new(http, auth)))
-                }
-                SourceType::GoogleCalendar => {
-                    Ok(Box::new(google::calendar::CalendarSource::new(http, auth)))
-                }
-                _ => unreachable!(),
-            }
+        SourceType::Gmail => {
+            let auth = google_auth(creds, &http)?;
+            Ok(Box::new(google::gmail::GmailSource::new(http, auth)))
         }
-        SourceType::SlackChannel | SourceType::SlackSearch => {
-            let sc = creds.slack.as_ref().ok_or_else(|| {
-                SourceError::Auth(
-                    "Slack credentials not configured. Set LORE_SLACK_TOKEN / \
-                     LORE_SLACK_USER_TOKEN or add a slack block to credentials.json"
-                        .into(),
-                )
-            })?;
-            match source_type {
-                SourceType::SlackChannel => {
-                    let token = sc.history_token().ok_or_else(|| {
-                        SourceError::Auth("slack-channel needs a bot_token or user_token".into())
-                    })?;
-                    Ok(Box::new(slack::channel::SlackChannelSource::new(
-                        http,
-                        token.to_string(),
-                    )))
-                }
-                SourceType::SlackSearch => {
-                    let token = sc.search_token().ok_or_else(|| {
-                        SourceError::Auth(
-                            "slack-search requires a user_token (xoxp-); bot tokens \
-                             cannot call search.messages"
-                                .into(),
-                        )
-                    })?;
-                    Ok(Box::new(slack::search::SlackSearchSource::new(
-                        http,
-                        token.to_string(),
-                    )))
-                }
-                _ => unreachable!(),
-            }
+        SourceType::GoogleDrive => {
+            let auth = google_auth(creds, &http)?;
+            Ok(Box::new(google::drive::DriveSource::new(http, auth)))
+        }
+        SourceType::GoogleCalendar => {
+            let auth = google_auth(creds, &http)?;
+            Ok(Box::new(google::calendar::CalendarSource::new(http, auth)))
+        }
+        SourceType::SlackChannel => {
+            let token = slack_creds(creds)?
+                .history_token()
+                .ok_or_else(|| {
+                    SourceError::Auth("slack-channel needs a bot_token or user_token".into())
+                })?
+                .to_string();
+            Ok(Box::new(slack::channel::SlackChannelSource::new(
+                http, token,
+            )))
+        }
+        SourceType::SlackSearch => {
+            let token = slack_creds(creds)?
+                .search_token()
+                .ok_or_else(|| {
+                    SourceError::Auth(
+                        "slack-search requires a user_token (xoxp-); bot tokens \
+                         cannot call search.messages"
+                            .into(),
+                    )
+                })?
+                .to_string();
+            Ok(Box::new(slack::search::SlackSearchSource::new(http, token)))
         }
         SourceType::Jira => {
             let jc = creds.jira.as_ref().ok_or_else(|| {

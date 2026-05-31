@@ -45,10 +45,10 @@ pub fn scan(pages: &[ScannedPage]) -> Vec<Rename> {
 
         if stem != normalized {
             if !claimed_slugs.insert(normalized.clone()) {
-                eprintln!(
-                    "warning: skipping {}: rename to '{}' would collide with another file",
-                    page.path.display(),
-                    normalized
+                tracing::warn!(
+                    path = %page.path.display(),
+                    rename_to = %normalized,
+                    "skipping rename: would collide with another file"
                 );
                 continue;
             }

@@ -34,9 +34,11 @@ pub struct Event {
     /// `is_self` gated by the source's `track_personal`: the event counts toward
     /// the user's personal work-log and performance reviews.
     pub is_personal: bool,
-    /// Source-agnostic hash of title+body. Used by the `content-hash` dedup
-    /// strategy to catch the same content arriving via multiple sources or
-    /// re-pushed manually.
+    /// Hash of date+title+body. Used by the `content-hash` dedup strategy to
+    /// catch the same content arriving via multiple sources on the same day.
+    /// Scoped by `date` so a templated/recurring body with an identical
+    /// title+body on a different day is kept as a distinct observation rather
+    /// than silently merged.
     pub content_hash: String,
     #[serde(default)]
     pub metadata: serde_json::Value,
@@ -58,14 +60,18 @@ impl EventId {
     }
 }
 
-/// Stable hash of an event's title + body for content-equivalence dedup.
-/// Unlike `EventId` which scopes by source + date + external_id, this hash
-/// is source-agnostic — useful for catching the same article ingested via
-/// two different sources, or the same PDF re-pushed by the user.
-pub fn content_hash(title: &str, body: &str) -> String {
+/// Stable hash of an event's date + title + body for content-equivalence dedup.
+/// Unlike `EventId` which scopes by source + date + external_id, this hash is
+/// source-agnostic — it catches the same article ingested via two different
+/// sources on the same day, or the same file re-pushed by the user. It is
+/// scoped by `date` so a recurring/templated body (a daily digest, a newsletter
+/// with a constant subject) is NOT collapsed across days: an identical
+/// title+body observed on a different day is a distinct observation.
+pub fn content_hash(date: jiff::civil::Date, title: &str, body: &str) -> String {
     // Normalize whitespace so trivial reformatting doesn't break the match.
     let normalized = format!(
-        "{}\n{}",
+        "{}\n{}\n{}",
+        date,
         title.split_whitespace().collect::<Vec<_>>().join(" "),
         body.split_whitespace().collect::<Vec<_>>().join(" ")
     );
@@ -75,6 +81,38 @@ pub fn content_hash(title: &str, body: &str) -> String {
 impl std::fmt::Display for EventId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+#[cfg(test)]
+mod content_hash_tests {
+    use super::content_hash;
+
+    #[test]
+    fn identical_content_same_day_collides() {
+        let d = jiff::civil::date(2026, 5, 23);
+        assert_eq!(
+            content_hash(d, "Daily digest", "all ok"),
+            content_hash(d, "Daily digest", "all ok")
+        );
+    }
+
+    #[test]
+    fn identical_content_different_day_is_distinct() {
+        // A templated/recurring body with an identical title+body on a different day
+        // is a distinct observation — it must NOT collapse to the same hash.
+        let a = content_hash(jiff::civil::date(2026, 5, 23), "Daily digest", "all ok");
+        let b = content_hash(jiff::civil::date(2026, 5, 24), "Daily digest", "all ok");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn whitespace_reformatting_is_ignored() {
+        let d = jiff::civil::date(2026, 5, 23);
+        assert_eq!(
+            content_hash(d, "A  B", "x\n\ny"),
+            content_hash(d, "A B", "x y")
+        );
     }
 }
 

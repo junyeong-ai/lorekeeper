@@ -9,7 +9,7 @@ use crate::concept_lint::{InvalidCategoryConcept, NearDuplicateConcept, Unresolv
 use crate::export::GraphExport;
 use crate::graph::{BrokenLink, HubEntry};
 use crate::merge::MergeResult;
-use crate::stale::{Category, StalePage};
+use crate::stale::{PageKind, StalePage};
 
 #[derive(Debug, Serialize)]
 pub struct HubsReport {
@@ -337,17 +337,17 @@ pub fn print_stale(r: &StaleReport, dirs: &VaultDirs) {
         return;
     }
 
-    // Bucket by category, preserving the input ordering (oldest first) within
-    // each bucket. `Category` derives `Ord`, so the outer iteration is also
+    // Bucket by page kind, preserving the input ordering (oldest first) within
+    // each bucket. `PageKind` derives `Ord`, so the outer iteration is also
     // deterministic.
-    let mut buckets: std::collections::BTreeMap<Category, Vec<&StalePage>> =
+    let mut buckets: std::collections::BTreeMap<PageKind, Vec<&StalePage>> =
         std::collections::BTreeMap::new();
     for page in &r.stale {
-        buckets.entry(page.category).or_default().push(page);
+        buckets.entry(page.kind).or_default().push(page);
     }
 
-    for (category, entries) in &buckets {
-        println!("\n{} ({}):", category.label(dirs), entries.len());
+    for (kind, entries) in &buckets {
+        println!("\n{} ({}):", kind.label(dirs), entries.len());
         for entry in entries {
             println!(
                 "  {:>4} days  {}  (updated: {})",

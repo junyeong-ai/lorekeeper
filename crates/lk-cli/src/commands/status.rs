@@ -1,6 +1,6 @@
 use super::{find_config, load_config};
 
-pub async fn run(opts: &super::GlobalOpts) -> miette::Result<()> {
+pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
     let config = load_config(&find_config(opts)?)?;
     let vault_root = config.vault.root_path();
     let log = lk_vault::IngestLog::new(vault_root.join(".lorekeeper").join("ingest.jsonl"));

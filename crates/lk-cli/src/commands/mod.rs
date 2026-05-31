@@ -15,12 +15,12 @@ pub mod synthesis;
 pub mod validate;
 pub mod wiki;
 
-pub struct GlobalOpts {
+pub struct GlobalOptions {
     pub config: Option<PathBuf>,
     pub template_dir: Option<PathBuf>,
 }
 
-pub fn find_config(opts: &GlobalOpts) -> miette::Result<PathBuf> {
+pub fn find_config(opts: &GlobalOptions) -> miette::Result<PathBuf> {
     if let Some(p) = opts.config.as_ref() {
         if !p.exists() {
             return Err(miette::miette!("Config file not found: {}", p.display()));

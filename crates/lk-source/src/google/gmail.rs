@@ -23,7 +23,7 @@ struct GmailParams {
     #[serde(default)]
     include_queries: Vec<String>,
     #[serde(default)]
-    exclude: Option<ExcludeConfig>,
+    exclude: Option<ExcludeParams>,
 }
 
 /// Validate this source's params at config-load time, before any network work.
@@ -39,7 +39,7 @@ fn default_lookback() -> u32 {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ExcludeConfig {
+struct ExcludeParams {
     #[serde(default)]
     subjects: Vec<String>,
     #[serde(default)]
@@ -118,7 +118,7 @@ impl GmailSource {
             .map(|h| h.value.as_str())
     }
 
-    fn should_exclude(msg: &Message, exclude: &ExcludeConfig) -> bool {
+    fn should_exclude(msg: &Message, exclude: &ExcludeParams) -> bool {
         let subject = Self::header(msg, "Subject")
             .unwrap_or_default()
             .to_lowercase();
@@ -231,61 +231,9 @@ impl Source for GmailSource {
                 }
             };
 
-            if let Some(ref exc) = p.exclude
-                && Self::should_exclude(&msg, exc)
-            {
-                continue;
+            if let Some(item) = map_message(msg, ctx.identity.email.trim(), p.exclude.as_ref()) {
+                items.push(item);
             }
-
-            if p.exclude.as_ref().is_none_or(|e| e.calendar_invites)
-                && has_calendar_attachment(&msg)
-            {
-                tracing::debug!(message_id = %msg.id, "gmail: skipping calendar invite");
-                continue;
-            }
-
-            let subject = Self::header(&msg, "Subject").unwrap_or("(no subject)");
-            let from = Self::header(&msg, "From").unwrap_or_default();
-            let snippet = msg.snippet.as_deref().unwrap_or_default();
-
-            let body = {
-                let extracted = msg.payload.as_ref().map(extract_body).unwrap_or_default();
-                if extracted.is_empty() {
-                    snippet.to_string()
-                } else {
-                    extracted
-                }
-            };
-
-            let Some(ts) = msg
-                .internal_date
-                .as_deref()
-                .and_then(|s| s.parse::<i64>().ok())
-                .and_then(|ms| jiff::Timestamp::from_millisecond(ms).ok())
-            else {
-                tracing::warn!(message_id = %msg.id, "gmail: skipping message with unparseable timestamp");
-                continue;
-            };
-
-            let me = ctx.identity.email.trim();
-            let is_self = !me.is_empty() && header_email(from).eq_ignore_ascii_case(me);
-
-            items.push(RawItem {
-                external_id: Some(msg.id.clone()),
-                title: subject.to_string(),
-                body,
-                url: Some(format!(
-                    "https://mail.google.com/mail/u/0/#inbox/{}",
-                    msg.id
-                )),
-                author: Some(from.to_string()),
-                timestamp: ts,
-                is_self,
-                metadata: serde_json::json!({
-                    "to": Self::header(&msg, "To"),
-                    "labels": msg.label_ids,
-                }),
-            });
         }
 
         tracing::info!(
@@ -295,6 +243,77 @@ impl Source for GmailSource {
         );
         Ok(items)
     }
+}
+
+/// Map one fetched Gmail message to a `RawItem`, or `None` if it is filtered
+/// (matched an `exclude` rule, is a calendar invite) or has no parseable timestamp.
+/// Pure — no I/O — so the exclude logic, snippet body-fallback, ownership match
+/// (`From` vs `identity_email`), and metadata projection are unit-testable against
+/// fixtures. `identity_email` must already be trimmed.
+fn map_message(
+    msg: Message,
+    identity_email: &str,
+    exclude: Option<&ExcludeParams>,
+) -> Option<RawItem> {
+    if let Some(exc) = exclude
+        && GmailSource::should_exclude(&msg, exc)
+    {
+        return None;
+    }
+    if exclude.is_none_or(|e| e.calendar_invites) && has_calendar_attachment(&msg) {
+        tracing::debug!(message_id = %msg.id, "gmail: skipping calendar invite");
+        return None;
+    }
+
+    let subject = GmailSource::header(&msg, "Subject").unwrap_or("(no subject)");
+    let from = GmailSource::header(&msg, "From").unwrap_or_default();
+    let snippet = msg.snippet.as_deref().unwrap_or_default();
+
+    let body = {
+        let extracted = msg.payload.as_ref().map(extract_body).unwrap_or_default();
+        if extracted.is_empty() {
+            // The MIME walk found no text body — fall back to Gmail's short snippet so
+            // the page isn't empty, but make the degradation observable: a silently
+            // truncated body would be summarized by the LLM as if it were complete.
+            tracing::warn!(
+                message_id = %msg.id,
+                "gmail: no text body extracted, falling back to snippet (truncated)"
+            );
+            snippet.to_string()
+        } else {
+            extracted
+        }
+    };
+
+    let Some(ts) = msg
+        .internal_date
+        .as_deref()
+        .and_then(|s| s.parse::<i64>().ok())
+        .and_then(|ms| jiff::Timestamp::from_millisecond(ms).ok())
+    else {
+        tracing::warn!(message_id = %msg.id, "gmail: skipping message with unparseable timestamp");
+        return None;
+    };
+
+    let is_self =
+        !identity_email.is_empty() && header_email(from).eq_ignore_ascii_case(identity_email);
+
+    Some(RawItem {
+        external_id: Some(msg.id.clone()),
+        title: subject.to_string(),
+        body,
+        url: Some(format!(
+            "https://mail.google.com/mail/u/0/#inbox/{}",
+            msg.id
+        )),
+        author: Some(from.to_string()),
+        timestamp: ts,
+        is_self,
+        metadata: serde_json::json!({
+            "to": GmailSource::header(&msg, "To"),
+            "labels": msg.label_ids,
+        }),
+    })
 }
 
 /// The bare address from a `From`/`To` header: `"Name" <addr@x>` → `addr@x`,
@@ -389,7 +408,63 @@ fn decode_base64url(data: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::header_email;
+    use super::{Message, header_email, map_message};
+
+    fn msg_from(json: serde_json::Value) -> Message {
+        serde_json::from_value(json).expect("message fixture parses")
+    }
+
+    // base64url(no-pad) of "Hello body".
+    const PLAIN_BODY_B64: &str = "SGVsbG8gYm9keQ";
+
+    #[test]
+    fn map_message_extracts_body_and_self_ownership() {
+        let msg = msg_from(serde_json::json!({
+            "id": "m1",
+            "snippet": "snippet text",
+            "internalDate": "1769158800000",
+            "labelIds": ["INBOX"],
+            "payload": {
+                "mimeType": "text/plain",
+                "headers": [
+                    {"name": "Subject", "value": "Weekly update"},
+                    {"name": "From", "value": "\"Me\" <ME@x.com>"}
+                ],
+                "body": {"data": PLAIN_BODY_B64}
+            }
+        }));
+        let item = map_message(msg, "me@x.com", None).expect("maps");
+        assert_eq!(item.title, "Weekly update");
+        assert_eq!(item.body, "Hello body");
+        assert!(item.is_self, "From matches identity case-insensitively");
+        assert_eq!(
+            item.url.as_deref(),
+            Some("https://mail.google.com/mail/u/0/#inbox/m1")
+        );
+    }
+
+    #[test]
+    fn map_message_falls_back_to_snippet_when_no_body() {
+        let msg = msg_from(serde_json::json!({
+            "id": "m2",
+            "snippet": "just the snippet",
+            "internalDate": "1769158800000",
+            "payload": {"headers": [{"name": "From", "value": "other@x.com"}]}
+        }));
+        let item = map_message(msg, "me@x.com", None).expect("maps");
+        assert_eq!(item.body, "just the snippet");
+        assert!(!item.is_self);
+    }
+
+    #[test]
+    fn map_message_skips_unparseable_timestamp() {
+        let msg = msg_from(serde_json::json!({
+            "id": "m3",
+            "internalDate": "not-a-number",
+            "payload": {"headers": []}
+        }));
+        assert!(map_message(msg, "me@x.com", None).is_none());
+    }
 
     #[test]
     fn header_email_extracts_bare_address() {

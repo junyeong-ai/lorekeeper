@@ -265,6 +265,15 @@ pub fn render_agents_md(locale: Locale, dirs: &lk_core::config::VaultDirs) -> St
          page you create directly simply omits it."
     )
     .unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "Some listed frontmatter keys are optional and NOT written at page creation: a \
+         concept's `audited_sources_hash` is stamped only by `lore graph audit-mark` after \
+         the first contradiction audit, and `aliases` appears only when the page actually \
+         has synonyms. Omit both when first authoring a page."
+    )
+    .unwrap();
 
     for schema in page_schemas(dirs) {
         writeln!(out).unwrap();
@@ -313,7 +322,10 @@ pub fn render_agents_md(locale: Locale, dirs: &lk_core::config::VaultDirs) -> St
     out
 }
 
-pub async fn run(opts: &super::GlobalOpts, root_override: Option<PathBuf>) -> miette::Result<()> {
+pub async fn run(
+    opts: &super::GlobalOptions,
+    root_override: Option<PathBuf>,
+) -> miette::Result<()> {
     let (vault_root, locale, dirs) = match root_override {
         Some(r) => {
             let (locale, dirs) = match find_config(opts).and_then(|p| load_config(&p)) {

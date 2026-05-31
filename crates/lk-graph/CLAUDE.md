@@ -49,8 +49,11 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
   scope dirs and records per-file mtimes. `is_dirty()` compares against the
   cache; `save()` persists atomically. The CLI skips the full scan when
   `is_dirty()` returns false.
-- **`suggest_links`**: pairs in the same Louvain community with no edge, ranked
-  by shared-neighbor count. Read-only, deterministic.
+- **`suggest_links`**: pairs in the same Louvain community with no edge that share at
+  least `graph.cluster.suggest_min_shared_neighbors` neighbors (default 2), ranked by
+  shared-neighbor count. The floor suppresses co-citation noise — a single shared neighbor
+  usually means "co-cited by one daily note", not a real relationship. Read-only,
+  deterministic.
 - **Mutations gated**: `index::fix()`, `normalize::apply()`, and
   `backlinks::sync_concept_backlinks` touch the filesystem — the first two only
   with `--fix`, backlinks only without `--dry-run`. All renames pre-checked.

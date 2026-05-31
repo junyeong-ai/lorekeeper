@@ -250,9 +250,16 @@ pub struct SuggestResult {
 }
 
 /// Suggest wikilinks to add: pairs of pages in the SAME Louvain community that have NO
-/// edge between them, ranked by shared-neighbor count (descending). Pure, deterministic,
-/// read-only — it reuses the community assignment passed in and never touches the vault.
-pub fn suggest_links(graph: &WikiGraph, cluster: &ClusterResult) -> SuggestResult {
+/// edge between them and share at least `min_shared_neighbors` neighbors, ranked by
+/// shared-neighbor count (descending). The floor suppresses co-citation noise (a single
+/// shared neighbor usually means "co-cited by one daily note", not a real relationship).
+/// Pure, deterministic, read-only — it reuses the community assignment passed in and
+/// never touches the vault.
+pub fn suggest_links(
+    graph: &WikiGraph,
+    cluster: &ClusterResult,
+    min_shared_neighbors: usize,
+) -> SuggestResult {
     let mut pairs: Vec<LinkSuggestion> = Vec::new();
 
     for community in &cluster.communities {
@@ -274,7 +281,7 @@ pub fn suggest_links(graph: &WikiGraph, cluster: &ClusterResult) -> SuggestResul
                     continue;
                 }
                 let shared = shared_count(&neighbor_sets[i], &neighbor_sets[j]);
-                if shared == 0 {
+                if shared < min_shared_neighbors.max(1) {
                     continue;
                 }
                 let (id_a, id_b) = (graph.node_id(a).to_owned(), graph.node_id(b).to_owned());
@@ -467,11 +474,30 @@ mod tests {
         ];
         let graph = WikiGraph::build(&pages, &VaultDirs::default());
         let cluster = detect_communities(&graph, &config);
-        let result = suggest_links(&graph, &cluster);
+        let result = suggest_links(&graph, &cluster, 1);
         assert_eq!(result.pairs.len(), 1);
         let s = &result.pairs[0];
         assert_eq!((s.a.as_str(), s.b.as_str()), ("b", "c"));
         assert_eq!(s.shared_neighbors, 1);
+    }
+
+    #[test]
+    fn suggest_links_floor_suppresses_single_shared_neighbor() {
+        // b and c share exactly ONE neighbor (a). With the default floor of 2 that
+        // co-citation-level signal is suppressed.
+        let config = GraphConfig::default();
+        let pages = vec![
+            make_page("a", &["b", "c"]),
+            make_page("b", &["a"]),
+            make_page("c", &["a"]),
+        ];
+        let graph = WikiGraph::build(&pages, &VaultDirs::default());
+        let cluster = detect_communities(&graph, &config);
+        let result = suggest_links(&graph, &cluster, 2);
+        assert!(
+            result.pairs.is_empty(),
+            "single shared neighbor must not be suggested at floor 2"
+        );
     }
 
     #[test]
@@ -485,7 +511,7 @@ mod tests {
         ];
         let graph = WikiGraph::build(&pages, &VaultDirs::default());
         let cluster = detect_communities(&graph, &config);
-        let result = suggest_links(&graph, &cluster);
+        let result = suggest_links(&graph, &cluster, 1);
         assert!(result.pairs.is_empty());
     }
 
@@ -503,7 +529,7 @@ mod tests {
         ];
         let graph = WikiGraph::build(&pages, &VaultDirs::default());
         let cluster = detect_communities(&graph, &config);
-        let result = suggest_links(&graph, &cluster);
+        let result = suggest_links(&graph, &cluster, 1);
         assert!(!result.pairs.is_empty());
         // Output is sorted by shared_neighbors descending.
         for w in result.pairs.windows(2) {

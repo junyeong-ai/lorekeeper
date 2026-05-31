@@ -47,7 +47,7 @@ enum Command {
     },
     /// Show last ingest time per source
     Status,
-    /// Check pipeline health (warn if source not ingested in 48h)
+    /// Check pipeline health (warn if a source is overdue vs its schedule; 48h fallback when unscheduled)
     Health {
         /// Treat first-install (all "never") as failure as well
         #[arg(long)]
@@ -120,7 +120,7 @@ async fn main() -> miette::Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let opts = commands::GlobalOpts {
+    let opts = commands::GlobalOptions {
         config: cli.config,
         template_dir: cli.template_dir,
     };

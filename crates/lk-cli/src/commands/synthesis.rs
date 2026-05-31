@@ -42,7 +42,7 @@ pub enum Period {
     },
 }
 
-pub async fn run(opts: &super::GlobalOpts, period: Period) -> miette::Result<()> {
+pub async fn run(opts: &super::GlobalOptions, period: Period) -> miette::Result<()> {
     let config = load_config(&find_config(opts)?)?;
     let vault_root = config.vault.root_path();
     let llm = build_llm_client(&config, &vault_root)?;

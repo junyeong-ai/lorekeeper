@@ -71,11 +71,7 @@ struct CalEvent {
 
 #[derive(Deserialize)]
 struct Attachment {
-    #[serde(rename = "fileUrl")]
-    _file_url: Option<String>,
     title: Option<String>,
-    #[serde(rename = "mimeType")]
-    _mime_type: Option<String>,
     #[serde(rename = "fileId")]
     file_id: Option<String>,
 }
@@ -206,97 +202,38 @@ impl Source for CalendarSource {
 
         tracing::info!(count = events.len(), "calendar: events found");
 
+        let s = ctx.locale.strings();
+        let me = ctx.identity.email.trim();
         let mut items = Vec::new();
         for ev in events {
-            let Some(id) = ev.id else {
+            let Some(mut mapped) = map_event(ev, me, &ctx.timezone, s) else {
                 continue;
             };
-            let summary = ev
-                .summary
-                .unwrap_or_else(|| ctx.locale.strings().untitled.to_string());
 
-            // Timed events carry an RFC3339 `dateTime`; all-day events carry only a
-            // `date` (YYYY-MM-DD), parsed as a civil date anchored to the configured
-            // timezone so the event lands on the correct vault day.
-            let ts = match ev.start.as_ref().and_then(|s| {
-                if let Some(dt) = s.date_time.as_deref() {
-                    dt.parse::<jiff::Timestamp>().ok()
-                } else if let Some(d) = s.date.as_deref() {
-                    d.parse::<jiff::civil::Date>()
-                        .ok()
-                        .and_then(|date| date.to_zoned(ctx.timezone.clone()).ok())
-                        .map(|z| z.timestamp())
-                } else {
-                    None
-                }
-            }) {
-                Some(t) => t,
-                None => {
-                    tracing::warn!(event_id = %id, "calendar: skipping event with unparseable timestamp");
-                    continue;
-                }
-            };
-
-            let attendee_names: Vec<String> = ev
-                .attendees
-                .as_ref()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|p| {
-                            p.display_name
-                                .as_deref()
-                                .or(p.email.as_deref())
-                                .map(String::from)
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            // Google Calendar descriptions are HTML (`<ul>`, `<a>`, `<br>`); convert to
-            // Markdown so the daily page and LLM see clean text, not raw tags.
-            let description = ev
-                .description
-                .as_deref()
-                .map(crate::markdown::html_to_markdown)
-                .unwrap_or_default();
-            let s = ctx.locale.strings();
-            let mut body_parts: Vec<String> = Vec::new();
-            if !description.is_empty() {
-                body_parts.push(description.clone());
-            }
-            if let Some(loc) = ev.location.as_deref().filter(|l| !l.is_empty()) {
-                body_parts.push(format!("{}: {loc}", s.location));
-            }
-            if !attendee_names.is_empty() {
-                body_parts.push(format!("{}: {}", s.attendees, attendee_names.join(", ")));
-            }
-
-            // Optionally fetch meeting notes from Drive links in description + attachments.
+            // Optionally enrich the body with meeting notes fetched from the Drive files
+            // referenced in the event (description links + attachments). The candidate
+            // list was computed purely in `map_event`; only the fetch is I/O here.
             if p.fetch_meeting_notes {
-                let mut file_entries: Vec<(String, Option<String>)> =
-                    extract_drive_file_ids(&description)
-                        .into_iter()
-                        .map(|id| (id, None))
-                        .collect();
-                for att in &ev.attachments {
-                    if let Some(ref fid) = att.file_id
-                        && !file_entries.iter().any(|(id, _)| id == fid)
-                    {
-                        file_entries.push((fid.clone(), att.title.clone()));
-                    }
-                }
-                for (file_id, att_title) in
-                    file_entries.into_iter().take(MAX_DRIVE_FETCHES_PER_EVENT)
+                for (file_id, att_title) in mapped
+                    .drive_files
+                    .into_iter()
+                    .take(MAX_DRIVE_FETCHES_PER_EVENT)
                 {
                     match fetch_drive_content(&self.http, &token, &file_id).await {
                         Ok(content) if !content.trim().is_empty() => {
                             let header = att_title.as_deref().unwrap_or(s.meeting_notes);
-                            body_parts.push(format!("**{header}:**\n\n{}", content.trim()));
+                            let note = format!("**{header}:**\n\n{}", content.trim());
+                            if mapped.item.body.is_empty() {
+                                mapped.item.body = note;
+                            } else {
+                                mapped.item.body.push_str("\n\n");
+                                mapped.item.body.push_str(&note);
+                            }
                         }
                         Ok(_) => {}
                         Err(e) => {
                             tracing::warn!(
-                                event_id = %id,
+                                event_id = ?mapped.item.external_id,
                                 file_id = %file_id,
                                 error = %e,
                                 "calendar: failed to fetch meeting notes from Drive, skipping"
@@ -306,43 +243,206 @@ impl Source for CalendarSource {
                 }
             }
 
-            let body = body_parts.join("\n\n");
-
-            let me = ctx.identity.email.trim();
-            let is_self = !me.is_empty()
-                && (ev
-                    .organizer
-                    .as_ref()
-                    .and_then(|p| p.email.as_deref())
-                    .is_some_and(|e| e.eq_ignore_ascii_case(me))
-                    || ev.attendees.as_ref().is_some_and(|a| {
-                        a.iter()
-                            .filter_map(|p| p.email.as_deref())
-                            .any(|e| e.eq_ignore_ascii_case(me))
-                    }));
-
-            items.push(RawItem {
-                external_id: Some(id),
-                title: summary,
-                body,
-                url: ev.html_link,
-                author: ev.organizer.and_then(|o| o.display_name.or(o.email)),
-                timestamp: ts,
-                is_self,
-                metadata: serde_json::json!({
-                    "status": ev.status,
-                    "attendees": attendee_names,
-                }),
-            });
+            items.push(mapped.item);
         }
 
         Ok(items)
     }
 }
 
+/// A mapped calendar event plus the Drive files it references (`(file_id, title)`),
+/// extracted purely so the caller can decide whether to fetch their contents.
+struct MappedEvent {
+    item: RawItem,
+    drive_files: Vec<(String, Option<String>)>,
+}
+
+/// Map one Calendar event to a `RawItem` (and its Drive-file candidates), or `None`
+/// if it has no id or no parseable start. Pure — no I/O — so timed/all-day timestamp
+/// resolution, organizer/attendee ownership, HTML→Markdown body assembly, and
+/// Drive-link candidate extraction are unit-testable against fixtures. `identity_email`
+/// must already be trimmed.
+fn map_event(
+    ev: CalEvent,
+    identity_email: &str,
+    timezone: &jiff::tz::TimeZone,
+    s: &lk_core::i18n::Strings,
+) -> Option<MappedEvent> {
+    let id = ev.id?;
+    let summary = ev.summary.unwrap_or_else(|| s.untitled.to_string());
+
+    // Timed events carry an RFC3339 `dateTime`; all-day events carry only a `date`
+    // (YYYY-MM-DD), parsed as a civil date anchored to the configured timezone so the
+    // event lands on the correct vault day.
+    let Some(ts) = ev.start.as_ref().and_then(|st| {
+        if let Some(dt) = st.date_time.as_deref() {
+            dt.parse::<jiff::Timestamp>().ok()
+        } else if let Some(d) = st.date.as_deref() {
+            d.parse::<jiff::civil::Date>()
+                .ok()
+                .and_then(|date| date.to_zoned(timezone.clone()).ok())
+                .map(|z| z.timestamp())
+        } else {
+            None
+        }
+    }) else {
+        tracing::warn!(event_id = %id, "calendar: skipping event with unparseable timestamp");
+        return None;
+    };
+
+    let attendee_names: Vec<String> = ev
+        .attendees
+        .as_ref()
+        .map(|a| {
+            a.iter()
+                .filter_map(|p| {
+                    p.display_name
+                        .as_deref()
+                        .or(p.email.as_deref())
+                        .map(String::from)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Google Calendar descriptions are HTML (`<ul>`, `<a>`, `<br>`); convert to Markdown
+    // so the daily page and LLM see clean text, not raw tags.
+    let description = ev
+        .description
+        .as_deref()
+        .map(crate::markdown::html_to_markdown)
+        .unwrap_or_default();
+    let mut body_parts: Vec<String> = Vec::new();
+    if !description.is_empty() {
+        body_parts.push(description.clone());
+    }
+    if let Some(loc) = ev.location.as_deref().filter(|l| !l.is_empty()) {
+        body_parts.push(format!("{}: {loc}", s.location));
+    }
+    if !attendee_names.is_empty() {
+        body_parts.push(format!("{}: {}", s.attendees, attendee_names.join(", ")));
+    }
+
+    // Drive-file candidates: links in the description, then attachments (deduped).
+    let mut drive_files: Vec<(String, Option<String>)> = extract_drive_file_ids(&description)
+        .into_iter()
+        .map(|id| (id, None))
+        .collect();
+    for att in &ev.attachments {
+        if let Some(ref fid) = att.file_id
+            && !drive_files.iter().any(|(id, _)| id == fid)
+        {
+            drive_files.push((fid.clone(), att.title.clone()));
+        }
+    }
+
+    let is_self = !identity_email.is_empty()
+        && (ev
+            .organizer
+            .as_ref()
+            .and_then(|p| p.email.as_deref())
+            .is_some_and(|e| e.eq_ignore_ascii_case(identity_email))
+            || ev.attendees.as_ref().is_some_and(|a| {
+                a.iter()
+                    .filter_map(|p| p.email.as_deref())
+                    .any(|e| e.eq_ignore_ascii_case(identity_email))
+            }));
+
+    let item = RawItem {
+        external_id: Some(id),
+        title: summary,
+        body: body_parts.join("\n\n"),
+        url: ev.html_link,
+        author: ev.organizer.and_then(|o| o.display_name.or(o.email)),
+        timestamp: ts,
+        is_self,
+        metadata: serde_json::json!({
+            "status": ev.status,
+            "attendees": attendee_names,
+        }),
+    };
+    Some(MappedEvent { item, drive_files })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn event_from(json: serde_json::Value) -> CalEvent {
+        serde_json::from_value(json).expect("event fixture parses")
+    }
+
+    #[test]
+    fn map_event_timed_with_self_attendee() {
+        let s = lk_core::i18n::Locale::En.strings();
+        let tz = jiff::tz::TimeZone::UTC;
+        let ev = event_from(serde_json::json!({
+            "id": "ev1",
+            "summary": "Sprint planning",
+            "start": {"dateTime": "2026-05-23T09:00:00Z"},
+            "description": "<p>Agenda</p>",
+            "location": "Room A",
+            "organizer": {"email": "boss@x.com", "displayName": "Boss"},
+            "attendees": [{"email": "ME@x.com"}, {"email": "boss@x.com"}],
+            "htmlLink": "https://cal/ev1"
+        }));
+        let m = map_event(ev, "me@x.com", &tz, s).expect("maps");
+        assert!(m.item.is_self, "self is an attendee (case-insensitive)");
+        assert_eq!(m.item.title, "Sprint planning");
+        assert!(m.item.body.contains("Agenda"));
+        assert!(m.item.body.contains("Room A"));
+        assert_eq!(m.item.author.as_deref(), Some("Boss"));
+    }
+
+    #[test]
+    fn map_event_all_day_resolves_to_tz_midnight() {
+        let s = lk_core::i18n::Locale::En.strings();
+        let tz = jiff::tz::TimeZone::get("Asia/Seoul").unwrap();
+        let ev = event_from(serde_json::json!({
+            "id": "ev2",
+            "summary": "Holiday",
+            "start": {"date": "2026-05-23"}
+        }));
+        let m = map_event(ev, "me@x.com", &tz, s).expect("maps");
+        // 2026-05-23 00:00 KST == 2026-05-22T15:00:00Z
+        assert_eq!(m.item.timestamp, "2026-05-22T15:00:00Z".parse().unwrap());
+        assert!(!m.item.is_self, "no attendees/organizer → not self");
+    }
+
+    #[test]
+    fn map_event_collects_drive_candidates_from_description_and_attachments() {
+        let s = lk_core::i18n::Locale::En.strings();
+        let tz = jiff::tz::TimeZone::UTC;
+        let ev = event_from(serde_json::json!({
+            "id": "ev3",
+            "summary": "Review",
+            "start": {"dateTime": "2026-05-23T09:00:00Z"},
+            "description": "Notes: https://docs.google.com/document/d/doc123/edit",
+            "attachments": [{"fileId": "att456", "title": "Deck"}]
+        }));
+        let m = map_event(ev, "me@x.com", &tz, s).expect("maps");
+        assert_eq!(
+            m.drive_files,
+            vec![
+                ("doc123".to_string(), None),
+                ("att456".to_string(), Some("Deck".to_string()))
+            ]
+        );
+    }
+
+    #[test]
+    fn map_event_skips_unparseable_and_idless() {
+        let s = lk_core::i18n::Locale::En.strings();
+        let tz = jiff::tz::TimeZone::UTC;
+        // No start at all.
+        let ev = event_from(serde_json::json!({"id": "ev4", "summary": "x"}));
+        assert!(map_event(ev, "me@x.com", &tz, s).is_none());
+        // No id.
+        let ev = event_from(
+            serde_json::json!({"summary": "x", "start": {"dateTime": "2026-05-23T09:00:00Z"}}),
+        );
+        assert!(map_event(ev, "me@x.com", &tz, s).is_none());
+    }
 
     #[test]
     fn extracts_google_doc_ids() {

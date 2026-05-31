@@ -105,7 +105,7 @@ Claude Code Skills        Semantic Plane             (same vault)
 | `lore synthesis annual` | Generate annual performance review |
 | `lore ingest --date YYYY-MM-DD` | Override target date (filters events) |
 | `lore status` | Show last ingest time per source |
-| `lore health` | Check staleness (warn if no ingest in 48h, exit 0 on first install) |
+| `lore health` | Check staleness per source's schedule (stale after 2 missed scheduled fires; 48h fallback when unscheduled; exit 0 on first install) |
 | `lore health --strict` | Also exit 1 if any source has never been ingested |
 | `lore performance` | Show work category distribution |
 | `lore schedule` | Print crontab entries (uses plain `lore` for PATH lookup) |
@@ -213,7 +213,7 @@ Templates live in `templates/` and use Jinja2 syntax (minijinja). Lookup order:
 2. `{source-type}.md.jinja` — default per source type (`gmail`, `google-drive`, `slack-channel`, `slack-search`, `jira`, `google-calendar`, `rss`, `manual`)
 3. Embedded fallback
 
-Periodic templates: `work-log`, `weekly-synthesis`, `weekly-personal`, `monthly-summary`, `quarterly-review`, `annual-review`, `concept`, `document`.
+Periodic templates: `work-log`, `weekly-synthesis`, `weekly-personal`, `monthly-summary`, `quarterly-review`, `annual-review`, `concept`, `document`, `exploration`.
 
 ## Timezone
 
@@ -229,7 +229,7 @@ lore schedule > /tmp/lore-cron.txt
 crontab /tmp/lore-cron.txt
 ```
 
-Each source's `schedule:` field in config.yaml uses standard cron syntax. The weekly synthesis runs on the schedule from `synthesis.weekly.schedule`.
+Each source's `schedule:` field in config.yaml uses standard cron syntax. Each enabled synthesis period (weekly/monthly/quarterly/annual) emits its own cron line from `synthesis.<period>.schedule`.
 
 ## Credentials
 

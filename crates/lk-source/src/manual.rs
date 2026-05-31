@@ -46,7 +46,6 @@ fn default_extensions() -> Vec<String> {
         "md".into(),
         "txt".into(),
         "markdown".into(),
-        "json".into(),
         "html".into(),
         "htm".into(),
     ]
@@ -163,17 +162,12 @@ fn read_item(path: &Path) -> Result<RawItem, SourceError> {
         .map_err(|e| SourceError::Parse(format!("read {}: {e}", path.display())))?;
 
     // Convert HTML to Markdown so the vault stores clean content, not raw tags.
-    // Use readability extraction first to strip boilerplate (nav, ads, footers),
-    // then convert the readable core to Markdown. Falls back to raw conversion
-    // when readability cannot extract a main content block.
+    // `readable_html_to_markdown` strips boilerplate via readability and keeps the
+    // full-page conversion (with a warning) when extraction fails or is empty.
     let body = match path.extension().and_then(|e| e.to_str()) {
         Some("html" | "htm") => {
-            let parsed_url = url::Url::parse("file:///inbox").unwrap();
-            let mut cursor = std::io::Cursor::new(raw.as_bytes());
-            match readability::extractor::extract(&mut cursor, &parsed_url) {
-                Ok(product) => crate::markdown::html_to_markdown(&product.content),
-                Err(_) => crate::markdown::html_to_markdown(&raw),
-            }
+            let base_url = url::Url::parse("file:///inbox").unwrap();
+            crate::markdown::readable_html_to_markdown(&raw, &base_url)
         }
         _ => raw,
     };
@@ -199,9 +193,14 @@ fn read_item(path: &Path) -> Result<RawItem, SourceError> {
         .and_then(|s| s.to_str())
         .unwrap_or("manual")
         .to_string();
+    // Fingerprint the content into the external_id so re-dropping a file with the
+    // SAME name but EDITED content on the same day yields a distinct event rather
+    // than colliding on `EventId` (source:date:hash(external_id)) and being dropped
+    // as a duplicate. Unchanged re-drops keep a stable id and still dedup.
+    let fingerprint = &blake3::hash(body.as_bytes()).to_hex()[..8];
 
     Ok(RawItem {
-        external_id: Some(format!("manual:{file_name}")),
+        external_id: Some(format!("manual:{file_name}:{fingerprint}")),
         title,
         body: content,
         url: None,

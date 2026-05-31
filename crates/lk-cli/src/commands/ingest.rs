@@ -3,7 +3,7 @@ use std::sync::Arc;
 use super::{build_llm_client, find_config, load_config, parse_date};
 
 pub async fn run(
-    opts: &super::GlobalOpts,
+    opts: &super::GlobalOptions,
     source: Option<String>,
     date_str: Option<String>,
     dry_run: bool,

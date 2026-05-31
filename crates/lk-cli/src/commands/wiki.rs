@@ -31,7 +31,7 @@ pub enum WikiCmd {
     },
 }
 
-pub async fn run(opts: &super::GlobalOpts, cmd: WikiCmd) -> miette::Result<()> {
+pub async fn run(opts: &super::GlobalOptions, cmd: WikiCmd) -> miette::Result<()> {
     match cmd {
         WikiCmd::Index { root } => run_index(opts, root).await,
         WikiCmd::Log { root } => run_log(opts, root).await,
@@ -40,7 +40,7 @@ pub async fn run(opts: &super::GlobalOpts, cmd: WikiCmd) -> miette::Result<()> {
 }
 
 pub async fn run_log(
-    opts: &super::GlobalOpts,
+    opts: &super::GlobalOptions,
     root_override: Option<PathBuf>,
 ) -> miette::Result<()> {
     let (vault_root, _locale, _threshold, dirs) =
@@ -56,7 +56,7 @@ pub async fn run_log(
 }
 
 pub async fn run_index(
-    opts: &super::GlobalOpts,
+    opts: &super::GlobalOptions,
     root_override: Option<PathBuf>,
 ) -> miette::Result<()> {
     let (vault_root, locale, threshold, dirs) = resolve_vault_with_threshold(opts, root_override)?;
@@ -72,7 +72,7 @@ pub async fn run_index(
 }
 
 fn resolve_vault_with_threshold(
-    opts: &super::GlobalOpts,
+    opts: &super::GlobalOptions,
     root_override: Option<PathBuf>,
 ) -> miette::Result<(PathBuf, Locale, usize, lk_core::config::VaultDirs)> {
     match root_override {
@@ -104,7 +104,7 @@ fn resolve_vault_with_threshold(
     }
 }
 
-async fn run_concepts(opts: &super::GlobalOpts, json: bool) -> miette::Result<()> {
+async fn run_concepts(opts: &super::GlobalOptions, json: bool) -> miette::Result<()> {
     let config_path = find_config(opts)?;
     let config = load_config(&config_path)?;
     let vault_root = config.vault.root_path();

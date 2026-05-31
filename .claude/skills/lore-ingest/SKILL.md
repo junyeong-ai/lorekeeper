@@ -1,6 +1,6 @@
 ---
 name: lore-ingest
-description: Daily knowledge ingestion pipeline — collects from Gmail, Google Drive, Google Calendar, Slack, Jira, and RSS into an Obsidian vault. Deduplicates, classifies, extracts concepts, writes structured pages. Tracks personal work for performance reviews. Atomic 5-phase ingest with no-data-loss guarantee.
+description: Daily knowledge ingestion pipeline — collects from Gmail, Google Drive, Google Calendar, Slack, Jira, RSS, and a manual inbox into an Obsidian vault. Deduplicates, classifies, extracts concepts, writes structured pages. Tracks personal work for performance reviews. Atomic 5-phase ingest with no-data-loss guarantee.
 when_to_use: |
   ingest, collect, daily ingest, run ingest, ingest sources,
   ingest status, source health, generate cron, schedule ingest,
@@ -33,7 +33,7 @@ an Obsidian vault. All commands accept `--config <path>` to override.
 | `lore synthesis quarterly [--previous]` | Quarterly review with category stats |
 | `lore synthesis annual [--previous]` | Annual review from quarterly summaries |
 | `lore status` | Last successful ingest per source |
-| `lore health [--strict]` | Warn if any source stale (>48h) |
+| `lore health [--strict]` | Warn if any source is overdue vs its schedule (2 missed fires; 48h fallback) |
 | `lore performance` | Work category distribution |
 | `lore schedule [--bin <path>]` | Print crontab entries |
 | `lore maintenance` | Prune ingest log + dedup cache (>90d) |

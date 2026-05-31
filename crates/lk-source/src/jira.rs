@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use serde::Deserialize;
+use tokio::sync::OnceCell;
 
 use lk_core::event::RawItem;
 
@@ -9,6 +10,9 @@ use crate::{ExtractContext, Source, SourceError};
 pub struct JiraSource {
     http: reqwest::Client,
     creds: JiraCredentials,
+    /// The authenticated user's `accountId`, fetched once and cached for the life
+    /// of the source (it is invariant for fixed credentials).
+    account_id: OnceCell<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -99,7 +103,53 @@ struct UserField {
 
 impl JiraSource {
     pub fn new(http: reqwest::Client, creds: JiraCredentials) -> Self {
-        Self { http, creds }
+        Self {
+            http,
+            creds,
+            account_id: OnceCell::new(),
+        }
+    }
+
+    /// The authenticated user's Jira `accountId`, the exact-match ownership key.
+    /// Fetched once via `/myself` and cached. A failure is PROPAGATED, never
+    /// degraded to "no account id": collapsing an auth/connectivity/schema error
+    /// into `None` would silently mark every assigned issue as not-self → not
+    /// personal, zeroing a whole batch's contribution record with no signal —
+    /// irrecoverable on an append-only review.
+    async fn account_id(&self) -> Result<&str, SourceError> {
+        self.account_id
+            .get_or_try_init(|| async {
+                let url = format!(
+                    "{}/rest/api/3/myself",
+                    self.creds.base_url.trim_end_matches('/')
+                );
+                let resp = crate::retry::send_with_retry(|| {
+                    self.http
+                        .get(&url)
+                        .basic_auth(&self.creds.email, Some(&self.creds.api_token))
+                        .send()
+                })
+                .await?;
+                if !resp.status().is_success() {
+                    let status = resp.status().as_u16();
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(SourceError::Api {
+                        status,
+                        message: format!("Jira /myself failed: {body}"),
+                    });
+                }
+                resp.json::<serde_json::Value>()
+                    .await
+                    .map_err(|e| SourceError::Parse(e.to_string()))?
+                    .get("accountId")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+                    .ok_or_else(|| {
+                        SourceError::Parse("Jira /myself response missing accountId".into())
+                    })
+            })
+            .await
+            .map(String::as_str)
     }
 }
 
@@ -125,36 +175,21 @@ impl Source for JiraSource {
         }
         let fields_csv = fields.join(",");
 
-        let myself_url = format!(
-            "{}/rest/api/3/myself",
-            self.creds.base_url.trim_end_matches('/')
-        );
-        let my_account_id: Option<String> = match self
-            .http
-            .get(&myself_url)
-            .basic_auth(&self.creds.email, Some(&self.creds.api_token))
-            .send()
-            .await
-        {
-            Ok(resp) if resp.status().is_success() => resp
-                .json::<serde_json::Value>()
-                .await
-                .ok()
-                .and_then(|v| v.get("accountId")?.as_str().map(String::from)),
-            _ => None,
-        };
+        let my_account_id = self.account_id().await?;
 
-        let resp = self
-            .http
-            .get(&url)
-            .basic_auth(&self.creds.email, Some(&self.creds.api_token))
-            .query(&[
-                ("jql", p.jql.as_str()),
-                ("maxResults", &p.max_results.to_string()),
-                ("fields", &fields_csv),
-            ])
-            .send()
-            .await?;
+        let max_results = p.max_results.to_string();
+        let resp = crate::retry::send_with_retry(|| {
+            self.http
+                .get(&url)
+                .basic_auth(&self.creds.email, Some(&self.creds.api_token))
+                .query(&[
+                    ("jql", p.jql.as_str()),
+                    ("maxResults", max_results.as_str()),
+                    ("fields", fields_csv.as_str()),
+                ])
+                .send()
+        })
+        .await?;
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
@@ -177,87 +212,102 @@ impl Source for JiraSource {
         let items = issues
             .into_iter()
             .filter_map(|issue| {
-                let summary = issue
-                    .fields
-                    .summary
-                    .as_deref()
-                    .unwrap_or(ctx.locale.strings().untitled);
-
-                let Some(ts) = issue
-                    .fields
-                    .updated
-                    .as_deref()
-                    .and_then(|s| s.parse::<jiff::Timestamp>().ok())
-                else {
-                    tracing::warn!(issue_key = %issue.key, "jira: skipping issue with unparseable timestamp");
-                    return None;
-                };
-
-                let assignee = issue.fields.assignee.as_ref();
-                let assignee_aid = assignee.and_then(|a| a.account_id.as_deref());
-                let is_me = my_account_id
-                    .as_deref()
-                    .is_some_and(|me| assignee_aid == Some(me));
-                let author = if is_me {
-                    Some(self.creds.email.clone())
-                } else {
-                    assignee
-                        .and_then(|a| a.email_address.as_deref().or(a.display_name.as_deref()))
-                        .map(String::from)
-                };
-
-                let status = issue.fields.status.and_then(|s| s.name);
-                let description = issue
-                    .fields
-                    .description
-                    .as_ref()
-                    .map(crate::markdown::adf_to_markdown)
-                    .unwrap_or_default();
-                let start_date = p
-                    .start_date_field
-                    .as_ref()
-                    .and_then(|f| issue.fields.extra.get(f))
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string);
-                // Snapshot the status + planned window as a header. These are the values
-                // *as of this run* — the page is a daily record, so a later schedule change
-                // doesn't rewrite history.
-                let body = with_status_header(
+                map_issue(
+                    issue,
+                    my_account_id,
+                    base,
+                    &self.creds.email,
+                    p.start_date_field.as_deref(),
                     ctx.locale.strings(),
-                    status.as_deref(),
-                    start_date.as_deref(),
-                    issue.fields.duedate.as_deref(),
-                    &description,
-                );
-
-                let assignee_account_id = issue
-                    .fields
-                    .assignee
-                    .as_ref()
-                    .and_then(|a| a.account_id.clone());
-
-                Some(RawItem {
-                    external_id: Some(issue.key.clone()),
-                    title: format!("[{}] {}", issue.key, summary),
-                    body,
-                    url: Some(format!("{base}/browse/{}", issue.key)),
-                    author,
-                    timestamp: ts,
-                    is_self: is_me,
-                    metadata: serde_json::json!({
-                        "status": status,
-                        "priority": issue.fields.priority.and_then(|p| p.name),
-                        "labels": issue.fields.labels,
-                        "duedate": issue.fields.duedate,
-                        "start_date": start_date,
-                        "assignee_account_id": assignee_account_id,
-                    }),
-                })
+                )
             })
             .collect();
 
         Ok(items)
     }
+}
+
+/// Map one Jira issue to a `RawItem`, or `None` if it has no parseable `updated`
+/// timestamp (it can't be filed onto a day). Pure — no I/O — so the ownership match,
+/// ADF→Markdown body, status/period header, and metadata projection are unit-testable
+/// against fixtures without a live Jira. `my_account_id` is the authenticated account's
+/// id (the exact ownership key); `my_email` stands in as the author when the issue is
+/// the user's own.
+fn map_issue(
+    issue: Issue,
+    my_account_id: &str,
+    base: &str,
+    my_email: &str,
+    start_date_field: Option<&str>,
+    strings: &lk_core::i18n::Strings,
+) -> Option<RawItem> {
+    let summary = issue.fields.summary.as_deref().unwrap_or(strings.untitled);
+
+    let Some(ts) = issue
+        .fields
+        .updated
+        .as_deref()
+        .and_then(|s| s.parse::<jiff::Timestamp>().ok())
+    else {
+        tracing::warn!(issue_key = %issue.key, "jira: skipping issue with unparseable timestamp");
+        return None;
+    };
+
+    let assignee = issue.fields.assignee.as_ref();
+    let assignee_aid = assignee.and_then(|a| a.account_id.as_deref());
+    let is_me = assignee_aid == Some(my_account_id);
+    let author = if is_me {
+        Some(my_email.to_string())
+    } else {
+        assignee
+            .and_then(|a| a.email_address.as_deref().or(a.display_name.as_deref()))
+            .map(String::from)
+    };
+
+    let status = issue.fields.status.and_then(|s| s.name);
+    let description = issue
+        .fields
+        .description
+        .as_ref()
+        .map(crate::markdown::adf_to_markdown)
+        .unwrap_or_default();
+    let start_date = start_date_field
+        .and_then(|f| issue.fields.extra.get(f))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    // Snapshot the status + planned window as a header. These are the values *as of this
+    // run* — the page is a daily record, so a later schedule change doesn't rewrite history.
+    let body = with_status_header(
+        strings,
+        status.as_deref(),
+        start_date.as_deref(),
+        issue.fields.duedate.as_deref(),
+        &description,
+    );
+
+    let assignee_account_id = issue
+        .fields
+        .assignee
+        .as_ref()
+        .and_then(|a| a.account_id.clone());
+
+    Some(RawItem {
+        external_id: Some(issue.key.clone()),
+        title: format!("[{}] {}", issue.key, summary),
+        body,
+        url: Some(format!("{base}/browse/{}", issue.key)),
+        author,
+        timestamp: ts,
+        is_self: is_me,
+        metadata: serde_json::json!({
+            "status": status,
+            "priority": issue.fields.priority.and_then(|p| p.name),
+            "labels": issue.fields.labels,
+            "duedate": issue.fields.duedate,
+            "start_date": start_date,
+            "assignee_account_id": assignee_account_id,
+        }),
+    })
 }
 
 /// Prefix the description with a one-line status/period snapshot (`**상태**: … · **기간**:
@@ -331,6 +381,97 @@ mod tests {
     fn valid_params_accepted() {
         let params = serde_json::json!({ "jql": "assignee = currentUser()" });
         assert!(validate_params(&params).is_ok());
+    }
+
+    fn issue_from(json: serde_json::Value) -> Issue {
+        serde_json::from_value(json).expect("issue fixture parses")
+    }
+
+    #[test]
+    fn map_issue_owns_when_assignee_matches_account() {
+        let s = lk_core::i18n::Locale::En.strings();
+        let issue = issue_from(serde_json::json!({
+            "key": "PROJ-1",
+            "fields": {
+                "summary": "Ship the thing",
+                "status": {"name": "In Progress"},
+                "updated": "2026-05-23T09:00:00.000+0000",
+                "assignee": {"accountId": "acc-123", "emailAddress": "other@x.com"},
+                "customfield_10015": "2026-05-18"
+            }
+        }));
+        let item = map_issue(
+            issue,
+            "acc-123",
+            "https://x.atlassian.net",
+            "me@x.com",
+            Some("customfield_10015"),
+            s,
+        )
+        .expect("maps");
+        assert!(item.is_self, "assignee accountId == my account → self");
+        assert_eq!(item.author.as_deref(), Some("me@x.com"));
+        assert_eq!(item.title, "[PROJ-1] Ship the thing");
+        assert_eq!(
+            item.url.as_deref(),
+            Some("https://x.atlassian.net/browse/PROJ-1")
+        );
+        assert!(
+            item.body.contains("In Progress"),
+            "status header present: {}",
+            item.body
+        );
+        assert!(
+            item.body.contains("2026-05-18"),
+            "start date from custom field: {}",
+            item.body
+        );
+    }
+
+    #[test]
+    fn map_issue_not_self_uses_assignee_identity() {
+        let s = lk_core::i18n::Locale::En.strings();
+        let issue = issue_from(serde_json::json!({
+            "key": "PROJ-2",
+            "fields": {
+                "summary": "Someone else's task",
+                "updated": "2026-05-23T09:00:00.000+0000",
+                "assignee": {"accountId": "acc-999", "displayName": "Alice"}
+            }
+        }));
+        let item = map_issue(
+            issue,
+            "acc-123",
+            "https://x.atlassian.net",
+            "me@x.com",
+            None,
+            s,
+        )
+        .expect("maps");
+        assert!(!item.is_self);
+        assert_eq!(item.author.as_deref(), Some("Alice"));
+    }
+
+    #[test]
+    fn map_issue_skips_unparseable_timestamp() {
+        let s = lk_core::i18n::Locale::En.strings();
+        let issue = issue_from(serde_json::json!({
+            "key": "PROJ-3",
+            "fields": {"summary": "No date", "updated": "not-a-timestamp"}
+        }));
+        assert!(map_issue(issue, "acc-123", "https://x", "me@x.com", None, s).is_none());
+    }
+
+    #[test]
+    fn map_issue_unassigned_is_not_self() {
+        let s = lk_core::i18n::Locale::En.strings();
+        let issue = issue_from(serde_json::json!({
+            "key": "PROJ-4",
+            "fields": {"summary": "Open", "updated": "2026-05-23T09:00:00.000+0000"}
+        }));
+        let item = map_issue(issue, "acc-123", "https://x", "me@x.com", None, s).expect("maps");
+        assert!(!item.is_self);
+        assert!(item.author.is_none());
     }
 
     #[test]

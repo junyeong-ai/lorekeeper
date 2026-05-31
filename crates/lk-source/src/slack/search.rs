@@ -3,7 +3,7 @@ use serde::Deserialize;
 
 use lk_core::event::RawItem;
 
-use super::{resolve_users, slack_post};
+use super::{resolve_users, slack_post, split_first_line};
 use crate::markdown::slack_to_markdown;
 use crate::{ExtractContext, Source, SourceError};
 
@@ -15,7 +15,7 @@ pub struct SlackSearchSource {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SearchParams {
-    queries: Vec<QuerySpec>,
+    queries: Vec<QueryParams>,
     #[serde(default = "default_lookback")]
     lookback_hours: u32,
 }
@@ -26,7 +26,7 @@ fn default_lookback() -> u32 {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct QuerySpec {
+struct QueryParams {
     channel: String,
     keywords: Vec<String>,
 }
@@ -127,15 +127,8 @@ impl Source for SlackSearchSource {
             );
 
             for m in matches {
-                let body = slack_to_markdown(&m.text, &users);
-                let title = body.lines().next().unwrap_or_default().to_string();
-                // Strip the first line from body so it doesn't duplicate the heading.
-                let body = body
-                    .split_once('\n')
-                    .map(|x| x.1)
-                    .unwrap_or("")
-                    .trim_start()
-                    .to_string();
+                let rendered = slack_to_markdown(&m.text, &users);
+                let (title, body) = split_first_line(&rendered);
 
                 let Some(ts) =
                     m.ts.parse::<f64>()

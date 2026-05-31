@@ -96,13 +96,15 @@ impl WikiGraph {
                             e.insert((node, true));
                         } else if is_concept == existing_is_concept {
                             // Same class (two documents in different dirs, etc.) — a real
-                            // ambiguity. Keep the first; warn. (A non-concept losing to an
-                            // already-claimed concept is silent: it's cited by path form.)
-                            eprintln!(
-                                "warning: ambiguous slug '{}': {} shadows {}",
-                                e.key(),
-                                graph[existing_node].id,
-                                page.id
+                            // ambiguity. Keep the first; warn through `tracing` (not
+                            // stdout) so it honours log config. A bare `[[slug]]` link
+                            // resolves to the kept page; the shadowed page stays reachable
+                            // by its path form.
+                            tracing::warn!(
+                                slug = %e.key(),
+                                kept = %graph[existing_node].id,
+                                shadowed = %page.id,
+                                "ambiguous bare slug: two same-class pages share it"
                             );
                         }
                     }

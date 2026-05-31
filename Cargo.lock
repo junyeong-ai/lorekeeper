@@ -1155,6 +1155,7 @@ dependencies = [
  "strsim",
  "tempfile",
  "thiserror",
+ "tracing",
  "walkdir",
 ]
 
@@ -1199,6 +1200,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64",
+ "blake3",
  "feed-rs",
  "htmd",
  "jiff",
