@@ -48,7 +48,9 @@ pub fn find_audit_candidates(
     wiki_dir: &str,
     locale: Locale,
 ) -> Result<Vec<AuditCandidate>, GraphError> {
-    let concepts_dir = vault_root.join(wiki_dir).join("concepts");
+    let concepts_dir = vault_root
+        .join(wiki_dir)
+        .join(lk_core::vault_path::CONCEPTS_SUBDIR);
     let entries = match std::fs::read_dir(&concepts_dir) {
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -124,7 +126,7 @@ pub fn mark_audited(
         return Err(GraphError::Io(format!("invalid concept slug: {slug:?}")));
     };
     let rel_path = PathBuf::from(wiki_dir)
-        .join("concepts")
+        .join(lk_core::vault_path::CONCEPTS_SUBDIR)
         .join(format!("{slug}.md"));
     let full_path = vault_root.join(&rel_path);
     let raw = std::fs::read_to_string(&full_path)
@@ -162,7 +164,7 @@ mod tests {
     /// Write a concept page with the given frontmatter and `## Sources` lines (Ko
     /// heading `출처`, the test locale).
     fn write_concept(root: &Path, slug: &str, frontmatter_body: &str, sources: &[&str]) {
-        let dir = root.join("wiki").join("concepts");
+        let dir = root.join("wiki").join(lk_core::vault_path::CONCEPTS_SUBDIR);
         std::fs::create_dir_all(&dir).unwrap();
         let body = sources
             .iter()
@@ -229,7 +231,11 @@ mod tests {
         // Swap one source so the set becomes {a, c} — SAME count (2), different set.
         // Edit in place so the `audited_sources_hash` marker is preserved. Count-only
         // tracking would miss this; the hash catches it.
-        let path = tmp.path().join("wiki").join("concepts").join("rag.md");
+        let path = tmp
+            .path()
+            .join("wiki")
+            .join(lk_core::vault_path::CONCEPTS_SUBDIR)
+            .join("rag.md");
         let swapped = std::fs::read_to_string(&path)
             .unwrap()
             .replace("- [[b]]", "- [[c]]");

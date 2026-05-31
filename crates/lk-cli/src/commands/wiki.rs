@@ -108,7 +108,7 @@ async fn run_concepts(opts: &super::GlobalOptions, json: bool) -> miette::Result
     let config_path = find_config(opts)?;
     let config = load_config(&config_path)?;
     let vault_root = config.vault.root_path();
-    let concept_dir = vault_root.join(&config.vault.dirs.wiki).join("concepts");
+    let concept_dir = vault_root.join(lk_core::vault_path::concepts_dir(&config.vault.dirs));
 
     let mut entries: Vec<ConceptEntry> = Vec::new();
 

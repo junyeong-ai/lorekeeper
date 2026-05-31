@@ -80,7 +80,7 @@ pub fn merge_concepts(
         ));
     }
 
-    let concepts_dir = Path::new(wiki_dir).join("concepts");
+    let concepts_dir = Path::new(wiki_dir).join(lk_core::vault_path::CONCEPTS_SUBDIR);
     let from_rel = concepts_dir.join(format!("{from}.md"));
     let into_rel = concepts_dir.join(format!("{into}.md"));
     if !vault_root.join(&from_rel).is_file() {

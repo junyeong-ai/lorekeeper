@@ -2,6 +2,9 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use lk_core::i18n::{Locale, Strings};
+use lk_core::vault_path::{
+    CONCEPTS_SUBDIR, DOCUMENTS_SUBDIR, EXPLORATIONS_SUBDIR, WORK_LOG_SUBDIR,
+};
 
 use super::{find_config, load_config};
 
@@ -54,7 +57,7 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs) -> Vec<PageSchema> {
     vec![
         PageSchema {
             type_name: "concept",
-            path_pattern: format!("{}/concepts/{{slug}}.md", dirs.wiki),
+            path_pattern: format!("{}/{CONCEPTS_SUBDIR}/{{slug}}.md", dirs.wiki),
             frontmatter: &[
                 "id",
                 "title",
@@ -92,7 +95,7 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs) -> Vec<PageSchema> {
         },
         PageSchema {
             type_name: "work-log",
-            path_pattern: format!("{}/work-log/YYYY-MM-DD.md", dirs.personal),
+            path_pattern: format!("{}/{WORK_LOG_SUBDIR}/YYYY-MM-DD.md", dirs.personal),
             frontmatter: &["id", "title", "created", "labels", "categories", "sources"],
             sections: vec![
                 s("Topic Summary", |i| i.topic_summary.to_string(), Owner::Llm),
@@ -101,7 +104,7 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs) -> Vec<PageSchema> {
         },
         PageSchema {
             type_name: "document",
-            path_pattern: format!("{}/documents/{{slug}}.md", dirs.wiki),
+            path_pattern: format!("{}/{DOCUMENTS_SUBDIR}/{{slug}}.md", dirs.wiki),
             frontmatter: &[
                 "id",
                 "title",
@@ -128,7 +131,7 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs) -> Vec<PageSchema> {
         },
         PageSchema {
             type_name: "exploration",
-            path_pattern: format!("{}/explorations/{{slug}}.md", dirs.wiki),
+            path_pattern: format!("{}/{EXPLORATIONS_SUBDIR}/{{slug}}.md", dirs.wiki),
             frontmatter: &[
                 "id",
                 "title",

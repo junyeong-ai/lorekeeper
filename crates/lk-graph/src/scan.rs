@@ -11,6 +11,7 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use lk_core::concept::slugify;
 use lk_core::config::{GraphConfig, VaultDirs};
 use lk_core::frontmatter::{self, Frontmatter};
+use lk_core::vault_path::{CONCEPTS_SUBDIR, DOCUMENTS_SUBDIR, EXPLORATIONS_SUBDIR};
 use lk_core::wikilink;
 use rayon::prelude::*;
 use walkdir::WalkDir;
@@ -293,7 +294,7 @@ impl VaultExistence {
 /// and `backlinks`.
 pub(crate) fn is_concept_page(path: &Path, dirs: &VaultDirs) -> bool {
     let s = path.to_string_lossy().replace('\\', "/");
-    s.starts_with(&format!("{}/concepts/", dirs.wiki))
+    s.starts_with(&format!("{}/{CONCEPTS_SUBDIR}/", dirs.wiki))
         && path.extension().is_some_and(|ext| ext == "md")
 }
 
@@ -308,8 +309,8 @@ pub(crate) fn is_valid_source(path: &Path, dirs: &VaultDirs) -> bool {
     s.starts_with(&format!("{}/", dirs.daily))
         || s.starts_with(&format!("{}/", dirs.personal))
         || s.starts_with(&format!("{}/", dirs.synthesis))
-        || s.starts_with(&format!("{}/documents/", dirs.wiki))
-        || s.starts_with(&format!("{}/explorations/", dirs.wiki))
+        || s.starts_with(&format!("{}/{DOCUMENTS_SUBDIR}/", dirs.wiki))
+        || s.starts_with(&format!("{}/{EXPLORATIONS_SUBDIR}/", dirs.wiki))
 }
 
 /// Stem-slug of a page path: slugify the file stem (the resolution key used

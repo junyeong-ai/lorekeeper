@@ -664,7 +664,7 @@ impl Pipeline {
     async fn load_existing_concept_refs(
         &self,
     ) -> Result<Vec<lk_queue::ExistingConceptRef>, PipelineError> {
-        let concept_dir = std::path::Path::new(&self.ctx.dirs.wiki).join("concepts");
+        let concept_dir = lk_core::vault_path::concepts_dir(&self.ctx.dirs);
         // Missing concepts directory is the legitimate "no concepts yet" state, not
         // an error. `list_markdown` already returns Ok(vec![]) in that case, so any
         // error returned here is a real I/O or permission failure worth surfacing.

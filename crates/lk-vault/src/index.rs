@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use lk_core::config::VaultDirs;
 use lk_core::frontmatter::parse_page;
 use lk_core::i18n::Locale;
+use lk_core::vault_path::{concepts_dir, documents_dir, explorations_dir, work_log_dir};
 use walkdir::WalkDir;
 
 use crate::{VaultError, VaultWriter};
@@ -41,15 +42,14 @@ pub fn build_index(
 ) -> Result<IndexResult, VaultError> {
     let strings = locale.strings();
 
-    let wiki = Path::new(&dirs.wiki);
-    let concept_rel = wiki.join("concepts");
+    let concept_rel = concepts_dir(dirs);
     let concept_rel_str = concept_rel.to_string_lossy().replace('\\', "/");
     let concepts =
         collect_dir_grouped(vault_root, &concept_rel, "category", Some(&concept_rel_str));
     // Group documents by `document_type` — a field EVERY document carries — so the
     // catalog buckets consistently (vs `source_project`, which only some documents have).
-    let documents = collect_dir_grouped(vault_root, &wiki.join("documents"), "document_type", None);
-    let explorations = collect_dir(vault_root, &wiki.join("explorations"));
+    let documents = collect_dir_grouped(vault_root, &documents_dir(dirs), "document_type", None);
+    let explorations = collect_dir(vault_root, &explorations_dir(dirs));
 
     // daily/ holds one sub-directory per source ID. We keep them as separate groups so
     // the index shows pages-per-source counts and stable ordering.
@@ -74,7 +74,7 @@ pub fn build_index(
         }
     }
 
-    let worklog = collect_dir(vault_root, &Path::new(&dirs.personal).join("work-log"));
+    let worklog = collect_dir(vault_root, &work_log_dir(dirs));
 
     // Synthesis tiers are merged into one bucket so the index has a single "synthesis"
     // section. Each entry keeps its full vault-relative path so the wikilink target is

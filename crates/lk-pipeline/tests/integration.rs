@@ -718,7 +718,7 @@ async fn performance_enabled_gates_personal_narratives() {
     let vault = dir.path();
 
     // A work-log page exists in the target ISO week.
-    let work_log = vault.join("me").join("work-log");
+    let work_log = vault.join("me").join(lk_core::vault_path::WORK_LOG_SUBDIR);
     std::fs::create_dir_all(&work_log).unwrap();
     std::fs::write(
         work_log.join("2026-05-20.md"),
@@ -761,7 +761,7 @@ async fn synthesis_page_is_a_materialized_view() {
     let dir = TempDir::new().unwrap();
     let vault = dir.path();
 
-    let work_log = vault.join("me").join("work-log");
+    let work_log = vault.join("me").join(lk_core::vault_path::WORK_LOG_SUBDIR);
     std::fs::create_dir_all(&work_log).unwrap();
     std::fs::write(
         work_log.join("2026-05-20.md"),

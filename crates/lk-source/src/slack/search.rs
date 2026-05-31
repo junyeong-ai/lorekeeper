@@ -33,9 +33,7 @@ struct QueryParams {
 
 /// Validate this source's params at config-load time, before any network work.
 pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
-    serde_json::from_value::<SearchParams>(params.clone())
-        .map(|_| ())
-        .map_err(|e| SourceError::InvalidParams(e.to_string()))
+    crate::parse_params::<SearchParams>(params).map(|_| ())
 }
 
 #[derive(Deserialize)]
@@ -76,8 +74,7 @@ impl Source for SlackSearchSource {
         params: &serde_json::Value,
         ctx: &ExtractContext,
     ) -> Result<Vec<RawItem>, SourceError> {
-        let p: SearchParams = serde_json::from_value(params.clone())
-            .map_err(|e| SourceError::InvalidParams(e.to_string()))?;
+        let p: SearchParams = crate::parse_params(params)?;
 
         let users = resolve_users(&self.http, &self.token).await;
 

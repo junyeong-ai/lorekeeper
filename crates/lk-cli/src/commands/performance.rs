@@ -9,7 +9,7 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
     let vault_root = config.vault.root_path();
     let reader = lk_vault::VaultReader::new(&vault_root);
 
-    let work_log_dir = std::path::Path::new(&config.vault.dirs.personal).join("work-log");
+    let work_log_dir = lk_core::vault_path::work_log_dir(&config.vault.dirs);
     let files = reader
         .list_markdown(&work_log_dir)
         .await

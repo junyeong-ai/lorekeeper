@@ -51,8 +51,7 @@ fn default_max_items() -> usize {
 
 /// Validate this source's params at config-load time, before any network work.
 pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
-    let p: RssParams = serde_json::from_value(params.clone())
-        .map_err(|e| SourceError::InvalidParams(e.to_string()))?;
+    let p: RssParams = crate::parse_params(params)?;
     if p.feeds.is_empty() {
         return Err(SourceError::InvalidParams(
             "rss `feeds` must list at least one feed".into(),
@@ -88,10 +87,10 @@ impl RssSource {
         Self { http }
     }
 
-    /// Fetch the full article from `url`, extract readable content via
-    /// `readability`, and convert the result to Markdown.  Falls back to
-    /// converting the raw HTML when readability extraction fails.
-    async fn fetch_article(&self, article_url: &str) -> Result<String, SourceError> {
+    /// Fetch the full article from `url` and extract its readable core as Markdown.
+    /// Returns `None` when readability can't isolate an article (the caller then keeps
+    /// the known-clean feed summary rather than adopting boilerplate).
+    async fn fetch_article(&self, article_url: &str) -> Result<Option<String>, SourceError> {
         let resp = self
             .http
             .get(article_url)
@@ -139,8 +138,7 @@ impl Source for RssSource {
         params: &serde_json::Value,
         ctx: &ExtractContext,
     ) -> Result<Vec<RawItem>, SourceError> {
-        let p: RssParams = serde_json::from_value(params.clone())
-            .map_err(|e| SourceError::InvalidParams(e.to_string()))?;
+        let p: RssParams = crate::parse_params(params)?;
 
         // News is past-dated, so pad only the lower bound. The pipeline still
         // splits items onto their own publication date (multi-date batch).
@@ -181,14 +179,21 @@ impl Source for RssSource {
                         // at least as substantial. Readability can mis-extract a short
                         // wrong node from the article page, and the feed summary is
                         // known-clean content we'd otherwise lose.
-                        Ok(full) if full.trim().len() >= item.body.trim().len() => {
+                        Ok(Some(full)) if full.trim().len() >= item.body.trim().len() => {
                             item.body = full;
                         }
-                        Ok(_) => {
+                        Ok(Some(_)) => {
                             tracing::warn!(
                                 feed = %feed_cfg.id,
                                 url = %article_url,
                                 "rss: full-text extraction shorter than feed summary; keeping summary"
+                            );
+                        }
+                        Ok(None) => {
+                            tracing::warn!(
+                                feed = %feed_cfg.id,
+                                url = %article_url,
+                                "rss: readability found no article core; keeping feed summary"
                             );
                         }
                         Err(e) => {

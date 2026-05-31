@@ -57,8 +57,7 @@ fn default_archive() -> bool {
 
 /// Validate this source's params at config-load time, before any I/O.
 pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
-    let p: ManualParams = serde_json::from_value(params.clone())
-        .map_err(|e| SourceError::InvalidParams(e.to_string()))?;
+    let p: ManualParams = crate::parse_params(params)?;
     if p.extensions.is_empty() {
         return Err(SourceError::InvalidParams(
             "manual `extensions` must list at least one file extension".into(),
@@ -93,8 +92,7 @@ impl Source for ManualSource {
         params: &serde_json::Value,
         _ctx: &ExtractContext,
     ) -> Result<Vec<RawItem>, SourceError> {
-        let p: ManualParams = serde_json::from_value(params.clone())
-            .map_err(|e| SourceError::InvalidParams(e.to_string()))?;
+        let p: ManualParams = crate::parse_params(params)?;
 
         let inbox = &p.inbox_dir;
         if !inbox.exists() {
@@ -162,12 +160,13 @@ fn read_item(path: &Path) -> Result<RawItem, SourceError> {
         .map_err(|e| SourceError::Parse(format!("read {}: {e}", path.display())))?;
 
     // Convert HTML to Markdown so the vault stores clean content, not raw tags.
-    // `readable_html_to_markdown` strips boilerplate via readability and keeps the
-    // full-page conversion (with a warning) when extraction fails or is empty.
+    // The user dropped this file deliberately, so when readability can't isolate an
+    // article core, convert the whole page — there is no cleaner source to keep.
     let body = match path.extension().and_then(|e| e.to_str()) {
         Some("html" | "htm") => {
             let base_url = url::Url::parse("file:///inbox").unwrap();
             crate::markdown::readable_html_to_markdown(&raw, &base_url)
+                .unwrap_or_else(|| crate::markdown::html_to_markdown(&raw))
         }
         _ => raw,
     };
@@ -243,8 +242,7 @@ pub fn post_commit_archive(
     duplicates: &[lk_core::event::Event],
     date: jiff::civil::Date,
 ) -> Result<(), SourceError> {
-    let p: ManualParams = serde_json::from_value(params.clone())
-        .map_err(|e| SourceError::InvalidParams(e.to_string()))?;
+    let p: ManualParams = crate::parse_params(params)?;
     if !p.archive_after_ingest || (novel.is_empty() && duplicates.is_empty()) {
         return Ok(());
     }

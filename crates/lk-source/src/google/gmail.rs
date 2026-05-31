@@ -28,9 +28,7 @@ struct GmailParams {
 
 /// Validate this source's params at config-load time, before any network work.
 pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
-    serde_json::from_value::<GmailParams>(params.clone())
-        .map(|_| ())
-        .map_err(|e| SourceError::InvalidParams(e.to_string()))
+    crate::parse_params::<GmailParams>(params).map(|_| ())
 }
 
 fn default_lookback() -> u32 {
@@ -142,8 +140,7 @@ impl Source for GmailSource {
         params: &serde_json::Value,
         ctx: &ExtractContext,
     ) -> Result<Vec<RawItem>, SourceError> {
-        let p: GmailParams = serde_json::from_value(params.clone())
-            .map_err(|e| SourceError::InvalidParams(e.to_string()))?;
+        let p: GmailParams = crate::parse_params(params)?;
 
         let token = self.auth.access_token().await?;
 

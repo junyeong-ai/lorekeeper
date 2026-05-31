@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 
 use lk_core::config::VaultDirs;
 use lk_core::frontmatter::{self, Frontmatter};
+use lk_core::vault_path::{
+    CONCEPTS_SUBDIR, DOCUMENTS_SUBDIR, EXPLORATIONS_SUBDIR, WORK_LOG_SUBDIR,
+};
 use serde::Serialize;
 
 use crate::GraphError;
@@ -54,14 +57,23 @@ impl PageKind {
         let s = path.to_string_lossy().replace('\\', "/");
         // Order matters: more specific prefixes first.
         let prefixes: [(String, PageKind); 10] = [
-            (format!("{}/concepts/", dirs.wiki), PageKind::WikiConcepts),
-            (format!("{}/documents/", dirs.wiki), PageKind::WikiDocuments),
             (
-                format!("{}/explorations/", dirs.wiki),
+                format!("{}/{CONCEPTS_SUBDIR}/", dirs.wiki),
+                PageKind::WikiConcepts,
+            ),
+            (
+                format!("{}/{DOCUMENTS_SUBDIR}/", dirs.wiki),
+                PageKind::WikiDocuments,
+            ),
+            (
+                format!("{}/{EXPLORATIONS_SUBDIR}/", dirs.wiki),
                 PageKind::WikiExplorations,
             ),
             (format!("{}/", dirs.daily), PageKind::Daily),
-            (format!("{}/work-log/", dirs.personal), PageKind::MeWorkLog),
+            (
+                format!("{}/{WORK_LOG_SUBDIR}/", dirs.personal),
+                PageKind::MeWorkLog,
+            ),
             (
                 format!("{}/{}/", dirs.personal, dirs.weekly),
                 PageKind::Weekly,
@@ -94,11 +106,11 @@ impl PageKind {
     /// Display label for the page kind, built from the configured directory names.
     pub fn label(self, dirs: &VaultDirs) -> String {
         match self {
-            PageKind::WikiConcepts => format!("{}/concepts", dirs.wiki),
-            PageKind::WikiDocuments => format!("{}/documents", dirs.wiki),
-            PageKind::WikiExplorations => format!("{}/explorations", dirs.wiki),
+            PageKind::WikiConcepts => format!("{}/{CONCEPTS_SUBDIR}", dirs.wiki),
+            PageKind::WikiDocuments => format!("{}/{DOCUMENTS_SUBDIR}", dirs.wiki),
+            PageKind::WikiExplorations => format!("{}/{EXPLORATIONS_SUBDIR}", dirs.wiki),
             PageKind::Daily => dirs.daily.clone(),
-            PageKind::MeWorkLog => format!("{}/work-log", dirs.personal),
+            PageKind::MeWorkLog => format!("{}/{WORK_LOG_SUBDIR}", dirs.personal),
             PageKind::Weekly => dirs.weekly.clone(),
             PageKind::Monthly => format!("{}/{}", dirs.personal, dirs.monthly),
             PageKind::Quarterly => format!("{}/{}", dirs.personal, dirs.quarterly),

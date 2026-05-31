@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use lk_core::config::Config;
-use lk_core::vault_path::VaultPath;
+use lk_core::vault_path::{VaultPath, work_log_dir};
 use lk_queue::TargetKind;
 use lk_vault::{VaultPage, VaultReader, section_body};
 
@@ -268,7 +268,7 @@ impl Synthesizer {
         let (year, week) = iso_year_week(date);
         let (start, end) = iso_week_range(year, week)?;
 
-        let dir = PathBuf::from(&self.ctx.dirs.personal).join("work-log");
+        let dir = work_log_dir(&self.ctx.dirs);
         let pages = self.read_date_range(&dir, start, end).await?;
 
         if pages.is_empty() {
@@ -330,7 +330,7 @@ impl Synthesizer {
             return Ok(None);
         }
         let (start, end) = month_range(year, month)?;
-        let dir = PathBuf::from(&self.ctx.dirs.personal).join("work-log");
+        let dir = work_log_dir(&self.ctx.dirs);
         let pages = self.read_date_range(&dir, start, end).await?;
 
         if pages.is_empty() {
@@ -626,7 +626,7 @@ impl Synthesizer {
         start: jiff::civil::Date,
         end: jiff::civil::Date,
     ) -> Result<Vec<serde_json::Value>, PipelineError> {
-        let dir = PathBuf::from(&self.ctx.dirs.personal).join("work-log");
+        let dir = work_log_dir(&self.ctx.dirs);
         let pages = self.read_date_range(&dir, start, end).await?;
 
         let mut counts: BTreeMap<String, usize> = BTreeMap::new();

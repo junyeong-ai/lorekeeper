@@ -31,28 +31,27 @@ pub fn html_to_markdown(html: &str) -> String {
 /// Extract the readable article core from a full HTML page and convert it to
 /// Markdown, stripping boilerplate (nav, ads, footers) via `readability`.
 ///
-/// Readability is heuristic and can mis-extract on non-article pages (a sidebar,
-/// a near-empty node). When extraction fails OR yields empty content, the
-/// full-page conversion is kept instead, and the degradation is `tracing::warn!`ed
-/// so pages that systematically need the fallback are observable rather than
-/// silently reduced to boilerplate. Callers that already hold a known-clean body
-/// (e.g. an RSS feed summary) should additionally guard on the returned length
-/// before replacing it — this helper has no prior body to compare against.
-pub fn readable_html_to_markdown(html: &str, base_url: &url::Url) -> String {
+/// Returns `None` when readability fails or yields empty content — it is heuristic
+/// and mis-extracts on non-article pages (a sidebar, a near-empty node). The caller
+/// owns the fallback because the right one differs: a feed reader keeps its
+/// known-clean summary, an importer of a user-chosen file converts the whole page.
+/// Folding a full-page fallback in here would let boilerplate longer than a clean
+/// summary silently replace it.
+pub fn readable_html_to_markdown(html: &str, base_url: &url::Url) -> Option<String> {
     let mut cursor = std::io::Cursor::new(html.as_bytes());
     match readability::extractor::extract(&mut cursor, base_url) {
         Ok(product) => {
             let extracted = html_to_markdown(&product.content);
             if extracted.trim().is_empty() {
-                tracing::warn!(url = %base_url, "readability extracted empty content; keeping full-page markdown");
-                html_to_markdown(html)
+                tracing::warn!(url = %base_url, "readability extracted empty content");
+                None
             } else {
-                extracted
+                Some(extracted)
             }
         }
         Err(e) => {
-            tracing::warn!(url = %base_url, error = %e, "readability extraction failed; keeping full-page markdown");
-            html_to_markdown(html)
+            tracing::warn!(url = %base_url, error = %e, "readability extraction failed");
+            None
         }
     }
 }
@@ -682,5 +681,27 @@ mod tests {
     fn empty_inputs_are_empty() {
         assert_eq!(html_to_markdown("   "), "");
         assert_eq!(slack_to_markdown("", &no_users()), "");
+    }
+
+    #[test]
+    fn readable_returns_none_when_no_article_core() {
+        // No extractable article body — the helper signals failure rather than
+        // falling back to boilerplate, so the caller keeps its known-clean content.
+        let base = url::Url::parse("https://example.com/").unwrap();
+        assert_eq!(
+            readable_html_to_markdown("<html><body></body></html>", &base),
+            None
+        );
+    }
+
+    #[test]
+    fn readable_returns_some_for_an_article() {
+        let base = url::Url::parse("https://example.com/post").unwrap();
+        let html = format!(
+            "<html><body><article><h1>Title</h1>{}</article></body></html>",
+            "<p>This is a substantial paragraph of article prose worth extracting.</p>".repeat(6)
+        );
+        let extracted = readable_html_to_markdown(&html, &base).expect("article extracted");
+        assert!(extracted.contains("substantial paragraph"));
     }
 }

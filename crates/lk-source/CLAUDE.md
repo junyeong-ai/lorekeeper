@@ -56,9 +56,9 @@ map to `RawItem`.
     skipped (NOT dated to `now` — that would misfile old posts onto today); likewise a
     title-less entry. Provenance: entry author → feed title → configured feed id.
     `fetch_full_text` feeds fetch the article and run it through
-    `markdown::readable_html_to_markdown` (readability + full-page fallback with a warn),
-    but the result replaces the feed summary only when it is at least as long — a short
-    mis-extraction never overwrites known-clean summary content.
+    `markdown::readable_html_to_markdown`, which returns `None` when readability finds no
+    article core; on `None` (or a result shorter than the summary) the known-clean feed
+    summary is kept, so boilerplate never overwrites it.
   - **Error isolation**: individual item failures (thread fetch, file download, timestamp
     parse) are caught with `tracing::warn!` and skipped — one inaccessible thread or file
     does not abort the entire source. Gmail and Slack history use cursor pagination with
@@ -84,9 +84,10 @@ map to `RawItem`.
 - `Source` has no `source_type()` accessor — the factory selects by the input enum.
 - `markdown` module normalizes rich text to Markdown, loss-aversely (unmapped constructs
   degrade to their text): `adf_to_markdown`, `html_to_markdown` (via `htmd`),
-  `slack_to_markdown`, and `readable_html_to_markdown` (readability article extraction with
-  a full-page fallback + `tracing::warn!` on degradation — single source for the RSS/manual
-  readability chain). Keeps LLM/vault input clean instead of ADF/HTML/token soup.
+  `slack_to_markdown`, and `readable_html_to_markdown` (readability article extraction
+  returning `None` + `tracing::warn!` when no article core is found — the caller owns the
+  fallback: RSS keeps the feed summary, manual converts the whole user-chosen page). Keeps
+  LLM/vault input clean instead of ADF/HTML/token soup.
 - `google/oauth.rs` mints a Google refresh token via an OAuth loopback flow (consent
   URL + ephemeral `127.0.0.1` callback server + code exchange), re-exported as
   `obtain_google_refresh_token` for the `lore init credentials` wizard. URL-building and

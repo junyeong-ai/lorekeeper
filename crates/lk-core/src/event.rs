@@ -68,14 +68,27 @@ impl EventId {
 /// with a constant subject) is NOT collapsed across days: an identical
 /// title+body observed on a different day is a distinct observation.
 pub fn content_hash(date: jiff::civil::Date, title: &str, body: &str) -> String {
-    // Normalize whitespace so trivial reformatting doesn't break the match.
-    let normalized = format!(
-        "{}\n{}\n{}",
-        date,
-        title.split_whitespace().collect::<Vec<_>>().join(" "),
-        body.split_whitespace().collect::<Vec<_>>().join(" ")
-    );
+    use std::fmt::Write as _;
+    // One normalized buffer: whitespace runs collapse to a single space (so trivial
+    // reformatting doesn't break the match) and `date` scopes the hash to its day.
+    let mut normalized = String::with_capacity(title.len() + body.len() + 16);
+    let _ = writeln!(normalized, "{date}");
+    push_whitespace_normalized(&mut normalized, title);
+    normalized.push('\n');
+    push_whitespace_normalized(&mut normalized, body);
     blake3::hash(normalized.as_bytes()).to_hex()[..16].to_string()
+}
+
+/// Append `text` with internal whitespace runs collapsed to one space and edges
+/// trimmed — applied identically on `record` and `dedup` so reformatting alone
+/// never changes the hash.
+fn push_whitespace_normalized(out: &mut String, text: &str) {
+    for (i, word) in text.split_whitespace().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
 }
 
 impl std::fmt::Display for EventId {

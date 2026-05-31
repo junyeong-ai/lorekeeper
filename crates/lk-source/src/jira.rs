@@ -32,9 +32,7 @@ struct JiraParams {
 
 /// Validate this source's params at config-load time, before any network work.
 pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
-    serde_json::from_value::<JiraParams>(params.clone())
-        .map(|_| ())
-        .map_err(|e| SourceError::InvalidParams(e.to_string()))
+    crate::parse_params::<JiraParams>(params).map(|_| ())
 }
 
 fn default_fields() -> Vec<String> {
@@ -160,8 +158,7 @@ impl Source for JiraSource {
         params: &serde_json::Value,
         ctx: &ExtractContext,
     ) -> Result<Vec<RawItem>, SourceError> {
-        let p: JiraParams = serde_json::from_value(params.clone())
-            .map_err(|e| SourceError::InvalidParams(e.to_string()))?;
+        let p: JiraParams = crate::parse_params(params)?;
 
         let url = format!(
             "{}/rest/api/3/search/jql",

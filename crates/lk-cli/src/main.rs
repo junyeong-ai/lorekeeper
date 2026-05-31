@@ -5,7 +5,11 @@ use std::path::PathBuf;
 use clap::Parser;
 
 #[derive(Parser)]
-#[command(name = "lore", about = "Knowledge ingestion pipeline for Obsidian")]
+#[command(
+    name = "lore",
+    version,
+    about = "Knowledge ingestion pipeline for Obsidian"
+)]
 struct Cli {
     /// Path to config file (default: ./config.yaml or ~/.config/lorekeeper/config.yaml)
     #[arg(long, global = true, env = "LORE_CONFIG")]

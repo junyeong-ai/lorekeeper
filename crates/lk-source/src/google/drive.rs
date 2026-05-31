@@ -24,8 +24,7 @@ struct DriveParams {
 
 /// Validate this source's params at config-load time, before any network work.
 pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
-    let p: DriveParams = serde_json::from_value(params.clone())
-        .map_err(|e| SourceError::InvalidParams(e.to_string()))?;
+    let p: DriveParams = crate::parse_params(params)?;
     if p.folder.trim().is_empty() {
         return Err(SourceError::InvalidParams(
             "drive `folder` must not be empty (use the Drive folder name or ID)".into(),
@@ -107,8 +106,7 @@ impl Source for DriveSource {
         params: &serde_json::Value,
         ctx: &ExtractContext,
     ) -> Result<Vec<RawItem>, SourceError> {
-        let p: DriveParams = serde_json::from_value(params.clone())
-            .map_err(|e| SourceError::InvalidParams(e.to_string()))?;
+        let p: DriveParams = crate::parse_params(params)?;
 
         let token = self.auth.access_token().await?;
         let folder_id = self.resolve_folder_id(&token, &p.folder).await?;

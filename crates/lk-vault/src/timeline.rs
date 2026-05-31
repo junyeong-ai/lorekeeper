@@ -31,6 +31,7 @@ use std::path::Path;
 
 use lk_core::config::VaultDirs;
 use lk_core::frontmatter::parse_page;
+use lk_core::vault_path::{concepts_dir, documents_dir, explorations_dir};
 use walkdir::WalkDir;
 
 use crate::VaultError;
@@ -55,10 +56,13 @@ struct Entry {
 /// missing a parseable `created` date are skipped (they have no place on a timeline),
 /// never guessed.
 pub fn build_timeline(vault_root: &Path, dirs: &VaultDirs) -> Result<String, VaultError> {
-    let wiki = Path::new(&dirs.wiki);
     let mut entries: Vec<Entry> = Vec::new();
-    for sub in ["concepts", "documents", "explorations"] {
-        collect_into(&mut entries, vault_root, &wiki.join(sub));
+    for dir in [
+        concepts_dir(dirs),
+        documents_dir(dirs),
+        explorations_dir(dirs),
+    ] {
+        collect_into(&mut entries, vault_root, &dir);
     }
 
     // Bound to the rolling window, measured from the newest entry (not the wall clock,

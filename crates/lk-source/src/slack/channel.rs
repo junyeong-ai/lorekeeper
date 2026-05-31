@@ -54,8 +54,7 @@ impl ChannelParams {
 
 /// Validate this source's params at config-load time, before any network work.
 pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
-    let p: ChannelParams = serde_json::from_value(params.clone())
-        .map_err(|e| SourceError::InvalidParams(e.to_string()))?;
+    let p: ChannelParams = crate::parse_params(params)?;
     if p.channel_refs().is_empty() {
         return Err(SourceError::InvalidParams(
             "slack-channel requires `channel` or `channels`".into(),
@@ -158,8 +157,7 @@ impl Source for SlackChannelSource {
         params: &serde_json::Value,
         ctx: &ExtractContext,
     ) -> Result<Vec<RawItem>, SourceError> {
-        let p: ChannelParams = serde_json::from_value(params.clone())
-            .map_err(|e| SourceError::InvalidParams(e.to_string()))?;
+        let p: ChannelParams = crate::parse_params(params)?;
 
         let users = resolve_users(&self.http, &self.token).await;
 

@@ -94,6 +94,17 @@ pub trait Source: Send + Sync {
     ) -> Result<Vec<RawItem>, SourceError>;
 }
 
+/// Deserialize a source's untyped `params` into its typed schema. Every params
+/// struct is `#[serde(deny_unknown_fields)]`, so this maps a missing key, wrong
+/// type, or unknown/typo'd key to `InvalidParams` with a uniform error shape. The
+/// single place JSON params become a typed struct — both `validate_params` and each
+/// adapter's `extract` route through it.
+pub(crate) fn parse_params<T: serde::de::DeserializeOwned>(
+    params: &serde_json::Value,
+) -> Result<T, SourceError> {
+    serde_json::from_value(params.clone()).map_err(|e| SourceError::InvalidParams(e.to_string()))
+}
+
 /// Validate a source's `params` against its adapter's typed schema without any
 /// network access or credentials. Used by `lore validate` to surface config errors
 /// (missing required keys, wrong types, unknown/typo'd keys) before runtime.

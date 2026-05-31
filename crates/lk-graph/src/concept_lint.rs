@@ -70,7 +70,9 @@ pub fn scan_concept_pages(
     vault_root: &Path,
     wiki_dir: &str,
 ) -> Result<Vec<ConceptPage>, GraphError> {
-    let concepts_dir = vault_root.join(wiki_dir).join("concepts");
+    let concepts_dir = vault_root
+        .join(wiki_dir)
+        .join(lk_core::vault_path::CONCEPTS_SUBDIR);
     let entries = match std::fs::read_dir(&concepts_dir) {
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -416,7 +418,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn write_concept(root: &Path, slug: &str, frontmatter_body: &str) {
-        let dir = root.join("wiki").join("concepts");
+        let dir = root.join("wiki").join(lk_core::vault_path::CONCEPTS_SUBDIR);
         std::fs::create_dir_all(&dir).unwrap();
         let content = format!("---\n{frontmatter_body}\n---\n\n# {slug}\n");
         std::fs::write(dir.join(format!("{slug}.md")), content).unwrap();
@@ -452,7 +454,10 @@ mod tests {
         // An unclosed frontmatter block fails to parse; the page must still surface by
         // its file stem (so slug-only lints see it) with no category and empty body.
         let tmp = TempDir::new().unwrap();
-        let dir = tmp.path().join("wiki").join("concepts");
+        let dir = tmp
+            .path()
+            .join("wiki")
+            .join(lk_core::vault_path::CONCEPTS_SUBDIR);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("broken.md"),

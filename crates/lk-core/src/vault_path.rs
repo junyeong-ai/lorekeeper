@@ -10,6 +10,16 @@ use crate::config::VaultDirs;
 /// findings.
 pub const RESERVED_WIKI_FILES: [&str; 3] = ["index.md", "AGENTS.md", "log.md"];
 
+/// Fixed subdirectory names within the configurable top-level vault dirs. The
+/// top-level dirs (`<daily>`, `<personal>`, `<synthesis>`, `<wiki>`) are user-set
+/// via `vault.dirs.*`; these leaf names are structural and single-sourced here so
+/// every crate that builds or scans a vault path agrees on them — never an inline
+/// literal.
+pub const CONCEPTS_SUBDIR: &str = "concepts";
+pub const DOCUMENTS_SUBDIR: &str = "documents";
+pub const EXPLORATIONS_SUBDIR: &str = "explorations";
+pub const WORK_LOG_SUBDIR: &str = "work-log";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VaultPath(PathBuf);
 
@@ -23,11 +33,7 @@ impl VaultPath {
     }
 
     pub fn work_log(dirs: &VaultDirs, date: jiff::civil::Date) -> Self {
-        Self(
-            PathBuf::from(&dirs.personal)
-                .join("work-log")
-                .join(format!("{date}.md")),
-        )
+        Self(work_log_dir(dirs).join(format!("{date}.md")))
     }
 
     pub fn weekly_synthesis(dirs: &VaultDirs, year: i16, week: u8) -> Self {
@@ -71,32 +77,40 @@ impl VaultPath {
     }
 
     pub fn concept(dirs: &VaultDirs, slug: &str) -> Self {
-        Self(
-            PathBuf::from(&dirs.wiki)
-                .join("concepts")
-                .join(format!("{slug}.md")),
-        )
+        Self(concepts_dir(dirs).join(format!("{slug}.md")))
     }
 
     pub fn document(dirs: &VaultDirs, slug: &str) -> Self {
-        Self(
-            PathBuf::from(&dirs.wiki)
-                .join("documents")
-                .join(format!("{slug}.md")),
-        )
+        Self(documents_dir(dirs).join(format!("{slug}.md")))
     }
 
     pub fn exploration(dirs: &VaultDirs, slug: &str) -> Self {
-        Self(
-            PathBuf::from(&dirs.wiki)
-                .join("explorations")
-                .join(format!("{slug}.md")),
-        )
+        Self(explorations_dir(dirs).join(format!("{slug}.md")))
     }
 
     pub fn resolve(&self, vault_root: &Path) -> PathBuf {
         vault_root.join(&self.0)
     }
+}
+
+/// Relative directory holding the work-log pages (`<personal>/work-log/`).
+pub fn work_log_dir(dirs: &VaultDirs) -> PathBuf {
+    PathBuf::from(&dirs.personal).join(WORK_LOG_SUBDIR)
+}
+
+/// Relative directory holding the concept pages (`<wiki>/concepts/`).
+pub fn concepts_dir(dirs: &VaultDirs) -> PathBuf {
+    PathBuf::from(&dirs.wiki).join(CONCEPTS_SUBDIR)
+}
+
+/// Relative directory holding the document pages (`<wiki>/documents/`).
+pub fn documents_dir(dirs: &VaultDirs) -> PathBuf {
+    PathBuf::from(&dirs.wiki).join(DOCUMENTS_SUBDIR)
+}
+
+/// Relative directory holding the exploration pages (`<wiki>/explorations/`).
+pub fn explorations_dir(dirs: &VaultDirs) -> PathBuf {
+    PathBuf::from(&dirs.wiki).join(EXPLORATIONS_SUBDIR)
 }
 
 impl AsRef<Path> for VaultPath {

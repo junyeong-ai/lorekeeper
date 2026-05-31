@@ -33,9 +33,7 @@ struct CalendarParams {
 
 /// Validate this source's params at config-load time, before any network work.
 pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
-    serde_json::from_value::<CalendarParams>(params.clone())
-        .map(|_| ())
-        .map_err(|e| SourceError::InvalidParams(e.to_string()))
+    crate::parse_params::<CalendarParams>(params).map(|_| ())
 }
 
 fn default_calendar() -> String {
@@ -165,8 +163,7 @@ impl Source for CalendarSource {
         params: &serde_json::Value,
         ctx: &ExtractContext,
     ) -> Result<Vec<RawItem>, SourceError> {
-        let p: CalendarParams = serde_json::from_value(params.clone())
-            .map_err(|e| SourceError::InvalidParams(e.to_string()))?;
+        let p: CalendarParams = crate::parse_params(params)?;
 
         let token = self.auth.access_token().await?;
 
