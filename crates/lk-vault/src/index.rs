@@ -27,7 +27,7 @@ static INDEX_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Output from `build_index`: the main index page plus optional per-category sub-pages
 /// when the concept count exceeds the split threshold.
-pub struct IndexOutput {
+pub struct IndexResult {
     pub main: String,
     pub sub_pages: Vec<(String, String)>,
 }
@@ -43,7 +43,7 @@ pub fn build_index(
     locale: Locale,
     index_split_threshold: usize,
     dirs: &VaultDirs,
-) -> Result<IndexOutput, VaultError> {
+) -> Result<IndexResult, VaultError> {
     let strings = locale.strings();
 
     let wiki = Path::new(&dirs.wiki);
@@ -228,7 +228,7 @@ pub fn build_index(
         );
     }
 
-    Ok(IndexOutput {
+    Ok(IndexResult {
         main: out,
         sub_pages,
     })

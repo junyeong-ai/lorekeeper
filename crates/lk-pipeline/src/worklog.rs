@@ -11,7 +11,7 @@ use lk_vault::{TemplateEngine, VaultReader};
 
 use crate::PipelineError;
 use crate::llm_cache::{self, SectionDecision};
-use crate::render::{RenderOutput, llm_inputs_map, splice_preserved_sections};
+use crate::render::{RenderResult, llm_inputs_map, splice_preserved_sections};
 
 pub async fn render_work_log(
     events: &[Event],
@@ -21,7 +21,7 @@ pub async fn render_work_log(
     locale: Locale,
     llm: &Arc<dyn LlmClient>,
     reader: &VaultReader,
-) -> Result<Vec<RenderOutput>, PipelineError> {
+) -> Result<Vec<RenderResult>, PipelineError> {
     // The work-log is the performance subsystem; `performance.enabled` gates it at the
     // mechanism boundary so no caller can produce one while the subsystem is off.
     if !perf.enabled || events.is_empty() {
@@ -114,7 +114,7 @@ pub async fn render_work_log(
 
         let content = splice_preserved_sections(fresh, std::iter::once((topic_heading, &decision)));
 
-        outputs.push(RenderOutput { path, content });
+        outputs.push(RenderResult { path, content });
     }
 
     Ok(outputs)

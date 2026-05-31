@@ -10,7 +10,7 @@ use lk_vault::{VaultPage, VaultReader, section_body};
 use crate::PipelineError;
 use crate::context::PipelineContext;
 use crate::llm_cache::{self, SectionDecision};
-use crate::render::{RenderOutput, llm_inputs_map, splice_preserved_sections};
+use crate::render::{RenderResult, llm_inputs_map, splice_preserved_sections};
 
 pub struct Synthesizer {
     ctx: Arc<PipelineContext>,
@@ -180,7 +180,7 @@ impl Synthesizer {
     pub async fn try_weekly_synthesis(
         &self,
         date: jiff::civil::Date,
-    ) -> Result<Option<RenderOutput>, PipelineError> {
+    ) -> Result<Option<RenderResult>, PipelineError> {
         let (year, week) = iso_year_week(date);
         let (start, end) = iso_week_range(year, week)?;
 
@@ -255,13 +255,13 @@ impl Synthesizer {
             context,
         )?;
 
-        Ok(Some(RenderOutput { path, content }))
+        Ok(Some(RenderResult { path, content }))
     }
 
     pub async fn try_weekly_personal(
         &self,
         date: jiff::civil::Date,
-    ) -> Result<Option<RenderOutput>, PipelineError> {
+    ) -> Result<Option<RenderResult>, PipelineError> {
         if !self.performance_enabled() {
             return Ok(None);
         }
@@ -318,14 +318,14 @@ impl Synthesizer {
             context,
         )?;
 
-        Ok(Some(RenderOutput { path, content }))
+        Ok(Some(RenderResult { path, content }))
     }
 
     pub async fn try_monthly_personal(
         &self,
         year: i16,
         month: u8,
-    ) -> Result<Option<RenderOutput>, PipelineError> {
+    ) -> Result<Option<RenderResult>, PipelineError> {
         if !self.performance_enabled() {
             return Ok(None);
         }
@@ -381,14 +381,14 @@ impl Synthesizer {
             context,
         )?;
 
-        Ok(Some(RenderOutput { path, content }))
+        Ok(Some(RenderResult { path, content }))
     }
 
     pub async fn try_quarterly_personal(
         &self,
         year: i16,
         quarter: u8,
-    ) -> Result<Option<RenderOutput>, PipelineError> {
+    ) -> Result<Option<RenderResult>, PipelineError> {
         if !self.performance_enabled() {
             return Ok(None);
         }
@@ -468,13 +468,13 @@ impl Synthesizer {
             context,
         )?;
 
-        Ok(Some(RenderOutput { path, content }))
+        Ok(Some(RenderResult { path, content }))
     }
 
     pub async fn try_annual_personal(
         &self,
         year: i16,
-    ) -> Result<Option<RenderOutput>, PipelineError> {
+    ) -> Result<Option<RenderResult>, PipelineError> {
         if !self.performance_enabled() {
             return Ok(None);
         }
@@ -551,7 +551,7 @@ impl Synthesizer {
             context,
         )?;
 
-        Ok(Some(RenderOutput { path, content }))
+        Ok(Some(RenderResult { path, content }))
     }
 
     /// Narrative standing in for one month of a quarterly/annual rollup: the monthly

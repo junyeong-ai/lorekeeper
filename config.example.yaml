@@ -332,6 +332,14 @@ concepts:
 #     max_iterations: 100            # max local-moving passes
 #     min_community_size: 1          # drop communities smaller than this
 
+# ─── Maintenance ──────────────────────────────────────────
+# Retention horizon for `lore maintenance` pruning (ingest log, dedup cache,
+# drained queue files). Fully optional — omit the block to use the default.
+# maintenance:
+#   retention_days: 90               # must exceed the longest silent gap between
+#                                    # re-arrivals of the same item, or a slow-recurring
+#                                    # source re-emits as novel after the gap
+
 # ─── LLM ──────────────────────────────────────────────────
 # provider:
 #   queue     — (default) emit JSONL tasks under <vault>/.lorekeeper/queue/.

@@ -390,11 +390,16 @@ impl DedupCache {
         Ok(DedupResult { novel, duplicates })
     }
 
-    /// Upsert every event's keys with the current time. Used for BOTH novel events
-    /// (first record) and re-seen duplicates (timestamp refresh) — redb `insert` is an
-    /// upsert, so re-recording a duplicate slides its `seen_at` forward and keeps it
-    /// out of the prune window.
-    pub fn record(&self, events: &[Event]) -> Result<(), PipelineError> {
+    /// Upsert every event's keys with the current time in a single write transaction.
+    /// Used for BOTH novel events (first record) and re-seen duplicates (timestamp
+    /// refresh) — redb `insert` is an upsert, so re-recording a duplicate slides its
+    /// `seen_at` forward and keeps it out of the prune window. Recording novel and
+    /// re-seen events together (one transaction) keeps their timestamps atomic: a
+    /// crash can never persist one set without the other.
+    pub fn record<'a>(
+        &self,
+        events: impl IntoIterator<Item = &'a Event>,
+    ) -> Result<(), PipelineError> {
         // A read-only/empty cache never persists — dry-run never commits anyway.
         let Some(db) = &self.db else {
             return Ok(());

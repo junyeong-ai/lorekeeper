@@ -47,6 +47,7 @@ fn base_config(vault_root: &std::path::Path) -> Config {
         llm: Default::default(),
         concepts: Default::default(),
         graph: Default::default(),
+        maintenance: Default::default(),
     }
 }
 

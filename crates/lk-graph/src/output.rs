@@ -12,13 +12,6 @@ use crate::merge::MergeResult;
 use crate::stale::{Category, StalePage};
 
 #[derive(Debug, Serialize)]
-pub struct BuildReport {
-    pub pages: usize,
-    pub wikilinks: usize,
-    pub components: usize,
-}
-
-#[derive(Debug, Serialize)]
 pub struct HubsReport {
     pub hubs: Vec<HubEntry>,
 }
@@ -97,12 +90,6 @@ pub fn print_json<T: Serialize>(data: &T) -> Result<(), String> {
         serde_json::to_string_pretty(&envelope).map_err(|e| e.to_string())?
     );
     Ok(())
-}
-
-pub fn print_build(r: &BuildReport) {
-    println!("pages:      {}", r.pages);
-    println!("wikilinks:  {}", r.wikilinks);
-    println!("components: {}", r.components);
 }
 
 pub fn print_hubs(r: &HubsReport) {
@@ -401,7 +388,7 @@ pub fn print_merge(result: &MergeResult) {
         };
         println!("  {verb} concept page: {}", result.from_slug);
     }
-    if result.from_had_body {
+    if result.from_authored {
         if result.dry_run {
             println!(
                 "  ! '{}' has authored body content a merge would discard — salvage it \

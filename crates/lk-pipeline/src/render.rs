@@ -22,7 +22,7 @@ pub fn llm_inputs_map(
         .collect()
 }
 
-pub struct RenderOutput {
+pub struct RenderResult {
     pub path: VaultPath,
     pub content: String,
 }
@@ -63,7 +63,7 @@ pub fn render_daily_page(
     ctx: &RenderContext<'_>,
     engine: &TemplateEngine,
     dirs: &VaultDirs,
-) -> Result<RenderOutput, PipelineError> {
+) -> Result<RenderResult, PipelineError> {
     let RenderContext {
         source_id,
         source_type,
@@ -163,7 +163,7 @@ pub fn render_daily_page(
         .render(chosen, &context)
         .map_err(|e| PipelineError::Render(e.to_string()))?;
 
-    Ok(RenderOutput { path, content })
+    Ok(RenderResult { path, content })
 }
 
 pub struct DocumentLlmInputHashes<'a> {
@@ -185,7 +185,7 @@ pub fn render_document_page(
     ctx: &DocumentRenderContext<'_>,
     engine: &TemplateEngine,
     dirs: &VaultDirs,
-) -> Result<RenderOutput, PipelineError> {
+) -> Result<RenderResult, PipelineError> {
     let DocumentRenderContext {
         slug,
         event,
@@ -240,7 +240,7 @@ pub fn render_document_page(
         .render("document.md.jinja", &context)
         .map_err(|e| PipelineError::Render(e.to_string()))?;
 
-    Ok(RenderOutput { path, content })
+    Ok(RenderResult { path, content })
 }
 
 /// Splice cached LLM-filled bodies into a freshly-rendered page. Each

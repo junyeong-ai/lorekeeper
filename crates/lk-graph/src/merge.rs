@@ -44,7 +44,7 @@ pub struct MergeResult {
     pub deleted: bool,
     /// True when the deleted `from` page had human-authored body content beyond the
     /// template scaffold — a salvage warning, not an error.
-    pub from_had_body: bool,
+    pub from_authored: bool,
     pub dry_run: bool,
 }
 
@@ -98,8 +98,8 @@ pub fn merge_concepts(
 
     // Gate BEFORE any mutation: a merge would discard `from`'s authored prose (links
     // are rewired, body is not). Refuse unless forced, so nothing is silently lost.
-    let from_had_body = concept_has_authored_body(&vault_root.join(&from_rel))?;
-    if from_had_body && !force && !dry_run {
+    let from_authored = concept_has_authored_body(&vault_root.join(&from_rel))?;
+    if from_authored && !force && !dry_run {
         return Err(GraphError::Io(format!(
             "'{from}' has authored body content that a merge would discard — salvage it \
              into '{into}', then re-run with --force (or --dry-run to preview)"
@@ -144,7 +144,7 @@ pub fn merge_concepts(
         into_slug: into,
         rewritten,
         deleted: true,
-        from_had_body,
+        from_authored,
         dry_run,
     })
 }
@@ -398,7 +398,7 @@ mod tests {
         ];
         let r = merge_concepts(&pages, root, "wiki", "a", "b", true, false).unwrap();
         assert!(
-            r.from_had_body,
+            r.from_authored,
             "authored prose must be flagged for salvage"
         );
 
@@ -414,7 +414,7 @@ mod tests {
         ];
         let r2 = merge_concepts(&pages2, root, "wiki", "c", "b", true, false).unwrap();
         assert!(
-            !r2.from_had_body,
+            !r2.from_authored,
             "scaffold + sources only must NOT be flagged"
         );
     }
@@ -444,7 +444,7 @@ mod tests {
 
         // dry-run previews without the gate firing.
         let preview = merge_concepts(&pages, root, "wiki", "a", "b", true, false).unwrap();
-        assert!(preview.from_had_body);
+        assert!(preview.from_authored);
         assert!(root.join("wiki/concepts/a.md").exists());
 
         // With force, the merge proceeds and deletes `from`.
@@ -479,7 +479,7 @@ mod tests {
         );
         // With force: proceeds, flags the body, deletes the page.
         let forced = merge_concepts(&pages, root, "wiki", "a", "b", false, true).unwrap();
-        assert!(forced.from_had_body);
+        assert!(forced.from_authored);
         assert!(forced.deleted);
     }
 
@@ -504,7 +504,7 @@ mod tests {
         assert!(
             merge_concepts(&pages, root, "wiki", "a", "b", true, false)
                 .unwrap()
-                .from_had_body,
+                .from_authored,
             "indented Sources heading must not be mistaken for the machine-owned section"
         );
     }

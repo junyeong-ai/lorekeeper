@@ -21,8 +21,9 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   warns if pending queue files exist (run `/lore-process` first to avoid duplicate
   LLM work).
 - **`lore maintenance`** prunes the ingest log, dedup cache, and drained `queue/processed/`
-  files past the 90-day retention; it must not overlap a running `lore ingest` (redb
-  single-writer). It never touches live `*.jsonl.tmp` — the ingest startup sweep does.
+  files past `maintenance.retention_days` (default 90); it must not overlap a running
+  `lore ingest` (redb single-writer). It never touches live `*.jsonl.tmp` — the ingest
+  startup sweep does.
 - **`lore synthesis <period>`** rejects `--date`/`--year` together with `--previous`
   (clap `conflicts_with`), and flushes the LLM queue after writing its pages.
 - **`lore queue status`** (`commands/queue.rs`) is the authoritative stale-task guard:

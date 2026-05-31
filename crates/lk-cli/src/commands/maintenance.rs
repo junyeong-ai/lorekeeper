@@ -1,18 +1,19 @@
 use super::{find_config, load_config};
 
-/// Retention horizon for the ingest log, dedup cache, and drained queue files.
-///
-/// Dedup invariant: an item recognized as a duplicate has its `seen_at` refreshed on
-/// every re-arrival, so a *steady-state* recurring item never ages out. But an item
-/// absent for longer than this window is pruned, and a later re-arrival is then treated
-/// as novel (a fresh page + LLM tasks). So this must exceed the longest expected silent
-/// gap between re-arrivals of the same item — 90 days comfortably covers daily/weekly
-/// feeds and quarterly recurrences; lengthen it if a source can resurface less often.
-const RETENTION_DAYS: i64 = 90;
+/// Seconds-since-epoch cutoff for pruning: entries with `seen_at`/mtime older than this
+/// are removed. Clamped at 0 so a retention horizon exceeding the time since the Unix
+/// epoch keeps everything, never a negative cutoff that would wrap when cast to `u64`
+/// and wipe the entire cache. Saturating arithmetic keeps it sound for any input.
+fn prune_cutoff_secs(now_secs: i64, retention_days: i64) -> i64 {
+    now_secs
+        .saturating_sub(retention_days.saturating_mul(86_400))
+        .max(0)
+}
 
 pub async fn run(opts: &super::GlobalOpts) -> miette::Result<()> {
     let config = load_config(&find_config(opts)?)?;
     let vault_root = config.vault.root_path();
+    let retention_days = config.maintenance.retention_days;
     // redb allows a single writer at a time. Maintenance opens its own DedupCache, so it must
     // NOT overlap an active `lore ingest`. Schedule maintenance in a window that doesn't intersect
     // ingest schedules in your crontab.
@@ -20,7 +21,7 @@ pub async fn run(opts: &super::GlobalOpts) -> miette::Result<()> {
         "Note: `lore maintenance` must not overlap an active `lore ingest` run (dedup file lock)."
     );
     let log_path = vault_root.join(".lorekeeper").join("ingest.jsonl");
-    let cutoff_secs = jiff::Timestamp::now().as_second() - (RETENTION_DAYS * 24 * 3600);
+    let cutoff_secs = prune_cutoff_secs(jiff::Timestamp::now().as_second(), retention_days);
 
     // 1. Prune ingest log
     if log_path.exists() {
@@ -54,7 +55,7 @@ pub async fn run(opts: &super::GlobalOpts) -> miette::Result<()> {
             .map_err(|e| miette::miette!("write log: {e}"))?;
 
         eprintln!(
-            "log: pruned {dropped} entries older than {RETENTION_DAYS}d (kept {} of {original}).",
+            "log: pruned {dropped} entries older than {retention_days}d (kept {} of {original}).",
             kept.len()
         );
     } else {
@@ -98,7 +99,7 @@ pub async fn run(opts: &super::GlobalOpts) -> miette::Result<()> {
                 pruned += 1;
             }
         }
-        eprintln!("queue: pruned {pruned} processed file(s) older than {RETENTION_DAYS}d.");
+        eprintln!("queue: pruned {pruned} processed file(s) older than {retention_days}d.");
     } else {
         eprintln!("queue: no processed/ directory to maintain.");
     }
@@ -116,10 +117,28 @@ pub async fn run(opts: &super::GlobalOpts) -> miette::Result<()> {
         let removed = cache
             .prune(cutoff_secs as u64)
             .map_err(|e| miette::miette!("dedup prune: {e}"))?;
-        eprintln!("dedup: pruned {removed} entries older than {RETENTION_DAYS}d.");
+        eprintln!("dedup: pruned {removed} entries older than {retention_days}d.");
     } else {
         eprintln!("dedup: no cache file to maintain.");
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prune_cutoff_secs;
+
+    #[test]
+    fn cutoff_is_now_minus_retention() {
+        assert_eq!(prune_cutoff_secs(1_000_000, 1), 1_000_000 - 86_400);
+    }
+
+    #[test]
+    fn cutoff_clamps_to_zero_for_retention_longer_than_epoch() {
+        // A retention horizon longer than the time elapsed keeps everything (cutoff 0),
+        // never a negative value that would wrap to a huge u64 and wipe the cache.
+        assert_eq!(prune_cutoff_secs(1_000_000, 1_000_000), 0);
+        assert_eq!(prune_cutoff_secs(i64::MAX / 2, i64::MAX), 0);
+    }
 }

@@ -110,7 +110,7 @@ Claude Code Skills        Semantic Plane             (same vault)
 | `lore performance` | Show work category distribution |
 | `lore schedule` | Print crontab entries (uses plain `lore` for PATH lookup) |
 | `lore schedule --bin /full/path/lore` | Override bin path in cron lines |
-| `lore maintenance` | Prune ingest log, dedup cache, and drained queue files older than 90 days |
+| `lore maintenance` | Prune ingest log, dedup cache, and drained queue files past `maintenance.retention_days` (default 90) |
 | `lore schema` | Generate `wiki/AGENTS.md` (page format schema from locale) |
 | `lore graph lint` | Structural health: orphans, broken links, hubs, invalid categories, near-duplicates, alias conflicts, unresolved conflicts, index drift |
 | `lore graph suggest-links` | Community-based cross-reference suggestions |

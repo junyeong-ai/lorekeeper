@@ -10,7 +10,7 @@ mod worklog;
 
 pub use context::PipelineContext;
 pub use dedup::DedupCache;
-pub use render::RenderOutput;
+pub use render::RenderResult;
 pub use synthesis::Synthesizer;
 
 use std::collections::BTreeMap;
@@ -45,8 +45,8 @@ pub struct IngestResult {
     /// their dedup timestamps (not rendered).
     pub duplicates: Vec<Event>,
     pub concepts: Vec<ExtractedConcept>,
-    pub daily_pages: Vec<RenderOutput>,
-    pub document_pages: Vec<RenderOutput>,
+    pub daily_pages: Vec<RenderResult>,
+    pub document_pages: Vec<RenderResult>,
 }
 
 impl IngestResult {
@@ -191,7 +191,7 @@ impl Pipeline {
             by_date.entry(event.date).or_default().push(i);
         }
 
-        let mut daily_pages: Vec<RenderOutput> = Vec::new();
+        let mut daily_pages: Vec<RenderResult> = Vec::new();
         let mut all_concepts: Vec<ExtractedConcept> = Vec::new();
 
         // Normalize once: blank focus = no filter, identical across every provider path.
@@ -400,7 +400,7 @@ impl Pipeline {
             }
             let content = render::splice_preserved_sections(fresh.content, splices);
 
-            daily_pages.push(render::RenderOutput {
+            daily_pages.push(render::RenderResult {
                 path: fresh.path,
                 content,
             });
@@ -430,7 +430,7 @@ impl Pipeline {
 
     /// Render the concept pages accumulated across every `plan` call in this run.
     /// Call once after all sources are planned and before committing dedup.
-    pub async fn render_concept_pages(&self) -> Result<Vec<RenderOutput>, PipelineError> {
+    pub async fn render_concept_pages(&self) -> Result<Vec<RenderResult>, PipelineError> {
         let drafts = self.concept_drafts.lock().await;
         drafts.render_pages(&self.ctx.engine, &self.ctx.dirs, self.ctx.locale)
     }
@@ -440,15 +440,13 @@ impl Pipeline {
     /// AND refreshes the `duplicates`' timestamps (re-seen) so steady-state re-arrivals
     /// never age out of the retention window and re-emit as new.
     pub fn commit(&self, novel: &[Event], duplicates: &[Event]) -> Result<(), PipelineError> {
-        self.dedup.record(novel)?;
-        self.dedup.record(duplicates)?;
-        Ok(())
+        self.dedup.record(novel.iter().chain(duplicates))
     }
 
     pub async fn render_work_log(
         &self,
         personal_events: &[Event],
-    ) -> Result<Vec<RenderOutput>, PipelineError> {
+    ) -> Result<Vec<RenderResult>, PipelineError> {
         worklog::render_work_log(
             personal_events,
             &self.ctx.perf,
@@ -481,7 +479,7 @@ impl Pipeline {
         let summary_heading = strings.summary;
         let concepts_heading = strings.related_concepts;
 
-        let mut document_pages: Vec<RenderOutput> = Vec::new();
+        let mut document_pages: Vec<RenderResult> = Vec::new();
         let mut all_concepts: Vec<lk_core::concept::ExtractedConcept> = Vec::new();
 
         for event in &events {
@@ -636,7 +634,7 @@ impl Pipeline {
             }
             let content = render::splice_preserved_sections(fresh.content, splices);
 
-            document_pages.push(render::RenderOutput {
+            document_pages.push(render::RenderResult {
                 path: fresh.path,
                 content,
             });

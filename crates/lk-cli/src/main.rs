@@ -69,7 +69,7 @@ enum Command {
         #[arg(long)]
         root: Option<PathBuf>,
     },
-    /// Prune ingest log and dedup cache entries older than 90 days
+    /// Prune ingest log, dedup cache, and drained queue files past the configured retention (default 90 days)
     Maintenance,
     /// Wikilink graph analysis for the vault
     Graph {

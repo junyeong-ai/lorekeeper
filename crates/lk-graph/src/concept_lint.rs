@@ -54,7 +54,7 @@ pub struct ConceptPage {
     /// even when frontmatter is absent or malformed.
     pub slug: String,
     /// Vault-relative path, for lint output.
-    pub rel_path: PathBuf,
+    pub path: PathBuf,
     /// `category` frontmatter value, if present.
     pub category: Option<String>,
     /// Page body (frontmatter stripped), for conflict-callout scanning.
@@ -114,7 +114,7 @@ pub fn scan_concept_pages(
         };
         pages.push(ConceptPage {
             slug: file_stem,
-            rel_path,
+            path: rel_path,
             category,
             body,
         });
@@ -145,7 +145,7 @@ pub fn invalid_categories(
                 return None;
             }
             Some(InvalidCategoryConcept {
-                path: page.rel_path.clone(),
+                path: page.path.clone(),
                 slug: page.slug.clone(),
                 category: category.to_owned(),
             })
@@ -399,7 +399,7 @@ pub fn unresolved_conflicts(pages: &[ConceptPage]) -> Vec<UnresolvedConflict> {
                 }
                 if let Some(title) = parse_conflict_callout(line) {
                     return Some(UnresolvedConflict {
-                        path: page.rel_path.clone(),
+                        path: page.path.clone(),
                         slug: page.slug.clone(),
                         note: title.to_owned(),
                     });

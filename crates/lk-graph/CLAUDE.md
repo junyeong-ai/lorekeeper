@@ -103,7 +103,7 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
   LLM confirms genuine relationships before any edge is written. `## Sources`
   (citation-derived, `backlinks-sync`) is the only machine-maintained concept relation.
 - **`concept_lint::scan_concept_pages`** reads `{wiki}/concepts/*.md` ONCE into `Vec<ConceptPage>`
-  (slug = file stem, rel_path, category, body), sorted by slug. The three concept lints below
+  (slug = file stem, path, category, body), sorted by slug. The three concept lints below
   are pure functions over `&[ConceptPage]` — `graph lint` walks the concepts dir a single
   time, not once per check. A page with malformed frontmatter still yields one (slug from file
   stem, no category, empty body) so slug-only checks see it while content checks skip it.

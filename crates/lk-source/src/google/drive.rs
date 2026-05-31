@@ -66,7 +66,7 @@ impl DriveSource {
         Self { http, auth }
     }
 
-    async fn find_folder_id(&self, token: &str, path: &str) -> Result<String, SourceError> {
+    async fn resolve_folder_id(&self, token: &str, path: &str) -> Result<String, SourceError> {
         let mut parent_id = "root".to_string();
         for segment in path.split('/') {
             if segment.is_empty() {
@@ -111,7 +111,7 @@ impl Source for DriveSource {
             .map_err(|e| SourceError::InvalidParams(e.to_string()))?;
 
         let token = self.auth.access_token().await?;
-        let folder_id = self.find_folder_id(&token, &p.folder).await?;
+        let folder_id = self.resolve_folder_id(&token, &p.folder).await?;
 
         let name_fragment = p
             .file_pattern

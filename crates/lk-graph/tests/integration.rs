@@ -28,21 +28,6 @@ fn build_correct_page_count() {
     assert!(g.component_count() > 0);
 }
 
-#[test]
-fn build_report_serialises_as_json() {
-    let root = fixture_root();
-    let config = default_config();
-    let pages = scan::scan_vault(&root, &config).unwrap();
-    let g = graph::WikiGraph::build(&pages, &VaultDirs::default());
-    let report = output::BuildReport {
-        pages: g.node_count(),
-        wikilinks: g.edge_count(),
-        components: g.component_count(),
-    };
-    let json = serde_json::to_value(&report).unwrap();
-    assert!(json["pages"].as_u64().unwrap() >= 5);
-}
-
 // --- Hubs ---
 
 #[test]

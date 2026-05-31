@@ -43,6 +43,9 @@ pub struct Config {
     /// Optional and fully defaulted; absent in config.yaml means "use defaults".
     #[serde(default)]
     pub graph: GraphConfig,
+    /// Retention horizons for `lore maintenance` pruning.
+    #[serde(default)]
+    pub maintenance: MaintenanceConfig,
 }
 
 impl Config {
@@ -210,6 +213,12 @@ impl Config {
         if self.concepts.index_split_threshold == 0 {
             return Err(ConfigError::Validation(
                 "concepts.index_split_threshold must be >= 1".into(),
+            ));
+        }
+
+        if self.maintenance.retention_days <= 0 {
+            return Err(ConfigError::Validation(
+                "maintenance.retention_days must be >= 1".into(),
             ));
         }
 
@@ -904,8 +913,29 @@ pub struct ConceptCategory {
     pub label: String,
 }
 
-/// Wikilink graph analysis configuration. Mirrors the sections of the retired
-/// CJK-correct rule) and output format (the `--json` flag controls that).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MaintenanceConfig {
+    /// Retention horizon (days) for `lore maintenance`: the ingest log, the dedup
+    /// cache, and drained `queue/processed/` files are pruned past this age.
+    ///
+    /// A duplicate's `seen_at` is refreshed on every re-arrival, so a steady-state
+    /// recurring item never ages out. But an item absent for longer than this window
+    /// is pruned, and a later re-arrival is then treated as novel (a fresh page + LLM
+    /// tasks). So this must exceed the longest expected silent gap between re-arrivals
+    /// of the same item: 90 days comfortably covers daily/weekly feeds and quarterly
+    /// recurrences; raise it for a source that can resurface less often.
+    pub retention_days: i64,
+}
+
+impl Default for MaintenanceConfig {
+    fn default() -> Self {
+        Self { retention_days: 90 }
+    }
+}
+
+/// Wikilink graph analysis configuration, consumed by `lore graph` / `lk-graph`.
+/// Splits into analysis `scope`, structural `graph` metrics, and `cluster` settings.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GraphConfig {
@@ -1171,6 +1201,34 @@ sources:
     #[test]
     fn default_llm_provider_is_queue() {
         assert_eq!(LlmConfig::default().provider, LlmProvider::Queue);
+    }
+
+    #[test]
+    fn maintenance_retention_defaults_to_90_and_rejects_non_positive() {
+        let base = |days: &str| {
+            format!(
+                r#"
+vault:
+  root: /tmp/vault
+identity:
+  name: test
+  email: test@test.com
+sources:
+  s1:
+    type: gmail
+maintenance:
+  retention_days: {days}
+"#
+            )
+        };
+        assert_eq!(MaintenanceConfig::default().retention_days, 90);
+        let ok: Config = serde_yaml_ng::from_str(&base("120")).unwrap();
+        assert!(ok.validate().is_ok());
+        let bad: Config = serde_yaml_ng::from_str(&base("0")).unwrap();
+        assert!(
+            bad.validate().is_err(),
+            "retention_days=0 should be rejected"
+        );
     }
 
     #[test]

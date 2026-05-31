@@ -7,7 +7,7 @@ use lk_core::vault_path::VaultPath;
 use lk_vault::{TemplateEngine, VaultReader, replace_section, section_body};
 
 use crate::PipelineError;
-use crate::render::RenderOutput;
+use crate::render::RenderResult;
 
 /// In-memory aggregator for concept page state across multiple dates in a single run.
 /// Reads existing vault pages on first encounter, then merges further mentions.
@@ -159,7 +159,7 @@ impl ConceptDrafts {
         engine: &TemplateEngine,
         dirs: &VaultDirs,
         locale: Locale,
-    ) -> Result<Vec<RenderOutput>, PipelineError> {
+    ) -> Result<Vec<RenderResult>, PipelineError> {
         self.drafts
             .values()
             .map(|d| d.render(engine, dirs, locale))
@@ -187,7 +187,7 @@ impl ConceptDraft {
         engine: &TemplateEngine,
         dirs: &VaultDirs,
         locale: Locale,
-    ) -> Result<RenderOutput, PipelineError> {
+    ) -> Result<RenderResult, PipelineError> {
         let path = VaultPath::concept(dirs, &self.slug);
         let strings = locale.strings();
 
@@ -229,7 +229,7 @@ impl ConceptDraft {
             }
         }
 
-        Ok(RenderOutput { path, content })
+        Ok(RenderResult { path, content })
     }
 }
 
