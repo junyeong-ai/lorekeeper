@@ -80,14 +80,16 @@ foreach ($skillName in $SkillNames) {
     }
 }
 
-# Scheduled task (user-level only — installed alongside the skills).
-$schedTask = Join-Path $env:USERPROFILE '.claude\scheduled-tasks\lore-daily-ingest'
-if (Test-Path $schedTask) {
-    if (Prompt-YesNo "Remove scheduled task $schedTask?") {
-        Write-Step "Removing $schedTask"
-        Remove-Item -Recurse -Force $schedTask
-        Write-Ok 'Scheduled task removed: lore-daily-ingest'
-        $removed++
+# Scheduled tasks (user-level only — installed alongside the skills).
+foreach ($schedName in @('lore-daily-ingest', 'lore-weekly-ingest')) {
+    $schedTask = Join-Path $env:USERPROFILE ".claude\scheduled-tasks\$schedName"
+    if (Test-Path $schedTask) {
+        if (Prompt-YesNo "Remove scheduled task $schedTask?") {
+            Write-Step "Removing $schedTask"
+            Remove-Item -Recurse -Force $schedTask
+            Write-Ok "Scheduled task removed: $schedName"
+            $removed++
+        }
     }
 }
 

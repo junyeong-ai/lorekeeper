@@ -144,12 +144,17 @@ jobs:
             tar -czf "$archive" -C .claude/skills "$skill"
             sha256sum "$archive" > "${archive}.sha256"
           done
+          # Scheduled-task agent definitions ship as plain `.md` release assets;
+          # install.sh / install.ps1 fetch them by name (`v{version}/{name}.md`).
+          cp scripts/lore-daily-ingest.md scripts/lore-weekly-ingest.md .
       - uses: actions/upload-artifact@v7
         with:
           name: skills
           path: |
             *-skill-v*.tar.gz
             *-skill-v*.tar.gz.sha256
+            lore-daily-ingest.md
+            lore-weekly-ingest.md
           if-no-files-found: error
 
   release:

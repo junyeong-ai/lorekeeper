@@ -1,6 +1,6 @@
 ---
 name: lore-daily-ingest
-description: Autonomous daily Lorekeeper ingest — refresh yesterday's pages (Monday → Friday), collect today's events, drain LLM queue, sync concept backlinks + run a graph health check daily, and on Mondays run weekly synthesis.
+description: Autonomous daily Lorekeeper ingest — refresh yesterday's pages (Monday → Friday), collect today's events, drain LLM queue, sync concept backlinks, and run a graph health check. Weekly synthesis + knowledge audit are a separate task (`lore-weekly-ingest`).
 ---
 
 ## Role
@@ -12,16 +12,18 @@ Combines the `lore` binary + `/lore-process` skill:
 - **Refresh yesterday** — re-ingest so Calendar scheduled→actual and Jira status changes are captured. No `--force`: Calendar/Jira are *mutable* source types and re-render with latest state automatically (`SourceType::is_mutable`); append-only sources (mail/Slack/RSS) correctly dedup as already-seen, so nothing is needlessly rewritten.
 - **Ingest today** — lookahead events (Calendar 24h) + overnight activity (Slack/Gmail/Jira)
 - **Drain queue** — `/lore-process` fills summaries, concepts, work-log topic synthesis
-- **Graph health** — `lore wiki index` rebuilds the catalog daily; `lore graph lint` (read-only) surfaces orphans/broken/stale/invalid-category
-- **Backlinks (daily)** — `backlinks-sync` re-derives `## 출처` + `source_count` from real citations; **(Monday only) Weekly synthesis** — `lore synthesis weekly --previous`
+- **Graph health (daily)** — `backlinks-sync` re-derives `## 출처` + `source_count` from real citations; `lore wiki index` rebuilds the catalog; `lore graph lint` (read-only) surfaces orphans/broken/near-duplicate/conflict/invalid-category/index-drift
+
+Weekly synthesis and the knowledge audit (dormancy, contradiction worklist,
+near-duplicate review) are a separate cadence — see the `lore-weekly-ingest` task.
 
 ## Output contract (violation = task failure)
 
 The final assistant text message MUST be one of:
 
 - **(A) Success report** — dates processed, per-source event counts,
-  queue tasks drained, `graph lint` finding counts, weekly synthesis
-  path + graph-sync changed-page counts if Monday. 5-10 lines.
+  queue tasks drained, `graph lint` finding counts, graph-sync changed-page
+  counts. 5-10 lines.
 
 - **(B) Partial failure** — which steps succeeded, which sources
   failed, recovery command (`lore ingest --force --date <date>`).
@@ -112,13 +114,15 @@ lore graph lint             # read-only health report
   (catalog links to pages no longer on disk). Idempotent — re-running
   is a no-op. Daily cadence keeps the catalog current with the
   concepts created on every ingest.
-- `graph lint` is pure read — no vault writes. Surfaces orphans,
-  broken wikilinks, stale pages, and invalid concept categories.
-  Exit code 1 means findings exist (NOT an error); capture the counts
-  for the report and continue regardless.
+- `graph lint` is pure read — no vault writes. Surfaces orphans, broken
+  wikilinks, near-duplicate concepts, unresolved contradictions, invalid
+  concept categories, and index drift. Dormancy (`graph stale`) and the
+  contradiction worklist belong to the weekly task, not here. Exit code 1 means
+  findings exist (NOT an error); capture the counts for the report and
+  continue regardless.
 
 - `backlinks-sync` is deterministic and idempotent (diff-based; only changed
-  concept pages are written). It runs DAILY because it now owns both the `## 출처`
+  concept pages are written). It runs DAILY because it owns both the `## 출처`
   body AND the frontmatter `source_count` — ingest leaves the body empty and only
   approximates the count, so a daily sync keeps citations and counts current the same
   day a concept is created (a weekly cadence would leave new concepts with an empty
@@ -126,18 +130,7 @@ lore graph lint             # read-only health report
   genuinely-changed pages. Ingest preserves these sections across re-renders, so the
   two never fight.
 
-### Step 6 (Monday only): Weekly synthesis
-
-```bash
-if [ "$DOW" = "1" ]; then
-    lore synthesis weekly --previous
-fi
-```
-
-- `--previous` synthesises last week (Mon-Sun) → `weekly/synthesis/`
-  and `weekly/me/` pages.
-
-### Step 7: Report
+### Step 6: Report
 
 Output (A) or (B) as defined in the output contract.
 
@@ -148,8 +141,7 @@ Output (A) or (B) as defined in the output contract.
   re-render latest state, append-only sources dedup. Multiple runs per day never
   duplicate and never needlessly rewrite unchanged pages.
 - No external communication (gh/SSH/etc.) after steps complete.
-- Turn budget 180s. On timeout, report results up to last
-  successful step.
+- Turn budget 180s. On timeout, report results up to the last successful step.
 
 ## Failure recovery
 
@@ -157,7 +149,7 @@ Every step is idempotent — safe to re-run on the same date:
 - Step 2/3: mutable sources re-render latest state, append-only sources dedup
 - Step 4 lore-process: section replace + concept merge are idempotent
 - Step 5 wiki index: deterministic full rebuild, re-run is a no-op; lint is read-only
-- Step 5 backlinks-sync: deterministic diff-based, re-run is a no-op; Step 6 weekly synthesis re-run overwrites the same week
+- Step 5 backlinks-sync: deterministic diff-based, re-run is a no-op
 
 Manual recovery:
 ```bash

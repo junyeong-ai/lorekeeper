@@ -126,11 +126,13 @@ inspecting pages.
    for human review, never auto-create pages.
 5. **Concept lifecycle** — two parts:
    - **Near-duplicates** from layer 1's `near_duplicate_concepts`: for a true
-     variant-spelling pair (`vector-db` ~ `vector-database`), merge with
-     `lore graph merge <from> <into>` then `lore graph backlinks-sync` (the merge
-     rewires every wikilink and deletes the `from` page; it refuses if `from` has
-     authored prose unless `--force`, so salvage first). Leave deliberate
-     model-version siblings (`gpt-4`/`gpt-5`) split — they are distinct concepts.
+     variant-spelling pair (`vector-db` ~ `vector-database`), recommend consolidating
+     it with `lore graph merge <from> <into>` followed by `lore graph backlinks-sync`
+     (the merge rewires every wikilink and deletes the `from` page; it refuses if `from`
+     has authored prose unless `--force`, so any authored prose is salvaged into the
+     survivor first). Like every audit finding the merge is **surfaced, not run** — it
+     deletes a page, so a human makes the call. Leave deliberate model-version siblings
+     (`gpt-4`/`gpt-5`) split — they are distinct concepts.
    - **Staleness**: run `lore graph stale --days 90`, filter concept entries.
      `stale` already excludes concepts still cited by recent activity (liveness is
      graph-derived), so an entry here is genuinely dormant — no manual recency grep

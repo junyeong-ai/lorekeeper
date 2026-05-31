@@ -340,15 +340,24 @@ install_skill() {
     log_ok "Skill installed"
 }
 
-# The autonomous daily-ingest scheduled task: a Claude Code agent definition that
-# chains `lore ingest` → /lore-process → graph reconcile (→ Monday weekly synthesis).
-# It is a user-level agent (always under ~/.claude/scheduled-tasks/, never project),
-# and it drives the skills, so it is installed only alongside them (skill_level != none).
-# The scheduler that fires it is the user's own cron / remote-agent runner — this just
-# places the definition where the runner looks for it.
-install_scheduled_task() {
+# Autonomous scheduled tasks: Claude Code agent definitions the user's cron /
+# remote-agent runner fires. `lore-daily-ingest` chains `lore ingest` →
+# /lore-process → graph reconcile; `lore-weekly-ingest` runs Monday weekly synthesis
+# + knowledge audit. They are user-level agents (always under ~/.claude/scheduled-tasks/,
+# never project) and drive the skills, so they install only alongside them
+# (skill_level != none). This just places the definitions where the runner looks.
+SCHEDULED_TASKS="lore-daily-ingest lore-weekly-ingest"
+
+install_scheduled_tasks() {
     [ "$1" = "none" ] && return
-    local name="lore-daily-ingest"
+    local name
+    for name in $SCHEDULED_TASKS; do
+        install_one_scheduled_task "$name"
+    done
+}
+
+install_one_scheduled_task() {
+    local name="$1"
     local src=""
     if [ -n "$repo_dir" ] && [ -f "$repo_dir/scripts/${name}.md" ]; then
         src="$repo_dir/scripts/${name}.md"
@@ -369,8 +378,8 @@ install_scheduled_task() {
         existing="$(skill_sha256 "$target")"
         new="$(skill_sha256 "$src")"
         if [ -n "$existing" ] && [ "$existing" = "$new" ]; then
-            if [ "$LORE_INSTALL_FORCE" != "1" ] && ! prompt_yesno "Scheduled task is already current. Reinstall?" "N"; then
-                log_info "Scheduled task kept"
+            if [ "$LORE_INSTALL_FORCE" != "1" ] && ! prompt_yesno "Scheduled task '$name' is already current. Reinstall?" "N"; then
+                log_info "Scheduled task '$name' kept"
                 return
             fi
         fi
@@ -378,7 +387,7 @@ install_scheduled_task() {
     fi
     mkdir -p "$(dirname "$target")"
     cp "$src" "$target"
-    log_ok "Scheduled task installed (register it with your cron / agent runner)"
+    log_ok "Scheduled task '$name' installed (register it with your cron / agent runner)"
 }
 
 # ═════════════════════════════ ORCHESTRATION ═══════════════════════════════
@@ -454,7 +463,7 @@ render_review() {
         none)    printf '  %sskill%s     (skipped)\n' "$C_DIM" "$C_RESET" ;;
     esac
     [ "$skill_level" != "none" ] && \
-        printf '  %sschedule%s  ~/.claude/scheduled-tasks/lore-daily-ingest\n' "$C_DIM" "$C_RESET"
+        printf '  %sschedule%s  ~/.claude/scheduled-tasks/lore-{daily,weekly}-ingest\n' "$C_DIM" "$C_RESET"
 }
 
 check_path() {
@@ -625,8 +634,8 @@ main() {
                 SKILL_NAME="$skill" install_skill "$skill_level" "$skill_src"
             fi
         done
-        # The daily-ingest scheduled task drives the skills, so install it with them.
-        install_scheduled_task "$skill_level"
+        # The scheduled tasks drive the skills, so install them with the skills.
+        install_scheduled_tasks "$skill_level"
     fi
 
     printf '\n'

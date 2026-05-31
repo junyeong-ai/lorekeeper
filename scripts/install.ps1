@@ -145,12 +145,20 @@ function Install-Skill($level, $src, $skillName) {
     Write-Ok 'Skill installed'
 }
 
-# The autonomous daily-ingest scheduled task — a user-level Claude Code agent that
-# chains `lore ingest` -> /lore-process -> graph reconcile. Installed only with the
-# skills (it drives them); the firing scheduler is the user's own cron / agent runner.
-function Install-ScheduledTask($level, $version, $repoDir) {
+# Autonomous scheduled tasks — user-level Claude Code agents the user's scheduler
+# fires: `lore-daily-ingest` chains `lore ingest` -> /lore-process -> graph reconcile;
+# `lore-weekly-ingest` runs Monday weekly synthesis + knowledge audit. Installed only
+# with the skills (they drive them).
+$ScheduledTasks = @('lore-daily-ingest', 'lore-weekly-ingest')
+
+function Install-ScheduledTasks($level, $version, $repoDir) {
     if ($level -eq 'none') { return }
-    $name = 'lore-daily-ingest'
+    foreach ($name in $ScheduledTasks) {
+        Install-OneScheduledTask $name $version $repoDir
+    }
+}
+
+function Install-OneScheduledTask($name, $version, $repoDir) {
     $src = $null
     if ($repoDir -and (Test-Path (Join-Path $repoDir "scripts\$name.md"))) {
         $src = Join-Path $repoDir "scripts\$name.md"
@@ -174,7 +182,7 @@ function Install-ScheduledTask($level, $version, $repoDir) {
     }
     New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
     Copy-Item -Path $src -Destination $target -Force
-    Write-Ok 'Scheduled task installed (register it with your scheduler)'
+    Write-Ok "Scheduled task '$name' installed (register it with your scheduler)"
 }
 
 # ── main ─────────────────────────────────────────────────────────────────
@@ -214,7 +222,7 @@ switch ($Skill) {
     'none'    { Write-Host '  skills    (skipped)' }
 }
 if ($Skill -ne 'none') {
-    Write-Host "  schedule  $env:USERPROFILE\.claude\scheduled-tasks\lore-daily-ingest"
+    Write-Host "  schedule  $env:USERPROFILE\.claude\scheduled-tasks\lore-{daily,weekly}-ingest"
 }
 
 if ($DryRun) { Write-Host ''; Write-Warn '(dry-run) Not executing'; exit 0 }
@@ -257,7 +265,7 @@ if ($Skill -ne 'none') {
         if ($skillSrc) { Install-Skill $Skill $skillSrc $skillName }
         else { Write-Warn "Skill '$skillName' unavailable; skipping" }
     }
-    Install-ScheduledTask $Skill $version $repoDir
+    Install-ScheduledTasks $Skill $version $repoDir
 }
 
 Write-Host ''

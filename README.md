@@ -139,11 +139,17 @@ Workflow:
 2. `/lore-process` (run in Claude Code) — drains the queue, fills summaries, creates/merges concept pages
 3. For unattended cron: `lore ingest && claude -p "/lore-process"`
 
-For a single autonomous agent that chains ingest → `/lore-process` → graph reconcile
-(→ Monday weekly synthesis), the installer ships the **`lore-daily-ingest`** scheduled
-task to `~/.claude/scheduled-tasks/lore-daily-ingest/SKILL.md` (alongside the skills).
-Point your cron or remote-agent runner at it; the source template is
-[`scripts/lore-daily-ingest.md`](scripts/lore-daily-ingest.md).
+For unattended operation the installer ships two scheduled-task definitions (alongside
+the skills) to `~/.claude/scheduled-tasks/`; point your cron or remote-agent runner at them:
+
+- **`lore-daily-ingest`** (weekday mornings) — chains ingest → `/lore-process` → graph
+  reconcile (backlinks + catalog + structural lint). Source: [`scripts/lore-daily-ingest.md`](scripts/lore-daily-ingest.md).
+- **`lore-weekly-ingest`** (Monday) — weekly synthesis (cross-source themes + personal
+  review) and a knowledge audit (dormancy, contradiction worklist, near-duplicate
+  review). Source: [`scripts/lore-weekly-ingest.md`](scripts/lore-weekly-ingest.md).
+
+The daily task keeps the graph structurally consistent every day; the weekly task adds
+the slower, judgment-bearing passes (synthesis + semantic audit) on a weekly cadence.
 
 The skill is **fully idempotent**: re-running on a partially-processed queue file is safe because vault edits replace section content rather than append, and concept page merging preserves accumulated state.
 
