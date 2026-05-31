@@ -1,6 +1,6 @@
 ---
 name: lore-ingest
-description: Daily knowledge ingestion pipeline — collects from Gmail, Google Drive, Google Calendar, Slack, Jira, RSS, and a manual inbox into an Obsidian vault. Deduplicates, classifies, extracts concepts, writes structured pages. Tracks personal work for performance reviews. Atomic 5-phase ingest with no-data-loss guarantee.
+description: Daily knowledge ingestion pipeline — collects from Gmail, Google Drive, Google Calendar, Slack, Jira, RSS, and a manual inbox into an Obsidian vault. Deduplicates, classifies, extracts concepts, writes structured pages. Tracks personal work for performance reviews. Atomic phased ingest with a no-data-loss guarantee.
 when_to_use: |
   ingest, collect, daily ingest, run ingest, ingest sources,
   ingest status, source health, generate cron, schedule ingest,
@@ -80,7 +80,8 @@ Default provider is `queue` (buffers tasks to JSONL for `/lore-process`).
 
 ## Atomic ingest flow
 
-Five phases, all-or-nothing per run:
+The atomic write→commit sequence is all-or-nothing per source, followed by a
+post-commit cleanup hook:
 
 1. **Plan** — fetch, normalize, dedup-check, classify
 2. **Write page bodies** — atomic per-file (tmp + rename). Time-windowed
@@ -93,6 +94,8 @@ Five phases, all-or-nothing per run:
    they never produce work-log entries even with `track_personal: true`).
 4. **Flush LLM queue** — atomic JSONL task file (queue mode)
 5. **Commit dedup** — only if all writes + flush succeeded
+6. **Post-commit archive** — `manual` inbox files move to `archived/{date}/`,
+   only after a successful commit, so a mid-run failure leaves them for retry.
 
 Crash between flush and commit → next run re-processes (no data loss).
 

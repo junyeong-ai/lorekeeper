@@ -41,8 +41,8 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
   `broken`/`orphans`/`index-sync` resolve against a full-vault *existence
   universe* (`scan::VaultExistence`, built via `build_with_existence`): a `<wiki>/`
   page linking a `<daily>/` page is not broken, and a concept linked only from
-  `<daily>/` is not an orphan. Reserved meta pages (`index.md`, `AGENTS.md` —
-  `lk_core::vault_path::RESERVED_WIKI_FILES`) are never orphans or index-drift.
+  `<daily>/` is not an orphan. Reserved meta pages
+  (`lk_core::vault_path::RESERVED_WIKI_FILES`) are never orphans or index-drift.
 - **Exit codes**: 0 = ok/no findings, 1 = findings, 2 = runtime error.
   `hubs`/`cluster`/`export`/`suggest-links` never exit 1.
 - **`cache`**: mtime-based scan cache for `--incremental`. `build()` walks

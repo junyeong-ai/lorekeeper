@@ -13,7 +13,7 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   placeholder values silently is a footgun. A vault-relative config can't be auto-found
   (the vault path lives *inside* the config).
 - **`build_llm_client`** maps `llm.provider` to a client (`queue` or `noop`).
-- **`lore ingest`** owns the 5-phase flow and the exit code: any source/extract/pipeline
+- **`lore ingest`** owns the ingest phase flow and the exit code: any source/extract/pipeline
   failure (`had_failure`) or write/flush failure returns non-zero — including under
   `--dry-run`. Dry-run uses `Pipeline::new_dry_run`, skips the tmp sweep, and does not
   write the ingest log, so it leaves the vault untouched.
