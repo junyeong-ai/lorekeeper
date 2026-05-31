@@ -1,7 +1,6 @@
 use std::path::Path;
 
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
-use strsim::sorensen_dice;
 
 use lk_core::config::DedupStrategy;
 use lk_core::event::Event;
@@ -11,7 +10,6 @@ use crate::PipelineError;
 const EVENT_IDS: TableDefinition<&str, u64> = TableDefinition::new("event_ids");
 const CONTENT_HASHES: TableDefinition<&str, u64> = TableDefinition::new("content_hashes");
 const URLS: TableDefinition<&str, u64> = TableDefinition::new("urls");
-const TITLES: TableDefinition<&str, u64> = TableDefinition::new("titles");
 
 /// Exact query-parameter keys stripped during URL canonicalisation. These are
 /// vendor-tracking parameters whose presence varies by attribution path but
@@ -99,11 +97,22 @@ pub(crate) fn normalize_url(raw: &str, extra_tracking: &[String]) -> String {
         url.set_path(&path);
     }
 
+    // On YouTube, `si` is a pure share/referral token, so the SAME video re-shared with
+    // a different `si` must still dedup. It is kept globally (not in the built-in set)
+    // because on other hosts `si` can be a resource selector — so it is stripped for
+    // YouTube hosts ONLY.
+    let strip_si = url.host_str().is_some_and(|h| {
+        matches!(
+            h,
+            "youtube.com" | "www.youtube.com" | "m.youtube.com" | "music.youtube.com" | "youtu.be"
+        )
+    });
+
     // Strip tracking parameters while preserving resource-identifying query
     // keys. Remaining pairs are sorted for canonical ordering.
     let mut pairs: Vec<(String, String)> = url
         .query_pairs()
-        .filter(|(k, _)| !is_tracking_param(k, extra_tracking))
+        .filter(|(k, _)| !(is_tracking_param(k, extra_tracking) || (strip_si && k == "si")))
         .map(|(k, v)| (k.into_owned(), v.into_owned()))
         .collect();
     pairs.sort();
@@ -149,7 +158,6 @@ pub struct DedupCache {
     /// `None` is a read-only "empty" cache used by dry-run: it never creates or
     /// writes a file, treats every event as novel, and no-ops on record/prune.
     db: Option<Database>,
-    title_threshold: f64,
     /// User-configured extra tracking-param keys, merged with the built-ins during
     /// URL canonicalisation.
     extra_tracking: Vec<String>,
@@ -161,11 +169,7 @@ pub struct DedupCache {
 }
 
 impl DedupCache {
-    pub fn open(
-        path: &Path,
-        title_threshold: f64,
-        extra_tracking: Vec<String>,
-    ) -> Result<Self, PipelineError> {
+    pub fn open(path: &Path, extra_tracking: Vec<String>) -> Result<Self, PipelineError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| PipelineError::Dedup(format!("create dir: {e}")))?;
@@ -175,7 +179,6 @@ impl DedupCache {
 
         Ok(Self {
             db: Some(db),
-            title_threshold,
             extra_tracking,
             read_only: false,
         })
@@ -185,11 +188,7 @@ impl DedupCache {
     /// If the cache file exists it is opened for reading so the preview reflects real
     /// dedup state; if it doesn't, every event is reported novel (as a real first run
     /// would also see), and no file is created.
-    pub fn open_read_only(
-        path: &Path,
-        title_threshold: f64,
-        extra_tracking: Vec<String>,
-    ) -> Result<Self, PipelineError> {
+    pub fn open_read_only(path: &Path, extra_tracking: Vec<String>) -> Result<Self, PipelineError> {
         let db = if path.exists() {
             match Database::open(path) {
                 Ok(db) => Some(db),
@@ -206,7 +205,6 @@ impl DedupCache {
         };
         Ok(Self {
             db,
-            title_threshold,
             extra_tracking,
             read_only: true,
         })
@@ -233,7 +231,6 @@ impl DedupCache {
                 txn.open_table(EVENT_IDS)?;
                 txn.open_table(CONTENT_HASHES)?;
                 txn.open_table(URLS)?;
-                txn.open_table(TITLES)?;
                 Ok(())
             })();
 
@@ -294,30 +291,22 @@ impl DedupCache {
         // Any OTHER table error — corruption, an unexpected schema state — must
         // surface rather than silently disabling persisted dedup and re-emitting
         // every prior event as novel.
-        let (tbl_ids, tbl_hashes, tbl_urls, tbl_titles) = match read_txn.as_ref() {
-            None => (None, None, None, None),
+        let (tbl_ids, tbl_hashes, tbl_urls) = match read_txn.as_ref() {
+            None => (None, None, None),
             Some(txn) => {
                 let open = |def| match txn.open_table(def) {
                     Ok(table) => Ok(Some(table)),
                     Err(redb::TableError::TableDoesNotExist(_)) => Ok(None),
                     Err(e) => Err(PipelineError::Dedup(e.to_string())),
                 };
-                let tables = (
-                    open(EVENT_IDS)?,
-                    open(CONTENT_HASHES)?,
-                    open(URLS)?,
-                    open(TITLES)?,
-                );
+                let tables = (open(EVENT_IDS)?, open(CONTENT_HASHES)?, open(URLS)?);
                 // A writable cache always has every table (created at open time), so a
                 // missing one is an anomaly worth surfacing. A read-only dry-run against an
                 // older cache legitimately lacks a newer column — keep each table's `Option`
                 // and consult whichever ARE present per strategy, rather than disabling all
                 // persisted dedup the moment one is absent.
                 if !self.read_only
-                    && (tables.0.is_none()
-                        || tables.1.is_none()
-                        || tables.2.is_none()
-                        || tables.3.is_none())
+                    && (tables.0.is_none() || tables.1.is_none() || tables.2.is_none())
                 {
                     tracing::warn!(
                         "dedup cache missing lookup tables; persisted dedup degraded for this run"
@@ -383,34 +372,6 @@ impl DedupCache {
                             }
                         }
                     }
-                    DedupStrategy::Title => {
-                        if let Some(title_table) = &tbl_titles {
-                            let iter = title_table
-                                .iter()
-                                .map_err(|e| PipelineError::Dedup(e.to_string()))?;
-                            for entry in iter {
-                                let entry =
-                                    entry.map_err(|e| PipelineError::Dedup(e.to_string()))?;
-                                let key = entry.0.value();
-                                if sorensen_dice(&event.title.to_lowercase(), &key.to_lowercase())
-                                    >= self.title_threshold
-                                {
-                                    dup = true;
-                                    break;
-                                }
-                            }
-                        }
-                        if !dup {
-                            let event_title_lower = event.title.to_lowercase();
-                            dup = novel.iter().any(|n| {
-                                sorensen_dice(&n.title.to_lowercase(), &event_title_lower)
-                                    >= self.title_threshold
-                            });
-                        }
-                        if dup {
-                            break;
-                        }
-                    }
                 }
             }
 
@@ -453,9 +414,6 @@ impl DedupCache {
             let mut urls = txn
                 .open_table(URLS)
                 .map_err(|e| PipelineError::Dedup(e.to_string()))?;
-            let mut titles = txn
-                .open_table(TITLES)
-                .map_err(|e| PipelineError::Dedup(e.to_string()))?;
 
             for event in events {
                 ids.insert(event.id.as_str(), now)
@@ -469,10 +427,6 @@ impl DedupCache {
                     urls.insert(url.as_str(), now)
                         .map_err(|e| PipelineError::Dedup(e.to_string()))?;
                 }
-
-                titles
-                    .insert(event.title.as_str(), now)
-                    .map_err(|e| PipelineError::Dedup(e.to_string()))?;
             }
         }
 
@@ -494,7 +448,7 @@ impl DedupCache {
         let mut total_removed = 0u64;
 
         {
-            for table_def in [EVENT_IDS, CONTENT_HASHES, URLS, TITLES] {
+            for table_def in [EVENT_IDS, CONTENT_HASHES, URLS] {
                 let mut table = txn
                     .open_table(table_def)
                     .map_err(|e| PipelineError::Dedup(e.to_string()))?;
@@ -622,6 +576,25 @@ mod tests {
     }
 
     #[test]
+    fn normalize_url_strips_si_on_youtube_only() {
+        // On YouTube `si` is a share/referral token: the same video re-shared with a
+        // different `si` must canonicalize identically (so it dedups), while `v` survives.
+        assert_eq!(
+            normalize_url("https://youtu.be/dQw4w9WgXcQ?si=AaA"),
+            "https://youtu.be/dQw4w9WgXcQ"
+        );
+        assert_eq!(
+            normalize_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ&si=BbB"),
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        );
+        // Two shares of the same video with different `si` collapse to one canonical URL.
+        assert_eq!(
+            normalize_url("https://youtu.be/abc?si=one"),
+            normalize_url("https://youtu.be/abc?si=two"),
+        );
+    }
+
+    #[test]
     fn normalize_url_strips_config_extra_params_exact_and_prefix() {
         let extra = vec!["pk_*".to_string(), "myref".to_string()];
         // Exact `myref` and prefix `pk_*` come off; the resource `id` stays.
@@ -725,7 +698,7 @@ mod tests {
     #[test]
     fn dedup_filters_seen_events() {
         let dir = TempDir::new().unwrap();
-        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85, vec![]).unwrap();
+        let cache = DedupCache::open(&dir.path().join("dedup.redb"), vec![]).unwrap();
 
         let cascade = vec![DedupStrategy::EventId];
         let events = vec![ev("a", "A", None), ev("b", "B", None)];
@@ -745,7 +718,7 @@ mod tests {
         // dropped) so `commit` can refresh its `seen_at` and it never ages out of the
         // retention window to re-emit as new.
         let dir = TempDir::new().unwrap();
-        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85, vec![]).unwrap();
+        let cache = DedupCache::open(&dir.path().join("dedup.redb"), vec![]).unwrap();
         let cascade = vec![DedupStrategy::EventId];
         let events = vec![ev("a", "A", None)];
         cache.record(&events).unwrap();
@@ -762,12 +735,8 @@ mod tests {
     #[test]
     fn cascade_tries_each_strategy_in_order() {
         let dir = TempDir::new().unwrap();
-        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85, vec![]).unwrap();
-        let cascade = vec![
-            DedupStrategy::EventId,
-            DedupStrategy::Url,
-            DedupStrategy::Title,
-        ];
+        let cache = DedupCache::open(&dir.path().join("dedup.redb"), vec![]).unwrap();
+        let cascade = vec![DedupStrategy::EventId, DedupStrategy::Url];
 
         cache
             .record(&[ev("seed", "Seeded Title", Some("https://example.com/a"))])
@@ -781,9 +750,10 @@ mod tests {
         )];
         assert_eq!(cache.dedup(by_url, &cascade).unwrap().novel.len(), 0);
 
-        // Matches via Title only (different id, no url).
-        let by_title = vec![ev("other2", "Seeded Title", None)];
-        assert_eq!(cache.dedup(by_title, &cascade).unwrap().novel.len(), 0);
+        // Matches nothing in the cascade → novel (same title is NOT a dedup signal:
+        // distinct observations that merely share a headline must both survive).
+        let same_title = vec![ev("other2", "Seeded Title", None)];
+        assert_eq!(cache.dedup(same_title, &cascade).unwrap().novel.len(), 1);
 
         // Matches nothing in the cascade → novel.
         let novel = vec![ev("fresh", "Brand New", Some("https://example.com/z"))];
@@ -795,7 +765,7 @@ mod tests {
         // The same article ingested via two sources (different event IDs and URLs)
         // collapses to one event when content-hash is in the cascade.
         let dir = TempDir::new().unwrap();
-        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85, vec![]).unwrap();
+        let cache = DedupCache::open(&dir.path().join("dedup.redb"), vec![]).unwrap();
         let cascade = vec![DedupStrategy::ContentHash];
         let a = ev("from-rss", "Anthropic releases Opus 4.7", None);
         let b = ev("from-mail", "Anthropic releases Opus 4.7", None);
@@ -808,8 +778,7 @@ mod tests {
         // Dry-run with no existing cache (open_read_only → None) must still drop
         // intra-batch duplicates so the preview matches a real run.
         let dir = TempDir::new().unwrap();
-        let cache =
-            DedupCache::open_read_only(&dir.path().join("absent.redb"), 0.85, vec![]).unwrap();
+        let cache = DedupCache::open_read_only(&dir.path().join("absent.redb"), vec![]).unwrap();
         let cascade = vec![DedupStrategy::EventId];
         let batch = vec![ev("a", "A", None), ev("a", "A", None)];
         let novel = cache.dedup(batch, &cascade).unwrap().novel;
@@ -825,7 +794,7 @@ mod tests {
     #[test]
     fn intra_batch_duplicates_are_filtered() {
         let dir = TempDir::new().unwrap();
-        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85, vec![]).unwrap();
+        let cache = DedupCache::open(&dir.path().join("dedup.redb"), vec![]).unwrap();
         let cascade = vec![DedupStrategy::EventId, DedupStrategy::Url];
 
         // Two events with the same id in ONE batch (nothing committed yet).
@@ -844,7 +813,7 @@ mod tests {
     #[test]
     fn url_dedup_filters_same_url_different_id() {
         let dir = TempDir::new().unwrap();
-        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85, vec![]).unwrap();
+        let cache = DedupCache::open(&dir.path().join("dedup.redb"), vec![]).unwrap();
         let cascade = vec![DedupStrategy::Url];
 
         cache
@@ -863,7 +832,7 @@ mod tests {
     #[test]
     fn url_dedup_matches_normalized_urls() {
         let dir = TempDir::new().unwrap();
-        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85, vec![]).unwrap();
+        let cache = DedupCache::open(&dir.path().join("dedup.redb"), vec![]).unwrap();
         let cascade = vec![DedupStrategy::Url];
 
         cache
@@ -881,7 +850,7 @@ mod tests {
     #[test]
     fn url_dedup_distinguishes_different_resource_params() {
         let dir = TempDir::new().unwrap();
-        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85, vec![]).unwrap();
+        let cache = DedupCache::open(&dir.path().join("dedup.redb"), vec![]).unwrap();
         let cascade = vec![DedupStrategy::Url];
 
         cache
@@ -910,35 +879,9 @@ mod tests {
     }
 
     #[test]
-    fn title_dedup_matches_across_dates() {
-        let dir = TempDir::new().unwrap();
-        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85, vec![]).unwrap();
-
-        cache
-            .record(&[ev("a", "Anthropic releases Opus 4.7", None)])
-            .unwrap();
-
-        let cascade = vec![DedupStrategy::Title];
-
-        // A near-identical title on the same date is a duplicate.
-        let same_day = vec![ev("b", "Anthropic releases Opus 4.7!", None)];
-        assert_eq!(cache.dedup(same_day, &cascade).unwrap().novel.len(), 0);
-
-        // The same title on a different date is also a duplicate.
-        let other_day = Event {
-            date: jiff::civil::date(2026, 6, 1),
-            ..ev("c", "Anthropic releases Opus 4.7", None)
-        };
-        assert_eq!(
-            cache.dedup(vec![other_day], &cascade).unwrap().novel.len(),
-            0
-        );
-    }
-
-    #[test]
     fn prune_removes_old_entries() {
         let dir = TempDir::new().unwrap();
-        let cache = DedupCache::open(&dir.path().join("dedup.redb"), 0.85, vec![]).unwrap();
+        let cache = DedupCache::open(&dir.path().join("dedup.redb"), vec![]).unwrap();
 
         cache.record(&[ev("a", "A", Some("http://x"))]).unwrap();
 
@@ -946,7 +889,7 @@ mod tests {
         let removed = cache.prune(future_cutoff).unwrap();
         assert!(
             removed >= 3,
-            "should remove from all 3 tables (event_id + url + title)"
+            "should remove from all 3 tables (event_id + content_hash + url)"
         );
     }
 }

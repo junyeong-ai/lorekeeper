@@ -1,5 +1,13 @@
 use super::{find_config, load_config};
 
+/// Retention horizon for the ingest log, dedup cache, and drained queue files.
+///
+/// Dedup invariant: an item recognized as a duplicate has its `seen_at` refreshed on
+/// every re-arrival, so a *steady-state* recurring item never ages out. But an item
+/// absent for longer than this window is pruned, and a later re-arrival is then treated
+/// as novel (a fresh page + LLM tasks). So this must exceed the longest expected silent
+/// gap between re-arrivals of the same item — 90 days comfortably covers daily/weekly
+/// feeds and quarterly recurrences; lengthen it if a source can resurface less often.
 const RETENTION_DAYS: i64 = 90;
 
 pub async fn run(opts: &super::GlobalOpts) -> miette::Result<()> {
@@ -102,8 +110,9 @@ pub async fn run(opts: &super::GlobalOpts) -> miette::Result<()> {
     // 3. Prune dedup cache
     let dedup_path = vault_root.join(".lorekeeper").join("dedup.redb");
     if dedup_path.exists() {
-        let cache = lk_pipeline::dedup_cache_for_maintenance(&dedup_path, &config)
-            .map_err(|e| miette::miette!("dedup open: {e}"))?;
+        let cache =
+            lk_pipeline::DedupCache::open(&dedup_path, config.dedup.extra_tracking_params.clone())
+                .map_err(|e| miette::miette!("dedup open: {e}"))?;
         let removed = cache
             .prune(cutoff_secs as u64)
             .map_err(|e| miette::miette!("dedup prune: {e}"))?;

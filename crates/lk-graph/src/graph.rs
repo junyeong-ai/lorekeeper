@@ -112,11 +112,12 @@ impl WikiGraph {
 
         // Aliases form the lowest-precedence resolution layer (after filename and id):
         // a concept's declared `aliases` let a bare `[[synonym]]` link land on it, but
-        // never shadow a real page, and the first concept to claim an alias wins. Real-page
-        // membership comes from the full-vault `existence` (not just the in-scope nodes),
-        // so this precedence matches `VaultExistence`/`backlinks` exactly even when the
-        // analysis scope is a strict subset of the vault.
-        let mut alias_to_node: HashMap<String, NodeIndex> = HashMap::new();
+        // never shadow a real page. When two concepts claim the same alias the smallest-id
+        // concept wins — order-independent and the SAME tiebreak `VaultExistence`/`backlinks`
+        // use, so all three resolvers pick the same concept. Real-page membership comes from
+        // the full-vault `existence` (not just the in-scope nodes), so this precedence
+        // matches even when the analysis scope is a strict subset of the vault.
+        let mut alias_to_node: HashMap<String, (&str, NodeIndex)> = HashMap::new();
         for page in pages {
             if !is_concept_page(&page.path, dirs) {
                 continue;
@@ -126,7 +127,15 @@ impl WikiGraph {
                 if existence.is_real_page(alias) {
                     continue;
                 }
-                alias_to_node.entry(alias.clone()).or_insert(node);
+                alias_to_node
+                    .entry(alias.clone())
+                    .and_modify(|(cur_id, cur_node)| {
+                        if page.id.as_str() < *cur_id {
+                            *cur_id = page.id.as_str();
+                            *cur_node = node;
+                        }
+                    })
+                    .or_insert((page.id.as_str(), node));
             }
         }
 
@@ -142,7 +151,7 @@ impl WikiGraph {
                     .get(target.as_str())
                     .map(|(node, _)| *node)
                     .or_else(|| id_to_node.get(target.as_str()).copied())
-                    .or_else(|| alias_to_node.get(target.as_str()).copied());
+                    .or_else(|| alias_to_node.get(target.as_str()).map(|(_, node)| *node));
                 if let Some(target_idx) = in_scope {
                     if source_idx != target_idx {
                         graph.add_edge(source_idx, target_idx, ());

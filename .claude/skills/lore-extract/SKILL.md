@@ -196,8 +196,9 @@ Extract knowledge using the manifest. Requires a prior scan.
       | Rule invariants | → Key Findings |
       | Spec problem statement | → Background & Constraints |
 
-   e. **Generalise** using manifest `strip_patterns`.
-      Keep technology names, error messages, API surfaces intact.
+   e. **Generalise** using manifest `strip_patterns` — applied to the BODY prose only,
+      not to `id`/slug (the page id is `{project}-{slug}`, so the project name necessarily
+      survives there). Keep technology names, error messages, API surfaces intact.
 
    f. Extract concepts. Assign categories via `concept_mapping`.
 

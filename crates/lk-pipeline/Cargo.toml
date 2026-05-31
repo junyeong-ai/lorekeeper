@@ -14,7 +14,6 @@ tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 jiff = { workspace = true }
-strsim = { workspace = true }
 redb = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }

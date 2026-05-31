@@ -29,17 +29,20 @@ pub fn mark_personal(events: &mut [Event], track_personal: bool) {
     }
 }
 
-/// A character that can be part of the same keyword token as a matched needle.
-/// **ASCII only** — alphanumerics plus the punctuation that appears inside the
-/// kinds of tokens classification keywords target. CJK scripts are deliberately
-/// NOT identifier characters: unlike space-delimited Latin text, agglutinative
-/// Korean writes content morphemes with no separator (the particle in "검토를"),
-/// so treating an adjacent Hangul syllable as "same token" would make every
-/// particle/affix suppress a real keyword match. Excluding CJK means a CJK
-/// keyword matches as a substring (correct for morpheme-joined text) while ASCII
-/// keeps strict token boundaries.
+/// A character that can be part of the same keyword token as a matched needle —
+/// the standard `\w` word-character set: ASCII alphanumerics plus `_`. Hyphens,
+/// dots, and other punctuation are treated as token boundaries, so a keyword
+/// matches inside a compound: `AI` matches `AI-powered`, `GPT` matches `GPT-4`,
+/// `node` matches `node.js`. The original false positive this guards against
+/// (`AI` inside `FAIR`) is still rejected by the alphanumeric boundary alone.
+/// CJK scripts are deliberately NOT identifier characters: unlike space-delimited
+/// Latin text, agglutinative Korean writes content morphemes with no separator
+/// (the particle in "검토를"), so treating an adjacent Hangul syllable as "same
+/// token" would make every particle/affix suppress a real keyword match. Excluding
+/// CJK means a CJK keyword matches as a substring (correct for morpheme-joined
+/// text) while ASCII keeps strict token boundaries.
 fn is_identifier_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '%' | '+' | '-')
+    c.is_ascii_alphanumeric() || c == '_'
 }
 
 /// Substring match that requires the needle to NOT be flanked by ASCII identifier
@@ -76,6 +79,20 @@ pub fn classify_by_keywords(events: &mut [Event], rules: &[lk_core::config::Clas
         return;
     }
 
+    // Lowercase each rule's non-blank keywords once up front rather than per event.
+    let prepared: Vec<(&lk_core::config::ClassifyRule, Vec<String>)> = rules
+        .iter()
+        .map(|rule| {
+            let keywords = rule
+                .keywords
+                .iter()
+                .filter(|kw| !kw.trim().is_empty())
+                .map(|kw| kw.to_lowercase())
+                .collect();
+            (rule, keywords)
+        })
+        .collect();
+
     for event in events {
         if event.classification.is_some() {
             continue;
@@ -83,12 +100,8 @@ pub fn classify_by_keywords(events: &mut [Event], rules: &[lk_core::config::Clas
 
         let text = format!("{} {}", event.title, event.body).to_lowercase();
 
-        for rule in rules {
-            let matched = rule
-                .keywords
-                .iter()
-                .filter(|kw| !kw.trim().is_empty())
-                .any(|kw| contains_bounded(&text, &kw.to_lowercase()));
+        for (rule, keywords) in &prepared {
+            let matched = keywords.iter().any(|kw| contains_bounded(&text, kw));
 
             if matched {
                 event.classification = Some(rule.category.clone());
@@ -241,6 +254,26 @@ mod tests {
         let mut events2 = vec![make_event("AI research update")];
         classify_by_keywords(&mut events2, &rules);
         assert_eq!(events2[0].classification.as_deref(), Some("ai_topic"));
+    }
+
+    #[test]
+    fn keyword_matches_inside_hyphen_and_dot_compounds() {
+        // Hyphens/dots are token boundaries, so a keyword matches inside a compound —
+        // the common shape in tech text (`AI-powered`, `GPT-4`, `node.js`).
+        let rules = vec![lk_core::config::ClassifyRule {
+            category: "ai_topic".into(),
+            keywords: vec!["AI".into(), "GPT".into(), "node".into()],
+            work_category: None,
+        }];
+        for title in ["AI-powered platform", "GPT-4 launch", "node.js runtime"] {
+            let mut events = vec![make_event(title)];
+            classify_by_keywords(&mut events, &rules);
+            assert_eq!(
+                events[0].classification.as_deref(),
+                Some("ai_topic"),
+                "keyword must match inside compound {title:?}"
+            );
+        }
     }
 
     #[test]

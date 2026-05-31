@@ -1170,7 +1170,6 @@ dependencies = [
  "redb",
  "serde",
  "serde_json",
- "strsim",
  "tempfile",
  "thiserror",
  "tokio",

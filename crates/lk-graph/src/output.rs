@@ -3,7 +3,7 @@ use serde::Serialize;
 
 use crate::alias::{AliasConflict, AliasConflictKind};
 use crate::audit::AuditCandidate;
-use crate::backlinks::{ConceptUpdate, SyncReport};
+use crate::backlinks::{BacklinksSyncResult, ConceptUpdate};
 use crate::cluster::{ClusterResult, LinkSuggestion};
 use crate::concept_lint::{InvalidCategoryConcept, NearDuplicateConcept, UnresolvedConflict};
 use crate::export::GraphExport;
@@ -377,7 +377,7 @@ pub fn print_stale(r: &StaleReport, dirs: &VaultDirs) {
 #[derive(Debug, Serialize)]
 pub struct BacklinksSyncReport {
     #[serde(flatten)]
-    pub sync: SyncReport,
+    pub sync: BacklinksSyncResult,
     pub changed: usize,
 }
 

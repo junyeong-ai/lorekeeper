@@ -26,18 +26,6 @@ use lk_vault::VaultReader;
 
 use concept_draft::ConceptDrafts;
 
-/// Helper for the `lore maintenance` CLI command: opens the dedup cache standalone.
-pub fn dedup_cache_for_maintenance(
-    path: &Path,
-    config: &Config,
-) -> Result<DedupCache, PipelineError> {
-    DedupCache::open(
-        path,
-        config.dedup.title_threshold,
-        config.dedup.extra_tracking_params.clone(),
-    )
-}
-
 #[derive(Debug, Error)]
 pub enum PipelineError {
     #[error("dedup: {0}")]
@@ -93,11 +81,7 @@ impl Pipeline {
         config: &Config,
     ) -> Result<Self, PipelineError> {
         let dedup_path = vault_root.join(".lorekeeper").join("dedup.redb");
-        let dedup = DedupCache::open(
-            &dedup_path,
-            config.dedup.title_threshold,
-            config.dedup.extra_tracking_params.clone(),
-        )?;
+        let dedup = DedupCache::open(&dedup_path, config.dedup.extra_tracking_params.clone())?;
         Ok(Self::with_dedup(ctx, dedup, config, vault_root))
     }
 
@@ -110,11 +94,8 @@ impl Pipeline {
         config: &Config,
     ) -> Result<Self, PipelineError> {
         let dedup_path = vault_root.join(".lorekeeper").join("dedup.redb");
-        let dedup = DedupCache::open_read_only(
-            &dedup_path,
-            config.dedup.title_threshold,
-            config.dedup.extra_tracking_params.clone(),
-        )?;
+        let dedup =
+            DedupCache::open_read_only(&dedup_path, config.dedup.extra_tracking_params.clone())?;
         Ok(Self::with_dedup(ctx, dedup, config, vault_root))
     }
 

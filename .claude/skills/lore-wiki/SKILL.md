@@ -73,7 +73,11 @@ Answer a question grounded in vault content, with compounding.
      for the exploration page format (frontmatter keys, section headings, ownership).
      Use slug-only values (no `[[…]]` wikilinks) in the `grounded_concepts` and
      `grounded_documents` frontmatter arrays; wikilinks belong in the body's
-     Grounding section. Tell the user where it landed.
+     Grounding section. Then **finalize** so the new page leaves the graph clean:
+     `lore graph backlinks-sync` (its Grounding wikilinks are real citations that
+     raise each grounded concept's `source_count`), then `lore wiki index` (so the
+     exploration is catalogued and the next audit shows no index drift). Tell the
+     user where it landed.
    - **Ephemeral** (single-fact, navigational lookup) → do not file.
 
    The judgment is per-answer by the model. No frequency rule, no

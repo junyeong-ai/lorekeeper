@@ -223,8 +223,17 @@ impl VaultExistence {
                 if ids.contains(alias) || by_filename.contains_key(alias) {
                     continue;
                 }
+                // Winner is the lexicographically-smallest claimant id, pinned here so it
+                // never depends on the caller's page ordering. The backlinks resolver
+                // tiebreaks on the same key, so a duplicate alias resolves to one concept
+                // and `source_count` can never diverge from the resolved graph.
                 by_alias
                     .entry(alias.clone())
+                    .and_modify(|cur| {
+                        if page.id < *cur {
+                            *cur = page.id.clone();
+                        }
+                    })
                     .or_insert_with(|| page.id.clone());
             }
         }
@@ -485,6 +494,37 @@ mod tests {
         ];
         let ex = VaultExistence::from_pages(&pages, &VaultDirs::default());
         assert_eq!(ex.resolve("k8s"), Some("wiki/concepts/k8s"));
+    }
+
+    #[test]
+    fn duplicate_alias_resolves_to_smallest_id_regardless_of_order() {
+        // Two concepts claim the same alias. The winner must be the lexicographically
+        // smallest id and must NOT depend on the order pages are passed in — otherwise a
+        // differently-ordered caller (e.g. backlinks) could credit a different concept and
+        // make `source_count` disagree with the resolved graph.
+        let apple = ScannedPage {
+            id: "wiki/concepts/apple".to_owned(),
+            path: PathBuf::from("wiki/concepts/apple.md"),
+            title: "Apple".to_owned(),
+            outgoing: vec![],
+            aliases: vec!["fruit".to_owned()],
+        };
+        let banana = ScannedPage {
+            id: "wiki/concepts/banana".to_owned(),
+            path: PathBuf::from("wiki/concepts/banana.md"),
+            title: "Banana".to_owned(),
+            outgoing: vec![],
+            aliases: vec!["fruit".to_owned()],
+        };
+        let forward =
+            VaultExistence::from_pages(&[apple.clone(), banana.clone()], &VaultDirs::default());
+        let reversed = VaultExistence::from_pages(&[banana, apple], &VaultDirs::default());
+        assert_eq!(forward.resolve("fruit"), Some("wiki/concepts/apple"));
+        assert_eq!(
+            reversed.resolve("fruit"),
+            Some("wiki/concepts/apple"),
+            "duplicate-alias winner must be order-independent"
+        );
     }
 
     #[test]

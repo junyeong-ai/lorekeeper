@@ -52,10 +52,14 @@ concept_categories) with the `Synthesizer`.
   a concept anywhere in the vault never invalidates unrelated cache entries; `categories`
   is sorted before hashing so config field order can't perturb the cache.
 - **`new_dry_run`** opens the dedup cache read-only (no file creation).
-- **DedupCache**: default cascade is `event-id → content-hash → url` (first match =
-  duplicate); `title` (fuzzy Sørensen-Dice) is **opt-in** — it can merge distinct
-  same-title observations, so recurring-title feeds keep it off. `dedup` returns
-  `{novel, duplicates}`; `commit` records novel AND re-records duplicates (upsert) to
+- **DedupCache**: cascade is `event-id → content-hash → url` (first match =
+  duplicate). Every strategy is an EXACT match, so dedup is lossless: it merges only
+  provably-identical observations and never collapses two distinct records (a false
+  merge would silently drop an observation, and a dropped event never becomes a page or
+  gets cited — irrecoverable in an accumulate-and-cite vault). Records that merely share
+  a title/headline both survive; downstream concept-merge, `backlinks-sync`, and
+  `near-duplicate-concepts` reconcile genuine overlap losslessly.
+  `dedup` returns `{novel, duplicates}`; `commit` records novel AND re-records duplicates (upsert) to
   refresh `seen_at`, so a steady-state re-arrival never ages past retention and
   re-emits as new. Persisted-table lookups are gated on the cache being present, but
   the intra-batch (seen-id/url) checks ALWAYS run — so a dry-run with no
@@ -64,9 +68,7 @@ concept_categories) with the `Synthesizer`.
   removal (built-in `utm_*`, `fbclid`, `gclid`, `igshid`, `ref_src`, … — single-letter
   ambiguous params like `si` are deliberately kept (host-specific resource selectors) PLUS
   `dedup.extra_tracking_params` from config, where a trailing `*` is a prefix match)
-  with resource-identifying params preserved and sorted. Titles are
-  compared case-insensitively (both sides lowercased) and scanned across the
-  full table (no date partition). The cache is recreated only on a recoverable mismatch — a schema-type
+  with resource-identifying params preserved and sorted. The cache is recreated only on a recoverable mismatch — a schema-type
   change or an outdated on-disk format after a redb major upgrade
   (`DatabaseError::UpgradeRequired`) — never on I/O/corruption errors. On recreation
   the stale file is renamed to `*.redb.backup.{timestamp}-pid{pid}` (not deleted),
@@ -79,8 +81,10 @@ concept_categories) with the `Synthesizer`.
   only when the source opts into `track_personal`. A recipient/CC/mention is never the
   author, so it is never personal. `classify_by_keywords` reads `SourceConfig.classify`
   (ordered `Vec<ClassifyRule>`, first match wins) and uses `contains_bounded`
-  (ASCII-alphanumeric/`._%+-` token boundary; CJK matches across attached particles so
-  `검토`→`검토를`/`재검토`) — keyword classification only. Classification is purely
+  (standard `\w` token boundary — ASCII-alphanumeric + `_`, so a keyword matches inside
+  hyphen/dot compounds like `AI`→`AI-powered`, `GPT`→`GPT-4`; CJK matches across attached
+  particles so `검토`→`검토를`/`재검토`) — keyword classification only. Keywords are
+  lowercased once per `classify_by_keywords` call, not per event. Classification is purely
   deterministic; an event no rule matches stays uncategorized (general section /
   `uncategorized` work-log) — a safe default with no LLM step.
 - **Concept merge** reads existing `created`/`updated` frontmatter (the keys actually

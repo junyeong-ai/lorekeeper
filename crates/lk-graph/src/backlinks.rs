@@ -35,9 +35,11 @@ pub struct ConceptUpdate {
     pub removed: Vec<String>,
 }
 
-/// Aggregate report for the whole sync run.
+/// Outcome of a backlinks-sync run (a mutating operation), mirroring `MergeResult`:
+/// domain-module operation outcomes are `*Result`; the CLI presentation wrapper is
+/// `output::BacklinksSyncReport`.
 #[derive(Debug, Default, Serialize)]
-pub struct SyncReport {
+pub struct BacklinksSyncResult {
     /// Concept pages whose sources section differed and was rewritten (or would be,
     /// under `--dry-run`).
     pub updated: Vec<ConceptUpdate>,
@@ -60,7 +62,7 @@ pub fn sync_concept_backlinks(
     locale: Locale,
     dry_run: bool,
     dirs: &VaultDirs,
-) -> Result<SyncReport, GraphError> {
+) -> Result<BacklinksSyncResult, GraphError> {
     // Reverse index: concept slug (filename) → sorted set of source page ids that
     // wikilink to it. Use BTreeMap/BTreeSet so the rendered body is deterministic.
     //
@@ -83,7 +85,11 @@ pub fn sync_concept_backlinks(
                 .and_then(slugify)
         })
         .collect();
-    let mut alias_to_stem: HashMap<String, String> = HashMap::new();
+    // alias → (winning concept id, that concept's stem). When two concepts claim the
+    // same alias the winner is the concept with the smallest id — the SAME tiebreak
+    // `VaultExistence::by_alias` uses — so a duplicate alias credits the exact concept
+    // the graph resolves it to, regardless of page order or concept-file nesting.
+    let mut alias_winner: HashMap<String, (String, String)> = HashMap::new();
     for page in pages {
         if !is_concept_page(&page.path, dirs) {
             continue;
@@ -100,11 +106,21 @@ pub fn sync_concept_backlinks(
             if real_slugs.contains(alias) {
                 continue;
             }
-            alias_to_stem
+            alias_winner
                 .entry(alias.clone())
-                .or_insert_with(|| stem.clone());
+                .and_modify(|(cur_id, cur_stem)| {
+                    if page.id < *cur_id {
+                        *cur_id = page.id.clone();
+                        *cur_stem = stem.clone();
+                    }
+                })
+                .or_insert_with(|| (page.id.clone(), stem.clone()));
         }
     }
+    let alias_to_stem: HashMap<String, String> = alias_winner
+        .into_iter()
+        .map(|(alias, (_, stem))| (alias, stem))
+        .collect();
 
     let mut incoming: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for page in pages {
@@ -122,9 +138,9 @@ pub fn sync_concept_backlinks(
     }
 
     let writer = VaultWriter::new(vault_root);
-    let mut report = SyncReport {
+    let mut report = BacklinksSyncResult {
         dry_run,
-        ..SyncReport::default()
+        ..BacklinksSyncResult::default()
     };
 
     for page in pages {
@@ -366,6 +382,47 @@ mod tests {
             std::fs::read_to_string(dir.path().join("wiki/concepts/kubernetes.md")).unwrap();
         assert!(content.contains("## 출처\n\n- [[daily/x/2026-05-20]]"));
         assert!(content.contains("source_count: 1"));
+    }
+
+    #[test]
+    fn duplicate_alias_credits_smallest_id_concept_not_smallest_stem() {
+        // Two concepts in different subdirectories claim the same alias. The winner must
+        // be the smallest *id* (matching VaultExistence's resolver), NOT the smallest stem.
+        // Here id order and stem order disagree, so this distinguishes the two tiebreaks
+        // and locks the resolvers to a single shared key.
+        let dir = TempDir::new().unwrap();
+        write_concept(&dir, "aaa/banana", &[]); // smaller id, larger stem
+        write_concept(&dir, "zzz/apple", &[]); // larger id, smaller stem
+        let pages = vec![
+            ScannedPage {
+                id: "wiki/concepts/zzz/apple".to_owned(),
+                path: PathBuf::from("wiki/concepts/zzz/apple.md"),
+                title: "apple".to_owned(),
+                outgoing: vec![],
+                aliases: vec!["fruit".to_owned()],
+            },
+            ScannedPage {
+                id: "wiki/concepts/aaa/banana".to_owned(),
+                path: PathBuf::from("wiki/concepts/aaa/banana.md"),
+                title: "banana".to_owned(),
+                outgoing: vec![],
+                aliases: vec!["fruit".to_owned()],
+            },
+            make_page("daily/x/2026-05-20", "daily/x/2026-05-20.md", &["fruit"]),
+        ];
+        sync_concept_backlinks(&pages, dir.path(), Locale::Ko, false, &VaultDirs::default())
+            .unwrap();
+        let banana =
+            std::fs::read_to_string(dir.path().join("wiki/concepts/aaa/banana.md")).unwrap();
+        assert!(
+            banana.contains("- [[daily/x/2026-05-20]]"),
+            "the smallest-id concept must be credited the alias citation"
+        );
+        let apple = std::fs::read_to_string(dir.path().join("wiki/concepts/zzz/apple.md")).unwrap();
+        assert!(
+            !apple.contains("- [[daily/x/2026-05-20]]"),
+            "the smaller-stem (larger-id) concept must NOT be credited"
+        );
     }
 
     #[test]

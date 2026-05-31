@@ -296,7 +296,7 @@ Rust 1.95 / 2024 edition. Key crates:
 - `jiff` (date/time)
 - `minijinja` (templates)
 - `redb` (embedded dedup cache)
-- `strsim` (title similarity)
+- `strsim` (concept near-duplicate detection)
 - `blake3` (event ID hashing)
 - `thiserror` / `miette` (errors)
 - `tracing` / `tracing-subscriber` (structured logging)

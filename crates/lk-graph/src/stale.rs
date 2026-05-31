@@ -159,6 +159,12 @@ pub fn find_stale(
         let Some(&src_date) = date_by_id.get(page.id.as_str()) else {
             continue;
         };
+        // A machine-written `updated:`/`created:` can be mis-stamped in the future
+        // (LLM error, clock skew). A future-dated source must never become a permanent
+        // liveness anchor that suppresses staleness for every concept it cites.
+        if src_date > today {
+            continue;
+        }
         for target in &page.outgoing {
             if let Some(target_id) = existence.resolve(target)
                 && target_id != page.id.as_str()
@@ -351,6 +357,39 @@ mod tests {
         assert!(
             stale.is_empty(),
             "a concept cited by a recent page is live, not stale: {stale:?}"
+        );
+    }
+
+    #[test]
+    fn future_dated_source_does_not_keep_old_concept_alive() {
+        // A source page whose `updated:` is mis-stamped in the future must NOT become a
+        // permanent liveness anchor. The old concept it cites stays stale.
+        let dir = TempDir::new().unwrap();
+        let dirs = VaultDirs::default();
+        write(
+            &dir,
+            "wiki/concepts/rag.md",
+            "---\nupdated: 2025-11-25\n---\n\nbody\n",
+        );
+        write(
+            &dir,
+            "daily/ai-news/2099-01-01.md",
+            "---\nupdated: 2099-01-01\n---\n\nSee [[rag]].\n",
+        );
+        let concept = page("wiki/concepts/rag", "wiki/concepts/rag.md");
+        let future = ScannedPage {
+            id: "daily/ai-news/2099-01-01".to_owned(),
+            path: PathBuf::from("daily/ai-news/2099-01-01.md"),
+            title: "d".to_owned(),
+            outgoing: vec!["rag".to_owned()],
+            aliases: Vec::new(),
+        };
+        let all = vec![concept.clone(), future];
+        let stale = find_stale(&[concept], &all, dir.path(), today(), 90, &dirs).unwrap();
+        assert_eq!(
+            stale.len(),
+            1,
+            "a future-dated citation must not suppress staleness: {stale:?}"
         );
     }
 

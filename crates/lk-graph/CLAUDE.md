@@ -7,6 +7,11 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
 
 - **deps**: `lk-core` (slugify, frontmatter, wikilink) + `petgraph` + `rayon` +
   `walkdir`. No reqwest/tokio — independent of the ingestion stack.
+- **Output type naming**: CLI-facing presentation structs in `output.rs` are `*Report`
+  (`HubsReport`, `StaleReport`, `BacklinksSyncReport`, …). Domain-module computation/
+  operation outcomes are `*Result` (`ClusterResult`, `SuggestResult`, `MergeResult`,
+  `BacklinksSyncResult`). A domain `*Result` may be wrapped by an `output.rs` `*Report`
+  for display (e.g. `BacklinksSyncResult` → `BacklinksSyncReport`).
 - **Domain rules are single-sourced**: slug normalization = `lk_core::slugify` (NFKC),
   frontmatter = `lk_core::frontmatter::parse_page`, wikilinks =
   `lk_core::wikilink::extract_wikilinks`. No second implementation.
@@ -24,9 +29,11 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
   lets a bare `[[synonym]]` resolve to it. Applied CONSISTENTLY in all three
   resolvers — `VaultExistence` (`by_alias`), `WikiGraph` (`alias_to_node`), and
   `backlinks` (`alias_to_stem`, so `source_count` matches the graph). An alias never
-  overrides a real id/filename, and the first concept to claim one wins. `alias::find_alias_conflicts`
+  overrides a real id/filename, and when two concepts claim the same alias the
+  smallest-id concept wins — order-independent, so all three resolvers pick the same
+  concept regardless of scan order or concept-file nesting. `alias::find_alias_conflicts`
   surfaces the two ways this goes wrong (a `Duplicate` alias claimed by two concepts;
-  one that `ShadowsRealPage`) as a `graph lint` finding — so the deterministic first-wins
+  one that `ShadowsRealPage`) as a `graph lint` finding — so the deterministic winner
   never calcifies silently. This is the deterministic, audit-friendly answer to synonyms
   (no embeddings): the LLM/human registers the alias, the graph resolves it.
 - **Integrity checks vs analysis scope**: `hubs`/`cluster`/`suggest-links`

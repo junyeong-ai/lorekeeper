@@ -244,12 +244,10 @@ sources:
 
 # ─── Deduplication ────────────────────────────────────────
 dedup:
-  # Evidence-based stages only by default: same event-id / identical body / same canonical URL.
-  # `title` (fuzzy title matching) is opt-in — leave it out to preserve recurring titles
-  # ("Weekly Sync" and the like) as distinct observations. Add it only for sources whose title
-  # is a unique identifier.
+  # Exact-match stages: same event-id / identical body / same canonical URL. Each proves
+  # "same observation" exactly, so dedup is lossless — it never collapses two distinct
+  # records (recurring "Weekly Sync" notes stay separate observations).
   cascade: [event-id, content-hash, url]
-  title_threshold: 0.85
   # Extra query keys to strip during URL canonicalisation, beyond the built-in tracking set
   # (utm_*, fbclid, gclid, igshid, ref_src …). A trailing `*` is a prefix match (e.g. `pk_*`).
   # Never add a resource-identifying key — distinct pages would be merged into one.

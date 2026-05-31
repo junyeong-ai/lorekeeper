@@ -164,13 +164,6 @@ impl Config {
             ));
         }
 
-        if !(0.0..=1.0).contains(&self.dedup.title_threshold) {
-            return Err(ConfigError::Validation(format!(
-                "dedup.title_threshold must be in [0.0, 1.0], got {}",
-                self.dedup.title_threshold
-            )));
-        }
-
         for param in &self.dedup.extra_tracking_params {
             // An entry is a literal key, optionally ending in a single `*` for a prefix
             // match. Reject anything that leaves no literal prefix (blank, whitespace,
@@ -679,7 +672,6 @@ impl std::fmt::Display for SourceType {
 #[serde(default)]
 pub struct DedupConfig {
     pub cascade: Vec<DedupStrategy>,
-    pub title_threshold: f64,
     /// Additional query-parameter keys to strip during URL canonicalisation, on top
     /// of the built-in vendor-tracking set. For attribution parameters a site adds
     /// that aren't yet built in — never resource-identifying keys, which would merge
@@ -690,18 +682,16 @@ pub struct DedupConfig {
 impl Default for DedupConfig {
     fn default() -> Self {
         Self {
-            // Default to evidence-based stages only: a shared event-id, identical body
-            // content, or the same canonical URL each prove "same observation". Fuzzy
-            // `Title` is NOT default — recurring titles ("Weekly Sync", repeated Jira
-            // summaries, release notes) are distinct observations, and a full-table
-            // fuzzy match would silently merge and drop them. A source that genuinely
-            // benefits from title dedup opts in explicitly.
+            // Exact-match stages only: a shared event-id, identical body content, or the
+            // same canonical URL each prove "same observation" exactly. Dedup is therefore
+            // lossless — it never collapses two distinct records, since a false merge would
+            // silently drop an observation that can never be recovered in an
+            // accumulate-and-cite vault.
             cascade: vec![
                 DedupStrategy::EventId,
                 DedupStrategy::ContentHash,
                 DedupStrategy::Url,
             ],
-            title_threshold: 0.85,
             extra_tracking_params: Vec::new(),
         }
     }
@@ -713,10 +703,6 @@ pub enum DedupStrategy {
     EventId,
     ContentHash,
     Url,
-    /// Fuzzy (Sørensen-Dice) title match across the whole table. Opt-in only: it can
-    /// merge distinct same-title observations. Use for sources where titles are stable
-    /// unique identifiers, not for recurring-title feeds.
-    Title,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1402,24 +1388,6 @@ synthesis:
             config.validate().is_err(),
             "scheduling a personal review with performance disabled must be rejected"
         );
-    }
-
-    #[test]
-    fn validate_rejects_bad_threshold() {
-        let yaml = r#"
-vault:
-  root: /tmp/vault
-identity:
-  name: test
-  email: test@test.com
-sources:
-  s1:
-    type: gmail
-dedup:
-  title_threshold: 1.5
-"#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
-        assert!(config.validate().is_err());
     }
 
     #[test]
