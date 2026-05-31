@@ -50,7 +50,7 @@ struct Entry {
 }
 
 /// Build the `log.md` body: a reverse-chronological knowledge timeline for the vault at
-/// `vault_root`, bounded to the most recent [`TIMELINE_WINDOW_DAYS`]. A pure function of
+/// `vault_root`, bounded to the most recent `TIMELINE_WINDOW_DAYS`. A pure function of
 /// on-disk frontmatter — re-running on an unchanged vault yields identical bytes. Pages
 /// missing a parseable `created` date are skipped (they have no place on a timeline),
 /// never guessed.
