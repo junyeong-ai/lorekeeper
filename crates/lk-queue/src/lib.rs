@@ -1,7 +1,9 @@
+#[cfg(feature = "test-util")]
 pub mod mock;
 mod noop;
 mod queue;
 
+#[cfg(feature = "test-util")]
 pub use mock::MockLlmClient;
 pub use noop::NoopLlmClient;
 pub use queue::{QueueLlmClient, QueueTask, TaskKind};

@@ -13,7 +13,7 @@ concept_categories) with the `Synthesizer`.
   (frontmatter, raw event list, all `## ` headings) is re-rendered every ingest from
   the template. The **semantic** layer (summary body, refined event bodies, concept
   wiki-links) is owned by the LLM via the queue and **preserved across re-renders**.
-  `Pipeline::plan`, `worklog`, and `synthesis` all implement this with:
+  `Pipeline::plan`, `work_log`, and `synthesis` all implement this with:
   1. Compute `Request::cache_hash()` for every LLM task that would fire.
   2. Look up the previous render via `VaultReader` and ask `llm_cache::lookup` whether
      the same hash + a filled section body already exist on disk. If yes, skip the
@@ -59,9 +59,12 @@ concept_categories) with the `Synthesizer`.
   gets cited — irrecoverable in an accumulate-and-cite vault). Records that merely share
   a title/headline both survive; downstream concept-merge, `backlinks-sync`, and
   `near-duplicate-concepts` reconcile genuine overlap losslessly.
-  `content-hash` is `blake3(date + title + body)` — scoped by `date` so a recurring or
+  `content-hash` is `Some(blake3(date + title + body))` — scoped by `date` so a recurring or
   templated body (a daily digest, a newsletter with a constant subject) observed on a
-  DIFFERENT day is a distinct observation, not a silent cross-day merge.
+  DIFFERENT day is a distinct observation, not a silent cross-day merge. It is `None` when
+  the body has no substantive text: a shared title alone is not content-equivalence (two
+  distinct posts can share a headline), so title-only events are excluded from the
+  content-hash strategy and fall through to url/event-id rather than being falsely merged.
   `dedup` returns `{novel, duplicates}`; `commit` records novel AND re-records duplicates (upsert) to
   refresh `seen_at`, so a steady-state re-arrival never ages past retention and
   re-emits as new. Persisted-table lookups are gated on the cache being present, but

@@ -151,7 +151,7 @@ pub struct Strings {
     pub index_documents: &'static str,
     pub index_explorations: &'static str,
     pub index_daily: &'static str,
-    pub index_worklog: &'static str,
+    pub index_work_log: &'static str,
     pub index_synthesis: &'static str,
 }
 
@@ -212,7 +212,7 @@ static KO: Strings = Strings {
     index_documents: "문서",
     index_explorations: "탐구",
     index_daily: "일일",
-    index_worklog: "업무 로그",
+    index_work_log: "업무 로그",
     index_synthesis: "종합",
 };
 
@@ -273,7 +273,7 @@ static EN: Strings = Strings {
     index_documents: "Documents",
     index_explorations: "Explorations",
     index_daily: "Daily",
-    index_worklog: "Work Log",
+    index_work_log: "Work Log",
     index_synthesis: "Synthesis",
 };
 

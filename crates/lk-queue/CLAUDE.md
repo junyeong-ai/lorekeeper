@@ -65,3 +65,5 @@ knows about; provider choice is config-driven (`build_llm_client` in lk-cli).
     were written, so it never references a page that doesn't exist.
   - `NoopLlmClient` — empty results (uses default trait impls). For dev/CI.
   - `MockLlmClient` — tests only, with configurable `summary`, `concepts`, `themes`.
+    Behind the `test-util` feature (dependents enable it as a dev-dependency), so it is
+    never compiled into the release binary.

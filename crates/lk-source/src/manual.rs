@@ -355,7 +355,7 @@ mod tests {
                 performance_category: None,
                 is_self: false,
                 is_personal: false,
-                content_hash: String::new(),
+                content_hash: None,
                 metadata: item.metadata.clone(),
             })
             .collect();
@@ -401,7 +401,7 @@ mod tests {
                 performance_category: None,
                 is_self: false,
                 is_personal: false,
-                content_hash: String::new(),
+                content_hash: None,
                 metadata: item.metadata.clone(),
             })
             .collect();

@@ -351,17 +351,21 @@ impl DedupCache {
                         }
                     }
                     DedupStrategy::ContentHash => {
-                        let hash = event.content_hash.as_str();
-                        let in_cache = match &tbl_hashes {
-                            Some(hashes) => hashes
-                                .get(hash)
-                                .map_err(|e| PipelineError::Dedup(e.to_string()))?
-                                .is_some(),
-                            None => false,
-                        };
-                        if seen_hashes.contains(hash) || in_cache {
-                            dup = true;
-                            break;
+                        // Only events with a substantive body carry a content hash;
+                        // title-only items have `None` and fall through to URL / event-id
+                        // so two distinct posts sharing a headline are never merged.
+                        if let Some(hash) = event.content_hash.as_deref() {
+                            let in_cache = match &tbl_hashes {
+                                Some(hashes) => hashes
+                                    .get(hash)
+                                    .map_err(|e| PipelineError::Dedup(e.to_string()))?
+                                    .is_some(),
+                                None => false,
+                            };
+                            if seen_hashes.contains(hash) || in_cache {
+                                dup = true;
+                                break;
+                            }
                         }
                     }
                     DedupStrategy::Url => {
@@ -385,7 +389,9 @@ impl DedupCache {
 
             if !dup {
                 seen_ids.insert(event.id.as_str().to_string());
-                seen_hashes.insert(event.content_hash.clone());
+                if let Some(hash) = &event.content_hash {
+                    seen_hashes.insert(hash.clone());
+                }
                 if let Some(ref url) = event.url {
                     seen_urls.insert(normalize_url(url, &self.extra_tracking));
                 }
@@ -431,9 +437,11 @@ impl DedupCache {
             for event in events {
                 ids.insert(event.id.as_str(), now)
                     .map_err(|e| PipelineError::Dedup(e.to_string()))?;
-                hashes
-                    .insert(event.content_hash.as_str(), now)
-                    .map_err(|e| PipelineError::Dedup(e.to_string()))?;
+                if let Some(hash) = event.content_hash.as_deref() {
+                    hashes
+                        .insert(hash, now)
+                        .map_err(|e| PipelineError::Dedup(e.to_string()))?;
+                }
 
                 if let Some(ref url) = event.url {
                     let url = normalize_url(url, &self.extra_tracking);
@@ -527,6 +535,17 @@ mod tests {
             is_personal: false,
             content_hash: lk_core::event::content_hash(date, title, ""),
             metadata: serde_json::Value::Null,
+        }
+    }
+
+    /// Like `ev` but with a substantive body, so the event carries a content hash
+    /// (content-hash dedup only applies to events with real content).
+    fn ev_body(id_suffix: &str, title: &str, body: &str, url: Option<&str>) -> Event {
+        let date = jiff::civil::date(2026, 5, 23);
+        Event {
+            body: body.into(),
+            content_hash: lk_core::event::content_hash(date, title, body),
+            ..ev(id_suffix, title, url)
         }
     }
 
@@ -790,16 +809,34 @@ mod tests {
     #[test]
     fn content_hash_dedup_catches_same_content_different_source() {
         // The same article ingested via two sources ON THE SAME DAY (different event IDs
-        // and URLs) collapses to one event when content-hash is in the cascade. `ev`
-        // fixes the date, so this is the same-day cross-source case the date-scoped hash
-        // still merges.
+        // and URLs) collapses to one event when content-hash is in the cascade. Both
+        // carry the SAME substantive body, which is what establishes content-equivalence.
         let dir = TempDir::new().unwrap();
         let cache = DedupCache::open(&dir.path().join("dedup.redb"), vec![]).unwrap();
         let cascade = vec![DedupStrategy::ContentHash];
-        let a = ev("from-rss", "Anthropic releases Opus 4.7", None);
-        let b = ev("from-mail", "Anthropic releases Opus 4.7", None);
+        let body = "Anthropic today announced Opus 4.7, its most capable model.";
+        let a = ev_body("from-rss", "Anthropic releases Opus 4.7", body, None);
+        let b = ev_body("from-mail", "Anthropic releases Opus 4.7", body, None);
         let novel = cache.dedup(vec![a, b], &cascade).unwrap().novel;
         assert_eq!(novel.len(), 1);
+    }
+
+    #[test]
+    fn content_hash_does_not_merge_title_only_items() {
+        // Two items sharing only a headline (no body, distinct URLs) are NOT provably the
+        // same content. Content-hash must not merge them — a false merge silently drops a
+        // distinct observation. They fall through the cascade and both survive.
+        let dir = TempDir::new().unwrap();
+        let cache = DedupCache::open(&dir.path().join("dedup.redb"), vec![]).unwrap();
+        let cascade = vec![DedupStrategy::ContentHash, DedupStrategy::Url];
+        let a = ev("item-a", "Weekly roundup", Some("https://a.example/1"));
+        let b = ev("item-b", "Weekly roundup", Some("https://b.example/2"));
+        let novel = cache.dedup(vec![a, b], &cascade).unwrap().novel;
+        assert_eq!(
+            novel.len(),
+            2,
+            "title-only items with distinct URLs must both survive"
+        );
     }
 
     #[test]
@@ -811,13 +848,14 @@ mod tests {
         let cache = DedupCache::open(&dir.path().join("dedup.redb"), vec![]).unwrap();
         let cascade = vec![DedupStrategy::ContentHash];
         let title = "Daily status: all systems operational";
+        let body = "All systems operational. No incidents in the last 24h.";
         let mk = |date: jiff::civil::Date| Event {
             id: EventId::new("digest", date, &date.to_string()),
             source_id: "digest".into(),
             source_type: SourceType::Gmail,
             date,
             title: title.into(),
-            body: String::new(),
+            body: body.into(),
             url: None,
             author: None,
             labels: vec![],
@@ -825,7 +863,7 @@ mod tests {
             performance_category: None,
             is_self: false,
             is_personal: false,
-            content_hash: lk_core::event::content_hash(date, title, ""),
+            content_hash: lk_core::event::content_hash(date, title, body),
             metadata: serde_json::Value::Null,
         };
         let a = mk(jiff::civil::date(2026, 5, 23));
@@ -948,7 +986,14 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let cache = DedupCache::open(&dir.path().join("dedup.redb"), vec![]).unwrap();
 
-        cache.record(&[ev("a", "A", Some("http://x"))]).unwrap();
+        cache
+            .record(&[ev_body(
+                "a",
+                "A",
+                "a body that yields a content hash",
+                Some("http://x"),
+            )])
+            .unwrap();
 
         let future_cutoff = jiff::Timestamp::now().as_second() as u64 + 1;
         let removed = cache.prune(future_cutoff).unwrap();

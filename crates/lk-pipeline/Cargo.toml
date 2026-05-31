@@ -11,14 +11,13 @@ lk-core = { workspace = true }
 lk-vault = { workspace = true }
 lk-queue = { workspace = true }
 tokio = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
 jiff = { workspace = true }
 redb = { workspace = true }
-async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 url = "2"
 
 [dev-dependencies]
 tempfile = "3"
+lk-queue = { workspace = true, features = ["test-util"] }

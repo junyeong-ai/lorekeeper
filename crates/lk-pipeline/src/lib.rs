@@ -6,7 +6,7 @@ mod llm_cache;
 mod normalize;
 pub mod render;
 mod synthesis;
-mod worklog;
+mod work_log;
 
 pub use context::PipelineContext;
 pub use dedup::DedupCache;
@@ -447,7 +447,7 @@ impl Pipeline {
         &self,
         personal_events: &[Event],
     ) -> Result<Vec<RenderResult>, PipelineError> {
-        worklog::render_work_log(
+        work_log::render_work_log(
             personal_events,
             &self.ctx.perf,
             &self.ctx.engine,

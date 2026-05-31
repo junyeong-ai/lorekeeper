@@ -38,8 +38,11 @@ pub struct Event {
     /// catch the same content arriving via multiple sources on the same day.
     /// Scoped by `date` so a templated/recurring body with an identical
     /// title+body on a different day is kept as a distinct observation rather
-    /// than silently merged.
-    pub content_hash: String,
+    /// than silently merged. `None` when the body has no substantive text: a
+    /// shared title alone is not evidence of content-equivalence (two distinct
+    /// posts can share a headline), so such events are excluded from content-hash
+    /// dedup and fall through to the URL / event-id strategies.
+    pub content_hash: Option<String>,
     #[serde(default)]
     pub metadata: serde_json::Value,
 }
@@ -67,8 +70,17 @@ impl EventId {
 /// scoped by `date` so a recurring/templated body (a daily digest, a newsletter
 /// with a constant subject) is NOT collapsed across days: an identical
 /// title+body observed on a different day is a distinct observation.
-pub fn content_hash(date: jiff::civil::Date, title: &str, body: &str) -> String {
+///
+/// Returns `None` when the body has no non-whitespace text. Content-equivalence
+/// is established by the body, not the title: two distinct posts can share a
+/// headline, and a content-hash match drops one as a duplicate — a silent,
+/// irrecoverable loss in an accumulate-and-cite vault. Title-only items are left
+/// for the URL / event-id strategies to disambiguate.
+pub fn content_hash(date: jiff::civil::Date, title: &str, body: &str) -> Option<String> {
     use std::fmt::Write as _;
+    // No substantive body → no content hash: a shared title alone is not evidence of
+    // content-equivalence, so the event is excluded from content-hash dedup.
+    body.split_whitespace().next()?;
     // One normalized buffer: whitespace runs collapse to a single space (so trivial
     // reformatting doesn't break the match) and `date` scopes the hash to its day.
     let mut normalized = String::with_capacity(title.len() + body.len() + 16);
@@ -76,7 +88,7 @@ pub fn content_hash(date: jiff::civil::Date, title: &str, body: &str) -> String 
     push_whitespace_normalized(&mut normalized, title);
     normalized.push('\n');
     push_whitespace_normalized(&mut normalized, body);
-    blake3::hash(normalized.as_bytes()).to_hex()[..16].to_string()
+    Some(blake3::hash(normalized.as_bytes()).to_hex()[..16].to_string())
 }
 
 /// Append `text` with internal whitespace runs collapsed to one space and edges
@@ -126,6 +138,16 @@ mod content_hash_tests {
             content_hash(d, "A  B", "x\n\ny"),
             content_hash(d, "A B", "x y")
         );
+    }
+
+    #[test]
+    fn empty_body_has_no_content_hash() {
+        // A shared title is not content-equivalence — an empty/whitespace body
+        // yields no hash so two distinct title-only items are never merged.
+        let d = jiff::civil::date(2026, 5, 23);
+        assert_eq!(content_hash(d, "Same headline", ""), None);
+        assert_eq!(content_hash(d, "Same headline", "   \n\t "), None);
+        assert!(content_hash(d, "Same headline", "real body").is_some());
     }
 }
 

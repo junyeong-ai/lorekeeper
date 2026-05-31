@@ -74,7 +74,7 @@ pub fn build_index(
         }
     }
 
-    let worklog = collect_dir(vault_root, &work_log_dir(dirs));
+    let work_log = collect_dir(vault_root, &work_log_dir(dirs));
 
     // Synthesis tiers are merged into one bucket so the index has a single "synthesis"
     // section. Each entry keeps its full vault-relative path so the wikilink target is
@@ -96,7 +96,7 @@ pub fn build_index(
         + documents.len()
         + explorations.len()
         + daily_groups.values().map(Vec::len).sum::<usize>()
-        + worklog.len()
+        + work_log.len()
         + synthesis.len();
 
     let mut out = String::new();
@@ -202,13 +202,13 @@ pub fn build_index(
         }
     }
 
-    if !worklog.is_empty() {
+    if !work_log.is_empty() {
         let heading = strings.topic_summary;
         render_group(
             &mut out,
-            strings.index_worklog,
-            worklog.len(),
-            &worklog,
+            strings.index_work_log,
+            work_log.len(),
+            &work_log,
             |body| first_subheading_under_heading(body, heading),
         );
     }
@@ -735,7 +735,7 @@ mod tests {
     }
 
     #[test]
-    fn worklog_uses_first_subheading() {
+    fn work_log_uses_first_subheading() {
         let tmp = TempDir::new().unwrap();
         write_file(
             tmp.path(),

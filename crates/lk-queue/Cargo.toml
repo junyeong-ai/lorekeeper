@@ -15,7 +15,11 @@ jiff = { workspace = true }
 async-trait = { workspace = true }
 blake3 = { workspace = true }
 thiserror = { workspace = true }
-tracing = { workspace = true }
+
+[features]
+# Exposes `MockLlmClient` for cross-crate tests. Enabled by dependents only as a
+# dev-dependency, so the mock is never compiled into the release binary.
+test-util = []
 
 [dev-dependencies]
 tempfile = "3"

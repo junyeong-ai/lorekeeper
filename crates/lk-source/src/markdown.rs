@@ -8,8 +8,10 @@ use std::collections::HashMap;
 use lk_core::text::collapse_blank_lines;
 use serde_json::Value;
 
-/// Convert an HTML fragment to Markdown via `htmd`. On any conversion error the original
-/// HTML is returned so content is never lost.
+/// Convert an HTML fragment to Markdown via `htmd`. `htmd::convert` reads from an
+/// in-memory string, whose only fallible step is a `Read` that cannot fail, and HTML5
+/// parsing always recovers from malformed markup — so conversion is infallible here; the
+/// `Result` collapses to an empty string for the unreachable error case.
 pub fn html_to_markdown(html: &str) -> String {
     if html.trim().is_empty() {
         return String::new();
@@ -25,7 +27,7 @@ pub fn html_to_markdown(html: &str) -> String {
     converter
         .convert(html)
         .map(|md| md.trim().to_string())
-        .unwrap_or_else(|_| html.trim().to_string())
+        .unwrap_or_default()
 }
 
 /// Extract the readable article core from a full HTML page and convert it to
@@ -447,8 +449,16 @@ fn strip_emoji_shortcodes(text: &str) -> String {
     while let Some(start) = rest.find(':') {
         out.push_str(&rest[..start]);
         let after = &rest[start + 1..];
+        // A real shortcode is delimited, not embedded mid-word: the opening colon must
+        // not directly follow an alphanumeric. This preserves `key:value:pair`-style
+        // technical text (which would otherwise lose its middle token) while still
+        // matching `:tada:`, ` :grin:`, and `(:wave:)`.
+        let boundary = !rest[..start]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric());
         match after.find(':') {
-            Some(end) if end > 0 && end <= 40 => {
+            Some(end) if boundary && end > 0 && end <= 40 => {
                 let code = &after[..end];
                 let is_shortcode = !code.contains(' ')
                     && code
@@ -667,6 +677,21 @@ mod tests {
         assert_eq!(slack_to_markdown(":+1: great", &u), " great");
         assert_eq!(slack_to_markdown(":pray::fire:", &u), "");
         assert_eq!(slack_to_markdown(":custom_parrot:", &u), "");
+    }
+
+    #[test]
+    fn slack_emoji_strip_preserves_colon_delimited_words() {
+        let u = no_users();
+        // A colon embedded mid-word is not an emoji shortcode — `key:value:pair`
+        // technical text must keep its middle token, not be silently eaten.
+        assert_eq!(
+            slack_to_markdown("config:value:here", &u),
+            "config:value:here"
+        );
+        assert_eq!(slack_to_markdown("app:icon:large", &u), "app:icon:large");
+        // Delimited shortcodes still strip, even adjacent to punctuation.
+        assert_eq!(slack_to_markdown("nice (:tada:)", &u), "nice ()");
+        assert_eq!(slack_to_markdown("done :+1:", &u), "done ");
     }
 
     #[test]
