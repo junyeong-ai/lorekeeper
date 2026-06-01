@@ -7,7 +7,7 @@ use lk_core::event::Event;
 use lk_core::i18n::Locale;
 use lk_core::vault_path::VaultPath;
 use lk_queue::{LlmClient, SummarizeRequest, TargetKind, TaskTarget};
-use lk_vault::{TemplateEngine, VaultReader};
+use lk_vault::{TemplateEngine, VaultStore};
 
 use crate::PipelineError;
 use crate::llm_cache::{self, SectionDecision};
@@ -20,7 +20,7 @@ pub async fn render_work_log(
     dirs: &VaultDirs,
     locale: Locale,
     llm: &Arc<dyn LlmClient>,
-    reader: &VaultReader,
+    reader: &dyn VaultStore,
 ) -> Result<Vec<RenderResult>, PipelineError> {
     // The work-log is the performance subsystem; `performance.enabled` gates it at the
     // mechanism boundary so no caller can produce one while the subsystem is off.

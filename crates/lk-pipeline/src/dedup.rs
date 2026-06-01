@@ -126,14 +126,16 @@ pub(crate) fn normalize_url(raw: &str, extra_tracking: &[String]) -> String {
         url.set_query(Some(&qs));
     }
 
-    // Strip pure anchor fragments (`#section`, `#L42`) — they point within a
-    // single page, not at a distinct resource. PRESERVE hash-route fragments
-    // (`#/issues/1`, `#!/path`) used by SPA hash routers, where the fragment IS
-    // the resource identity — dropping it would merge two distinct pages and
-    // silently drop one observation.
-    match url.fragment() {
-        Some(frag) if frag.starts_with('/') || frag.starts_with("!/") => {}
-        _ => url.set_fragment(None),
+    // Strip pure anchor fragments (`#section`, `#L42`) — they point within a single
+    // page, not at a distinct resource. PRESERVE fragments that carry resource
+    // identity, where dropping them would merge two distinct pages and silently drop
+    // one observation: SPA hash routes (`#/issues/1`, `#!/path`) and query-like
+    // fragments that encode a selector (`#gid=1` for a sheet tab, `#tab=2`, `#page=3`).
+    let preserve_fragment = url
+        .fragment()
+        .is_some_and(|f| f.starts_with('/') || f.starts_with("!/") || f.contains(['=', '&']));
+    if !preserve_fragment {
+        url.set_fragment(None);
     }
 
     url.to_string()
@@ -701,6 +703,26 @@ mod tests {
         assert_ne!(
             normalize_url("https://app.example.com/#/issues/1"),
             normalize_url("https://app.example.com/#/issues/2")
+        );
+    }
+
+    #[test]
+    fn normalize_url_preserves_query_like_fragment() {
+        // A selector-bearing fragment (a sheet tab, a paginated view) is resource
+        // identity, not an in-page anchor — dropping it would merge two distinct
+        // resources and silently lose one observation.
+        assert_eq!(
+            normalize_url("https://docs.google.com/spreadsheets/d/X/edit#gid=0"),
+            "https://docs.google.com/spreadsheets/d/X/edit#gid=0"
+        );
+        assert_ne!(
+            normalize_url("https://docs.google.com/spreadsheets/d/X/edit#gid=0"),
+            normalize_url("https://docs.google.com/spreadsheets/d/X/edit#gid=1")
+        );
+        // A pure anchor is still stripped.
+        assert_eq!(
+            normalize_url("https://example.com/doc#introduction"),
+            "https://example.com/doc"
         );
     }
 

@@ -17,7 +17,9 @@ concept_categories) with the `Synthesizer`.
   wiki-links) is owned by the LLM via the queue and **preserved across re-renders**.
   `Pipeline::plan`, `work_log`, and `synthesis` all implement this with:
   1. Compute `Request::cache_hash()` for every LLM task that would fire.
-  2. Look up the previous render via `VaultReader` and ask `llm_cache::lookup` whether
+  2. Look up the previous render via the `VaultStore` (the pipeline's vault-read seam,
+     backed by `FsVault`; `lk_vault::InMemoryVault` is the in-memory double for store-level
+     tests and a future non-filesystem backend) and ask `llm_cache::lookup` whether
      the same hash + a filled section body already exist on disk. If yes, skip the
      LLM enqueue and stash the existing body as `preserved_body`.
   3. Render the fresh template (heading is always emitted; the body is empty when the
@@ -77,9 +79,10 @@ concept_categories) with the `Synthesizer`.
   ambiguous params like `si` are deliberately kept (host-specific resource selectors) PLUS
   `dedup.extra_tracking_params` from config, where a trailing `*` is a prefix match)
   with resource-identifying params preserved and sorted. Pure anchor fragments
-  (`#section`, `#L42`) are dropped, but hash-route fragments (`#/issues/1`, `#!/path`)
-  used by SPA routers are PRESERVED — they carry resource identity, so stripping them
-  would merge distinct pages. The cache is recreated only on a recoverable mismatch — a schema-type
+  (`#section`, `#L42`) are dropped, but fragments that carry resource identity are
+  PRESERVED — SPA hash routes (`#/issues/1`, `#!/path`) and selector fragments
+  (`#gid=1` for a sheet tab, `#tab=2`) — since stripping them would merge distinct
+  resources and silently drop one observation. The cache is recreated only on a recoverable mismatch — a schema-type
   change or an outdated on-disk format after a redb major upgrade
   (`DatabaseError::UpgradeRequired`) — never on I/O/corruption errors. On recreation
   the stale file is renamed to `*.redb.backup.{timestamp}-pid{pid}` (not deleted),

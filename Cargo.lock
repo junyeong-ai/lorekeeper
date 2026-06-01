@@ -437,6 +437,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
 
 [[package]]
+name = "emojis"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0a4d5d50b0b58df5173d8ff1192b4d1422ceae5d981b30d4b6f8ed1d673a2bc4"
+dependencies = [
+ "phf 0.13.1",
+]
+
+[[package]]
 name = "encode_unicode"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1198,6 +1207,7 @@ dependencies = [
  "async-trait",
  "base64",
  "blake3",
+ "emojis",
  "feed-rs",
  "htmd",
  "jiff",
@@ -1218,6 +1228,7 @@ dependencies = [
 name = "lk-vault"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "jiff",
  "lk-core",
  "minijinja",

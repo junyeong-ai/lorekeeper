@@ -370,7 +370,7 @@ fn collect_parts(
 }
 
 fn has_calendar_attachment(msg: &Message) -> bool {
-    fn check_parts(parts: Option<&[MimePart]>) -> bool {
+    fn has_calendar_part(parts: Option<&[MimePart]>) -> bool {
         let Some(parts) = parts else { return false };
         for part in parts {
             if part
@@ -380,7 +380,7 @@ fn has_calendar_attachment(msg: &Message) -> bool {
             {
                 return true;
             }
-            if check_parts(part.parts.as_deref()) {
+            if has_calendar_part(part.parts.as_deref()) {
                 return true;
             }
         }
@@ -390,7 +390,7 @@ fn has_calendar_attachment(msg: &Message) -> bool {
         p.mime_type
             .as_deref()
             .is_some_and(|m| m.starts_with("text/calendar"))
-            || check_parts(p.parts.as_deref())
+            || has_calendar_part(p.parts.as_deref())
     })
 }
 

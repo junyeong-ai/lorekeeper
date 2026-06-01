@@ -1,7 +1,7 @@
 mod index;
 mod log;
-mod reader;
 mod section;
+mod store;
 mod template;
 mod timeline;
 mod writer;
@@ -12,8 +12,8 @@ pub use lk_core::frontmatter::{Frontmatter, VaultPage, parse_page};
 
 pub use self::index::{IndexResult, build_index, first_line_under_heading, write_index};
 pub use self::log::{IngestLog, LogEntry, LogStatus};
-pub use self::reader::VaultReader;
 pub use self::section::{replace_section, section_body, set_frontmatter_field};
+pub use self::store::{FsVault, InMemoryVault, VaultStore};
 pub use self::template::TemplateEngine;
 pub use self::timeline::{build_timeline, write_timeline};
 pub use self::writer::VaultWriter;

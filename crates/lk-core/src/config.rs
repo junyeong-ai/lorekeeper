@@ -211,6 +211,11 @@ impl Config {
                 "graph.cluster.min_community_size must be >= 1".into(),
             ));
         }
+        if self.graph.cluster.max_iterations == 0 {
+            return Err(ConfigError::Validation(
+                "graph.cluster.max_iterations must be >= 1".into(),
+            ));
+        }
         if self.graph.cluster.suggest_min_shared_neighbors == 0 {
             return Err(ConfigError::Validation(
                 "graph.cluster.suggest_min_shared_neighbors must be >= 1".into(),

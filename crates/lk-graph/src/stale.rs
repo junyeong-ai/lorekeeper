@@ -126,7 +126,7 @@ impl PageKind {
 /// field are skipped.
 ///
 /// `all_pages` is the full-vault universe used only to derive incoming-citation
-/// recency — a concept still cited by this week's daily notes is *live*, not stale,
+/// recency — a concept still cited by this week's daily pages is *live*, not stale,
 /// even when its own `updated` is old. This is the deterministic, graph-derived line
 /// between "old" and "actually dormant": no heuristic, no content inspection. Callers
 /// pass the report scope as `pages` and the whole vault as `all_pages` (a superset).

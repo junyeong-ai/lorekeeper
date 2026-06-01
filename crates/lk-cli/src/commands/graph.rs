@@ -12,7 +12,7 @@ use super::GlobalOptions;
 struct ResolvedConfig {
     root: PathBuf,
     graph: GraphConfig,
-    tz: jiff::tz::TimeZone,
+    timezone: jiff::tz::TimeZone,
     locale: Locale,
     vault_dirs: VaultDirs,
     concept_categories: Vec<ConceptCategory>,
@@ -450,7 +450,7 @@ fn run_stale(
 
     // Staleness is reported for the analysis scope (the evergreen wiki by default),
     // but liveness — "is this page still cited by recent activity?" — is derived from
-    // the WHOLE vault, so a concept reinforced by this week's daily notes is not
+    // the WHOLE vault, so a concept reinforced by this week's daily pages is not
     // flagged. Scan every page dir (the full-vault view backlinks-sync uses) and
     // filter the report set back down to the configured scope.
     let report_scope = rc.graph.scope.dirs.clone();
@@ -487,7 +487,7 @@ fn run_stale(
         .cloned()
         .collect();
 
-    let today = jiff::Timestamp::now().to_zoned(rc.tz).date();
+    let today = jiff::Timestamp::now().to_zoned(rc.timezone).date();
 
     let stale_pages = stale::find_stale(
         &candidates,
@@ -698,7 +698,7 @@ fn resolve_config_full(
         return Ok(ResolvedConfig {
             root,
             graph,
-            tz: jiff::tz::TimeZone::system(),
+            timezone: jiff::tz::TimeZone::system(),
             locale: Locale::default(),
             vault_dirs,
             concept_categories: Vec::new(),
@@ -709,7 +709,7 @@ fn resolve_config_full(
     let config = super::load_config(&config_path).map_err(|e| format!("{e}"))?;
     Ok(ResolvedConfig {
         root: config.vault.root_path(),
-        tz: config.vault.timezone(),
+        timezone: config.vault.timezone(),
         locale: config.vault.locale(),
         vault_dirs: config.vault.dirs.clone(),
         graph: config.graph,

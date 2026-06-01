@@ -439,38 +439,88 @@ fn decode_entities(text: &str) -> String {
         .replace("&amp;", "&")
 }
 
-/// Strip Slack emoji shortcodes (`:grin:`, `:custom_emoji:`). Emoji aren't core
-/// information in long-lived documents — they're decorative — so removing them is
-/// cleaner than maintaining an ever-growing mapping table (standard + per-workspace
-/// custom emoji make exhaustive conversion infeasible and a maintenance burden).
+/// Strip Slack emoji shortcodes (`:tada:`, `:+1:`). Emoji are decorative, not core
+/// information in a long-lived knowledge vault, so they're removed. Only shortcodes in the
+/// standard Unicode emoji set are stripped, and only in prose: a shortcode written as a code
+/// literal is content, so code spans are preserved verbatim. Colon-delimited prose
+/// (`:default:`, a `key:value:` token) and Slack-specific or workspace-custom names (not in
+/// the standard set) are likewise never mistaken for an emoji and deleted.
 fn strip_emoji_shortcodes(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
+    // Code spans are skipped using the CommonMark rule: a run of N backticks opens a span
+    // that closes at the next run of EXACTLY N backticks. This keeps inline (`` `…` ``) and
+    // fenced (```` ```…``` ````) code intact even when a fenced body itself contains
+    // backticks — a naive split on `` ` `` miscounts parity there and would eat a shortcode
+    // inside the fence.
+    let bytes = text.as_bytes();
+    let n = bytes.len();
+    let mut out = String::with_capacity(n);
+    let mut prose_start = 0;
+    let mut i = 0;
+    while i < n {
+        if bytes[i] != b'`' {
+            i += 1;
+            continue;
+        }
+        // Strip the prose run preceding this backtick run.
+        strip_prose_shortcodes(&text[prose_start..i], &mut out);
+        let open = i;
+        while i < n && bytes[i] == b'`' {
+            i += 1;
+        }
+        let run = i - open;
+        // Seek the matching closing run of exactly `run` backticks.
+        let mut close_end = None;
+        let mut j = i;
+        while j < n {
+            if bytes[j] != b'`' {
+                j += 1;
+                continue;
+            }
+            let cstart = j;
+            while j < n && bytes[j] == b'`' {
+                j += 1;
+            }
+            if j - cstart == run {
+                close_end = Some(j);
+                break;
+            }
+        }
+        match close_end {
+            // Emit the whole code span (both fences + body) verbatim.
+            Some(end) => {
+                out.push_str(&text[open..end]);
+                i = end;
+                prose_start = end;
+            }
+            // Unclosed run: the backticks are literal text, so the rest is prose again.
+            None => {
+                out.push_str(&text[open..i]);
+                prose_start = i;
+            }
+        }
+    }
+    strip_prose_shortcodes(&text[prose_start..], &mut out);
+    out
+}
+
+/// Strip recognized emoji shortcodes from one prose run (no code spans), into `out`.
+fn strip_prose_shortcodes(text: &str, out: &mut String) {
     let mut rest = text;
     while let Some(start) = rest.find(':') {
         out.push_str(&rest[..start]);
         let after = &rest[start + 1..];
-        // A real shortcode is delimited, not embedded mid-word: the opening colon must
-        // not directly follow an alphanumeric. This preserves `key:value:pair`-style
-        // technical text (which would otherwise lose its middle token) while still
-        // matching `:tada:`, ` :grin:`, and `(:wave:)`.
+        // A shortcode is delimited, not embedded mid-word: the opening colon must not
+        // directly follow an alphanumeric, so `key:tada:value` is left intact.
         let boundary = !rest[..start]
             .chars()
             .next_back()
             .is_some_and(|c| c.is_alphanumeric());
         match after.find(':') {
-            Some(end) if boundary && end > 0 && end <= 40 => {
-                let code = &after[..end];
-                let is_shortcode = !code.contains(' ')
-                    && code
-                        .chars()
-                        .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '+');
-                if is_shortcode {
-                    // Drop the shortcode entirely (no replacement needed).
-                    rest = &after[end + 1..];
-                } else {
-                    out.push(':');
-                    rest = after;
-                }
+            Some(end)
+                if boundary && end > 0 && emojis::get_by_shortcode(&after[..end]).is_some() =>
+            {
+                // Drop the recognized emoji shortcode entirely.
+                rest = &after[end + 1..];
             }
             _ => {
                 out.push(':');
@@ -479,7 +529,6 @@ fn strip_emoji_shortcodes(text: &str) -> String {
         }
     }
     out.push_str(rest);
-    out
 }
 
 #[cfg(test)]
@@ -672,15 +721,17 @@ mod tests {
     #[test]
     fn slack_emoji_shortcodes_stripped() {
         let u = no_users();
-        // Emoji shortcodes are stripped entirely (not converted) — they're decorative,
-        // not core document information, and maintaining a mapping is infeasible.
+        // Recognized Unicode emoji shortcodes are stripped entirely (not converted) —
+        // they're decorative, not core document information.
         assert_eq!(slack_to_markdown(":+1: great", &u), " great");
         assert_eq!(slack_to_markdown(":pray::fire:", &u), "");
-        assert_eq!(slack_to_markdown(":custom_parrot:", &u), "");
+        // A workspace-custom emoji is NOT in the standard set, so it survives as literal
+        // text rather than risk deleting a real word that looks like a shortcode.
+        assert_eq!(slack_to_markdown(":custom_parrot:", &u), ":custom_parrot:");
     }
 
     #[test]
-    fn slack_emoji_strip_preserves_colon_delimited_words() {
+    fn slack_emoji_strip_preserves_prose_and_colon_delimited_words() {
         let u = no_users();
         // A colon embedded mid-word is not an emoji shortcode — `key:value:pair`
         // technical text must keep its middle token, not be silently eaten.
@@ -689,9 +740,44 @@ mod tests {
             "config:value:here"
         );
         assert_eq!(slack_to_markdown("app:icon:large", &u), "app:icon:large");
+        // A delimited word that merely LOOKS like a shortcode but isn't a real emoji
+        // (a Ruby symbol, colon-emphasis) must be preserved, not deleted.
+        assert_eq!(
+            slack_to_markdown("the :default: value", &u),
+            "the :default: value"
+        );
+        assert_eq!(
+            slack_to_markdown("mark :important:", &u),
+            "mark :important:"
+        );
         // Delimited shortcodes still strip, even adjacent to punctuation.
         assert_eq!(slack_to_markdown("nice (:tada:)", &u), "nice ()");
         assert_eq!(slack_to_markdown("done :+1:", &u), "done ");
+    }
+
+    #[test]
+    fn slack_emoji_strip_preserves_shortcodes_in_code_spans() {
+        let u = no_users();
+        // A shortcode written as a code literal is content, not decoration — a `code`
+        // span must survive verbatim even when it holds a real emoji shortcode, while a
+        // bare prose shortcode on the same line is still stripped.
+        assert_eq!(
+            slack_to_markdown("use `:tada:` here :tada:", &u),
+            "use `:tada:` here "
+        );
+        assert_eq!(
+            slack_to_markdown("the `:x:` marker", &u),
+            "the `:x:` marker"
+        );
+        // A fenced block whose body itself contains backticks: the shortcode inside must
+        // survive (the opening ``` matches the closing ```; the inner single backticks
+        // don't close it). A naive backtick-parity split mis-counts here and strips it.
+        assert_eq!(
+            slack_to_markdown("```\nlet s = `:tada:`;\n```", &u),
+            "```\nlet s = `:tada:`;\n```"
+        );
+        // A double-backtick inline span is a code span too (run length 2).
+        assert_eq!(slack_to_markdown("``:tada:``", &u), "``:tada:``");
     }
 
     #[test]

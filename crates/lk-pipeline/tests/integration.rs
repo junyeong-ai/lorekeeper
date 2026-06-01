@@ -76,7 +76,6 @@ async fn concept_pages_written_with_merge() {
 
     let concepts = vec![ExtractedConcept {
         name: "Claude Code".into(),
-        slug: "claude-code".into(),
         category: None,
     }];
 
@@ -124,7 +123,6 @@ async fn concept_pages_written_with_merge() {
     drop(pipeline);
     let llm2: Arc<dyn LlmClient> = Arc::new(MockLlmClient::with_concepts(vec![ExtractedConcept {
         name: "Claude Code".into(),
-        slug: "claude-code".into(),
         category: None,
     }]));
     let mut pipeline2 = Pipeline::new(vault, make_ctx(&config, llm2), &config).unwrap();
@@ -311,7 +309,6 @@ async fn concept_accumulates_across_sources_in_one_run() {
 
     let llm: Arc<dyn LlmClient> = Arc::new(MockLlmClient::with_concepts(vec![ExtractedConcept {
         name: "Shared Concept".into(),
-        slug: "shared-concept".into(),
         category: None,
     }]));
     let mut pipeline = Pipeline::new(vault, make_ctx(&config, llm), &config).unwrap();

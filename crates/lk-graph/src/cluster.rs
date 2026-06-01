@@ -238,7 +238,7 @@ pub struct SuggestResult {
 /// Suggest wikilinks to add: pairs of pages in the SAME Louvain community that have NO
 /// edge between them and share at least `min_shared_neighbors` neighbors, ranked by
 /// shared-neighbor count (descending). The floor suppresses co-citation noise (a single
-/// shared neighbor usually means "co-cited by one daily note", not a real relationship).
+/// shared neighbor usually means "co-cited by one daily page", not a real relationship).
 /// Pure, deterministic, read-only — it reuses the community assignment passed in and
 /// never touches the vault.
 pub fn suggest_links(

@@ -41,7 +41,7 @@ use crate::writer::VaultWriter;
 /// the page to roughly one year of knowledge activity regardless of how old the vault is.
 const TIMELINE_WINDOW_DAYS: i64 = 365;
 
-struct Entry {
+struct TimelineEntry {
     /// When the node first entered the vault (frontmatter `created`) — the timeline anchor.
     created: jiff::civil::Date,
     /// Vault-relative wikilink target (path form, without `.md`) — always resolves.
@@ -56,7 +56,7 @@ struct Entry {
 /// missing a parseable `created` date are skipped (they have no place on a timeline),
 /// never guessed.
 pub fn build_timeline(vault_root: &Path, dirs: &VaultDirs) -> Result<String, VaultError> {
-    let mut entries: Vec<Entry> = Vec::new();
+    let mut entries: Vec<TimelineEntry> = Vec::new();
     for dir in [
         concepts_dir(dirs),
         documents_dir(dirs),
@@ -78,7 +78,7 @@ pub fn build_timeline(vault_root: &Path, dirs: &VaultDirs) -> Result<String, Vau
     // newest knowledge is first. Within a date, entries sort by title then id — a stable,
     // deterministic render.
     let shown = entries.len();
-    let mut by_date: BTreeMap<jiff::civil::Date, Vec<Entry>> = BTreeMap::new();
+    let mut by_date: BTreeMap<jiff::civil::Date, Vec<TimelineEntry>> = BTreeMap::new();
     for e in entries {
         by_date.entry(e.created).or_default().push(e);
     }
@@ -120,9 +120,9 @@ pub fn write_timeline(
     Ok(rel)
 }
 
-/// Walk one knowledge directory, parsing each page's `created`/`title` into an [`Entry`].
+/// Walk one knowledge directory, parsing each page's `created`/`title` into a [`TimelineEntry`].
 /// Unreadable or undated pages are skipped — never guessed onto the timeline.
-fn collect_into(entries: &mut Vec<Entry>, vault_root: &Path, rel_dir: &Path) {
+fn collect_into(entries: &mut Vec<TimelineEntry>, vault_root: &Path, rel_dir: &Path) {
     let abs = vault_root.join(rel_dir);
     if !abs.is_dir() {
         return;
@@ -158,7 +158,7 @@ fn collect_into(entries: &mut Vec<Entry>, vault_root: &Path, rel_dir: &Path) {
                     .unwrap_or("untitled")
                     .to_owned()
             });
-        entries.push(Entry { created, id, title });
+        entries.push(TimelineEntry { created, id, title });
     }
 }
 

@@ -8,13 +8,11 @@
 //! the next run.
 //!
 //! Pure set comparison: no heuristics, no LLM, no per-source rules. A page is in
-//! the sources list iff it has an outgoing wikilink whose target resolves to that
-//! concept's filename.
+//! the sources list iff it has an outgoing wikilink that resolves to the concept.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use lk_core::concept::slugify;
 use lk_core::config::VaultDirs;
 use lk_core::frontmatter;
 use lk_core::i18n::Locale;
@@ -22,7 +20,7 @@ use lk_vault::{VaultWriter, replace_section, section_body, set_frontmatter_field
 use serde::Serialize;
 
 use crate::GraphError;
-use crate::scan::{ScannedPage, is_concept_page, is_valid_source};
+use crate::scan::{ScannedPage, VaultExistence, is_concept_page, is_valid_source};
 
 /// Outcome of one concept page's reconciliation.
 #[derive(Debug, Clone, Serialize)]
@@ -63,77 +61,30 @@ pub fn sync_concept_backlinks(
     dry_run: bool,
     dirs: &VaultDirs,
 ) -> Result<BacklinksSyncResult, GraphError> {
-    // Reverse index: concept slug (filename) → sorted set of source page ids that
-    // wikilink to it. Use BTreeMap/BTreeSet so the rendered body is deterministic.
-    //
-    // Only event/document pages are considered sources — concept-to-concept links
-    // belong in `## Related`, not `## Sources`, and navigation pages
-    // (`wiki/index.md`, `wiki/AGENTS.md`) shouldn't appear as sources at all.
-    // Map each concept's declared alias slugs to its canonical filename slug so a bare
-    // `[[synonym]]` citation is credited to the concept — keeping `source_count` and
-    // `## Sources` consistent with the wikilink graph's alias resolution. The exclusion
-    // set is EVERY real page's filename slug (not just concepts): an alias that collides
-    // with any real page is inert because the real page wins in `VaultExistence` /
-    // `WikiGraph`, so crediting it here would diverge from the graph. The first concept
-    // to claim a free alias wins (same precedence as `VaultExistence`).
-    let real_slugs: HashSet<String> = pages
-        .iter()
-        .filter_map(|p| {
-            p.path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .and_then(slugify)
-        })
-        .collect();
-    // alias → (winning concept id, that concept's stem). When two concepts claim the
-    // same alias the winner is the concept with the smallest id — the SAME tiebreak
-    // `VaultExistence::by_alias` uses — so a duplicate alias credits the exact concept
-    // the graph resolves it to, regardless of page order or concept-file nesting.
-    let mut alias_winner: HashMap<String, (String, String)> = HashMap::new();
-    for page in pages {
-        if !is_concept_page(&page.path, dirs) {
-            continue;
-        }
-        let Some(stem) = page
-            .path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .and_then(slugify)
-        else {
-            continue;
-        };
-        for alias in &page.aliases {
-            if real_slugs.contains(alias) {
-                continue;
-            }
-            alias_winner
-                .entry(alias.clone())
-                .and_modify(|(cur_id, cur_stem)| {
-                    if page.id < *cur_id {
-                        *cur_id = page.id.clone();
-                        *cur_stem = stem.clone();
-                    }
-                })
-                .or_insert_with(|| (page.id.clone(), stem.clone()));
-        }
-    }
-    let alias_to_stem: HashMap<String, String> = alias_winner
-        .into_iter()
-        .map(|(alias, (_, stem))| (alias, stem))
-        .collect();
-
+    // Reverse index: concept page id → sorted set of source page ids that cite it.
+    // Resolution goes through the same `VaultExistence` the graph uses, so a citation
+    // by bare slug, path id, or declared alias all credit the one page the graph
+    // resolves them to — `## Sources` and `source_count` can never diverge from the
+    // wikilink graph. Only non-concept content pages count as sources (`is_valid_source`);
+    // a concept→concept link belongs in `## Related`, and navigation pages aren't sources.
+    // BTreeMap/BTreeSet keep the rendered body deterministic.
+    let existence = VaultExistence::from_pages(pages, dirs);
     let mut incoming: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for page in pages {
         if !is_valid_source(&page.path, dirs) {
             continue;
         }
         for target in &page.outgoing {
-            // Credit an alias citation to the concept's canonical slug.
-            let key = alias_to_stem
-                .get(target)
-                .cloned()
-                .unwrap_or_else(|| target.clone());
-            incoming.entry(key).or_default().insert(page.id.clone());
+            // Self-references are excluded for the same reason the graph excludes
+            // self-edges.
+            if let Some(target_id) = existence.resolve(target).map(str::to_owned)
+                && target_id != page.id
+            {
+                incoming
+                    .entry(target_id)
+                    .or_default()
+                    .insert(page.id.clone());
+            }
         }
     }
 
@@ -148,27 +99,14 @@ pub fn sync_concept_backlinks(
             continue;
         }
 
-        let stem = page
-            .path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .and_then(slugify)
-            .unwrap_or_default();
-        if stem.is_empty() {
+        if page.id.is_empty() {
             continue;
         }
 
-        // Sources for this concept = every page whose outgoing wikilinks include
-        // this concept's filename slug. Self-references are excluded for the same
-        // reason the graph excludes self-edges.
+        // Sources for this concept = every page that resolves a wikilink to it.
         let mut sources: Vec<String> = incoming
-            .get(&stem)
-            .map(|set| {
-                set.iter()
-                    .filter(|id| id.as_str() != page.id)
-                    .cloned()
-                    .collect()
-            })
+            .get(&page.id)
+            .map(|set| set.iter().cloned().collect())
             .unwrap_or_default();
         sources.sort();
 
@@ -354,6 +292,31 @@ mod tests {
 
         let content = std::fs::read_to_string(dir.path().join("wiki/concepts/oy365.md")).unwrap();
         assert!(content.contains("## 출처\n\n- [[daily/slack/2026-05-20]]\n\n## 메타"));
+    }
+
+    #[test]
+    fn path_form_citation_is_credited() {
+        // A page citing the concept by its full path id (`[[wiki/concepts/oy365]]`)
+        // must be credited identically to a bare `[[oy365]]` — both resolve to the
+        // same concept in the graph, so `source_count` can't diverge by citation form.
+        let dir = TempDir::new().unwrap();
+        write_concept(&dir, "oy365", &[]);
+        let pages = vec![
+            make_page("wiki/concepts/oy365", "wiki/concepts/oy365.md", &[]),
+            make_page(
+                "daily/slack/2026-05-20",
+                "daily/slack/2026-05-20.md",
+                &["wiki/concepts/oy365"],
+            ),
+        ];
+        let report =
+            sync_concept_backlinks(&pages, dir.path(), Locale::Ko, false, &VaultDirs::default())
+                .unwrap();
+        assert_eq!(report.updated.len(), 1);
+        assert_eq!(report.updated[0].added, vec!["daily/slack/2026-05-20"]);
+        let content = std::fs::read_to_string(dir.path().join("wiki/concepts/oy365.md")).unwrap();
+        assert!(content.contains("- [[daily/slack/2026-05-20]]"));
+        assert!(content.contains("source_count: 1"));
     }
 
     #[test]

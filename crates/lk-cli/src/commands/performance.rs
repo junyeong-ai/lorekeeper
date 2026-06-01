@@ -1,3 +1,5 @@
+use lk_vault::VaultStore;
+
 use super::{find_config, load_config};
 
 pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
@@ -7,7 +9,7 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
         return Ok(());
     }
     let vault_root = config.vault.root_path();
-    let reader = lk_vault::VaultReader::new(&vault_root);
+    let reader = lk_vault::FsVault::new(&vault_root);
 
     let work_log_dir = lk_core::vault_path::work_log_dir(&config.vault.dirs);
     let files = reader

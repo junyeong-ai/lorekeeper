@@ -62,9 +62,10 @@ map to `RawItem`.
   - **Error isolation**: individual item failures (thread fetch, file download, timestamp
     parse) are caught with `tracing::warn!` and skipped — one inaccessible thread or file
     does not abort the entire source. Gmail and Slack history use cursor pagination with
-    per-adapter caps (Slack history 500, replies 200, Gmail 200) — the Slack caps live in
-    the shared `paginate` helper, which `tracing::warn!`s when a cap truncates so silent
-    loss on a very busy channel is observable; other adapters issue bounded single requests.
+    caps (`slack-channel` exposes `max_messages_per_channel`/`max_thread_messages`,
+    defaults 500/200, validated `> 0`; Gmail 200) — the cap is enforced in the shared
+    `paginate` helper, which `tracing::warn!`s when it truncates so a very busy channel is
+    observable and the operator can raise the cap; other adapters issue bounded single requests.
   - **Transient-failure retry**: Slack retries inside `slack_post`; Google (token refresh)
     and Jira (`/myself`, search) wrap idempotent requests in `retry::send_with_retry`
     (bounded retries on 429/5xx + connect/timeout, honoring numeric `Retry-After`), so a

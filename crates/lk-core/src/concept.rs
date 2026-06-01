@@ -1,10 +1,12 @@
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
 
+/// A concept the LLM surfaced from a source. The page filename is always
+/// `slugify(name)` — the same key a bare `[[name]]` wikilink resolves through — so a
+/// citation can never point at a file that doesn't exist.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractedConcept {
     pub name: String,
-    pub slug: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
 }

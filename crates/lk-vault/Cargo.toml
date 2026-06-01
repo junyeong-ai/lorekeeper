@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 lk-core = { workspace = true }
 tokio = { workspace = true }
+async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 jiff = { workspace = true }

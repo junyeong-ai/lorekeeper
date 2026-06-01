@@ -39,6 +39,16 @@ struct ChannelParams {
     /// since they're noise for work analysis; set false to keep them.
     #[serde(default = "default_exclude_bots")]
     exclude_bots: bool,
+    /// Safety cap on messages fetched per channel in one run (newest-first). Raise it for
+    /// a high-volume channel where the window holds more than this; a cap hit is logged so
+    /// truncation is never silent.
+    #[serde(default = "default_max_messages_per_channel")]
+    max_messages_per_channel: usize,
+    /// Safety cap on messages fetched per thread. `conversations.replies` returns the
+    /// root message plus its replies, and both count toward this cap — it bounds the
+    /// fetch, not a precise reply count.
+    #[serde(default = "default_max_thread_messages")]
+    max_thread_messages: usize,
 }
 
 impl ChannelParams {
@@ -60,6 +70,11 @@ pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
             "slack-channel requires `channel` or `channels`".into(),
         ));
     }
+    if p.max_messages_per_channel == 0 || p.max_thread_messages == 0 {
+        return Err(SourceError::InvalidParams(
+            "slack-channel `max_messages_per_channel` and `max_thread_messages` must be > 0".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -69,6 +84,14 @@ fn default_lookback() -> u32 {
 
 fn default_exclude_bots() -> bool {
     true
+}
+
+fn default_max_messages_per_channel() -> usize {
+    500
+}
+
+fn default_max_thread_messages() -> usize {
+    200
 }
 
 #[derive(Deserialize)]
@@ -124,20 +147,20 @@ impl SlackChannelSource {
     }
 
     /// Fetch the full thread for a root message (`conversations.replies` returns the root
-    /// plus every reply). Paginates with `next_cursor` and caps at 200 replies to prevent
+    /// plus every reply). Paginates with `next_cursor`, capped at `max_messages` to prevent
     /// runaway on huge threads.
     async fn fetch_thread(
         &self,
         channel_id: &str,
         root_ts: &str,
+        max_messages: usize,
     ) -> Result<Vec<SlackMessage>, SourceError> {
-        const MAX_REPLIES: usize = 200;
         paginate::<HistoryData, SlackMessage, _>(
             &self.http,
             &self.token,
             "conversations.replies",
             &[("channel", channel_id), ("ts", root_ts), ("limit", "100")],
-            MAX_REPLIES,
+            max_messages,
             |data| {
                 (
                     data.messages.unwrap_or_default(),
@@ -170,8 +193,7 @@ impl Source for SlackChannelSource {
             let channel_id = resolve_channel_id(&self.http, &self.token, ch_ref).await?;
             let channel_name = ch_ref.strip_prefix('#').unwrap_or(ch_ref);
 
-            // Paginate through conversations.history; cap at 500 messages per channel.
-            const MAX_HISTORY: usize = 500;
+            // Paginate through conversations.history, capped per the source config.
             let messages = paginate::<HistoryData, SlackMessage, _>(
                 &self.http,
                 &self.token,
@@ -185,7 +207,7 @@ impl Source for SlackChannelSource {
                     ("inclusive", "true"),
                     ("limit", "100"),
                 ],
-                MAX_HISTORY,
+                p.max_messages_per_channel,
                 |data| {
                     (
                         data.messages.unwrap_or_default(),
@@ -206,7 +228,10 @@ impl Source for SlackChannelSource {
                 let has_replies = root.reply_count.unwrap_or(0) > 0
                     || root.thread_ts.as_deref() == Some(root.ts.as_str());
                 let mut thread = if p.include_threads && has_replies {
-                    match self.fetch_thread(&channel_id, &root.ts).await {
+                    match self
+                        .fetch_thread(&channel_id, &root.ts, p.max_thread_messages)
+                        .await
+                    {
                         Ok(t) => t,
                         Err(e) => {
                             tracing::warn!(
@@ -356,6 +381,8 @@ mod tests {
             watch_users: vec![],
             include_threads: false,
             exclude_bots: true,
+            max_messages_per_channel: 500,
+            max_thread_messages: 200,
         };
         assert_eq!(p.channel_refs(), vec!["#a", "C1", "C2"]);
     }
@@ -378,6 +405,28 @@ mod tests {
         }))
         .unwrap();
         assert!(p.exclude_bots);
+    }
+
+    #[test]
+    fn caps_default_and_reject_zero() {
+        let p: ChannelParams =
+            serde_json::from_value(serde_json::json!({ "channel": "#x" })).unwrap();
+        assert_eq!(p.max_messages_per_channel, 500);
+        assert_eq!(p.max_thread_messages, 200);
+        assert!(
+            validate_params(&serde_json::json!({ "channel": "#x", "max_messages_per_channel": 0 }))
+                .is_err()
+        );
+        assert!(
+            validate_params(&serde_json::json!({ "channel": "#x", "max_thread_messages": 0 }))
+                .is_err()
+        );
+        assert!(
+            validate_params(
+                &serde_json::json!({ "channel": "#x", "max_messages_per_channel": 2000 })
+            )
+            .is_ok()
+        );
     }
 
     #[test]

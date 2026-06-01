@@ -53,7 +53,7 @@ pub fn build_index(
 
     // daily/ holds one sub-directory per source ID. We keep them as separate groups so
     // the index shows pages-per-source counts and stable ordering.
-    let mut daily_groups: BTreeMap<String, Vec<Entry>> = BTreeMap::new();
+    let mut daily_groups: BTreeMap<String, Vec<IndexEntry>> = BTreeMap::new();
     let daily_root = vault_root.join(&dirs.daily);
     if daily_root.is_dir() {
         let mut sub_dirs: Vec<(String, PathBuf)> = Vec::new();
@@ -79,7 +79,7 @@ pub fn build_index(
     // Synthesis tiers are merged into one bucket so the index has a single "synthesis"
     // section. Each entry keeps its full vault-relative path so the wikilink target is
     // unambiguous.
-    let mut synthesis: Vec<Entry> = Vec::new();
+    let mut synthesis: Vec<IndexEntry> = Vec::new();
     let synthesis_dirs = [
         PathBuf::from(&dirs.synthesis).join(&dirs.weekly),
         PathBuf::from(&dirs.personal).join(&dirs.weekly),
@@ -281,7 +281,7 @@ pub async fn write_index(
 
 /// A single catalog entry: vault-relative path, the slug used in the wikilink, and the
 /// raw page body (used to extract a per-category one-liner at render time).
-struct Entry {
+struct IndexEntry {
     rel_path: String,
     /// Wikilink target. Daily/work-log/synthesis pages use the full vault-relative
     /// path (without `.md`); concepts use `slug|title` pipe format for correct
@@ -291,7 +291,7 @@ struct Entry {
     category: Option<String>,
 }
 
-fn collect_dir(vault_root: &Path, rel: &Path) -> Vec<Entry> {
+fn collect_dir(vault_root: &Path, rel: &Path) -> Vec<IndexEntry> {
     collect_dir_grouped(vault_root, rel, "category", None)
 }
 
@@ -300,7 +300,7 @@ fn collect_dir_grouped(
     rel: &Path,
     group_field: &str,
     concept_rel_dir: Option<&str>,
-) -> Vec<Entry> {
+) -> Vec<IndexEntry> {
     let abs = vault_root.join(rel);
     if !abs.is_dir() {
         return Vec::new();
@@ -313,8 +313,8 @@ fn collect_files(
     abs_dir: &Path,
     group_field: &str,
     concept_rel_dir: Option<&str>,
-) -> Vec<Entry> {
-    let mut entries: Vec<Entry> = Vec::new();
+) -> Vec<IndexEntry> {
+    let mut entries: Vec<IndexEntry> = Vec::new();
     for w in WalkDir::new(abs_dir).follow_links(false) {
         let w = match w {
             Ok(w) => w,
@@ -400,7 +400,7 @@ fn collect_files(
             .filter(|s| !s.is_empty())
             .map(String::from);
 
-        entries.push(Entry {
+        entries.push(IndexEntry {
             rel_path,
             link_target,
             body: page.body,
@@ -415,7 +415,7 @@ fn render_group(
     out: &mut String,
     title: &str,
     count: usize,
-    entries: &[Entry],
+    entries: &[IndexEntry],
     extract: impl Fn(&str) -> Option<String>,
 ) {
     writeln!(out).unwrap();
@@ -441,7 +441,7 @@ struct GroupedSectionOptions<'a> {
 fn render_grouped_section(
     out: &mut String,
     sub_pages: &mut Vec<(String, String)>,
-    entries: &[Entry],
+    entries: &[IndexEntry],
     extract: impl Fn(&str) -> Option<String>,
     opts: &GroupedSectionOptions<'_>,
     dirs: &VaultDirs,
@@ -452,8 +452,8 @@ fn render_grouped_section(
         uncategorized_label,
         split,
     } = opts;
-    let mut by_group: BTreeMap<String, Vec<&Entry>> = BTreeMap::new();
-    let mut ungrouped: Vec<&Entry> = Vec::new();
+    let mut by_group: BTreeMap<String, Vec<&IndexEntry>> = BTreeMap::new();
+    let mut ungrouped: Vec<&IndexEntry> = Vec::new();
     for entry in entries {
         match &entry.category {
             Some(g) => by_group.entry(g.clone()).or_default().push(entry),

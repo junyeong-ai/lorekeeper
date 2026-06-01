@@ -5,7 +5,7 @@ use std::sync::Arc;
 use lk_core::config::Config;
 use lk_core::vault_path::{VaultPath, work_log_dir};
 use lk_queue::TargetKind;
-use lk_vault::{VaultPage, VaultReader, section_body};
+use lk_vault::{FsVault, VaultPage, VaultStore, section_body};
 
 use crate::PipelineError;
 use crate::context::PipelineContext;
@@ -14,7 +14,7 @@ use crate::render::{RenderResult, llm_inputs_map, splice_preserved_sections};
 
 pub struct Synthesizer {
     ctx: Arc<PipelineContext>,
-    reader: VaultReader,
+    reader: Arc<dyn VaultStore>,
     sources: Vec<String>,
 }
 
@@ -59,7 +59,7 @@ impl SynthesisSection {
 
 impl Synthesizer {
     pub fn new(vault_root: &Path, ctx: Arc<PipelineContext>, config: &Config) -> Self {
-        let reader = VaultReader::new(vault_root);
+        let reader: Arc<dyn VaultStore> = Arc::new(FsVault::new(vault_root));
         // Cross-source weekly themes are opt-in: only the sources explicitly listed in
         // `synthesis.weekly.include_sources` are rolled up. Knowledge feeds (news, RSS)
         // deliberately stay out — their value is the continuously-accumulated concept

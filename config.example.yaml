@@ -64,6 +64,8 @@ sources:
       include_threads: true     # include thread replies as context
       exclude_bots: true        # drop bot/integration messages (default true)
       # watch_users: ["U0123…"] # (optional) only threads a given user authored or was mentioned in; empty = all
+      # max_messages_per_channel: 500 # (optional) per-run history cap; raise for very busy channels
+      # max_thread_messages: 200      # (optional) per-thread fetch cap (root message + replies)
     labels: [team-ops]
     extract_concepts: true
     track_personal: true

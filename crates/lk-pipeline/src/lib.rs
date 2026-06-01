@@ -22,7 +22,7 @@ use thiserror::Error;
 use lk_core::concept::ExtractedConcept;
 use lk_core::config::{Config, DedupConfig, SourceConfig, SourceType};
 use lk_core::event::{Event, RawItem};
-use lk_vault::VaultReader;
+use lk_vault::{FsVault, VaultStore};
 
 use concept_draft::ConceptDrafts;
 
@@ -64,7 +64,7 @@ pub struct IngestOptions {
 pub struct Pipeline {
     ctx: Arc<PipelineContext>,
     dedup: DedupCache,
-    reader: VaultReader,
+    reader: Arc<dyn VaultStore>,
     dedup_config: DedupConfig,
     /// Concept accumulation spans the WHOLE run, not a single `plan` call: a concept
     /// page is a cross-source aggregate, so two sources mentioning the same slug merge
@@ -107,7 +107,7 @@ impl Pipeline {
         Self {
             ctx,
             dedup,
-            reader: VaultReader::new(vault_root),
+            reader: Arc::new(FsVault::new(vault_root)),
             dedup_config: config.dedup.clone(),
             concept_drafts: ConceptDrafts::new(),
         }
@@ -404,7 +404,7 @@ impl Pipeline {
             // concept mentioned by multiple sources aggregates into one page.
             for concept in &day_concepts {
                 self.concept_drafts
-                    .merge(concept, *date, &self.reader, &self.ctx.dirs)
+                    .merge(concept, *date, self.reader.as_ref(), &self.ctx.dirs)
                     .await?;
             }
             all_concepts.extend(day_concepts);
@@ -446,7 +446,7 @@ impl Pipeline {
             &self.ctx.dirs,
             self.ctx.locale,
             &self.ctx.llm,
-            &self.reader,
+            self.reader.as_ref(),
         )
         .await
     }
@@ -634,7 +634,7 @@ impl Pipeline {
             // Merge concepts into run-level accumulator.
             for concept in &doc_concepts {
                 self.concept_drafts
-                    .merge(concept, event.date, &self.reader, &self.ctx.dirs)
+                    .merge(concept, event.date, self.reader.as_ref(), &self.ctx.dirs)
                     .await?;
             }
             all_concepts.extend(doc_concepts);

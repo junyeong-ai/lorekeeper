@@ -26,12 +26,14 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
   (`#heading`, `^block`) stripped before resolution.
 - **Alias resolution** (lowest precedence: id → filename → alias). A concept's
   `aliases` frontmatter (slugified into `ScannedPage::aliases`, self-slug dropped)
-  lets a bare `[[synonym]]` resolve to it. Applied CONSISTENTLY in all three
-  resolvers — `VaultExistence` (`by_alias`), `WikiGraph` (`alias_to_node`), and
-  `backlinks` (`alias_to_stem`, so `source_count` matches the graph). An alias never
-  overrides a real id/filename, and when two concepts claim the same alias the
-  smallest-id concept wins — order-independent, so all three resolvers pick the same
-  concept regardless of scan order or concept-file nesting. `alias::find_alias_conflicts`
+  lets a bare `[[synonym]]` resolve to it. The same precedence is applied by every
+  resolver: `VaultExistence` (`by_alias`) and `WikiGraph` (`alias_to_node`, which consults
+  `VaultExistence::is_real_page` so a real id/filename always shadows an alias) each build
+  the map, and `backlinks` resolves citations through `VaultExistence::resolve` so
+  `source_count` matches the graph rather than re-deriving aliases. An alias never overrides
+  a real id/filename, and when two concepts claim the same alias the smallest-id concept
+  wins — order-independent, so every resolver picks the same concept regardless of scan
+  order or concept-file nesting. `alias::find_alias_conflicts`
   surfaces the two ways this goes wrong (a `Duplicate` alias claimed by two concepts;
   one that `ShadowsRealPage`) as a `graph lint` finding — so the deterministic winner
   never calcifies silently. This is the deterministic, audit-friendly answer to synonyms
@@ -52,7 +54,7 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
 - **`suggest_links`**: pairs in the same Louvain community with no edge that share at
   least `graph.cluster.suggest_min_shared_neighbors` neighbors (default 2), ranked by
   shared-neighbor count. The floor suppresses co-citation noise — a single shared neighbor
-  usually means "co-cited by one daily note", not a real relationship. Read-only,
+  usually means "co-cited by one daily page", not a real relationship. Read-only,
   deterministic.
 - **Mutations gated**: `index::fix()`, `normalize::apply()`, and
   `backlinks::sync_concept_backlinks` touch the filesystem — the first two only
@@ -60,7 +62,7 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
 - **`stale::find_stale`**: reports pages that are **old AND dormant** — `updated`
   (or `created` fallback) older than the threshold AND no incoming citation from a
   page that is itself recent. Liveness is derived from the full-vault wikilink graph
-  (so a concept cited by this week's daily notes is live, not stale), which is why
+  (so a concept cited by this week's daily pages is live, not stale), which is why
   the CLI scans every page dir but reports only the configured scope. Distinguishes
   "old" from "actually dormant" deterministically — no heuristic. Groups by path
   prefix. Pure read.
@@ -77,8 +79,10 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
   the LLM/human. Sorted by `source_count` desc, then slug.
 - **`backlinks::sync_concept_backlinks`**: rewrites the `## Sources` section on
   each concept page to match the wikilink graph. Uses full-vault scope (not
-  `graph.scope.dirs`) so `<daily>`/`<personal>`/`<synthesis>` pages are included. Only event/document
-  pages qualify as sources (concept-to-concept links belong in `## Related`).
+  `graph.scope.dirs`) so `<daily>`/`<personal>`/`<synthesis>` pages are included. Only
+  non-concept content pages qualify as sources — `<daily>`, `<personal>`, `<synthesis>`,
+  `<wiki>/documents`, and `<wiki>/explorations` (a concept-to-concept link belongs in
+  `## Related`, and navigation pages never appear).
   The actual heading text is resolved from `locale.strings()` at runtime (e.g.
   `Sources`/`Related` under `locale: en`, localized otherwise) — never a hardcoded
   literal. It is ALSO the SOLE owner of the frontmatter `source_count` (= number of

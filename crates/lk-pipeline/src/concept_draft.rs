@@ -4,7 +4,7 @@ use lk_core::concept::{ExtractedConcept, slugify};
 use lk_core::config::VaultDirs;
 use lk_core::i18n::Locale;
 use lk_core::vault_path::VaultPath;
-use lk_vault::{TemplateEngine, VaultReader, replace_section, section_body};
+use lk_vault::{TemplateEngine, VaultStore, replace_section, section_body};
 
 use crate::PipelineError;
 use crate::render::RenderResult;
@@ -50,10 +50,10 @@ impl ConceptDrafts {
         &mut self,
         concept: &ExtractedConcept,
         date: jiff::civil::Date,
-        reader: &VaultReader,
+        reader: &dyn VaultStore,
         dirs: &VaultDirs,
     ) -> Result<(), PipelineError> {
-        let Some(safe_slug) = canonical_slug(&concept.slug, &concept.name) else {
+        let Some(safe_slug) = slugify(&concept.name) else {
             tracing::warn!(name = %concept.name, "skipping concept with empty slug");
             return Ok(());
         };
@@ -261,10 +261,6 @@ fn capture_section(
     None
 }
 
-pub(crate) fn canonical_slug(provided: &str, name: &str) -> Option<String> {
-    slugify(provided).or_else(|| slugify(name))
-}
-
 /// Surface a genuine category conflict — an established category that a fresh
 /// extraction disagrees with. Identity is first-writer (the established one is kept),
 /// but a silent divergence would calcify a possibly-wrong assignment, so make it
@@ -286,7 +282,7 @@ fn warn_category_conflict(slug: &str, established: Option<&str>, incoming: Optio
 /// Filter that callers use to drop concepts whose slug would be empty before threading
 /// them into rendered output. Keeps daily-page wiki links honest.
 pub fn is_valid(concept: &ExtractedConcept) -> bool {
-    canonical_slug(&concept.slug, &concept.name).is_some()
+    slugify(&concept.name).is_some()
 }
 
 #[cfg(test)]
@@ -316,16 +312,6 @@ mod tests {
         // Empty section → None (so a re-render doesn't splice a blank body).
         let empty = "# RAG\n\n## 핵심\n\n\n## 출처\n";
         assert!(capture_section(empty, |s| s.concept_synthesis).is_none());
-    }
-
-    #[test]
-    fn slug_with_slashes_is_normalized() {
-        assert_eq!(canonical_slug("foo/bar", "Foo Bar"), Some("foo-bar".into()));
-        assert_eq!(canonical_slug("..", "Up Up"), Some("up-up".into()));
-        assert_eq!(
-            canonical_slug("", "Hello World"),
-            Some("hello-world".into())
-        );
     }
 
     #[test]
