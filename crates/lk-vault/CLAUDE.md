@@ -31,13 +31,13 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   not the H1 title. `write_index` handles the atomic write.
 - **`timeline::build_timeline`** generates `{wiki}/log.md` — a reverse-chronological
   knowledge timeline (when each concept/document/exploration first entered the vault).
-  A materialized view like the index (regenerate → byte-identical), with three rules:
+  A materialized view like the index (regenerate → byte-identical), with two rules:
   anchored on `created` ONLY (never `updated`, which churns on re-mention/machine work
-  and would inject fake "knowledge changed" events); durable knowledge nodes only
-  (daily/synthesis excluded — a principled split, not a fuzzy score); and bounded to a
-  rolling `TIMELINE_WINDOW_DAYS` (365) measured from the newest *entry* (not the wall
-  clock, to stay deterministic) so it can't grow unbounded as the vault ages. `log.md`
-  is in `RESERVED_WIKI_FILES`, so the graph never flags it as an orphan or index drift.
+  and would inject fake "knowledge changed" events); and durable knowledge nodes only
+  (daily/synthesis excluded — a principled split, not a fuzzy score). Complete like
+  `index.md` — every knowledge node ever created appears, never truncated (text-only,
+  grows linearly in node count). `log.md` is in `RESERVED_WIKI_FILES`, so the graph
+  never flags it as an orphan or index drift.
 - **`set_frontmatter_field`** sets a scalar inside the frontmatter block, matching ONLY a
   top-level (column-0) key — never an indented key nested under a mapping (e.g. `summary:`
   under `llm_inputs:`) — and recognizes a leading BOM. The single source of truth for

@@ -121,7 +121,7 @@ Claude Code Skills        Semantic Plane             (same vault)
 | `lore graph audit-candidates` | Concepts whose source set changed since their last contradiction audit |
 | `lore graph audit-mark <slug>` | Record a concept as audited (drops it from `audit-candidates` until its sources change) |
 | `lore wiki index` | Rebuild `wiki/index.md` — by-topic catalog |
-| `lore wiki log` | Rebuild `wiki/log.md` — by-time knowledge timeline (recent window) |
+| `lore wiki log` | Rebuild `wiki/log.md` — by-time knowledge timeline |
 | `lore wiki concepts` | List all concept pages |
 | `lore queue status` | Classify pending LLM tasks: current / stale / missing-target |
 
