@@ -85,14 +85,12 @@ pub async fn run(
         lk_pipeline::PipelineContext::new(opts.template_dir.as_deref(), llm.clone(), &config)
             .map_err(|e| miette::miette!("{e}"))?,
     );
-    let pipeline = Arc::new(
-        if dry_run {
-            lk_pipeline::Pipeline::new_dry_run(&vault_root, ctx, &config)
-        } else {
-            lk_pipeline::Pipeline::new(&vault_root, ctx, &config)
-        }
-        .map_err(|e| miette::miette!("{e}"))?,
-    );
+    let mut pipeline = if dry_run {
+        lk_pipeline::Pipeline::new_dry_run(&vault_root, ctx, &config)
+    } else {
+        lk_pipeline::Pipeline::new(&vault_root, ctx, &config)
+    }
+    .map_err(|e| miette::miette!("{e}"))?;
     let writer = lk_vault::VaultWriter::new(&vault_root);
     let log = lk_vault::IngestLog::new(vault_root.join(".lorekeeper").join("ingest.jsonl"));
     let options = lk_pipeline::IngestOptions {
@@ -343,9 +341,10 @@ pub async fn run(
             .map_err(|e| miette::miette!("queue flush: {e}"))?;
     }
 
-    // Phase 5: Commit dedup ONLY if every write AND the queue flush succeeded. Each
-    // source committed independently so that future runs that re-extract these events
-    // know they're already persisted.
+    // Phase 5: Commit dedup ONLY if every write AND the queue flush succeeded. The run
+    // is atomic as a whole — Phase 4 flushes one batched queue write for all sources, so
+    // there is no per-source commit point: a single write failure leaves every source
+    // uncommitted, and the materialized-view re-render makes the next run idempotent.
     for p in &planned {
         let status = if any_write_failed {
             lk_vault::LogStatus::Failed

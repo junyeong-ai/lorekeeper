@@ -133,6 +133,15 @@ inspecting pages.
      survivor first). Like every audit finding the merge is **surfaced, not run** — it
      deletes a page, so a human makes the call. Leave deliberate model-version siblings
      (`gpt-4`/`gpt-5`) split — they are distinct concepts.
+   - **Synonym / abbreviation aliases**: `near_duplicate_concepts` is string-similarity,
+     so it cannot see an acronym and its expansion (`rag` ↔ `retrieval-augmented-generation`,
+     `k8s` ↔ `kubernetes`) — they share almost no characters. From the `lore wiki concepts`
+     registry you already loaded, read down the list ONCE and spot equivalent pairs by
+     meaning. Recommend declaring the non-canonical form as an `aliases` entry on the
+     canonical concept (`backlinks-sync` then resolves both spellings to one page), or a
+     `merge` when one side has no distinct content. Read-only suggestion — a human edits
+     frontmatter. An acronym can be genuinely ambiguous (`rag` could be red-amber-green),
+     so never auto-alias; surface the candidate and let the human confirm the meaning.
    - **Staleness**: run `lore graph stale --days 90`, filter concept entries.
      `stale` already excludes concepts still cited by recent activity (liveness is
      graph-derived), so an entry here is genuinely dormant — no manual recency grep

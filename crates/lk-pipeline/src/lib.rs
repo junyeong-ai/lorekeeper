@@ -66,12 +66,11 @@ pub struct Pipeline {
     dedup: DedupCache,
     reader: VaultReader,
     dedup_config: DedupConfig,
-    run_lock: tokio::sync::Mutex<()>,
     /// Concept accumulation spans the WHOLE run, not a single `plan` call: a concept
-    /// page is a cross-source aggregate, so two sources mentioning the same slug must
-    /// merge into one page. Rendered once via `render_concept_pages` after all sources
-    /// are planned.
-    concept_drafts: tokio::sync::Mutex<ConceptDrafts>,
+    /// page is a cross-source aggregate, so two sources mentioning the same slug merge
+    /// into one page, rendered once via `render_concept_pages` after all sources are
+    /// planned. Exclusive `&mut self` access keeps this run-level state coherent.
+    concept_drafts: ConceptDrafts,
 }
 
 impl Pipeline {
@@ -110,28 +109,24 @@ impl Pipeline {
             dedup,
             reader: VaultReader::new(vault_root),
             dedup_config: config.dedup.clone(),
-            run_lock: tokio::sync::Mutex::new(()),
-            concept_drafts: tokio::sync::Mutex::new(ConceptDrafts::new()),
+            concept_drafts: ConceptDrafts::new(),
         }
     }
 
     /// Build daily and concept pages without recording dedup. The caller writes pages
     /// to the vault, then calls `commit` to mark events as seen.
     ///
-    /// Concurrency: `plan` serializes via an internal mutex, so a second concurrent
-    /// `plan` blocks until the first returns. The mutex is NOT held across the
-    /// subsequent `commit` call, so callers running multiple pipelines against the
-    /// same dedup cache must externally serialize the plan→write→commit sequence
-    /// to avoid race-induced duplicates.
+    /// `plan` takes `&mut self`: one `Pipeline` drives one ingest run with exclusive
+    /// access. The caller plans every source, then writes all pages, then commits dedup
+    /// — distinct phases over the whole source list — while concept drafts accumulate
+    /// run-wide across the `plan` calls and render once in `render_concept_pages`.
     pub async fn plan(
-        &self,
+        &mut self,
         source_id: &str,
         config: &SourceConfig,
         items: Vec<RawItem>,
         options: &IngestOptions,
     ) -> Result<IngestResult, PipelineError> {
-        let _guard = self.run_lock.lock().await;
-
         let mut events =
             normalize::normalize(source_id, config.source_type, items, &self.ctx.timezone);
         tracing::info!(source = source_id, raw = events.len(), "normalized");
@@ -407,13 +402,10 @@ impl Pipeline {
 
             // Merge into the run-level accumulator (shared across all sources) so a
             // concept mentioned by multiple sources aggregates into one page.
-            {
-                let mut drafts = self.concept_drafts.lock().await;
-                for concept in &day_concepts {
-                    drafts
-                        .merge(concept, *date, &self.reader, &self.ctx.dirs)
-                        .await?;
-                }
+            for concept in &day_concepts {
+                self.concept_drafts
+                    .merge(concept, *date, &self.reader, &self.ctx.dirs)
+                    .await?;
             }
             all_concepts.extend(day_concepts);
         }
@@ -431,8 +423,8 @@ impl Pipeline {
     /// Render the concept pages accumulated across every `plan` call in this run.
     /// Call once after all sources are planned and before committing dedup.
     pub async fn render_concept_pages(&self) -> Result<Vec<RenderResult>, PipelineError> {
-        let drafts = self.concept_drafts.lock().await;
-        drafts.render_pages(&self.ctx.engine, &self.ctx.dirs, self.ctx.locale)
+        self.concept_drafts
+            .render_pages(&self.ctx.engine, &self.ctx.dirs, self.ctx.locale)
     }
 
     /// Mark this run's events as processed. Call AFTER vault writes succeed to avoid
@@ -460,7 +452,7 @@ impl Pipeline {
     }
 
     async fn plan_documents(
-        &self,
+        &mut self,
         source_id: &str,
         config: &SourceConfig,
         events: Vec<Event>,
@@ -640,13 +632,10 @@ impl Pipeline {
             });
 
             // Merge concepts into run-level accumulator.
-            {
-                let mut drafts = self.concept_drafts.lock().await;
-                for concept in &doc_concepts {
-                    drafts
-                        .merge(concept, event.date, &self.reader, &self.ctx.dirs)
-                        .await?;
-                }
+            for concept in &doc_concepts {
+                self.concept_drafts
+                    .merge(concept, event.date, &self.reader, &self.ctx.dirs)
+                    .await?;
             }
             all_concepts.extend(doc_concepts);
         }
@@ -695,8 +684,7 @@ impl Pipeline {
             }
         }
 
-        let drafts = self.concept_drafts.lock().await;
-        for (slug, name) in drafts.known_slugs_and_names() {
+        for (slug, name) in self.concept_drafts.known_slugs_and_names() {
             if !refs.iter().any(|r| r.slug == slug) {
                 refs.push(lk_queue::ExistingConceptRef { slug, name });
             }
