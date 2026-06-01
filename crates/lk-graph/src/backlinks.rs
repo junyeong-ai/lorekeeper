@@ -208,7 +208,11 @@ pub(crate) fn parse_existing_sources(content: &str, heading: &str) -> Vec<String
 /// Set the frontmatter `source_count` — a thin wrapper over the single-sourced
 /// `set_frontmatter_field` so backlinks and the audit marker share one writer.
 fn set_source_count(content: &str, count: u64) -> String {
-    set_frontmatter_field(content, frontmatter::field::SOURCE_COUNT, &count.to_string())
+    set_frontmatter_field(
+        content,
+        frontmatter::field::SOURCE_COUNT,
+        &count.to_string(),
+    )
 }
 
 /// Render the sources list to the same shape `concept.md.jinja` produces:

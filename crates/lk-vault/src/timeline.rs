@@ -218,7 +218,10 @@ mod tests {
         concept(tmp.path(), "recent", "Recent", "2026-05-20");
         let out = build_timeline(tmp.path(), &VaultDirs::default()).unwrap();
         assert!(out.contains("|Recent]]"), "recent entry shown");
-        assert!(out.contains("|Ancient]]"), "years-old entry shown — never truncated");
+        assert!(
+            out.contains("|Ancient]]"),
+            "years-old entry shown — never truncated"
+        );
         assert!(out.contains("2 entries"));
         // Newest date first, oldest last — reverse chronological across any span.
         let h_recent = out.find("## 2026-05-20").unwrap();
