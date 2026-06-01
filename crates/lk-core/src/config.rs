@@ -998,7 +998,7 @@ pub struct GraphMetricsConfig {
 pub struct GraphClusterConfig {
     /// Louvain resolution parameter; higher favors more, smaller communities.
     pub resolution: f64,
-    /// Maximum local-moving passes before the algorithm stops.
+    /// Maximum local-moving passes per aggregation level before that level stops.
     pub max_iterations: usize,
     /// Communities smaller than this are dropped from results.
     pub min_community_size: usize,

@@ -331,7 +331,7 @@ concepts:
 #     concept_near_duplicate_threshold: 0.6  # slug similarity to flag as near-dup merge candidate
 #   cluster:
 #     resolution: 1.0                # Louvain resolution (higher = more, smaller communities)
-#     max_iterations: 100            # max local-moving passes
+#     max_iterations: 100            # max local-moving passes per aggregation level
 #     min_community_size: 1          # drop communities smaller than this
 #     suggest_min_shared_neighbors: 2  # suggest-links floor: min shared neighbors per pair (cuts co-citation noise)
 
