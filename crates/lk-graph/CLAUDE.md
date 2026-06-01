@@ -56,7 +56,7 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
   shared-neighbor count. The floor suppresses co-citation noise — a single shared neighbor
   usually means "co-cited by one daily page", not a real relationship. Read-only,
   deterministic.
-- **Mutations gated**: `index::fix()`, `normalize::apply()`, and
+- **Mutations gated**: `index_drift::fix()`, `normalize::apply()`, and
   `backlinks::sync_concept_backlinks` touch the filesystem — the first two only
   with `--fix`, backlinks only without `--dry-run`. All renames pre-checked.
 - **`stale::find_stale`**: reports pages that are **old AND dormant** — `updated`
@@ -125,7 +125,7 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
   state.
 - **`concept_lint::near_duplicate_concepts`**: reports concept-slug pairs whose
   Sørensen-Dice similarity (on separator-stripped slugs) ≥
-  `graph.graph.concept_near_duplicate_threshold` (default 0.6) — variant-spelling
+  `graph.metrics.concept_near_duplicate_threshold` (default 0.6) — variant-spelling
   duplicates (`vector-db` ~ `vector-database` = 0.6) the LLM dedup hint missed. Digit-boundary
   version variants (`gpt-4`/`gpt-4o`, `claude-3`/`claude-3-5`) are deliberately distinct
   concepts and are skipped (`is_version_variant`) — that orthogonal exclusion is why the

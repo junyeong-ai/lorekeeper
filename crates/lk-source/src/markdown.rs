@@ -127,7 +127,8 @@ fn render_adf(node: &Value, out: &mut String) {
             }
             out.push('\n');
         }
-        // doc, panel, table cells, and anything unrecognized: recurse so text is preserved.
+        "table" => render_adf_table(node, out),
+        // doc, panel, and anything unrecognized: recurse so text is preserved.
         // For unknown leaf nodes (no content array), rescue common attrs.
         _ => {
             if node.get("content").and_then(Value::as_array).is_some() {
@@ -187,6 +188,61 @@ fn render_adf_list(node: &Value, out: &mut String, ordered_start: Option<usize>)
     out.push('\n');
 }
 
+/// Render an ADF table as a GFM pipe table. Each cell is flattened to a single line
+/// (cell separators escaped); the first row becomes the GFM header. Ragged rows are
+/// padded to the widest row so the column count is consistent.
+fn render_adf_table(node: &Value, out: &mut String) {
+    let Some(content) = node.get("content").and_then(Value::as_array) else {
+        return;
+    };
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for row in content {
+        if row.get("type").and_then(Value::as_str) != Some("tableRow") {
+            continue;
+        }
+        let Some(cells) = row.get("content").and_then(Value::as_array) else {
+            continue;
+        };
+        let rendered: Vec<String> = cells
+            .iter()
+            .map(|cell| {
+                let mut inner = String::new();
+                render_adf_children(cell, &mut inner);
+                // A GFM cell is single-line; collapse whitespace and escape the pipe.
+                inner
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .replace('|', "\\|")
+            })
+            .collect();
+        if !rendered.is_empty() {
+            rows.push(rendered);
+        }
+    }
+    let Some(cols) = rows.iter().map(Vec::len).max() else {
+        return;
+    };
+
+    for (i, row) in rows.iter().enumerate() {
+        out.push('|');
+        for c in 0..cols {
+            out.push(' ');
+            out.push_str(row.get(c).map(String::as_str).unwrap_or(""));
+            out.push_str(" |");
+        }
+        out.push('\n');
+        if i == 0 {
+            out.push('|');
+            for _ in 0..cols {
+                out.push_str(" --- |");
+            }
+            out.push('\n');
+        }
+    }
+    out.push('\n');
+}
+
 fn adf_attr<'a>(node: &'a Value, key: &str) -> Option<&'a str> {
     node.get("attrs")
         .and_then(|a| a.get(key))
@@ -231,7 +287,7 @@ pub fn slack_to_markdown(text: &str, users: &HashMap<String, String>) -> String 
     let rewritten = rewrite_angle_tokens(text, users);
     let converted = convert_mrkdwn_formatting(&rewritten);
     let decoded = decode_entities(&converted);
-    strip_emoji_shortcodes(&decoded)
+    render_emoji_shortcodes(&decoded)
 }
 
 fn rewrite_angle_tokens(text: &str, users: &HashMap<String, String>) -> String {
@@ -439,13 +495,14 @@ fn decode_entities(text: &str) -> String {
         .replace("&amp;", "&")
 }
 
-/// Strip Slack emoji shortcodes (`:tada:`, `:+1:`). Emoji are decorative, not core
-/// information in a long-lived knowledge vault, so they're removed. Only shortcodes in the
-/// standard Unicode emoji set are stripped, and only in prose: a shortcode written as a code
-/// literal is content, so code spans are preserved verbatim. Colon-delimited prose
-/// (`:default:`, a `key:value:` token) and Slack-specific or workspace-custom names (not in
-/// the standard set) are likewise never mistaken for an emoji and deleted.
-fn strip_emoji_shortcodes(text: &str) -> String {
+/// Render Slack emoji shortcodes (`:tada:`, `:+1:`) as their Unicode glyph — exactly
+/// what the author saw — instead of dropping them, since a shortcode like `:100:` or
+/// `:rocket:` can carry real meaning. Only shortcodes in the standard Unicode emoji set
+/// are converted, and only in prose: a shortcode written as a code literal is content, so
+/// code spans are preserved verbatim. Colon-delimited prose (`:default:`, a `key:value:`
+/// token) and Slack-specific or workspace-custom names (not in the standard set) are left
+/// untouched.
+fn render_emoji_shortcodes(text: &str) -> String {
     // Code spans are skipped using the CommonMark rule: a run of N backticks opens a span
     // that closes at the next run of EXACTLY N backticks. This keeps inline (`` `…` ``) and
     // fenced (```` ```…``` ````) code intact even when a fenced body itself contains
@@ -461,8 +518,8 @@ fn strip_emoji_shortcodes(text: &str) -> String {
             i += 1;
             continue;
         }
-        // Strip the prose run preceding this backtick run.
-        strip_prose_shortcodes(&text[prose_start..i], &mut out);
+        // Convert the prose run preceding this backtick run.
+        render_prose_shortcodes(&text[prose_start..i], &mut out);
         let open = i;
         while i < n && bytes[i] == b'`' {
             i += 1;
@@ -499,12 +556,13 @@ fn strip_emoji_shortcodes(text: &str) -> String {
             }
         }
     }
-    strip_prose_shortcodes(&text[prose_start..], &mut out);
+    render_prose_shortcodes(&text[prose_start..], &mut out);
     out
 }
 
-/// Strip recognized emoji shortcodes from one prose run (no code spans), into `out`.
-fn strip_prose_shortcodes(text: &str, out: &mut String) {
+/// Convert recognized emoji shortcodes in one prose run (no code spans) to their glyph,
+/// writing into `out`.
+fn render_prose_shortcodes(text: &str, out: &mut String) {
     let mut rest = text;
     while let Some(start) = rest.find(':') {
         out.push_str(&rest[..start]);
@@ -516,12 +574,16 @@ fn strip_prose_shortcodes(text: &str, out: &mut String) {
             .next_back()
             .is_some_and(|c| c.is_alphanumeric());
         match after.find(':') {
-            Some(end)
-                if boundary && end > 0 && emojis::get_by_shortcode(&after[..end]).is_some() =>
-            {
-                // Drop the recognized emoji shortcode entirely.
-                rest = &after[end + 1..];
-            }
+            Some(end) if boundary && end > 0 => match emojis::get_by_shortcode(&after[..end]) {
+                Some(emoji) => {
+                    out.push_str(emoji.as_str());
+                    rest = &after[end + 1..];
+                }
+                None => {
+                    out.push(':');
+                    rest = after;
+                }
+            },
             _ => {
                 out.push(':');
                 rest = after;
@@ -616,6 +678,35 @@ mod tests {
             }]
         });
         assert_eq!(adf_to_markdown(&adf), "ok");
+    }
+
+    #[test]
+    fn adf_table_renders_as_pipe_table() {
+        let adf = json!({
+            "type": "table",
+            "content": [
+                {"type": "tableRow", "content": [
+                    {"type": "tableHeader", "content": [
+                        {"type": "paragraph", "content": [{"type": "text", "text": "Name"}]}
+                    ]},
+                    {"type": "tableHeader", "content": [
+                        {"type": "paragraph", "content": [{"type": "text", "text": "Role"}]}
+                    ]}
+                ]},
+                {"type": "tableRow", "content": [
+                    {"type": "tableCell", "content": [
+                        {"type": "paragraph", "content": [{"type": "text", "text": "Ada"}]}
+                    ]},
+                    {"type": "tableCell", "content": [
+                        {"type": "paragraph", "content": [{"type": "text", "text": "Eng"}]}
+                    ]}
+                ]}
+            ]
+        });
+        assert_eq!(
+            adf_to_markdown(&adf),
+            "| Name | Role |\n| --- | --- |\n| Ada | Eng |"
+        );
     }
 
     fn no_users() -> HashMap<String, String> {
@@ -719,29 +810,29 @@ mod tests {
     }
 
     #[test]
-    fn slack_emoji_shortcodes_stripped() {
+    fn slack_emoji_shortcodes_render_to_glyphs() {
         let u = no_users();
-        // Recognized Unicode emoji shortcodes are stripped entirely (not converted) —
-        // they're decorative, not core document information.
-        assert_eq!(slack_to_markdown(":+1: great", &u), " great");
-        assert_eq!(slack_to_markdown(":pray::fire:", &u), "");
+        // Recognized Unicode emoji shortcodes render as their glyph — faithful to what the
+        // author saw, never dropped (a `:100:`/`:rocket:` can carry real meaning).
+        assert_eq!(slack_to_markdown(":+1: great", &u), "👍 great");
+        assert_eq!(slack_to_markdown(":pray::fire:", &u), "🙏🔥");
         // A workspace-custom emoji is NOT in the standard set, so it survives as literal
-        // text rather than risk deleting a real word that looks like a shortcode.
+        // text rather than risk mangling a real word that looks like a shortcode.
         assert_eq!(slack_to_markdown(":custom_parrot:", &u), ":custom_parrot:");
     }
 
     #[test]
-    fn slack_emoji_strip_preserves_prose_and_colon_delimited_words() {
+    fn slack_emoji_render_preserves_prose_and_colon_delimited_words() {
         let u = no_users();
         // A colon embedded mid-word is not an emoji shortcode — `key:value:pair`
-        // technical text must keep its middle token, not be silently eaten.
+        // technical text must keep its middle token, not be touched.
         assert_eq!(
             slack_to_markdown("config:value:here", &u),
             "config:value:here"
         );
         assert_eq!(slack_to_markdown("app:icon:large", &u), "app:icon:large");
         // A delimited word that merely LOOKS like a shortcode but isn't a real emoji
-        // (a Ruby symbol, colon-emphasis) must be preserved, not deleted.
+        // (a Ruby symbol, colon-emphasis) must be preserved, not converted.
         assert_eq!(
             slack_to_markdown("the :default: value", &u),
             "the :default: value"
@@ -750,20 +841,20 @@ mod tests {
             slack_to_markdown("mark :important:", &u),
             "mark :important:"
         );
-        // Delimited shortcodes still strip, even adjacent to punctuation.
-        assert_eq!(slack_to_markdown("nice (:tada:)", &u), "nice ()");
-        assert_eq!(slack_to_markdown("done :+1:", &u), "done ");
+        // Delimited shortcodes render to glyphs, even adjacent to punctuation.
+        assert_eq!(slack_to_markdown("nice (:tada:)", &u), "nice (🎉)");
+        assert_eq!(slack_to_markdown("done :+1:", &u), "done 👍");
     }
 
     #[test]
-    fn slack_emoji_strip_preserves_shortcodes_in_code_spans() {
+    fn slack_emoji_render_preserves_shortcodes_in_code_spans() {
         let u = no_users();
         // A shortcode written as a code literal is content, not decoration — a `code`
         // span must survive verbatim even when it holds a real emoji shortcode, while a
-        // bare prose shortcode on the same line is still stripped.
+        // bare prose shortcode on the same line still renders to its glyph.
         assert_eq!(
             slack_to_markdown("use `:tada:` here :tada:", &u),
-            "use `:tada:` here "
+            "use `:tada:` here 🎉"
         );
         assert_eq!(
             slack_to_markdown("the `:x:` marker", &u),
@@ -771,7 +862,7 @@ mod tests {
         );
         // A fenced block whose body itself contains backticks: the shortcode inside must
         // survive (the opening ``` matches the closing ```; the inner single backticks
-        // don't close it). A naive backtick-parity split mis-counts here and strips it.
+        // don't close it). A naive backtick-parity split mis-counts here and converts it.
         assert_eq!(
             slack_to_markdown("```\nlet s = `:tada:`;\n```", &u),
             "```\nlet s = `:tada:`;\n```"

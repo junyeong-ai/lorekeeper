@@ -348,6 +348,16 @@ mod tests {
     }
 
     #[test]
+    fn setext_underline_in_body_is_not_a_section_boundary() {
+        // A source body can carry setext headings (`Subhead\n---`). Section boundaries
+        // are ATX `## ` lines only, so a setext underline is ordinary body content —
+        // the real boundary is `## Meta`. The whole body is replaced as one span.
+        let doc = "## Key Events\n\nSubhead\n---\n\nbody\n\n## Meta\n\nm\n";
+        let out = replace_section(doc, "Key Events", "rewritten");
+        assert_eq!(out, "## Key Events\n\nrewritten\n\n## Meta\n\nm\n");
+    }
+
+    #[test]
     fn idempotent_when_body_is_already_correct() {
         let doc = "## Sources\n\n- [[a]]\n- [[b]]\n\n## Meta\n";
         let out = replace_section(doc, "Sources", "- [[a]]\n- [[b]]");

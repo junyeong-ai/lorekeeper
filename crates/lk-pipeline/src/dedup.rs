@@ -29,7 +29,6 @@ const TRACKING_QUERY_EXACT_KEYS: &[&str] = &[
     "gbraid",
     "igshid",
     "ref_src",
-    "spm",
     "vero_id",
     "vero_conv",
     "oly_enc_id",
@@ -64,11 +63,20 @@ pub(crate) fn normalize_url(raw: &str, extra_tracking: &[String]) -> String {
         return raw.to_string();
     };
 
+    // The host is case-insensitive under every scheme, so canonicalise it once up front.
+    // (`mailto:` has no host, so its case-sensitive local-part is untouched.)
+    if let Some(host) = url.host_str() {
+        let host = host.to_ascii_lowercase();
+        if url.set_host(Some(&host)).is_err() {
+            return raw.to_string();
+        }
+    }
+
     let scheme = match url.scheme() {
         "http" | "https" => "https",
         other => {
-            // Non-HTTP schemes (ftp, mailto, …) are kept as-is since the
-            // scheme itself is semantically meaningful.
+            // Non-HTTP schemes (ftp, mailto, …) keep their scheme — it is semantically
+            // meaningful — but still drop query/fragment so trivial variants dedup.
             if url.set_scheme(&other.to_ascii_lowercase()).is_err() {
                 return raw.to_string();
             }
@@ -79,13 +87,6 @@ pub(crate) fn normalize_url(raw: &str, extra_tracking: &[String]) -> String {
     };
     if url.set_scheme(scheme).is_err() {
         return raw.to_string();
-    }
-
-    if let Some(host) = url.host_str() {
-        let host = host.to_ascii_lowercase();
-        if url.set_host(Some(&host)).is_err() {
-            return raw.to_string();
-        }
     }
 
     let _ = url.set_username("");

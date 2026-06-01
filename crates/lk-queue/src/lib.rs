@@ -39,7 +39,7 @@ pub enum TargetKind {
     /// Daily page concept wiki-links + concept page creation/merge.
     DailyConcepts,
     /// Cross-source weekly synthesis narrative.
-    WeeklySynthesisNarrative,
+    WeeklySynthesisThemes,
     /// Personal weekly review narrative.
     WeeklyPersonalNarrative,
     /// Personal monthly review narrative.
@@ -72,7 +72,7 @@ impl TargetKind {
             TargetKind::DailyRefineEvents => "refine_events",
             TargetKind::DailyConcepts | TargetKind::DocumentConcepts => "concepts",
             TargetKind::WorkLogSynthesis => "topic_summary",
-            TargetKind::WeeklySynthesisNarrative => "themes",
+            TargetKind::WeeklySynthesisThemes => "themes",
             TargetKind::WeeklyPersonalNarrative
             | TargetKind::MonthlyPersonalNarrative
             | TargetKind::QuarterlyPersonalNarrative
@@ -100,7 +100,7 @@ impl TargetKind {
             },
             TargetKind::DailySummary
             | TargetKind::DailyConcepts
-            | TargetKind::WeeklySynthesisNarrative
+            | TargetKind::WeeklySynthesisThemes
             | TargetKind::WeeklyPersonalNarrative
             | TargetKind::MonthlyPersonalNarrative
             | TargetKind::QuarterlyPersonalNarrative

@@ -1,7 +1,7 @@
 # lk-source
 
 Source adapters. Each implements `Source::extract(params, ctx) -> Result<Vec<RawItem>, SourceError>`;
-`create_source(source_type, ..)` is the factory. No dedup/render here — just fetch +
+`build_source(source_type, ..)` is the factory. No dedup/render here — just fetch +
 map to `RawItem`.
 
 - **`validate_params(source_type, params)`** deserializes into each adapter's typed

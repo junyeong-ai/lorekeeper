@@ -172,7 +172,7 @@ impl Pipeline {
         }
 
         classify::assign_labels(&mut events, &config.labels);
-        classify::mark_personal(&mut events, config.track_personal);
+        classify::assign_personal(&mut events, config.track_personal);
         classify::classify_by_keywords(&mut events, &config.classify);
 
         if config.source_type == SourceType::Manual {
@@ -393,12 +393,15 @@ impl Pipeline {
             if let Some(d) = concepts_decision.as_ref() {
                 splices.push((concepts_heading, d));
             }
-            let content = render::splice_preserved_sections(fresh.content, splices);
-
-            daily_pages.push(render::RenderResult {
-                path: fresh.path,
-                content,
-            });
+            // A cached body that can't be spliced (a custom template heading diverged
+            // from the configured one) yields `None`; skip the write so the previous
+            // on-disk page — and its LLM body — is left intact.
+            if let Some(content) = render::splice_preserved_sections(fresh.content, splices) {
+                daily_pages.push(render::RenderResult {
+                    path: fresh.path,
+                    content,
+                });
+            }
 
             // Merge into the run-level accumulator (shared across all sources) so a
             // concept mentioned by multiple sources aggregates into one page.
@@ -624,12 +627,12 @@ impl Pipeline {
             if let Some(d) = concepts_decision.as_ref() {
                 splices.push((concepts_heading, d));
             }
-            let content = render::splice_preserved_sections(fresh.content, splices);
-
-            document_pages.push(render::RenderResult {
-                path: fresh.path,
-                content,
-            });
+            if let Some(content) = render::splice_preserved_sections(fresh.content, splices) {
+                document_pages.push(render::RenderResult {
+                    path: fresh.path,
+                    content,
+                });
+            }
 
             // Merge concepts into run-level accumulator.
             for concept in &doc_concepts {

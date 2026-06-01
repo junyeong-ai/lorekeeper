@@ -504,7 +504,7 @@ mod tests {
         // guard would freeze wrong-language themes under a matching hash.
         let target = TaskTarget {
             vault_path: "synthesis/weekly/2026-W01.md".into(),
-            kind: TargetKind::WeeklySynthesisNarrative,
+            kind: TargetKind::WeeklySynthesisThemes,
             anchor: "## Themes".into(),
         };
         let ko = ThemeRequest {

@@ -15,7 +15,7 @@ pub fn assign_labels(events: &mut [Event], labels: &[String]) {
 /// live) and carried on `Event::is_self`; here it is gated by the source's
 /// `track_personal` so only opted-in sources feed the work-log and performance
 /// reviews. No text matching — a recipient, CC, or mention is never the author.
-pub fn mark_personal(events: &mut [Event], track_personal: bool) {
+pub fn assign_personal(events: &mut [Event], track_personal: bool) {
     if !track_personal {
         return;
     }
@@ -49,7 +49,10 @@ fn is_identifier_char(c: char) -> bool {
 /// characters on either side. Prevents the false positives a plain `contains`
 /// produces in Latin text — keyword "AI" matching "FAIR" — while a CJK needle (no
 /// ASCII boundary chars around it) matches as a substring, so Korean keywords
-/// match across attached particles ("검토" in "검토를", "재검토").
+/// match across attached particles ("검토" in "검토를", "재검토"). CJK has no word
+/// boundary to anchor against, so a short CJK keyword behaves like `contains` and also
+/// matches inside a larger compound ("검토" in "미검토") — configure CJK keywords
+/// specific enough that this is the intended grouping.
 fn contains_bounded(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return false;
@@ -154,7 +157,7 @@ mod tests {
     fn personal_follows_adapter_ownership_when_tracked() {
         let mut events = vec![make_event("Mine"), make_event("Theirs")];
         events[0].is_self = true;
-        mark_personal(&mut events, true);
+        assign_personal(&mut events, true);
         assert!(events[0].is_personal);
         assert!(events[0].labels.iter().any(|l| l == "personal"));
         assert!(!events[1].is_personal);
@@ -165,7 +168,7 @@ mod tests {
     fn personal_not_marked_when_tracking_off() {
         let mut events = vec![make_event("Mine")];
         events[0].is_self = true;
-        mark_personal(&mut events, false);
+        assign_personal(&mut events, false);
         assert!(!events[0].is_personal);
         assert!(events[0].labels.is_empty());
     }

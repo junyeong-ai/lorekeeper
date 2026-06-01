@@ -112,9 +112,11 @@ pub async fn render_work_log(
             .render("work-log.md.jinja", &context)
             .map_err(|e| PipelineError::Render(e.to_string()))?;
 
-        let content = splice_preserved_sections(fresh, std::iter::once((topic_heading, &decision)));
-
-        outputs.push(RenderResult { path, content });
+        if let Some(content) =
+            splice_preserved_sections(fresh, std::iter::once((topic_heading, &decision)))
+        {
+            outputs.push(RenderResult { path, content });
+        }
     }
 
     Ok(outputs)

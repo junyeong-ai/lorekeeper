@@ -13,7 +13,7 @@ pub mod cluster;
 pub mod concept_lint;
 pub mod export;
 pub mod graph;
-pub mod index;
+pub mod index_drift;
 pub mod merge;
 pub mod normalize;
 pub mod output;

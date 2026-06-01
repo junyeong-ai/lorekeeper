@@ -325,7 +325,7 @@ concepts:
 #     dirs: [wiki]                   # vault-relative dirs to scan (default: vault.dirs.wiki)
 #     exclude: []                    # glob patterns to skip (e.g., ["wiki/log.md"])
 #     follow_links: false            # follow symlinks during walk
-#   graph:
+#   metrics:
 #     min_hub_degree: 5              # minimum total degree to flag as hub in lint
 #     orphan_exclude: []             # page ids excluded from orphan reports
 #     concept_near_duplicate_threshold: 0.6  # slug similarity to flag as near-dup merge candidate

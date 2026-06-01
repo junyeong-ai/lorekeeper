@@ -15,7 +15,6 @@ use lk_core::vault_path::{
 };
 use serde::Serialize;
 
-use crate::GraphError;
 use crate::scan::{ScannedPage, VaultExistence, is_valid_source};
 
 /// A vault page that exceeds the staleness threshold.
@@ -42,7 +41,7 @@ pub enum PageKind {
     WikiDocuments,
     WikiExplorations,
     Daily,
-    MeWorkLog,
+    PersonalWorkLog,
     Weekly,
     Monthly,
     Quarterly,
@@ -72,7 +71,7 @@ impl PageKind {
             (format!("{}/", dirs.daily), PageKind::Daily),
             (
                 format!("{}/{WORK_LOG_SUBDIR}/", dirs.personal),
-                PageKind::MeWorkLog,
+                PageKind::PersonalWorkLog,
             ),
             (
                 format!("{}/{}/", dirs.personal, dirs.weekly),
@@ -110,7 +109,7 @@ impl PageKind {
             PageKind::WikiDocuments => format!("{}/{DOCUMENTS_SUBDIR}", dirs.wiki),
             PageKind::WikiExplorations => format!("{}/{EXPLORATIONS_SUBDIR}", dirs.wiki),
             PageKind::Daily => dirs.daily.clone(),
-            PageKind::MeWorkLog => format!("{}/{WORK_LOG_SUBDIR}", dirs.personal),
+            PageKind::PersonalWorkLog => format!("{}/{WORK_LOG_SUBDIR}", dirs.personal),
             PageKind::Weekly => dirs.weekly.clone(),
             PageKind::Monthly => format!("{}/{}", dirs.personal, dirs.monthly),
             PageKind::Quarterly => format!("{}/{}", dirs.personal, dirs.quarterly),
@@ -141,16 +140,22 @@ pub fn find_stale(
     today: jiff::civil::Date,
     threshold_days: u32,
     dirs: &VaultDirs,
-) -> Result<Vec<StalePage>, GraphError> {
+) -> Vec<StalePage> {
     // Read every page's date once, keyed by page id. A page dated by neither
     // `updated` nor `created` is absent from the map and contributes no recency.
+    // A page that has become unreadable or carries malformed frontmatter since the
+    // scan contributes nothing and is skipped — one bad page must not abort the report.
     let mut date_by_id: HashMap<&str, jiff::civil::Date> = HashMap::with_capacity(all_pages.len());
     for page in all_pages {
         let full = vault_root.join(&page.path);
-        let raw = std::fs::read_to_string(&full)
-            .map_err(|e| GraphError::Io(format!("failed to read {}: {e}", full.display())))?;
-        let parsed = frontmatter::parse_page(&raw)
-            .map_err(|e| GraphError::Io(format!("frontmatter in {}: {e}", full.display())))?;
+        let Ok(raw) = std::fs::read_to_string(&full) else {
+            tracing::warn!(path = %full.display(), "stale scan: unreadable page skipped");
+            continue;
+        };
+        let Ok(parsed) = frontmatter::parse_page(&raw) else {
+            tracing::warn!(path = %full.display(), "stale scan: unparseable frontmatter skipped");
+            continue;
+        };
         if let Some(date) = extract_date(&parsed.frontmatter) {
             date_by_id.insert(page.id.as_str(), date);
         }
@@ -226,7 +231,7 @@ pub fn find_stale(
             .then_with(|| a.path.cmp(&b.path))
     });
 
-    Ok(stale)
+    stale
 }
 
 /// Parse `updated` from the frontmatter, falling back to `created`. Returns `None`
@@ -278,8 +283,35 @@ mod tests {
             "---\nupdated: 2026-05-14\n---\n\nbody\n",
         );
         let pages = vec![page("wiki/concepts/fresh", "wiki/concepts/fresh.md")];
-        let stale = find_stale(&pages, &pages, dir.path(), today(), 90, &dirs).unwrap();
+        let stale = find_stale(&pages, &pages, dir.path(), today(), 90, &dirs);
         assert!(stale.is_empty());
+    }
+
+    #[test]
+    fn skips_unreadable_or_malformed_page_without_aborting() {
+        let dir = TempDir::new().unwrap();
+        let dirs = VaultDirs::default();
+        // A genuinely stale page that must still be reported.
+        write(
+            &dir,
+            "wiki/concepts/old.md",
+            "---\nupdated: 2025-11-25\n---\n\nbody\n",
+        );
+        // A page present in the scan whose file vanished, and one whose frontmatter is
+        // now malformed — both must be skipped, not abort the whole report.
+        write(
+            &dir,
+            "wiki/concepts/broken.md",
+            "---\nupdated: \"unterminated\n---\nbody\n",
+        );
+        let pages = vec![
+            page("wiki/concepts/old", "wiki/concepts/old.md"),
+            page("wiki/concepts/gone", "wiki/concepts/gone.md"),
+            page("wiki/concepts/broken", "wiki/concepts/broken.md"),
+        ];
+        let stale = find_stale(&pages, &pages, dir.path(), today(), 90, &dirs);
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].path, PathBuf::from("wiki/concepts/old.md"));
     }
 
     #[test]
@@ -302,7 +334,7 @@ mod tests {
             page("wiki/concepts/old", "wiki/concepts/old.md"),
             page("wiki/concepts/edge", "wiki/concepts/edge.md"),
         ];
-        let stale = find_stale(&pages, &pages, dir.path(), today(), 90, &dirs).unwrap();
+        let stale = find_stale(&pages, &pages, dir.path(), today(), 90, &dirs);
         assert_eq!(stale.len(), 1);
         assert_eq!(stale[0].path, PathBuf::from("wiki/concepts/old.md"));
         assert_eq!(stale[0].days_old, 180);
@@ -319,7 +351,7 @@ mod tests {
             "---\ncreated: 2025-11-25\n---\n\nbody\n",
         );
         let pages = vec![page("wiki/concepts/c", "wiki/concepts/c.md")];
-        let stale = find_stale(&pages, &pages, dir.path(), today(), 90, &dirs).unwrap();
+        let stale = find_stale(&pages, &pages, dir.path(), today(), 90, &dirs);
         assert_eq!(stale.len(), 1);
         assert_eq!(stale[0].updated, jiff::civil::date(2025, 11, 25));
     }
@@ -338,7 +370,7 @@ mod tests {
             page("wiki/concepts/n", "wiki/concepts/n.md"),
             page("wiki/concepts/o", "wiki/concepts/o.md"),
         ];
-        let stale = find_stale(&pages, &pages, dir.path(), today(), 90, &dirs).unwrap();
+        let stale = find_stale(&pages, &pages, dir.path(), today(), 90, &dirs);
         assert!(stale.is_empty());
     }
 
@@ -366,7 +398,7 @@ mod tests {
             aliases: Vec::new(),
         };
         let all = vec![concept.clone(), daily];
-        let stale = find_stale(&[concept], &all, dir.path(), today(), 90, &dirs).unwrap();
+        let stale = find_stale(&[concept], &all, dir.path(), today(), 90, &dirs);
         assert!(
             stale.is_empty(),
             "a concept cited by a recent page is live, not stale: {stale:?}"
@@ -398,7 +430,7 @@ mod tests {
             aliases: Vec::new(),
         };
         let all = vec![concept.clone(), future];
-        let stale = find_stale(&[concept], &all, dir.path(), today(), 90, &dirs).unwrap();
+        let stale = find_stale(&[concept], &all, dir.path(), today(), 90, &dirs);
         assert_eq!(
             stale.len(),
             1,
@@ -431,7 +463,7 @@ mod tests {
             aliases: vec![],
         };
         let all = vec![rag.clone(), related];
-        let stale = find_stale(&[rag], &all, dir.path(), today(), 90, &dirs).unwrap();
+        let stale = find_stale(&[rag], &all, dir.path(), today(), 90, &dirs);
         assert_eq!(
             stale.len(),
             1,
@@ -463,7 +495,7 @@ mod tests {
             aliases: Vec::new(),
         };
         let all = vec![concept.clone(), daily];
-        let stale = find_stale(&[concept], &all, dir.path(), today(), 90, &dirs).unwrap();
+        let stale = find_stale(&[concept], &all, dir.path(), today(), 90, &dirs);
         assert_eq!(
             stale.len(),
             1,
@@ -493,7 +525,7 @@ mod tests {
         );
         assert_eq!(
             PageKind::from_path(Path::new("me/work-log/2026-05-23.md"), &dirs),
-            PageKind::MeWorkLog
+            PageKind::PersonalWorkLog
         );
         assert_eq!(
             PageKind::from_path(Path::new("synthesis/weekly/2026-W21.md"), &dirs),
@@ -536,7 +568,7 @@ mod tests {
         };
         assert_eq!(
             PageKind::from_path(Path::new("my-logs/work-log/2026-05-23.md"), &dirs),
-            PageKind::MeWorkLog
+            PageKind::PersonalWorkLog
         );
         assert_eq!(
             PageKind::from_path(Path::new("my-logs/weekly/2026-W21.md"), &dirs),

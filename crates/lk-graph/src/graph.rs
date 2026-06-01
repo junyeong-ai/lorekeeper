@@ -379,14 +379,14 @@ mod tests {
         ];
         let g = WikiGraph::build(&pages, &VaultDirs::default());
 
-        let orphans = g.orphans(&config.graph.orphan_exclude, Path::new("wiki"));
+        let orphans = g.orphans(&config.metrics.orphan_exclude, Path::new("wiki"));
         assert_eq!(orphans, vec!["wiki/orphan"]);
     }
 
     #[test]
     fn orphan_exclude_respected() {
         let mut config = GraphConfig::default();
-        config.graph.orphan_exclude = vec!["wiki/orphan".to_owned()];
+        config.metrics.orphan_exclude = vec!["wiki/orphan".to_owned()];
 
         let pages = vec![
             make_page("wiki/connected", &["other"]),
@@ -395,7 +395,7 @@ mod tests {
         ];
         let g = WikiGraph::build(&pages, &VaultDirs::default());
 
-        let orphans = g.orphans(&config.graph.orphan_exclude, Path::new("wiki"));
+        let orphans = g.orphans(&config.metrics.orphan_exclude, Path::new("wiki"));
         assert!(orphans.is_empty());
     }
 
@@ -538,14 +538,14 @@ mod tests {
 
         let legacy = WikiGraph::build(&scope, &VaultDirs::default());
         assert_eq!(
-            legacy.orphans(&config.graph.orphan_exclude, Path::new("wiki")),
+            legacy.orphans(&config.metrics.orphan_exclude, Path::new("wiki")),
             vec!["wiki/concepts/bar"]
         );
 
         let existence = VaultExistence::from_pages(&full, &VaultDirs::default());
         let g = WikiGraph::build_with_existence(&scope, &existence, &VaultDirs::default());
         assert!(
-            g.orphans(&config.graph.orphan_exclude, Path::new("wiki"))
+            g.orphans(&config.metrics.orphan_exclude, Path::new("wiki"))
                 .is_empty()
         );
     }
@@ -567,7 +567,7 @@ mod tests {
         let existence = VaultExistence::from_pages(&full, &VaultDirs::default());
         let g = WikiGraph::build_with_existence(&scope, &existence, &VaultDirs::default());
         assert!(
-            g.orphans(&config.graph.orphan_exclude, Path::new("wiki"))
+            g.orphans(&config.metrics.orphan_exclude, Path::new("wiki"))
                 .is_empty()
         );
     }
@@ -581,7 +581,7 @@ mod tests {
         let g = WikiGraph::build(&pages, &VaultDirs::default());
 
         assert_eq!(
-            g.orphans(&config.graph.orphan_exclude, Path::new("wiki")),
+            g.orphans(&config.metrics.orphan_exclude, Path::new("wiki")),
             vec!["wiki/lonely"]
         );
     }
@@ -600,7 +600,7 @@ mod tests {
         let g = WikiGraph::build(&pages, &VaultDirs::default());
 
         assert_eq!(
-            g.orphans(&config.graph.orphan_exclude, Path::new("wiki")),
+            g.orphans(&config.metrics.orphan_exclude, Path::new("wiki")),
             vec!["wiki/b/dup"]
         );
     }
@@ -619,7 +619,7 @@ mod tests {
         let g = WikiGraph::build_with_existence(&scope, &existence, &VaultDirs::default());
 
         assert_eq!(
-            g.orphans(&config.graph.orphan_exclude, Path::new("wiki")),
+            g.orphans(&config.metrics.orphan_exclude, Path::new("wiki")),
             vec!["wiki/lonely"]
         );
     }

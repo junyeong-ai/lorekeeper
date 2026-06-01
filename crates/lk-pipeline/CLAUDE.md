@@ -91,7 +91,7 @@ concept_categories) with the `Synthesizer`.
   by comparing its structured authorship field (`From` address, message author id,
   issue assignee account, calendar organizer/attendee) to `ExtractContext::identity` —
   exact match, no text heuristics. `normalize` carries it to `Event::is_self`, and
-  `mark_personal(events, track_personal)` sets `is_personal` + the `personal` label
+  `assign_personal(events, track_personal)` sets `is_personal` + the `personal` label
   only when the source opts into `track_personal`. A recipient/CC/mention is never the
   author, so it is never personal. `classify_by_keywords` reads `SourceConfig.classify`
   (ordered `Vec<ClassifyRule>`, first match wins) and uses `contains_bounded`

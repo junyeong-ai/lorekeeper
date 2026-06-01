@@ -153,7 +153,7 @@ fn slack_creds(creds: &Credentials) -> Result<&credentials::SlackCredentials, So
     })
 }
 
-pub fn create_source(
+pub fn build_source(
     source_type: SourceType,
     http: reqwest::Client,
     creds: &Credentials,

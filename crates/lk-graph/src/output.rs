@@ -119,7 +119,7 @@ pub fn print_broken(r: &BrokenReport) {
     println!("{} broken link(s)", r.count);
 }
 
-pub fn print_index_sync(r: &IndexSyncReport) {
+pub fn print_index_report(r: &IndexSyncReport) {
     if r.missing_from_index.is_empty() && r.missing_from_disk.is_empty() {
         println!("index.md is in sync");
         return;
@@ -406,7 +406,7 @@ pub fn print_merge(result: &MergeResult) {
     println!("  next: run `lore graph backlinks-sync` to re-derive sources + source_count");
 }
 
-pub fn print_backlinks_sync(r: &BacklinksSyncReport) {
+pub fn print_backlinks_report(r: &BacklinksSyncReport) {
     println!("=== Backlinks sync ===");
 
     if r.sync.dry_run {

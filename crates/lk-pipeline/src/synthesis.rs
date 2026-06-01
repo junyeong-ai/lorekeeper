@@ -155,7 +155,7 @@ impl Synthesizer {
         heading: &str,
         decision: &SectionDecision,
         context: serde_json::Value,
-    ) -> Result<String, PipelineError> {
+    ) -> Result<Option<String>, PipelineError> {
         let mut ctx = context;
         if let Some(map) = ctx.as_object_mut() {
             let i18n = serde_json::to_value(self.ctx.locale.strings())
@@ -171,6 +171,8 @@ impl Synthesizer {
             .engine
             .render(template, &ctx)
             .map_err(|e| PipelineError::Render(e.to_string()))?;
+        // `None` (a cached body whose heading drifted out of the template) leaves the
+        // on-disk page untouched — the caller skips the write and a later run re-fills.
         Ok(splice_preserved_sections(
             rendered,
             std::iter::once((heading, decision)),
@@ -209,7 +211,7 @@ impl Synthesizer {
         }
 
         let path = VaultPath::weekly_synthesis(&self.ctx.dirs, year, week);
-        let kind = TargetKind::WeeklySynthesisNarrative;
+        let kind = TargetKind::WeeklySynthesisThemes;
         let heading = self.ctx.locale.strings().key_themes_this_week;
 
         let req = lk_queue::ThemeRequest {
@@ -255,7 +257,7 @@ impl Synthesizer {
             context,
         )?;
 
-        Ok(Some(RenderResult { path, content }))
+        Ok(content.map(|content| RenderResult { path, content }))
     }
 
     pub async fn try_weekly_personal(
@@ -318,7 +320,7 @@ impl Synthesizer {
             context,
         )?;
 
-        Ok(Some(RenderResult { path, content }))
+        Ok(content.map(|content| RenderResult { path, content }))
     }
 
     pub async fn try_monthly_personal(
@@ -381,7 +383,7 @@ impl Synthesizer {
             context,
         )?;
 
-        Ok(Some(RenderResult { path, content }))
+        Ok(content.map(|content| RenderResult { path, content }))
     }
 
     pub async fn try_quarterly_personal(
@@ -468,7 +470,7 @@ impl Synthesizer {
             context,
         )?;
 
-        Ok(Some(RenderResult { path, content }))
+        Ok(content.map(|content| RenderResult { path, content }))
     }
 
     pub async fn try_annual_personal(
@@ -551,7 +553,7 @@ impl Synthesizer {
             context,
         )?;
 
-        Ok(Some(RenderResult { path, content }))
+        Ok(content.map(|content| RenderResult { path, content }))
     }
 
     /// Narrative standing in for one month of a quarterly/annual rollup: the monthly

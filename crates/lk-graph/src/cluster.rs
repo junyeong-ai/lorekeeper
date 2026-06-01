@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use crate::graph::WikiGraph;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Community {
     pub id: u32,
     pub size: usize,
@@ -125,6 +125,12 @@ fn build_community(graph: &WikiGraph, mut member_indices: Vec<usize>) -> Communi
     }
 }
 
+/// Multi-level Louvain. Runs local moving on the current graph, aggregates each
+/// resulting community into a super-node, and recurses until a level produces no
+/// further merging. Returns the final community label of every ORIGINAL node and the
+/// total number of local-moving sweeps across all levels. Deterministic: nodes and
+/// communities are visited in index order throughout, and community labels are
+/// compacted in order of first appearance.
 fn run_louvain(
     adjacency: &[BTreeMap<usize, f64>],
     degree: &[f64],
@@ -132,16 +138,97 @@ fn run_louvain(
     n_u32: u32,
     config: &GraphConfig,
 ) -> (Vec<u32>, usize) {
+    let resolution = config.cluster.resolution;
+    let max_iterations = config.cluster.max_iterations;
+
+    // `membership[orig]` is the index, at the current level, of the super-node that
+    // original node `orig` belongs to. It starts as the identity (level 0 == original).
+    let mut membership: Vec<u32> = (0..n_u32).collect();
+    let mut level_adjacency: Vec<BTreeMap<usize, f64>> = adjacency.to_vec();
+    let mut level_degree: Vec<f64> = degree.to_vec();
+    let mut iterations = 0;
+
+    loop {
+        let level_nodes = level_adjacency.len();
+        let (comm, iters) = local_moving(
+            &level_adjacency,
+            &level_degree,
+            total_weight,
+            resolution,
+            max_iterations,
+        );
+        iterations += iters;
+
+        // Compact this level's community labels into a dense `0..k` range, assigning
+        // ids in order of first appearance so the mapping is deterministic.
+        let mut relabel: Vec<Option<u32>> = vec![None; level_nodes];
+        let mut k: u32 = 0;
+        let mut level_to_compact: Vec<u32> = vec![0; level_nodes];
+        for node in 0..level_nodes {
+            let c = comm[node] as usize;
+            level_to_compact[node] = *relabel[c].get_or_insert_with(|| {
+                let id = k;
+                k += 1;
+                id
+            });
+        }
+
+        // Carry every original node forward to its compacted super-node.
+        for m in membership.iter_mut() {
+            *m = level_to_compact[*m as usize];
+        }
+
+        // No community merged (every super-node kept to itself): converged.
+        if k as usize == level_nodes {
+            break;
+        }
+
+        // Aggregate: each community becomes one node. Weights between distinct
+        // communities sum; internal edges become self-loops, which local moving
+        // ignores, so they are not stored — `new_degree` (the sum of member degrees)
+        // already accounts for them and keeps the modularity math exact across levels.
+        let k_usize = k as usize;
+        let mut new_adjacency: Vec<BTreeMap<usize, f64>> = vec![BTreeMap::new(); k_usize];
+        let mut new_degree: Vec<f64> = vec![0.0; k_usize];
+        for node in 0..level_nodes {
+            let ci = level_to_compact[node] as usize;
+            new_degree[ci] += level_degree[node];
+            for (&nbr, &w) in &level_adjacency[node] {
+                let cj = level_to_compact[nbr] as usize;
+                if ci != cj {
+                    *new_adjacency[ci].entry(cj).or_insert(0.0) += w;
+                }
+            }
+        }
+
+        level_adjacency = new_adjacency;
+        level_degree = new_degree;
+    }
+
+    (membership, iterations)
+}
+
+/// One level of Louvain local moving: starting from every node in its own community,
+/// move each node (in index order) to the neighboring community that most increases
+/// modularity, repeating until a sweep makes no move or `max_iterations` is reached.
+/// Returns each node's community label (a node index) and the number of sweeps.
+fn local_moving(
+    adjacency: &[BTreeMap<usize, f64>],
+    degree: &[f64],
+    total_weight: f64,
+    resolution: f64,
+    max_iterations: usize,
+) -> (Vec<u32>, usize) {
     let n = adjacency.len();
+    let n_u32 = u32::try_from(n).expect("node count exceeds u32::MAX");
     let mut membership: Vec<u32> = (0..n_u32).collect();
     let mut community_total: BTreeMap<u32, f64> =
         (0..n_u32).map(|i| (i, degree[i as usize])).collect();
 
-    let resolution = config.cluster.resolution;
     let two_m = 2.0 * total_weight;
     let mut iterations = 0;
 
-    for _ in 0..config.cluster.max_iterations {
+    for _ in 0..max_iterations {
         iterations += 1;
         let mut changed = false;
 
@@ -365,6 +452,30 @@ mod tests {
         let result = detect_communities(&graph, &config);
         assert_eq!(result.communities.len(), 1);
         assert_eq!(result.communities[0].size, 4);
+    }
+
+    #[test]
+    fn two_cliques_joined_by_a_bridge_split_into_two() {
+        // Two 4-cliques connected by a single bridge edge. The optimal partition is the
+        // two cliques; running again must yield byte-identical communities (the
+        // multi-level pass is fully deterministic).
+        let config = GraphConfig::default();
+        let pages = vec![
+            make_page("a1", &["a2", "a3", "a4"]),
+            make_page("a2", &["a1", "a3", "a4"]),
+            make_page("a3", &["a1", "a2", "a4"]),
+            make_page("a4", &["a1", "a2", "a3", "b1"]),
+            make_page("b1", &["b2", "b3", "b4"]),
+            make_page("b2", &["b1", "b3", "b4"]),
+            make_page("b3", &["b1", "b2", "b4"]),
+            make_page("b4", &["b1", "b2", "b3"]),
+        ];
+        let graph = WikiGraph::build(&pages, &VaultDirs::default());
+        let result = detect_communities(&graph, &config);
+        assert_eq!(result.communities.len(), 2);
+        assert!(result.modularity > 0.3);
+        let again = detect_communities(&graph, &config);
+        assert_eq!(result.communities, again.communities);
     }
 
     #[test]

@@ -177,28 +177,16 @@ pub fn sync_concept_backlinks(
 /// on-disk order. Used only to compute the diff (added/removed) — the rewritten
 /// body is canonicalised through [`render_sources_body`].
 pub(crate) fn parse_existing_sources(content: &str, heading: &str) -> Vec<String> {
-    let target = format!("## {heading}");
-    let lines: Vec<&str> = content.split_inclusive('\n').collect();
-
-    let Some(start) = lines.iter().position(|l| {
-        let stripped = l.strip_suffix('\n').unwrap_or(l);
-        stripped == target
-    }) else {
+    // Read the section body through the same fence-aware boundary `replace_section`
+    // rewrites against, so the diff and the rewrite never disagree about where the
+    // section ends (a fenced `## ` inside the body is content, not a boundary).
+    let Some(body) = section_body(content, heading) else {
         return Vec::new();
     };
 
-    let end = lines[start + 1..]
-        .iter()
-        .position(|l| {
-            let stripped = l.strip_suffix('\n').unwrap_or(l);
-            stripped.starts_with("## ")
-        })
-        .map(|rel| rel + start + 1)
-        .unwrap_or(lines.len());
-
     let mut out = Vec::new();
-    for raw in &lines[start + 1..end] {
-        let line = raw.strip_suffix('\n').unwrap_or(raw).trim();
+    for line in body.lines() {
+        let line = line.trim();
         // Match `- [[target]]` (Obsidian wikilink list item). Anchors / aliases
         // are stripped so `- [[foo#bar|label]]` and `- [[foo]]` both report `foo`.
         let Some(rest) = line.strip_prefix("- [[") else {

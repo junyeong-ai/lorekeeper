@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use lk_core::config::{ConceptCategory, GraphConfig, VaultDirs};
 use lk_core::i18n::Locale;
 use lk_graph::{
-    alias, audit, backlinks, cache, cluster, concept_lint, export, graph, index, merge, normalize,
-    output, scan, stale,
+    alias, audit, backlinks, cache, cluster, concept_lint, export, graph, index_drift, merge,
+    normalize, output, scan, stale,
 };
 
 use super::GlobalOptions;
@@ -148,7 +148,7 @@ fn run_inner(
             return run_audit_mark(opts, root_override, json, slug);
         }
         GraphCmd::BacklinksSync { dry_run } => {
-            return run_backlinks_sync(opts, root_override, json, dry_run, incremental);
+            return run_backlinks(opts, root_override, json, dry_run, incremental);
         }
         GraphCmd::Merge {
             ref from,
@@ -207,18 +207,18 @@ fn run_inner(
 
     let has_findings = match cmd {
         GraphCmd::Lint => {
-            let hubs = g.hubs(10, rc.graph.graph.min_hub_degree);
+            let hubs = g.hubs(10, rc.graph.metrics.min_hub_degree);
             let orphans = g.orphans(
-                &rc.graph.graph.orphan_exclude,
+                &rc.graph.metrics.orphan_exclude,
                 Path::new(&rc.vault_dirs.wiki),
             );
             let broken = g.broken_links().to_vec();
-            let drift = index::diff(
+            let drift = index_drift::diff(
                 &g,
                 &existence,
                 &rc.root,
                 Path::new(&rc.vault_dirs.wiki),
-                &rc.graph.graph.orphan_exclude,
+                &rc.graph.metrics.orphan_exclude,
             )
             .map_err(|e| format!("{e}"))?;
             // Read the concept pages once; the three concept lints are pure functions
@@ -229,7 +229,7 @@ fn run_inner(
                 concept_lint::invalid_categories(&concept_pages, &rc.concept_categories);
             let near_duplicate_concepts = concept_lint::near_duplicate_concepts(
                 &concept_pages,
-                rc.graph.graph.concept_near_duplicate_threshold,
+                rc.graph.metrics.concept_near_duplicate_threshold,
             );
             let unresolved_conflicts = concept_lint::unresolved_conflicts(&concept_pages);
             // Alias conflicts read the scanned pages (which carry `aliases`), not the
@@ -284,7 +284,7 @@ fn run_inner(
         }
         GraphCmd::Orphans => {
             let orphans = g.orphans(
-                &rc.graph.graph.orphan_exclude,
+                &rc.graph.metrics.orphan_exclude,
                 Path::new(&rc.vault_dirs.wiki),
             );
             let count = orphans.len();
@@ -342,19 +342,19 @@ fn run_inner(
             false
         }
         GraphCmd::IndexSync { fix } => {
-            let drift = index::diff(
+            let drift = index_drift::diff(
                 &g,
                 &existence,
                 &rc.root,
                 Path::new(&rc.vault_dirs.wiki),
-                &rc.graph.graph.orphan_exclude,
+                &rc.graph.metrics.orphan_exclude,
             )
             .map_err(|e| format!("{e}"))?;
             let has = !drift.is_in_sync();
             let has_unfixable = !drift.missing_from_disk.is_empty();
             let fixed = if fix && !drift.missing_from_index.is_empty() {
                 Some(
-                    index::fix(&drift, &rc.root, Path::new(&rc.vault_dirs.wiki))
+                    index_drift::fix(&drift, &rc.root, Path::new(&rc.vault_dirs.wiki))
                         .map_err(|e| format!("{e}"))?,
                 )
             } else {
@@ -368,7 +368,7 @@ fn run_inner(
             if json {
                 output::print_json(&report)?;
             } else {
-                output::print_index_sync(&report);
+                output::print_index_report(&report);
             }
             has && (fixed.is_none() || has_unfixable)
         }
@@ -496,8 +496,7 @@ fn run_stale(
         today,
         days,
         &rc.vault_dirs,
-    )
-    .map_err(|e| format!("{e}"))?;
+    );
     let count = stale_pages.len();
     let report = output::StaleReport {
         threshold_days: days,
@@ -555,7 +554,7 @@ fn run_audit_mark(
     Ok(false)
 }
 
-fn run_backlinks_sync(
+fn run_backlinks(
     opts: &GlobalOptions,
     root_override: Option<PathBuf>,
     json: bool,
@@ -594,7 +593,7 @@ fn run_backlinks_sync(
     if json {
         output::print_json(&report)?;
     } else {
-        output::print_backlinks_sync(&report);
+        output::print_backlinks_report(&report);
     }
 
     if incremental && !dry_run {

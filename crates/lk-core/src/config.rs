@@ -195,15 +195,15 @@ impl Config {
         // Count thresholds whose `0` value is degenerate (everything-is-a-hub /
         // no-community-filter / split-every-category). Rejected up front so the
         // "out-of-range thresholds" guard holds for the integer knobs too.
-        if self.graph.graph.min_hub_degree == 0 {
+        if self.graph.metrics.min_hub_degree == 0 {
             return Err(ConfigError::Validation(
                 "graph.graph.min_hub_degree must be >= 1".into(),
             ));
         }
-        if !(0.0..=1.0).contains(&self.graph.graph.concept_near_duplicate_threshold) {
+        if !(0.0..=1.0).contains(&self.graph.metrics.concept_near_duplicate_threshold) {
             return Err(ConfigError::Validation(format!(
                 "graph.graph.concept_near_duplicate_threshold must be in [0.0, 1.0], got {}",
-                self.graph.graph.concept_near_duplicate_threshold
+                self.graph.metrics.concept_near_duplicate_threshold
             )));
         }
         if self.graph.cluster.min_community_size == 0 {
@@ -949,12 +949,12 @@ impl Default for MaintenanceConfig {
 }
 
 /// Wikilink graph analysis configuration, consumed by `lore graph` / `lk-graph`.
-/// Splits into analysis `scope`, structural `graph` metrics, and `cluster` settings.
+/// Splits into analysis `scope`, structural `metrics`, and `cluster` settings.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GraphConfig {
     pub scope: GraphScopeConfig,
-    pub graph: GraphMetricsConfig,
+    pub metrics: GraphMetricsConfig,
     pub cluster: GraphClusterConfig,
 }
 
@@ -1541,7 +1541,7 @@ sources:
 "#;
         let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(config.graph.scope.dirs.is_empty());
-        assert_eq!(config.graph.graph.min_hub_degree, 5);
+        assert_eq!(config.graph.metrics.min_hub_degree, 5);
         assert_eq!(config.graph.cluster.resolution, 1.0);
         assert_eq!(config.graph.cluster.max_iterations, 100);
         assert_eq!(config.graph.cluster.min_community_size, 1);
@@ -1563,7 +1563,7 @@ graph:
     dirs: [wiki, docs]
     exclude: ["wiki/log.md"]
     follow_links: true
-  graph:
+  metrics:
     min_hub_degree: 3
     orphan_exclude: ["wiki/index"]
   cluster:
@@ -1574,8 +1574,8 @@ graph:
         let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert_eq!(config.graph.scope.dirs.len(), 2);
         assert!(config.graph.scope.follow_links);
-        assert_eq!(config.graph.graph.min_hub_degree, 3);
-        assert_eq!(config.graph.graph.orphan_exclude, vec!["wiki/index"]);
+        assert_eq!(config.graph.metrics.min_hub_degree, 3);
+        assert_eq!(config.graph.metrics.orphan_exclude, vec!["wiki/index"]);
         assert_eq!(config.graph.cluster.resolution, 1.5);
         assert_eq!(config.graph.cluster.min_community_size, 2);
     }
@@ -1720,7 +1720,7 @@ sources:
   s1:
     type: gmail
 graph:
-  graph:
+  metrics:
     typo_field: 1
 "#;
         let result: Result<Config, _> = serde_yaml_ng::from_str(yaml);

@@ -151,7 +151,7 @@ pub async fn run(
         let started_at = std::time::Instant::now();
         eprintln!("▸ {id} ({})", sc.source_type);
 
-        let adapter = match lk_source::create_source(sc.source_type, http.clone(), &creds) {
+        let adapter = match lk_source::build_source(sc.source_type, http.clone(), &creds) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("  ✗ {e}");

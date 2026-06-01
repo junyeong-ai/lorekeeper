@@ -245,33 +245,34 @@ pub fn render_document_page(
 
 /// Splice cached LLM-filled bodies into a freshly-rendered page. Each
 /// `(heading, decision)` pair represents an LLM-owned section: if the decision is
-/// `cached` the existing body is written back over the empty section the template
+/// `cached`, its preserved body is written back over the empty section the template
 /// just rendered. Bodies for non-cached decisions are left untouched so the queue
 /// processor can fill them.
-pub fn splice_preserved_sections<'a, I>(content: String, sections: I) -> String
+///
+/// Returns `None` when a cached body cannot be placed because its heading is absent
+/// from the fresh render — a custom `--template-dir` or a locale switch renamed the
+/// section. Emitting the blanked render would drop the preserved LLM body, so the
+/// caller keeps the previous on-disk page; a later run re-enqueues the section under
+/// the new heading.
+pub fn splice_preserved_sections<'a, I>(content: String, sections: I) -> Option<String>
 where
     I: IntoIterator<Item = (&'a str, &'a SectionDecision)>,
 {
     let mut out = content;
     for (heading, decision) in sections {
         if let Some(body) = &decision.preserved_body {
-            // This body was read from `heading` on the previous render, and the
-            // template just re-emitted that heading — so a miss here means the
-            // rendered heading drifted from the one we cached against (e.g. a custom
-            // `--template-dir` renamed the section). Splicing would silently DROP the
-            // preserved LLM body; surface it loudly and leave the page for re-fill.
             if section_body(&out, heading).is_none() {
                 tracing::warn!(
                     heading,
-                    "preserved LLM section not spliced: heading missing in rendered \
-                     template (custom-template heading drift?) — body left for re-fill"
+                    "preserved LLM section not spliceable: heading missing in rendered \
+                     template — keeping previous page"
                 );
-                continue;
+                return None;
             }
             out = replace_section(&out, heading, body);
         }
     }
-    out
+    Some(out)
 }
 
 fn filter_by_class(events: &[&Event], class: &str) -> Vec<serde_json::Value> {
