@@ -1,5 +1,6 @@
 use lk_core::config::{SourceType, VaultDirs};
 use lk_core::event::Event;
+use lk_core::frontmatter::field;
 use lk_core::i18n::Locale;
 use lk_core::vault_path::VaultPath;
 use lk_queue::{CacheShape, TargetKind};
@@ -142,7 +143,7 @@ pub fn render_daily_page(
         "project_items": project_items,
         "knowledge_items": knowledge_items,
         "meeting_items": meeting_items,
-        "llm_inputs": llm_inputs_json,
+        (field::LLM_INPUTS): llm_inputs_json,
     });
 
     let source_template = format!("{source_id}.md.jinja");
@@ -233,7 +234,7 @@ pub fn render_document_page(
         "concepts": concepts,
         "extract_concepts": extract_concepts,
         "i18n": strings,
-        "llm_inputs": llm_inputs_json,
+        (field::LLM_INPUTS): llm_inputs_json,
     });
 
     let content = engine

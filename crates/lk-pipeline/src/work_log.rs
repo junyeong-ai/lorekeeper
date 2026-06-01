@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use lk_core::config::{PerformanceConfig, VaultDirs};
 use lk_core::event::Event;
+use lk_core::frontmatter::field;
 use lk_core::i18n::Locale;
 use lk_core::vault_path::VaultPath;
 use lk_queue::{LlmClient, SummarizeRequest, TargetKind, TaskTarget};
@@ -104,7 +105,7 @@ pub async fn render_work_log(
             "sources": sources,
             "daily_dir": dirs.daily,
             "i18n": locale.strings(),
-            "llm_inputs": llm_inputs_map(&[(kind, Some(&hash))]),
+            (field::LLM_INPUTS): llm_inputs_map(&[(kind, Some(&hash))]),
         });
 
         // The work-log template is embedded, so it always resolves.

@@ -42,11 +42,16 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   string after the marker (per CommonMark). Single source consumed by lk-graph.
 - **`text::collapse_blank_lines`** squeezes 3+ newlines to a paragraph break,
   strips `\r`. Single source consumed by lk-vault, lk-pipeline, lk-source.
-- **`frontmatter::field`** names a machine writer↔reader contract field once
-  (`SOURCE_COUNT`, `AUDITED_SOURCES_HASH`) so a rename can't silently break the
-  cross-crate agreement; `Frontmatter::source_count()` owns the parse. Use these
-  instead of bare string literals when reading/writing those fields. Template-owned
-  single-writer fields (`created`, `title`, …) stay literals.
+- **`frontmatter::field`** single-sources this system's PRIVATE machine-coordination
+  protocol keys (`SOURCE_COUNT`, `AUDITED_SOURCES_HASH`, `LLM_INPUTS`) — names invented here
+  with no meaning outside the tooling — so an internal rename can't silently break the
+  cross-crate agreement; `Frontmatter::source_count()` owns the parse. The criterion is
+  *internal protocol that crosses a crate boundary*: e.g. `LLM_INPUTS` — pipeline writes,
+  `queue status` in lk-cli reads (its inner per-kind keys are single-sourced by
+  `lk_queue::TargetKind::llm_inputs_key`). Standard published vault vocabulary (`created`,
+  `updated`, `title`, `id`, `aliases`) is read across crates too but stays a literal on
+  purpose: it is anchored to the external Obsidian page format, never the target of a silent
+  internal rename, so a constant would add no protection — only noise.
 - **`ConceptConfig`** (`concepts:` in YAML): optional `categories` list
   (`Vec<ConceptCategory>`, each with `id` + `label`). Validated: no empty ids, no
   empty labels, no duplicate ids. Empty list = no categorization (concepts get no

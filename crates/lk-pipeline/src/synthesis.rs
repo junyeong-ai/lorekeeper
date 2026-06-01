@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use lk_core::config::Config;
+use lk_core::frontmatter::field;
 use lk_core::vault_path::{VaultPath, work_log_dir};
 use lk_queue::TargetKind;
 use lk_vault::{FsVault, VaultPage, VaultStore, section_body};
@@ -162,7 +163,7 @@ impl Synthesizer {
                 .map_err(|e| PipelineError::Render(e.to_string()))?;
             map.insert("i18n".to_string(), i18n);
             map.insert(
-                "llm_inputs".to_string(),
+                field::LLM_INPUTS.to_string(),
                 serde_json::Value::Object(llm_inputs_map(&[(kind, Some(&decision.hash))])),
             );
         }

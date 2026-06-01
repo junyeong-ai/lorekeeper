@@ -2,12 +2,17 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-/// Frontmatter field names that form a machine writer↔reader contract spanning crates:
-/// one component writes the field and another, in a different crate, reads it, so a bare
-/// string literal on either side would let a rename break the contract with no compile
-/// error. They are single-sourced here and referenced by symbol everywhere. Fields with
-/// a single writer (template-owned values like `created`/`title`) stay plain literals —
-/// there is no cross-component agreement for them to drift.
+/// Names of this system's PRIVATE machine-coordination frontmatter fields — keys invented
+/// by the tooling with no meaning outside the vault — that cross a crate boundary (one
+/// crate writes, another reads). A bare literal on either side would let an internal
+/// refactor rename break the contract with no compile error, so they are single-sourced
+/// here and referenced by symbol everywhere.
+///
+/// The criterion is *internal protocol crossing a crate boundary*, not mere reuse.
+/// Standard published vault vocabulary (`created`, `updated`, `title`, `id`, `aliases` —
+/// keys Obsidian and human editors also read) is read across crates too, yet stays a
+/// plain literal on purpose: it is anchored to the external page format, never the target
+/// of a silent internal rename, so a constant would add no protection — only noise.
 pub mod field {
     /// A concept's incoming-citation count. Written by `graph backlinks-sync`; read by
     /// `graph audit-candidates`, the ingest concept merge, and `wiki index`.
@@ -15,6 +20,12 @@ pub mod field {
     /// BLAKE3-128 of a concept's canonical `## Sources` body at its last audit. Written
     /// by `graph audit-mark`; read by `graph audit-candidates`.
     pub const AUDITED_SOURCES_HASH: &str = "audited_sources_hash";
+    /// The map of LLM-task cache hashes that drives materialized-view completion
+    /// detection. Written by the pipeline render/work-log/synthesis stages; read by the
+    /// pipeline's own `llm_cache` and, across the crate boundary, by `queue status`
+    /// (lk-cli) to classify a pending task current/stale. Its inner per-kind keys are
+    /// single-sourced separately by `lk_queue::TargetKind::llm_inputs_key`.
+    pub const LLM_INPUTS: &str = "llm_inputs";
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

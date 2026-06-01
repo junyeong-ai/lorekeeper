@@ -166,7 +166,7 @@ fn classify_task(vault_root: &Path, task: &QueueTask) -> miette::Result<TaskStat
     let key = task.target.kind.llm_inputs_key();
     let stored = page
         .frontmatter
-        .get("llm_inputs")
+        .get(lk_core::frontmatter::field::LLM_INPUTS)
         .and_then(|v| v.get(key))
         .and_then(|v| v.as_str());
     Ok(if stored == Some(task.cache_hash.as_str()) {

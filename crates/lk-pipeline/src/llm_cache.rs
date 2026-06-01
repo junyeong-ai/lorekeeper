@@ -35,7 +35,7 @@
 //! the `completion_key` line (in-place) forces a re-enqueue on the next ingest. No
 //! `--force-llm` flag, no out-of-band cache invalidation API.
 
-use lk_core::frontmatter::VaultPage;
+use lk_core::frontmatter::{VaultPage, field};
 use lk_vault::section_body;
 
 /// Per-section cache decision. The pipeline computes one of these for every LLM
@@ -66,7 +66,7 @@ impl SectionDecision {
 pub fn stored_hash<'a>(existing: Option<&'a VaultPage>, key: &str) -> Option<&'a str> {
     existing?
         .frontmatter
-        .get("llm_inputs")
+        .get(field::LLM_INPUTS)
         .and_then(|v| v.get(key))
         .and_then(|v| v.as_str())
 }
