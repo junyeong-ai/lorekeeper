@@ -26,6 +26,9 @@ concept_categories) with the `Synthesizer`.
      LLM hasn't produced it).
   4. `render::splice_preserved_sections` replaces each fresh empty body with its
      `preserved_body` so the on-disk page round-trips unchanged when nothing changed.
+     It returns `Option`: if a cached body's heading is absent from the fresh render
+     (a custom template renamed the section), it returns `None` and the caller skips
+     the write — keeping the previous page rather than dropping the preserved body.
   5. The fresh frontmatter records the hash in `llm_inputs.<key>` regardless of whether
      the task was enqueued, so the cache is self-perpetuating.
   The pattern applies uniformly to daily, document, work-log, AND synthesis pages —

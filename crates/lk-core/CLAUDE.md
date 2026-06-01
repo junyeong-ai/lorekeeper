@@ -42,6 +42,11 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   string after the marker (per CommonMark). Single source consumed by lk-graph.
 - **`text::collapse_blank_lines`** squeezes 3+ newlines to a paragraph break,
   strips `\r`. Single source consumed by lk-vault, lk-pipeline, lk-source.
+- **`frontmatter::field`** names a machine writer↔reader contract field once
+  (`SOURCE_COUNT`, `AUDITED_SOURCES_HASH`) so a rename can't silently break the
+  cross-crate agreement; `Frontmatter::source_count()` owns the parse. Use these
+  instead of bare string literals when reading/writing those fields. Template-owned
+  single-writer fields (`created`, `title`, …) stay literals.
 - **`ConceptConfig`** (`concepts:` in YAML): optional `categories` list
   (`Vec<ConceptCategory>`, each with `id` + `label`). Validated: no empty ids, no
   empty labels, no duplicate ids. Empty list = no categorization (concepts get no
