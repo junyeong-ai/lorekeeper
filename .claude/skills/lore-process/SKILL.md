@@ -1,6 +1,6 @@
 ---
 name: lore-process
-description: Consume Lorekeeper LLM work queue. When `lore ingest` runs in queue mode (config `llm.provider: queue`), the Rust pipeline writes JSONL task files under `<vault>/.lorekeeper/queue/`. This skill drains those queues — running summarize and concept extraction using Claude Code's native LLM (no API key needed) and editing the target vault pages (plain markdown files) in place. Idempotent — partial progress is resumable; processed files move to `.lorekeeper/queue/processed/`. Run after each `lore ingest` (or daily) to enrich pages that were written with empty summary/concept sections.
+description: Drain the Lorekeeper LLM work queue after `lore ingest` runs in queue mode — fill the empty summary and concept sections of freshly-written vault pages using Claude Code's own LLM (no API key, no separate billing). Idempotent and resumable. Run after each ingest, or on a daily schedule.
 when_to_use: |
   queue process, drain queue, fill summaries,
   concept extraction run, enrich daily pages, post-ingest
