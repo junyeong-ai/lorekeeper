@@ -39,9 +39,8 @@ concepts:                            # LLM concept-page taxonomy
   index_split_threshold: 100         # split index.md into per-category pages above this
 graph:                               # wikilink graph analysis (lore graph *)
   scope: {dirs: [...]}               # defaults to vault.dirs.wiki
-  min_hub_degree: 5
+  metrics: {min_hub_degree: 5, orphan_exclude: [], concept_near_duplicate_threshold: 0.6}
   cluster: {resolution: 1.0, min_community_size: 1, suggest_min_shared_neighbors: 2}
-  concept_near_duplicate_threshold: 0.6
 llm: {provider: queue}
 ```
 

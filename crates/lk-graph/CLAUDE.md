@@ -16,9 +16,9 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
   frontmatter = `lk_core::frontmatter::parse_page`, wikilinks =
   `lk_core::wikilink::extract_wikilinks`. No second implementation.
 - **Config**: `config.yaml` `graph:` section (`GraphConfig` in lk-core).
-  `scope.dirs` (derived from `vault.dirs.wiki` when absent), `min_hub_degree`,
-  `orphan_exclude`, `cluster.*`. All `deny_unknown_fields`. Validated: relative,
-  no `..`.
+  `scope.dirs` (derived from `vault.dirs.wiki` when absent), `metrics.*`
+  (`min_hub_degree`, `orphan_exclude`, `concept_near_duplicate_threshold`), `cluster.*`.
+  All `deny_unknown_fields`. Validated: relative, no `..`.
 - **Wikilink resolution** (`scan::resolve_wikilink_target`): a bare target
   (`[[concept-a]]`) matches any `concept-a.md` by filename, regardless of depth;
   a path target (`[[<daily>/team-slack/2026-05-22]]`) matches that page id

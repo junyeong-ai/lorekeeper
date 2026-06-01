@@ -37,10 +37,12 @@ email-digest:
   params:
     lookback_hours: 24
     include_queries: ["category:primary"]   # exclude bots/notifications (GitHub etc.), work mail only
-  classify:                                   # optional: keyword→category section
+  classify:                                   # optional: ordered keyword→category rules (first match wins)
     # keyword values may be in any language — they match the source body verbatim
-    action_required: ["검토 요청", "확인 부탁", "please review"]
-    decisions: ["승인", "결재 완료", "approved"]
+    - category: action_required
+      keywords: ["검토 요청", "확인 부탁", "please review"]
+    - category: decisions
+      keywords: ["승인", "결재 완료", "approved"]
   labels: [personal]
   extract_concepts: true
   track_personal: true
