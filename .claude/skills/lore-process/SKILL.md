@@ -113,7 +113,7 @@ protocol below relies on:
       | `daily-refine-events`                                                  | `refine_events`   |
       | `daily-concepts`, `document-concepts`                                  | `concepts`        |
       | `work-log-synthesis`                                                   | `topic_summary`   |
-      | `weekly-synthesis-narrative`                                           | `themes`          |
+      | `weekly-synthesis-themes`                                              | `themes`          |
       | `weekly-/monthly-/quarterly-/annual-personal-narrative`                | `narrative`       |
 
       The three outcomes below are keyed on `llm_inputs.<key>` (the stale

@@ -1600,7 +1600,7 @@ mod materialized_view {
                 "daily-refine-events" => "refine_events",
                 "daily-concepts" | "document-concepts" => "concepts",
                 "work-log-synthesis" => "topic_summary",
-                "weekly-synthesis-narrative" => "themes",
+                "weekly-synthesis-themes" => "themes",
                 "weekly-personal-narrative"
                 | "monthly-personal-narrative"
                 | "quarterly-personal-narrative"

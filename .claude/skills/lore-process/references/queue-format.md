@@ -57,7 +57,7 @@ path patterns from AGENTS.md.
 `kind` values: `summarize` | `extract-concepts` | `identify-themes` | `refine-events`
 
 `target.kind` values: `daily-summary` | `daily-refine-events` | `daily-concepts` |
-`document-summary` | `document-concepts` | `weekly-synthesis-narrative` |
+`document-summary` | `document-concepts` | `weekly-synthesis-themes` |
 `weekly-personal-narrative` | `monthly-personal-narrative` |
 `quarterly-personal-narrative` | `annual-personal-narrative` | `work-log-synthesis`
 

@@ -197,12 +197,12 @@ impl Config {
         // "out-of-range thresholds" guard holds for the integer knobs too.
         if self.graph.metrics.min_hub_degree == 0 {
             return Err(ConfigError::Validation(
-                "graph.graph.min_hub_degree must be >= 1".into(),
+                "graph.metrics.min_hub_degree must be >= 1".into(),
             ));
         }
         if !(0.0..=1.0).contains(&self.graph.metrics.concept_near_duplicate_threshold) {
             return Err(ConfigError::Validation(format!(
-                "graph.graph.concept_near_duplicate_threshold must be in [0.0, 1.0], got {}",
+                "graph.metrics.concept_near_duplicate_threshold must be in [0.0, 1.0], got {}",
                 self.graph.metrics.concept_near_duplicate_threshold
             )));
         }
