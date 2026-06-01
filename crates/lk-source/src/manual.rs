@@ -1,5 +1,5 @@
-//! User-curated inbox source. The user drops files (`.md`, `.txt`, `.html`,
-//! `.json`, etc.) or URL lists into `<inbox_dir>` and `lore ingest` picks them
+//! User-curated inbox source. The user drops files (`.md`, `.txt`, `.markdown`,
+//! `.html`, `.htm` by default) into `<inbox_dir>` and `lore ingest` picks them
 //! up through the same pipeline as automated sources — dedup, classify,
 //! concept extraction, work-log routing.
 //!

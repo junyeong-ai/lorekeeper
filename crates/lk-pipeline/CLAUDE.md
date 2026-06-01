@@ -4,11 +4,13 @@ Deterministic transform stages between `lk-source` and `lk-vault`. Shares an
 `Arc<PipelineContext>` (engine, llm, dirs, perf, timezone, locale,
 concept_categories) with the `Synthesizer`.
 
-- **`Pipeline::plan` is per-source**; it returns that source's daily pages and merges
-  any extracted concepts into a **run-level** `Mutex<ConceptDrafts>`. Concept pages are a
-  cross-source aggregate, rendered ONCE via `render_concept_pages()` after all sources
-  are planned — never per source (that would let a later source's write clobber an
-  earlier one). `commit()` records dedup and must run only after writes + flush succeed.
+- **`Pipeline::plan` is per-source and takes `&mut self`**; one `Pipeline` owns one
+  ingest run exclusively (no shared-ref concurrency), so the plan→commit dedup window
+  needs no lock. It returns that source's daily pages and merges any extracted concepts
+  into a **run-level** `ConceptDrafts` accumulator. Concept pages are a cross-source
+  aggregate, rendered ONCE via `render_concept_pages()` after all sources are planned —
+  never per source (that would let a later source's write clobber an earlier one).
+  `commit()` records dedup and must run only after writes + flush succeed.
 - **Materialized-view render**: a daily page is two layers. The **structural** layer
   (frontmatter, raw event list, all `## ` headings) is re-rendered every ingest from
   the template. The **semantic** layer (summary body, refined event bodies, concept
