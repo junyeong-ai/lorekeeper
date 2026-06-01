@@ -74,17 +74,13 @@ pub fn find_audit_candidates(
         let Ok(page) = frontmatter::parse_page(&raw) else {
             continue;
         };
-        let source_count = page
-            .frontmatter
-            .get("source_count")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+        let source_count = page.frontmatter.source_count().unwrap_or(0);
         if source_count < MIN_SOURCES_FOR_AUDIT {
             continue;
         }
         let stored = page
             .frontmatter
-            .get("audited_sources_hash")
+            .get(frontmatter::field::AUDITED_SOURCES_HASH)
             .and_then(|v| v.as_str())
             .unwrap_or("");
         if sources_hash(&raw, locale) == stored {
@@ -132,7 +128,11 @@ pub fn mark_audited(
     let raw = std::fs::read_to_string(&full_path)
         .map_err(|e| GraphError::Io(format!("read {}: {e}", full_path.display())))?;
 
-    let updated = set_frontmatter_field(&raw, "audited_sources_hash", &sources_hash(&raw, locale));
+    let updated = set_frontmatter_field(
+        &raw,
+        frontmatter::field::AUDITED_SOURCES_HASH,
+        &sources_hash(&raw, locale),
+    );
     if updated == raw {
         return Ok(false);
     }

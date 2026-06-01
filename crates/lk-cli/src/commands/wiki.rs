@@ -162,11 +162,7 @@ async fn run_concepts(opts: &super::GlobalOptions, json: bool) -> miette::Result
             .filter(|s| !s.is_empty())
             .unwrap_or_default()
             .to_string();
-        let source_count = page
-            .frontmatter
-            .get("source_count")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+        let source_count = page.frontmatter.source_count().unwrap_or(0);
         if slug.is_empty() {
             continue;
         }

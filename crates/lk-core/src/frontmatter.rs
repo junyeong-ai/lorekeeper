@@ -2,6 +2,21 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+/// Frontmatter field names that form a machine writer↔reader contract spanning crates:
+/// one component writes the field and another, in a different crate, reads it, so a bare
+/// string literal on either side would let a rename break the contract with no compile
+/// error. They are single-sourced here and referenced by symbol everywhere. Fields with
+/// a single writer (template-owned values like `created`/`title`) stay plain literals —
+/// there is no cross-component agreement for them to drift.
+pub mod field {
+    /// A concept's incoming-citation count. Written by `graph backlinks-sync`; read by
+    /// `graph audit-candidates`, the ingest concept merge, and `wiki index`.
+    pub const SOURCE_COUNT: &str = "source_count";
+    /// BLAKE3-128 of a concept's canonical `## Sources` body at its last audit. Written
+    /// by `graph audit-mark`; read by `graph audit-candidates`.
+    pub const AUDITED_SOURCES_HASH: &str = "audited_sources_hash";
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Frontmatter {
     #[serde(flatten)]
@@ -11,6 +26,13 @@ pub struct Frontmatter {
 impl Frontmatter {
     pub fn get(&self, key: &str) -> Option<&serde_json::Value> {
         self.fields.get(key)
+    }
+
+    /// The incoming-citation count (`source_count`): `None` when absent or not an
+    /// integer. The one place key and parse are defined for every reader.
+    pub fn source_count(&self) -> Option<u64> {
+        self.get(field::SOURCE_COUNT)
+            .and_then(serde_json::Value::as_u64)
     }
 }
 

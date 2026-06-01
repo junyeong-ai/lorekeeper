@@ -133,7 +133,7 @@ pub fn sync_concept_backlinks(
         // of incoming citations, the same set that drives the `## Sources` body.
         let existing_count = frontmatter::parse_page(&raw)
             .ok()
-            .and_then(|p| p.frontmatter.get("source_count").and_then(|v| v.as_u64()))
+            .and_then(|p| p.frontmatter.source_count())
             .unwrap_or(0);
         let desired_count = sources.len() as u64;
 
@@ -208,7 +208,7 @@ pub(crate) fn parse_existing_sources(content: &str, heading: &str) -> Vec<String
 /// Set the frontmatter `source_count` — a thin wrapper over the single-sourced
 /// `set_frontmatter_field` so backlinks and the audit marker share one writer.
 fn set_source_count(content: &str, count: u64) -> String {
-    set_frontmatter_field(content, "source_count", &count.to_string())
+    set_frontmatter_field(content, frontmatter::field::SOURCE_COUNT, &count.to_string())
 }
 
 /// Render the sources list to the same shape `concept.md.jinja` produces:
