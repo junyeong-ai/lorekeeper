@@ -49,7 +49,7 @@ pub fn detect_communities(graph: &WikiGraph, config: &GraphConfig) -> ClusterRes
 
     let n_u32 = u32::try_from(n).expect("node count exceeds u32::MAX");
 
-    let (mut membership, iterations) = if total_weight > 0.0 {
+    let (membership, iterations) = if total_weight > 0.0 {
         run_louvain(&adjacency, &degree, total_weight, n_u32, config)
     } else {
         ((0..n_u32).collect(), 0)
@@ -61,28 +61,11 @@ pub fn detect_communities(graph: &WikiGraph, config: &GraphConfig) -> ClusterRes
     }
 
     let min_size = config.cluster.min_community_size;
-    if min_size > 1 {
-        let mut next_id = membership
-            .iter()
-            .copied()
-            .max()
-            .unwrap_or(0)
-            .checked_add(1)
-            .expect("community id overflow");
-        for members in by_community.values() {
-            if members.len() < min_size {
-                for &node in members {
-                    membership[node] = next_id;
-                    next_id = next_id.checked_add(1).expect("community id overflow");
-                }
-            }
-        }
-        by_community.clear();
-        for (i, &c) in membership.iter().enumerate() {
-            by_community.entry(c).or_default().push(i);
-        }
-    }
 
+    // Modularity measures the partition Louvain actually optimized. Communities below
+    // `min_size` are dropped from the reported result (the filter below) but are never
+    // re-partitioned first: scattering their nodes into singletons would skew this
+    // metric away from the clustering it is meant to describe.
     let modularity = compute_modularity(
         &adjacency,
         &degree,
@@ -97,6 +80,9 @@ pub fn detect_communities(graph: &WikiGraph, config: &GraphConfig) -> ClusterRes
         .map(|(_, members)| build_community(graph, members))
         .collect();
 
+    // Largest community first; ties broken by smallest first-member id so the output
+    // order is deterministic. Ids are then renumbered to match this display order — the
+    // `id` is an output rank, not a sort key.
     communities.sort_by(|a, b| {
         b.size
             .cmp(&a.size)
@@ -428,7 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn communities_sorted_by_size_then_id() {
+    fn communities_sorted_by_size_with_sequential_ids() {
         let config = GraphConfig::default();
         let pages = vec![
             make_page("a", &["b", "c"]),
