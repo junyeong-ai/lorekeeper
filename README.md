@@ -155,7 +155,7 @@ The skill is **fully idempotent**: re-running on a partially-processed queue fil
 
 ## Claude Code Skills
 
-These skills provide the Claude Code integration surface. All follow the `lore-{verb}` naming convention and are written in English (AI-native design).
+These skills provide the Claude Code integration surface. All use the `lore-` prefix and are written in English (AI-native design).
 
 | Skill | Purpose | Model-invocable |
 |-------|---------|:---------------:|
@@ -210,7 +210,7 @@ templates/      Jinja2 markdown templates (.md.jinja, embedded in the binary)
 Templates live in `templates/` and use Jinja2 syntax (minijinja). Lookup order:
 
 1. `{source-id}.md.jinja` — user override per source ID (optional)
-2. `{source-type}.md.jinja` — default per source type (`gmail`, `google-drive`, `slack-channel`, `slack-search`, `jira`, `google-calendar`, `rss`, `manual`)
+2. `{source-type}.md.jinja` — default per source type (`gmail`, `google-drive`, `slack-channel`, `slack-search`, `jira`, `google-calendar`, `rss`; the `manual` source renders through `document`)
 3. Embedded fallback
 
 Periodic templates: `work-log`, `weekly-synthesis`, `weekly-personal`, `monthly-summary`, `quarterly-review`, `annual-review`, `concept`, `document`, `exploration`.
