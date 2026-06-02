@@ -15,27 +15,37 @@ const URLS: TableDefinition<&str, u64> = TableDefinition::new("urls");
 /// vendor-tracking parameters whose presence varies by attribution path but
 /// never carry resource-identifying information. (Bare `ref` is deliberately NOT
 /// here — GitHub/GitLab use it as a revision selector; only `ref_src` is tracking.)
+///
+/// Each entry is annotated with its vendor: stripping a key is a one-way ratchet
+/// (a value silently merged into a base URL can never be recovered), so an addition
+/// must be a parameter that is provably attribution-only on every host, never a
+/// resource selector.
 const TRACKING_QUERY_EXACT_KEYS: &[&str] = &[
-    "fbclid",
-    "gclid",
-    "mc_cid",
-    "mc_eid",
-    "_hsenc",
-    "_hsmi",
-    "msclkid",
-    "ttclid",
-    "twclid",
-    "wbraid",
-    "gbraid",
-    "igshid",
-    "ref_src",
-    "vero_id",
-    "vero_conv",
-    "oly_enc_id",
-    "oly_anon_id",
-    "cmpid",
-    "ncid",
-    "mkt_tok",
+    // Ad-platform click identifiers — minted per click to attribute a paid
+    // campaign; the destination is identical regardless of the value.
+    "fbclid",  // Meta / Facebook Ads click id
+    "gclid",   // Google Ads click id
+    "wbraid",  // Google Ads click id (web→app, iOS)
+    "gbraid",  // Google Ads click id (app→web, iOS)
+    "msclkid", // Microsoft / Bing Ads click id
+    "ttclid",  // TikTok Ads click id
+    "twclid",  // X / Twitter Ads click id
+    "igshid",  // Instagram share/click id
+    // Email & marketing-automation tokens — per-send or per-recipient, never
+    // resource-identifying.
+    "mc_cid",      // Mailchimp campaign id
+    "mc_eid",      // Mailchimp recipient id
+    "_hsenc",      // HubSpot encrypted recipient token
+    "_hsmi",       // HubSpot email id
+    "vero_id",     // Vero email recipient id
+    "vero_conv",   // Vero conversion token
+    "oly_enc_id",  // Omeda / Olytics encrypted id
+    "oly_anon_id", // Omeda / Olytics anonymous id
+    "mkt_tok",     // Marketo email tracking token
+    // Generic referral / campaign tags — attribution metadata only.
+    "ref_src", // X / Twitter referral source
+    "cmpid",   // publisher campaign id
+    "ncid",    // network/campaign id (Google, news sites)
 ];
 
 /// Query-key prefixes stripped during URL canonicalisation. Only genuine
