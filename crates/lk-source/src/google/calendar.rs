@@ -13,14 +13,14 @@ const BASE: &str = "https://www.googleapis.com/calendar/v3";
 /// Maximum number of Drive files to fetch meeting notes from per calendar event.
 const MAX_DRIVE_FETCHES_PER_EVENT: usize = 3;
 
-pub struct CalendarSource {
+pub struct GoogleCalendarSource {
     http: reqwest::Client,
     auth: Arc<GoogleAuth>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CalendarParams {
+struct GoogleCalendarParams {
     #[serde(default = "default_calendar")]
     calendar_id: String,
     #[serde(default = "default_lookback")]
@@ -33,7 +33,7 @@ struct CalendarParams {
 
 /// Validate this source's params at config-load time, before any network work.
 pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
-    crate::parse_params::<CalendarParams>(params).map(|_| ())
+    crate::parse_params::<GoogleCalendarParams>(params).map(|_| ())
 }
 
 fn default_calendar() -> String {
@@ -150,20 +150,20 @@ async fn fetch_drive_content(
     resp.text().await.map_err(SourceError::Http)
 }
 
-impl CalendarSource {
+impl GoogleCalendarSource {
     pub fn new(http: reqwest::Client, auth: Arc<GoogleAuth>) -> Self {
         Self { http, auth }
     }
 }
 
 #[async_trait]
-impl Source for CalendarSource {
+impl Source for GoogleCalendarSource {
     async fn extract(
         &self,
         params: &serde_json::Value,
         ctx: &ExtractContext,
     ) -> Result<Vec<RawItem>, SourceError> {
-        let p: CalendarParams = crate::parse_params(params)?;
+        let p: GoogleCalendarParams = crate::parse_params(params)?;
 
         let token = self.auth.access_token().await?;
 
@@ -465,13 +465,13 @@ mod tests {
 
     #[test]
     fn fetch_meeting_notes_defaults_to_false() {
-        let params: CalendarParams = serde_json::from_value(serde_json::json!({})).unwrap();
+        let params: GoogleCalendarParams = serde_json::from_value(serde_json::json!({})).unwrap();
         assert!(!params.fetch_meeting_notes);
     }
 
     #[test]
     fn fetch_meeting_notes_can_be_enabled() {
-        let params: CalendarParams =
+        let params: GoogleCalendarParams =
             serde_json::from_value(serde_json::json!({"fetch_meeting_notes": true})).unwrap();
         assert!(params.fetch_meeting_notes);
     }

@@ -228,6 +228,16 @@ Extract knowledge using the manifest. Requires a prior scan.
       `backlinks-sync` reads to populate each concept's `## Sources`.
 
    h. Create/merge concept pages per AGENTS.md: fill the Synthesis section.
+      One concept = one page. Match each concept against the registry (loaded in
+      step 3) AND against concepts you have already created earlier in this run —
+      track them as you go, because a batch processes many documents and the
+      ingest-time registry can't see same-run creations. Match by slug-equivalence
+      OR meaning; on a match reuse the existing slug + name rather than minting a
+      variant. When a document names the concept differently from the canonical
+      title (an abbreviation/synonym, e.g. `RAG` for `Retrieval-Augmented-Generation`),
+      append that surface form to the page's `aliases` so a future bare `[[RAG]]`
+      resolves to the one page — alias only, never rename. `lore graph lint` flags
+      any alias that collides or shadows a real page, so it stays safe and reversible.
       Leave `## Sources` empty and `source_count: 0` — they are machine-owned and
       re-derived by the Finalize `backlinks-sync` from the document's forward
       `[[wikilink]]` (step g), the single source of truth. Never hand-write

@@ -10,21 +10,21 @@ use crate::{ExtractContext, Source, SourceError};
 
 const BASE: &str = "https://www.googleapis.com/drive/v3";
 
-pub struct DriveSource {
+pub struct GoogleDriveSource {
     http: reqwest::Client,
     auth: Arc<GoogleAuth>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct DriveParams {
+struct GoogleDriveParams {
     folder: String,
     file_pattern: String,
 }
 
 /// Validate this source's params at config-load time, before any network work.
 pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
-    let p: DriveParams = crate::parse_params(params)?;
+    let p: GoogleDriveParams = crate::parse_params(params)?;
     if p.folder.trim().is_empty() {
         return Err(SourceError::InvalidParams(
             "drive `folder` must not be empty (use the Drive folder name or ID)".into(),
@@ -60,7 +60,7 @@ struct FileMeta {
     modified_time: Option<String>,
 }
 
-impl DriveSource {
+impl GoogleDriveSource {
     pub fn new(http: reqwest::Client, auth: Arc<GoogleAuth>) -> Self {
         Self { http, auth }
     }
@@ -100,13 +100,13 @@ impl DriveSource {
 }
 
 #[async_trait]
-impl Source for DriveSource {
+impl Source for GoogleDriveSource {
     async fn extract(
         &self,
         params: &serde_json::Value,
         ctx: &ExtractContext,
     ) -> Result<Vec<RawItem>, SourceError> {
-        let p: DriveParams = crate::parse_params(params)?;
+        let p: GoogleDriveParams = crate::parse_params(params)?;
 
         let token = self.auth.access_token().await?;
         let folder_id = self.resolve_folder_id(&token, &p.folder).await?;

@@ -114,6 +114,12 @@ concept_categories) with the `Synthesizer`.
   it. Before extraction, `load_existing_concept_refs()` scans the vault's concept
   directory + in-memory drafts and passes them as `existing_concepts` in the LLM
   request, preventing duplicate concept creation.
+- **`theme` vs `topic` are deliberately distinct, not drift.** A weekly-synthesis
+  `Theme` (`identify_themes`) is a cross-source cluster spanning a whole week; a work-log
+  `topic_summary`/`topic_heading` is a single day's per-source activity grouping. They sit
+  at different altitudes (like `category` vs `performance_category`), so the vocabulary is
+  kept separate on purpose — do NOT unify them into one term (it would also collide with
+  graph "topic communities").
 - **Synthesizer** methods are `try_weekly_synthesis` (cross-source themes) +
   `try_{weekly,monthly,quarterly,annual}_review` (personal performance reviews). Each is a
   materialized view like a daily page: `summarize_section` (or, for weekly themes,

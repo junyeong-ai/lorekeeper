@@ -4,7 +4,7 @@ title: "{{ i18n.rss_title }} {{ date }}"
 created: {{ date }}
 labels: {{ labels | tojson }}
 source: {{ source_id }}
-events_count: {{ events | length }}
+event_count: {{ events | length }}
 llm_inputs:
   summary: {{ llm_inputs.summary | tojson }}
   refine_events: {{ llm_inputs.refine_events | tojson }}

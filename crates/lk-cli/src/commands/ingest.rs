@@ -190,7 +190,7 @@ pub async fn run(
                     timestamp: jiff::Timestamp::now(),
                     source_id: id.clone(),
                     status: lk_vault::LogStatus::Skipped,
-                    events_count: 0,
+                    event_count: 0,
                     duration_ms: started_at.elapsed().as_millis() as u64,
                     error: None,
                 })
@@ -340,7 +340,7 @@ pub async fn run(
             timestamp: jiff::Timestamp::now(),
             source_id: p.id.clone(),
             status,
-            events_count: p.result.events.len(),
+            event_count: p.result.events.len(),
             duration_ms: p.started_at.elapsed().as_millis() as u64,
             error: if any_write_failed {
                 Some("vault write failed".into())
@@ -458,7 +458,7 @@ async fn record_failure(
         timestamp: jiff::Timestamp::now(),
         source_id: source_id.into(),
         status: lk_vault::LogStatus::Failed,
-        events_count: 0,
+        event_count: 0,
         duration_ms: start.elapsed().as_millis() as u64,
         error: Some(error.into()),
     })

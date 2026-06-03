@@ -78,7 +78,7 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs) -> Vec<PageSchema> {
         PageSchema {
             type_name: "daily",
             path_pattern: format!("{}/{{source-id}}/YYYY-MM-DD.md", dirs.daily),
-            frontmatter: &["id", "title", "created", "labels", "source", "events_count"],
+            frontmatter: &["id", "title", "created", "labels", "source", "event_count"],
             sections: vec![
                 s("Summary", |i| i.summary.to_string(), Owner::Llm),
                 s(

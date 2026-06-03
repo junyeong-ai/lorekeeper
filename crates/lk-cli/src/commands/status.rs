@@ -13,7 +13,7 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
         match last {
             Some(e) => eprintln!(
                 "  {id} ({}) — last: {}, {} events",
-                sc.source_type, e.timestamp, e.events_count
+                sc.source_type, e.timestamp, e.event_count
             ),
             None => eprintln!("  {id} ({}) — never ingested", sc.source_type),
         }

@@ -44,11 +44,19 @@ each as an independent source, and report the aggregate results.
    original content, set `document_type` from the format vocabulary
    (`note`|`report`|`data`; the source's nature goes in `tags`), and link the
    extracted concepts as `[[wikilinks]]` in the related-concepts section.
-4. Extract every named entity, technology, and topic as concepts (typically
-   several per source). For each, create or merge a concept page per AGENTS.md
-   and fill the Synthesis section with a 1-2 sentence definition for a new
-   concept. Leave `## Sources`/`source_count` for `backlinks-sync` — the document's
-   forward `[[wikilink]]` from step 3 is the source of truth, never hand-edited.
+4. Load the concept registry once (`lore wiki concepts`). Extract every named
+   entity, technology, and topic as concepts (typically several per source). One
+   concept = one page: match each against the registry AND against concepts you
+   created earlier in this add (track them as you go, so a folder of many files
+   can't mint the same concept twice) — by slug-equivalence OR meaning. On a match
+   reuse the existing slug + name rather than minting a variant; when a source
+   names it differently from the canonical title (an abbreviation/synonym, e.g.
+   `RAG` for `Retrieval-Augmented-Generation`), append that surface form to the
+   page's `aliases` so a future bare `[[RAG]]` resolves to the one page — alias
+   only, never rename. Fill the Synthesis section with a 1-2 sentence definition
+   for a new concept. Leave `## Sources`/`source_count` for `backlinks-sync` — the
+   document's forward `[[wikilink]]` from step 3 is the source of truth, never
+   hand-edited.
 5. **Finalize**: `lore graph backlinks-sync`, then `lore wiki index`, then
    `lore graph lint` to confirm no structural drift (index/broken links).
    Pre-existing review items (uncategorized, near-dup, open conflicts) may
@@ -140,8 +148,12 @@ inspecting pages.
      meaning. Recommend declaring the non-canonical form as an `aliases` entry on the
      canonical concept (`backlinks-sync` then resolves both spellings to one page), or a
      `merge` when one side has no distinct content. Read-only suggestion — a human edits
-     frontmatter. An acronym can be genuinely ambiguous (`rag` could be red-amber-green),
-     so never auto-alias; surface the candidate and let the human confirm the meaning.
+     frontmatter. This is a registry scan WITHOUT the source text, so an acronym can be
+     genuinely ambiguous here (`rag` could be red-amber-green) — surface the candidate for
+     human confirmation, don't auto-alias at audit time. (Aliasing AT extraction is the
+     same principle, not a contradiction: there the source text disambiguates the term, so
+     a concept-creating skill that confidently recognizes the synonym registers the alias
+     directly. Confidence comes from context; a context-free registry match doesn't have it.)
    - **Staleness**: run `lore graph stale --days 90`, filter concept entries.
      `stale` already excludes concepts still cited by recent activity (liveness is
      graph-derived), so an entry here is genuinely dormant — no manual recency grep

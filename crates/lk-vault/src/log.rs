@@ -14,7 +14,7 @@ pub struct LogEntry {
     pub timestamp: jiff::Timestamp,
     pub source_id: String,
     pub status: LogStatus,
-    pub events_count: usize,
+    pub event_count: usize,
     pub duration_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,

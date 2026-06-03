@@ -16,7 +16,7 @@ pub struct SlackChannelSource {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ChannelParams {
+struct SlackChannelParams {
     /// A single channel (`#name` or id). Kept alongside `channels` so existing configs
     /// and the common single-channel case stay terse.
     #[serde(default)]
@@ -51,7 +51,7 @@ struct ChannelParams {
     max_thread_messages: usize,
 }
 
-impl ChannelParams {
+impl SlackChannelParams {
     /// All channel references (single + list), in config order.
     fn channel_refs(&self) -> Vec<&str> {
         self.channel
@@ -64,7 +64,7 @@ impl ChannelParams {
 
 /// Validate this source's params at config-load time, before any network work.
 pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
-    let p: ChannelParams = crate::parse_params(params)?;
+    let p: SlackChannelParams = crate::parse_params(params)?;
     if p.channel_refs().is_empty() {
         return Err(SourceError::InvalidParams(
             "slack-channel requires `channel` or `channels`".into(),
@@ -180,7 +180,7 @@ impl Source for SlackChannelSource {
         params: &serde_json::Value,
         ctx: &ExtractContext,
     ) -> Result<Vec<RawItem>, SourceError> {
-        let p: ChannelParams = crate::parse_params(params)?;
+        let p: SlackChannelParams = crate::parse_params(params)?;
 
         let users = resolve_users(&self.http, &self.token).await;
 
@@ -374,7 +374,7 @@ mod tests {
 
     #[test]
     fn channel_refs_merge_single_and_list() {
-        let p = ChannelParams {
+        let p = SlackChannelParams {
             channel: Some("#a".into()),
             channels: vec!["C1".into(), "C2".into()],
             lookback_hours: 24,
@@ -400,7 +400,7 @@ mod tests {
 
     #[test]
     fn exclude_bots_defaults_on() {
-        let p: ChannelParams = serde_json::from_value(serde_json::json!({
+        let p: SlackChannelParams = serde_json::from_value(serde_json::json!({
             "channel": "#x"
         }))
         .unwrap();
@@ -409,7 +409,7 @@ mod tests {
 
     #[test]
     fn caps_default_and_reject_zero() {
-        let p: ChannelParams =
+        let p: SlackChannelParams =
             serde_json::from_value(serde_json::json!({ "channel": "#x" })).unwrap();
         assert_eq!(p.max_messages_per_channel, 500);
         assert_eq!(p.max_thread_messages, 200);

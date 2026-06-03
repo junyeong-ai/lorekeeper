@@ -245,12 +245,28 @@ protocol below relies on:
 
         1. At the start of processing a queue file, run `lore wiki concepts`
            to load the current concept registry into context.
-        2. If `input.existing_concepts` is present, use it as the
-           authoritative registry (it was snapshot at ingest time).
-        3. For each extracted concept, check if a slug-equivalent or
-           semantically equivalent concept already exists. Use existing
-           slug + name when matched — do NOT create a variant.
-        4. Slug normalization: NFKC → lowercase → non-alphanumeric to
+        2. If `input.existing_concepts` is present, union it with the registry
+           (it was snapshot at ingest time). It can be STALE within a run —
+           concepts you create while draining this queue are not in it.
+        3. Maintain a **created-this-run set**: every time you mint a new concept
+           page OR register a new alias on an existing one, add that slug + name +
+           alias(es) to your in-context registry BEFORE processing the next task.
+           The ingest-time snapshot can't see same-run changes, so two tasks would
+           otherwise independently mint `RAG` and `Retrieval-Augmented-Generation`,
+           or a second task would miss the `RAG` alias a first task just added —
+           only your running set closes both gaps.
+        4. For each extracted concept, check the unioned registry (snapshot +
+           created-this-run) for a slug-equivalent OR semantically equivalent
+           concept. When matched, use the existing slug + name — do NOT create a
+           variant. **If the source's surface form differs from the canonical name
+           (e.g. source says `RAG`, canonical is `Retrieval-Augmented-Generation`),
+           append the surface form to that concept's `aliases` frontmatter** so a
+           future bare `[[RAG]]` resolves to the one page. This is the convergence
+           step: the deterministic graph resolves aliases (`lk-graph`) and
+           `lore graph lint` surfaces any alias that collides or shadows a real
+           page — so registering the alias is safe and reversible. Add the alias
+           only; never rename the canonical page or rewrite its body.
+        5. Slug normalization: NFKC → lowercase → non-alphanumeric to
            hyphen → collapse runs → trim. Same as `lk_core::slugify`.
 
         **Source references are machine-owned — do NOT hand-write them.** Leave the
@@ -398,8 +414,9 @@ succeeded. Failure rules:
 - **Re-running on a partially-processed file is safe** because:
   - Daily summary/concept edits replace the section body — repeating the
     edit produces identical content. No drift.
-  - Concept page merging preserves original `created` and dedupes the
-    `## Sources` body — re-adding the same `- [[ref]]` is a no-op.
+  - Concept page merging preserves the original `created` and reuses the
+    existing slug; the `## Sources` body is never written during processing
+    (it stays empty for `backlinks-sync` to own), so a re-run touches nothing there.
   - `source_count` is never written by processing — new pages start at `0`,
     ingest preserves the existing value, and only `lore graph backlinks-sync`
     computes the authoritative count from the wikilink graph.

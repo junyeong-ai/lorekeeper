@@ -165,11 +165,11 @@ pub fn build_source(
         }
         SourceType::GoogleDrive => {
             let auth = google_auth(creds, &http)?;
-            Ok(Box::new(google::drive::DriveSource::new(http, auth)))
+            Ok(Box::new(google::drive::GoogleDriveSource::new(http, auth)))
         }
         SourceType::GoogleCalendar => {
             let auth = google_auth(creds, &http)?;
-            Ok(Box::new(google::calendar::CalendarSource::new(http, auth)))
+            Ok(Box::new(google::calendar::GoogleCalendarSource::new(http, auth)))
         }
         SourceType::SlackChannel => {
             let token = slack_creds(creds)?

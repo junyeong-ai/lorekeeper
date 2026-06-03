@@ -108,14 +108,20 @@ the insight's nature (troubleshooting, constraint, pattern) belongs in
 For each technology, pattern, or constraint:
 
 1. Slugify: NFKC → lowercase → non-alnum to hyphen → collapse → trim
-2. Check existing concepts from step 2
+2. Match against the registry (loaded in step 2) AND against any concept you
+   already created earlier in this capture (track them as you go) by
+   slug-equivalence OR meaning — one concept = one page. A match reuses the
+   existing page; only an unmatched concept creates a new one.
 3. New → create with a 1-2 sentence synthesis in the Synthesis section
    (heading from AGENTS.md). Leave `## Sources` empty and `source_count: 0` —
    they are machine-owned and filled by `backlinks-sync` in step 6.
-4. Existing → update `updated` and enrich the synthesis if warranted.
-   Do NOT hand-edit `## Sources` or `source_count` — `backlinks-sync`
-   re-derives both from the wikilink graph (the document's forward link
-   from step 4 is the source of truth).
+4. Existing → update `updated` and enrich the synthesis if warranted. When this
+   source names the concept differently from the canonical title (an
+   abbreviation/synonym, e.g. `RAG` for `Retrieval-Augmented-Generation`), append
+   that surface form to the page's `aliases` so a future bare `[[RAG]]` resolves to
+   the one page — alias only, never rename. Do NOT hand-edit `## Sources` or
+   `source_count` — `backlinks-sync` re-derives both from the wikilink graph (the
+   document's forward link from step 4 is the source of truth).
 5. Assign category from config.yaml `concepts.categories`
 
 ### 6. Finalize

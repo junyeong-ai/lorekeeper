@@ -14,7 +14,7 @@ pub struct SlackSearchSource {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SearchParams {
+struct SlackSearchParams {
     queries: Vec<QueryParams>,
     #[serde(default = "default_lookback")]
     lookback_hours: u32,
@@ -33,7 +33,7 @@ struct QueryParams {
 
 /// Validate this source's params at config-load time, before any network work.
 pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
-    crate::parse_params::<SearchParams>(params).map(|_| ())
+    crate::parse_params::<SlackSearchParams>(params).map(|_| ())
 }
 
 #[derive(Deserialize)]
@@ -74,7 +74,7 @@ impl Source for SlackSearchSource {
         params: &serde_json::Value,
         ctx: &ExtractContext,
     ) -> Result<Vec<RawItem>, SourceError> {
-        let p: SearchParams = crate::parse_params(params)?;
+        let p: SlackSearchParams = crate::parse_params(params)?;
 
         let users = resolve_users(&self.http, &self.token).await;
 
