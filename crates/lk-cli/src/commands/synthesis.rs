@@ -80,7 +80,7 @@ pub async fn run(opts: &super::GlobalOptions, period: Period) -> miette::Result<
                 outs.push(out);
             }
             if let Some(out) = synth
-                .try_weekly_personal(target)
+                .try_weekly_review(target)
                 .await
                 .map_err(|e| miette::miette!("{e}"))?
             {
@@ -101,7 +101,7 @@ pub async fn run(opts: &super::GlobalOptions, period: Period) -> miette::Result<
         Period::Monthly { date, previous } => {
             let (year, month) = resolve_monthly_target(date.as_deref(), previous, today)?;
             match synth
-                .try_monthly_personal(year, month)
+                .try_monthly_review(year, month)
                 .await
                 .map_err(|e| miette::miette!("{e}"))?
             {
@@ -115,7 +115,7 @@ pub async fn run(opts: &super::GlobalOptions, period: Period) -> miette::Result<
         Period::Quarterly { date, previous } => {
             let (year, quarter) = resolve_quarterly_target(date.as_deref(), previous, today)?;
             match synth
-                .try_quarterly_personal(year, quarter)
+                .try_quarterly_review(year, quarter)
                 .await
                 .map_err(|e| miette::miette!("{e}"))?
             {
@@ -133,7 +133,7 @@ pub async fn run(opts: &super::GlobalOptions, period: Period) -> miette::Result<
                 year.map(|y| y as i16).unwrap_or_else(|| today.year())
             };
             match synth
-                .try_annual_personal(target_year)
+                .try_annual_review(target_year)
                 .await
                 .map_err(|e| miette::miette!("{e}"))?
             {

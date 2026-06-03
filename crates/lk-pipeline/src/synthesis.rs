@@ -65,7 +65,7 @@ impl Synthesizer {
         // `synthesis.weekly.include_sources` are rolled up. Knowledge feeds (news, RSS)
         // deliberately stay out — their value is the continuously-accumulated concept
         // graph, so a weekly digest of them would be redundant. An empty list yields no
-        // themes page; the personal weekly narrative (work-log) is produced regardless.
+        // themes page; the weekly review narrative (work-log) is produced regardless.
         let sources = config.synthesis.weekly.include_sources.clone();
         Self {
             ctx,
@@ -74,7 +74,7 @@ impl Synthesizer {
         }
     }
 
-    /// The personal narratives (weekly/monthly/quarterly/annual) are the work-log
+    /// The review narratives (weekly/monthly/quarterly/annual) are the work-log
     /// performance subsystem, gated by `performance.enabled`. Disabled → no review pages,
     /// even if work-log entries exist. The cross-source weekly themes page is independent
     /// and not gated here.
@@ -261,7 +261,7 @@ impl Synthesizer {
         Ok(content.map(|content| RenderResult { path, content }))
     }
 
-    pub async fn try_weekly_personal(
+    pub async fn try_weekly_review(
         &self,
         date: jiff::civil::Date,
     ) -> Result<Option<RenderResult>, PipelineError> {
@@ -284,8 +284,8 @@ impl Synthesizer {
             .collect::<Vec<_>>()
             .join("\n\n---\n\n");
 
-        let path = VaultPath::weekly_personal(&self.ctx.dirs, year, week);
-        let kind = TargetKind::WeeklyPersonalNarrative;
+        let path = VaultPath::weekly_review(&self.ctx.dirs, year, week);
+        let kind = TargetKind::WeeklyReviewNarrative;
         let heading = self.ctx.locale.strings().key_summary;
         let section = self
             .summarize_section(
@@ -296,7 +296,7 @@ impl Synthesizer {
                 &path,
                 kind,
                 heading,
-                "weekly personal",
+                "weekly review",
             )
             .await?;
         let Some(narrative) = section.narrative else {
@@ -304,6 +304,7 @@ impl Synthesizer {
         };
         let category_stats = self.aggregate_category_stats(start, end).await?;
         let context = serde_json::json!({
+            "title": self.ctx.locale.weekly_title(year, week),
             "year": year,
             "week": week,
             "start_date": start.to_string(),
@@ -314,7 +315,7 @@ impl Synthesizer {
         });
 
         let content = self.render_section(
-            "weekly-personal.md.jinja",
+            "weekly-review.md.jinja",
             kind,
             heading,
             &section.decision,
@@ -324,7 +325,7 @@ impl Synthesizer {
         Ok(content.map(|content| RenderResult { path, content }))
     }
 
-    pub async fn try_monthly_personal(
+    pub async fn try_monthly_review(
         &self,
         year: i16,
         month: u8,
@@ -346,13 +347,13 @@ impl Synthesizer {
             .collect::<Vec<_>>()
             .join("\n\n---\n\n");
 
-        let path = VaultPath::monthly_personal(&self.ctx.dirs, year, month);
-        let kind = TargetKind::MonthlyPersonalNarrative;
+        let path = VaultPath::monthly_review(&self.ctx.dirs, year, month);
+        let kind = TargetKind::MonthlyReviewNarrative;
         let heading = self.ctx.locale.strings().key_summary;
         let section = self
             .summarize_section(
                 format!(
-                    "Generate a monthly work summary with key achievements and category distribution:\n\n{combined}"
+                    "Generate a monthly performance review with key achievements and category distribution:\n\n{combined}"
                 ),
                 15,
                 &path,
@@ -377,7 +378,7 @@ impl Synthesizer {
         });
 
         let content = self.render_section(
-            "monthly-summary.md.jinja",
+            "monthly-review.md.jinja",
             kind,
             heading,
             &section.decision,
@@ -387,7 +388,7 @@ impl Synthesizer {
         Ok(content.map(|content| RenderResult { path, content }))
     }
 
-    pub async fn try_quarterly_personal(
+    pub async fn try_quarterly_review(
         &self,
         year: i16,
         quarter: u8,
@@ -430,8 +431,8 @@ impl Synthesizer {
             return Ok(None);
         }
 
-        let path = VaultPath::quarterly_personal(&self.ctx.dirs, year, quarter);
-        let kind = TargetKind::QuarterlyPersonalNarrative;
+        let path = VaultPath::quarterly_review(&self.ctx.dirs, year, quarter);
+        let kind = TargetKind::QuarterlyReviewNarrative;
         let heading = self.ctx.locale.strings().key_summary;
         let section = self
             .summarize_section(
@@ -474,7 +475,7 @@ impl Synthesizer {
         Ok(content.map(|content| RenderResult { path, content }))
     }
 
-    pub async fn try_annual_personal(
+    pub async fn try_annual_review(
         &self,
         year: i16,
     ) -> Result<Option<RenderResult>, PipelineError> {
@@ -512,8 +513,8 @@ impl Synthesizer {
 
         let breakdown_heading = strings.quarterly_breakdown;
 
-        let path = VaultPath::annual_personal(&self.ctx.dirs, year);
-        let kind = TargetKind::AnnualPersonalNarrative;
+        let path = VaultPath::annual_review(&self.ctx.dirs, year);
+        let kind = TargetKind::AnnualReviewNarrative;
         let heading = strings.overall_summary;
         let section = self
             .summarize_section(
@@ -563,7 +564,7 @@ impl Synthesizer {
     /// dedups a boundary ISO week shared by two adjacent *fallback* months so no weekly
     /// review is counted twice. A month with its own monthly review returns early and
     /// does NOT claim its weeks — so if a neighbouring month falls back, the shared
-    /// boundary week appears in both that month's monthly summary and the neighbour's
+    /// boundary week appears in both that month's monthly review and the neighbour's
     /// weekly fallback. That is deliberate: for a narrative rollup, including a boundary
     /// week's work in both is harmless, whereas dropping it would lose real activity.
     /// (The numeric category table is computed separately from raw work-log over the
@@ -659,7 +660,7 @@ impl Synthesizer {
         let stats = self
             .ctx
             .perf
-            .work_categories
+            .performance_categories
             .iter()
             .filter_map(|cat| {
                 let count = counts.get(cat).copied().unwrap_or(0);
@@ -717,7 +718,7 @@ fn iso_year_week(date: jiff::civil::Date) -> (i16, u8) {
 }
 
 /// The distinct ISO year-weeks that any day in `[start, end]` falls into, in order.
-/// Used to locate the weekly personal narratives overlapping a quarter.
+/// Used to locate the weekly review narratives overlapping a quarter.
 fn iso_weeks_in_range(
     start: jiff::civil::Date,
     end: jiff::civil::Date,

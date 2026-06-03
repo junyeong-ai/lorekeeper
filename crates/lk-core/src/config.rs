@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::ConfigError;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClassifyRule {
     /// Daily-page grouping bucket assigned to a matching event (e.g.
     /// `action_required`). A presentation axis — it controls which section the
@@ -14,13 +15,13 @@ pub struct ClassifyRule {
     pub keywords: Vec<String>,
     /// Optional EXPLICIT bridge to the performance taxonomy: when set, a matching
     /// event also gets this `performance_category`, contributing to the work-log /
-    /// review distribution. Must be one of `performance.work_categories` (validated
-    /// at load). Omitted = this rule is grouping-only and the event's performance
-    /// category falls back to the per-source-type map. This keeps the two
+    /// review distribution. Must be one of `performance.performance_categories`
+    /// (validated at load). Omitted = this rule is grouping-only and the event's
+    /// performance category falls back to the per-source-type map. This keeps the two
     /// taxonomies orthogonal while making the content→performance link visible and
     /// opt-in per rule, rather than a fragile string coincidence.
     #[serde(default)]
-    pub work_category: Option<String>,
+    pub performance_category: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -114,12 +115,12 @@ impl Config {
                 // The performance bridge must target a real performance category, or
                 // the work-log distribution would silently drop the rule's events into
                 // "uncategorized" — the same fail-fast contract as the source maps.
-                if let Some(wc) = &rule.work_category
-                    && !self.performance.work_categories.contains(wc)
+                if let Some(pc) = &rule.performance_category
+                    && !self.performance.performance_categories.contains(pc)
                 {
                     return Err(ConfigError::Validation(format!(
-                        "sources.{id}.classify: rule '{}' work_category '{wc}' is not in \
-                         performance.work_categories",
+                        "sources.{id}.classify: rule '{}' performance_category '{pc}' is not in \
+                         performance.performance_categories",
                         rule.category
                     )));
                 }
@@ -229,9 +230,10 @@ impl Config {
             .values()
             .chain(self.performance.source_type_category_map.values())
         {
-            if !self.performance.work_categories.contains(category) {
+            if !self.performance.performance_categories.contains(category) {
                 return Err(ConfigError::Validation(format!(
-                    "category '{category}' in source mapping is not in performance.work_categories"
+                    "category '{category}' in source mapping is not in \
+                     performance.performance_categories"
                 )));
             }
         }
@@ -664,7 +666,7 @@ impl std::fmt::Display for SourceType {
 #[serde(default, deny_unknown_fields)]
 pub struct PerformanceConfig {
     pub enabled: bool,
-    pub work_categories: Vec<String>,
+    pub performance_categories: Vec<String>,
     /// Per-source-ID category override (highest priority).
     pub source_category_map: BTreeMap<String, String>,
     /// Per-source-type default category (fallback when source_category_map has no entry).
@@ -686,13 +688,13 @@ impl PerformanceConfig {
     /// specific:
     /// 1. `source_category_map[source_id]` — an explicit per-source intent.
     /// 2. `performance_category` — the event's own content signal, set by a
-    ///    `classify` rule's `work_category` bridge. This OUTRANKS the per-type map
-    ///    so a genuine content signal (e.g. a Jira issue whose body marks it as
+    ///    `classify` rule's `performance_category` bridge. This OUTRANKS the per-type
+    ///    map so a genuine content signal (e.g. a Jira issue whose body marks it as
     ///    `innovation`) wins over the coarse "all Jira = project-delivery" default.
     /// 3. `source_type_category_map[source_type]` — the coarse fallback.
     ///
-    /// All three already draw from `work_categories` (the rule bridge and the maps
-    /// are validated against it at load), so no membership re-check is needed here.
+    /// All three already draw from `performance_categories` (the rule bridge and the
+    /// maps are validated against it at load), so no membership re-check is needed here.
     pub fn resolve_category(
         &self,
         source_id: &str,
@@ -716,7 +718,7 @@ impl Default for PerformanceConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            work_categories: vec![
+            performance_categories: vec![
                 "project-delivery".into(),
                 "technical-leadership".into(),
                 "team-contribution".into(),
@@ -734,9 +736,9 @@ impl Default for PerformanceConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct SynthesisConfig {
     pub weekly: WeeklySynthesisConfig,
-    pub monthly: PersonalReviewSynthesisConfig,
-    pub quarterly: PersonalReviewSynthesisConfig,
-    pub annual: PersonalReviewSynthesisConfig,
+    pub monthly: PersonalReviewConfig,
+    pub quarterly: PersonalReviewConfig,
+    pub annual: PersonalReviewConfig,
 }
 
 impl SynthesisConfig {
@@ -766,9 +768,11 @@ impl SynthesisConfig {
     }
 }
 
-/// Weekly synthesis carries the cross-source themes page on top of the personal
-/// weekly narrative, so it alone takes `include_sources`. The other periods are
-/// work-log-only performance reviews and share the leaner `PersonalReviewSynthesisConfig`.
+/// Weekly synthesis carries the cross-source themes page on top of the weekly review
+/// narrative, so it alone takes `include_sources`. The other periods are
+/// work-log-only performance reviews and share the leaner `PersonalReviewConfig`.
+/// "Synthesis" is reserved for the cross-source weekly themes; the monthly/quarterly/
+/// annual periods are personal performance *reviews*, named accordingly.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct WeeklySynthesisConfig {
@@ -793,12 +797,12 @@ impl Default for WeeklySynthesisConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct PersonalReviewSynthesisConfig {
+pub struct PersonalReviewConfig {
     pub enabled: bool,
     pub schedule: Option<String>,
 }
 
-impl Default for PersonalReviewSynthesisConfig {
+impl Default for PersonalReviewConfig {
     fn default() -> Self {
         Self {
             enabled: true,

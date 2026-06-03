@@ -114,7 +114,8 @@ concept_categories) with the `Synthesizer`.
   it. Before extraction, `load_existing_concept_refs()` scans the vault's concept
   directory + in-memory drafts and passes them as `existing_concepts` in the LLM
   request, preventing duplicate concept creation.
-- **Synthesizer** methods are `try_weekly_synthesis` + `try_*_personal`. Each is a
+- **Synthesizer** methods are `try_weekly_synthesis` (cross-source themes) +
+  `try_{weekly,monthly,quarterly,annual}_review` (personal performance reviews). Each is a
   materialized view like a daily page: `summarize_section` (or, for weekly themes,
   an inlined `identify_themes` path) computes `cache_hash`, looks up the existing
   page via `lookup`, gates the LLM call on `decision.enqueue()`, and `render_section`

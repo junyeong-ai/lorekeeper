@@ -23,12 +23,12 @@ pub struct Event {
     /// daily page. Deliberately SEPARATE from `performance_category`: "what kind of
     /// communication is this" is orthogonal to "what kind of contribution is this".
     /// A rule may set both, but they never share a value space.
-    pub classification: Option<String>,
+    pub category: Option<String>,
     /// Personal-performance contribution bucket (e.g. `project-delivery`), used only
     /// for work-log / review category distribution. Set from a `classify` rule's
-    /// optional `work_category` field — the single EXPLICIT bridge from a content
-    /// signal to the performance taxonomy. `None` lets `resolve_category` fall back
-    /// to the coarse per-source-type map. Never inferred from free-form text.
+    /// optional `performance_category` field — the single EXPLICIT bridge from a
+    /// content signal to the performance taxonomy. `None` lets `resolve_category` fall
+    /// back to the coarse per-source-type map. Never inferred from free-form text.
     pub performance_category: Option<String>,
     /// Authored by the configured identity, as determined by the source adapter
     /// from its structured authorship fields (email From, message author id,

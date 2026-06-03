@@ -1134,7 +1134,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "lk-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "jiff",
@@ -1149,7 +1149,7 @@ dependencies = [
 
 [[package]]
 name = "lk-graph"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "globset",
@@ -1170,7 +1170,7 @@ dependencies = [
 
 [[package]]
 name = "lk-pipeline"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "jiff",
  "lk-core",
@@ -1185,7 +1185,7 @@ dependencies = [
 
 [[package]]
 name = "lk-queue"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "blake3",
@@ -1200,7 +1200,7 @@ dependencies = [
 
 [[package]]
 name = "lk-source"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -1224,7 +1224,7 @@ dependencies = [
 
 [[package]]
 name = "lk-vault"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "jiff",
@@ -1256,7 +1256,7 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
 name = "lore"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "clap",
  "dialoguer",

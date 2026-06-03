@@ -178,7 +178,7 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs) -> Vec<PageSchema> {
             )],
         },
         PageSchema {
-            type_name: "weekly-personal",
+            type_name: "weekly-review",
             path_pattern: format!("{}/{}/YYYY-Www.md", dirs.personal, dirs.weekly),
             frontmatter: &["id", "title", "created", "labels", "period", "days_logged"],
             sections: vec![
@@ -192,7 +192,7 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs) -> Vec<PageSchema> {
             ],
         },
         PageSchema {
-            type_name: "monthly-summary",
+            type_name: "monthly-review",
             path_pattern: format!("{}/{}/YYYY-MM.md", dirs.personal, dirs.monthly),
             frontmatter: &["id", "title", "created", "labels", "period", "days_logged"],
             sections: vec![
@@ -393,8 +393,8 @@ mod tests {
             "document",
             "exploration",
             "weekly-synthesis",
-            "weekly-personal",
-            "monthly-summary",
+            "weekly-review",
+            "monthly-review",
             "quarterly-review",
             "annual-review",
         ] {

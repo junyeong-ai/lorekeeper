@@ -41,8 +41,8 @@ const EMBEDDED: &[(&str, &str)] = &[
         include_str!("../../../templates/jira.md.jinja"),
     ),
     (
-        "monthly-summary.md.jinja",
-        include_str!("../../../templates/monthly-summary.md.jinja"),
+        "monthly-review.md.jinja",
+        include_str!("../../../templates/monthly-review.md.jinja"),
     ),
     (
         "quarterly-review.md.jinja",
@@ -61,8 +61,8 @@ const EMBEDDED: &[(&str, &str)] = &[
         include_str!("../../../templates/slack-search.md.jinja"),
     ),
     (
-        "weekly-personal.md.jinja",
-        include_str!("../../../templates/weekly-personal.md.jinja"),
+        "weekly-review.md.jinja",
+        include_str!("../../../templates/weekly-review.md.jinja"),
     ),
     (
         "weekly-synthesis.md.jinja",

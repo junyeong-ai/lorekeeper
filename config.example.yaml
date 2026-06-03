@@ -107,6 +107,7 @@ sources:
     schedule: "30 8 * * 1-5"
     params:
       lookback_hours: 24
+      # max_messages: 200 # (optional) per-day fetch cap; raise for busy accounts or backfills
       # Work mail only. `-label:ai-news` splits newsletters out of the work-log — the
       # ai-newsletters source below owns `label:ai-news`, so the two streams are mutually exclusive.
       include_queries:
@@ -117,7 +118,7 @@ sources:
         subjects: ["[Automated]", "noreply", "no-reply"]
         senders: ["notifications@", "mailer-daemon@", "calendar-notification@"]
         calendar_invites: true  # auto-exclude text/calendar attachments (invites/accepts/declines) (default true)
-    # keyword → classification (source level, kept separate from params). Matched in order; first match wins.
+    # keyword → category (source level, kept separate from params). Matched in order; first match wins.
     classify:
       - category: action_required
         keywords: ["action required", "please review", "검토 요청", "확인 부탁"]
@@ -249,7 +250,7 @@ performance:
   # weekly/monthly/quarterly/annual personal reviews). Off → none are produced, even
   # if sources set track_personal (which only flags events on their daily pages).
   enabled: true
-  work_categories:
+  performance_categories:
     - project-delivery
     - technical-leadership
     - team-contribution
@@ -266,7 +267,7 @@ performance:
 
 # ─── Synthesis reports ────────────────────────────────────
 # weekly has two tracks: (1) a cross-source "weekly themes" page over include_sources (opt-in),
-# written to synthesis/weekly/; (2) a personal weekly summary from me/work-log (me/weekly/).
+# written to synthesis/weekly/; (2) a personal weekly review from me/work-log (me/weekly/).
 # (2) plus me/monthly/, me/quarterly/, me/annual/ are all work-log-based personal performance
 # reviews, toggled together by performance.enabled — knowledge/news sources are irrelevant to them.
 synthesis:

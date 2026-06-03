@@ -54,7 +54,7 @@ enum Command {
         #[arg(long)]
         strict: bool,
     },
-    /// Show personal work category distribution
+    /// Show personal performance category distribution
     Performance,
     /// Validate config file
     Validate,

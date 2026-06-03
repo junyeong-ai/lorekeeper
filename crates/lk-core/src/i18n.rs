@@ -54,17 +54,24 @@ impl Locale {
 
     // ── Dynamic titles (word order differs per language, so format per arm) ──
 
+    pub fn weekly_title(self, year: i16, week: u8) -> String {
+        match self {
+            Locale::Ko => format!("{year}년 {week}주차 성과 리뷰"),
+            Locale::En => format!("{year}-W{week:02} Performance Review"),
+        }
+    }
+
     pub fn monthly_title(self, year: i16, month: i8) -> String {
         match self {
-            Locale::Ko => format!("{year}년 {month}월 업무 요약"),
-            Locale::En => format!("Work Summary {year}-{month:02}"),
+            Locale::Ko => format!("{year}년 {month}월 성과 리뷰"),
+            Locale::En => format!("{year}-{month:02} Performance Review"),
         }
     }
 
     pub fn quarterly_title(self, year: i16, quarter: u8) -> String {
         match self {
             Locale::Ko => format!("{year}년 {quarter}분기 성과 리뷰"),
-            Locale::En => format!("{year} Q{quarter} Performance Review"),
+            Locale::En => format!("{year}-Q{quarter} Performance Review"),
         }
     }
 
@@ -137,7 +144,6 @@ pub struct Strings {
     pub manual_title: &'static str,
     pub work_log_title: &'static str,
     pub weekly_synthesis_title: &'static str,
-    pub weekly_personal_title: &'static str,
     // Work-log sections
     pub topic_summary: &'static str,
     // Document page sections
@@ -170,7 +176,7 @@ static KO: Strings = Strings {
     overall_summary: "종합 요약",
     quarterly_breakdown: "분기별 요약",
     monthly_breakdown: "월별 요약",
-    category_distribution: "업무 카테고리 분포",
+    category_distribution: "카테고리 분포",
     col_category: "카테고리",
     col_count: "건수",
     col_ratio: "비중",
@@ -202,7 +208,6 @@ static KO: Strings = Strings {
     manual_title: "지식 입력",
     work_log_title: "업무 기록",
     weekly_synthesis_title: "주간 종합",
-    weekly_personal_title: "내 주간 업무",
     topic_summary: "주제별 요약",
     document_content: "내용",
     exploration_question: "질문",
@@ -263,7 +268,6 @@ static EN: Strings = Strings {
     manual_title: "Inbox",
     work_log_title: "Work Log",
     weekly_synthesis_title: "Weekly Synthesis",
-    weekly_personal_title: "My Week",
     topic_summary: "Topics",
     document_content: "Content",
     exploration_question: "Question",
@@ -302,8 +306,20 @@ mod tests {
 
     #[test]
     fn dynamic_titles_differ_by_locale() {
-        assert_eq!(Locale::Ko.monthly_title(2026, 5), "2026년 5월 업무 요약");
-        assert_eq!(Locale::En.monthly_title(2026, 5), "Work Summary 2026-05");
+        assert_eq!(Locale::Ko.weekly_title(2026, 21), "2026년 21주차 성과 리뷰");
+        assert_eq!(
+            Locale::En.weekly_title(2026, 21),
+            "2026-W21 Performance Review"
+        );
+        assert_eq!(Locale::Ko.monthly_title(2026, 5), "2026년 5월 성과 리뷰");
+        assert_eq!(
+            Locale::En.monthly_title(2026, 5),
+            "2026-05 Performance Review"
+        );
+        assert_eq!(
+            Locale::En.quarterly_title(2026, 2),
+            "2026-Q2 Performance Review"
+        );
     }
 
     #[test]

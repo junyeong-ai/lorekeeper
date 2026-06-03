@@ -719,7 +719,7 @@ async fn weekly_synthesis_is_opt_in_via_include_sources() {
 }
 
 #[tokio::test]
-async fn performance_enabled_gates_personal_narratives() {
+async fn performance_enabled_gates_review_narratives() {
     let dir = TempDir::new().unwrap();
     let vault = dir.path();
 
@@ -739,7 +739,7 @@ async fn performance_enabled_gates_personal_narratives() {
     let synth = Synthesizer::new(vault, make_ctx(&config, llm.clone()), &config);
     assert!(
         synth
-            .try_weekly_personal(jiff::civil::date(2026, 5, 23))
+            .try_weekly_review(jiff::civil::date(2026, 5, 23))
             .await
             .unwrap()
             .is_some(),
@@ -752,7 +752,7 @@ async fn performance_enabled_gates_personal_narratives() {
     let synth = Synthesizer::new(vault, make_ctx(&config, llm), &config);
     assert!(
         synth
-            .try_weekly_personal(jiff::civil::date(2026, 5, 23))
+            .try_weekly_review(jiff::civil::date(2026, 5, 23))
             .await
             .unwrap()
             .is_none(),
@@ -784,10 +784,10 @@ async fn synthesis_page_is_a_materialized_view() {
     let llm1: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
     let synth1 = Synthesizer::new(vault, make_ctx(&config, llm1.clone()), &config);
     let out1 = synth1
-        .try_weekly_personal(week_date)
+        .try_weekly_review(week_date)
         .await
         .unwrap()
-        .expect("weekly personal produced");
+        .expect("weekly review produced");
     let page_path = vault.join(out1.path.as_ref());
     std::fs::create_dir_all(page_path.parent().unwrap()).unwrap();
     std::fs::write(&page_path, &out1.content).unwrap();
@@ -817,10 +817,10 @@ async fn synthesis_page_is_a_materialized_view() {
     let llm2: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
     let synth2 = Synthesizer::new(vault, make_ctx(&config, llm2.clone()), &config);
     let out2 = synth2
-        .try_weekly_personal(week_date)
+        .try_weekly_review(week_date)
         .await
         .unwrap()
-        .expect("weekly personal produced on re-run");
+        .expect("weekly review produced on re-run");
     llm2.flush().await.unwrap();
     assert!(
         out2.content.contains("REAL-SYNTHESIS-NARRATIVE"),
@@ -845,7 +845,7 @@ async fn quarterly_review_includes_latest_unsummarized_month_via_weekly_fallback
     use lk_queue::QueueLlmClient;
 
     // Q2 2026 = Apr/May/Jun. Apr and May have monthly reviews; Jun does NOT (it's the
-    // current month, not yet summarized) but has a weekly personal review. The per-month
+    // current month, not yet summarized) but has a weekly review. The per-month
     // fallback must pull June from its weekly review — a whole-quarter fallback would
     // silently omit June because monthly reviews already exist for the other two months.
     let dir = TempDir::new().unwrap();
@@ -877,7 +877,7 @@ async fn quarterly_review_includes_latest_unsummarized_month_via_weekly_fallback
         Arc::new(QueueLlmClient::new(vault.join(".lorekeeper").join("queue")));
     let synth = Synthesizer::new(vault, make_ctx(&config, llm), &config);
     let out = synth
-        .try_quarterly_personal(2026, 2)
+        .try_quarterly_review(2026, 2)
         .await
         .unwrap()
         .expect("quarterly review produced");
@@ -910,7 +910,7 @@ async fn work_log_generation_is_gated_by_performance_enabled() {
         url: None,
         author: None,
         labels: vec!["personal".into()],
-        classification: None,
+        category: None,
         performance_category: None,
         is_self: true,
         is_personal: true,
@@ -1584,10 +1584,10 @@ mod materialized_view {
                 "daily-concepts" | "document-concepts" => "concepts",
                 "work-log-synthesis" => "topic_summary",
                 "weekly-synthesis-themes" => "themes",
-                "weekly-personal-narrative"
-                | "monthly-personal-narrative"
-                | "quarterly-personal-narrative"
-                | "annual-personal-narrative" => "narrative",
+                "weekly-review-narrative"
+                | "monthly-review-narrative"
+                | "quarterly-review-narrative"
+                | "annual-review-narrative" => "narrative",
                 other => panic!("unmapped target.kind in test: {other}"),
             }
         };

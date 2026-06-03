@@ -99,15 +99,14 @@ Claude Code Skills        Semantic Plane             (same vault)
 | `lore ingest [source]` | Run ingestion (all enabled sources or single ID) |
 | `lore ingest --dry-run` | Preview without writing to vault |
 | `lore ingest --date YYYY-MM-DD` | Re-materialize a specific day (backfill / repair) |
-| `lore synthesis weekly` | Generate weekly cross-source synthesis + personal summary |
-| `lore synthesis monthly` | Aggregate work-log into monthly summary |
+| `lore synthesis weekly` | Generate weekly cross-source synthesis + personal review |
+| `lore synthesis monthly` | Aggregate work-log into monthly review |
 | `lore synthesis quarterly` | Generate quarterly performance review |
 | `lore synthesis annual` | Generate annual performance review |
-| `lore ingest --date YYYY-MM-DD` | Override target date (filters events) |
 | `lore status` | Show last ingest time per source |
 | `lore health` | Check staleness per source's schedule (stale after 2 missed scheduled fires; 48h fallback when unscheduled; exit 0 on first install) |
 | `lore health --strict` | Also exit 1 if any source has never been ingested |
-| `lore performance` | Show work category distribution |
+| `lore performance` | Show performance category distribution |
 | `lore schedule` | Print crontab entries (uses plain `lore` for PATH lookup) |
 | `lore schedule --bin /full/path/lore` | Override bin path in cron lines |
 | `lore maintenance` | Prune ingest log, drained queue files, and streaming event logs past `maintenance.retention_days` (default 90) |
@@ -198,8 +197,8 @@ templates/      Jinja2 markdown templates (.md.jinja, embedded in the binary)
 **Derived** (cross-source):
 - `me/work-log/YYYY-MM-DD.md` — aggregated from sources with `track_personal: true`, grouped by date
 - `synthesis/weekly/YYYY-W{nn}.md` — cross-source weekly themes
-- `me/weekly/YYYY-W{nn}.md` — personal weekly summary
-- `me/monthly/YYYY-MM.md` — monthly work summary
+- `me/weekly/YYYY-W{nn}.md` — personal weekly review
+- `me/monthly/YYYY-MM.md` — personal monthly review
 - `me/quarterly/YYYY-Q{n}.md` — quarterly performance review
 - `me/annual/YYYY.md` — annual performance review
 - `wiki/concepts/{slug}.md` — extracted concepts; re-extraction merges in place (keeps `created`, title, and category; widens first/last-seen). `source_count` and the `## Sources` body are re-derived from the wikilink graph by `lore graph backlinks-sync` — there is no `sources` frontmatter array
@@ -213,7 +212,7 @@ Templates live in `templates/` and use Jinja2 syntax (minijinja). Lookup order:
 2. `{source-type}.md.jinja` — default per source type (`gmail`, `google-drive`, `slack-channel`, `slack-search`, `jira`, `google-calendar`, `rss`; the `manual` source renders through `document`)
 3. Embedded fallback
 
-Periodic templates: `work-log`, `weekly-synthesis`, `weekly-personal`, `monthly-summary`, `quarterly-review`, `annual-review`, `concept`, `document`, `exploration`.
+Periodic templates: `work-log`, `weekly-synthesis`, `weekly-review`, `monthly-review`, `quarterly-review`, `annual-review`, `concept`, `document`, `exploration`.
 
 ## Timezone
 

@@ -1,6 +1,6 @@
 ---
 id: me-{{ year }}-W{{ "%02d" | format(week) }}
-title: "{{ i18n.weekly_personal_title }} {{ year }}-W{{ "%02d" | format(week) }}"
+title: "{{ title }}"
 created: {{ end_date }}
 labels: ["personal"]
 period: "{{ year }}-W{{ "%02d" | format(week) }}"
@@ -9,7 +9,7 @@ llm_inputs:
   narrative: {{ llm_inputs.narrative | tojson }}
 ---
 
-# {{ i18n.weekly_personal_title }} {{ year }}-W{{ "%02d" | format(week) }}
+# {{ title }}
 
 ## {{ i18n.period }}
 

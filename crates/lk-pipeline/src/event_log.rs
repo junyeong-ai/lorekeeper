@@ -157,7 +157,7 @@ mod tests {
             url: Some(format!("https://example.com/{external_id}")),
             author: None,
             labels: vec![],
-            classification: None,
+            category: None,
             performance_category: None,
             is_self: false,
             is_personal: false,

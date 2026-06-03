@@ -18,12 +18,15 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   exhaustive matching is the point.
 - **`SourceConfig.classify`** is a `Vec<ClassifyRule>` (ordered rules, first match
   wins), kept OUT of the free-form `params` so adapter params can use
-  `deny_unknown_fields`. Validation rejects rules with empty keywords.
+  `deny_unknown_fields`. `ClassifyRule` itself is `deny_unknown_fields` too, so an
+  unknown key in a rule fails at load instead of being silently ignored. Validation
+  rejects rules with empty keywords.
 - **Two orthogonal taxonomies, one explicit bridge.** `ClassifyRule.category` is a
-  daily-page *grouping* bucket (→ `Event::classification`); `performance.work_categories`
+  daily-page *grouping* bucket (→ `Event::category`); `performance.performance_categories`
   is the *contribution* taxonomy (→ work-log/reviews). They never share a value space.
-  A rule's optional `ClassifyRule.work_category` (→ `Event::performance_category`) is the
-  ONLY explicit link between them — validated at load to be a real `work_categories` id.
+  A rule's optional `ClassifyRule.performance_category` (→ `Event::performance_category`)
+  is the ONLY explicit link between them — validated at load to be a real
+  `performance_categories` id.
   `PerformanceConfig::resolve_category` precedence: `source_category_map[id]` →
   `performance_category` (content signal) → `source_type_category_map[type]` (coarse
   fallback). The content signal deliberately OUTRANKS the per-type default so a genuine

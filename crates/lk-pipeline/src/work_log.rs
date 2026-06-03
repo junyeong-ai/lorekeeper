@@ -134,7 +134,7 @@ fn group_by_category(
     locale: Locale,
 ) -> Vec<WorkLogGroup> {
     let mut groups: Vec<WorkLogGroup> = perf
-        .work_categories
+        .performance_categories
         .iter()
         .map(|c| WorkLogGroup {
             category: c.clone(),
@@ -156,7 +156,7 @@ fn group_by_category(
         );
 
         let idx = match category {
-            Some(cat) => perf.work_categories.iter().position(|c| c == &cat),
+            Some(cat) => perf.performance_categories.iter().position(|c| c == &cat),
             None => None,
         };
 

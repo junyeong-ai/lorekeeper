@@ -11,7 +11,7 @@ use lk_core::text::collapse_blank_lines;
 /// body heading to at least H4 keeps embedded content strictly inside its event.
 const BODY_HEADING_FLOOR: usize = 4;
 
-pub fn normalize(
+pub fn normalize_events(
     source_id: &str,
     source_type: SourceType,
     items: Vec<RawItem>,
@@ -46,7 +46,7 @@ pub fn normalize(
                 url: item.url,
                 author: item.author,
                 labels: vec![],
-                classification: None,
+                category: None,
                 performance_category: None,
                 is_self: item.is_self,
                 is_personal: false,
@@ -74,7 +74,7 @@ mod tests {
         }];
 
         let tz = jiff::tz::TimeZone::UTC;
-        let events = normalize("email-digest", SourceType::Gmail, items, &tz);
+        let events = normalize_events("email-digest", SourceType::Gmail, items, &tz);
         assert_eq!(events.len(), 1);
         assert!(events[0].id.as_str().starts_with("email-digest:"));
     }
@@ -94,8 +94,8 @@ mod tests {
             metadata: serde_json::Value::Null,
         };
         // "ab"+"c" must not hash to the same id as "a"+"bc".
-        let a = normalize("s", SourceType::Gmail, vec![mk("ab", "c")], &tz);
-        let b = normalize("s", SourceType::Gmail, vec![mk("a", "bc")], &tz);
+        let a = normalize_events("s", SourceType::Gmail, vec![mk("ab", "c")], &tz);
+        let b = normalize_events("s", SourceType::Gmail, vec![mk("a", "bc")], &tz);
         assert_ne!(a[0].id, b[0].id);
     }
 
@@ -114,8 +114,8 @@ mod tests {
         };
 
         let tz = jiff::tz::TimeZone::UTC;
-        let a = normalize("my-tasks", SourceType::Jira, vec![make()], &tz);
-        let b = normalize("my-tasks", SourceType::Jira, vec![make()], &tz);
+        let a = normalize_events("my-tasks", SourceType::Jira, vec![make()], &tz);
+        let b = normalize_events("my-tasks", SourceType::Jira, vec![make()], &tz);
         assert_eq!(a[0].id, b[0].id);
     }
 
@@ -134,7 +134,7 @@ mod tests {
             is_self: false,
             metadata: serde_json::Value::Null,
         };
-        let events = normalize("my-tasks", SourceType::Jira, vec![item], &tz);
+        let events = normalize_events("my-tasks", SourceType::Jira, vec![item], &tz);
         assert!(
             !events[0].body.lines().any(|l| l.trim_end() == "## Plan"),
             "body H2 must be demoted so it can't be read as a section boundary:\n{}",
@@ -165,8 +165,8 @@ mod tests {
         let utc = jiff::tz::TimeZone::UTC;
         let kst = jiff::tz::TimeZone::get("Asia/Seoul").unwrap();
 
-        let utc_events = normalize("s", SourceType::Gmail, vec![item.clone()], &utc);
-        let kst_events = normalize("s", SourceType::Gmail, vec![item], &kst);
+        let utc_events = normalize_events("s", SourceType::Gmail, vec![item.clone()], &utc);
+        let kst_events = normalize_events("s", SourceType::Gmail, vec![item], &kst);
 
         assert_eq!(utc_events[0].date, jiff::civil::date(2026, 5, 22));
         assert_eq!(kst_events[0].date, jiff::civil::date(2026, 5, 23));

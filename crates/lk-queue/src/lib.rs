@@ -41,13 +41,13 @@ pub enum TargetKind {
     /// Cross-source weekly synthesis narrative.
     WeeklySynthesisThemes,
     /// Personal weekly review narrative.
-    WeeklyPersonalNarrative,
+    WeeklyReviewNarrative,
     /// Personal monthly review narrative.
-    MonthlyPersonalNarrative,
+    MonthlyReviewNarrative,
     /// Personal quarterly review narrative.
-    QuarterlyPersonalNarrative,
+    QuarterlyReviewNarrative,
     /// Personal annual review narrative.
-    AnnualPersonalNarrative,
+    AnnualReviewNarrative,
     /// Cross-source topic synthesis for a work-log page.
     WorkLogSynthesis,
     /// Refine event bodies in-place: translate to locale language, distill raw
@@ -73,10 +73,10 @@ impl TargetKind {
             TargetKind::DailyConcepts | TargetKind::DocumentConcepts => "concepts",
             TargetKind::WorkLogSynthesis => "topic_summary",
             TargetKind::WeeklySynthesisThemes => "themes",
-            TargetKind::WeeklyPersonalNarrative
-            | TargetKind::MonthlyPersonalNarrative
-            | TargetKind::QuarterlyPersonalNarrative
-            | TargetKind::AnnualPersonalNarrative => "narrative",
+            TargetKind::WeeklyReviewNarrative
+            | TargetKind::MonthlyReviewNarrative
+            | TargetKind::QuarterlyReviewNarrative
+            | TargetKind::AnnualReviewNarrative => "narrative",
         }
     }
 
@@ -101,10 +101,10 @@ impl TargetKind {
             TargetKind::DailySummary
             | TargetKind::DailyConcepts
             | TargetKind::WeeklySynthesisThemes
-            | TargetKind::WeeklyPersonalNarrative
-            | TargetKind::MonthlyPersonalNarrative
-            | TargetKind::QuarterlyPersonalNarrative
-            | TargetKind::AnnualPersonalNarrative
+            | TargetKind::WeeklyReviewNarrative
+            | TargetKind::MonthlyReviewNarrative
+            | TargetKind::QuarterlyReviewNarrative
+            | TargetKind::AnnualReviewNarrative
             | TargetKind::WorkLogSynthesis
             | TargetKind::DocumentSummary
             | TargetKind::DocumentConcepts => CacheShape::FillEmpty,

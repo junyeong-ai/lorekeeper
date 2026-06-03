@@ -24,15 +24,30 @@ struct GmailParams {
     include_queries: Vec<String>,
     #[serde(default)]
     exclude: Option<ExcludeParams>,
+    /// Cap on messages fetched per day window. A busy day or a `--date` backfill can
+    /// exceed it; the newest `max_messages` are kept and a truncation warning is logged
+    /// so the operator can raise it — the same observable-cap contract as slack-channel.
+    #[serde(default = "default_max_messages")]
+    max_messages: usize,
 }
 
 /// Validate this source's params at config-load time, before any network work.
 pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
-    crate::parse_params::<GmailParams>(params).map(|_| ())
+    let p: GmailParams = crate::parse_params(params)?;
+    if p.max_messages == 0 {
+        return Err(SourceError::InvalidParams(
+            "gmail `max_messages` must be > 0".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn default_lookback() -> u32 {
     24
+}
+
+fn default_max_messages() -> usize {
+    200
 }
 
 #[derive(Debug, Deserialize)]
@@ -163,7 +178,6 @@ impl Source for GmailSource {
         );
 
         const PAGE_SIZE: usize = 50;
-        const MAX_MESSAGES: usize = 200;
 
         let mut refs: Vec<MessageRef> = Vec::new();
         let mut page_token: Option<String> = None;
@@ -188,8 +202,22 @@ impl Source for GmailSource {
             let page_empty = page.is_empty();
             refs.extend(page);
 
-            if page_empty || refs.len() >= MAX_MESSAGES {
-                refs.truncate(MAX_MESSAGES);
+            // Stop at the cap. Only warn when messages were actually dropped — either this
+            // page overshot the cap, or another page is still pending. Fetching exactly
+            // `max_messages` with no further page drops nothing, so it must stay silent
+            // (a "dropped" warning there would be a false alarm).
+            if refs.len() >= p.max_messages {
+                let dropped = refs.len() > p.max_messages || list.next_page_token.is_some();
+                refs.truncate(p.max_messages);
+                if dropped {
+                    tracing::warn!(
+                        max = p.max_messages,
+                        "gmail: message cap hit, some messages were dropped; raise max_messages"
+                    );
+                }
+                break;
+            }
+            if page_empty {
                 break;
             }
 

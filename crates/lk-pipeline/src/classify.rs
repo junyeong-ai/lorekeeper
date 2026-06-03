@@ -97,7 +97,7 @@ pub fn classify_by_keywords(events: &mut [Event], rules: &[lk_core::config::Clas
         .collect();
 
     for event in events {
-        if event.classification.is_some() {
+        if event.category.is_some() {
             continue;
         }
 
@@ -107,12 +107,12 @@ pub fn classify_by_keywords(events: &mut [Event], rules: &[lk_core::config::Clas
             let matched = keywords.iter().any(|kw| contains_bounded(&text, kw));
 
             if matched {
-                event.classification = Some(rule.category.clone());
+                event.category = Some(rule.category.clone());
                 // A rule may also bridge to the performance taxonomy. Only set it
                 // when the rule opts in; otherwise leave it None so `resolve_category`
                 // falls back to the per-source-type map.
-                if let Some(wc) = &rule.work_category {
-                    event.performance_category = Some(wc.clone());
+                if let Some(pc) = &rule.performance_category {
+                    event.performance_category = Some(pc.clone());
                 }
                 break;
             }
@@ -138,7 +138,7 @@ mod tests {
             url: None,
             author: None,
             labels: vec![],
-            classification: None,
+            category: None,
             performance_category: None,
             is_self: false,
             is_personal: false,
@@ -174,44 +174,44 @@ mod tests {
     }
 
     #[test]
-    fn keyword_classification() {
+    fn keyword_category() {
         let rules = vec![
             lk_core::config::ClassifyRule {
                 category: "action_required".into(),
                 keywords: vec!["please review".into(), "검토 요청".into()],
-                work_category: None,
+                performance_category: None,
             },
             lk_core::config::ClassifyRule {
                 category: "decisions".into(),
                 keywords: vec!["approved".into()],
-                work_category: None,
+                performance_category: None,
             },
         ];
         let mut events = vec![make_event("Please review this PR")];
         classify_by_keywords(&mut events, &rules);
-        assert_eq!(events[0].classification.as_deref(), Some("action_required"));
+        assert_eq!(events[0].category.as_deref(), Some("action_required"));
     }
 
     #[test]
-    fn classification_and_performance_bridge_are_separate_axes() {
-        // A rule with a work_category bridge sets BOTH the daily-grouping
-        // `classification` and the performance `performance_category`; a rule
-        // without the bridge sets only `classification`.
+    fn category_and_performance_bridge_are_separate_axes() {
+        // A rule with a performance_category bridge sets BOTH the daily-grouping
+        // `category` and the performance `performance_category`; a rule
+        // without the bridge sets only `category`.
         let rules = vec![
             lk_core::config::ClassifyRule {
                 category: "decisions".into(),
                 keywords: vec!["approved".into()],
-                work_category: Some("technical-leadership".into()),
+                performance_category: Some("technical-leadership".into()),
             },
             lk_core::config::ClassifyRule {
                 category: "knowledge_sharing".into(),
                 keywords: vec!["fyi".into()],
-                work_category: None,
+                performance_category: None,
             },
         ];
         let mut bridged = vec![make_event("Change approved")];
         classify_by_keywords(&mut bridged, &rules);
-        assert_eq!(bridged[0].classification.as_deref(), Some("decisions"));
+        assert_eq!(bridged[0].category.as_deref(), Some("decisions"));
         assert_eq!(
             bridged[0].performance_category.as_deref(),
             Some("technical-leadership"),
@@ -221,7 +221,7 @@ mod tests {
         let mut grouping_only = vec![make_event("FYI: new doc")];
         classify_by_keywords(&mut grouping_only, &rules);
         assert_eq!(
-            grouping_only[0].classification.as_deref(),
+            grouping_only[0].category.as_deref(),
             Some("knowledge_sharing")
         );
         assert!(
@@ -231,11 +231,11 @@ mod tests {
     }
 
     #[test]
-    fn keyword_classification_rejects_substring_false_positives() {
+    fn keyword_category_rejects_substring_false_positives() {
         let rules = vec![lk_core::config::ClassifyRule {
             category: "ai_topic".into(),
             keywords: vec!["AI".into()],
-            work_category: None,
+            performance_category: None,
         }];
 
         // "FAIR" and "MAIL" contain "AI" as a substring but not as a token.
@@ -245,18 +245,18 @@ mod tests {
         ];
         classify_by_keywords(&mut events, &rules);
         assert!(
-            events[0].classification.is_none(),
+            events[0].category.is_none(),
             "FAIR must not match keyword AI"
         );
         assert!(
-            events[1].classification.is_none(),
+            events[1].category.is_none(),
             "MAIL must not match keyword AI"
         );
 
         // Standalone "AI" as a whole token matches.
         let mut events2 = vec![make_event("AI research update")];
         classify_by_keywords(&mut events2, &rules);
-        assert_eq!(events2[0].classification.as_deref(), Some("ai_topic"));
+        assert_eq!(events2[0].category.as_deref(), Some("ai_topic"));
     }
 
     #[test]
@@ -266,13 +266,13 @@ mod tests {
         let rules = vec![lk_core::config::ClassifyRule {
             category: "ai_topic".into(),
             keywords: vec!["AI".into(), "GPT".into(), "node".into()],
-            work_category: None,
+            performance_category: None,
         }];
         for title in ["AI-powered platform", "GPT-4 launch", "node.js runtime"] {
             let mut events = vec![make_event(title)];
             classify_by_keywords(&mut events, &rules);
             assert_eq!(
-                events[0].classification.as_deref(),
+                events[0].category.as_deref(),
                 Some("ai_topic"),
                 "keyword must match inside compound {title:?}"
             );
@@ -284,7 +284,7 @@ mod tests {
         let rules = vec![lk_core::config::ClassifyRule {
             category: "action_required".into(),
             keywords: vec!["검토".into()],
-            work_category: None,
+            performance_category: None,
         }];
         // "검토" must classify "검토를"/"재검토"/"검토중" — the particle/affix is part
         // of a different morpheme, not the same Latin-style token.
@@ -293,7 +293,7 @@ mod tests {
             let mut events = vec![make_event(title)];
             classify_by_keywords(&mut events, &rules);
             assert_eq!(
-                events[0].classification.as_deref(),
+                events[0].category.as_deref(),
                 Some("action_required"),
                 "keyword must match in {title:?}"
             );

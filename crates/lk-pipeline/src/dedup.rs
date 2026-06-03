@@ -49,7 +49,7 @@ mod tests {
             url: None,
             author: None,
             labels: vec![],
-            classification: None,
+            category: None,
             performance_category: None,
             is_self: false,
             is_personal: false,

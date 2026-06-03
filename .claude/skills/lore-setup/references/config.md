@@ -25,7 +25,7 @@ sources:                             # key = source id = <daily>/{id}/ directory
     classify:                        # optional ordered rules, first match wins
       - keywords: [deploy, incident]
         category: action_required    # daily-page grouping bucket
-        work_category: project-delivery   # optional → performance taxonomy
+        performance_category: project-delivery   # optional → performance taxonomy
     labels: [ ... ]
     extract_concepts: true|false     # whether to run LLM concept extraction
     track_personal: true|false       # whether to count toward the work-log

@@ -114,7 +114,7 @@ protocol below relies on:
       | `daily-concepts`, `document-concepts`                                  | `concepts`        |
       | `work-log-synthesis`                                                   | `topic_summary`   |
       | `weekly-synthesis-themes`                                              | `themes`          |
-      | `weekly-/monthly-/quarterly-/annual-personal-narrative`                | `narrative`       |
+      | `weekly-/monthly-/quarterly-/annual-review-narrative`                  | `narrative`       |
 
       The three outcomes below are keyed on `llm_inputs.<key>` (the stale
       reference point) for EVERY kind. They differ only in the *completion*

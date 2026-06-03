@@ -94,7 +94,7 @@ pub fn render_daily_page(
                 "body": e.body,
                 "author": e.author,
                 "url": e.url,
-                "classification": e.classification,
+                "category": e.category,
                 "labels": e.labels,
                 "is_personal": e.is_personal,
                 "subject": e.title,
@@ -122,11 +122,11 @@ pub fn render_daily_page(
         llm_inputs_json.insert(completion_key.to_string(), done.into());
     }
 
-    let action_items = filter_by_class(events, "action_required");
-    let decision_items = filter_by_class(events, "decisions");
-    let project_items = filter_by_class(events, "project_updates");
-    let knowledge_items = filter_by_class(events, "knowledge_sharing");
-    let meeting_items = filter_by_class(events, "meeting_followup");
+    let action_items = filter_by_category(events, "action_required");
+    let decision_items = filter_by_category(events, "decisions");
+    let project_items = filter_by_category(events, "project_updates");
+    let knowledge_items = filter_by_category(events, "knowledge_sharing");
+    let meeting_items = filter_by_category(events, "meeting_followup");
 
     let context = serde_json::json!({
         "date": date.to_string(),
@@ -276,10 +276,10 @@ where
     Some(out)
 }
 
-fn filter_by_class(events: &[&Event], class: &str) -> Vec<serde_json::Value> {
+fn filter_by_category(events: &[&Event], category: &str) -> Vec<serde_json::Value> {
     events
         .iter()
-        .filter(|e| e.classification.as_deref() == Some(class))
+        .filter(|e| e.category.as_deref() == Some(category))
         .map(|e| {
             serde_json::json!({
                 "subject": e.title,

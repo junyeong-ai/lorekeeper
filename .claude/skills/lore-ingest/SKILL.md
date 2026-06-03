@@ -27,13 +27,13 @@ an Obsidian vault. All commands accept `--config <path>` to override.
 | `lore ingest [source]` | Collect from one source (or all enabled), write pages, aggregate work-log |
 | `lore ingest --dry-run` | Preview without vault writes |
 | `lore ingest --date YYYY-MM-DD` | Re-materialize a specific day (backfill / repair) |
-| `lore synthesis weekly [--previous]` | Weekly synthesis + personal summary |
-| `lore synthesis monthly [--previous]` | Monthly performance summary |
+| `lore synthesis weekly [--previous]` | Weekly synthesis + personal review |
+| `lore synthesis monthly [--previous]` | Monthly performance review |
 | `lore synthesis quarterly [--previous]` | Quarterly review with category stats |
-| `lore synthesis annual [--previous]` | Annual review from quarterly summaries |
+| `lore synthesis annual [--previous]` | Annual review from quarterly reviews |
 | `lore status` | Last successful ingest per source |
 | `lore health [--strict]` | Warn if any source is overdue vs its schedule (2 missed fires; 48h fallback) |
-| `lore performance` | Work category distribution |
+| `lore performance` | Performance category distribution |
 | `lore schedule [--bin <path>]` | Print crontab entries |
 | `lore maintenance` | Prune ingest log + drained queue files (>90d) |
 
@@ -41,7 +41,7 @@ an Obsidian vault. All commands accept `--config <path>` to override.
 
 - "ingest today" → `lore ingest`
 - "ingest email only" → `lore ingest email-digest`
-- "weekly summary" → `lore synthesis weekly --previous`
+- "weekly review" → `lore synthesis weekly --previous`
 - "monthly review" → `lore synthesis monthly --previous`
 - "quarterly review" → `lore synthesis quarterly --previous`
 - "annual review" → `lore synthesis annual --previous`

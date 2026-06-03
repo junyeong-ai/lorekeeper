@@ -105,7 +105,7 @@ impl Pipeline {
         options: &IngestOptions,
     ) -> Result<IngestResult, PipelineError> {
         let mut events =
-            normalize::normalize(source_id, config.source_type, items, &self.ctx.timezone);
+            normalize::normalize_events(source_id, config.source_type, items, &self.ctx.timezone);
         tracing::info!(source = source_id, raw = events.len(), "normalized");
 
         if let Some(target) = options.target_date {

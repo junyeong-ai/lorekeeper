@@ -44,7 +44,7 @@ impl VaultPath {
         )
     }
 
-    pub fn weekly_personal(dirs: &VaultDirs, year: i16, week: u8) -> Self {
+    pub fn weekly_review(dirs: &VaultDirs, year: i16, week: u8) -> Self {
         Self(
             PathBuf::from(&dirs.personal)
                 .join(&dirs.weekly)
@@ -52,7 +52,7 @@ impl VaultPath {
         )
     }
 
-    pub fn monthly_personal(dirs: &VaultDirs, year: i16, month: u8) -> Self {
+    pub fn monthly_review(dirs: &VaultDirs, year: i16, month: u8) -> Self {
         Self(
             PathBuf::from(&dirs.personal)
                 .join(&dirs.monthly)
@@ -60,7 +60,7 @@ impl VaultPath {
         )
     }
 
-    pub fn quarterly_personal(dirs: &VaultDirs, year: i16, quarter: u8) -> Self {
+    pub fn quarterly_review(dirs: &VaultDirs, year: i16, quarter: u8) -> Self {
         Self(
             PathBuf::from(&dirs.personal)
                 .join(&dirs.quarterly)
@@ -68,7 +68,7 @@ impl VaultPath {
         )
     }
 
-    pub fn annual_personal(dirs: &VaultDirs, year: i16) -> Self {
+    pub fn annual_review(dirs: &VaultDirs, year: i16) -> Self {
         Self(
             PathBuf::from(&dirs.personal)
                 .join(&dirs.annual)
@@ -157,30 +157,30 @@ mod tests {
     }
 
     #[test]
-    fn weekly_personal_path() {
+    fn weekly_review_path() {
         let dirs = VaultDirs::default();
-        let path = VaultPath::weekly_personal(&dirs, 2026, 21);
+        let path = VaultPath::weekly_review(&dirs, 2026, 21);
         assert_eq!(path.to_string(), "me/weekly/2026-W21.md");
     }
 
     #[test]
-    fn monthly_personal_path() {
+    fn monthly_review_path() {
         let dirs = VaultDirs::default();
-        let path = VaultPath::monthly_personal(&dirs, 2026, 5);
+        let path = VaultPath::monthly_review(&dirs, 2026, 5);
         assert_eq!(path.to_string(), "me/monthly/2026-05.md");
     }
 
     #[test]
-    fn quarterly_personal_path() {
+    fn quarterly_review_path() {
         let dirs = VaultDirs::default();
-        let path = VaultPath::quarterly_personal(&dirs, 2026, 2);
+        let path = VaultPath::quarterly_review(&dirs, 2026, 2);
         assert_eq!(path.to_string(), "me/quarterly/2026-Q2.md");
     }
 
     #[test]
-    fn annual_personal_path() {
+    fn annual_review_path() {
         let dirs = VaultDirs::default();
-        let path = VaultPath::annual_personal(&dirs, 2026);
+        let path = VaultPath::annual_review(&dirs, 2026);
         assert_eq!(path.to_string(), "me/annual/2026.md");
     }
 
