@@ -12,7 +12,7 @@ Data Sources              lore (Rust CLI)            Obsidian Vault (vault.dirs.
 ────────────              ───────────────            ──────────────────────────────
 Google Drive ──┐          ┌─ Extract (per-source)    <daily>/{source-id}/
 Gmail ─────────┤          ├─ Normalize → Event       <personal>/work-log/
-Slack ─────────┼─ config ─┤  Deduplicate (cascade)   <personal>/{weekly,monthly,quarterly,annual}/
+Slack ─────────┼─ config ─┤  Collapse dup (intra-batch)<personal>/{weekly,monthly,quarterly,annual}/
 Jira ──────────┤  .yaml   ├─ Classify (labels)       <synthesis>/{weekly}/
 Calendar ──────┤          ├─ Concepts (LLM)          <wiki>/concepts/
 RSS/Atom ──────┤          ├─ Render (templates)      <wiki>/documents/
@@ -33,7 +33,7 @@ crates/
   lk-core/      Domain types, config, i18n, slugify (NFKC), frontmatter, wikilink, vault paths
   lk-vault/     Obsidian vault I/O: atomic write, templates (embedded), ingest log
   lk-source/    Source adapters + factory, markdown normalization (ADF/HTML/Slack→MD)
-  lk-pipeline/  Pipeline (per-source plan/commit), dedup, classify, concepts, synthesis
+  lk-pipeline/  Pipeline (per-source plan), intra-batch dedup, classify, concepts, synthesis
   lk-queue/     Semantic task queue: LlmClient trait, QueueLlmClient (JSONL), noop (+ mock for tests)
   lk-graph/     Wikilink graph analysis: lint, hubs, cluster, suggest-links (no HTTP/async)
   lk-cli/       Binary `lore` — one module per subcommand under commands/
@@ -70,11 +70,12 @@ Auto-discovered: `./config.yaml` → `~/.config/lorekeeper/config.yaml`.
 - **Ownership decided by the adapter**: each source sets `RawItem::is_self` by exact-matching its structured authorship field against the user — Gmail `From`/Calendar organizer-or-attendee vs `identity.email`, Slack author vs `identity.slack_id`, Jira assignee vs the authenticated `/myself` account. `is_personal` = `is_self && track_personal`. The pipeline never infers ownership from free-form text, so recipients/CCs/mentions never pollute the personal work-log or reviews.
 - **`source_count` owned by `backlinks-sync`**: ingest writes `0`; `lore graph backlinks-sync` re-derives the exact citation count from the wikilink graph.
 - **Stale LLM tasks are caught deterministically**: `lore queue status` classifies each pending task `current`/`stale`/`missing-target` against its target page in tested Rust; `/lore-process` processes only `current` tasks.
-- **Atomic ingest**: plan → write daily/concept → work-log → flush LLM queue → commit dedup, then a post-commit archive hook for the `manual` source. The run is atomic as a whole — one batched queue flush precedes the dedup commit, so any write or flush failure leaves every source uncommitted and the next run re-renders idempotently; the archive runs only after a successful commit, so a mid-run failure leaves inbox files for retry.
+- **Idempotent ingest**: plan → write daily/concept → work-log → flush LLM queue → log, then an archive hook for the `manual` source. There is no commit step: a daily page is re-rendered in full each run, so any write or flush failure just leaves the affected pages for the next run to reproduce byte-identically. The `manual` archive runs only after a fully successful run, so a mid-run failure leaves inbox files for retry.
+- **Daily pages re-render in full each run; STREAMING sources project from an event log.** A complete-refetch source (Gmail/Jira/Calendar/Slack/Drive) reproduces its whole window on demand, so it renders directly from the fetch. A streaming source (RSS — `SourceType::is_streaming`, a rolling capped feed) can't, so it projects its page from a durable per-date event log (`.lorekeeper/events/{source}/{date}.jsonl`, raw pre-LLM events): each run UNIONs the fetch with the stored log (`EventId` key, fresh wins) so an item that scrolled out of the feed is never lost. The log is the OPPOSITE of a suppression cache — it never blocks regeneration, it enables it: a deleted page self-heals from it and `lore ingest --date <past>` repairs any day. Duplication is converged where it adds value — the concept/graph layer (one concept = one page) — and preserved at the raw layer, where every observation is provenance.
 - **Daily pages are materialized views**: structural fields (frontmatter, raw event list, headings) are re-rendered every ingest; semantic fields (summary, refined events, concept wiki-links) are LLM-owned, preserved across re-renders, and invalidated by a BLAKE3-128 hash in the page's `llm_inputs` frontmatter — so re-ingesting unchanged data enqueues zero LLM tasks. Completion detection and cache-shape mechanics live in `lk-pipeline`.
 - **Domain logic single-sourced in lk-core**: slugify (NFKC), frontmatter, wikilink, blank-line collapsing. Zero duplicate implementations across crates. (Rich-text→Markdown conversion — ADF/HTML/Slack — is single-sourced separately in `lk-source::markdown`.)
 - **i18n single source of truth**: `vault.locale` (ko/en) switches all labels. Templates use `{{ i18n.* }}`. `lore schema` generates `<wiki>/AGENTS.md` from the i18n bundle. Source content is never translated.
-- **`--dry-run` is side-effect-free**: no vault writes, no dedup, no log.
+- **`--dry-run` is side-effect-free**: no vault writes, no log.
 
 ## Source types
 

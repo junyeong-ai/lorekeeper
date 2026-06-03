@@ -1,7 +1,8 @@
 //! RSS/Atom feed source. Polls one or more public feeds (vendor blogs, news
 //! aggregators) and maps each entry to a [`RawItem`]. No credentials — feeds are
-//! public HTTP. Cross-feed duplicates collapse downstream via the dedup cascade
-//! (event-id + content-hash + url), so this adapter only fetches and maps.
+//! public HTTP. Each entry's `external_id` is namespaced by feed (`{feed_id}:{guid}`),
+//! so the same article carried by two of this source's feeds stays two distinct
+//! observations (each feed is its own provenance) rather than being merged.
 
 use async_trait::async_trait;
 use serde::Deserialize;

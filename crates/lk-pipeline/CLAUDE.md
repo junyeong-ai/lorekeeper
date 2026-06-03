@@ -4,13 +4,26 @@ Deterministic transform stages between `lk-source` and `lk-vault`. Shares an
 `Arc<PipelineContext>` (engine, llm, dirs, perf, timezone, locale,
 concept_categories) with the `Synthesizer`.
 
+- **Streaming sources project their page from an event log.** A complete-refetch source
+  renders directly from the fetch. A STREAMING source (`SourceType::is_streaming` — only RSS:
+  a rolling, capped feed that can't reproduce a past day) instead projects from `event_log`,
+  a durable per-date record of its raw (pre-LLM) events (`.lorekeeper/events/{source}/{date}.jsonl`).
+  For those sources `plan` UNIONs the fetch with the stored log by `EventId`
+  (`event_log::merge_by_id`, fresh wins so a still-in-feed item picks up an in-place edit),
+  persists it (unless dry-run), and renders the page from the merged set — so an item that
+  scrolled out of the feed is never lost. This is NOT a suppression cache: it never blocks
+  regeneration, it enables it — a deleted page self-heals from the log and `--date` repairs
+  any day. The log holds RAW bodies, so a re-render always feeds refine raw text — no per-block
+  refine state, no skill change. `read` is STRICT on a corrupt line (errors, leaves the file
+  intact) — silently dropping it would re-write the reduced set and lose the event. `manual` is
+  exempt (document pages, one per inbox file). Duplication converges at the concept/graph layer
+  and is preserved at the raw layer, where every observation is provenance.
 - **`Pipeline::plan` is per-source and takes `&mut self`**; one `Pipeline` owns one
-  ingest run exclusively (no shared-ref concurrency), so the plan→commit dedup window
-  needs no lock. It returns that source's daily pages and merges any extracted concepts
-  into a **run-level** `ConceptDrafts` accumulator. Concept pages are a cross-source
-  aggregate, rendered ONCE via `render_concept_pages()` after all sources are planned —
-  never per source (that would let a later source's write clobber an earlier one).
-  `commit()` records dedup and must run only after writes + flush succeed.
+  ingest run exclusively (no shared-ref concurrency). It returns that source's daily
+  pages and merges any extracted concepts into a **run-level** `ConceptDrafts`
+  accumulator. Concept pages are a cross-source aggregate, rendered ONCE via
+  `render_concept_pages()` after all sources are planned — never per source (that would
+  let a later source's write clobber an earlier one).
 - **Materialized-view render**: a daily page is two layers. The **structural** layer
   (frontmatter, raw event list, all `## ` headings) is re-rendered every ingest from
   the template. The **semantic** layer (summary body, refined event bodies, concept
@@ -58,38 +71,24 @@ concept_categories) with the `Synthesizer`.
   BLAKE3-128s the identity. `existing_concepts` is excluded from the identity so adding
   a concept anywhere in the vault never invalidates unrelated cache entries; `categories`
   is sorted before hashing so config field order can't perturb the cache.
-- **`new_dry_run`** opens the dedup cache read-only (no file creation).
-- **DedupCache**: cascade is `event-id → content-hash → url` (first match =
-  duplicate). Every strategy is an EXACT match, so dedup is lossless: it merges only
-  provably-identical observations and never collapses two distinct records (a false
-  merge would silently drop an observation, and a dropped event never becomes a page or
-  gets cited — irrecoverable in an accumulate-and-cite vault). Records that merely share
-  a title/headline both survive; downstream concept-merge, `backlinks-sync`, and
-  `near-duplicate-concepts` reconcile genuine overlap losslessly.
-  `content-hash` is `Some(blake3(date + title + body))` — scoped by `date` so a recurring or
-  templated body (a daily digest, a newsletter with a constant subject) observed on a
-  DIFFERENT day is a distinct observation, not a silent cross-day merge. It is `None` when
-  the body has no substantive text: a shared title alone is not content-equivalence (two
-  distinct posts can share a headline), so title-only events are excluded from the
-  content-hash strategy and fall through to url/event-id rather than being falsely merged.
-  `dedup` returns `{novel, duplicates}`; `commit` records novel AND re-records duplicates (upsert) to
-  refresh `seen_at`, so a steady-state re-arrival never ages past retention and
-  re-emits as new. Persisted-table lookups are gated on the cache being present, but
-  the intra-batch (seen-id/url) checks ALWAYS run — so a dry-run with no
-  cache still matches a real run. URLs are canonicalised before lookup and storage:
-  http→https, host lowercase, trailing slash removal, auth stripping, tracking-param
-  removal (built-in `utm_*`, `fbclid`, `gclid`, `igshid`, `ref_src`, … — single-letter
-  ambiguous params like `si` are deliberately kept (host-specific resource selectors) PLUS
-  `dedup.extra_tracking_params` from config, where a trailing `*` is a prefix match)
-  with resource-identifying params preserved and sorted. Pure anchor fragments
-  (`#section`, `#L42`) are dropped, but fragments that carry resource identity are
-  PRESERVED — SPA hash routes (`#/issues/1`, `#!/path`) and selector fragments
-  (`#gid=1` for a sheet tab, `#tab=2`) — since stripping them would merge distinct
-  resources and silently drop one observation. The cache is recreated only on a recoverable mismatch — a schema-type
-  change or an outdated on-disk format after a redb major upgrade
-  (`DatabaseError::UpgradeRequired`) — never on I/O/corruption errors. On recreation
-  the stale file is renamed to `*.redb.backup.{timestamp}-pid{pid}` (not deleted),
-  preserving dedup history for manual recovery.
+- **`dedup::deduplicate(events)`** is the ONLY deduplication — pure, stateless,
+  in-memory, scoped to ONE source's single fetch. It collapses by EXACT identity ONLY:
+  a shared `EventId` (`source:date:hash(external_id)`), keeping the first occurrence. Two
+  events merge iff one fetch surfaced the literal same item twice (paginated history
+  overlap); since `EventId` IS the identity, this is provably lossless — single-key dedup
+  with first-wins can never drop a distinct observation, and has no transitivity gap.
+  Nothing else is a merge signal: a shared url, title, or body does NOT merge. The same
+  article carried by two RSS feeds keeps both (each feed namespaces its `external_id`, so
+  the ids differ → distinct provenance); a recurring same-title event (a daily "Standup")
+  always survives. url/title are deliberately NOT dedup keys — a url is not a reliable
+  identity (shared meeting links, shared landing pages), so keying on it would false-merge.
+  Cross-RUN behaviour is owned by the event log, not by this dedup: an event's date pins it
+  to one `<daily>/{source}/{date}` page, the fetch is UNIONed with that date's log, and the
+  page re-renders IN FULL from the merged set — so re-runs are byte-identical and late- or
+  partially-arriving items accumulate (never deplete). Cross-SOURCE observations are
+  deliberately NOT suppressed — the same article in RSS and Slack appears on both source
+  timelines (provenance), and `concept-merge` / `backlinks-sync` / `near-duplicate-concepts`
+  converge the knowledge losslessly at the page layer.
 - **classify**: ownership is decided at the source. Each adapter sets `RawItem::is_self`
   by comparing its structured authorship field (`From` address, message author id,
   issue assignee account, calendar organizer/attendee) to `ExtractContext::identity` —
@@ -111,7 +110,7 @@ concept_categories) with the `Synthesizer`.
   assignment doesn't silently calcify. `merge` only widens the `first_seen`/`last_seen`
   window (`observe`); it does NOT count citations. `source_count` is written as `0` by
   the template and owned solely by `lore graph backlinks-sync`, which re-derives it
-  exactly from the wikilink graph — so a crash or `--force` re-ingest can never inflate
+  exactly from the wikilink graph — so a crash or an idempotent re-ingest can never inflate
   it. Before extraction, `load_existing_concept_refs()` scans the vault's concept
   directory + in-memory drafts and passes them as `existing_concepts` in the LLM
   request, preventing duplicate concept creation.

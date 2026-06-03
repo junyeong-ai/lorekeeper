@@ -7,7 +7,6 @@ pub async fn run(
     source: Option<String>,
     date_str: Option<String>,
     dry_run: bool,
-    force: bool,
 ) -> miette::Result<()> {
     let config = load_config(&find_config(opts)?)?;
     let vault_root = config.vault.root_path();
@@ -30,9 +29,9 @@ pub async fn run(
     //   - queue mode: re-running just emits another file that `/lore-process` drains
     //     alongside the existing ones; warn so the user can drain first to avoid
     //     duplicate LLM work on the same target pages.
-    //   - any non-queue provider (e.g. noop): this run marks events seen in dedup but
-    //     produces no tasks to fill the empty sections, so the pending tasks are
-    //     stranded — a stronger warning, since draining means switching back to queue.
+    //   - any non-queue provider (e.g. noop): this run writes the pages but produces no
+    //     tasks to fill the empty sections, so the pending tasks are stranded — a stronger
+    //     warning, since draining means switching back to queue.
     let pending = pending_queue_count(&vault_root)?;
     if pending > 0 {
         let queue_dir = vault_root.join(".lorekeeper").join("queue");
@@ -85,18 +84,12 @@ pub async fn run(
         lk_pipeline::PipelineContext::new(opts.template_dir.as_deref(), llm.clone(), &config)
             .map_err(|e| miette::miette!("{e}"))?,
     );
-    let mut pipeline = if dry_run {
-        lk_pipeline::Pipeline::new_dry_run(&vault_root, ctx, &config)
-    } else {
-        lk_pipeline::Pipeline::new(&vault_root, ctx, &config)
-    }
-    .map_err(|e| miette::miette!("{e}"))?;
+    let mut pipeline = lk_pipeline::Pipeline::new(&vault_root, ctx);
     let writer = lk_vault::VaultWriter::new(&vault_root);
     let log = lk_vault::IngestLog::new(vault_root.join(".lorekeeper").join("ingest.jsonl"));
     let options = lk_pipeline::IngestOptions {
-        dry_run,
-        force,
         target_date,
+        dry_run,
     };
 
     let sources: Vec<(String, lk_core::config::SourceConfig)> = match source {
@@ -136,7 +129,7 @@ pub async fn run(
         identity: config.identity.clone(),
     };
 
-    // Phase 1: Plan all sources (no commits, no writes yet).
+    // Phase 1: Plan all sources (no vault writes yet).
     struct Planned {
         id: String,
         result: lk_pipeline::IngestResult,
@@ -188,17 +181,10 @@ pub async fn run(
             }
         };
 
-        if !result.duplicates.is_empty() {
-            eprintln!("  deduplicated: {} (already seen)", result.duplicates.len());
-        }
-
-        // Skip ONLY when there is truly nothing to do — no pages AND no duplicates. A
-        // pure-duplicate run still has work: Phase 5 must refresh its dedup timestamps and
-        // Phase 6 must archive a manual source's inbox files, so a duplicate never lingers
-        // and re-arrives every run. Falling through to `planned` drives both; with no pages
-        // the write phase is a no-op.
-        if result.is_empty() && result.duplicates.is_empty() {
-            eprintln!("  — skipped (no new events)");
+        // Skip only when there are no pages to write. (A manual source with an empty
+        // inbox lands here too; with no events its archive step is a no-op.)
+        if result.is_empty() {
+            eprintln!("  — skipped (no events)");
             if !dry_run {
                 log.record(&lk_vault::LogEntry {
                     timestamp: jiff::Timestamp::now(),
@@ -330,28 +316,24 @@ pub async fn run(
         }
     }
 
-    // Phase 4: Persist queued LLM tasks atomically. Runs BEFORE dedup commit so the
-    // queue file is the durability anchor for semantic work: if a crash strands the
-    // flush, dedup is not yet committed and a re-run will re-extract the events and
-    // re-queue the tasks. The temp + fsync + rename inside the queue client ensures
-    // we never observe a half-written JSONL on disk.
+    // Phase 4: Persist queued LLM tasks atomically. The queue file is the durability
+    // anchor for semantic work: the temp + fsync + rename inside the queue client ensures
+    // we never observe a half-written JSONL on disk, and a crash that strands the flush is
+    // recovered by the next run re-rendering the same pages and re-queueing the tasks.
     if !any_write_failed {
         llm.flush()
             .await
             .map_err(|e| miette::miette!("queue flush: {e}"))?;
     }
 
-    // Phase 5: Commit dedup ONLY if every write AND the queue flush succeeded. The run
-    // is atomic as a whole — Phase 4 flushes one batched queue write for all sources, so
-    // there is no per-source commit point: a single write failure leaves every source
-    // uncommitted, and the materialized-view re-render makes the next run idempotent.
+    // Phase 5: Record the per-source ingest-log entry. The run is idempotent — daily
+    // pages are materialized views re-rendered in full each run — so a write failure
+    // anywhere just leaves the affected pages for the next run to reproduce; there is no
+    // commit point to roll back.
     for p in &planned {
         let status = if any_write_failed {
             lk_vault::LogStatus::Failed
         } else {
-            pipeline
-                .commit(&p.result.events, &p.result.duplicates)
-                .map_err(|e| miette::miette!("dedup commit for {}: {e}", p.id))?;
             lk_vault::LogStatus::Success
         };
         log.record(&lk_vault::LogEntry {
@@ -361,7 +343,7 @@ pub async fn run(
             events_count: p.result.events.len(),
             duration_ms: p.started_at.elapsed().as_millis() as u64,
             error: if any_write_failed {
-                Some("vault write failed; dedup not committed".into())
+                Some("vault write failed".into())
             } else {
                 None
             },
@@ -370,21 +352,17 @@ pub async fn run(
         .unwrap_or_else(|e| tracing::warn!(error = %e, "ingest-log write failed"));
     }
 
-    // Phase 6: Post-commit archive for manual sources. Runs only after dedup
-    // commit succeeded, so files stay in inbox for retry if any earlier phase failed.
+    // Phase 6: Archive consumed inbox files for manual sources. Runs only after a fully
+    // successful run, so files stay in the inbox for retry if any earlier phase failed.
     if !any_write_failed {
         for p in &planned {
             let sc = sources.iter().find(|(id, _)| id == &p.id).map(|(_, sc)| sc);
             if let Some(sc) = sc
                 && sc.source_type == lk_core::config::SourceType::Manual
-                && let Err(e) = lk_source::post_commit_archive(
-                    &sc.params,
-                    &p.result.events,
-                    &p.result.duplicates,
-                    extract_target,
-                )
+                && let Err(e) =
+                    lk_source::archive_consumed_files(&sc.params, &p.result.events, extract_target)
             {
-                tracing::warn!(source = %p.id, error = %e, "post-commit archive failed");
+                tracing::warn!(source = %p.id, error = %e, "manual archive failed");
             }
         }
     }
@@ -396,7 +374,7 @@ pub async fn run(
         total_pages,
         all_personal.len(),
         if any_write_failed {
-            " (some writes failed; dedup not committed — safe to re-run)"
+            " (some writes failed — safe to re-run)"
         } else {
             ""
         }

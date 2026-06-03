@@ -3,16 +3,19 @@
 Domain types and config — no I/O, no async. Depended on by every other crate.
 
 - **`Config::load` validates eagerly**: `validate()` rejects empty/`/`-containing source
-  IDs, bad cron, out-of-range thresholds, empty dedup cascade, unknown synthesis/category
-  references, and `vault.dirs.*` values that are absolute or contain `..` (path-traversal
-  guard before any path is built). A relative `vault.root` is resolved against the config
-  file's parent directory. Every config struct — top-level (`Config`, `VaultConfig`,
-  `VaultDirs`, `Identity`, `SourceConfig`, `DedupConfig`, `PerformanceConfig`) as well as
-  the nested ones — carries `#[serde(deny_unknown_fields)]`, so a typo'd key fails at load
-  instead of being silently ignored.
-- **`SourceType` is a closed enum** with `default_template_name()` co-located on it.
-  Adding a source type is a compiler-checked change here + a `lk-source` adapter/factory
-  arm. Don't replace it with a runtime registry — exhaustive matching is the point.
+  IDs, bad cron, out-of-range thresholds, unknown synthesis/category references, and
+  `vault.dirs.*` values that are absolute or contain `..` (path-traversal guard before any
+  path is built). A relative `vault.root` is resolved against the config file's parent
+  directory. Every config struct — top-level (`Config`, `VaultConfig`, `VaultDirs`,
+  `Identity`, `SourceConfig`, `PerformanceConfig`) as well as the nested ones — carries
+  `#[serde(deny_unknown_fields)]`, so a typo'd key fails at load instead of being silently
+  ignored.
+- **`SourceType` is a closed enum** with `default_template_name()` and `is_streaming()`
+  co-located on it. Adding a source type is a compiler-checked change here + a `lk-source`
+  adapter/factory arm; set `is_streaming()` true only if the source CANNOT completely
+  re-fetch a past day (a rolling/capped feed like RSS) — that gates the per-date event-log
+  accumulation in `lk-pipeline`. Don't replace the enum with a runtime registry —
+  exhaustive matching is the point.
 - **`SourceConfig.classify`** is a `Vec<ClassifyRule>` (ordered rules, first match
   wins), kept OUT of the free-form `params` so adapter params can use
   `deny_unknown_fields`. Validation rejects rules with empty keywords.
@@ -25,11 +28,6 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   `performance_category` (content signal) → `source_type_category_map[type]` (coarse
   fallback). The content signal deliberately OUTRANKS the per-type default so a genuine
   signal beats the "all Jira = project-delivery" blanket. No string-coincidence magic.
-- **`SourceType::is_mutable()`** (Jira, Calendar) marks source types whose items change
-  after their date (status, scheduled→actual). `Pipeline::plan` bypasses dedup for them
-  so a same-day re-ingest re-renders latest state instead of dedup-freezing the first
-  snapshot; the LLM cache still skips unchanged content. Append-only types keep full
-  dedup. This is why the daily scheduled job needs no blanket `--force`.
 - **`EventId::new(source_id, date, content)`** = `source:date:blake3(content)[..16]`.
   In `lk-pipeline::normalize`, `content` is the `external_id` or a JSON array of
   `[title, body]` — never a bare concatenation (that collides).

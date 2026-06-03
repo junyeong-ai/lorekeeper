@@ -70,7 +70,7 @@ Data Sources              lore (Rust CLI)            Obsidian Vault
 ────────────              ───────────────            ──────────────
 Google Drive ──┐          ┌─ Extract (per-source)    daily/{source-id}/
 Gmail ─────────┤          ├─ Normalize → Event       me/work-log/
-Slack ─────────┼─ config ─┤  Deduplicate (cascade)   me/{weekly,monthly,quarterly,annual}/
+Slack ─────────┼─ config ─┤  Collapse dup (intra-batch)me/{weekly,monthly,quarterly,annual}/
 Jira ──────────┤  .yaml   ├─ Classify (labels)       synthesis/{weekly}/
 Calendar ──────┤          ├─ Concepts (LLM)          wiki/concepts/
 RSS/Atom ──────┤          ├─ Render (templates)      wiki/documents/
@@ -98,7 +98,7 @@ Claude Code Skills        Semantic Plane             (same vault)
 | `lore validate` | Verify config.yaml |
 | `lore ingest [source]` | Run ingestion (all enabled sources or single ID) |
 | `lore ingest --dry-run` | Preview without writing to vault |
-| `lore ingest --force` | Skip dedup, re-ingest everything |
+| `lore ingest --date YYYY-MM-DD` | Re-materialize a specific day (backfill / repair) |
 | `lore synthesis weekly` | Generate weekly cross-source synthesis + personal summary |
 | `lore synthesis monthly` | Aggregate work-log into monthly summary |
 | `lore synthesis quarterly` | Generate quarterly performance review |
@@ -110,7 +110,7 @@ Claude Code Skills        Semantic Plane             (same vault)
 | `lore performance` | Show work category distribution |
 | `lore schedule` | Print crontab entries (uses plain `lore` for PATH lookup) |
 | `lore schedule --bin /full/path/lore` | Override bin path in cron lines |
-| `lore maintenance` | Prune ingest log, dedup cache, and drained queue files past `maintenance.retention_days` (default 90) |
+| `lore maintenance` | Prune ingest log, drained queue files, and streaming event logs past `maintenance.retention_days` (default 90) |
 | `lore schema` | Generate `wiki/AGENTS.md` (page format schema from locale) |
 | `lore graph lint` | Structural health: orphans, broken links, hubs, invalid categories, near-duplicates, alias conflicts, unresolved conflicts, index drift |
 | `lore graph suggest-links` | Community-based cross-reference suggestions |
@@ -135,7 +135,7 @@ Claude Code Skills        Semantic Plane             (same vault)
 | `noop` |  | Development, CI, or vault-only sources where you only need Rust templating without semantic enrichment. |
 
 Workflow:
-1. `lore ingest` (cron-scheduled) — fetches sources, dedups, writes structural pages, queues semantic tasks
+1. `lore ingest` (cron-scheduled) — fetches sources, re-renders structural pages, queues semantic tasks
 2. `/lore-process` (run in Claude Code) — drains the queue, fills summaries, creates/merges concept pages
 3. For unattended cron: `lore ingest && claude -p "/lore-process"`
 
@@ -183,7 +183,7 @@ crates/
   lk-core/      Domain types, config, error, vault path builder
   lk-vault/     Obsidian vault I/O: read, write, frontmatter, templates, log
   lk-source/    Source adapters: Gmail, Drive, Slack, Jira, Calendar, RSS, Manual
-  lk-pipeline/  Transform stages: normalize, dedup, classify, render, synthesis
+  lk-pipeline/  Transform stages: normalize, intra-batch dedup, classify, render, synthesis
   lk-queue/     Semantic task queue: LlmClient trait, JSONL queue, noop, test mock
   lk-graph/     Wikilink graph analysis (lint, hubs, cluster, suggest-links)
   lk-cli/       Binary entry point (lore)
@@ -301,7 +301,6 @@ Rust 1.95 / 2024 edition. Key crates:
 - `clap` (CLI)
 - `jiff` (date/time)
 - `minijinja` (templates)
-- `redb` (embedded dedup cache)
 - `strsim` (concept near-duplicate detection)
 - `blake3` (event ID hashing)
 - `thiserror` / `miette` (errors)

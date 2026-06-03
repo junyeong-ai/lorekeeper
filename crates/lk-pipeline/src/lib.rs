@@ -2,6 +2,7 @@ mod classify;
 mod concept_draft;
 mod context;
 mod dedup;
+mod event_log;
 mod llm_cache;
 mod normalize;
 pub mod render;
@@ -9,7 +10,6 @@ mod synthesis;
 mod work_log;
 
 pub use context::PipelineContext;
-pub use dedup::DedupCache;
 pub use render::RenderResult;
 pub use synthesis::Synthesizer;
 
@@ -20,7 +20,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use lk_core::concept::ExtractedConcept;
-use lk_core::config::{Config, DedupConfig, SourceConfig, SourceType};
+use lk_core::config::{SourceConfig, SourceType};
 use lk_core::event::{Event, RawItem};
 use lk_vault::{FsVault, VaultStore};
 
@@ -28,8 +28,8 @@ use concept_draft::ConceptDrafts;
 
 #[derive(Debug, Error)]
 pub enum PipelineError {
-    #[error("dedup: {0}")]
-    Dedup(String),
+    #[error("event-log: {0}")]
+    EventLog(String),
     #[error("render: {0}")]
     Render(String),
     #[error(transparent)]
@@ -41,9 +41,6 @@ pub enum PipelineError {
 pub struct IngestResult {
     pub source_id: String,
     pub events: Vec<Event>,
-    /// Events recognized as duplicates this run. Carried so `commit` can refresh
-    /// their dedup timestamps (not rendered).
-    pub duplicates: Vec<Event>,
     pub concepts: Vec<ExtractedConcept>,
     pub daily_pages: Vec<RenderResult>,
     pub document_pages: Vec<RenderResult>,
@@ -56,16 +53,20 @@ impl IngestResult {
 }
 
 pub struct IngestOptions {
-    pub dry_run: bool,
-    pub force: bool,
+    /// Anchor the fetch window and the kept-date filter to a specific day instead of
+    /// today, for `lore ingest --date <past>` backfill / repair.
     pub target_date: Option<jiff::civil::Date>,
+    /// Preview only: plan normally (reading the event log to reflect what WOULD be
+    /// written) but never mutate it, so a dry-run leaves the vault untouched.
+    pub dry_run: bool,
 }
 
 pub struct Pipeline {
     ctx: Arc<PipelineContext>,
-    dedup: DedupCache,
     reader: Arc<dyn VaultStore>,
-    dedup_config: DedupConfig,
+    /// Durable per-date record of observed events. A daily page is a projection of it,
+    /// so a streaming source (RSS) never loses an item that has scrolled out of its feed.
+    event_log: event_log::EventLog,
     /// Concept accumulation spans the WHOLE run, not a single `plan` call: a concept
     /// page is a cross-source aggregate, so two sources mentioning the same slug merge
     /// into one page, rendered once via `render_concept_pages` after all sources are
@@ -74,52 +75,28 @@ pub struct Pipeline {
 }
 
 impl Pipeline {
-    pub fn new(
-        vault_root: &Path,
-        ctx: Arc<PipelineContext>,
-        config: &Config,
-    ) -> Result<Self, PipelineError> {
-        let dedup_path = vault_root.join(".lorekeeper").join("dedup.redb");
-        let dedup = DedupCache::open(&dedup_path, config.dedup.extra_tracking_params.clone())?;
-        Ok(Self::with_dedup(ctx, dedup, config, vault_root))
-    }
-
-    /// Pipeline for `--dry-run`: dedup is opened read-only and never creates the cache
-    /// file, so a preview run leaves the vault untouched while still reflecting real
-    /// dedup state when a cache already exists.
-    pub fn new_dry_run(
-        vault_root: &Path,
-        ctx: Arc<PipelineContext>,
-        config: &Config,
-    ) -> Result<Self, PipelineError> {
-        let dedup_path = vault_root.join(".lorekeeper").join("dedup.redb");
-        let dedup =
-            DedupCache::open_read_only(&dedup_path, config.dedup.extra_tracking_params.clone())?;
-        Ok(Self::with_dedup(ctx, dedup, config, vault_root))
-    }
-
-    fn with_dedup(
-        ctx: Arc<PipelineContext>,
-        dedup: DedupCache,
-        config: &Config,
-        vault_root: &Path,
-    ) -> Self {
+    pub fn new(vault_root: &Path, ctx: Arc<PipelineContext>) -> Self {
         Self {
             ctx,
-            dedup,
             reader: Arc::new(FsVault::new(vault_root)),
-            dedup_config: config.dedup.clone(),
+            event_log: event_log::EventLog::new(vault_root),
             concept_drafts: ConceptDrafts::new(),
         }
     }
 
-    /// Build daily and concept pages without recording dedup. The caller writes pages
-    /// to the vault, then calls `commit` to mark events as seen.
+    /// Build a source's daily (or document) pages and accumulate its concepts.
+    ///
+    /// A daily page is re-rendered IN FULL each run, so a re-run reproduces it
+    /// byte-identically. A complete-refetch source renders from the fetch; a STREAMING
+    /// source (RSS) renders from the union of the fetch and its per-date event log, so a
+    /// scrolled-out item is never lost and a deleted page self-heals from the log. The log
+    /// is the source of truth, never a suppression cache — it only ever adds to what a page
+    /// can show.
     ///
     /// `plan` takes `&mut self`: one `Pipeline` drives one ingest run with exclusive
-    /// access. The caller plans every source, then writes all pages, then commits dedup
-    /// — distinct phases over the whole source list — while concept drafts accumulate
-    /// run-wide across the `plan` calls and render once in `render_concept_pages`.
+    /// access. The caller plans every source, then writes all pages — distinct phases
+    /// over the whole source list — while concept drafts accumulate run-wide across the
+    /// `plan` calls and render once in `render_concept_pages`.
     pub async fn plan(
         &mut self,
         source_id: &str,
@@ -136,50 +113,51 @@ impl Pipeline {
             tracing::info!(target = %target, kept = events.len(), "filtered by --date");
         }
 
-        if events.is_empty() {
-            return Ok(empty_result(source_id, vec![]));
+        // Collapse repeats of the SAME item within this single fetch (same event-id —
+        // exact identity, e.g. paginated history overlap).
+        let before = events.len();
+        events = dedup::deduplicate(events);
+        if events.len() != before {
+            tracing::info!(source = source_id, kept = events.len(), "intra-batch dedup");
         }
 
-        // Duplicates are retained (not just dropped) so `commit` can refresh their
-        // `seen_at` — a recurring item recognized as a duplicate must not age out of
-        // the retention window and re-emit as new.
-        //
-        // Mutable source types (Jira/Calendar) re-render with the latest upstream
-        // state every run: their items change after first sight (status, assignee,
-        // scheduled→actual), so dedup-by-event-id would freeze the first snapshot.
-        // They bypass dedup ENTIRELY for themselves — every strategy, not just
-        // event-id — because a re-render is the intended behaviour: matching a prior
-        // snapshot by content-hash/url would suppress the very update we want, and a
-        // cross-source content collision (a Jira issue whose text happens to equal a
-        // mail body) must NOT drop the distinct issue from its own daily page. This is
-        // the per-source equivalent of `--force`, which is why the daily job needs no
-        // blanket flag. Records still land in the cache via `commit` below (as novel),
-        // so cache growth/retention is unaffected; unchanged content still skips LLM
-        // work via the materialized-view cache, so the re-render is cheap.
-        // Append-only types keep full dedup: re-seeing an item is a true duplicate.
-        let bypass_dedup = options.force || config.source_type.is_mutable();
-        let duplicates = if !bypass_dedup {
-            let result = self.dedup.dedup(events, &self.dedup_config.cascade)?;
-            events = result.novel;
-            tracing::info!(source = source_id, novel = events.len(), "dedup");
-            result.duplicates
-        } else {
-            Vec::new()
-        };
-
-        if events.is_empty() {
-            return Ok(empty_result(source_id, duplicates));
+        // Manual is a document source (one page per inbox file, archived after ingest), not
+        // a daily aggregation — it doesn't project from the per-date event log.
+        if config.source_type == SourceType::Manual {
+            if events.is_empty() {
+                return Ok(empty_result(source_id));
+            }
+            classify::assign_labels(&mut events, &config.labels);
+            classify::assign_personal(&mut events, config.track_personal);
+            classify::classify_by_keywords(&mut events, &config.classify);
+            return self.plan_documents(source_id, config, events).await;
         }
 
+        // A STREAMING source (RSS) fetches a rolling, capped window that can't reproduce a
+        // past day, so its daily page is a projection of the per-date event log: union this
+        // fetch with the stored events (fresh wins on id) so a scrolled-out item is never
+        // lost and a deleted page self-heals from the log. `--date` is folded in so a repair
+        // run renders from the log even when the feed returns nothing for that day. Only
+        // dates present in the fetch (or `--date`) are re-rendered — a date that lives only
+        // in the log keeps its already-correct frozen page rather than being churned.
+        // Complete-refetch sources reproduce their whole window on demand, so they render
+        // directly from the fetch and keep no log (nothing to accumulate).
+        if config.source_type.is_streaming() {
+            events =
+                self.accumulate_with_log(source_id, events, options.target_date, options.dry_run)?;
+        }
+
+        if events.is_empty() {
+            return Ok(empty_result(source_id));
+        }
+
+        // Classification is a render-time derivation of current config — re-applied to the
+        // whole set so a config change reaches preserved events too. A streaming source's
+        // log stores pre-classification, pre-refine events: the source of truth, untouched
+        // by the LLM, so a re-render always feeds refine raw text.
         classify::assign_labels(&mut events, &config.labels);
         classify::assign_personal(&mut events, config.track_personal);
         classify::classify_by_keywords(&mut events, &config.classify);
-
-        if config.source_type == SourceType::Manual {
-            return self
-                .plan_documents(source_id, config, events, duplicates, options)
-                .await;
-        }
 
         let mut by_date: BTreeMap<jiff::civil::Date, Vec<usize>> = BTreeMap::new();
         for (i, event) in events.iter().enumerate() {
@@ -416,26 +394,49 @@ impl Pipeline {
         Ok(IngestResult {
             source_id: source_id.into(),
             events,
-            duplicates,
             concepts: all_concepts,
             daily_pages,
             document_pages: vec![],
         })
     }
 
+    /// Union this run's freshly-fetched events with the durable per-date event log, per
+    /// date, and return the full merged set the page will project. Persists the merged log
+    /// (unless `dry_run`). `target_date` is folded in so a `--date` repair run reads the
+    /// log for that day even when the fetch returned nothing for it.
+    fn accumulate_with_log(
+        &self,
+        source_id: &str,
+        fresh: Vec<Event>,
+        target_date: Option<jiff::civil::Date>,
+        dry_run: bool,
+    ) -> Result<Vec<Event>, PipelineError> {
+        let mut fresh_by_date: BTreeMap<jiff::civil::Date, Vec<Event>> = BTreeMap::new();
+        for event in fresh {
+            fresh_by_date.entry(event.date).or_default().push(event);
+        }
+        let mut dates: std::collections::BTreeSet<jiff::civil::Date> =
+            fresh_by_date.keys().copied().collect();
+        dates.extend(target_date);
+
+        let mut merged_all = Vec::new();
+        for date in dates {
+            let stored = self.event_log.read(source_id, date)?;
+            let fresh_for_date = fresh_by_date.remove(&date).unwrap_or_default();
+            let merged = event_log::merge_by_id(stored, fresh_for_date);
+            if !dry_run && !merged.is_empty() {
+                self.event_log.write(source_id, date, &merged)?;
+            }
+            merged_all.extend(merged);
+        }
+        Ok(merged_all)
+    }
+
     /// Render the concept pages accumulated across every `plan` call in this run.
-    /// Call once after all sources are planned and before committing dedup.
+    /// Call once after all sources are planned.
     pub async fn render_concept_pages(&self) -> Result<Vec<RenderResult>, PipelineError> {
         self.concept_drafts
             .render_pages(&self.ctx.engine, &self.ctx.dirs, self.ctx.locale)
-    }
-
-    /// Mark this run's events as processed. Call AFTER vault writes succeed to avoid
-    /// losing pages when a write fails midway. Records the `novel` events (first sight)
-    /// AND refreshes the `duplicates`' timestamps (re-seen) so steady-state re-arrivals
-    /// never age out of the retention window and re-emit as new.
-    pub fn commit(&self, novel: &[Event], duplicates: &[Event]) -> Result<(), PipelineError> {
-        self.dedup.record(novel.iter().chain(duplicates))
     }
 
     pub async fn render_work_log(
@@ -459,8 +460,6 @@ impl Pipeline {
         source_id: &str,
         config: &SourceConfig,
         events: Vec<Event>,
-        duplicates: Vec<Event>,
-        _options: &IngestOptions,
     ) -> Result<IngestResult, PipelineError> {
         let focus = config.normalized_focus();
 
@@ -646,7 +645,6 @@ impl Pipeline {
         Ok(IngestResult {
             source_id: source_id.into(),
             events,
-            duplicates,
             concepts: all_concepts,
             daily_pages: vec![],
             document_pages,
@@ -697,11 +695,10 @@ impl Pipeline {
     }
 }
 
-fn empty_result(source_id: &str, duplicates: Vec<Event>) -> IngestResult {
+fn empty_result(source_id: &str) -> IngestResult {
     IngestResult {
         source_id: source_id.into(),
         events: vec![],
-        duplicates,
         concepts: vec![],
         daily_pages: vec![],
         document_pages: vec![],

@@ -50,7 +50,7 @@ the target page's `llm_inputs.<key>` frontmatter at render time. On a re-ingest,
 the pipeline compares the new hash against the cached one: if they match and
 the section is non-empty, the task is **not** enqueued at all. This is the
 designed self-healing path — a successful previous run never triggers redundant
-LLM work, regardless of `--force`.
+LLM work, even though every re-ingest re-renders the page in full.
 
 That cache rests on the contract that this skill writes only LLM-produced
 content into the target sections, never structural artifacts. The hash key for
@@ -415,11 +415,11 @@ succeeded. Failure rules:
   There is no append-while-reading hazard. You may still want to wait so
   the user sees the new pages before they get edited.
 
-## Forcing a re-run
+## Regenerating a section
 
-To regenerate a section that was already filled, then run `lore ingest --force`
-for the same date. The pipeline sees the cache miss, re-queues the task, and
-`/lore-process` fills it on the next run. No flag, no skill argument — the page
+To regenerate a section that was already filled, invalidate its cache and re-ingest
+that day (`lore ingest --date <day>`). The pipeline sees the cache miss, re-queues the
+task, and `/lore-process` fills it on the next run. No flag, no skill argument — the page
 itself is the cache key. How to invalidate depends on the section's cache shape:
 
 - **Fill-empty sections** (summary, concepts, narratives): delete the body OR

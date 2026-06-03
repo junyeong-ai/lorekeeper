@@ -131,6 +131,7 @@ mod tests {
             id: EventId::new("test", jiff::civil::date(2026, 5, 23), title),
             source_id: "test".into(),
             source_type: SourceType::Gmail,
+            timestamp: jiff::Timestamp::UNIX_EPOCH,
             date: jiff::civil::date(2026, 5, 23),
             title: title.into(),
             body: String::new(),
@@ -141,7 +142,6 @@ mod tests {
             performance_category: None,
             is_self: false,
             is_personal: false,
-            content_hash: lk_core::event::content_hash(jiff::civil::date(2026, 5, 23), title, ""),
             metadata: serde_json::Value::Null,
         }
     }

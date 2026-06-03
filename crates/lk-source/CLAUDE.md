@@ -76,12 +76,11 @@ map to `RawItem`.
   JSON→Markdown renderer, and storing raw JSON as a document is meaningless). Files are
   read into `RawItem` with `external_id = "manual:{filename}:{blake3(body)[..8]}"` — the
   content fingerprint means a same-name file re-dropped with EDITED content on the same
-  day is a distinct event, not an `EventId` collision dropped as a duplicate; an unchanged
-  re-drop keeps a stable id and still dedups. Symlinks are rejected. Archive-after-ingest defaults to
-  **true**, but archival is deferred to `post_commit_archive` (run only after the
-  dedup commit), so a mid-pipeline failure leaves the inbox intact for retry. It
-  archives BOTH novel and deduplicated files — a duplicate left in the inbox would
-  be re-scanned and re-deduplicated on every run.
+  day is a distinct event; an unchanged re-drop keeps a stable id. Symlinks are rejected.
+  Archive-after-ingest defaults to **true**, but archival is deferred to
+  `archive_consumed_files` (run only after a fully successful run), so a mid-pipeline failure
+  leaves the inbox intact for retry. It archives every scanned file (one event per file),
+  so nothing lingers in the inbox to be re-scanned next run.
 - `Source` has no `source_type()` accessor — the factory selects by the input enum.
 - `markdown` module normalizes rich text to Markdown, loss-aversely (unmapped constructs
   degrade to their text): `adf_to_markdown`, `html_to_markdown` (via `htmd`),

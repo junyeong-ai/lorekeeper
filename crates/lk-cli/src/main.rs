@@ -40,9 +40,6 @@ enum Command {
         /// Preview without writing to vault
         #[arg(long)]
         dry_run: bool,
-        /// Skip dedup, force re-ingest
-        #[arg(long)]
-        force: bool,
     },
     /// Generate synthesis reports
     Synthesis {
@@ -73,7 +70,7 @@ enum Command {
         #[arg(long)]
         root: Option<PathBuf>,
     },
-    /// Prune ingest log, dedup cache, and drained queue files past the configured retention (default 90 days)
+    /// Prune the ingest log, drained queue files, and streaming event logs past the configured retention (default 90 days)
     Maintenance,
     /// Wikilink graph analysis for the vault
     Graph {
@@ -154,8 +151,7 @@ async fn main() -> miette::Result<()> {
             source,
             date,
             dry_run,
-            force,
-        } => commands::ingest::run(&opts, source, date, dry_run, force).await,
+        } => commands::ingest::run(&opts, source, date, dry_run).await,
         Command::Synthesis { period } => commands::synthesis::run(&opts, period).await,
         Command::Health { strict } => commands::health::run(&opts, strict).await,
         Command::Performance => commands::performance::run(&opts).await,

@@ -8,8 +8,8 @@ mod rss;
 mod slack;
 
 /// Move consumed manual-inbox files into `<inbox>/archived/{date}/` after the
-/// pipeline has committed daily pages and dedup.
-pub use manual::post_commit_archive;
+/// pipeline has written its pages on a fully successful run.
+pub use manual::archive_consumed_files;
 
 use std::sync::Arc;
 

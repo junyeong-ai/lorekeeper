@@ -30,7 +30,6 @@ sources:                             # key = source id = <daily>/{id}/ directory
     extract_concepts: true|false     # whether to run LLM concept extraction
     track_personal: true|false       # whether to count toward the work-log
 
-dedup: {cascade: [event-id, content-hash, url], extra_tracking_params: [...]}  # exact-match stages; lossless
 labels: {categories: [...]}
 performance: {...}                   # performance-category mapping (see config.example)
 synthesis: {weekly: {...}, monthly: {...}, quarterly: {...}, annual: {...}}

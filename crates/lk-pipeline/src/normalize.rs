@@ -1,5 +1,5 @@
 use lk_core::config::SourceType;
-use lk_core::event::{Event, EventId, RawItem, content_hash};
+use lk_core::event::{Event, EventId, RawItem};
 use lk_core::markdown::demote_headings;
 use lk_core::text::collapse_blank_lines;
 
@@ -34,12 +34,12 @@ pub fn normalize(
             let id = EventId::new(source_id, date, &hash_input);
             let title = item.title;
             let body = demote_headings(&collapse_blank_lines(&item.body), BODY_HEADING_FLOOR);
-            let ch = content_hash(date, &title, &body);
 
             Event {
                 id,
                 source_id: source_id.to_string(),
                 source_type,
+                timestamp: item.timestamp,
                 date,
                 title,
                 body,
@@ -50,7 +50,6 @@ pub fn normalize(
                 performance_category: None,
                 is_self: item.is_self,
                 is_personal: false,
-                content_hash: ch,
                 metadata: item.metadata,
             }
         })

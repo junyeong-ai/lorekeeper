@@ -1,12 +1,12 @@
 //! User-curated inbox source. The user drops files (`.md`, `.txt`, `.markdown`,
 //! `.html`, `.htm` by default) into `<inbox_dir>` and `lore ingest` picks them
-//! up through the same pipeline as automated sources — dedup, classify,
-//! concept extraction, work-log routing.
+//! up through the same pipeline as automated sources — classify, concept
+//! extraction, work-log routing.
 //!
-//! Archival is deferred to `post_commit_archive()`, called only after the
-//! pipeline has committed daily pages and dedup — so a mid-pipeline crash
-//! leaves files in the inbox for safe retry. Re-pushing the same content is a
-//! no-op thanks to `content-hash` dedup.
+//! Archival is deferred to `archive_consumed_files()`, called only after the
+//! pipeline has written its pages — so a mid-run failure leaves files in the
+//! inbox for safe retry. Each file's content-fingerprinted id makes a re-render
+//! idempotent.
 
 use std::path::{Path, PathBuf};
 
@@ -31,12 +31,12 @@ struct ManualParams {
     #[serde(default = "default_extensions")]
     extensions: Vec<String>,
     /// Archive consumed files under `<inbox_dir>/archived/{date}/` after the
-    /// pipeline has committed daily pages and dedup.
+    /// pipeline has written its pages.
     ///
-    /// **Default: true** — archival is now deferred to `post_commit_archive()`,
-    /// which the pipeline calls only after successful commit. A mid-pipeline
-    /// failure leaves files in the inbox for safe retry; `content-hash` dedup
-    /// absorbs any re-runs.
+    /// **Default: true** — archival is deferred to `archive_consumed_files()`,
+    /// which the pipeline calls only after a fully successful run. A mid-run
+    /// failure leaves files in the inbox for safe retry; the idempotent
+    /// re-render absorbs any re-runs.
     #[serde(default = "default_archive")]
     archive_after_ingest: bool,
 }
@@ -185,17 +185,15 @@ fn read_item(path: &Path) -> Result<RawItem, SourceError> {
     };
 
     let (title, content) = split_title(&body, path);
-    // Full filename (with extension) so `note.md` and `note.txt` don't collide
-    // on the external_id and dedup as the same item.
+    // Full filename (with extension) so `note.md` and `note.txt` get distinct ids.
     let file_name = path
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("manual")
         .to_string();
-    // Fingerprint the content into the external_id so re-dropping a file with the
-    // SAME name but EDITED content on the same day yields a distinct event rather
-    // than colliding on `EventId` (source:date:hash(external_id)) and being dropped
-    // as a duplicate. Unchanged re-drops keep a stable id and still dedup.
+    // Fingerprint the content into the external_id so re-dropping a file with the SAME name
+    // but EDITED content on the same day yields a distinct `EventId` (a distinct document
+    // page) rather than re-rendering the same one; an unchanged re-drop keeps a stable id.
     let fingerprint = &blake3::hash(body.as_bytes()).to_hex()[..8];
 
     Ok(RawItem {
@@ -229,27 +227,24 @@ fn split_title(body: &str, path: &Path) -> (String, String) {
     (stem, body.to_string())
 }
 
-/// Move every consumed inbox file — both the novel events and the deduplicated
-/// duplicates — into `<inbox>/archived/{date}/` after the pipeline has committed
-/// daily pages and dedup. Duplicates are archived too: their content is already in
-/// the vault (dedup matched it), so leaving them in the inbox would re-scan and
-/// re-dedup them on every run, growing the inbox without bound. Called by the
-/// pipeline's post-commit hook so a mid-pipeline failure leaves the inbox intact
-/// for safe retry.
-pub fn post_commit_archive(
+/// Move every consumed inbox file into `<inbox>/archived/{date}/` after the pipeline
+/// has written the vault pages. Runs only on a successful run so a mid-run failure
+/// leaves the inbox intact for safe retry. Each scanned file maps to one event (its
+/// content-fingerprinted id is unique per file), so archiving the run's `events` clears
+/// the whole batch — a file left behind would be re-scanned every run.
+pub fn archive_consumed_files(
     params: &serde_json::Value,
-    novel: &[lk_core::event::Event],
-    duplicates: &[lk_core::event::Event],
+    events: &[lk_core::event::Event],
     date: jiff::civil::Date,
 ) -> Result<(), SourceError> {
     let p: ManualParams = crate::parse_params(params)?;
-    if !p.archive_after_ingest || (novel.is_empty() && duplicates.is_empty()) {
+    if !p.archive_after_ingest || events.is_empty() {
         return Ok(());
     }
     let archive_dir = p.inbox_dir.join("archived").join(date.to_string());
     std::fs::create_dir_all(&archive_dir)
         .map_err(|e| SourceError::Parse(format!("create archive dir: {e}")))?;
-    for event in novel.iter().chain(duplicates) {
+    for event in events {
         let Some(src_str) = event.metadata.get("source_file").and_then(|v| v.as_str()) else {
             continue;
         };
@@ -262,7 +257,7 @@ pub fn post_commit_archive(
         };
         let dest = archive_dir.join(name);
         if let Err(e) = std::fs::rename(&src, &dest) {
-            tracing::warn!(file = %src.display(), error = %e, "manual: post-commit archive failed");
+            tracing::warn!(file = %src.display(), error = %e, "manual: archive failed");
         }
     }
     Ok(())
@@ -320,7 +315,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn archives_consumed_files_post_commit() {
+    async fn archives_consumed_files() {
         let tmp = TempDir::new().unwrap();
         write(&tmp.path().join("a.md"), "# A\n\nx");
         let src = ManualSource::new();
@@ -345,6 +340,7 @@ mod tests {
                 id: lk_core::event::EventId::new("manual", ctx.target_date, &item.title),
                 source_id: "manual".into(),
                 source_type: lk_core::config::SourceType::Manual,
+                timestamp: item.timestamp,
                 date: ctx.target_date,
                 title: item.title.clone(),
                 body: item.body.clone(),
@@ -355,24 +351,22 @@ mod tests {
                 performance_category: None,
                 is_self: false,
                 is_personal: false,
-                content_hash: None,
                 metadata: item.metadata.clone(),
             })
             .collect();
 
-        post_commit_archive(&params, &events, &[], ctx.target_date).unwrap();
+        archive_consumed_files(&params, &events, ctx.target_date).unwrap();
         assert!(!tmp.path().join("a.md").exists());
         assert!(tmp.path().join("archived/2026-05-24/a.md").exists());
     }
 
     #[tokio::test]
-    async fn archives_deduplicated_files_too_not_just_novel() {
-        // A duplicate file's content is already in the vault, so it must be archived
-        // alongside novel files — otherwise it lingers in the inbox and is re-scanned
-        // and re-deduplicated on every run.
+    async fn archives_every_scanned_file() {
+        // Every file the run consumed is archived so nothing lingers in the inbox to be
+        // re-scanned on the next run.
         let tmp = TempDir::new().unwrap();
-        write(&tmp.path().join("novel.md"), "# Novel\n\nx");
-        write(&tmp.path().join("dup.md"), "# Dup\n\ny");
+        write(&tmp.path().join("one.md"), "# One\n\nx");
+        write(&tmp.path().join("two.md"), "# Two\n\ny");
         let src = ManualSource::new();
         let params = serde_json::json!({
             "inbox_dir": tmp.path(),
@@ -385,12 +379,13 @@ mod tests {
             identity: lk_core::config::Identity::default(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
-        let mut events: Vec<lk_core::event::Event> = items
+        let events: Vec<lk_core::event::Event> = items
             .iter()
             .map(|item| lk_core::event::Event {
                 id: lk_core::event::EventId::new("manual", ctx.target_date, &item.title),
                 source_id: "manual".into(),
                 source_type: lk_core::config::SourceType::Manual,
+                timestamp: item.timestamp,
                 date: ctx.target_date,
                 title: item.title.clone(),
                 body: item.body.clone(),
@@ -401,20 +396,17 @@ mod tests {
                 performance_category: None,
                 is_self: false,
                 is_personal: false,
-                content_hash: None,
                 metadata: item.metadata.clone(),
             })
             .collect();
-        // One arbitrary item is treated as a duplicate, the rest as novel.
-        let dup = vec![events.pop().unwrap()];
-        post_commit_archive(&params, &events, &dup, ctx.target_date).unwrap();
+        archive_consumed_files(&params, &events, ctx.target_date).unwrap();
 
-        // Both the novel and the duplicate file are gone from the inbox top level
-        // and present under archived/ — nothing lingers to be re-scanned.
-        assert!(!tmp.path().join("novel.md").exists());
-        assert!(!tmp.path().join("dup.md").exists());
-        assert!(tmp.path().join("archived/2026-05-24/novel.md").exists());
-        assert!(tmp.path().join("archived/2026-05-24/dup.md").exists());
+        // Every scanned file is gone from the inbox top level and present under
+        // archived/ — nothing lingers to be re-scanned.
+        assert!(!tmp.path().join("one.md").exists());
+        assert!(!tmp.path().join("two.md").exists());
+        assert!(tmp.path().join("archived/2026-05-24/one.md").exists());
+        assert!(tmp.path().join("archived/2026-05-24/two.md").exists());
     }
 
     #[test]

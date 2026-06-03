@@ -7,6 +7,10 @@ pub struct Event {
     pub id: EventId,
     pub source_id: String,
     pub source_type: SourceType,
+    /// Precise instant the item was observed/published (carried from `RawItem`). `date`
+    /// is its calendar day in the vault timezone — the page-bucketing key — while
+    /// `timestamp` orders events deterministically WITHIN a day (chronological).
+    pub timestamp: jiff::Timestamp,
     pub date: jiff::civil::Date,
     pub title: String,
     pub body: String,
@@ -34,15 +38,6 @@ pub struct Event {
     /// `is_self` gated by the source's `track_personal`: the event counts toward
     /// the user's personal work-log and performance reviews.
     pub is_personal: bool,
-    /// Hash of date+title+body. Used by the `content-hash` dedup strategy to
-    /// catch the same content arriving via multiple sources on the same day.
-    /// Scoped by `date` so a templated/recurring body with an identical
-    /// title+body on a different day is kept as a distinct observation rather
-    /// than silently merged. `None` when the body has no substantive text: a
-    /// shared title alone is not evidence of content-equivalence (two distinct
-    /// posts can share a headline), so such events are excluded from content-hash
-    /// dedup and fall through to the URL / event-id strategies.
-    pub content_hash: Option<String>,
     #[serde(default)]
     pub metadata: serde_json::Value,
 }
@@ -63,98 +58,15 @@ impl EventId {
     }
 }
 
-/// Stable hash of an event's date + title + body for content-equivalence dedup.
-/// Unlike `EventId` which scopes by source + date + external_id, this hash is
-/// source-agnostic — it catches the same article ingested via two different
-/// sources on the same day, or the same file re-pushed by the user. It is
-/// scoped by `date` so a recurring/templated body (a daily digest, a newsletter
-/// with a constant subject) is NOT collapsed across days: an identical
-/// title+body observed on a different day is a distinct observation.
-///
-/// Returns `None` when the body has no non-whitespace text. Content-equivalence
-/// is established by the body, not the title: two distinct posts can share a
-/// headline, and a content-hash match drops one as a duplicate — a silent,
-/// irrecoverable loss in an accumulate-and-cite vault. Title-only items are left
-/// for the URL / event-id strategies to disambiguate.
-pub fn content_hash(date: jiff::civil::Date, title: &str, body: &str) -> Option<String> {
-    use std::fmt::Write as _;
-    // No substantive body → no content hash: a shared title alone is not evidence of
-    // content-equivalence, so the event is excluded from content-hash dedup.
-    body.split_whitespace().next()?;
-    // One normalized buffer: whitespace runs collapse to a single space (so trivial
-    // reformatting doesn't break the match) and `date` scopes the hash to its day.
-    let mut normalized = String::with_capacity(title.len() + body.len() + 16);
-    let _ = writeln!(normalized, "{date}");
-    push_whitespace_normalized(&mut normalized, title);
-    normalized.push('\n');
-    push_whitespace_normalized(&mut normalized, body);
-    Some(blake3::hash(normalized.as_bytes()).to_hex()[..16].to_string())
-}
-
-/// Append `text` with internal whitespace runs collapsed to one space and edges
-/// trimmed — applied identically on `record` and `dedup` so reformatting alone
-/// never changes the hash.
-fn push_whitespace_normalized(out: &mut String, text: &str) {
-    for (i, word) in text.split_whitespace().enumerate() {
-        if i > 0 {
-            out.push(' ');
-        }
-        out.push_str(word);
-    }
-}
-
 impl std::fmt::Display for EventId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
 }
 
-#[cfg(test)]
-mod content_hash_tests {
-    use super::content_hash;
-
-    #[test]
-    fn identical_content_same_day_collides() {
-        let d = jiff::civil::date(2026, 5, 23);
-        assert_eq!(
-            content_hash(d, "Daily digest", "all ok"),
-            content_hash(d, "Daily digest", "all ok")
-        );
-    }
-
-    #[test]
-    fn identical_content_different_day_is_distinct() {
-        // A templated/recurring body with an identical title+body on a different day
-        // is a distinct observation — it must NOT collapse to the same hash.
-        let a = content_hash(jiff::civil::date(2026, 5, 23), "Daily digest", "all ok");
-        let b = content_hash(jiff::civil::date(2026, 5, 24), "Daily digest", "all ok");
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn whitespace_reformatting_is_ignored() {
-        let d = jiff::civil::date(2026, 5, 23);
-        assert_eq!(
-            content_hash(d, "A  B", "x\n\ny"),
-            content_hash(d, "A B", "x y")
-        );
-    }
-
-    #[test]
-    fn empty_body_has_no_content_hash() {
-        // A shared title is not content-equivalence — an empty/whitespace body
-        // yields no hash so two distinct title-only items are never merged.
-        let d = jiff::civil::date(2026, 5, 23);
-        assert_eq!(content_hash(d, "Same headline", ""), None);
-        assert_eq!(content_hash(d, "Same headline", "   \n\t "), None);
-        assert!(content_hash(d, "Same headline", "real body").is_some());
-    }
-}
-
 /// Intermediate representation produced by source adapters before normalization.
 /// Each adapter maps its API response into one or more `RawItem`s, which
-/// `lk-pipeline::normalize` then converts into `Event`s (assigning date, id,
-/// content hash, etc.).
+/// `lk-pipeline::normalize` then converts into `Event`s (assigning date and id).
 #[derive(Debug, Clone)]
 pub struct RawItem {
     pub external_id: Option<String>,

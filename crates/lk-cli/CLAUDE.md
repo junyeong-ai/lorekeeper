@@ -15,15 +15,15 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
 - **`build_llm_client`** maps `llm.provider` to a client (`queue` or `noop`).
 - **`lore ingest`** owns the ingest phase flow and the exit code: any source/extract/pipeline
   failure (`had_failure`) or write/flush failure returns non-zero — including under
-  `--dry-run`. Dry-run uses `Pipeline::new_dry_run`, skips the tmp sweep, and does not
-  write the ingest log, so it leaves the vault untouched.
+  `--dry-run`. Dry-run plans normally but skips every vault write, the tmp sweep, and the
+  ingest log, so it leaves the vault untouched.
 - **`lore ingest` startup** sweeps stale `*.jsonl.tmp` (>1h) from crashed runs and
   warns if pending queue files exist (run `/lore-process` first to avoid duplicate
   LLM work).
-- **`lore maintenance`** prunes the ingest log, dedup cache, and drained `queue/processed/`
-  files past `maintenance.retention_days` (default 90); it must not overlap a running
-  `lore ingest` (redb single-writer). It never touches live `*.jsonl.tmp` — the ingest
-  startup sweep does.
+- **`lore maintenance`** prunes the ingest log, drained `queue/processed/` files, and the
+  streaming `events/{source}/{date}.jsonl` logs past `maintenance.retention_days` (default
+  90; event logs prune by the recorded day, parsed from the filename). It never touches
+  live `*.jsonl.tmp` — the ingest startup sweep does.
 - **`lore synthesis <period>`** rejects `--date`/`--year` together with `--previous`
   (clap `conflicts_with`), and flushes the LLM queue after writing its pages.
 - **`lore queue status`** (`commands/queue.rs`) is the authoritative stale-task guard:

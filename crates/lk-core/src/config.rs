@@ -30,8 +30,6 @@ pub struct Config {
     pub identity: Identity,
     pub sources: BTreeMap<String, SourceConfig>,
     #[serde(default)]
-    pub dedup: DedupConfig,
-    #[serde(default)]
     pub performance: PerformanceConfig,
     #[serde(default)]
     pub synthesis: SynthesisConfig,
@@ -160,29 +158,6 @@ impl Config {
                 "unsupported vault.locale: '{tag}' (supported: {})",
                 supported.join(", ")
             )));
-        }
-
-        if self.dedup.cascade.is_empty() {
-            return Err(ConfigError::Validation(
-                "dedup.cascade must contain at least one strategy".into(),
-            ));
-        }
-
-        for param in &self.dedup.extra_tracking_params {
-            // An entry is a literal key, optionally ending in a single `*` for a prefix
-            // match. Reject anything that leaves no literal prefix (blank, whitespace,
-            // bare `*`/`**` — which would strip EVERY query param and silently merge
-            // distinct resources) or that embeds a `*` mid-key (unsupported syntax that
-            // would never match and is almost certainly a mistake).
-            let trimmed = param.trim();
-            let prefix = trimmed.strip_suffix('*').unwrap_or(trimmed);
-            if prefix.is_empty() || prefix.contains('*') {
-                return Err(ConfigError::Validation(format!(
-                    "dedup.extra_tracking_params entry {param:?} is invalid: \
-                     give a key (optionally ending in a single `*` for a prefix), \
-                     not a bare/empty wildcard"
-                )));
-            }
         }
 
         if !(0.1..=5.0).contains(&self.graph.cluster.resolution) {
@@ -637,31 +612,25 @@ pub enum SourceType {
 }
 
 impl SourceType {
-    /// Whether a source's items can change *after* their date — so re-ingesting the
-    /// same day must re-render with the latest upstream state rather than dedup the
-    /// item away as already-seen.
-    ///
-    /// Jira issues change status/assignee and Calendar events move (scheduled→actual)
-    /// on the same day they were first seen; their `event-id` (issue key / event id)
-    /// is stable, so the `event-id` dedup stage would otherwise freeze the first
-    /// snapshot. Mutable sources therefore bypass dedup per-run — equivalent to a
-    /// scoped `--force`, so the daily scheduled job needs no blanket `--force`.
-    ///
-    /// This is NOT wasteful: the materialized-view re-render is structural only, the
-    /// LLM cache (BLAKE3 `llm_inputs`) still skips unchanged content, and an unchanged
-    /// page round-trips byte-identical. Only a genuine state change produces a diff.
-    ///
-    /// Append-only sources (mail, chat, RSS, drive, manual) keep full dedup: their
-    /// items don't mutate after publication, so re-seeing one is a true duplicate.
-    pub fn is_mutable(self) -> bool {
-        matches!(self, SourceType::Jira | SourceType::GoogleCalendar)
-    }
-
     pub fn events_heading(self, strings: &crate::i18n::Strings) -> &'static str {
         match self {
             SourceType::SlackChannel | SourceType::SlackSearch => strings.key_messages,
             _ => strings.key_events,
         }
+    }
+
+    /// Whether the source fetches a rolling, capped window that CANNOT completely
+    /// re-fetch a past day. An RSS feed drops old entries as new ones arrive, so an item
+    /// observed on day N is gone from the feed before a later run re-renders page N —
+    /// rendering from the fetch alone would silently lose it. Streaming sources therefore
+    /// project their daily pages from the per-date event log (accumulate, never deplete).
+    ///
+    /// Complete-refetch sources (Gmail/Jira/Calendar/Slack/Drive) reproduce their whole
+    /// window on demand via date-range queries, so they render directly from the fetch and
+    /// keep no log — there is nothing to accumulate. `Manual` is neither: it produces
+    /// document pages (one per inbox file), not a daily aggregation.
+    pub fn is_streaming(self) -> bool {
+        matches!(self, SourceType::Rss)
     }
 
     /// Default Jinja template filename for this source type. User overrides
@@ -689,43 +658,6 @@ impl std::fmt::Display for SourceType {
             .unwrap_or_else(|| format!("{self:?}"));
         f.write_str(&s)
     }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct DedupConfig {
-    pub cascade: Vec<DedupStrategy>,
-    /// Additional query-parameter keys to strip during URL canonicalisation, on top
-    /// of the built-in vendor-tracking set. For attribution parameters a site adds
-    /// that aren't yet built in — never resource-identifying keys, which would merge
-    /// distinct pages. Exact keys; a trailing `*` matches a prefix (e.g. `pk_*`).
-    pub extra_tracking_params: Vec<String>,
-}
-
-impl Default for DedupConfig {
-    fn default() -> Self {
-        Self {
-            // Exact-match stages only: a shared event-id, identical body content, or the
-            // same canonical URL each prove "same observation" exactly. Dedup is therefore
-            // lossless — it never collapses two distinct records, since a false merge would
-            // silently drop an observation that can never be recovered in an
-            // accumulate-and-cite vault.
-            cascade: vec![
-                DedupStrategy::EventId,
-                DedupStrategy::ContentHash,
-                DedupStrategy::Url,
-            ],
-            extra_tracking_params: Vec::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum DedupStrategy {
-    EventId,
-    ContentHash,
-    Url,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -930,15 +862,11 @@ pub struct ConceptCategory {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MaintenanceConfig {
-    /// Retention horizon (days) for `lore maintenance`: the ingest log, the dedup
-    /// cache, and drained `queue/processed/` files are pruned past this age.
-    ///
-    /// A duplicate's `seen_at` is refreshed on every re-arrival, so a steady-state
-    /// recurring item never ages out. But an item absent for longer than this window
-    /// is pruned, and a later re-arrival is then treated as novel (a fresh page + LLM
-    /// tasks). So this must exceed the longest expected silent gap between re-arrivals
-    /// of the same item: 90 days comfortably covers daily/weekly feeds and quarterly
-    /// recurrences; raise it for a source that can resurface less often.
+    /// Retention horizon (days) for `lore maintenance`: prunes the ingest log, drained
+    /// `queue/processed/` files, and per-date streaming event logs older than this.
+    /// User-facing pages are permanent — this only trims operational history. Dropping a
+    /// streaming source's long-past event log forfeits re-projecting that day, never live
+    /// data: the frozen page already holds its items.
     pub retention_days: i64,
 }
 
@@ -1128,24 +1056,6 @@ sources:
         assert!(config.validate().is_err(), "'..' segment must be rejected");
     }
 
-    fn config_with_extra_tracking(entries: &str) -> Config {
-        let yaml = format!(
-            r#"
-vault:
-  root: /tmp/vault
-identity:
-  name: test
-  email: test@test.com
-sources:
-  s1:
-    type: gmail
-dedup:
-  extra_tracking_params: {entries}
-"#
-        );
-        serde_yaml_ng::from_str(&yaml).unwrap()
-    }
-
     #[test]
     fn near_duplicate_threshold_default_catches_real_spelling_variants() {
         // 0.6 is deliberate: `vector-db` ~ `vector-database` scores exactly 0.6, and
@@ -1155,27 +1065,6 @@ dedup:
         assert_eq!(
             GraphMetricsConfig::default().concept_near_duplicate_threshold,
             0.6
-        );
-    }
-
-    #[test]
-    fn validate_rejects_bare_wildcard_tracking_param() {
-        // A bare `*` would strip every query param and silently merge distinct resources.
-        for bad in ["[\"*\"]", "[\"\"]", "[\"  \"]", "[\"**\"]", "[\"a*b\"]"] {
-            assert!(
-                config_with_extra_tracking(bad).validate().is_err(),
-                "extra_tracking_params {bad} must be rejected"
-            );
-        }
-    }
-
-    #[test]
-    fn validate_accepts_well_formed_tracking_params() {
-        // A literal key and a single trailing-`*` prefix are both valid.
-        assert!(
-            config_with_extra_tracking("[\"pk_campaign\", \"pk_*\"]")
-                .validate()
-                .is_ok()
         );
     }
 

@@ -18,12 +18,12 @@ maintenance run cannot race an active flush. Only `.jsonl` files matter to this 
 
 **Known limitation:** the tmp sweep is mtime-based, not PID-aware. If an ingest process
 is paused (SIGSTOP) for more than 1 hour, a later-starting ingest could delete its tmp;
-the paused ingest's flush then fails with ENOENT and that run's LLM tasks are lost. Pages
-written before the failure remain on disk and the affected events are NOT marked seen in
-dedup (the flush failure aborts before the dedup commit), so recovery is simply:
+the paused ingest's flush then fails with ENOENT and that run's LLM tasks are lost.
+Ingest is idempotent (pages are materialized views re-rendered from the source window),
+so recovery is simply re-running it:
 
 ```bash
-lore ingest --force      # re-extracts the same events, re-queues their tasks
+lore ingest              # re-renders the same pages, re-queues their tasks
 /lore-process            # drains the new queue file
 ```
 

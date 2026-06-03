@@ -26,8 +26,7 @@ an Obsidian vault. All commands accept `--config <path>` to override.
 | `lore validate` | Parse + validate config, print summary |
 | `lore ingest [source]` | Collect from one source (or all enabled), write pages, aggregate work-log |
 | `lore ingest --dry-run` | Preview without vault writes |
-| `lore ingest --date YYYY-MM-DD` | Backfill events for a specific date |
-| `lore ingest --force` | Skip dedup, re-process everything |
+| `lore ingest --date YYYY-MM-DD` | Re-materialize a specific day (backfill / repair) |
 | `lore synthesis weekly [--previous]` | Weekly synthesis + personal summary |
 | `lore synthesis monthly [--previous]` | Monthly performance summary |
 | `lore synthesis quarterly [--previous]` | Quarterly review with category stats |
@@ -36,7 +35,7 @@ an Obsidian vault. All commands accept `--config <path>` to override.
 | `lore health [--strict]` | Warn if any source is overdue vs its schedule (2 missed fires; 48h fallback) |
 | `lore performance` | Work category distribution |
 | `lore schedule [--bin <path>]` | Print crontab entries |
-| `lore maintenance` | Prune ingest log + dedup cache (>90d) |
+| `lore maintenance` | Prune ingest log + drained queue files (>90d) |
 
 ## Trigger mapping
 
@@ -108,6 +107,8 @@ concept pages, work-log topic synthesis), then `lore graph backlinks-sync` +
 
 ## Safety notes
 
-- Don't run if cron already scheduled (safe via dedup, but wasteful)
-- Don't run `lore maintenance` concurrently (redb file lock)
-- Don't `--force` casually (re-writes all pages)
+- Re-running is always safe — ingest is idempotent (pages are materialized views
+  re-rendered in full from the source window), so a duplicate run just reproduces
+  the same bytes. It's only wasteful, never corrupting.
+- `lore ingest --date <past>` re-materializes a specific day — the way to repair or
+  backfill a missing/edited daily page.

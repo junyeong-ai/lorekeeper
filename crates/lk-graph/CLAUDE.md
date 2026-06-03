@@ -88,7 +88,7 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
   literal. It is ALSO the SOLE owner of the frontmatter `source_count` (= number of
   incoming citations): ingest preserves the on-disk value across re-render (0 for a new
   page) and `backlinks-sync` re-derives the real count from the wikilink graph, so it
-  reflects source deletions and can never be inflated by a crash or `--force` re-ingest.
+  reflects source deletions and can never be inflated by a crash or an idempotent re-ingest.
   The `## Sources` body is the single source-of-truth for citations — concept
   frontmatter carries no `sources` array.
 - **`merge::merge_concepts`** (`lore graph merge <from> <into>`) folds a duplicate

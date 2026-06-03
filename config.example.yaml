@@ -231,8 +231,7 @@ sources:
   # Manual curation — drop files into the <vault>/inbox/ directory and they become
   # individual wiki/documents/{slug}.md document pages (LLM summary + concept extraction included).
   # HTML is run through the readability crate to extract the body, then converted to Markdown.
-  # content-hash dedup means the same file added twice is not registered twice.
-  # After processing, files move to inbox/archived/{date}/ (post-commit, safe).
+  # After processing, files move to inbox/archived/{date}/ (post-run, safe).
   manual-inbox:
     type: manual
     enabled: false
@@ -243,17 +242,6 @@ sources:
       archive_after_ingest: true  # auto-archive after processing (default true)
     labels: [knowledge]
     extract_concepts: true
-
-# ─── Deduplication ────────────────────────────────────────
-dedup:
-  # Exact-match stages: same event-id / identical body / same canonical URL. Each proves
-  # "same observation" exactly, so dedup is lossless — it never collapses two distinct
-  # records (recurring "Weekly Sync" notes stay separate observations).
-  cascade: [event-id, content-hash, url]
-  # Extra query keys to strip during URL canonicalisation, beyond the built-in tracking set
-  # (utm_*, fbclid, gclid, igshid, ref_src …). A trailing `*` is a prefix match (e.g. `pk_*`).
-  # Never add a resource-identifying key — distinct pages would be merged into one.
-  extra_tracking_params: []
 
 # ─── Performance tracking ─────────────────────────────────
 performance:
@@ -336,12 +324,12 @@ concepts:
 #     suggest_min_shared_neighbors: 2  # suggest-links floor: min shared neighbors per pair (cuts co-citation noise)
 
 # ─── Maintenance ──────────────────────────────────────────
-# Retention horizon for `lore maintenance` pruning (ingest log, dedup cache,
-# drained queue files). Fully optional — omit the block to use the default.
+# Retention horizon for `lore maintenance` pruning (ingest log + drained queue files +
+# streaming event logs).
+# Fully optional — omit the block to use the default.
 # maintenance:
-#   retention_days: 90               # must exceed the longest silent gap between
-#                                    # re-arrivals of the same item, or a slow-recurring
-#                                    # source re-emits as novel after the gap
+#   retention_days: 90               # how long pruned history (ingest log entries,
+#                                    # drained queue/processed files) is kept
 
 # ─── LLM ──────────────────────────────────────────────────
 # provider:

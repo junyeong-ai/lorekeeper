@@ -9,7 +9,7 @@ Autonomous daily ingest executor. Assumes no user present (scheduler
 fires on weekday mornings).
 
 Combines the `lore` binary + `/lore-process` skill:
-- **Refresh yesterday** — re-ingest so Calendar scheduled→actual and Jira status changes are captured. No `--force`: Calendar/Jira are *mutable* source types and re-render with latest state automatically (`SourceType::is_mutable`); append-only sources (mail/Slack/RSS) correctly dedup as already-seen, so nothing is needlessly rewritten.
+- **Refresh yesterday** — `lore ingest --date <yesterday>` so Calendar scheduled→actual and Jira status changes are captured. Every page is a materialized view re-rendered in full from the source window, so the refresh is idempotent: unchanged data reproduces the same bytes (and skips LLM work via the cache), only genuine changes produce a diff.
 - **Ingest today** — lookahead events (Calendar 24h) + overnight activity (Slack/Gmail/Jira)
 - **Drain queue** — `/lore-process` fills summaries, concepts, work-log topic synthesis
 - **Graph health (daily)** — `backlinks-sync` re-derives `## 출처` + `source_count` from real citations; `lore wiki index` rebuilds the catalog; `lore graph lint` (read-only) surfaces orphans/broken/near-duplicate/conflict/invalid-category/index-drift
@@ -26,7 +26,7 @@ The final assistant text message MUST be one of:
   counts. 5-10 lines.
 
 - **(B) Partial failure** — which steps succeeded, which sources
-  failed, recovery command (`lore ingest --force --date <date>`).
+  failed, recovery command (`lore ingest --date <date>`).
 
 Idle termination with tool calls only and no text = failure.
 
@@ -73,10 +73,9 @@ Skip if inbox is empty or has no binary files.
 lore ingest --date "$YESTERDAY"
 ```
 
-- `--date` scopes to one day
-- No `--force`: mutable source types (Jira/Calendar) re-render with the latest
-  upstream state on their own; append-only sources dedup as already-seen, so the
-  refresh updates exactly what changed and rewrites nothing else
+- `--date` scopes to one day and re-renders that day's pages in full from the
+  source window, so the refresh picks up Jira/Calendar state changes and updates
+  exactly what changed (unchanged content reproduces byte-identically)
 - Continue to step 3 even on failure (record partial failure)
 
 ### Step 3: Ingest today
@@ -87,8 +86,8 @@ lore ingest
 
 - All enabled sources (email-digest, my-schedule, my-tasks, team-slack)
 - Calendar `lookahead_hours: 24` captures today's upcoming events
-- Idempotent on same-day re-runs: mutable sources reflect latest state, append-only
-  sources dedup; the LLM cache skips unchanged content either way
+- Idempotent on same-day re-runs: every page re-renders in full from the source
+  window, and the LLM cache skips unchanged content
 
 ### Step 4: Drain LLM queue
 
@@ -137,16 +136,16 @@ Output (A) or (B) as defined in the output contract.
 ## Guards
 
 - No user questions — autonomous judgment only.
-- Steps 2 + 3 are idempotent without `--force`: mutable sources (Jira/Calendar)
-  re-render latest state, append-only sources dedup. Multiple runs per day never
-  duplicate and never needlessly rewrite unchanged pages.
+- Steps 2 + 3 are idempotent: every page is a materialized view re-rendered in full
+  from the source window, so multiple runs per day reproduce the same bytes and never
+  duplicate (the LLM cache also skips unchanged content).
 - No external communication (gh/SSH/etc.) after steps complete.
 - Turn budget 180s. On timeout, report results up to the last successful step.
 
 ## Failure recovery
 
 Every step is idempotent — safe to re-run on the same date:
-- Step 2/3: mutable sources re-render latest state, append-only sources dedup
+- Step 2/3: every page re-renders in full from the source window (same bytes on re-run)
 - Step 4 lore-process: section replace + concept merge are idempotent
 - Step 5 wiki index: deterministic full rebuild, re-run is a no-op; lint is read-only
 - Step 5 backlinks-sync: deterministic diff-based, re-run is a no-op
@@ -158,5 +157,5 @@ lore ingest
 # then invoke /lore-process
 ```
 
-`--force` (bypass dedup for ALL sources) remains available for the rare case of
-rebuilding append-only pages from scratch, but the daily job never needs it.
+To rebuild a specific day's pages (e.g. after deleting one), just
+`lore ingest --date <day>` — the page is re-projected from that day's event log.
