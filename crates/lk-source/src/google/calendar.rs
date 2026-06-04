@@ -392,6 +392,44 @@ mod tests {
     }
 
     #[test]
+    fn map_event_ownership_is_organizer_or_attendee_exact_match() {
+        let s = lk_core::i18n::Locale::En.strings();
+        let tz = jiff::tz::TimeZone::UTC;
+
+        // Organizer match alone confers ownership (no attendee list at all).
+        let organized = event_from(serde_json::json!({
+            "id": "ev-org",
+            "summary": "1:1",
+            "start": {"dateTime": "2026-05-23T09:00:00Z"},
+            "organizer": {"email": "Me@x.com"}
+        }));
+        let m = map_event(organized, "me@x.com", &tz, s).expect("maps");
+        assert!(m.item.is_self, "organizer match is ownership");
+
+        // Neither organizer nor attendee → not self, even when the identity appears
+        // in free-form text. Ownership is structured-field exact match only.
+        let unrelated = event_from(serde_json::json!({
+            "id": "ev-other",
+            "summary": "Mentions me@x.com in the title",
+            "start": {"dateTime": "2026-05-23T09:00:00Z"},
+            "organizer": {"email": "boss@x.com"},
+            "attendees": [{"email": "peer@x.com"}]
+        }));
+        let m = map_event(unrelated, "me@x.com", &tz, s).expect("maps");
+        assert!(!m.item.is_self, "text mention must never confer ownership");
+
+        // Empty configured identity never matches anything.
+        let any = event_from(serde_json::json!({
+            "id": "ev-any",
+            "summary": "Meeting",
+            "start": {"dateTime": "2026-05-23T09:00:00Z"},
+            "organizer": {"email": ""}
+        }));
+        let m = map_event(any, "", &tz, s).expect("maps");
+        assert!(!m.item.is_self, "empty identity must be a safe non-match");
+    }
+
+    #[test]
     fn map_event_all_day_resolves_to_tz_midnight() {
         let s = lk_core::i18n::Locale::En.strings();
         let tz = jiff::tz::TimeZone::get("Asia/Seoul").unwrap();

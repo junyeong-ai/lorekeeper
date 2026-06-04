@@ -53,8 +53,10 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
   `is_dirty()` returns false.
 - **`suggest_links`**: pairs in the same Louvain community with no edge that share at
   least `graph.cluster.suggest_min_shared_neighbors` neighbors (default 2), ranked by
-  shared-neighbor count. The floor suppresses co-citation noise — a single shared neighbor
-  usually means "co-cited by one daily page", not a real relationship. Read-only,
+  shared-neighbor count. It runs on the analysis scope (`graph.scope.dirs`, the wiki by
+  default), so daily/personal pages are never nodes or neighbors here — the floor
+  suppresses in-scope co-citation noise: a single shared neighbor usually means
+  "co-cited by one document/exploration page", not a real relationship. Read-only,
   deterministic.
 - **Mutations gated**: `index_drift::fix()`, `normalize::apply()`, and
   `backlinks::sync_concept_backlinks` touch the filesystem — the first two only
@@ -103,7 +105,7 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
   concept's `## Sources` + `source_count`. Near-dup *detection* (below) only reports
   candidates; this is the execution counterpart a human triggers.
 - **`## Related` is NOT machine-written.** Louvain communities encode
-  "co-cited together" (the graph is dominated by daily/document→concept edges), not
+  "co-cited together" (the in-scope graph is dominated by document/exploration→concept edges), not
   topical relatedness, so auto-writing community co-membership as `[[related]]` edges
   manufactures co-occurrence noise and self-reinforcing cliques. Related links are
   instead curated via `lore-wiki audit`: `suggest_links` proposes candidates and an

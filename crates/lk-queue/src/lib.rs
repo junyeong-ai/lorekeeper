@@ -373,3 +373,56 @@ pub trait LlmClient: Send + Sync {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn concept_req(existing: Vec<ExistingConceptRef>) -> ExtractConceptsRequest {
+        ExtractConceptsRequest {
+            text: "body".into(),
+            source_id: "s".into(),
+            source_type: SourceType::Rss,
+            date: jiff::civil::date(2026, 5, 23),
+            focus: None,
+            target: TaskTarget {
+                vault_path: "daily/s/2026-05-23.md".into(),
+                kind: TargetKind::DailyConcepts,
+                anchor: "## Concepts".into(),
+            },
+            existing_concepts: existing,
+            categories: vec![],
+        }
+    }
+
+    #[test]
+    fn existing_concepts_are_payload_only_and_sorted() {
+        let with = concept_req(vec![
+            ExistingConceptRef {
+                slug: "zeta".into(),
+                name: "Zeta".into(),
+            },
+            ExistingConceptRef {
+                slug: "alpha".into(),
+                name: "Alpha".into(),
+            },
+        ]);
+        let without = concept_req(vec![]);
+
+        // Registry hints never shape the cache identity: a growing concept registry
+        // must not invalidate unrelated extraction caches.
+        assert_eq!(with.cache_hash(), without.cache_hash());
+        assert!(with.cache_identity().get("existing_concepts").is_none());
+
+        // …but the skill payload carries them, sorted by slug so the queue file is
+        // byte-deterministic regardless of registry scan order.
+        let input = with.task_input();
+        let slugs: Vec<&str> = input["existing_concepts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["slug"].as_str().unwrap())
+            .collect();
+        assert_eq!(slugs, ["alpha", "zeta"]);
+    }
+}

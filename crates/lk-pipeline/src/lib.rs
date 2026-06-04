@@ -357,7 +357,7 @@ impl Pipeline {
             let refine_done_stamp =
                 llm_cache::stored_hash(existing.as_ref(), refine_completion_key);
 
-            let llm_inputs = render::LlmInputHashes {
+            let llm_inputs = render::DailyLlmInputHashes {
                 summary: &summary_decision.hash,
                 refine_events: &refine_decision.hash,
                 refine_events_done: refine_done_stamp,
@@ -365,7 +365,7 @@ impl Pipeline {
             };
 
             let fresh = render::render_daily_page(
-                &render::RenderContext {
+                &render::DailyRenderContext {
                     source_id,
                     source_type: config.source_type,
                     date: *date,

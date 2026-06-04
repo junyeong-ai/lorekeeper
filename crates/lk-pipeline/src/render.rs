@@ -31,7 +31,7 @@ pub struct RenderResult {
 /// Per-page LLM input hashes stamped into the rendered frontmatter. Subsequent
 /// re-ingests read these back to decide whether each LLM task is still necessary.
 /// `concepts` is optional because not every source extracts concepts.
-pub struct LlmInputHashes<'a> {
+pub struct DailyLlmInputHashes<'a> {
     pub summary: &'a str,
     /// Current-input hash for the event list — pre-stamped every render, exactly like
     /// `summary`, so it is always the stale-task reference point.
@@ -44,7 +44,7 @@ pub struct LlmInputHashes<'a> {
     pub concepts: Option<&'a str>,
 }
 
-pub struct RenderContext<'a> {
+pub struct DailyRenderContext<'a> {
     pub source_id: &'a str,
     pub source_type: SourceType,
     pub date: jiff::civil::Date,
@@ -57,15 +57,15 @@ pub struct RenderContext<'a> {
     /// e.g. a personal work-log feed) doesn't carry a permanently-empty section.
     pub extract_concepts: bool,
     pub locale: Locale,
-    pub llm_inputs: LlmInputHashes<'a>,
+    pub llm_inputs: DailyLlmInputHashes<'a>,
 }
 
 pub fn render_daily_page(
-    ctx: &RenderContext<'_>,
+    ctx: &DailyRenderContext<'_>,
     engine: &TemplateEngine,
     dirs: &VaultDirs,
 ) -> Result<RenderResult, PipelineError> {
-    let RenderContext {
+    let DailyRenderContext {
         source_id,
         source_type,
         date,

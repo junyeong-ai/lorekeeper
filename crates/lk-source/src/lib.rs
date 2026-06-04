@@ -7,8 +7,9 @@ pub(crate) mod retry;
 mod rss;
 mod slack;
 
-/// Move consumed manual-inbox files into `<inbox>/archived/{date}/` after the
-/// pipeline has written its pages on a fully successful run.
+/// Move consumed manual-inbox files into `<inbox>/archived/{date}/`. The CLI calls
+/// this only once a source's vault writes and the queue flush have succeeded, so a
+/// write/flush failure leaves the inbox intact for retry.
 pub use manual::archive_consumed_files;
 
 use std::sync::Arc;
@@ -49,6 +50,10 @@ pub struct ExtractContext {
     /// The configured user. Adapters compare their structured authorship fields
     /// against it to set `RawItem::is_self`.
     pub identity: lk_core::config::Identity,
+    /// Anchor for user-supplied relative filesystem paths in source params (the
+    /// manual source's `inbox_dir`). Resolving against it — never the process CWD —
+    /// keeps scheduled runs and interactive runs reading the same directories.
+    pub vault_root: std::path::PathBuf,
 }
 
 impl ExtractContext {
@@ -224,6 +229,7 @@ mod tests {
             timezone: jiff::tz::TimeZone::get(tz).unwrap(),
             locale: lk_core::i18n::Locale::default(),
             identity: lk_core::config::Identity::default(),
+            vault_root: std::path::PathBuf::new(),
         }
     }
 

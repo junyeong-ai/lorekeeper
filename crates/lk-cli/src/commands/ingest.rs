@@ -128,6 +128,7 @@ pub async fn run(
         timezone: tz,
         locale: config.vault.locale(),
         identity: config.identity.clone(),
+        vault_root: vault_root.clone(),
     };
 
     // Phase 1: Plan all sources (no vault writes yet).
@@ -357,15 +358,22 @@ pub async fn run(
         .unwrap_or_else(|e| tracing::warn!(error = %e, "ingest-log write failed"));
     }
 
-    // Phase 6: Archive consumed inbox files for manual sources. Runs only after a fully
-    // successful run, so files stay in the inbox for retry if any earlier phase failed.
+    // Phase 6: Archive consumed inbox files for manual sources. Reached only when every
+    // vault write succeeded (`!any_write_failed`) AND the queue flush above succeeded (a
+    // flush error `?`-returns before here) — by then the manual source's knowledge is
+    // durably materialized, so another source's fetch failure must not strand its inbox.
+    // Any write/flush failure leaves files in the inbox for safe retry.
     if !any_write_failed {
         for p in &planned {
             let sc = sources.iter().find(|(id, _)| id == &p.id).map(|(_, sc)| sc);
             if let Some(sc) = sc
                 && sc.source_type == lk_core::config::SourceType::Manual
-                && let Err(e) =
-                    lk_source::archive_consumed_files(&sc.params, &p.result.events, extract_target)
+                && let Err(e) = lk_source::archive_consumed_files(
+                    &sc.params,
+                    &p.result.events,
+                    extract_target,
+                    &vault_root,
+                )
             {
                 tracing::warn!(source = %p.id, error = %e, "manual archive failed");
             }

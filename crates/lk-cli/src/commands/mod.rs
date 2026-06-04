@@ -21,6 +21,18 @@ pub struct GlobalOptions {
 }
 
 pub fn find_config(opts: &GlobalOptions) -> miette::Result<PathBuf> {
+    let path = locate_config(opts)?;
+    // Canonicalize at this single I/O boundary so the returned path is always absolute
+    // (and symlink-resolved). `Config::load` resolves a relative `vault.root` against the
+    // config file's parent dir; an absolute parent makes the vault root — and every path
+    // derived from it, in every crate — independent of the process CWD by construction,
+    // so no downstream consumer has to reason about CWD. lk-core stays pure (no `current_dir`).
+    path.canonicalize()
+        .map_err(|e| miette::miette!("resolve config path {}: {e}", path.display()))
+}
+
+/// Locate the config file (possibly as a relative path); `find_config` absolutizes it.
+fn locate_config(opts: &GlobalOptions) -> miette::Result<PathBuf> {
     if let Some(p) = opts.config.as_ref() {
         if !p.exists() {
             return Err(miette::miette!("Config file not found: {}", p.display()));

@@ -75,14 +75,20 @@ map to `RawItem`.
     their warn-and-skip isolation. Extend new idempotent calls with the same helper.
 - **Manual source** (`manual.rs`): watches an inbox directory for user-dropped files
   (`.md`, `.txt`, `.markdown`, `.html`, `.htm` by default — NOT `.json`: there is no
-  JSON→Markdown renderer, and storing raw JSON as a document is meaningless). Files are
+  JSON→Markdown renderer, and storing raw JSON as a document is meaningless).
+  `inbox_dir` is resolved by `resolve_inbox_dir` — `~`/`~/…` expands to home, a relative
+  path anchors at `ExtractContext::vault_root` (never the process CWD, so cron and
+  interactive runs read the same inbox); extract and archive share the one resolution.
+  `validate_params` rejects an empty or `.`/`..` `inbox_dir` (it would resolve to the vault
+  root and the adapter would scan/archive vault pages). Files are
   read into `RawItem` with `external_id = "manual:{filename}:{blake3(body)[..8]}"` — the
   content fingerprint means a same-name file re-dropped with EDITED content on the same
   day is a distinct event; an unchanged re-drop keeps a stable id. Symlinks are rejected.
   Archive-after-ingest defaults to **true**, but archival is deferred to
-  `archive_consumed_files` (run only after a fully successful run), so a mid-pipeline failure
-  leaves the inbox intact for retry. It archives every scanned file (one event per file),
-  so nothing lingers in the inbox to be re-scanned next run.
+  `archive_consumed_files` (run only after every vault write and the queue flush
+  succeeded), so a write/flush failure leaves the inbox intact for retry. It archives
+  every scanned file (one event per file), so nothing lingers in the inbox to be
+  re-scanned next run.
 - `Source` has no `source_type()` accessor — the factory selects by the input enum.
 - `markdown` module normalizes rich text to Markdown, loss-aversely (unmapped constructs
   degrade to their text): `adf_to_markdown`, `html_to_markdown` (via `htmd`),

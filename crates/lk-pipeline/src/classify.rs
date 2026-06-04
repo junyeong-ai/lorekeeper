@@ -29,53 +29,11 @@ pub fn assign_personal(events: &mut [Event], track_personal: bool) {
     }
 }
 
-/// A character that can be part of the same keyword token as a matched needle —
-/// the standard `\w` word-character set: ASCII alphanumerics plus `_`. Hyphens,
-/// dots, and other punctuation are treated as token boundaries, so a keyword
-/// matches inside a compound: `AI` matches `AI-powered`, `GPT` matches `GPT-4`,
-/// `node` matches `node.js`. The original false positive this guards against
-/// (`AI` inside `FAIR`) is still rejected by the alphanumeric boundary alone.
-/// CJK scripts are deliberately NOT identifier characters: unlike space-delimited
-/// Latin text, agglutinative Korean writes content morphemes with no separator
-/// (the particle in "검토를"), so treating an adjacent Hangul syllable as "same
-/// token" would make every particle/affix suppress a real keyword match. Excluding
-/// CJK means a CJK keyword matches as a substring (correct for morpheme-joined
-/// text) while ASCII keeps strict token boundaries.
-fn is_identifier_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_'
-}
-
-/// Substring match that requires the needle to NOT be flanked by ASCII identifier
-/// characters on either side. Prevents the false positives a plain `contains`
-/// produces in Latin text — keyword "AI" matching "FAIR" — while a CJK needle (no
-/// ASCII boundary chars around it) matches as a substring, so Korean keywords
-/// match across attached particles ("검토" in "검토를", "재검토"). CJK has no word
-/// boundary to anchor against, so a short CJK keyword behaves like `contains` and also
-/// matches inside a larger compound ("검토" in "미검토") — configure CJK keywords
-/// specific enough that this is the intended grouping.
-fn contains_bounded(haystack: &str, needle: &str) -> bool {
-    if needle.is_empty() {
-        return false;
-    }
-    let mut from = 0;
-    while let Some(rel) = haystack[from..].find(needle) {
-        let start = from + rel;
-        let end = start + needle.len();
-        let before_ok = haystack[..start]
-            .chars()
-            .next_back()
-            .is_none_or(|c| !is_identifier_char(c));
-        let after_ok = haystack[end..]
-            .chars()
-            .next()
-            .is_none_or(|c| !is_identifier_char(c));
-        if before_ok && after_ok {
-            return true;
-        }
-        from = start + needle.chars().next().map_or(1, char::len_utf8);
-    }
-    false
-}
+// Keyword matching is single-sourced in `lk_core::text::contains_bounded` (standard
+// `\w` token boundary for Latin, substring semantics for CJK) — the SAME predicate
+// `Config::validate` uses to prove classify-rule reachability, so matching and
+// validation can never disagree about what a keyword matches.
+use lk_core::text::contains_bounded;
 
 pub fn classify_by_keywords(events: &mut [Event], rules: &[lk_core::config::ClassifyRule]) {
     if rules.is_empty() {

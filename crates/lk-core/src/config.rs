@@ -95,18 +95,23 @@ impl Config {
         }
 
         for (id, sc) in &self.sources {
+            // Earlier rules' lowercased keywords, for the reachability proof below.
+            let mut earlier: Vec<(&str, String)> = Vec::new();
             for rule in &sc.classify {
                 if rule.category.trim().is_empty() {
                     return Err(ConfigError::Validation(format!(
                         "sources.{id}.classify: rule has a blank category name"
                     )));
                 }
-                let non_blank: Vec<_> = rule
+                // Lowercased exactly as `classify_by_keywords` prepares them, so the
+                // reachability check below sees the same keywords matching will.
+                let lowered: Vec<String> = rule
                     .keywords
                     .iter()
                     .filter(|kw| !kw.trim().is_empty())
+                    .map(|kw| kw.to_lowercase())
                     .collect();
-                if non_blank.is_empty() {
+                if lowered.is_empty() {
                     return Err(ConfigError::Validation(format!(
                         "sources.{id}.classify: category '{}' has no non-blank keywords",
                         rule.category
@@ -124,6 +129,35 @@ impl Config {
                         rule.category
                     )));
                 }
+                // Reachability proof: rules are first-match-wins, so this rule is dead
+                // config iff every event it would match is claimed by an earlier rule.
+                // That holds whenever EVERY keyword bounded-contains some earlier rule's
+                // keyword (`contains_bounded` is transitive across containment — see its
+                // doc), e.g. an earlier `ai` shadows a later `ai ethics`. A sufficient
+                // condition only — a rule with one unshadowed keyword is reachable and
+                // passes — so this can never reject a working priority ordering. The fix
+                // is to put the more specific rule first, or delete the dead one.
+                let shadowed: Option<Vec<(&str, &(&str, String))>> = lowered
+                    .iter()
+                    .map(|kw| {
+                        earlier
+                            .iter()
+                            .find(|(_, prior)| crate::text::contains_bounded(kw, prior))
+                            .map(|hit| (kw.as_str(), hit))
+                    })
+                    .collect();
+                if let Some(hits) = shadowed
+                    && let Some((kw, (prior_cat, prior_kw))) = hits.first()
+                {
+                    return Err(ConfigError::Validation(format!(
+                        "sources.{id}.classify: rule '{}' is unreachable — every keyword is \
+                         already matched by an earlier rule (keyword '{kw}' is covered by rule \
+                         '{prior_cat}'s keyword '{prior_kw}'); put the more specific rule first \
+                         or remove it",
+                        rule.category
+                    )));
+                }
+                earlier.extend(lowered.into_iter().map(|kw| (rule.category.as_str(), kw)));
             }
         }
 
@@ -967,7 +1001,16 @@ impl Default for GraphClusterConfig {
     }
 }
 
-fn expand_tilde(path: &str) -> PathBuf {
+/// Expand `~` / a leading `~/` to the user's home directory. The single source
+/// for tilde expansion in user-supplied config paths (`vault.root`, the manual
+/// source's `inbox_dir`) — config values are written by humans in a shell
+/// mindset, but nothing else expands `~` for us.
+pub fn expand_tilde(path: &str) -> PathBuf {
+    if path == "~"
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return PathBuf::from(home);
+    }
     if let Some(rest) = path.strip_prefix("~/")
         && let Ok(home) = std::env::var("HOME")
     {
@@ -1040,6 +1083,13 @@ sources:
     fn expand_tilde_works() {
         let expanded = expand_tilde("~/Documents");
         assert!(!expanded.to_string_lossy().contains('~'));
+        // A bare `~` is the home directory itself — shell convention, and the
+        // `~/...` form's natural degenerate case.
+        if let Ok(home) = std::env::var("HOME") {
+            assert_eq!(expand_tilde("~"), PathBuf::from(home));
+        }
+        // `~` is only special as the whole first component.
+        assert_eq!(expand_tilde("a/~/b"), PathBuf::from("a/~/b"));
     }
 
     #[test]
@@ -1533,6 +1583,113 @@ sources:
         assert!(
             config.validate().is_err(),
             "classify rule with empty keywords must be rejected"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_unreachable_classify_rule() {
+        // First-match-wins: an earlier "ai" claims every event a later "AI ethics"
+        // would match (case-insensitive, bounded containment) — the later rule is
+        // provably dead config and must fail at load, not silently never fire.
+        let yaml = r#"
+vault:
+  root: /tmp/vault
+identity:
+  name: test
+  email: test@test.com
+sources:
+  s1:
+    type: gmail
+    classify:
+      - category: ai_topic
+        keywords: ["ai"]
+      - category: ethics
+        keywords: ["AI ethics"]
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("unreachable") && err.contains("ethics"),
+            "fully-shadowed rule must be rejected with the shadowing pair named: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_specific_rule_before_general() {
+        // The correct priority ordering — specific first, general after — must pass:
+        // "ai" alone (no "ethics") still reaches the second rule.
+        let yaml = r#"
+vault:
+  root: /tmp/vault
+identity:
+  name: test
+  email: test@test.com
+sources:
+  s1:
+    type: gmail
+    classify:
+      - category: ethics
+        keywords: ["ai ethics"]
+      - category: ai_topic
+        keywords: ["ai"]
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(
+            config.validate().is_ok(),
+            "specific-before-general ordering must be accepted"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_partially_overlapping_rule() {
+        // One keyword shadowed, one reachable → the rule still fires on "fairness"
+        // and must pass. The check is a sufficient condition only — it can never
+        // reject a rule that has any reachable keyword.
+        let yaml = r#"
+vault:
+  root: /tmp/vault
+identity:
+  name: test
+  email: test@test.com
+sources:
+  s1:
+    type: gmail
+    classify:
+      - category: ai_topic
+        keywords: ["ai"]
+      - category: ethics
+        keywords: ["ai ethics", "fairness"]
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(
+            config.validate().is_ok(),
+            "a rule with at least one unshadowed keyword is reachable"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_classify_rule_keywords() {
+        // An exact duplicate keyword in a later rule is the simplest shadow: the
+        // earlier rule always wins, so the later rule never fires.
+        let yaml = r#"
+vault:
+  root: /tmp/vault
+identity:
+  name: test
+  email: test@test.com
+sources:
+  s1:
+    type: gmail
+    classify:
+      - category: action_required
+        keywords: ["검토"]
+      - category: review_request
+        keywords: ["검토"]
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(
+            config.validate().is_err(),
+            "a later rule whose only keyword duplicates an earlier rule's must be rejected"
         );
     }
 

@@ -11,7 +11,11 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   `~/.config/lorekeeper/config.yaml` (XDG). The XDG path is what makes a binary-only install
   (no repo) work. There is no `config.example.yaml` fallback — running with the example's
   placeholder values silently is a footgun. A vault-relative config can't be auto-found
-  (the vault path lives *inside* the config).
+  (the vault path lives *inside* the config). It `canonicalize`s the located path at this
+  single I/O boundary, so the returned path is always absolute: `Config::load` then resolves
+  a relative `vault.root` against an absolute config dir, making `vault.root` — and every
+  path derived from it in every crate — CWD-independent by construction (lk-core needs no
+  `current_dir`).
 - **`build_llm_client`** maps `llm.provider` to a client (`queue` or `noop`).
 - **`lore ingest`** owns the ingest phase flow and the exit code: any source/extract/pipeline
   failure (`had_failure`) or write/flush failure returns non-zero — including under
