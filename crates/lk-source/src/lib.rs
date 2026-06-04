@@ -169,7 +169,9 @@ pub fn build_source(
         }
         SourceType::GoogleCalendar => {
             let auth = google_auth(creds, &http)?;
-            Ok(Box::new(google::calendar::GoogleCalendarSource::new(http, auth)))
+            Ok(Box::new(google::calendar::GoogleCalendarSource::new(
+                http, auth,
+            )))
         }
         SourceType::SlackChannel => {
             let token = slack_creds(creds)?

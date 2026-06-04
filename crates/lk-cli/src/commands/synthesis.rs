@@ -51,11 +51,12 @@ pub async fn run(opts: &super::GlobalOptions, period: Period) -> miette::Result<
         lk_pipeline::PipelineContext::new(opts.template_dir.as_deref(), llm.clone(), &config)
             .map_err(|e| miette::miette!("{e}"))?,
     );
-    let synth = lk_pipeline::Synthesizer::new(&vault_root, ctx, &config);
-    let writer = lk_vault::VaultWriter::new(&vault_root);
 
     let tz = config.vault.timezone();
     let today = jiff::Timestamp::now().to_zoned(tz).date();
+
+    let synth = lk_pipeline::Synthesizer::new(&vault_root, ctx, &config, today);
+    let writer = lk_vault::VaultWriter::new(&vault_root);
 
     // Plan every period's page upfront so all queue-mode LLM tasks land in the
     // buffer before ANY write happens. This decouples buffering from page writes:

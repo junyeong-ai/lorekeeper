@@ -56,6 +56,14 @@ pub struct IngestOptions {
     /// Anchor the fetch window and the kept-date filter to a specific day instead of
     /// today, for `lore ingest --date <past>` backfill / repair.
     pub target_date: Option<jiff::civil::Date>,
+    /// Wall-clock today in the vault timezone — the realized/forecast boundary, independent
+    /// of `target_date`. An event dated after `today` is a FORECAST (a calendar look-ahead
+    /// event that hasn't happened): the vault never materializes a page for it (`Pipeline::plan`
+    /// skips the date entirely), so a forecast becomes knowledge only once its date arrives.
+    /// The work-log gate (`render_work_log`) and the synthesis read cap
+    /// (`Synthesizer::read_date_range`) enforce the same boundary on the event- and
+    /// read-driven paths as defense in depth.
+    pub today: jiff::civil::Date,
     /// Preview only: plan normally (reading the event log to reflect what WOULD be
     /// written) but never mutate it, so a dry-run leaves the vault untouched.
     pub dry_run: bool,
@@ -182,6 +190,15 @@ impl Pipeline {
         let concepts_heading = strings.related_concepts;
 
         for (date, day_indices) in &by_date {
+            // A date after today is a FORECAST (a calendar look-ahead event that hasn't
+            // happened): it isn't knowledge yet, so the vault never materializes a page for
+            // it. The events already served their timezone-boundary purpose during fetch;
+            // skipping the date here means no page, no concepts, and therefore nothing any
+            // downstream consumer (work-log, synthesis, backlinks, orphans) can leak from a
+            // not-yet-real day. The normal ingest writes the page once the date becomes today.
+            if *date > options.today {
+                continue;
+            }
             let day_events: Vec<&Event> = day_indices.iter().map(|&i| &events[i]).collect();
             let combined: String = day_events
                 .iter()
@@ -442,17 +459,9 @@ impl Pipeline {
     pub async fn render_work_log(
         &self,
         personal_events: &[Event],
+        today: jiff::civil::Date,
     ) -> Result<Vec<RenderResult>, PipelineError> {
-        work_log::render_work_log(
-            personal_events,
-            &self.ctx.perf,
-            &self.ctx.engine,
-            &self.ctx.dirs,
-            self.ctx.locale,
-            &self.ctx.llm,
-            self.reader.as_ref(),
-        )
-        .await
+        work_log::render_work_log(personal_events, today, &self.ctx, self.reader.as_ref()).await
     }
 
     async fn plan_documents(

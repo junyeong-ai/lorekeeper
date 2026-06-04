@@ -67,6 +67,12 @@ fn make_ctx(config: &Config, llm: Arc<dyn LlmClient>) -> Arc<PipelineContext> {
     Arc::new(PipelineContext::new(None, llm, config).unwrap())
 }
 
+/// A `today` far enough ahead that no test event is a forecast, so the realized/forecast
+/// gate never fires in tests that don't deliberately exercise it.
+fn far_future() -> jiff::civil::Date {
+    jiff::civil::date(2099, 1, 1)
+}
+
 #[tokio::test]
 async fn concept_pages_written_with_merge() {
     let dir = TempDir::new().unwrap();
@@ -87,6 +93,7 @@ async fn concept_pages_written_with_merge() {
 
     let options = IngestOptions {
         target_date: None,
+        today: far_future(),
         dry_run: false,
     };
 
@@ -132,6 +139,7 @@ async fn concept_pages_written_with_merge() {
             items2,
             &IngestOptions {
                 target_date: None,
+                today: far_future(),
                 dry_run: false,
             },
         )
@@ -190,6 +198,7 @@ async fn timezone_affects_vault_date() {
             items,
             &IngestOptions {
                 target_date: None,
+                today: far_future(),
                 dry_run: false,
             },
         )
@@ -234,6 +243,7 @@ async fn target_date_filters_events() {
             items,
             &IngestOptions {
                 target_date: Some(jiff::civil::date(2026, 5, 23)),
+                today: far_future(),
                 dry_run: false,
             },
         )
@@ -268,6 +278,7 @@ async fn multi_date_events_produce_multiple_daily_pages() {
             items,
             &IngestOptions {
                 target_date: None,
+                today: far_future(),
                 dry_run: false,
             },
         )
@@ -309,6 +320,7 @@ async fn concept_accumulates_across_sources_in_one_run() {
     let ts: jiff::Timestamp = "2026-05-23T10:00:00Z".parse().unwrap();
     let opts = IngestOptions {
         target_date: None,
+        today: far_future(),
         dry_run: false,
     };
     for sid in ["test-source", "second-source"] {
@@ -366,6 +378,7 @@ async fn llm_failure_does_not_break_pipeline() {
             items,
             &IngestOptions {
                 target_date: None,
+                today: far_future(),
                 dry_run: false,
             },
         )
@@ -404,6 +417,7 @@ async fn write_failure_keeps_events_novel_for_retry() {
 
     let opts = IngestOptions {
         target_date: None,
+        today: far_future(),
         dry_run: false,
     };
 
@@ -470,6 +484,7 @@ async fn re_plan_reproduces_the_same_events_idempotently() {
     let items = || vec![raw_item("Subject", "Body", "M1", ts)];
     let opts = IngestOptions {
         target_date: None,
+        today: far_future(),
         dry_run: false,
     };
 
@@ -511,6 +526,7 @@ async fn intra_batch_duplicates_collapse_in_one_plan() {
     let other = raw_item("First", "Body", "M2", ts);
     let opts = IngestOptions {
         target_date: None,
+        today: far_future(),
         dry_run: false,
     };
 
@@ -538,6 +554,7 @@ async fn daily_page_accumulates_across_feed_depletion() {
     let ts: jiff::Timestamp = "2026-05-23T10:00:00Z".parse().unwrap();
     let opts = IngestOptions {
         target_date: None,
+        today: far_future(),
         dry_run: false,
     };
 
@@ -586,6 +603,7 @@ async fn dry_run_does_not_write_the_event_log() {
             vec![raw_item("A", "", "A", ts)],
             &IngestOptions {
                 target_date: None,
+                today: far_future(),
                 dry_run: true,
             },
         )
@@ -627,6 +645,7 @@ async fn queue_mode_emits_jsonl_tasks_with_targets() {
             items,
             &IngestOptions {
                 target_date: None,
+                today: far_future(),
                 dry_run: false,
             },
         )
@@ -694,7 +713,7 @@ async fn weekly_synthesis_is_opt_in_via_include_sources() {
     // Empty include_sources → the source is NOT swept into a cross-source themes page,
     // even though its daily page sits in range. Knowledge feeds stay out of the digest.
     let config = base_config(vault);
-    let synth = Synthesizer::new(vault, make_ctx(&config, llm.clone()), &config);
+    let synth = Synthesizer::new(vault, make_ctx(&config, llm.clone()), &config, far_future());
     assert!(
         synth
             .try_weekly_synthesis(jiff::civil::date(2026, 5, 23))
@@ -707,7 +726,7 @@ async fn weekly_synthesis_is_opt_in_via_include_sources() {
     // Listing the source opts it in → a themes page is produced.
     let mut config = base_config(vault);
     config.synthesis.weekly.include_sources = vec!["test-source".into()];
-    let synth = Synthesizer::new(vault, make_ctx(&config, llm), &config);
+    let synth = Synthesizer::new(vault, make_ctx(&config, llm), &config, far_future());
     assert!(
         synth
             .try_weekly_synthesis(jiff::civil::date(2026, 5, 23))
@@ -736,7 +755,7 @@ async fn performance_enabled_gates_review_narratives() {
 
     // performance.enabled: true → the personal weekly review is produced.
     let config = base_config(vault);
-    let synth = Synthesizer::new(vault, make_ctx(&config, llm.clone()), &config);
+    let synth = Synthesizer::new(vault, make_ctx(&config, llm.clone()), &config, far_future());
     assert!(
         synth
             .try_weekly_review(jiff::civil::date(2026, 5, 23))
@@ -749,7 +768,7 @@ async fn performance_enabled_gates_review_narratives() {
     // performance.enabled: false → no review, even though the work-log page exists.
     let mut config = base_config(vault);
     config.performance.enabled = false;
-    let synth = Synthesizer::new(vault, make_ctx(&config, llm), &config);
+    let synth = Synthesizer::new(vault, make_ctx(&config, llm), &config, far_future());
     assert!(
         synth
             .try_weekly_review(jiff::civil::date(2026, 5, 23))
@@ -757,6 +776,56 @@ async fn performance_enabled_gates_review_narratives() {
             .unwrap()
             .is_none(),
         "disabling performance must suppress personal reviews"
+    );
+}
+
+#[tokio::test]
+async fn synthesis_excludes_pages_dated_after_today() {
+    // Defense at the read boundary: a performance review must reflect only realized days,
+    // so a work-log page dated after `today` (a forecast day that hasn't happened) is never
+    // summed into a review — even if it somehow exists on disk.
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+
+    // The ONLY work-log page in the target ISO week (Mon 2026-05-18 .. Sun 2026-05-24) is
+    // dated Sunday 2026-05-24.
+    let work_log = vault.join("me").join(lk_core::vault_path::WORK_LOG_SUBDIR);
+    std::fs::create_dir_all(&work_log).unwrap();
+    std::fs::write(
+        work_log.join("2026-05-24.md"),
+        "---\nid: work-log-2026-05-24\ncategories: [project-delivery]\n---\n\n# Work\n\nbody\n",
+    )
+    .unwrap();
+
+    let llm: Arc<dyn LlmClient> = Arc::new(NoopLlmClient);
+    let config = base_config(vault);
+
+    // today = 2026-05-20: the 05-24 page is a forecast day, so the week has no realized
+    // work-log and the review produces nothing.
+    let synth = Synthesizer::new(
+        vault,
+        make_ctx(&config, llm.clone()),
+        &config,
+        jiff::civil::date(2026, 5, 20),
+    );
+    assert!(
+        synth
+            .try_weekly_review(jiff::civil::date(2026, 5, 23))
+            .await
+            .unwrap()
+            .is_none(),
+        "a work-log page dated after today must not feed a performance review"
+    );
+
+    // Once today has moved past that date the same page is realized and the review appears.
+    let synth = Synthesizer::new(vault, make_ctx(&config, llm), &config, far_future());
+    assert!(
+        synth
+            .try_weekly_review(jiff::civil::date(2026, 5, 23))
+            .await
+            .unwrap()
+            .is_some(),
+        "once realized, the same work-log page feeds the review"
     );
 }
 
@@ -782,7 +851,12 @@ async fn synthesis_page_is_a_materialized_view() {
 
     // First run: empty narrative + a queued task + llm_inputs.narrative hash stamped.
     let llm1: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
-    let synth1 = Synthesizer::new(vault, make_ctx(&config, llm1.clone()), &config);
+    let synth1 = Synthesizer::new(
+        vault,
+        make_ctx(&config, llm1.clone()),
+        &config,
+        far_future(),
+    );
     let out1 = synth1
         .try_weekly_review(week_date)
         .await
@@ -815,7 +889,12 @@ async fn synthesis_page_is_a_materialized_view() {
 
     // Second run, identical input: cache hit → no new task, narrative preserved.
     let llm2: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
-    let synth2 = Synthesizer::new(vault, make_ctx(&config, llm2.clone()), &config);
+    let synth2 = Synthesizer::new(
+        vault,
+        make_ctx(&config, llm2.clone()),
+        &config,
+        far_future(),
+    );
     let out2 = synth2
         .try_weekly_review(week_date)
         .await
@@ -875,7 +954,7 @@ async fn quarterly_review_includes_latest_unsummarized_month_via_weekly_fallback
 
     let llm: Arc<dyn LlmClient> =
         Arc::new(QueueLlmClient::new(vault.join(".lorekeeper").join("queue")));
-    let synth = Synthesizer::new(vault, make_ctx(&config, llm), &config);
+    let synth = Synthesizer::new(vault, make_ctx(&config, llm), &config, far_future());
     let out = synth
         .try_quarterly_review(2026, 2)
         .await
@@ -924,7 +1003,7 @@ async fn work_log_generation_is_gated_by_performance_enabled() {
     let pipeline = Pipeline::new(vault, make_ctx(&config, llm.clone()));
     assert!(
         !pipeline
-            .render_work_log(std::slice::from_ref(&event))
+            .render_work_log(std::slice::from_ref(&event), jiff::civil::date(2026, 6, 4))
             .await
             .unwrap()
             .is_empty(),
@@ -938,11 +1017,195 @@ async fn work_log_generation_is_gated_by_performance_enabled() {
     let pipeline = Pipeline::new(vault, make_ctx(&config, llm));
     assert!(
         pipeline
-            .render_work_log(std::slice::from_ref(&event))
+            .render_work_log(std::slice::from_ref(&event), jiff::civil::date(2026, 6, 4))
             .await
             .unwrap()
             .is_empty(),
         "disabling performance must suppress work-log generation"
+    );
+}
+
+#[tokio::test]
+async fn work_log_excludes_future_dated_contribution() {
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let today = jiff::civil::date(2026, 6, 4);
+
+    let make_event = |date: jiff::civil::Date, title: &str| lk_core::event::Event {
+        id: lk_core::event::EventId::new("my-schedule", date, title),
+        source_id: "my-schedule".into(),
+        source_type: SourceType::GoogleCalendar,
+        timestamp: jiff::Timestamp::UNIX_EPOCH,
+        date,
+        title: title.into(),
+        body: "details".into(),
+        url: None,
+        author: None,
+        labels: vec!["personal".into()],
+        category: None,
+        performance_category: None,
+        is_self: true,
+        is_personal: true,
+        metadata: serde_json::Value::Null,
+    };
+
+    let llm: Arc<dyn LlmClient> = Arc::new(NoopLlmClient);
+    let config = base_config(vault);
+    let pipeline = Pipeline::new(vault, make_ctx(&config, llm));
+
+    // A future-dated personal event (a calendar look-ahead meeting) is a commitment, not
+    // work performed — it must never produce a work-log page.
+    let future = make_event(jiff::civil::date(2026, 6, 5), "tomorrow's meeting");
+    assert!(
+        pipeline
+            .render_work_log(std::slice::from_ref(&future), today)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a future-dated event must not produce a work-log page"
+    );
+
+    // Mixed batch: only the date <= today entry yields a page; the future one is dropped.
+    let past = make_event(today, "today's standup");
+    let pages = pipeline
+        .render_work_log(&[past, future], today)
+        .await
+        .unwrap();
+    assert_eq!(
+        pages.len(),
+        1,
+        "only the non-future date produces a work-log"
+    );
+    assert!(
+        pages[0].path.to_string().contains("2026-06-04"),
+        "the produced page is for today, not the future date: {}",
+        pages[0].path
+    );
+}
+
+#[tokio::test]
+async fn gmail_daily_page_renders_category_highlights() {
+    // Gmail's daily page surfaces an email-triage highlight section for a curated set of
+    // categories ABOVE the full event list. A `classify` rule routes a matching event into
+    // a highlight bucket; the event must appear BOTH in its highlight section AND in the
+    // full Key Events list — the buckets are an additive highlight, never a replacement,
+    // so an event is never hidden by its category.
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let mut config = base_config(vault);
+    config.sources.get_mut("test-source").unwrap().classify = vec![lk_core::config::ClassifyRule {
+        category: "action_required".into(),
+        keywords: vec!["deadline".into()],
+        performance_category: None,
+    }];
+
+    let strings = config.vault.locale().strings();
+    let action_heading = strings.action_required;
+    let key_events_heading = strings.key_events;
+
+    let llm: Arc<dyn LlmClient> = Arc::new(NoopLlmClient);
+    let mut pipeline = Pipeline::new(vault, make_ctx(&config, llm));
+
+    let ts: jiff::Timestamp = "2026-05-23T10:00:00Z".parse().unwrap();
+    let result = pipeline
+        .plan(
+            "test-source",
+            config.sources.get("test-source").unwrap(),
+            vec![raw_item(
+                "Project deadline moved",
+                "Ship by Friday.",
+                "MSG-1",
+                ts,
+            )],
+            &IngestOptions {
+                target_date: None,
+                today: far_future(),
+                dry_run: false,
+            },
+        )
+        .await
+        .unwrap();
+
+    let content = result
+        .daily_pages
+        .first()
+        .map(|p| p.content.as_str())
+        .expect("gmail daily page rendered");
+
+    assert!(
+        content.contains(&format!("## {action_heading}")),
+        "the action_required highlight section must render for a Gmail page:\n{content}"
+    );
+    assert!(
+        content.contains("action_required: 1"),
+        "the frontmatter action_required count must reflect the one bucketed event:\n{content}"
+    );
+    assert!(
+        content.contains("Project deadline moved"),
+        "the bucketed event must appear in the highlight:\n{content}"
+    );
+    assert!(
+        content.contains(&format!("## {key_events_heading}")),
+        "the full Key Events list must always render regardless of category:\n{content}"
+    );
+}
+
+#[tokio::test]
+async fn forecast_date_is_not_materialized() {
+    // The vault is realized-only: an event dated after `today` is a calendar look-ahead
+    // FORECAST — not knowledge yet — so the pipeline materializes NO page, no concepts, and
+    // no citations for it. It becomes a page only once its date arrives. A realized event in
+    // the same batch is unaffected, so a forecast can never suppress real work.
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let config = base_config(vault); // test-source: Gmail, extract_concepts: true
+
+    // The mock WOULD return a concept for any extraction — proving the date skip, not the
+    // LLM, is what suppresses the forecast date.
+    let llm: Arc<dyn LlmClient> = Arc::new(MockLlmClient::with_concepts(vec![ExtractedConcept {
+        name: "Future Topic".into(),
+        category: None,
+    }]));
+    let mut pipeline = Pipeline::new(vault, make_ctx(&config, llm));
+
+    let today = jiff::civil::date(2026, 6, 4);
+    let realized_ts: jiff::Timestamp = "2026-06-04T09:00:00Z".parse().unwrap();
+    let forecast_ts: jiff::Timestamp = "2026-06-06T10:00:00Z".parse().unwrap(); // two days ahead
+    let result = pipeline
+        .plan(
+            "test-source",
+            config.sources.get("test-source").unwrap(),
+            vec![
+                raw_item("Today standup", "notes", "MSG-NOW", realized_ts),
+                raw_item(
+                    "Upcoming planning meeting",
+                    "agenda",
+                    "MSG-FUT",
+                    forecast_ts,
+                ),
+            ],
+            &IngestOptions {
+                target_date: None,
+                today,
+                dry_run: false,
+            },
+        )
+        .await
+        .unwrap();
+
+    // Exactly one daily page — today's. The forecast date is never materialized.
+    assert_eq!(
+        result.daily_pages.len(),
+        1,
+        "only the realized date produces a page; the forecast date is skipped"
+    );
+    assert!(
+        result.daily_pages[0]
+            .path
+            .to_string()
+            .contains("2026-06-04"),
+        "the produced page is today's, not the forecast date: {}",
+        result.daily_pages[0].path
     );
 }
 
@@ -1019,6 +1282,7 @@ mod materialized_view {
                     items.clone(),
                     &IngestOptions {
                         target_date: None,
+                        today: far_future(),
                         dry_run: false,
                     },
                 )
@@ -1060,6 +1324,7 @@ mod materialized_view {
                 items,
                 &IngestOptions {
                     target_date: None,
+                    today: far_future(),
                     dry_run: false,
                 },
             )
@@ -1106,6 +1371,7 @@ mod materialized_view {
                     initial,
                     &IngestOptions {
                         target_date: None,
+                        today: far_future(),
                         dry_run: false,
                     },
                 )
@@ -1133,6 +1399,7 @@ mod materialized_view {
                 changed,
                 &IngestOptions {
                     target_date: None,
+                    today: far_future(),
                     dry_run: false,
                 },
             )
@@ -1182,6 +1449,7 @@ mod materialized_view {
                     vec![raw_item("Event A", "Body A", "E1", ts)],
                     &IngestOptions {
                         target_date: None,
+                        today: far_future(),
                         dry_run: false,
                     },
                 )
@@ -1208,6 +1476,7 @@ mod materialized_view {
                     ],
                     &IngestOptions {
                         target_date: None,
+                        today: far_future(),
                         dry_run: false,
                     },
                 )
@@ -1277,6 +1546,7 @@ mod materialized_view {
                     items.clone(),
                     &IngestOptions {
                         target_date: None,
+                        today: far_future(),
                         dry_run: false,
                     },
                 )
@@ -1306,6 +1576,7 @@ mod materialized_view {
                 items,
                 &IngestOptions {
                     target_date: None,
+                    today: far_future(),
                     dry_run: false,
                 },
             )
@@ -1410,6 +1681,7 @@ mod materialized_view {
                     items.clone(),
                     &IngestOptions {
                         target_date: None,
+                        today: far_future(),
                         dry_run: false,
                     },
                 )
@@ -1443,6 +1715,7 @@ mod materialized_view {
                 items,
                 &IngestOptions {
                     target_date: None,
+                    today: far_future(),
                     dry_run: false,
                 },
             )
@@ -1493,6 +1766,7 @@ mod materialized_view {
                     items.clone(),
                     &IngestOptions {
                         target_date: None,
+                        today: far_future(),
                         dry_run: false,
                     },
                 )
@@ -1528,6 +1802,7 @@ mod materialized_view {
                 items,
                 &IngestOptions {
                     target_date: None,
+                    today: far_future(),
                     dry_run: false,
                 },
             )
@@ -1567,6 +1842,7 @@ mod materialized_view {
                     items,
                     &IngestOptions {
                         target_date: None,
+                        today: far_future(),
                         dry_run: false,
                     },
                 )
@@ -1673,6 +1949,7 @@ mod materialized_view {
                     items.clone(),
                     &IngestOptions {
                         target_date: None,
+                        today: far_future(),
                         dry_run: false,
                     },
                 )
@@ -1722,6 +1999,7 @@ mod materialized_view {
                 items,
                 &IngestOptions {
                     target_date: None,
+                    today: far_future(),
                     dry_run: false,
                 },
             )

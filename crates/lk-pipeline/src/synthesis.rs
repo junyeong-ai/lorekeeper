@@ -17,6 +17,11 @@ pub struct Synthesizer {
     ctx: Arc<PipelineContext>,
     reader: Arc<dyn VaultStore>,
     sources: Vec<String>,
+    /// Realized/forecast boundary (wall-clock today, vault tz). Synthesis never reads a
+    /// page dated after today, so a review or theme run mid-period reflects only the days
+    /// that have actually happened — a forecast schedule-preview page can never inflate a
+    /// performance review or a weekly digest.
+    today: jiff::civil::Date,
 }
 
 /// Outcome of resolving a synthesis page's LLM-owned section.
@@ -59,7 +64,12 @@ impl SynthesisSection {
 }
 
 impl Synthesizer {
-    pub fn new(vault_root: &Path, ctx: Arc<PipelineContext>, config: &Config) -> Self {
+    pub fn new(
+        vault_root: &Path,
+        ctx: Arc<PipelineContext>,
+        config: &Config,
+        today: jiff::civil::Date,
+    ) -> Self {
         let reader: Arc<dyn VaultStore> = Arc::new(FsVault::new(vault_root));
         // Cross-source weekly themes are opt-in: only the sources explicitly listed in
         // `synthesis.weekly.include_sources` are rolled up. Knowledge feeds (news, RSS)
@@ -71,6 +81,7 @@ impl Synthesizer {
             ctx,
             reader,
             sources,
+            today,
         }
     }
 
@@ -685,6 +696,10 @@ impl Synthesizer {
         start: jiff::civil::Date,
         end: jiff::civil::Date,
     ) -> Result<Vec<VaultPage>, PipelineError> {
+        // Synthesis reflects realized time only: never read a page dated after today, so a
+        // review or theme run mid-period excludes forecast days that haven't happened. This
+        // is the single read boundary for every synthesis path (themes and all reviews).
+        let end = end.min(self.today);
         let mut pages = Vec::new();
         let mut date = start;
         while date <= end {

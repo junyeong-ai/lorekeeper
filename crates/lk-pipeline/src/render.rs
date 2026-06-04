@@ -122,13 +122,7 @@ pub fn render_daily_page(
         llm_inputs_json.insert(completion_key.to_string(), done.into());
     }
 
-    let action_items = filter_by_category(events, "action_required");
-    let decision_items = filter_by_category(events, "decisions");
-    let project_items = filter_by_category(events, "project_updates");
-    let knowledge_items = filter_by_category(events, "knowledge_sharing");
-    let meeting_items = filter_by_category(events, "meeting_followup");
-
-    let context = serde_json::json!({
+    let mut context = serde_json::json!({
         "date": date.to_string(),
         "source_id": source_id,
         "labels": labels,
@@ -137,14 +131,46 @@ pub fn render_daily_page(
         "concepts": concepts,
         "extract_concepts": extract_concepts,
         "i18n": strings,
-        "action_count": action_items.len(),
-        "action_required_items": action_items,
-        "decision_items": decision_items,
-        "project_items": project_items,
-        "knowledge_items": knowledge_items,
-        "meeting_items": meeting_items,
         (field::LLM_INPUTS): llm_inputs_json,
     });
+
+    // Gmail's daily page adds an email-triage highlight view: dedicated sections for a
+    // fixed, curated set of email categories surfaced ABOVE the full event list. Every
+    // event still renders under Key Events regardless of category, so a category outside
+    // this set is never hidden — the buckets are an email-only highlight, not the event
+    // list. Because only the Gmail template reads them, they are computed only for Gmail;
+    // every other source type renders straight from `events` and never pays for filters
+    // its template never reads.
+    if source_type == SourceType::Gmail {
+        let action_items = filter_by_category(events, "action_required");
+        let obj = context
+            .as_object_mut()
+            .expect("daily render context is a json object");
+        obj.insert(
+            "action_count".into(),
+            serde_json::Value::from(action_items.len()),
+        );
+        obj.insert(
+            "action_required_items".into(),
+            serde_json::Value::Array(action_items),
+        );
+        obj.insert(
+            "decision_items".into(),
+            serde_json::Value::Array(filter_by_category(events, "decisions")),
+        );
+        obj.insert(
+            "project_items".into(),
+            serde_json::Value::Array(filter_by_category(events, "project_updates")),
+        );
+        obj.insert(
+            "knowledge_items".into(),
+            serde_json::Value::Array(filter_by_category(events, "knowledge_sharing")),
+        );
+        obj.insert(
+            "meeting_items".into(),
+            serde_json::Value::Array(filter_by_category(events, "meeting_followup")),
+        );
+    }
 
     let source_template = format!("{source_id}.md.jinja");
     let type_template = source_type.default_template_name();

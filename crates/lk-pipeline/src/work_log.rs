@@ -1,36 +1,45 @@
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::Arc;
 
-use lk_core::config::{PerformanceConfig, VaultDirs};
+use lk_core::config::PerformanceConfig;
 use lk_core::event::Event;
 use lk_core::frontmatter::field;
 use lk_core::i18n::Locale;
 use lk_core::vault_path::VaultPath;
-use lk_queue::{LlmClient, SummarizeRequest, TargetKind, TaskTarget};
-use lk_vault::{TemplateEngine, VaultStore};
+use lk_queue::{SummarizeRequest, TargetKind, TaskTarget};
+use lk_vault::VaultStore;
 
+use crate::PipelineContext;
 use crate::PipelineError;
 use crate::llm_cache::{self, SectionDecision};
 use crate::render::{RenderResult, llm_inputs_map, splice_preserved_sections};
 
 pub async fn render_work_log(
     events: &[Event],
-    perf: &PerformanceConfig,
-    engine: &TemplateEngine,
-    dirs: &VaultDirs,
-    locale: Locale,
-    llm: &Arc<dyn LlmClient>,
+    today: jiff::civil::Date,
+    ctx: &PipelineContext,
     reader: &dyn VaultStore,
 ) -> Result<Vec<RenderResult>, PipelineError> {
+    let perf = &ctx.perf;
+    let locale = ctx.locale;
+
     // The work-log is the performance subsystem; `performance.enabled` gates it at the
     // mechanism boundary so no caller can produce one while the subsystem is off.
     if !perf.enabled || events.is_empty() {
         return Ok(vec![]);
     }
 
+    // The work-log records PERFORMED contribution, so it is strictly backward-looking:
+    // an event dated after `today` is a not-yet-occurred commitment (a calendar
+    // look-ahead event, say), never work done. The work-log is event-driven (it never
+    // goes through the daily-page render that already drops forecast dates), so it owns
+    // this temporal gate itself — no caller can leak a future contribution into a
+    // work-log page or a performance review.
     let mut by_date: BTreeMap<jiff::civil::Date, Vec<Event>> = BTreeMap::new();
     for event in events {
+        if event.date > today {
+            continue;
+        }
         by_date.entry(event.date).or_default().push(event.clone());
     }
 
@@ -51,7 +60,7 @@ pub async fn render_work_log(
         };
         let categories: Vec<String> = groups.iter().map(|g| g.category.clone()).collect();
 
-        let path = VaultPath::work_log(dirs, date);
+        let path = VaultPath::work_log(&ctx.dirs, date);
         let vault_path = path.to_string();
 
         let synthesis_input: String = day_events
@@ -86,7 +95,7 @@ pub async fn render_work_log(
         );
 
         if decision.enqueue() {
-            match llm.summarize(req).await {
+            match ctx.llm.summarize(req).await {
                 Ok(_) => {}
                 Err(e) if e.is_fatal() => return Err(PipelineError::Llm(e)),
                 Err(e) => {
@@ -103,13 +112,14 @@ pub async fn render_work_log(
             "date": date.to_string(),
             "categories": categories,
             "sources": sources,
-            "daily_dir": dirs.daily,
+            "daily_dir": ctx.dirs.daily,
             "i18n": locale.strings(),
             (field::LLM_INPUTS): llm_inputs_map(&[(kind, Some(&hash))]),
         });
 
         // The work-log template is embedded, so it always resolves.
-        let fresh = engine
+        let fresh = ctx
+            .engine
             .render("work-log.md.jinja", &context)
             .map_err(|e| PipelineError::Render(e.to_string()))?;
 

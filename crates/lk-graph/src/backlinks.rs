@@ -131,9 +131,19 @@ pub fn sync_concept_backlinks(
         // `source_count` frontmatter is re-derived here too (ingest preserves the
         // on-disk value but never computes it): the authoritative count is the number
         // of incoming citations, the same set that drives the `## Sources` body.
+        // The page was read successfully above; a frontmatter that won't parse here is
+        // real corruption, and this branch is about to REWRITE the page — silently
+        // treating the count as 0 would reset a valid count from a transient parse glitch.
+        // A simply-absent `source_count` field is the legitimate new-page case → 0.
         let existing_count = frontmatter::parse_page(&raw)
-            .ok()
-            .and_then(|p| p.frontmatter.source_count())
+            .map_err(|e| {
+                GraphError::Io(format!(
+                    "failed to parse frontmatter of {}: {e}",
+                    full_path.display()
+                ))
+            })?
+            .frontmatter
+            .source_count()
             .unwrap_or(0);
         let desired_count = sources.len() as u64;
 

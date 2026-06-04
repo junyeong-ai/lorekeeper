@@ -89,6 +89,7 @@ pub async fn run(
     let log = lk_vault::IngestLog::new(vault_root.join(".lorekeeper").join("ingest.jsonl"));
     let options = lk_pipeline::IngestOptions {
         target_date,
+        today,
         dry_run,
     };
 
@@ -265,17 +266,21 @@ pub async fn run(
         if any_write_failed {
             break;
         }
-        for e in &p.result.events {
-            if e.is_personal {
-                all_personal.push(e.clone());
-            }
-        }
-        if !all_personal.is_empty() {
-            eprintln!(
-                "  personal items for {}: {}",
-                p.id,
-                p.result.events.iter().filter(|e| e.is_personal).count()
-            );
+        // Only realized personal contribution feeds the work-log; a forecast (calendar
+        // look-ahead) commitment is not work done, so it is neither collected nor counted.
+        // `render_work_log` re-asserts this as the subsystem invariant, but gating here
+        // keeps the run summary honest and avoids passing events it would only drop.
+        let before = all_personal.len();
+        all_personal.extend(
+            p.result
+                .events
+                .iter()
+                .filter(|e| e.is_personal && e.date <= today)
+                .cloned(),
+        );
+        let added = all_personal.len() - before;
+        if added > 0 {
+            eprintln!("  personal items for {}: {added}", p.id);
         }
     }
 
@@ -302,7 +307,7 @@ pub async fn run(
     // track_personal, which only flags personal events on their daily pages.
     if !any_write_failed && !all_personal.is_empty() {
         let work_logs = pipeline
-            .render_work_log(&all_personal)
+            .render_work_log(&all_personal, today)
             .await
             .map_err(|e| miette::miette!("work-log: {e}"))?;
         for wl in &work_logs {
