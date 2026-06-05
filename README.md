@@ -114,7 +114,10 @@ Claude Code Skills        Semantic Plane             (same vault)
 | `lore graph lint` | Structural health: orphans, broken links, hubs, invalid categories, near-duplicates, alias conflicts, unresolved conflicts, index drift |
 | `lore graph suggest-links` | Community-based cross-reference suggestions |
 | `lore graph cluster` | Topic communities via Louvain modularity |
+| `lore graph export [--with-clusters]` | Export the full node-link graph as JSON (optionally with community assignments) |
 | `lore graph backlinks-sync` | Re-derive each concept's `## Sources` + `source_count` from the wikilink graph (resolves `[[alias]]` citations to the canonical concept) |
+| `lore graph index-sync [--fix]` | Check `wiki/index.md` against disk pages; `--fix` adds missing entries |
+| `lore graph normalize [--fix]` | Check slug normalization; `--fix` renames files and updates wikilinks |
 | `lore graph merge <from> <into>` | Fold a duplicate concept into a canonical one (rewires wikilinks, deletes `from`) |
 | `lore graph stale --days N` | Report pages that are old AND no longer cited by recent activity (dormant, not just old) |
 | `lore graph audit-candidates` | Concepts whose source set changed since their last contradiction audit |
