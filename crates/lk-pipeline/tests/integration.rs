@@ -1009,7 +1009,7 @@ async fn work_log_generation_is_gated_by_performance_enabled() {
             .is_empty(),
         "work-log should be produced when performance is enabled"
     );
-    drop(pipeline); // release the single-writer dedup lock before reopening
+    drop(pipeline); // one Pipeline owns one ingest run; finish it before reopening
 
     // Disabled → no work-log at the mechanism boundary, regardless of caller.
     let mut config = base_config(vault);
@@ -1348,6 +1348,88 @@ mod materialized_view {
             "refined events preserved"
         );
         assert!(page.contains("REAL-CONCEPT-WIKILINK"), "concepts preserved");
+    }
+
+    #[tokio::test]
+    async fn work_log_topic_synthesis_is_a_materialized_view() {
+        // The work-log's topic section follows the same cache discipline as a daily
+        // page: an unchanged personal-event set re-renders the page WITHOUT enqueueing
+        // a new synthesis task, and the skill-authored topic body survives the
+        // re-render. Daily and synthesis pages already pin this; the work-log is the
+        // third page family with an LLM-owned section.
+        let dir = TempDir::new().unwrap();
+        let vault = dir.path();
+        let config = base_config(vault);
+        let today = jiff::civil::date(2026, 6, 4);
+        let topic_heading = config.vault.locale().strings().topic_summary;
+
+        let event = lk_core::event::Event {
+            id: lk_core::event::EventId::new("test-source", jiff::civil::date(2026, 5, 20), "x"),
+            source_id: "test-source".into(),
+            source_type: SourceType::Gmail,
+            timestamp: jiff::Timestamp::UNIX_EPOCH,
+            date: jiff::civil::date(2026, 5, 20),
+            title: "did a thing".into(),
+            body: "details".into(),
+            url: None,
+            author: None,
+            labels: vec!["personal".into()],
+            category: None,
+            performance_category: None,
+            is_self: true,
+            is_personal: true,
+            metadata: serde_json::Value::Null,
+        };
+
+        let queue_dir = vault.join(".lorekeeper").join("queue");
+
+        // First run: the topic-synthesis task is enqueued and the rendered page
+        // pre-stamps the current input hash.
+        let llm1: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
+        let pages1 = {
+            let pipeline = Pipeline::new(vault, make_ctx(&config, llm1.clone()));
+            pipeline
+                .render_work_log(std::slice::from_ref(&event), today)
+                .await
+                .unwrap()
+        };
+        assert_eq!(pages1.len(), 1, "one work-log page for the event's date");
+        llm1.flush().await.unwrap();
+        assert!(
+            queue_task_kinds_for_source(&queue_dir).contains("summarize"),
+            "first run enqueues the topic synthesis"
+        );
+
+        // Persist the page and simulate `/lore-process` filling the topic section.
+        let abs = vault.join(pages1[0].path.as_ref());
+        tokio::fs::create_dir_all(abs.parent().unwrap())
+            .await
+            .unwrap();
+        let filled =
+            lk_vault::replace_section(&pages1[0].content, topic_heading, "REAL-TOPIC-BODY");
+        tokio::fs::write(&abs, filled).await.unwrap();
+        clear_queue_dir(&queue_dir).await;
+
+        // Second run, same events: cache hit — nothing enqueued, body preserved.
+        let llm2: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
+        let pages2 = {
+            let pipeline = Pipeline::new(vault, make_ctx(&config, llm2.clone()));
+            pipeline
+                .render_work_log(std::slice::from_ref(&event), today)
+                .await
+                .unwrap()
+        };
+        llm2.flush().await.unwrap();
+        let kinds = queue_task_kinds_for_source(&queue_dir);
+        assert!(
+            kinds.is_empty(),
+            "an unchanged event set must not re-enqueue the topic synthesis; got {kinds:?}"
+        );
+        assert!(
+            pages2[0].content.contains("REAL-TOPIC-BODY"),
+            "the skill-authored topic body must survive the re-render:\n{}",
+            pages2[0].content
+        );
     }
 
     #[tokio::test]

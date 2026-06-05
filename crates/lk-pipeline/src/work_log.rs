@@ -176,3 +176,81 @@ fn group_by_category(
     groups.retain(|g| g.count > 0);
     groups
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lk_core::config::SourceType;
+    use lk_core::event::{Event, EventId};
+
+    fn event(performance_category: Option<&str>) -> Event {
+        let date = jiff::civil::date(2026, 6, 1);
+        Event {
+            id: EventId::new("my-tasks", date, "x"),
+            source_id: "my-tasks".into(),
+            source_type: SourceType::Jira,
+            timestamp: jiff::Timestamp::UNIX_EPOCH,
+            date,
+            title: "t".into(),
+            body: "b".into(),
+            url: None,
+            author: None,
+            labels: vec![],
+            category: None,
+            performance_category: performance_category.map(Into::into),
+            is_self: true,
+            is_personal: true,
+            metadata: serde_json::Value::Null,
+        }
+    }
+
+    fn perf(categories: &[&str]) -> PerformanceConfig {
+        PerformanceConfig {
+            enabled: true,
+            performance_categories: categories.iter().map(|c| (*c).to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn group_by_category_buckets_in_config_order_and_drops_empty_groups() {
+        let perf = perf(&["project-delivery", "innovation", "team-contribution"]);
+        let events = vec![
+            event(Some("project-delivery")),
+            event(Some("project-delivery")),
+            event(Some("innovation")),
+        ];
+        let groups = group_by_category(&events, &perf, Locale::En);
+        let view: Vec<(&str, usize)> = groups
+            .iter()
+            .map(|g| (g.category.as_str(), g.count))
+            .collect();
+        // Configured order is preserved; `team-contribution` (count 0) and the
+        // uncategorized bucket (count 0) are dropped, never rendered as empty sections.
+        assert_eq!(view, [("project-delivery", 2), ("innovation", 1)]);
+    }
+
+    #[test]
+    fn group_by_category_routes_unresolved_events_to_the_uncategorized_bucket() {
+        // No explicit performance_category and no source/type mapping → the event
+        // still counts, under the locale's uncategorized label — work is never
+        // silently dropped from the work-log because classification didn't fire.
+        let perf = perf(&["project-delivery"]);
+        let groups = group_by_category(&[event(None)], &perf, Locale::En);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].category, Locale::En.strings().uncategorized);
+        assert_eq!(groups[0].count, 1);
+    }
+
+    #[test]
+    fn group_by_category_never_invents_a_bucket_for_an_unconfigured_category() {
+        // A classify rule carrying a performance_category outside the configured
+        // list must not mint a new bucket — the event lands in uncategorized, so the
+        // work-log's section vocabulary stays exactly `performance.performance_categories`.
+        let perf = perf(&["project-delivery"]);
+        let groups = group_by_category(&[event(Some("not-configured"))], &perf, Locale::En);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].category, Locale::En.strings().uncategorized);
+        assert_eq!(groups[0].count, 1);
+    }
+}

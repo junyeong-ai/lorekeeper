@@ -315,3 +315,57 @@ fn filter_by_category(events: &[&Event], category: &str) -> Vec<serde_json::Valu
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cached(body: &str) -> SectionDecision {
+        SectionDecision {
+            hash: "h".into(),
+            cached: true,
+            preserved_body: Some(body.into()),
+        }
+    }
+
+    fn uncached() -> SectionDecision {
+        SectionDecision {
+            hash: "h".into(),
+            cached: false,
+            preserved_body: None,
+        }
+    }
+
+    #[test]
+    fn splice_writes_cached_bodies_and_leaves_uncached_sections_for_the_queue() {
+        let fresh = "# Page\n\n## Summary\n\n## Concepts\n\n".to_string();
+        let summary = cached("A preserved summary body.");
+        let concepts = uncached();
+        let out =
+            splice_preserved_sections(fresh, [("Summary", &summary), ("Concepts", &concepts)])
+                .expect("every cached heading exists in the fresh render");
+        assert!(
+            out.contains("A preserved summary body."),
+            "cached body must be written over the empty section:\n{out}"
+        );
+        assert_eq!(
+            section_body(&out, "Concepts").map(str::trim),
+            Some(""),
+            "an uncached section must stay empty for the queue processor to fill:\n{out}"
+        );
+    }
+
+    #[test]
+    fn splice_refuses_when_a_cached_heading_is_missing_from_the_render() {
+        // A custom `--template-dir` or a locale switch renamed `## Summary` in the
+        // fresh render. Emitting it would drop the preserved LLM body, so the splice
+        // must return `None` — the caller keeps the previous on-disk page and a later
+        // run re-enqueues the section under the new heading.
+        let fresh = "# Page\n\n## Daily Overview\n\n".to_string();
+        let summary = cached("Body that must not be lost.");
+        assert!(
+            splice_preserved_sections(fresh, [("Summary", &summary)]).is_none(),
+            "a missing heading must refuse the splice rather than drop the body"
+        );
+    }
+}
