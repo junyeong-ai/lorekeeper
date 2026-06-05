@@ -116,7 +116,7 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
   are pure functions over `&[ConceptPage]` — `graph lint` walks the concepts dir a single
   time, not once per check. A page with malformed frontmatter still yields one (slug from file
   stem, no category, empty body) so slug-only checks see it while content checks skip it.
-- **`concept_lint::invalid_categories`**: surfaces concept pages whose `category`
+- **`concept_lint::find_invalid_categories`**: surfaces concept pages whose `category`
   frontmatter value is not in `config.concepts.categories[].id`. The ingest
   pipeline strips invalid categories synchronously, but queue-mode concept
   page creation is done by `/lore-process` which can emit a category the
@@ -125,7 +125,7 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
   list (categorisation off) suppresses every finding. Pages without a
   `category` field are not flagged — that is the documented uncategorised
   state.
-- **`concept_lint::near_duplicate_concepts`**: reports concept-slug pairs whose
+- **`concept_lint::find_near_duplicate_concepts`**: reports concept-slug pairs whose
   Sørensen-Dice similarity (on separator-stripped slugs) ≥
   `graph.metrics.concept_near_duplicate_threshold` (default 0.6) — variant-spelling
   duplicates (`vector-db` ~ `vector-database` = 0.6) the LLM dedup hint missed. Digit-boundary
@@ -135,7 +135,7 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
   via a **character-bigram inverted index** (only slugs sharing a bigram are scored), so the
   scan is near-linear, not O(n²), as the vault grows — safe because Sørensen-Dice > 0 implies
   a shared bigram. Read-only merge candidates surfaced in `graph lint`; a human decides.
-- **`concept_lint::unresolved_conflicts`**: reports concept pages whose body carries an
+- **`concept_lint::find_unresolved_conflicts`**: reports concept pages whose body carries an
   unresolved `> [!conflict]` callout — a contradiction `/lore-wiki audit` flagged
   between cited sources. The marker lives in the LLM-owned synthesis body (NOT
   frontmatter, which ingest re-render regenerates from the template), so it survives

@@ -724,7 +724,7 @@ fn filter_valid_concepts(
 ) -> Vec<ExtractedConcept> {
     let valid_cat_ids: Vec<&str> = categories.iter().map(|c| c.id.as_str()).collect();
     raw.into_iter()
-        .filter(concept_draft::is_valid)
+        .filter(concept_draft::has_valid_slug)
         .map(|mut ec| {
             if let Some(ref cat) = ec.category
                 && !valid_cat_ids.contains(&cat.as_str())

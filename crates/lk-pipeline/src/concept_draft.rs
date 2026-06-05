@@ -277,7 +277,7 @@ fn warn_category_conflict(slug: &str, established: Option<&str>, incoming: Optio
 
 /// Filter that callers use to drop concepts whose slug would be empty before threading
 /// them into rendered output. Keeps daily-page wiki links honest.
-pub fn is_valid(concept: &ExtractedConcept) -> bool {
+pub fn has_valid_slug(concept: &ExtractedConcept) -> bool {
     slugify(&concept.name).is_some()
 }
 

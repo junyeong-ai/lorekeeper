@@ -129,7 +129,7 @@ pub fn scan_concept_pages(
 /// Pages without a `category` field are not flagged — leaving the field unset is the
 /// documented way to mark a concept as uncategorised. When `configured` is empty, the
 /// categorisation feature is off and nothing is flagged.
-pub fn invalid_categories(
+pub fn find_invalid_categories(
     pages: &[ConceptPage],
     configured: &[ConceptCategory],
 ) -> Vec<InvalidCategoryConcept> {
@@ -170,7 +170,10 @@ pub struct NearDuplicateConcept {
 /// below 1.0 — exact duplicates can't co-exist as separate files). These are
 /// candidate merges: a variant spelling that fragments the concept graph. Read-only;
 /// the lint reports, a human decides. `threshold` outside `(0, 1]` yields nothing.
-pub fn near_duplicate_concepts(pages: &[ConceptPage], threshold: f64) -> Vec<NearDuplicateConcept> {
+pub fn find_near_duplicate_concepts(
+    pages: &[ConceptPage],
+    threshold: f64,
+) -> Vec<NearDuplicateConcept> {
     if !(0.0..=1.0).contains(&threshold) || threshold == 0.0 {
         return Vec::new();
     }
@@ -390,7 +393,7 @@ fn parse_conflict_callout(line: &str) -> Option<&str> {
 /// is fence-aware (a callout quoted inside a code block is content, not a live marker)
 /// and reports each page once, keyed on the first marker's title. Read-only; the lint
 /// reports, a human resolves the contradiction and deletes the callout to clear it.
-pub fn unresolved_conflicts(pages: &[ConceptPage]) -> Vec<UnresolvedConflict> {
+pub fn find_unresolved_conflicts(pages: &[ConceptPage]) -> Vec<UnresolvedConflict> {
     pages
         .iter()
         .filter_map(|page| {
@@ -475,27 +478,28 @@ mod tests {
     fn empty_config_means_no_findings_regardless_of_pages() {
         let tmp = TempDir::new().unwrap();
         write_concept(tmp.path(), "x", "id: x\ncategory: anything");
-        assert!(invalid_categories(&scan(tmp.path()), &[]).is_empty());
+        assert!(find_invalid_categories(&scan(tmp.path()), &[]).is_empty());
     }
 
     #[test]
     fn missing_concepts_dir_is_not_an_error() {
         let tmp = TempDir::new().unwrap();
-        assert!(invalid_categories(&scan(tmp.path()), &cats(&["ai-ml"])).is_empty());
+        assert!(find_invalid_categories(&scan(tmp.path()), &cats(&["ai-ml"])).is_empty());
     }
 
     #[test]
     fn valid_category_is_silent() {
         let tmp = TempDir::new().unwrap();
         write_concept(tmp.path(), "x", "id: x\ncategory: ai-ml");
-        assert!(invalid_categories(&scan(tmp.path()), &cats(&["ai-ml"])).is_empty());
+        assert!(find_invalid_categories(&scan(tmp.path()), &cats(&["ai-ml"])).is_empty());
     }
 
     #[test]
     fn unknown_category_is_flagged() {
         let tmp = TempDir::new().unwrap();
         write_concept(tmp.path(), "x", "id: x\ncategory: security");
-        let result = invalid_categories(&scan(tmp.path()), &cats(&["ai-ml", "infrastructure"]));
+        let result =
+            find_invalid_categories(&scan(tmp.path()), &cats(&["ai-ml", "infrastructure"]));
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].slug, "x");
         assert_eq!(result[0].category, "security");
@@ -506,14 +510,14 @@ mod tests {
         // Omitting the field is the documented way to mark a concept as uncategorised.
         let tmp = TempDir::new().unwrap();
         write_concept(tmp.path(), "x", "id: x");
-        assert!(invalid_categories(&scan(tmp.path()), &cats(&["ai-ml"])).is_empty());
+        assert!(find_invalid_categories(&scan(tmp.path()), &cats(&["ai-ml"])).is_empty());
     }
 
     #[test]
     fn falls_back_to_filename_when_id_missing() {
         let tmp = TempDir::new().unwrap();
         write_concept(tmp.path(), "fallback-slug", "category: nope");
-        let result = invalid_categories(&scan(tmp.path()), &cats(&["ai-ml"]));
+        let result = find_invalid_categories(&scan(tmp.path()), &cats(&["ai-ml"]));
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].slug, "fallback-slug");
     }
@@ -524,7 +528,7 @@ mod tests {
         write_concept(tmp.path(), "zeta", "id: zeta\ncategory: bogus");
         write_concept(tmp.path(), "alpha", "id: alpha\ncategory: bogus");
         write_concept(tmp.path(), "mu", "id: mu\ncategory: bogus");
-        let result = invalid_categories(&scan(tmp.path()), &cats(&["ai-ml"]));
+        let result = find_invalid_categories(&scan(tmp.path()), &cats(&["ai-ml"]));
         let slugs: Vec<&str> = result.iter().map(|f| f.slug.as_str()).collect();
         assert_eq!(slugs, vec!["alpha", "mu", "zeta"]);
     }
@@ -535,7 +539,7 @@ mod tests {
         write_concept(tmp.path(), "vector-database", "id: vector-database");
         write_concept(tmp.path(), "vector-db", "id: vector-db");
         write_concept(tmp.path(), "kubernetes", "id: kubernetes");
-        let result = near_duplicate_concepts(&scan(tmp.path()), 0.6);
+        let result = find_near_duplicate_concepts(&scan(tmp.path()), 0.6);
         assert!(
             result
                 .iter()
@@ -558,7 +562,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write_concept(tmp.path(), "a i", "id: a i");
         write_concept(tmp.path(), "ai", "id: ai");
-        let result = near_duplicate_concepts(&scan(tmp.path()), 0.6);
+        let result = find_near_duplicate_concepts(&scan(tmp.path()), 0.6);
         assert!(
             result
                 .iter()
@@ -586,7 +590,7 @@ mod tests {
         ] {
             write_concept(tmp.path(), slug, &format!("id: {slug}"));
         }
-        let result = near_duplicate_concepts(&scan(tmp.path()), 0.6);
+        let result = find_near_duplicate_concepts(&scan(tmp.path()), 0.6);
         assert_eq!(
             result.len(),
             1,
@@ -603,7 +607,7 @@ mod tests {
         write_concept(tmp.path(), "gpt-4o", "id: gpt-4o");
         write_concept(tmp.path(), "claude-3", "id: claude-3");
         write_concept(tmp.path(), "claude-3-5", "id: claude-3-5");
-        let result = near_duplicate_concepts(&scan(tmp.path()), 0.6);
+        let result = find_near_duplicate_concepts(&scan(tmp.path()), 0.6);
         assert!(
             result.is_empty(),
             "model version variants are distinct concepts, not duplicates: {result:?}"
@@ -622,7 +626,7 @@ mod tests {
         write_concept(tmp.path(), "claude-4", "id: claude-4");
         write_concept(tmp.path(), "llama-2", "id: llama-2");
         write_concept(tmp.path(), "llama-3", "id: llama-3");
-        let result = near_duplicate_concepts(&scan(tmp.path()), 0.6);
+        let result = find_near_duplicate_concepts(&scan(tmp.path()), 0.6);
         assert!(
             result.is_empty(),
             "sibling model generations must not be flagged as duplicates: {result:?}"
@@ -677,7 +681,7 @@ mod tests {
             "rag",
             "id: rag\n---\n\n## 핵심\n\n> [!conflict] sources disagree on chunk size\n\nbody",
         );
-        let result = unresolved_conflicts(&scan(tmp.path()));
+        let result = find_unresolved_conflicts(&scan(tmp.path()));
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].slug, "rag");
         assert_eq!(result[0].note, "sources disagree on chunk size");
@@ -694,7 +698,7 @@ mod tests {
             "b",
             "id: b\n---\n\n```\n> [!conflict] this is an example\n```\n",
         );
-        let result = unresolved_conflicts(&scan(tmp.path()));
+        let result = find_unresolved_conflicts(&scan(tmp.path()));
         assert!(result.is_empty(), "false positives: {result:?}");
     }
 
@@ -719,8 +723,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write_concept(tmp.path(), "vector-database", "id: vector-database");
         write_concept(tmp.path(), "vector-db", "id: vector-db");
-        assert!(near_duplicate_concepts(&scan(tmp.path()), 0.0).is_empty());
+        assert!(find_near_duplicate_concepts(&scan(tmp.path()), 0.0).is_empty());
         let empty = TempDir::new().unwrap();
-        assert!(near_duplicate_concepts(&scan(empty.path()), 0.85).is_empty());
+        assert!(find_near_duplicate_concepts(&scan(empty.path()), 0.85).is_empty());
     }
 }

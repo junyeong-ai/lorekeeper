@@ -1,6 +1,6 @@
 //! Concept merge: fold a duplicate concept page into a canonical one.
 //!
-//! `near_duplicate_concepts` (in `concepts`) only *reports* variant-spelling
+//! `find_near_duplicate_concepts` (in `concepts`) only *reports* variant-spelling
 //! duplicates (`vector-db` ~ `vector-database`); this module is the execution
 //! counterpart that resolves one. It rewrites every wikilink that targets the
 //! `from` concept so it points at `into`, then deletes the now-orphaned `from`

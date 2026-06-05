@@ -226,12 +226,12 @@ fn run_inner(
             let concept_pages = concept_lint::scan_concept_pages(&rc.root, &rc.vault_dirs.wiki)
                 .map_err(|e| format!("{e}"))?;
             let invalid_categories =
-                concept_lint::invalid_categories(&concept_pages, &rc.concept_categories);
-            let near_duplicate_concepts = concept_lint::near_duplicate_concepts(
+                concept_lint::find_invalid_categories(&concept_pages, &rc.concept_categories);
+            let near_duplicate_concepts = concept_lint::find_near_duplicate_concepts(
                 &concept_pages,
                 rc.graph.metrics.concept_near_duplicate_threshold,
             );
-            let unresolved_conflicts = concept_lint::unresolved_conflicts(&concept_pages);
+            let unresolved_conflicts = concept_lint::find_unresolved_conflicts(&concept_pages);
             // Alias conflicts read the scanned pages (which carry `aliases`), not the
             // concept-lint page set — the two declaration failures a silent first-wins
             // alias resolution would otherwise hide.

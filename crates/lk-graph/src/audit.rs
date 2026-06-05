@@ -1,6 +1,6 @@
 //! Contradiction-audit worklist for concept pages.
 //!
-//! `concept_lint::unresolved_conflicts` *tracks* contradictions a human already
+//! `concept_lint::find_unresolved_conflicts` *tracks* contradictions a human already
 //! flagged with a `> [!conflict]` callout, but nothing *surfaces* the concepts that
 //! warrant a fresh look. A concept cited by two or more independent sources can carry
 //! conflicting claims; once that source set changes, it deserves another audit.
