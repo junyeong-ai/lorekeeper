@@ -383,7 +383,7 @@ fn run_inner(
             let report = output::NormalizeReport {
                 renames: renames
                     .iter()
-                    .map(|r| output::RenameEntry {
+                    .map(|r| output::RenameSuggestion {
                         from: r.old_slug.clone(),
                         to: r.new_slug.clone(),
                     })

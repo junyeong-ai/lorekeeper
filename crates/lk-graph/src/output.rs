@@ -7,13 +7,13 @@ use crate::backlinks::{BacklinksSyncResult, ConceptUpdate};
 use crate::cluster::{ClusterResult, LinkSuggestion};
 use crate::concept_lint::{InvalidCategoryConcept, NearDuplicateConcept, UnresolvedConflict};
 use crate::export::GraphExport;
-use crate::graph::{BrokenLink, HubEntry};
+use crate::graph::{BrokenLink, HubPageRef};
 use crate::merge::MergeResult;
 use crate::stale::{PageKind, StalePage};
 
 #[derive(Debug, Serialize)]
 pub struct HubsReport {
-    pub hubs: Vec<HubEntry>,
+    pub hubs: Vec<HubPageRef>,
 }
 
 #[derive(Debug, Serialize)]
@@ -38,13 +38,13 @@ pub struct IndexSyncReport {
 
 #[derive(Debug, Serialize)]
 pub struct NormalizeReport {
-    pub renames: Vec<RenameEntry>,
+    pub renames: Vec<RenameSuggestion>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub applied: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
-pub struct RenameEntry {
+pub struct RenameSuggestion {
     pub from: String,
     pub to: String,
 }
@@ -60,7 +60,7 @@ pub struct LintReport {
     pub pages: usize,
     pub wikilinks: usize,
     pub components: usize,
-    pub hubs: Vec<HubEntry>,
+    pub hubs: Vec<HubPageRef>,
     pub orphans: Vec<String>,
     pub broken: Vec<BrokenLink>,
     pub index: IndexSyncReport,

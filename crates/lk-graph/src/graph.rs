@@ -33,7 +33,7 @@ pub struct BrokenLink {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct HubEntry {
+pub struct HubPageRef {
     pub id: String,
     pub title: String,
     pub degree: usize,
@@ -202,14 +202,14 @@ impl WikiGraph {
         petgraph::algo::connected_components(&self.graph)
     }
 
-    pub fn hubs(&self, top: usize, min_degree: usize) -> Vec<HubEntry> {
-        let mut entries: Vec<HubEntry> = self
+    pub fn hubs(&self, top: usize, min_degree: usize) -> Vec<HubPageRef> {
+        let mut entries: Vec<HubPageRef> = self
             .id_to_node
             .iter()
             .map(|(id, &idx)| {
                 let out = self.graph.edges_directed(idx, Direction::Outgoing).count();
                 let inc = self.graph.edges_directed(idx, Direction::Incoming).count();
-                HubEntry {
+                HubPageRef {
                     id: id.clone(),
                     title: self.graph[idx].title.clone(),
                     degree: out + inc,
