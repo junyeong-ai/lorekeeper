@@ -96,9 +96,10 @@ extracted:               # per-document tracking (written by run)
 ```
 
 One source can feed several documents and several sources can fold into
-one (theme-driven extraction, not 1:1). When the mapping is many-to-many,
-record it with a `coverage_note` on the affected `extracted` entries rather
-than forcing a single `source`/`vault_page` pair.
+one (theme-driven extraction, not 1:1). When several fold into one, record
+`extracted[].source` as a LIST of the verbatim source paths (each still
+filesystem-checkable for re-scan diffing) plus a `coverage_note` — never a
+synthetic label like `"a + b"`, which would look deleted on the next scan.
 
 ## Phase 1: Scan
 
@@ -195,6 +196,7 @@ Extract knowledge using the manifest. Requires a prior scan.
       | Learning `[PROMOTES:]` | → Transferable Patterns |
       | Rule invariants | → Key Findings |
       | Spec problem statement | → Background & Constraints |
+      | Guide / CLAUDE.md / code doc-comment | → context to Background & Constraints, invariants/rules to Key Findings, reusable design to Transferable Patterns |
 
    e. **Generalise** using manifest `strip_patterns` — applied to the BODY prose only,
       not to `id`/slug (the page id is `{project}-{slug}`, so the project name necessarily
@@ -232,10 +234,13 @@ Extract knowledge using the manifest. Requires a prior scan.
       matching against the registry loaded in step 3, with the concepts already
       created earlier in this run as the created-this-run set (a batch
       processes many documents, so that set is what closes same-run gaps).
-      New concept → fill the Synthesis section. `## Sources` / `source_count`
+      New concept → fill the Synthesis section, emit `## Related` empty
+      (human/audit-curated, never machine-written). `## Sources` / `source_count`
       stay machine-owned (see the shared reference); the Finalize
       `backlinks-sync` re-derives both from the document's forward
-      `[[wikilink]]` (step g), the single source of truth.
+      `[[wikilink]]` (step g), the single source of truth. If no configured
+      category fits a transferable concept, omit the `category` field (leave it
+      uncategorized) rather than forcing a wrong one.
 
    i. **Update manifest** `extracted` list with the new entry.
 

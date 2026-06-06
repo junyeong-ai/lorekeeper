@@ -110,7 +110,9 @@ inspecting pages.
    against false positives.
 3. **Contradictions** — run `lore graph --json audit-candidates` for the
    worklist: concepts with 2+ sources AND a source set that changed since their last
-   audit (the `audited_sources_hash` marker). Work it one page at a time
+   audit (the `audited_sources_hash` marker). It exits non-zero when the worklist is
+   non-empty — read the JSON `data`, not the exit code (don't wrap it in `set -e`).
+   Work it one page at a time
    (avoids combinatorial blow-up). For each, read its cited sources and only flag
    a genuine, unambiguous contradiction (two sources asserting incompatible facts)
    — never a difference in emphasis or a gap; uncertainty means do not flag. When
@@ -165,7 +167,7 @@ inspecting pages.
 Quick vault stats.
 
 - Total concept pages, explorations, daily pages.
-- Last ingest time (read `.lorekeeper/ingest.jsonl`).
+- Last ingest time (read `<vault>/.lorekeeper/ingest.jsonl` — vault-relative; resolve the vault root from `lore validate` first).
 - Any pending queue files.
 
 ## When NOT to invoke

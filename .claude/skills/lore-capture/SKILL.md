@@ -92,7 +92,9 @@ section yourself, including the ones marked `machine` (`## Content`, the
 related-concepts section). The only exception is each concept's `## Sources`
 + `source_count`, which `backlinks-sync` re-derives in step 6 (leave empty).
 Omit the `llm_inputs` frontmatter block entirely — it belongs to the
-pipeline cache, not to directly-authored pages.
+pipeline cache, not to directly-authored pages. An in-the-moment capture has
+no originating file or URL, so omit `source_file`/`source_url` too (set them
+only when the insight came from a concrete file or link you can cite).
 
 Link the relevant concepts as `[[wikilink]]`s in the document's
 related-concepts section (heading from AGENTS.md) — these forward links are
