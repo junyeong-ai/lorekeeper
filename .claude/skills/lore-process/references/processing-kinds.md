@@ -113,9 +113,11 @@ tags: ["{category-id}"]
 ---
 ```
 
-Do NOT add any keys beyond those listed above. Leave the `## Sources` body
-EMPTY and `source_count: 0` at write time — both are machine-owned (see the
-shared dedup reference).
+Do NOT add any keys beyond those listed above. Emit all three body sections in
+the AGENTS.md concept format: `## Synthesis` (you fill — see below), `## Sources`
+(leave EMPTY), and `## Related` (leave EMPTY). `## Sources` and `source_count: 0`
+are machine-owned (see the shared dedup reference); `## Related` is human/audit-
+curated and never machine-written, so emit the heading with no bullets.
 
 **When creating a new concept page**, fill the Synthesis section (heading
 from AGENTS.md) with a 1-2 sentence definition/context of the concept based
