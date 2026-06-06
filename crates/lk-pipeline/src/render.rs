@@ -36,15 +36,17 @@ pub struct DailyLlmInputHashes<'a> {
     /// Current-input hash for the event list — pre-stamped every render, exactly like
     /// `summary`, so it is always the stale-task reference point.
     pub refine_events: &'a str,
-    /// Completion stamp for the in-place event rewrite, owned by `/lore-process` and
-    /// passed through unchanged here. `None` until the skill has refined for the
-    /// current input; equal to `refine_events` once it has. The render→splice cycle
-    /// preserves it (and the refined body) on a cache hit.
+    /// Completion stamp for the in-place event rewrite, owned by `/lore-process`.
+    /// `Some` ONLY when the refine task is a cache hit (the on-disk marker equals the
+    /// current input hash); `None` on a miss, so a stale marker is dropped rather than
+    /// riding a changed-input render forward. The render→splice cycle preserves it (and
+    /// the refined body) on a cache hit.
     pub refine_events_done: Option<&'a str>,
     pub concepts: Option<&'a str>,
     /// Completion stamp for concept extraction, owned by `/lore-process`. Mirrors
-    /// `refine_events_done`: concept extraction can legitimately find nothing, so an
-    /// empty `## Related Concepts` body can't signal completion — this marker does.
+    /// `refine_events_done` (cache-hit only): concept extraction can legitimately find
+    /// nothing, so an empty `## Related Concepts` body can't signal completion — this
+    /// marker does.
     pub concepts_done: Option<&'a str>,
 }
 

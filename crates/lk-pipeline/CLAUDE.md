@@ -53,8 +53,13 @@ concept_categories) with the `Synthesizer`.
   `themes`) with the current-input hash (the stale-task reference point — `llm_inputs.
   <key>` always equals the current input for every kind), and `/lore-process` writes the
   companion `llm_inputs.<key>_done` marker once it has finished, even with an empty
-  result. The render→splice cycle reads each `*_done` marker off the existing page and
-  re-emits it so it round-trips. `llm_cache::lookup_in_place` returns cached only when
+  result. The render re-emits each `*_done` marker ONLY on a cache hit (where
+  `lookup_marked` proved it equals the current input hash), so it round-trips when valid
+  and a stale marker is dropped on a miss instead of riding a changed-input render
+  forward. Every template that has a marked section emits its `*_done` key conditionally
+  (mirroring the input key), so the marker the pipeline provides reaches the page —
+  `materialized_view::empty_concept_result_is_cached_not_re_enqueued` guards that the
+  template doesn't silently drop it. `llm_cache::lookup_marked` returns cached only when
   the marker equals the current hash, never consulting the body. Because the input key
   is always current, a queued marker task whose `cache_hash` differs is unambiguously
   stale and dropped; a first run, a crash before flush, an unprocessed page, OR a

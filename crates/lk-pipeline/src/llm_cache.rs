@@ -24,7 +24,7 @@
 //!   valid *finished* result. The pipeline still pre-stamps `llm_inputs.<key>` with the
 //!   *current-input* hash (the stale-task reference point, identical in role to the
 //!   body-signalled case), but completion is tracked by a SECOND field (`completion_key`)
-//!   that `/lore-process` writes once it has finished. [`lookup_in_place`] returns cached
+//!   that `/lore-process` writes once it has finished. [`lookup_marked`] returns cached
 //!   only when that completion stamp equals the current-input hash — never consulting the
 //!   body, so an empty-but-done extraction stays cached instead of re-enqueueing forever.
 //!
@@ -131,7 +131,7 @@ pub fn lookup(
 /// cached exactly when `/lore-process` has stamped it equal to the current-input
 /// `hash`. On a hit the current (already-rewritten) body is preserved and spliced
 /// back over the fresh render.
-pub fn lookup_in_place(
+pub fn lookup_marked(
     existing: Option<&VaultPage>,
     completion_key: &str,
     heading: &str,
@@ -249,7 +249,7 @@ mod tests {
             "id: x\nllm_inputs:\n  refine_events: abc\n  refine_events_done: abc\n",
             "## 주요 이벤트\n\n### A\n\nrefined body\n\n## 관련 개념\n",
         );
-        let d = lookup_in_place(
+        let d = lookup_marked(
             Some(&page),
             "refine_events_done",
             "주요 이벤트",
@@ -268,7 +268,7 @@ mod tests {
             "id: x\nllm_inputs:\n  refine_events: abc\n  refine_events_done: abc\n",
             "## Key Events\n\n### A\n\nbody\n",
         );
-        let d = lookup_in_place(
+        let d = lookup_marked(
             Some(&page),
             "refine_events_done",
             "주요 이벤트",
@@ -287,7 +287,7 @@ mod tests {
             "id: x\nllm_inputs:\n  refine_events: abc\n",
             "## 주요 이벤트\n\n### A\n\nbody\n",
         );
-        let d = lookup_in_place(
+        let d = lookup_marked(
             Some(&page),
             "refine_events_done",
             "주요 이벤트",

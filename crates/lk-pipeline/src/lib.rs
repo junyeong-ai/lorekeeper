@@ -273,7 +273,7 @@ impl Pipeline {
                 .cache_shape()
                 .completion_key()
                 .expect("DailyRefineEvents completion is marker-signalled");
-            let refine_decision = llm_cache::lookup_in_place(
+            let refine_decision = llm_cache::lookup_marked(
                 existing.as_ref(),
                 refine_completion_key,
                 events_heading,
@@ -333,7 +333,7 @@ impl Pipeline {
                     .cache_shape()
                     .completion_key()
                     .expect("concept extraction completion is marker-signalled");
-                let decision = llm_cache::lookup_in_place(
+                let decision = llm_cache::lookup_marked(
                     existing.as_ref(),
                     concepts_completion_key,
                     concepts_heading,
@@ -373,18 +373,26 @@ impl Pipeline {
             };
 
             // `refine_events`/`concepts` are pre-stamped with the current-input hash
-            // (the stale-task reference point, like summary); `*_done` are the
-            // skill-owned completion stamps, passed through from disk unchanged.
-            let refine_done_stamp =
-                llm_cache::stored_hash(existing.as_ref(), refine_completion_key);
-            let concepts_done_stamp = llm_cache::stored_hash(existing.as_ref(), "concepts_done");
+            // (the stale-task reference point, like summary). A `*_done` completion
+            // marker is valid ONLY for the input it was stamped against, so emit it
+            // only on a cache hit — where `lookup_marked` proved it equals the current
+            // hash. A miss drops it (the skill re-stamps after processing), so a stale
+            // marker can never ride a changed-input render forward and later false-hit
+            // on a revert to the earlier input.
+            let refine_events_done = refine_decision
+                .cached
+                .then_some(refine_decision.hash.as_str());
+            let concepts_done = concepts_decision
+                .as_ref()
+                .filter(|d| d.cached)
+                .map(|d| d.hash.as_str());
 
             let llm_inputs = render::DailyLlmInputHashes {
                 summary: &summary_decision.hash,
                 refine_events: &refine_decision.hash,
-                refine_events_done: refine_done_stamp,
+                refine_events_done,
                 concepts: concepts_decision.as_ref().map(|d| d.hash.as_str()),
-                concepts_done: concepts_done_stamp,
+                concepts_done,
             };
 
             let fresh = render::render_daily_page(
@@ -681,7 +689,7 @@ impl Pipeline {
                     .cache_shape()
                     .completion_key()
                     .expect("concept extraction completion is marker-signalled");
-                let decision = llm_cache::lookup_in_place(
+                let decision = llm_cache::lookup_marked(
                     existing.as_ref(),
                     concepts_completion_key,
                     concepts_heading,
@@ -712,11 +720,15 @@ impl Pipeline {
 
             let concept_names: Vec<String> = doc_concepts.iter().map(|c| c.name.clone()).collect();
 
-            let concepts_done_stamp = llm_cache::stored_hash(existing.as_ref(), "concepts_done");
+            // Completion marker is valid only on a cache hit — see the daily path.
+            let concepts_done = concepts_decision
+                .as_ref()
+                .filter(|d| d.cached)
+                .map(|d| d.hash.as_str());
             let llm_inputs = render::DocumentLlmInputHashes {
                 summary: &summary_decision.hash,
                 concepts: concepts_decision.as_ref().map(|d| d.hash.as_str()),
-                concepts_done: concepts_done_stamp,
+                concepts_done,
             };
 
             let fresh = render::render_document_page(

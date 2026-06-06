@@ -7,6 +7,9 @@ period: "{{ year }}-W{{ "%02d" | format(week) }}"
 sources_covered: {{ sources | tojson }}
 llm_inputs:
   themes: {{ llm_inputs.themes | tojson }}
+{%- if llm_inputs.themes_done %}
+  themes_done: {{ llm_inputs.themes_done | tojson }}
+{%- endif %}
 ---
 
 # {{ i18n.weekly_synthesis_title }} {{ year }}-W{{ "%02d" | format(week) }}

@@ -1900,7 +1900,7 @@ mod materialized_view {
 
         let llm2: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
         let mut pipeline2 = Pipeline::new(vault, make_ctx(&config, llm2.clone()));
-        pipeline2
+        let result2 = pipeline2
             .plan(
                 "test-source",
                 sc,
@@ -1919,6 +1919,90 @@ mod materialized_view {
         assert!(
             !kinds.contains("extract-concepts"),
             "an empty-but-done concepts section must stay cached, not re-enqueue: got {kinds:?}",
+        );
+        // The materialized view re-renders every ingest, so the marker only survives if
+        // the TEMPLATE emits it. Assert it round-trips through the render — a template
+        // that dropped `concepts_done` would re-enqueue on the next ingest forever.
+        assert!(
+            result2.daily_pages[0].content.contains("concepts_done"),
+            "the re-rendered page must carry concepts_done through; the daily template \
+             dropped the marker:\n{}",
+            result2.daily_pages[0].content
+        );
+    }
+
+    #[tokio::test]
+    async fn changed_input_drops_the_stale_completion_marker() {
+        // A completion marker is valid only for the input it was stamped against. When
+        // the input changes (concept extraction misses), the OLD `concepts_done` must
+        // NOT ride the re-render forward — otherwise a later revert to the original input
+        // would false-hit the stale marker against a body left empty by the interim
+        // render. The render emits the marker only on a cache hit, so a miss drops it.
+        let dir = TempDir::new().unwrap();
+        let vault = dir.path();
+        let config = base_config(vault);
+        let sc = config.sources.get("test-source").unwrap();
+
+        let ts: jiff::Timestamp = "2026-05-23T10:00:00Z".parse().unwrap();
+        let queue_dir = vault.join(".lorekeeper").join("queue");
+
+        // Ingest A, simulate the skill stamping concepts_done for input A.
+        let llm1: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
+        let result1 = {
+            let mut p = Pipeline::new(vault, make_ctx(&config, llm1.clone()));
+            let r = p
+                .plan(
+                    "test-source",
+                    sc,
+                    vec![raw_item("Event A", "Body A", "E1", ts)],
+                    &IngestOptions {
+                        target_date: None,
+                        today: far_future(),
+                        dry_run: false,
+                    },
+                )
+                .await
+                .unwrap();
+            write_to_vault(vault, &r).await;
+            llm1.flush().await.unwrap();
+            r
+        };
+        let page_rel = result1.daily_pages[0].path.to_string();
+        let abs = vault.join(&page_rel);
+        let mut content = tokio::fs::read_to_string(&abs).await.unwrap();
+        if let Some(h) = task_hash_for_page(&queue_dir, &page_rel, "extract-concepts") {
+            content = stamp_completion(&content, "concepts", &h);
+        }
+        tokio::fs::write(&abs, content).await.unwrap();
+        clear_queue_dir(&queue_dir).await;
+
+        // Ingest B with DIFFERENT content → concepts input hash changes → miss.
+        let llm2: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
+        let mut p2 = Pipeline::new(vault, make_ctx(&config, llm2.clone()));
+        let result2 = p2
+            .plan(
+                "test-source",
+                sc,
+                vec![raw_item("Event B", "Totally different body", "E2", ts)],
+                &IngestOptions {
+                    target_date: None,
+                    today: far_future(),
+                    dry_run: false,
+                },
+            )
+            .await
+            .unwrap();
+        llm2.flush().await.unwrap();
+
+        assert!(
+            queue_task_kinds_for_source(&queue_dir).contains("extract-concepts"),
+            "changed input must re-enqueue concept extraction",
+        );
+        assert!(
+            !result2.daily_pages[0].content.contains("concepts_done"),
+            "a stale completion marker must be dropped on a miss, not ride the \
+             re-render forward:\n{}",
+            result2.daily_pages[0].content
         );
     }
 

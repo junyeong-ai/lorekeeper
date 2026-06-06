@@ -14,6 +14,9 @@ llm_inputs:
 {%- if llm_inputs.concepts %}
   concepts: {{ llm_inputs.concepts | tojson }}
 {%- endif %}
+{%- if llm_inputs.concepts_done %}
+  concepts_done: {{ llm_inputs.concepts_done | tojson }}
+{%- endif %}
 ---
 
 # {{ i18n.calendar_title }} {{ date }}
