@@ -29,7 +29,9 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
 - **`lore maintenance`** prunes the ingest log, drained `queue/processed/` files, and the
   streaming `events/{source}/{date}.jsonl` logs past `maintenance.retention_days` (default
   90; event logs prune by the recorded day, parsed from the filename). It never touches
-  live `*.jsonl.tmp` — the ingest startup sweep does.
+  live `*.jsonl.tmp` — the ingest startup sweep does. With `maintenance.schedule` set,
+  `lore schedule` emits crontab lines for it and for `lore queue prune`, so both
+  janitors run unattended.
 - **`lore synthesis <period>`** rejects `--date`/`--year` together with `--previous`
   (clap `conflicts_with`), and flushes the LLM queue after writing its pages.
 - **`lore queue status`** (`commands/queue.rs`) is the authoritative stale-task guard:
@@ -37,6 +39,12 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   the task `current` / `stale` / `missing-target` by comparing against `task.cache_hash`.
   `/lore-process` consumes `--json` from it and processes only `current` tasks — the hash
   check lives here in tested Rust, never re-derived in skill prose.
+- **`lore queue prune`** applies that same classification destructively: drops `stale` and
+  `missing-target` tasks (exactly what `/lore-process` would discard without editing),
+  rewriting files atomically via `lk_queue::write_tasks_atomic` — the one writer for queue
+  files. All-current files stay byte-identical; a file left with no tasks is deleted (it
+  never produced page edits, so nothing belongs in `processed/`). `--dry-run` reports the
+  same counts with zero writes.
 - **`lore init credentials`** (in `init.rs`) is the interactive credential wizard. UX
   (dialoguer prompts, masked secrets, TTY guard) lives here; the JSON shape + atomic
   `0600` write live in `lk_source::credentials` (`from_file`/`save`). The Google branch

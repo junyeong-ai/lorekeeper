@@ -80,10 +80,9 @@ what counts as a concept (per-type scoping: see
 [source-types.md](source-types.md)). Never invent it from the path.
 
 **Concept dedup** follows the shared convergence algorithm in
-`shared/concept-dedup.md` (sibling of this skill's directory; the SKILL.md
-protocol carries the resolved path): the run-start registry (`lore wiki
-concepts`) plus the created-this-run set is the full dedup context — the
-queue task carries no concept registry of its own.
+`${CLAUDE_SKILL_DIR}/../shared/concept-dedup.md`: the run-start registry
+(`lore wiki concepts`) plus the created-this-run set is the full dedup
+context — the queue task carries no concept registry of its own.
 
 **Category assignment.** Hard constraint: the `category` value MUST be one of
 the IDs in `input.categories` (verbatim string match) or the field MUST be

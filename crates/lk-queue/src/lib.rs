@@ -6,7 +6,7 @@ mod queue;
 #[cfg(feature = "test-util")]
 pub use mock::MockLlmClient;
 pub use noop::NoopLlmClient;
-pub use queue::{QueueLlmClient, QueueTask, TaskKind};
+pub use queue::{QueueLlmClient, QueueTask, TaskKind, write_tasks_atomic};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -31,7 +31,11 @@ impl LlmError {
 
 /// What kind of vault content a semantic task produces. Used for classification/logging;
 /// the actual section heading is carried in `TaskTarget.anchor`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `EnumIter` exists for the skill-contract tests: the iterator is macro-generated
+/// from the variant list itself, so iterating the full kind space can never drift
+/// from the enum — no hand-maintained variant array to forget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::EnumIter)]
 #[serde(rename_all = "kebab-case")]
 pub enum TargetKind {
     /// Daily page summary body.

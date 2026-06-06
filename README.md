@@ -126,6 +126,7 @@ Claude Code Skills        Semantic Plane             (same vault)
 | `lore wiki log` | Rebuild `wiki/log.md` — by-time knowledge timeline |
 | `lore wiki concepts` | List all concept pages |
 | `lore queue status` | Classify pending LLM tasks: current / stale / missing-target |
+| `lore queue prune` | Remove stale / missing-target tasks from the pending queue |
 
 ## LLM provider modes
 
@@ -231,7 +232,7 @@ lore schedule > /tmp/lore-cron.txt
 crontab /tmp/lore-cron.txt
 ```
 
-Each source's `schedule:` field in config.yaml uses standard cron syntax. Each enabled synthesis period (weekly/monthly/quarterly/annual) emits its own cron line from `synthesis.<period>.schedule`.
+Each source's `schedule:` field in config.yaml uses standard cron syntax. Each enabled synthesis period (weekly/monthly/quarterly/annual) emits its own cron line from `synthesis.<period>.schedule`. With `maintenance.schedule` set, two more lines are emitted — `lore maintenance` and `lore queue prune` — so retention pruning and dead-task cleanup run unattended.
 
 ## Credentials
 

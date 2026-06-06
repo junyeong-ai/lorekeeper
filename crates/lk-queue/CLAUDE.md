@@ -62,10 +62,19 @@ knows about; provider choice is config-driven (`build_llm_client` in lk-cli).
   by `daily-refine-events` because its section is non-empty from render). The
   pipeline, work-log, and synthesis derive both from these; the skill's key table
   mirrors them. Adding a `TargetKind` is compiler-forced to choose a key and a shape.
+  The skill-side mirror is enforced too: `tests/skill_contract.rs` iterates the full
+  kind space via `strum::EnumIter` (macro-generated from the variant list, so the
+  iteration can never drift from the enum — never hand-maintain a variant array) and
+  requires every wire name and in-place completion key to appear in the `/lore-process`
+  skill files, with each kind's `llm_inputs` key on the same table row as its wire
+  name — renaming or adding a kind fails the test until the skill documentation is
+  updated.
 - **Providers**:
-  - `QueueLlmClient` — buffers tasks in memory; `flush` writes the whole run to
-    `<run-id>.jsonl.tmp`, fsyncs, and renames atomically (cleaning the temp on rename
-    failure). Invariant: a `.jsonl` file becomes visible only after its target pages
+  - `QueueLlmClient` — buffers tasks in memory; `flush` writes the whole run through
+    `write_tasks_atomic` (temp + fsync + rename, cleaning the temp on rename failure) —
+    the single queue-file writer, also used by `lore queue prune` to rewrite files, so
+    every queue file on disk has identical durability and encoding guarantees.
+    Invariant: a `.jsonl` file becomes visible only after its target pages
     were written, so it never references a page that doesn't exist.
   - `NoopLlmClient` — empty results (uses default trait impls). For dev/CI.
   - `MockLlmClient` — tests only, with configurable `summary`, `concepts`, `themes`.

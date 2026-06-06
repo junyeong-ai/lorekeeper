@@ -1,9 +1,8 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
 
 use lk_core::concept::ExtractedConcept;
 
@@ -61,7 +60,8 @@ pub struct QueueTask {
     pub target: TaskTarget,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// `EnumIter` exists for the skill-contract tests — see [`crate::TargetKind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::EnumIter)]
 #[serde(rename_all = "kebab-case")]
 pub enum TaskKind {
     Summarize,
@@ -72,7 +72,8 @@ pub enum TaskKind {
 
 impl TaskKind {
     /// The kebab-case wire name, matching the `#[serde(rename_all = "kebab-case")]`
-    /// JSONL encoding. The single source of truth for the textual kind label.
+    /// JSONL encoding (pinned by `as_str_matches_wire_encoding`). The single source
+    /// of truth for the textual kind label.
     pub fn as_str(self) -> &'static str {
         match self {
             TaskKind::Summarize => "summarize",
@@ -81,6 +82,45 @@ impl TaskKind {
             TaskKind::RefineEvents => "refine-events",
         }
     }
+}
+
+/// Write `tasks` as JSONL to `final_path` atomically (temp + fsync + rename),
+/// cleaning up the temp file if the rename fails. The single writer implementation
+/// for queue files: `QueueLlmClient::flush` creates them through it and
+/// `lore queue prune` rewrites them through it, so every queue file on disk —
+/// fresh or pruned — has identical durability and encoding guarantees.
+pub fn write_tasks_atomic(final_path: &Path, tasks: &[QueueTask]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let tmp_path = final_path.with_extension("jsonl.tmp");
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&tmp_path)?;
+    for task in tasks {
+        let line = serde_json::to_string(task).map_err(std::io::Error::other)?;
+        writeln!(file, "{line}")?;
+    }
+    file.flush()?;
+    file.sync_all()?;
+    drop(file);
+
+    if let Err(e) = std::fs::rename(&tmp_path, final_path) {
+        // The rename error is the one the caller needs to see — deliberately
+        // discard the unlink error so a stale `.jsonl.tmp` never accumulates.
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e);
+    }
+
+    // Make the rename itself crash-durable: the file's bytes are fsynced above,
+    // but the directory entry needs its own fsync or a power loss can roll the
+    // rename back. Unix-only — Windows cannot fsync a directory handle via std.
+    #[cfg(unix)]
+    if let Some(dir) = final_path.parent() {
+        std::fs::File::open(dir)?.sync_all()?;
+    }
+    Ok(())
 }
 
 impl QueueLlmClient {
@@ -195,48 +235,12 @@ impl LlmClient for QueueLlmClient {
             return Ok(());
         }
 
-        tokio::fs::create_dir_all(&self.queue_dir)
-            .await
+        std::fs::create_dir_all(&self.queue_dir)
             .map_err(|e| LlmError::QueueIo(format!("create dir: {e}")))?;
 
         let final_path = self.queue_path();
-        let tmp_path = final_path.with_extension("jsonl.tmp");
-
-        // Open the temp file for write (truncate if a previous flush attempt left one).
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&tmp_path)
-            .await
-            .map_err(|e| LlmError::QueueIo(format!("open {}: {e}", tmp_path.display())))?;
-
-        for task in buffer.tasks.iter() {
-            let line = serde_json::to_string(task)
-                .map_err(|e| LlmError::QueueIo(format!("serialize: {e}")))?;
-            file.write_all(format!("{line}\n").as_bytes())
-                .await
-                .map_err(|e| LlmError::QueueIo(format!("write: {e}")))?;
-        }
-        file.flush()
-            .await
-            .map_err(|e| LlmError::QueueIo(format!("flush: {e}")))?;
-        file.sync_all()
-            .await
-            .map_err(|e| LlmError::QueueIo(format!("fsync: {e}")))?;
-        drop(file);
-
-        if let Err(e) = tokio::fs::rename(&tmp_path, &final_path).await {
-            // Best-effort cleanup so a future run doesn't see a stale `.jsonl.tmp`
-            // accumulating in the queue dir. The rename error is the one the caller
-            // needs to see — we deliberately discard the unlink error.
-            let _ = tokio::fs::remove_file(&tmp_path).await;
-            return Err(LlmError::QueueIo(format!(
-                "rename {} → {}: {e}",
-                tmp_path.display(),
-                final_path.display()
-            )));
-        }
+        write_tasks_atomic(&final_path, &buffer.tasks)
+            .map_err(|e| LlmError::QueueIo(format!("write {}: {e}", final_path.display())))?;
 
         *buffer = Buffer::default();
         Ok(())
@@ -248,6 +252,17 @@ mod tests {
     use super::*;
     use crate::TargetKind;
     use tempfile::TempDir;
+
+    #[test]
+    fn as_str_matches_wire_encoding() {
+        // `as_str` documents itself as the serde JSONL encoding; pin the two
+        // together so `queue status` labels and on-disk task records can't diverge.
+        use strum::IntoEnumIterator;
+        for kind in TaskKind::iter() {
+            let wire = serde_json::to_value(kind).unwrap();
+            assert_eq!(wire.as_str().unwrap(), kind.as_str());
+        }
+    }
 
     #[tokio::test]
     async fn summarize_buffers_until_flush() {

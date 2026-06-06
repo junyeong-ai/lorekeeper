@@ -13,8 +13,8 @@ pub struct ExtractedConcept {
 
 /// Normalize an arbitrary name into a path-safe slug.
 ///
-/// Pipeline: **NFKC normalize → lowercase → keep `[alphanumeric + '-']`, mapping every
-/// other character (whitespace, punctuation, …) to a separator → collapse runs of
+/// Pipeline: **NFKC normalize → lowercase → map every non-alphanumeric char
+/// (whitespace, punctuation, including literal `-`) to a separator → collapse runs of
 /// separators into a single `-` and trim leading/trailing `-`**.
 ///
 /// NFKC folds compatibility forms first, so composed and decomposed Hangul and

@@ -331,6 +331,8 @@ concepts:
 # maintenance:
 #   retention_days: 90               # how long pruned history (ingest log entries,
 #                                    # drained queue/processed files) is kept
+#   schedule: "0 6 * * 0"            # cron for `lore schedule` to emit unattended
+#                                    # `lore maintenance` + `lore queue prune` lines
 
 # ─── LLM ──────────────────────────────────────────────────
 # provider:

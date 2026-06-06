@@ -30,7 +30,8 @@ an Obsidian vault. All commands accept `--config <path>` to override.
 | `lore health [--strict]` | Warn if any source is overdue vs its schedule (2 missed fires; 48h fallback) |
 | `lore performance` | Performance category distribution |
 | `lore schedule [--bin <path>]` | Print crontab entries |
-| `lore maintenance` | Prune ingest log + drained queue files (>90d) |
+| `lore maintenance` | Prune operational history (ingest log, drained queue files, streaming event logs) past `maintenance.retention_days` (default 90d) |
+| `lore queue prune [--dry-run]` | Drop dead pending tasks (stale / missing-target) without an LLM session |
 
 ## Trigger mapping
 
@@ -45,12 +46,15 @@ an Obsidian vault. All commands accept `--config <path>` to override.
 - "health check" → `lore health`
 - "generate cron" → `lore schedule`
 - "prune old logs" → `lore maintenance`
+- "clean dead queue tasks" → `lore queue prune`
 
 ## Output semantics
 
 - Progress and diagnostics → **stderr**
 - Data (cron lines) → **stdout**
-- Exit codes: `0` success, `1` stale sources, `2` runtime error
+- Exit codes: `0` success, non-zero on any failure. Findings-style commands
+  have their own conventions: `lore health` exits `1` when a source is overdue,
+  `lore graph *` uses `0` clean / `1` findings / `2` runtime error.
 
 ## Configuration
 

@@ -19,6 +19,23 @@ pub enum QueueCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Remove dead tasks from pending queue files using the same classification as
+    /// `status`: `stale` and `missing-target` tasks are exactly what `/lore-process`
+    /// would drop without editing anything, so pruning them is that drop performed
+    /// deterministically, without an LLM session. Files are rewritten atomically
+    /// keeping only `current` tasks; a file left with none is deleted (it never
+    /// produced page edits, so there is nothing to archive in `processed/`).
+    Prune {
+        /// Vault root override (default: vault.root from config)
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Output in JSON format (envelope: {"ok": true, "data": …})
+        #[arg(long)]
+        json: bool,
+        /// Classify and report only; write and delete nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 /// Where a queued task stands relative to its target page's current input hash.
@@ -53,7 +70,53 @@ struct TaskReport {
 pub async fn run(opts: &super::GlobalOptions, cmd: QueueCmd) -> miette::Result<()> {
     match cmd {
         QueueCmd::Status { root, json } => status(opts, root, json).await,
+        QueueCmd::Prune {
+            root,
+            json,
+            dry_run,
+        } => prune(opts, root, json, dry_run).await,
     }
+}
+
+fn resolve_vault_root(
+    opts: &super::GlobalOptions,
+    root: Option<PathBuf>,
+) -> miette::Result<PathBuf> {
+    match root {
+        Some(r) => Ok(r),
+        None => Ok(load_config(&find_config(opts)?)?.vault.root_path()),
+    }
+}
+
+/// Pending queue files, sorted by name (run-id order). `.jsonl` only — skips the
+/// `processed/` subdir and any `.jsonl.tmp`.
+fn pending_queue_files(queue_dir: &Path) -> miette::Result<Vec<PathBuf>> {
+    if !queue_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut files: Vec<PathBuf> = std::fs::read_dir(queue_dir)
+        .map_err(|e| miette::miette!("read {}: {e}", queue_dir.display()))?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("jsonl"))
+        .collect();
+    files.sort();
+    Ok(files)
+}
+
+/// Read every task in one queue file. An unparseable line is a hard error — the
+/// file is left intact for inspection rather than silently dropping work.
+fn read_tasks(file: &Path) -> miette::Result<Vec<QueueTask>> {
+    let content = std::fs::read_to_string(file)
+        .map_err(|e| miette::miette!("read {}: {e}", file.display()))?;
+    content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str(line)
+                .map_err(|e| miette::miette!("parse task in {}: {e}", file.display()))
+        })
+        .collect()
 }
 
 async fn status(
@@ -61,37 +124,19 @@ async fn status(
     root: Option<PathBuf>,
     json: bool,
 ) -> miette::Result<()> {
-    let vault_root = match root {
-        Some(r) => r,
-        None => load_config(&find_config(opts)?)?.vault.root_path(),
-    };
+    let vault_root = resolve_vault_root(opts, root)?;
     let queue_dir = vault_root.join(".lorekeeper").join("queue");
 
     let mut reports = Vec::new();
-    if queue_dir.is_dir() {
-        let mut files: Vec<PathBuf> = std::fs::read_dir(&queue_dir)
-            .map_err(|e| miette::miette!("read {}: {e}", queue_dir.display()))?
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            // `.jsonl` only — skips the `processed/` subdir and any `.jsonl.tmp`.
-            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("jsonl"))
-            .collect();
-        files.sort();
-
-        for file in files {
-            let content = std::fs::read_to_string(&file)
-                .map_err(|e| miette::miette!("read {}: {e}", file.display()))?;
-            for line in content.lines().filter(|l| !l.trim().is_empty()) {
-                let task: QueueTask = serde_json::from_str(line)
-                    .map_err(|e| miette::miette!("parse task in {}: {e}", file.display()))?;
-                let status = classify_task(&vault_root, &task)?;
-                reports.push(TaskReport {
-                    task_id: task.task_id,
-                    kind: task.kind.as_str().to_string(),
-                    vault_path: task.target.vault_path,
-                    status,
-                });
-            }
+    for file in pending_queue_files(&queue_dir)? {
+        for task in read_tasks(&file)? {
+            let status = classify_task(&vault_root, &task)?;
+            reports.push(TaskReport {
+                task_id: task.task_id,
+                kind: task.kind.as_str().to_string(),
+                vault_path: task.target.vault_path,
+                status,
+            });
         }
     }
 
@@ -144,6 +189,105 @@ async fn status(
             "queue: {current} current, {stale} stale, {missing} missing-target \
              across {} task(s)",
             reports.len()
+        );
+    }
+    Ok(())
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct PruneSummary {
+    pruned_stale: usize,
+    pruned_missing_target: usize,
+    kept_current: usize,
+    files_rewritten: usize,
+    files_deleted: usize,
+}
+
+/// Drop every `stale` and `missing-target` task from the pending queue, keeping
+/// `current` ones. Safe by construction: a pending file's tasks targeted pages that
+/// existed when the file was renamed into place (flush invariant), so missing-target
+/// means the page was deleted afterwards — the result has nowhere to land — and
+/// stale means `/lore-process` would drop the task on contact without editing.
+/// Files all-current are left untouched; rewrites go through
+/// `lk_queue::write_tasks_atomic` (temp + fsync + rename).
+fn prune_queue(vault_root: &Path, queue_dir: &Path, dry_run: bool) -> miette::Result<PruneSummary> {
+    let mut summary = PruneSummary::default();
+    for file in pending_queue_files(queue_dir)? {
+        let tasks = read_tasks(&file)?;
+        let mut kept = Vec::with_capacity(tasks.len());
+        let mut dropped = 0usize;
+        for task in tasks {
+            match classify_task(vault_root, &task)? {
+                TaskStatus::Current => kept.push(task),
+                TaskStatus::Stale => {
+                    summary.pruned_stale += 1;
+                    dropped += 1;
+                }
+                TaskStatus::MissingTarget => {
+                    summary.pruned_missing_target += 1;
+                    dropped += 1;
+                }
+            }
+        }
+        summary.kept_current += kept.len();
+        if dropped == 0 {
+            // All-current file: stays byte-identical on disk.
+            continue;
+        }
+        if kept.is_empty() {
+            summary.files_deleted += 1;
+            if !dry_run {
+                std::fs::remove_file(&file)
+                    .map_err(|e| miette::miette!("remove {}: {e}", file.display()))?;
+            }
+        } else {
+            summary.files_rewritten += 1;
+            if !dry_run {
+                lk_queue::write_tasks_atomic(&file, &kept)
+                    .map_err(|e| miette::miette!("rewrite {}: {e}", file.display()))?;
+            }
+        }
+    }
+    Ok(summary)
+}
+
+async fn prune(
+    opts: &super::GlobalOptions,
+    root: Option<PathBuf>,
+    json: bool,
+    dry_run: bool,
+) -> miette::Result<()> {
+    let vault_root = resolve_vault_root(opts, root)?;
+    let queue_dir = vault_root.join(".lorekeeper").join("queue");
+    let summary = prune_queue(&vault_root, &queue_dir, dry_run)?;
+
+    if json {
+        let envelope = serde_json::json!({
+            "ok": true,
+            "data": {
+                "dry_run": dry_run,
+                "pruned_stale": summary.pruned_stale,
+                "pruned_missing_target": summary.pruned_missing_target,
+                "kept_current": summary.kept_current,
+                "files_rewritten": summary.files_rewritten,
+                "files_deleted": summary.files_deleted,
+            }
+        });
+        println!("{}", serde_json::to_string_pretty(&envelope).unwrap());
+    } else {
+        let label = if dry_run {
+            "queue prune (dry-run)"
+        } else {
+            "queue prune"
+        };
+        eprintln!(
+            "{label}: dropped {} stale + {} missing-target, kept {} current; \
+             {} file(s) rewritten, {} deleted",
+            summary.pruned_stale,
+            summary.pruned_missing_target,
+            summary.kept_current,
+            summary.files_rewritten,
+            summary.files_deleted
         );
     }
     Ok(())
@@ -244,5 +388,121 @@ mod tests {
         write_page(dir.path(), "daily/s/2026-05-23.md", "id: x\n");
         let t = task("daily/s/2026-05-23.md", "abc123");
         assert_eq!(classify_task(dir.path(), &t).unwrap(), TaskStatus::Stale);
+    }
+
+    fn write_queue_file(queue_dir: &Path, name: &str, tasks: &[QueueTask]) -> PathBuf {
+        std::fs::create_dir_all(queue_dir).unwrap();
+        let path = queue_dir.join(name);
+        let lines: String = tasks
+            .iter()
+            .map(|t| format!("{}\n", serde_json::to_string(t).unwrap()))
+            .collect();
+        std::fs::write(&path, lines).unwrap();
+        path
+    }
+
+    #[test]
+    fn prune_rewrites_mixed_file_keeping_only_current() {
+        let dir = TempDir::new().unwrap();
+        let queue_dir = dir.path().join(".lorekeeper").join("queue");
+        write_page(
+            dir.path(),
+            "daily/s/2026-05-23.md",
+            "id: x\nllm_inputs:\n  summary: live\n",
+        );
+        let file = write_queue_file(
+            &queue_dir,
+            "run-1.jsonl",
+            &[
+                task("daily/s/2026-05-23.md", "live"),    // current
+                task("daily/s/2026-05-23.md", "oldhash"), // stale
+                task("daily/s/2026-05-24.md", "live"),    // missing-target
+            ],
+        );
+
+        let summary = prune_queue(dir.path(), &queue_dir, false).unwrap();
+        assert_eq!(
+            summary,
+            PruneSummary {
+                pruned_stale: 1,
+                pruned_missing_target: 1,
+                kept_current: 1,
+                files_rewritten: 1,
+                files_deleted: 0,
+            }
+        );
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(content.lines().count(), 1);
+        let survivor: QueueTask = serde_json::from_str(content.trim()).unwrap();
+        assert_eq!(survivor.cache_hash, "live");
+        assert_eq!(survivor.target.vault_path, "daily/s/2026-05-23.md");
+    }
+
+    #[test]
+    fn prune_deletes_file_with_no_current_tasks() {
+        let dir = TempDir::new().unwrap();
+        let queue_dir = dir.path().join(".lorekeeper").join("queue");
+        let file = write_queue_file(
+            &queue_dir,
+            "run-1.jsonl",
+            &[task("daily/s/2026-05-23.md", "x")], // missing-target
+        );
+
+        let summary = prune_queue(dir.path(), &queue_dir, false).unwrap();
+        assert_eq!(summary.pruned_missing_target, 1);
+        assert_eq!(summary.files_deleted, 1);
+        assert!(!file.exists(), "an all-dead file must be deleted");
+    }
+
+    #[test]
+    fn prune_leaves_all_current_file_byte_identical() {
+        let dir = TempDir::new().unwrap();
+        let queue_dir = dir.path().join(".lorekeeper").join("queue");
+        write_page(
+            dir.path(),
+            "daily/s/2026-05-23.md",
+            "id: x\nllm_inputs:\n  summary: live\n",
+        );
+        let file = write_queue_file(
+            &queue_dir,
+            "run-1.jsonl",
+            &[task("daily/s/2026-05-23.md", "live")],
+        );
+        let before = std::fs::read_to_string(&file).unwrap();
+
+        let summary = prune_queue(dir.path(), &queue_dir, false).unwrap();
+        assert_eq!(summary.kept_current, 1);
+        assert_eq!(summary.files_rewritten, 0);
+        assert_eq!(summary.files_deleted, 0);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+    }
+
+    #[test]
+    fn prune_dry_run_reports_but_changes_nothing() {
+        let dir = TempDir::new().unwrap();
+        let queue_dir = dir.path().join(".lorekeeper").join("queue");
+        let file = write_queue_file(
+            &queue_dir,
+            "run-1.jsonl",
+            &[task("daily/s/2026-05-23.md", "x")], // missing-target
+        );
+        let before = std::fs::read_to_string(&file).unwrap();
+
+        let summary = prune_queue(dir.path(), &queue_dir, true).unwrap();
+        assert_eq!(summary.pruned_missing_target, 1);
+        assert_eq!(
+            summary.files_deleted, 1,
+            "dry-run still reports the outcome"
+        );
+        assert!(file.exists(), "dry-run must not delete");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+    }
+
+    #[test]
+    fn prune_without_queue_dir_is_a_clean_noop() {
+        let dir = TempDir::new().unwrap();
+        let queue_dir = dir.path().join(".lorekeeper").join("queue");
+        let summary = prune_queue(dir.path(), &queue_dir, false).unwrap();
+        assert_eq!(summary, PruneSummary::default());
     }
 }

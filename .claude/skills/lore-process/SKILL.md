@@ -125,7 +125,8 @@ The essentials: a visible `.jsonl` is fully written and every
       | `daily-concepts`, `document-concepts`                 | `concepts`      |
       | `work-log-synthesis`                                  | `topic_summary` |
       | `weekly-synthesis-themes`                             | `themes`        |
-      | `weekly-/monthly-/quarterly-/annual-review-narrative` | `narrative`     |
+      | `weekly-review-narrative`, `monthly-review-narrative`   | `narrative`     |
+      | `quarterly-review-narrative`, `annual-review-narrative` | `narrative`     |
 
       Three outcomes, in order:
 
@@ -142,9 +143,11 @@ The essentials: a visible `.jsonl` is fully written and every
          LLM work per [references/processing-kinds.md](references/processing-kinds.md)
          and edit the page.
 
-      A missing `llm_inputs.<key>` field with `task.cache_hash` set means
-      the page is in an inconsistent state (template/pipeline drift); fail
-      the task and report it.
+      A missing `llm_inputs.<key>` field is the same supersession signal as
+      a hash mismatch: the page was replaced, or its stamp was hand-cleared
+      to force a re-render — the next ingest re-stamps and re-enqueues.
+      **Drop as stale, no edit** *(outcome 1)* — exactly how `lore queue
+      status` classifies it; never invent a different outcome here.
 
       **Refine-events completion contract.** `daily-refine-events` rewrites
       the raw event bodies *in place*, so the events section is non-empty
@@ -204,7 +207,8 @@ The essentials: a visible `.jsonl` is fully written and every
 6. **Report** to the user:
    - On full success: number of files processed and tasks completed.
    - On any failure: which file was left in place and the failed `task_id`s
-     with their error messages. Exit non-zero.
+     with their error messages, then stop — leave remaining files for the
+     next run.
 
 ## Idempotency contract
 
@@ -212,7 +216,7 @@ The queue file is moved to `processed/` ONLY when every task in it has
 succeeded. Failure rules:
 
 - **Any task fails** → leave the queue file in place, report the failed
-  `task_id` list to the user, exit non-zero. The next `/lore-process` run
+  `task_id` list to the user, and stop. The next `/lore-process` run
   reattempts the whole file from the start.
 - **Re-running on a partially-processed file is safe** because:
   - Section edits replace the body — repeating the edit produces identical

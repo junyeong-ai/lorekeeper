@@ -283,6 +283,10 @@ impl Config {
                 ConfigError::Validation(format!("synthesis.{period}.schedule: {e}"))
             })?;
         }
+        if let Some(ref sched) = self.maintenance.schedule {
+            validate_cron(sched)
+                .map_err(|e| ConfigError::Validation(format!("maintenance.schedule: {e}")))?;
+        }
 
         // A scheduled personal-review period can never run while the performance
         // subsystem is off; reject the contradiction rather than emit a no-op cron.
@@ -926,11 +930,18 @@ pub struct MaintenanceConfig {
     /// streaming source's long-past event log forfeits re-projecting that day, never live
     /// data: the frozen page already holds its items.
     pub retention_days: i64,
+    /// Optional cron expression; when set, `lore schedule` emits crontab lines for
+    /// `lore maintenance` and `lore queue prune`, so retention pruning and dead-task
+    /// cleanup run unattended instead of depending on the operator remembering them.
+    pub schedule: Option<String>,
 }
 
 impl Default for MaintenanceConfig {
     fn default() -> Self {
-        Self { retention_days: 90 }
+        Self {
+            retention_days: 90,
+            schedule: None,
+        }
     }
 }
 
