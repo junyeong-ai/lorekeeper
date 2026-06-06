@@ -1864,7 +1864,7 @@ mod materialized_view {
             .unwrap();
         tokio::fs::write(
             &concept_abs,
-            "---\ntitle: \"Concept A\"\ncreated: 2026-05-23\n---\n\n# Concept A\n",
+            "---\nid: concept-a\ntitle: \"Concept A\"\naliases: [\"Concept A\", \"CA\"]\ncreated: 2026-05-23\n---\n\n# Concept A\n",
         )
         .await
         .unwrap();

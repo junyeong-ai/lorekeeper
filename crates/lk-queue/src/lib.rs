@@ -421,7 +421,7 @@ mod tests {
             ExistingConceptRef {
                 slug: "zeta".into(),
                 name: "Zeta".into(),
-                aliases: vec![],
+                aliases: vec!["ZZ".into()],
             },
             ExistingConceptRef {
                 slug: "alpha".into(),
@@ -431,20 +431,25 @@ mod tests {
         ]);
         let without = concept_req(vec![]);
 
-        // Registry hints never shape the cache identity: a growing concept registry
-        // must not invalidate unrelated extraction caches.
+        // Registry hints — including aliases — never shape the cache identity: a growing
+        // concept registry (or a newly registered alias) must not invalidate unrelated
+        // extraction caches.
         assert_eq!(with.cache_hash(), without.cache_hash());
         assert!(with.cache_identity().get("existing_concepts").is_none());
 
         // …but the skill payload carries them, sorted by slug so the queue file is
-        // byte-deterministic regardless of registry scan order.
+        // byte-deterministic regardless of registry scan order, and the aliases ride along
+        // so an alias-only surface form is matched instead of forking a duplicate page.
         let input = with.task_input();
-        let slugs: Vec<&str> = input["existing_concepts"]
+        let refs = input["existing_concepts"].as_array().unwrap();
+        let slugs: Vec<&str> = refs.iter().map(|c| c["slug"].as_str().unwrap()).collect();
+        assert_eq!(slugs, ["alpha", "zeta"]);
+        let zeta_aliases: Vec<&str> = refs[1]["aliases"]
             .as_array()
             .unwrap()
             .iter()
-            .map(|c| c["slug"].as_str().unwrap())
+            .map(|a| a.as_str().unwrap())
             .collect();
-        assert_eq!(slugs, ["alpha", "zeta"]);
+        assert_eq!(zeta_aliases, ["ZZ"]);
     }
 }

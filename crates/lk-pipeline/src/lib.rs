@@ -80,6 +80,13 @@ pub struct Pipeline {
     /// into one page, rendered once via `render_concept_pages` after all sources are
     /// planned. Exclusive `&mut self` access keeps this run-level state coherent.
     concept_drafts: ConceptDrafts,
+    /// Document slugs claimed so far THIS run, across every source. Document pages share one
+    /// flat `<wiki>/documents/` namespace (unlike daily pages, which are keyed by
+    /// source+date), so two manual sources with a same-titled file would otherwise both
+    /// claim the bare slug — and since pages are written after all sources are planned,
+    /// neither sees the other's page on disk. Run-level reservation makes the later one
+    /// disambiguate by its own identity instead of silently overwriting the earlier page.
+    document_slugs: std::collections::HashSet<String>,
 }
 
 impl Pipeline {
@@ -89,6 +96,7 @@ impl Pipeline {
             reader: Arc::new(FsVault::new(vault_root)),
             event_log: event_log::EventLog::new(vault_root),
             concept_drafts: ConceptDrafts::new(),
+            document_slugs: std::collections::HashSet::new(),
         }
     }
 
@@ -507,13 +515,14 @@ impl Pipeline {
 
         let mut document_pages: Vec<RenderResult> = Vec::new();
         let mut all_concepts: Vec<lk_core::concept::ExtractedConcept> = Vec::new();
-        // Two documents in one batch can share a title — and therefore a base slug. Track the
-        // slugs already claimed and disambiguate a collision by the document's OWN stable
-        // identity (the trailing hash of its `EventId`), so a same-titled second document gets
-        // its own page instead of silently overwriting the first. First occurrence keeps the
-        // clean slug; the suffix is content-derived (stable across runs), never a positional
-        // counter (which would shift if the batch's order or membership changed).
-        let mut used_slugs: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // Two documents can share a title — and therefore a base slug — whether in one batch
+        // or across two sources in the same run. Disambiguate a collision by the document's
+        // OWN stable identity (the trailing hash of its `EventId`), so a same-titled later
+        // document gets its own page instead of silently overwriting the first. First
+        // occurrence keeps the clean slug; the suffix is content-derived (stable across runs),
+        // never a positional counter (which would shift if order or membership changed).
+        // `self.document_slugs` is run-level so a second source sees the first's claims even
+        // though pages are not written to disk until every source is planned.
 
         for event in &events {
             // Derive slug from title; fall back to source_file metadata.
@@ -568,7 +577,7 @@ impl Pipeline {
                     // the candidate never saturates, so the loop always reaches a free slug.
                     Some(n) => format!("{base_slug}-{hash}-{}", n - hash.len()),
                 };
-                if !used_slugs.contains(&candidate) {
+                if !self.document_slugs.contains(&candidate) {
                     let path = lk_core::vault_path::VaultPath::document(&self.ctx.dirs, &candidate)
                         .to_string();
                     let existing = self.reader.read_page(Path::new(&path)).await?;
@@ -579,13 +588,17 @@ impl Pipeline {
                             .and_then(|v| v.as_str())
                             .map(String::from)
                     });
-                    if owner.is_none() || owner == identity {
+                    // Claim only a free slug OR a page provably THIS document (owner present
+                    // and equal). A page with NO owner can't be proven to be ours, so it is
+                    // never taken over — we disambiguate around it rather than overwrite an
+                    // unidentifiable page.
+                    if existing.is_none() || (owner.is_some() && owner == identity) {
                         break (candidate, existing);
                     }
                 }
                 suffix_len = Some(suffix_len.map_or(6, |n| n + 2));
             };
-            used_slugs.insert(slug.clone());
+            self.document_slugs.insert(slug.clone());
 
             let vault_path =
                 lk_core::vault_path::VaultPath::document(&self.ctx.dirs, &slug).to_string();
@@ -681,7 +694,7 @@ impl Pipeline {
                 concepts: concepts_decision.as_ref().map(|d| d.hash.as_str()),
             };
 
-            let fresh = match render::render_document_page(
+            let fresh = render::render_document_page(
                 &render::DocumentRenderContext {
                     slug: &slug,
                     event,
@@ -693,18 +706,7 @@ impl Pipeline {
                 },
                 &self.ctx.engine,
                 &self.ctx.dirs,
-            ) {
-                Ok(output) => output,
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        source = source_id,
-                        slug = %slug,
-                        "document render failed; skipping"
-                    );
-                    continue;
-                }
-            };
+            )?;
 
             let mut splices: Vec<(&str, &llm_cache::SectionDecision)> =
                 vec![(summary_heading, &summary_decision)];

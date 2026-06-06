@@ -68,8 +68,11 @@ Daily pages are materialized views with two kinds of fields:
 The pipeline decides what needs work before the queue file exists: a task is
 enqueued only when its section is missing or its inputs changed. This skill's
 sole obligation to that machinery is to write **only** LLM-produced content
-into the target sections, never structural artifacts — a non-empty section
-body is the completion signal the next ingest reads.
+into the target sections, never structural artifacts. Completion is read back
+two ways (see Cache shapes below): a fill-empty section (summary, concepts) is
+done once its body is non-empty; the in-place event refine instead stamps the
+`llm_inputs.refine_events_done` marker, since its section is non-empty from the
+first render.
 
 ## Queue format & recovery
 
