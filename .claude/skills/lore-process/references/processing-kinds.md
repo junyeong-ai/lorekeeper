@@ -130,7 +130,9 @@ the synthesis if the new source adds meaningful context; otherwise leave it.
   `- [[Concept Name 1]]\n- [[Concept Name 2]]\n...`. Create each concept page
   (path from AGENTS.md) if it doesn't exist, following the concept page
   format above. Crucially include `aliases: ["Concept Name"]` so the
-  `[[Concept Name]]` wikilinks resolve to the slug-named file.
+  `[[Concept Name]]` wikilinks resolve to the slug-named file. If a concept
+  name contains `/` (e.g. `async/await`), emit it piped — `[[async-await|async/await]]`
+  — because a bare `[[async/await]]` resolves as a vault path, never via the alias.
 
 - **`work-log-synthesis`**: the input text contains personal events from
   multiple sources, each prefixed with `[source_id]`. Instead of a plain

@@ -30,7 +30,6 @@ sources:                             # key = source id = <daily>/{id}/ directory
     extract_concepts: true|false     # whether to run LLM concept extraction
     track_personal: true|false       # whether to count toward the work-log
 
-labels: {categories: [...]}
 performance: {...}                   # performance-category mapping (see config.example)
 synthesis: {weekly: {...}, monthly: {...}, quarterly: {...}, annual: {...}}
 concepts:                            # LLM concept-page taxonomy

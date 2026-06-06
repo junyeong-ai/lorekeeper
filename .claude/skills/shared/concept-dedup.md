@@ -26,7 +26,10 @@ algorithm so the wiki converges instead of accumulating variants.
    differs from the canonical name (source says `RAG`, canonical is
    `Retrieval-Augmented-Generation`), append the surface form to that
    concept's `aliases` frontmatter so a future bare `[[RAG]]` resolves to
-   the one page. Registering an alias is a metadata-only edit: it never
+   the one page. A surface form containing `/` (e.g. `async/await`) can NOT
+   be linked bare — `[[async/await]]` resolves as a vault *path*, not via the
+   alias — so link it piped: `[[async-await|async/await]]` (slug target,
+   surface as display). Registering an alias is a metadata-only edit: it never
    renames the canonical page and is not, by itself, a reason to rewrite
    the body. (Whether to enrich the Synthesis section on merge is a
    separate judgment the consuming skill's own spec governs.) This is safe
