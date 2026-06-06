@@ -150,10 +150,10 @@ pub async fn run(
             Ok(s) => s,
             Err(e) => {
                 eprintln!("  ✗ {e}");
-                if !dry_run {
-                    record_failure(&log, id, &started_at, &e.to_string()).await;
-                }
                 had_failure = true;
+                if !dry_run {
+                    record_failure(&log, id, &started_at, &e.to_string(), &mut had_failure).await;
+                }
                 continue;
             }
         };
@@ -162,10 +162,10 @@ pub async fn run(
             Ok(items) => items,
             Err(e) => {
                 eprintln!("  ✗ extract: {e}");
-                if !dry_run {
-                    record_failure(&log, id, &started_at, &e.to_string()).await;
-                }
                 had_failure = true;
+                if !dry_run {
+                    record_failure(&log, id, &started_at, &e.to_string(), &mut had_failure).await;
+                }
                 continue;
             }
         };
@@ -180,10 +180,10 @@ pub async fn run(
             Err(e) => {
                 eprintln!("  ✗ pipeline: {e}");
                 llm.rollback_source().await;
-                if !dry_run {
-                    record_failure(&log, id, &started_at, &e.to_string()).await;
-                }
                 had_failure = true;
+                if !dry_run {
+                    record_failure(&log, id, &started_at, &e.to_string(), &mut had_failure).await;
+                }
                 continue;
             }
         };
@@ -193,16 +193,19 @@ pub async fn run(
         if result.is_empty() {
             eprintln!("  — skipped (no events)");
             if !dry_run {
-                log.record(&lk_vault::LogEntry {
-                    timestamp: jiff::Timestamp::now(),
-                    source_id: id.clone(),
-                    status: lk_vault::LogStatus::Skipped,
-                    event_count: 0,
-                    duration_ms: started_at.elapsed().as_millis() as u64,
-                    error: None,
-                })
-                .await
-                .unwrap_or_else(|e| tracing::warn!(error = %e, "ingest-log write failed"));
+                record_log(
+                    &log,
+                    &lk_vault::LogEntry {
+                        timestamp: jiff::Timestamp::now(),
+                        source_id: id.clone(),
+                        status: lk_vault::LogStatus::Skipped,
+                        event_count: 0,
+                        duration_ms: started_at.elapsed().as_millis() as u64,
+                        error: None,
+                    },
+                    &mut had_failure,
+                )
+                .await;
             }
             continue;
         }
@@ -347,20 +350,23 @@ pub async fn run(
         } else {
             lk_vault::LogStatus::Success
         };
-        log.record(&lk_vault::LogEntry {
-            timestamp: jiff::Timestamp::now(),
-            source_id: p.id.clone(),
-            status,
-            event_count: p.result.events.len(),
-            duration_ms: p.started_at.elapsed().as_millis() as u64,
-            error: if any_write_failed {
-                Some("vault write failed".into())
-            } else {
-                None
+        record_log(
+            &log,
+            &lk_vault::LogEntry {
+                timestamp: jiff::Timestamp::now(),
+                source_id: p.id.clone(),
+                status,
+                event_count: p.result.events.len(),
+                duration_ms: p.started_at.elapsed().as_millis() as u64,
+                error: if any_write_failed {
+                    Some("vault write failed".into())
+                } else {
+                    None
+                },
             },
-        })
-        .await
-        .unwrap_or_else(|e| tracing::warn!(error = %e, "ingest-log write failed"));
+            &mut had_failure,
+        )
+        .await;
     }
 
     // Phase 6: Archive consumed inbox files for manual sources. Reached only when every
@@ -466,20 +472,34 @@ fn pending_queue_count(vault_root: &std::path::Path) -> miette::Result<usize> {
     Ok(n)
 }
 
+/// Append one ingest-log entry, surfacing a write failure as a run failure instead of
+/// swallowing it: the log is the audit trail `lore status` / `lore health` read, so a
+/// disk-full or permission error must reach the exit code, not just the tracing log.
+async fn record_log(log: &lk_vault::IngestLog, entry: &lk_vault::LogEntry, had_failure: &mut bool) {
+    if let Err(e) = log.record(entry).await {
+        tracing::warn!(error = %e, "ingest-log write failed");
+        *had_failure = true;
+    }
+}
+
 async fn record_failure(
     log: &lk_vault::IngestLog,
     source_id: &str,
     start: &std::time::Instant,
     error: &str,
+    had_failure: &mut bool,
 ) {
-    log.record(&lk_vault::LogEntry {
-        timestamp: jiff::Timestamp::now(),
-        source_id: source_id.into(),
-        status: lk_vault::LogStatus::Failed,
-        event_count: 0,
-        duration_ms: start.elapsed().as_millis() as u64,
-        error: Some(error.into()),
-    })
-    .await
-    .unwrap_or_else(|e| tracing::warn!(error = %e, "ingest-log write failed"));
+    record_log(
+        log,
+        &lk_vault::LogEntry {
+            timestamp: jiff::Timestamp::now(),
+            source_id: source_id.into(),
+            status: lk_vault::LogStatus::Failed,
+            event_count: 0,
+            duration_ms: start.elapsed().as_millis() as u64,
+            error: Some(error.into()),
+        },
+        had_failure,
+    )
+    .await;
 }

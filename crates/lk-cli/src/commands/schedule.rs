@@ -3,7 +3,8 @@ use super::{find_config, load_config};
 pub async fn run(opts: &super::GlobalOptions, bin: &str) -> miette::Result<()> {
     let config_path = find_config(opts)?;
     let config = load_config(&config_path)?;
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = std::env::current_dir()
+        .map_err(|e| miette::miette!("failed to read current directory: {e}"))?;
     let cwd_str = shell_escape(&cwd.display().to_string());
     let bin_escaped = shell_escape(bin);
 
