@@ -103,9 +103,27 @@ concept_categories) with the `Synthesizer`.
   lowercased once per `classify_by_keywords` call, not per event. Classification is purely
   deterministic; an event no rule matches stays uncategorized (general section /
   `uncategorized` work-log) — a safe default with no LLM step.
+- **Canonical event order is single-sourced.** Every page that materializes events sorts
+  them through `Event::canonical_cmp` (newest first, ties broken by `id` for a total order)
+  BEFORE any bucketing, hashing, or rendering — both the streaming event-log union
+  (`merge_by_id`) and the complete-refetch daily path (`plan`). So a page's bytes and its
+  LLM-input hash never depend on the adapter/API return order: re-ingesting the same set in
+  a different order is byte-identical and enqueues zero tasks. Don't sort events ad hoc
+  anywhere else — route through the one comparator.
+- **Document slugs are collision-free, identity-aware, across runs.** A document's page slug
+  is its title slug, but a same-titled *different* document never overwrites another's page.
+  A candidate slug is claimed only when it is free in this batch AND its on-disk page (if any)
+  is the SAME document — compared by the page's `source_file`/`source_url` identity. Otherwise
+  a suffix from the document's own `EventId` trailing hash is appended and lengthened until the
+  candidate is genuinely free (the full hash is unique per document, guaranteeing termination
+  and collision-freedom — not a positional counter, and not merely improbable). This catches
+  both intra-batch collisions and the cross-run case (a prior run's archived note's page still
+  on disk). Re-ingesting the same document reuses its slug (identity match) → idempotent.
 - **Concept merge** reads existing `created`/`updated` frontmatter (the keys actually
-  written), preserves the original title and category (established identity = first
-  writer wins). A re-extraction whose category DISAGREES with the established one is a
+  written), preserves the original title, category, AND `aliases` (established identity =
+  first writer wins) — a synonym a human or `/lore-wiki audit` registered survives the
+  re-render instead of being reset to `[title]` (the title is always re-emitted as the
+  first alias). A re-extraction whose category DISAGREES with the established one is a
   genuine conflict — kept established, but `tracing::warn`ed so a possibly-wrong day-1
   assignment doesn't silently calcify. `merge` only widens the `first_seen`/`last_seen`
   window (`observe`); it does NOT count citations. `source_count` is written as `0` by

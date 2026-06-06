@@ -157,9 +157,9 @@ fn file_mtime_epoch(path: &Path) -> Result<i64, GraphError> {
     let mtime = meta
         .modified()
         .map_err(|e| GraphError::Io(format!("mtime {}: {e}", path.display())))?;
-    let duration = mtime
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
+    let duration = mtime.duration_since(std::time::UNIX_EPOCH).map_err(|e| {
+        GraphError::Io(format!("mtime {} predates unix epoch: {e}", path.display()))
+    })?;
     Ok(duration.as_secs() as i64)
 }
 

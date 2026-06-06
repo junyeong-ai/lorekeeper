@@ -46,7 +46,13 @@ pub async fn render_work_log(
     let topic_heading = locale.strings().topic_summary;
 
     let mut outputs = Vec::new();
-    for (date, day_events) in by_date {
+    for (date, mut day_events) in by_date {
+        // Canonical order, like every other event-materializing page: the work-log groups
+        // personal events from many sources, so without this its grouping AND its
+        // `synthesis_input` (hashed for the cache) would depend on source-collection order.
+        // Sorting through the one comparator makes the page bytes and the cache hash
+        // independent of it — zero spurious re-enqueue on an unchanged day.
+        day_events.sort_by(Event::canonical_cmp);
         let groups = group_by_category(&day_events, perf, locale);
         if groups.is_empty() {
             continue;

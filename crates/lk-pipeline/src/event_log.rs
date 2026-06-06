@@ -129,11 +129,7 @@ pub fn merge_by_id(stored: Vec<Event>, fresh: Vec<Event>) -> Vec<Event> {
         by_id.insert(ev.id.as_str().to_string(), ev); // fresh wins
     }
     let mut merged: Vec<Event> = by_id.into_values().collect();
-    merged.sort_by(|a, b| {
-        b.timestamp
-            .cmp(&a.timestamp)
-            .then_with(|| a.id.as_str().cmp(b.id.as_str()))
-    });
+    merged.sort_by(Event::canonical_cmp);
     merged
 }
 

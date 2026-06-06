@@ -1,7 +1,7 @@
 ---
 id: {{ slug }}
 title: {{ name | tojson }}
-aliases: [{{ name | tojson }}]
+aliases: {{ aliases | tojson }}
 created: {{ first_seen }}
 updated: {{ last_seen }}
 {% if category %}category: {{ category | tojson }}

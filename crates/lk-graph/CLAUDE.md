@@ -95,8 +95,11 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
   frontmatter carries no `sources` array.
 - **`merge::merge_concepts`** (`lore graph merge <from> <into>`) folds a duplicate
   concept into a canonical one: it rewires every wikilink targeting `from` (bare slug AND
-  path id, anchors/aliases preserved) to `into` across the FULL vault, then deletes the
-  `from` page. It never copies/fabricates prose. **Authored-body guard**:
+  path id — resolved through `scan::resolve_wikilink_target` so a non-normalized path link
+  is rewritten too, anchors/aliases preserved) to `into` across the FULL vault, folds
+  `from`'s title + aliases into `into`'s `aliases` (so a synonym keeps resolving — durable
+  because ingest preserves concept `aliases` across re-render), then deletes the `from`
+  page. It never copies/fabricates prose. **Authored-body guard**:
   `concept_has_authored_body` is section-aware — a `- [[…]]` bullet is machine-owned ONLY
   under the `## Sources` heading (matched across all locales, column-0 exact like
   `backlinks-sync`); bullets under `## Related` (human-curated) or any synthesis prose

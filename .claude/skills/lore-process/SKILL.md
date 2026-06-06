@@ -61,17 +61,15 @@ compacted since you last read it.
 Daily pages are materialized views with two kinds of fields:
 
 - **Structural** (frontmatter, raw event list, headings) — owned by the Rust
-  pipeline, re-rendered on every ingest.
+  pipeline, re-rendered on every ingest. This skill never writes them.
 - **Semantic** (summary body, refined event bodies, concept wiki-links) —
-  owned by this skill, preserved across re-renders, and invalidated only when
-  the underlying LLM input changes.
+  owned by this skill, preserved across re-renders.
 
-The pipeline records a BLAKE3-128 hash of each LLM task's cache identity
-under the target page's `llm_inputs.<key>` frontmatter at render time. On a
-re-ingest it compares the new hash against the cached one: if they match and
-the section is non-empty, the task is **not** enqueued at all. That cache
-rests on the contract that this skill writes only LLM-produced content into
-the target sections, never structural artifacts.
+The pipeline decides what needs work before the queue file exists: a task is
+enqueued only when its section is missing or its inputs changed. This skill's
+sole obligation to that machinery is to write **only** LLM-produced content
+into the target sections, never structural artifacts — a non-empty section
+body is the completion signal the next ingest reads.
 
 ## Queue format & recovery
 

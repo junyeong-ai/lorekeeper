@@ -3,7 +3,8 @@
 //! `find_near_duplicate_concepts` (in `concepts`) only *reports* variant-spelling
 //! duplicates (`vector-db` ~ `vector-database`); this module is the execution
 //! counterpart that resolves one. It rewrites every wikilink that targets the
-//! `from` concept so it points at `into`, then deletes the now-orphaned `from`
+//! `from` concept so it points at `into`, folds `from`'s names (title + aliases) into
+//! `into`'s `aliases` so a synonym keeps resolving, then deletes the now-orphaned `from`
 //! page. The `## Sources` body and `source_count` are deliberately NOT touched
 //! here — they are owned by `backlinks-sync`, which re-derives them exactly from
 //! the post-merge link graph on its next run.
@@ -111,6 +112,16 @@ pub fn merge_concepts(
     let from_path_id = path_slug(&from_rel);
     let into_path_id = path_slug(&into_rel);
 
+    // Compute the merged alias list BEFORE mutating any page, so a malformed `from`/`into`
+    // aborts the merge before a single link is repointed (validate-before-mutate). The list
+    // is derived from names only, so it stays valid even though the rewrite loop below may
+    // rewrite `into`'s own body links.
+    let absorbed_aliases = if dry_run {
+        None
+    } else {
+        Some(compute_absorbed_aliases(vault_root, &from_rel, &into_rel)?)
+    };
+
     let mut rewritten = Vec::new();
     for page in pages {
         // The from page itself is about to be deleted — don't rewrite it.
@@ -135,6 +146,13 @@ pub fn merge_concepts(
     rewritten.sort_by(|a, b| a.path.cmp(&b.path));
 
     if !dry_run {
+        // Apply the pre-computed aliases (reading `into` fresh so the rewrite loop's body
+        // changes are kept), then delete `from`. A synonym that resolved to `from` keeps
+        // resolving — now to `into`; without this the merged name would silently stop
+        // resolving once the page is gone.
+        if let Some(aliases) = &absorbed_aliases {
+            apply_aliases(vault_root, &into_rel, aliases)?;
+        }
         std::fs::remove_file(vault_root.join(&from_rel))
             .map_err(|e| GraphError::Io(format!("delete {}: {e}", from_rel.display())))?;
     }
@@ -147,6 +165,83 @@ pub fn merge_concepts(
         from_authored,
         dry_run,
     })
+}
+
+/// Compute the `into` page's alias list after absorbing `from`'s identity (its title and
+/// any declared aliases), so a synonym that resolved to `from` keeps resolving — to `into` —
+/// once `from` is deleted. The `into` title stays first (Obsidian convention) and duplicates
+/// are dropped. This is the fallible half (it reads and parses both pages), kept separate so
+/// the caller runs it BEFORE any mutation — a malformed page aborts the merge before a single
+/// link is repointed.
+fn compute_absorbed_aliases(
+    vault_root: &Path,
+    from_rel: &Path,
+    into_rel: &Path,
+) -> Result<Vec<String>, GraphError> {
+    fn aliases_of(page: &lk_core::frontmatter::VaultPage) -> Vec<String> {
+        page.frontmatter
+            .get("aliases")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    fn title_of(page: &lk_core::frontmatter::VaultPage) -> Option<String> {
+        page.frontmatter
+            .get("title")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    }
+
+    let from_raw = std::fs::read_to_string(vault_root.join(from_rel))
+        .map_err(|e| GraphError::Io(format!("read {}: {e}", from_rel.display())))?;
+    let from = lk_core::frontmatter::parse_page(&from_raw)
+        .map_err(|e| GraphError::Io(format!("parse {}: {e}", from_rel.display())))?;
+
+    let into_raw = std::fs::read_to_string(vault_root.join(into_rel))
+        .map_err(|e| GraphError::Io(format!("read {}: {e}", into_rel.display())))?;
+    let into = lk_core::frontmatter::parse_page(&into_raw)
+        .map_err(|e| GraphError::Io(format!("parse {}: {e}", into_rel.display())))?;
+
+    // Names to absorb: `from`'s title (covers a bare `[[from-name]]`/`[[from-slug]]`, which
+    // slugify identically) plus every alias `from` itself carried.
+    let mut absorb = Vec::new();
+    absorb.extend(title_of(&from));
+    absorb.extend(aliases_of(&from));
+
+    // Rebuild the alias list deterministically: the `into` title first, then its existing
+    // aliases, then the absorbed `from` names — all deduped, so a title that sat mid-list or
+    // a pre-existing duplicate is normalized too.
+    let mut aliases: Vec<String> = Vec::new();
+    for name in title_of(&into)
+        .into_iter()
+        .chain(aliases_of(&into))
+        .chain(absorb)
+    {
+        if !aliases.contains(&name) {
+            aliases.push(name);
+        }
+    }
+    Ok(aliases)
+}
+
+/// Write the pre-computed alias list onto the `into` page. Reads `into` fresh so the merge's
+/// body-link rewrite is kept, then rewrites only the `aliases:` line via the single-sourced
+/// [`lk_vault::set_frontmatter_field`]; everything else round-trips untouched (an ingest
+/// re-render preserves the merged aliases — `lk-pipeline` carries `aliases` like the title).
+fn apply_aliases(vault_root: &Path, into_rel: &Path, aliases: &[String]) -> Result<(), GraphError> {
+    let into_raw = std::fs::read_to_string(vault_root.join(into_rel))
+        .map_err(|e| GraphError::Io(format!("read {}: {e}", into_rel.display())))?;
+    let value = serde_json::to_string(aliases)
+        .map_err(|e| GraphError::Io(format!("serialize aliases: {e}")))?;
+    let updated = lk_vault::set_frontmatter_field(&into_raw, "aliases", &value);
+    std::fs::write(vault_root.join(into_rel), updated)
+        .map_err(|e| GraphError::Io(format!("write {}: {e}", into_rel.display())))?;
+    Ok(())
 }
 
 /// Rewrite every wikilink targeting the from concept (bare slug or path id) to the
@@ -171,9 +266,13 @@ fn rewrite_links(
                 wikilink::split_wikilink_parts(&full[2..full.len() - 2]);
             let trimmed = page_raw.trim();
 
-            // Does this link target the from concept?
-            let is_bare = slugify(trimmed).as_deref() == Some(from_slug) && !trimmed.contains('/');
-            let is_path = trimmed == from_path_id;
+            // Does this link target the from concept? Resolve the target the SAME way the
+            // graph does (`resolve_wikilink_target`: per-segment slugify) so a non-normalized
+            // path link like `[[wiki/concepts/Vector DB]]` — which resolves to the from page
+            // and would dangle after deletion — is rewritten too, not just exact-id matches.
+            let resolved = crate::scan::resolve_wikilink_target(trimmed);
+            let is_bare = resolved == from_slug && !trimmed.contains('/');
+            let is_path = resolved == from_path_id;
             if !is_bare && !is_path {
                 return full.to_owned();
             }
@@ -507,5 +606,102 @@ mod tests {
                 .from_authored,
             "indented Sources heading must not be mistaken for the machine-owned section"
         );
+    }
+
+    #[test]
+    fn merge_rewrites_non_normalized_path_links() {
+        // A path-style link whose segments aren't slugified (`[[wiki/concepts/Vector DB]]`)
+        // still resolves to the `from` page, so the merge MUST rewrite it before deleting
+        // `from` — otherwise it would dangle. Resolution goes through the same normalizer the
+        // graph uses, not a raw string compare.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        write(
+            root,
+            "wiki/concepts/vector-db.md",
+            "---\nid: vector-db\n---\n\n# vector-db\n",
+        );
+        write(
+            root,
+            "wiki/concepts/vector-database.md",
+            "---\nid: vector-database\n---\n\n# vector-database\n",
+        );
+        write(
+            root,
+            "daily/x/d.md",
+            "See [[wiki/concepts/Vector DB]] for details.\n",
+        );
+        let pages = vec![
+            page("wiki/concepts/vector-db", "wiki/concepts/vector-db.md", &[]),
+            page(
+                "wiki/concepts/vector-database",
+                "wiki/concepts/vector-database.md",
+                &[],
+            ),
+            page("daily/x/d", "daily/x/d.md", &["wiki/concepts/vector-db"]),
+        ];
+        let r = merge_concepts(
+            &pages,
+            root,
+            "wiki",
+            "vector-db",
+            "vector-database",
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            r.rewritten.len(),
+            1,
+            "the non-normalized path link is rewritten"
+        );
+        let daily = std::fs::read_to_string(root.join("daily/x/d.md")).unwrap();
+        assert_eq!(
+            daily, "See [[wiki/concepts/vector-database]] for details.\n",
+            "path link must repoint to the canonical page, not dangle"
+        );
+    }
+
+    #[test]
+    fn merge_absorbs_from_names_into_into_aliases() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        write(
+            root,
+            "wiki/concepts/vector-db.md",
+            "---\nid: vector-db\ntitle: \"Vector DB\"\naliases: [\"Vector DB\",\"vecdb\"]\n---\n\n# Vector DB\n",
+        );
+        write(
+            root,
+            "wiki/concepts/vector-database.md",
+            "---\nid: vector-database\ntitle: \"Vector Database\"\naliases: [\"Vector Database\"]\n---\n\n# Vector Database\n",
+        );
+        let pages = vec![
+            page("wiki/concepts/vector-db", "wiki/concepts/vector-db.md", &[]),
+            page(
+                "wiki/concepts/vector-database",
+                "wiki/concepts/vector-database.md",
+                &[],
+            ),
+        ];
+        merge_concepts(
+            &pages,
+            root,
+            "wiki",
+            "vector-db",
+            "vector-database",
+            false,
+            false,
+        )
+        .unwrap();
+        // `from`'s title and aliases are folded into `into`'s aliases (into-title stays first,
+        // duplicates dropped), so a bare `[[Vector DB]]`/`[[vecdb]]` keeps resolving — to the
+        // surviving `vector-database` page.
+        let into = std::fs::read_to_string(root.join("wiki/concepts/vector-database.md")).unwrap();
+        assert!(
+            into.contains(r#"aliases: ["Vector Database","Vector DB","vecdb"]"#),
+            "from's names must be absorbed into the canonical page's aliases:\n{into}"
+        );
+        assert!(!root.join("wiki/concepts/vector-db.md").exists());
     }
 }

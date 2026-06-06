@@ -2000,6 +2000,120 @@ mod materialized_view {
         assert!(checked >= 3, "expected several tasks, checked {checked}");
     }
 
+    /// Two documents that share a title must not collide onto one slug-derived page — the
+    /// second would silently overwrite the first. The first keeps the clean slug; the
+    /// collision is disambiguated by the document's own stable id, so both survive.
+    #[tokio::test]
+    async fn same_titled_documents_get_distinct_pages() {
+        let dir = TempDir::new().unwrap();
+        let vault = dir.path();
+        let mut config = base_config(vault);
+        config.sources.get_mut("test-source").unwrap().source_type = SourceType::Manual;
+        let sc = config.sources.get("test-source").unwrap().clone();
+
+        let ts: jiff::Timestamp = "2026-05-23T10:00:00Z".parse().unwrap();
+        // Three documents share a title but are distinct files (distinct external ids) —
+        // the 3+ case the disambiguation must keep collision-free, not merely improbable.
+        let items = vec![
+            raw_item("Meeting Notes", "First file body", "DOC-A", ts),
+            raw_item("Meeting Notes", "Second file body", "DOC-B", ts),
+            raw_item("Meeting Notes", "Third file body", "DOC-C", ts),
+        ];
+
+        let queue_dir = vault.join(".lorekeeper").join("queue");
+        let llm: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir));
+        let mut pipeline = Pipeline::new(vault, make_ctx(&config, llm.clone()));
+        let r = pipeline
+            .plan(
+                "test-source",
+                &sc,
+                items,
+                &IngestOptions {
+                    target_date: None,
+                    today: far_future(),
+                    dry_run: false,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            r.document_pages.len(),
+            3,
+            "same-titled documents must not collide into a single page"
+        );
+        let paths: std::collections::HashSet<std::path::PathBuf> = r
+            .document_pages
+            .iter()
+            .map(|p| p.path.as_ref().to_path_buf())
+            .collect();
+        assert_eq!(
+            paths.len(),
+            3,
+            "all same-titled documents must occupy distinct page paths"
+        );
+    }
+
+    /// A later, DIFFERENT document that happens to share a title with one already in the
+    /// vault (e.g. a prior run's archived manual note) must not claim the existing page's
+    /// slug and overwrite it — the cross-run collision a batch-only check would miss. The
+    /// existing page's identity (`source_file`/`source_url`) is compared, and a mismatch
+    /// forces disambiguation.
+    #[tokio::test]
+    async fn document_does_not_overwrite_a_different_existing_doc_with_same_title() {
+        let dir = TempDir::new().unwrap();
+        let vault = dir.path();
+        let mut config = base_config(vault);
+        config.sources.get_mut("test-source").unwrap().source_type = SourceType::Manual;
+        let sc = config.sources.get("test-source").unwrap().clone();
+
+        // Pre-seed an existing document page owned by a DIFFERENT document.
+        let docs_dir = vault.join("wiki").join("documents");
+        tokio::fs::create_dir_all(&docs_dir).await.unwrap();
+        let existing_path = docs_dir.join("meeting-notes.md");
+        tokio::fs::write(
+            &existing_path,
+            "---\nid: meeting-notes\ntitle: \"Meeting Notes\"\nsource_file: \"old-file.md\"\n---\n\n# Meeting Notes\n\nOld content.\n",
+        )
+        .await
+        .unwrap();
+
+        let ts: jiff::Timestamp = "2026-05-23T10:00:00Z".parse().unwrap();
+        // A new, distinct document (its own external id → distinct identity) sharing the title.
+        let items = vec![raw_item("Meeting Notes", "New content", "NEW-DOC", ts)];
+
+        let queue_dir = vault.join(".lorekeeper").join("queue");
+        let llm: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir));
+        let mut pipeline = Pipeline::new(vault, make_ctx(&config, llm.clone()));
+        let r = pipeline
+            .plan(
+                "test-source",
+                &sc,
+                items,
+                &IngestOptions {
+                    target_date: None,
+                    today: far_future(),
+                    dry_run: false,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(r.document_pages.len(), 1);
+        let new_path = r.document_pages[0].path.as_ref().to_path_buf();
+        assert_ne!(
+            new_path,
+            std::path::Path::new("wiki/documents/meeting-notes.md"),
+            "a different same-titled document must not claim the existing page's slug"
+        );
+        // The pre-existing page is left untouched.
+        let old = tokio::fs::read_to_string(&existing_path).await.unwrap();
+        assert!(
+            old.contains("source_file: \"old-file.md\"") && old.contains("Old content."),
+            "the existing different document must be preserved, not overwritten:\n{old}"
+        );
+    }
+
     /// The document/manual path (`plan_documents`) is a materialized view exactly like
     /// the daily path, but every other test exercises only `SourceType::Gmail`. This
     /// guards the document preservation contract directly: re-ingesting an unchanged

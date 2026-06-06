@@ -163,6 +163,21 @@ async fn run_concepts(opts: &super::GlobalOptions, json: bool) -> miette::Result
             .unwrap_or_default()
             .to_string();
         let source_count = page.frontmatter.source_count().unwrap_or(0);
+        // Registered synonyms beyond the title, so the dedup registry the skills load at run
+        // start can match an alias-only surface form to this concept instead of forking a
+        // duplicate page. (The title is already carried in `title`.)
+        let aliases = page
+            .frontmatter
+            .get("aliases")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str())
+                    .filter(|s| *s != title)
+                    .map(String::from)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         if slug.is_empty() {
             continue;
         }
@@ -171,6 +186,7 @@ async fn run_concepts(opts: &super::GlobalOptions, json: bool) -> miette::Result
             title,
             category,
             source_count,
+            aliases,
         });
     }
 
@@ -185,6 +201,7 @@ async fn run_concepts(opts: &super::GlobalOptions, json: bool) -> miette::Result
                     "title": e.title,
                     "category": e.category,
                     "source_count": e.source_count,
+                    "aliases": e.aliases,
                 })
             })
             .collect();
@@ -194,8 +211,12 @@ async fn run_concepts(opts: &super::GlobalOptions, json: bool) -> miette::Result
         println!("# {} concepts", entries.len());
         for e in &entries {
             println!(
-                "{}\t{}\t{}\t{}",
-                e.slug, e.title, e.category, e.source_count
+                "{}\t{}\t{}\t{}\t{}",
+                e.slug,
+                e.title,
+                e.category,
+                e.source_count,
+                e.aliases.join(", ")
             );
         }
     }
@@ -208,4 +229,5 @@ struct ConceptEntry {
     title: String,
     category: String,
     source_count: u64,
+    aliases: Vec<String>,
 }

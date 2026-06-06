@@ -37,6 +37,14 @@ struct ConceptDraft {
     preserved_synthesis: Option<String>,
     preserved_sources: Option<String>,
     preserved_related: Option<String>,
+    /// Extra `aliases` (beyond the page title itself) carried verbatim from the existing
+    /// page. Aliases are established identity, not regenerated content: a human or
+    /// `/lore-wiki audit` registers a synonym/abbreviation (e.g. `RAG` →
+    /// `retrieval-augmented-generation`) so a bare `[[RAG]]` resolves to the one page.
+    /// An ingest re-render that re-emitted only `[title]` would silently erase them and
+    /// break every link that relied on the alias — so they are preserved exactly like the
+    /// title and category. The title seed is dropped here and re-added first at render.
+    preserved_aliases: Vec<String>,
 }
 
 impl ConceptDrafts {
@@ -112,6 +120,20 @@ impl ConceptDrafts {
                 );
                 let category = existing_category.or_else(|| concept.category.clone());
                 let source_count = page.frontmatter.source_count().unwrap_or(0);
+                // Keep every alias except the title seed (`render` re-adds the title first),
+                // so a synonym a human/audit registered survives this re-render.
+                let preserved_aliases = page
+                    .frontmatter
+                    .get("aliases")
+                    .and_then(|v| v.as_array())
+                    .map(|seq| {
+                        seq.iter()
+                            .filter_map(|x| x.as_str())
+                            .filter(|a| *a != name.as_str())
+                            .map(String::from)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
 
                 ConceptDraft {
                     slug: safe_slug.clone(),
@@ -123,6 +145,7 @@ impl ConceptDrafts {
                     preserved_synthesis: capture_section(&page.body, |s| s.concept_synthesis),
                     preserved_sources: capture_section(&page.body, |s| s.concept_sources),
                     preserved_related: capture_section(&page.body, |s| s.related),
+                    preserved_aliases,
                 }
             }
             None => ConceptDraft {
@@ -135,6 +158,7 @@ impl ConceptDrafts {
                 preserved_synthesis: None,
                 preserved_sources: None,
                 preserved_related: None,
+                preserved_aliases: Vec::new(),
             },
         };
 
@@ -143,10 +167,10 @@ impl ConceptDrafts {
         Ok(())
     }
 
-    pub fn known_slugs_and_names(&self) -> Vec<(String, String)> {
+    pub fn known_concepts(&self) -> Vec<(String, String, Vec<String>)> {
         self.drafts
             .values()
-            .map(|d| (d.slug.clone(), d.name.clone()))
+            .map(|d| (d.slug.clone(), d.name.clone(), d.preserved_aliases.clone()))
             .collect()
     }
 
@@ -187,9 +211,20 @@ impl ConceptDraft {
         let path = VaultPath::concept(dirs, &self.slug);
         let strings = locale.strings();
 
+        // The title is always the first alias (Obsidian convention); preserved synonyms
+        // follow, deduped. Single list, so the template never hardcodes `[name]` and a
+        // re-render can't drop a registered alias.
+        let mut aliases = vec![self.name.clone()];
+        for a in &self.preserved_aliases {
+            if !aliases.contains(a) {
+                aliases.push(a.clone());
+            }
+        }
+
         let context = serde_json::json!({
             "slug": self.slug,
             "name": self.name,
+            "aliases": aliases,
             "category": self.category.as_deref().unwrap_or(""),
             "first_seen": self.first_seen.to_string(),
             "last_seen": self.last_seen.to_string(),
@@ -322,6 +357,7 @@ mod tests {
             preserved_synthesis: None,
             preserved_sources: None,
             preserved_related: None,
+            preserved_aliases: Vec::new(),
         };
         let engine = TemplateEngine::new(None).unwrap();
         let page = draft
@@ -357,6 +393,7 @@ mod tests {
             ),
             preserved_sources: Some("- [[daily/x/2026-05-01]]\n- [[daily/x/2026-05-02]]".into()),
             preserved_related: Some("- [[vector-search]]".into()),
+            preserved_aliases: Vec::new(),
         };
         let engine = TemplateEngine::new(None).unwrap();
         let page = draft
@@ -398,6 +435,7 @@ mod tests {
             preserved_synthesis: None,
             preserved_sources: None,
             preserved_related: None,
+            preserved_aliases: Vec::new(),
         };
         let engine = TemplateEngine::new(None).unwrap();
         let page = draft
@@ -411,6 +449,35 @@ mod tests {
         assert!(
             page.content.contains("source_count: 0"),
             "source_count must still render correctly:\n{}",
+            page.content
+        );
+    }
+
+    #[test]
+    fn preserved_aliases_survive_render() {
+        // A synonym registered by a human or `/lore-wiki audit` (so a bare `[[RAG]]`
+        // resolves to the canonical page) must NOT be wiped when a later ingest re-renders
+        // the concept. The title is always the first alias; preserved synonyms follow.
+        let draft = ConceptDraft {
+            slug: "retrieval-augmented-generation".into(),
+            name: "Retrieval Augmented Generation".into(),
+            category: None,
+            first_seen: jiff::civil::date(2026, 5, 1),
+            last_seen: jiff::civil::date(2026, 5, 1),
+            source_count: 0,
+            preserved_synthesis: None,
+            preserved_sources: None,
+            preserved_related: None,
+            preserved_aliases: vec!["RAG".into()],
+        };
+        let engine = TemplateEngine::new(None).unwrap();
+        let page = draft
+            .render(&engine, &VaultDirs::default(), Locale::Ko)
+            .unwrap();
+        assert!(
+            page.content
+                .contains(r#"aliases: ["Retrieval Augmented Generation","RAG"]"#),
+            "registered alias must survive the re-render (title first, then synonyms):\n{}",
             page.content
         );
     }

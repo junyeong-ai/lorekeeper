@@ -24,7 +24,18 @@ pub struct QueueLlmClient {
     queue_dir: PathBuf,
     run_id: String,
     counter: AtomicU64,
-    buffer: tokio::sync::Mutex<Vec<QueueTask>>,
+    buffer: tokio::sync::Mutex<Buffer>,
+}
+
+/// Buffered tasks plus the rollback savepoint, guarded by one lock so the savepoint is
+/// always a valid index into the very task list it bounds — the rollback invariant holds
+/// by construction rather than by a sequential-use convention.
+#[derive(Default)]
+struct Buffer {
+    tasks: Vec<QueueTask>,
+    /// Task count captured at the last `begin_source`; `rollback_source` truncates back to
+    /// it to drop a failed source's tasks while keeping every earlier source's.
+    source_mark: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,7 +103,7 @@ impl QueueLlmClient {
             queue_dir,
             run_id,
             counter: AtomicU64::new(0),
-            buffer: tokio::sync::Mutex::new(Vec::new()),
+            buffer: tokio::sync::Mutex::new(Buffer::default()),
         }
     }
 
@@ -110,12 +121,23 @@ impl QueueLlmClient {
     }
 
     async fn enqueue(&self, task: QueueTask) {
-        self.buffer.lock().await.push(task);
+        self.buffer.lock().await.tasks.push(task);
     }
 }
 
 #[async_trait]
 impl LlmClient for QueueLlmClient {
+    async fn begin_source(&self) {
+        let mut buffer = self.buffer.lock().await;
+        buffer.source_mark = buffer.tasks.len();
+    }
+
+    async fn rollback_source(&self) {
+        let mut buffer = self.buffer.lock().await;
+        let mark = buffer.source_mark;
+        buffer.tasks.truncate(mark);
+    }
+
     async fn summarize(&self, req: SummarizeRequest) -> Result<String, LlmError> {
         let kind = if req.target.kind == crate::TargetKind::DailyRefineEvents {
             TaskKind::RefineEvents
@@ -170,7 +192,7 @@ impl LlmClient for QueueLlmClient {
 
     async fn flush(&self) -> Result<(), LlmError> {
         let mut buffer = self.buffer.lock().await;
-        if buffer.is_empty() {
+        if buffer.tasks.is_empty() {
             return Ok(());
         }
 
@@ -190,7 +212,7 @@ impl LlmClient for QueueLlmClient {
             .await
             .map_err(|e| LlmError::QueueIo(format!("open {}: {e}", tmp_path.display())))?;
 
-        for task in buffer.iter() {
+        for task in buffer.tasks.iter() {
             let line = serde_json::to_string(task)
                 .map_err(|e| LlmError::QueueIo(format!("serialize: {e}")))?;
             file.write_all(format!("{line}\n").as_bytes())
@@ -217,7 +239,7 @@ impl LlmClient for QueueLlmClient {
             )));
         }
 
-        buffer.clear();
+        *buffer = Buffer::default();
         Ok(())
     }
 }
@@ -291,6 +313,58 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(content.lines().count(), 3);
+    }
+
+    #[tokio::test]
+    async fn rollback_source_discards_only_tasks_buffered_since_begin() {
+        let dir = TempDir::new().unwrap();
+        let client = QueueLlmClient::new(dir.path().to_path_buf());
+
+        fn req(path: &str) -> SummarizeRequest {
+            SummarizeRequest {
+                text: "x".into(),
+                max_sentences: 5,
+                locale: "ko".into(),
+                source_type: None,
+                focus: None,
+                target: TaskTarget {
+                    vault_path: path.into(),
+                    kind: TargetKind::DailySummary,
+                    anchor: String::new(),
+                },
+            }
+        }
+
+        // Source A commits its task (no rollback).
+        client.begin_source().await;
+        client
+            .summarize(req("daily/a/2026-05-23.md"))
+            .await
+            .unwrap();
+
+        // Source B begins, buffers a task, then its plan "fails" → rollback.
+        client.begin_source().await;
+        client
+            .summarize(req("daily/b/2026-05-23.md"))
+            .await
+            .unwrap();
+        client.rollback_source().await;
+
+        client.flush().await.unwrap();
+
+        let content = tokio::fs::read_to_string(client.queue_path())
+            .await
+            .unwrap();
+        assert_eq!(
+            content.lines().count(),
+            1,
+            "only the committed source's task survives a rollback"
+        );
+        assert!(content.contains("daily/a/2026-05-23.md"));
+        assert!(
+            !content.contains("daily/b/2026-05-23.md"),
+            "a rolled-back source's tasks must never reach the flushed queue file"
+        );
     }
 
     #[tokio::test]
@@ -425,10 +499,12 @@ mod tests {
                 ExistingConceptRef {
                     slug: "alpha".into(),
                     name: "Alpha".into(),
+                    aliases: vec![],
                 },
                 ExistingConceptRef {
                     slug: "beta".into(),
                     name: "Beta".into(),
+                    aliases: vec![],
                 },
             ],
             categories: vec![

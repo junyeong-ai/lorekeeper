@@ -5,7 +5,7 @@ created: {{ date }}
 labels: {{ labels | tojson }}
 source: {{ source_id }}
 event_count: {{ events | length }}
-action_required: {{ action_count }}
+action_required: {{ action_required_count }}
 llm_inputs:
   summary: {{ llm_inputs.summary | tojson }}
   refine_events: {{ llm_inputs.refine_events | tojson }}
@@ -31,34 +31,34 @@ llm_inputs:
 {% endfor %}
 
 {% endif %}
-{% if decision_items %}
+{% if decisions_items %}
 ## {{ i18n.decisions }}
 
-{% for item in decision_items %}
+{% for item in decisions_items %}
 - **{{ item.subject }}** — {{ item.body }}
 {% endfor %}
 
 {% endif %}
-{% if project_items %}
+{% if project_updates_items %}
 ## {{ i18n.project_updates }}
 
-{% for item in project_items %}
+{% for item in project_updates_items %}
 - **{{ item.subject }}** — {{ item.body }}
 {% endfor %}
 
 {% endif %}
-{% if knowledge_items %}
+{% if knowledge_sharing_items %}
 ## {{ i18n.knowledge_sharing }}
 
-{% for item in knowledge_items %}
+{% for item in knowledge_sharing_items %}
 - **{{ item.subject }}** — {{ item.body }}
 {% endfor %}
 
 {% endif %}
-{% if meeting_items %}
+{% if meeting_followup_items %}
 ## {{ i18n.meeting_followup }}
 
-{% for item in meeting_items %}
+{% for item in meeting_followup_items %}
 - **{{ item.subject }}** — {{ item.body }}
 {% endfor %}
 

@@ -3,13 +3,20 @@
 Semantic task queue abstraction. The `LlmClient` trait is the only seam the pipeline
 knows about; provider choice is config-driven (`build_llm_client` in lk-cli).
 
-- **Trait surface**: `summarize`, `extract_concepts`, `identify_themes`, and `flush`.
+- **Trait surface**: `summarize`, `extract_concepts`, `identify_themes`, `flush`, and the
+  per-source transaction pair `begin_source`/`rollback_source`. The CLI opens a boundary
+  before planning each source and rolls back if that source's plan fails partway, so a
+  half-produced source's buffered tasks never reach the flushed file — preserving the
+  invariant that a queued task always targets a written page. Both default to no-ops, so
+  non-buffering providers (noop/mock) are unaffected.
   `identify_themes` returns structured `Vec<Theme>` (JSON parsed) and has a default
   no-op implementation so noop/mock clients work without overriding it. `flush` is the
   transactional commit point for buffered side-effects. (Classification is deterministic
   in the pipeline — keyword rules, no LLM task — so the trait has no `classify`.)
 - **Concept dedup context**: `ExtractConceptsRequest` carries `existing_concepts:
-  Vec<ExistingConceptRef>` (slug + name of vault concepts) and `categories:
+  Vec<ExistingConceptRef>` (slug + name + registered aliases of vault concepts, so an
+  alias-only surface form is matched to the existing concept instead of forking a
+  duplicate page) and `categories:
   Vec<CategoryRef>` (config-driven category list). The queue serializes both into the
   task `input` for `/lore-process`.
 - **`focus`** (`Option<String>` on both requests, from `SourceConfig.focus`) is a

@@ -171,10 +171,15 @@ pub async fn run(
         };
         eprintln!("  extracted: {} items", raw.len());
 
+        // Open a per-source queue transaction: if plan fails partway it may have already
+        // buffered LLM tasks for pages it never finished writing — roll those back so the
+        // flushed queue file never references an unwritten page.
+        llm.begin_source().await;
         let result = match pipeline.plan(id, sc, raw, &options).await {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("  ✗ pipeline: {e}");
+                llm.rollback_source().await;
                 if !dry_run {
                     record_failure(&log, id, &started_at, &e.to_string()).await;
                 }

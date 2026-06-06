@@ -134,42 +134,19 @@ pub fn render_daily_page(
         (field::LLM_INPUTS): llm_inputs_json,
     });
 
-    // Gmail's daily page adds an email-triage highlight view: dedicated sections for a
-    // fixed, curated set of email categories surfaced ABOVE the full event list. Every
-    // event still renders under Key Events regardless of category, so a category outside
-    // this set is never hidden — the buckets are an email-only highlight, not the event
-    // list. Because only the Gmail template reads them, they are computed only for Gmail;
-    // every other source type renders straight from `events` and never pays for filters
-    // its template never reads.
-    if source_type == SourceType::Gmail {
-        let action_items = filter_by_category(events, "action_required");
-        let obj = context
-            .as_object_mut()
-            .expect("daily render context is a json object");
+    // Highlight buckets: for each category the source declares, expose `{category}_items`
+    // and `{category}_count` so its template can surface dedicated sections above the full
+    // event list. A source that declares none adds nothing and pays for no filtering.
+    let obj = context
+        .as_object_mut()
+        .expect("daily render context is a json object");
+    for category in source_type.highlight_categories() {
+        let items = filter_by_category(events, category);
         obj.insert(
-            "action_count".into(),
-            serde_json::Value::from(action_items.len()),
+            format!("{category}_count"),
+            serde_json::Value::from(items.len()),
         );
-        obj.insert(
-            "action_required_items".into(),
-            serde_json::Value::Array(action_items),
-        );
-        obj.insert(
-            "decision_items".into(),
-            serde_json::Value::Array(filter_by_category(events, "decisions")),
-        );
-        obj.insert(
-            "project_items".into(),
-            serde_json::Value::Array(filter_by_category(events, "project_updates")),
-        );
-        obj.insert(
-            "knowledge_items".into(),
-            serde_json::Value::Array(filter_by_category(events, "knowledge_sharing")),
-        );
-        obj.insert(
-            "meeting_items".into(),
-            serde_json::Value::Array(filter_by_category(events, "meeting_followup")),
-        );
+        obj.insert(format!("{category}_items"), serde_json::Value::Array(items));
     }
 
     let source_template = format!("{source_id}.md.jinja");

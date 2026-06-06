@@ -178,10 +178,16 @@ pub struct SummarizeRequest {
 
 /// Compact reference to an existing concept, passed to the LLM so it can reuse
 /// established names instead of creating duplicates with variant spellings.
+/// `aliases` carries the registered synonyms/abbreviations (e.g. `RAG` for
+/// `retrieval-augmented-generation`) beyond the title, so a surface form that only
+/// matches an alias is recognized as the existing concept rather than re-created under
+/// a new slug — without aliases here, the merge/audit alias machinery would resolve old
+/// links but not stop a fresh extraction from forking a duplicate page.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExistingConceptRef {
     pub slug: String,
     pub name: String,
+    pub aliases: Vec<String>,
 }
 
 /// Category definition passed to the LLM for concept classification.
@@ -351,6 +357,20 @@ pub trait LlmClient: Send + Sync {
         req: ExtractConceptsRequest,
     ) -> Result<Vec<ExtractedConcept>, LlmError>;
 
+    /// Open a per-source transaction boundary. The CLI calls this immediately before it
+    /// plans a source. Buffered tasks accumulate across sources for one atomic flush, but
+    /// a source whose plan fails PARTWAY has already buffered some tasks pointing at pages
+    /// that will never be written — flushing them would break the invariant that a queued
+    /// task always targets a written page. Pairing this with [`rollback_source`] lets the
+    /// CLI discard exactly that source's tasks while keeping earlier sources' valid ones.
+    /// Default no-op: providers that don't buffer (noop/mock) need no boundary.
+    async fn begin_source(&self) {}
+
+    /// Discard every task buffered since the last [`begin_source`], used when a source's
+    /// plan errors so its half-produced tasks never reach the flushed queue file. Default
+    /// no-op.
+    async fn rollback_source(&self) {}
+
     /// Extract structured themes from combined multi-source text. Returns a JSON-parsed
     /// list of themes with titles and descriptions. The default returns an empty vec,
     /// which suffices for noop and mock clients; queue mode emits a deferred task and
@@ -401,10 +421,12 @@ mod tests {
             ExistingConceptRef {
                 slug: "zeta".into(),
                 name: "Zeta".into(),
+                aliases: vec![],
             },
             ExistingConceptRef {
                 slug: "alpha".into(),
                 name: "Alpha".into(),
+                aliases: vec![],
             },
         ]);
         let without = concept_req(vec![]);

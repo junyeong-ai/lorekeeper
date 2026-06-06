@@ -159,6 +159,13 @@ impl Pipeline {
             return Ok(empty_result(source_id));
         }
 
+        // Canonical order BEFORE any bucketing, hashing, or rendering, so a complete-refetch
+        // source whose API returns the same set in a different order still produces the same
+        // page bytes and the same LLM-input hash (zero spurious re-enqueue). The streaming
+        // path already arrives sorted from `merge_by_id`; sorting again here is idempotent and
+        // single-sources the order for every source type through one comparator.
+        events.sort_by(Event::canonical_cmp);
+
         // Classification is a render-time derivation of current config — re-applied to the
         // whole set so a config change reaches preserved events too. A streaming source's
         // log stores pre-classification, pre-refine events: the source of truth, untouched
@@ -391,11 +398,22 @@ impl Pipeline {
             // A cached body that can't be spliced (a custom template heading diverged
             // from the configured one) yields `None`; skip the write so the previous
             // on-disk page — and its LLM body — is left intact.
-            if let Some(content) = render::splice_preserved_sections(fresh.content, splices) {
-                daily_pages.push(render::RenderResult {
+            match render::splice_preserved_sections(fresh.content, splices) {
+                Some(content) => daily_pages.push(render::RenderResult {
                     path: fresh.path,
                     content,
-                });
+                }),
+                // A cached section heading is absent from the freshly rendered template
+                // (almost always a custom template that renamed it). The previous on-disk
+                // page is kept intact; warn so the divergence is observable instead of a
+                // silently frozen page. Any task enqueued above targets that existing page
+                // (a preserved body implies a prior page), so no orphan-to-missing results.
+                None => tracing::warn!(
+                    source = source_id,
+                    date = %date,
+                    "daily page write skipped: a cached section heading is missing from the \
+                     rendered template; keeping the previous page"
+                ),
             }
 
             // Merge into the run-level accumulator (shared across all sources) so a
@@ -470,6 +488,11 @@ impl Pipeline {
         config: &SourceConfig,
         events: Vec<Event>,
     ) -> Result<IngestResult, PipelineError> {
+        // Canonical order so slug-collision disambiguation (first occurrence keeps the clean
+        // slug) is stable across runs — the same comparator the daily path and event log use.
+        let mut events = events;
+        events.sort_by(Event::canonical_cmp);
+
         let focus = config.normalized_focus();
 
         let existing_concepts = if config.extract_concepts {
@@ -484,10 +507,17 @@ impl Pipeline {
 
         let mut document_pages: Vec<RenderResult> = Vec::new();
         let mut all_concepts: Vec<lk_core::concept::ExtractedConcept> = Vec::new();
+        // Two documents in one batch can share a title — and therefore a base slug. Track the
+        // slugs already claimed and disambiguate a collision by the document's OWN stable
+        // identity (the trailing hash of its `EventId`), so a same-titled second document gets
+        // its own page instead of silently overwriting the first. First occurrence keeps the
+        // clean slug; the suffix is content-derived (stable across runs), never a positional
+        // counter (which would shift if the batch's order or membership changed).
+        let mut used_slugs: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         for event in &events {
             // Derive slug from title; fall back to source_file metadata.
-            let slug = match lk_core::concept::slugify(&event.title) {
+            let base_slug = match lk_core::concept::slugify(&event.title) {
                 Some(s) => s,
                 None => {
                     let source_file = event
@@ -508,11 +538,57 @@ impl Pipeline {
                     }
                 }
             };
+            // This document's stable identity — the manual file path the template records as
+            // `source_file` (`source_url` is also accepted, as forward-compat for any
+            // URL-sourced document). Used to decide whether an existing page at a candidate
+            // slug is THIS document (reuse it idempotently) or a DIFFERENT one (disambiguate)
+            // — so a later same-titled document never overwrites an earlier one's page,
+            // ACROSS runs, not just within this batch (`used_slugs` can't see prior-run pages).
+            let identity = event
+                .metadata
+                .get("source_file")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .or_else(|| event.url.clone());
+
+            // Resolve a collision-free slug. The bare title slug is tried first (readable);
+            // on any collision — a slug already claimed in this batch, OR an on-disk page
+            // owned by a DIFFERENT document — the document's own `EventId` hash is appended,
+            // lengthened, and finally given a numeric tail. The candidate ALWAYS keeps
+            // changing, so termination never depends on hash uniqueness, and a candidate is
+            // claimed ONLY when it is free or already this document's own page — a different
+            // document's page is never overwritten.
+            let hash = event.id.content_hash();
+            let mut suffix_len: Option<usize> = None;
+            let (slug, existing) = loop {
+                let candidate = match suffix_len {
+                    None => base_slug.clone(),
+                    Some(n) if n <= hash.len() => format!("{base_slug}-{}", &hash[..n]),
+                    // Past the full hash (astronomically unlikely): a numeric tail guarantees
+                    // the candidate never saturates, so the loop always reaches a free slug.
+                    Some(n) => format!("{base_slug}-{hash}-{}", n - hash.len()),
+                };
+                if !used_slugs.contains(&candidate) {
+                    let path = lk_core::vault_path::VaultPath::document(&self.ctx.dirs, &candidate)
+                        .to_string();
+                    let existing = self.reader.read_page(Path::new(&path)).await?;
+                    let owner = existing.as_ref().and_then(|pg| {
+                        pg.frontmatter
+                            .get("source_file")
+                            .or_else(|| pg.frontmatter.get("source_url"))
+                            .and_then(|v| v.as_str())
+                            .map(String::from)
+                    });
+                    if owner.is_none() || owner == identity {
+                        break (candidate, existing);
+                    }
+                }
+                suffix_len = Some(suffix_len.map_or(6, |n| n + 2));
+            };
+            used_slugs.insert(slug.clone());
 
             let vault_path =
                 lk_core::vault_path::VaultPath::document(&self.ctx.dirs, &slug).to_string();
-
-            let existing = self.reader.read_page(Path::new(&vault_path)).await?;
 
             let combined = format!("{}\n{}", event.title, event.body);
 
@@ -635,11 +711,17 @@ impl Pipeline {
             if let Some(d) = concepts_decision.as_ref() {
                 splices.push((concepts_heading, d));
             }
-            if let Some(content) = render::splice_preserved_sections(fresh.content, splices) {
-                document_pages.push(render::RenderResult {
+            match render::splice_preserved_sections(fresh.content, splices) {
+                Some(content) => document_pages.push(render::RenderResult {
                     path: fresh.path,
                     content,
-                });
+                }),
+                None => tracing::warn!(
+                    source = source_id,
+                    slug = %slug,
+                    "document page write skipped: a cached section heading is missing from the \
+                     rendered template; keeping the previous page"
+                ),
             }
 
             // Merge concepts into run-level accumulator.
@@ -686,17 +768,36 @@ impl Pipeline {
                 .get("title")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
+            // Registered synonyms beyond the title (the title is already carried as `name`),
+            // so the LLM recognizes an alias-only surface form as this concept.
+            let aliases = page
+                .frontmatter
+                .get("aliases")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str())
+                        .filter(|s| *s != name)
+                        .map(String::from)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
             if !slug.is_empty() && !name.is_empty() {
                 refs.push(lk_queue::ExistingConceptRef {
                     slug: slug.to_string(),
                     name: name.to_string(),
+                    aliases,
                 });
             }
         }
 
-        for (slug, name) in self.concept_drafts.known_slugs_and_names() {
+        for (slug, name, aliases) in self.concept_drafts.known_concepts() {
             if !refs.iter().any(|r| r.slug == slug) {
-                refs.push(lk_queue::ExistingConceptRef { slug, name });
+                refs.push(lk_queue::ExistingConceptRef {
+                    slug,
+                    name,
+                    aliases,
+                });
             }
         }
 

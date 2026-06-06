@@ -684,6 +684,26 @@ impl SourceType {
             SourceType::Manual => "document.md.jinja",
         }
     }
+
+    /// Categories surfaced as dedicated highlight sections ABOVE the full event list on
+    /// this source's daily page. For each entry the renderer exposes `{category}_items`
+    /// (events whose `Event::category` matches) and `{category}_count` to the template.
+    /// Every event still renders under the full event list regardless of category, so a
+    /// category outside this set is never hidden — the buckets are a highlight view, not
+    /// a filter. A source that returns `&[]` renders straight from the event list and
+    /// pays for no filtering; the renderer carries no per-type branching.
+    pub fn highlight_categories(self) -> &'static [&'static str] {
+        match self {
+            SourceType::Gmail => &[
+                "action_required",
+                "decisions",
+                "project_updates",
+                "knowledge_sharing",
+                "meeting_followup",
+            ],
+            _ => &[],
+        }
+    }
 }
 
 impl std::fmt::Display for SourceType {
