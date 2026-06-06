@@ -96,8 +96,8 @@ impl Synthesizer {
     /// A synthesis page is a materialized view exactly like a daily page: its one
     /// LLM-owned section (narrative or themes) is preserved across re-renders and
     /// re-computed only when the source input changes. This is the shared lookup:
-    /// build the request, hash its `cache_identity()`, and compare against the
-    /// existing page's `llm_inputs.<key>` frontmatter. On a hit the LLM call is
+    /// build the request, hash its `cache_identity()`, and compare against the existing
+    /// page's `*_done` completion marker (`completion_key`). On a hit the LLM call is
     /// skipped and the existing body is spliced back; on a miss the task runs (or
     /// enqueues, in queue mode).
     async fn summarize_section(
@@ -151,7 +151,7 @@ impl Synthesizer {
         let existing = self.reader.read_page(path.as_ref()).await?;
         Ok(llm_cache::lookup(
             existing.as_ref(),
-            kind.completion_key(),
+            &kind.completion_key(),
             heading,
             hash,
         ))
@@ -180,10 +180,7 @@ impl Synthesizer {
             // preserves it; on a miss there is no valid marker yet and the skill writes
             // it after processing.
             if decision.cached {
-                llm_inputs.insert(
-                    kind.completion_key().to_string(),
-                    decision.hash.clone().into(),
-                );
+                llm_inputs.insert(kind.completion_key(), decision.hash.clone().into());
             }
             map.insert(
                 field::LLM_INPUTS.to_string(),

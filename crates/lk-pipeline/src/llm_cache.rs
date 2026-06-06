@@ -40,8 +40,9 @@ pub struct SectionDecision {
     /// the new render's `llm_inputs.<key>` frontmatter regardless of whether the task
     /// is enqueued, so subsequent runs have a reference point.
     pub hash: String,
-    /// True when the cached page has this same hash AND the section is filled,
-    /// meaning the LLM task is redundant and should be skipped.
+    /// True when the existing page's `*_done` completion marker equals this hash,
+    /// meaning the section is already finished for this input and the LLM task is
+    /// redundant. The body is never consulted — an empty-but-done section is cached.
     pub cached: bool,
     /// Existing section body to splice back into the freshly rendered page when
     /// `cached`. Stripped of section framing whitespace so it can be handed to

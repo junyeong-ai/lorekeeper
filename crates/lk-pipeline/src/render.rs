@@ -125,7 +125,7 @@ pub fn render_daily_page(
         (TargetKind::DailyConcepts, llm_inputs.concepts_done),
     ] {
         if let Some(stamp) = done {
-            llm_inputs_json.insert(kind.completion_key().to_string(), stamp.into());
+            llm_inputs_json.insert(kind.completion_key(), stamp.into());
         }
     }
 
@@ -237,7 +237,7 @@ pub fn render_document_page(
         (TargetKind::DocumentConcepts, llm_inputs.concepts_done),
     ] {
         if let Some(stamp) = done {
-            llm_inputs_json.insert(kind.completion_key().to_string(), stamp.into());
+            llm_inputs_json.insert(kind.completion_key(), stamp.into());
         }
     }
 

@@ -243,7 +243,7 @@ impl Pipeline {
             };
             let summary_decision = llm_cache::lookup(
                 existing.as_ref(),
-                summary_req.target.kind.completion_key(),
+                &summary_req.target.kind.completion_key(),
                 summary_heading,
                 summary_req.cache_hash(),
             );
@@ -264,10 +264,9 @@ impl Pipeline {
                     anchor: format!("## {events_heading}"),
                 },
             };
-            let refine_completion_key = refine_req.target.kind.completion_key();
             let refine_decision = llm_cache::lookup(
                 existing.as_ref(),
-                refine_completion_key,
+                &refine_req.target.kind.completion_key(),
                 events_heading,
                 refine_req.cache_hash(),
             );
@@ -316,10 +315,9 @@ impl Pipeline {
                     },
                     categories: self.ctx.concept_categories.clone(),
                 };
-                let concepts_completion_key = concepts_req.target.kind.completion_key();
                 let decision = llm_cache::lookup(
                     existing.as_ref(),
-                    concepts_completion_key,
+                    &concepts_req.target.kind.completion_key(),
                     concepts_heading,
                     concepts_req.cache_hash(),
                 );
@@ -630,7 +628,7 @@ impl Pipeline {
             };
             let summary_decision = llm_cache::lookup(
                 existing.as_ref(),
-                summary_req.target.kind.completion_key(),
+                &summary_req.target.kind.completion_key(),
                 summary_heading,
                 summary_req.cache_hash(),
             );
@@ -668,10 +666,9 @@ impl Pipeline {
                     },
                     categories: self.ctx.concept_categories.clone(),
                 };
-                let concepts_completion_key = concepts_req.target.kind.completion_key();
                 let decision = llm_cache::lookup(
                     existing.as_ref(),
-                    concepts_completion_key,
+                    &concepts_req.target.kind.completion_key(),
                     concepts_heading,
                     concepts_req.cache_hash(),
                 );

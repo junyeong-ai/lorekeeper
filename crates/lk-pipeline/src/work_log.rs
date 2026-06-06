@@ -100,7 +100,7 @@ pub async fn render_work_log(
         let existing = reader.read_page(Path::new(&vault_path)).await?;
         let decision: SectionDecision = llm_cache::lookup(
             existing.as_ref(),
-            completion_key,
+            &completion_key,
             topic_heading,
             hash.clone(),
         );
@@ -124,7 +124,7 @@ pub async fn render_work_log(
         // changed-input render forward.
         let mut llm_inputs = llm_inputs_map(&[(kind, Some(&hash))]);
         if decision.cached {
-            llm_inputs.insert(completion_key.to_string(), hash.clone().into());
+            llm_inputs.insert(completion_key, hash.clone().into());
         }
 
         let context = serde_json::json!({

@@ -84,7 +84,9 @@ impl TargetKind {
         }
     }
 
-    /// The `llm_inputs.<key>_done` frontmatter field that marks this section finished.
+    /// The `llm_inputs.<key>_done` frontmatter field that marks this section finished —
+    /// always `llm_inputs_key()` + `_done`, DERIVED so the two can never drift (adding a
+    /// `TargetKind` only ever touches `llm_inputs_key`).
     ///
     /// Completion is uniformly marker-signalled: the pipeline pre-stamps `llm_inputs_key()`
     /// with the current input hash (the stale-task reference), and `/lore-process` stamps
@@ -95,19 +97,9 @@ impl TargetKind {
     /// focus-filtered summary can match nothing, the work-log skips trivial events, a
     /// review narrative can be empty when its inputs are, and the event refine is non-empty
     /// from the first render. Tying completion to a body would re-enqueue every such empty
-    /// result forever, so no kind does. Always `llm_inputs_key()` + `_done`.
-    pub fn completion_key(self) -> &'static str {
-        match self {
-            TargetKind::DailySummary | TargetKind::DocumentSummary => "summary_done",
-            TargetKind::DailyRefineEvents => "refine_events_done",
-            TargetKind::DailyConcepts | TargetKind::DocumentConcepts => "concepts_done",
-            TargetKind::WorkLogSynthesis => "topic_summary_done",
-            TargetKind::WeeklySynthesisThemes => "themes_done",
-            TargetKind::WeeklyReviewNarrative
-            | TargetKind::MonthlyReviewNarrative
-            | TargetKind::QuarterlyReviewNarrative
-            | TargetKind::AnnualReviewNarrative => "narrative_done",
-        }
+    /// result forever, so no kind does.
+    pub fn completion_key(self) -> String {
+        format!("{}_done", self.llm_inputs_key())
     }
 }
 
