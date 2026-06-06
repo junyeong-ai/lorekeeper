@@ -25,8 +25,9 @@ concept_categories) with the `Synthesizer`.
   `Pipeline::plan`, `work_log`, and `synthesis` all implement this with:
   1. Compute `Request::cache_hash()` for every LLM task that would fire.
   2. Look up the previous render via the `VaultStore` seam (`FsVault`; `InMemoryVault` for
-     tests) and ask `llm_cache::lookup` whether the same hash + a filled section body already
-     exist on disk. If yes, skip the LLM enqueue and stash the existing body as `preserved_body`.
+     tests) and ask `llm_cache::lookup` whether the page's `*_done` completion marker
+     already equals that hash (the body is never consulted). If yes, skip the LLM enqueue
+     and stash the existing body as `preserved_body`.
   3. Render the fresh template (heading is always emitted; the body is empty when the
      LLM hasn't produced it).
   4. `render::splice_preserved_sections` replaces each fresh empty body with its
@@ -34,14 +35,15 @@ concept_categories) with the `Synthesizer`.
      It returns `Option`: if a cached body's heading is absent from the fresh render
      (a custom template renamed the section), it returns `None` and the caller skips
      the write — keeping the previous page rather than dropping the preserved body.
-  5. The fresh frontmatter records the hash in `llm_inputs.<key>` regardless of whether
-     the task was enqueued, so the cache is self-perpetuating.
+  5. The fresh frontmatter records the hash in `llm_inputs.<key>` (the stale-task
+     reference) regardless of whether the task was enqueued, and re-emits the `*_done`
+     marker on a cache hit, so the cache is self-perpetuating.
   The pattern applies uniformly to daily, document, work-log, AND synthesis pages —
   every page with an LLM-owned section is a materialized view. `TargetKind::llm_inputs_key`
   is the single source of truth mapping a task kind to its frontmatter key.
-  Manual override: a vault editor deleting either the section body or the
-  `llm_inputs.<key>` line invalidates the cache for the next run — no flag, no
-  skill argument, no out-of-band invalidation API.
+  Manual override: a vault editor deleting the `llm_inputs.<key>_done` marker line
+  invalidates the cache for the next run — wiping the body alone does NOT (the body is
+  data, the marker is completion state). No flag, no out-of-band invalidation API.
   **Completion is uniformly marker-signalled (`TargetKind::completion_key`).** Every
   LLM-owned section has an input key (`summary`/`refine_events`/`concepts`/`themes`/
   `topic_summary`/`narrative`) pre-stamped with the current-input hash (the stale-task

@@ -14,10 +14,10 @@ pub async fn run(
     let creds = lk_source::credentials::Credentials::load(&vault_root)
         .map_err(|e| miette::miette!("{e}"))?;
 
-    // Dry-run must NOT mutate filesystem. In queue mode the LLM client itself writes
-    // queue files at the start of pipeline.plan() — well before the CLI's write
-    // suppression logic kicks in — so we force NoopLlmClient for dry-run regardless
-    // of the configured provider.
+    // Dry-run must NOT mutate filesystem. In queue mode the LLM client buffers tasks
+    // during planning and writes a queue file on `flush()`; rather than thread dry-run
+    // suppression through the flush path, we force NoopLlmClient for dry-run so no queue
+    // file is ever produced, regardless of the configured provider.
     let llm: std::sync::Arc<dyn lk_queue::LlmClient> = if dry_run {
         std::sync::Arc::new(lk_queue::NoopLlmClient)
     } else {
