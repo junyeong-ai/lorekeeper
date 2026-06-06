@@ -1822,10 +1822,9 @@ mod materialized_view {
 
     #[tokio::test]
     async fn growing_concept_registry_does_not_invalidate_other_caches() {
-        // Regression guard for the existing_concepts cache-poisoning bug. The first
-        // run populates the vault with a concept page; the second run with identical
-        // input must still hit the cache, even though `load_existing_concept_refs`
-        // now returns one more entry. Hash identity is the cache_identity subset.
+        // The first run populates the vault with a concept page; the second run with
+        // identical input must still hit the cache. The concept registry never enters
+        // the task (dedup is skill-side), so a growing vault can't perturb cache hits.
         let dir = TempDir::new().unwrap();
         let vault = dir.path();
         let config = base_config(vault);
@@ -1872,9 +1871,8 @@ mod materialized_view {
         clear_queue_dir(&queue_dir).await;
 
         // Second run with QueueLlmClient and IDENTICAL input. Vault now has one
-        // concept on disk — if existing_concepts were part of the cache identity,
-        // every cache lookup would miss and re-enqueue. With existing_concepts
-        // excluded by design, nothing fires.
+        // concept on disk — the cache identity is the input text/source/date/categories
+        // only, so nothing fires.
         let llm_queue: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
         let mut pipeline2 = Pipeline::new(vault, make_ctx(&config, llm_queue.clone()));
         let _ = pipeline2

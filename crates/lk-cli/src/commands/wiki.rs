@@ -163,9 +163,9 @@ async fn run_concepts(opts: &super::GlobalOptions, json: bool) -> miette::Result
             .unwrap_or_default()
             .to_string();
         let source_count = page.frontmatter.source_count().unwrap_or(0);
-        // Registered synonyms beyond the title, so the dedup registry the skills load at run
-        // start can match an alias-only surface form to this concept instead of forking a
-        // duplicate page. (The title is already carried in `title`.)
+        // Registered synonyms beyond the title, so when `/lore-process` loads the vault's
+        // concept registry at run-start it can match an alias-only surface form to this
+        // concept instead of forking a duplicate page. (The title is already carried in `title`.)
         let aliases = page
             .frontmatter
             .get("aliases")

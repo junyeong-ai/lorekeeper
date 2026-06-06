@@ -59,9 +59,8 @@ concept_categories) with the `Synthesizer`.
   `refine_events_done` line.
 - **Cache identity vs queue payload**: `Request::cache_identity()` in `lk-queue` is the
   hashable subset that shapes the LLM's output; `Request::task_input()` is the queue
-  payload (identity PLUS registry hints like `existing_concepts`). `cache_hash()`
-  BLAKE3-128s the identity. `existing_concepts` is excluded from the identity so adding
-  a concept anywhere in the vault never invalidates unrelated cache entries; `categories`
+  payload (identity PLUS `source_type`). `cache_hash()` BLAKE3-128s the identity;
+  `categories`
   is sorted before hashing so config field order can't perturb the cache.
 - **`dedup::deduplicate(events)`** is the ONLY deduplication — pure, stateless,
   in-memory, scoped to ONE source's single fetch. It collapses by EXACT identity ONLY:
@@ -112,9 +111,9 @@ concept_categories) with the `Synthesizer`.
   window (`observe`); it does NOT count citations. `source_count` is written as `0` by
   the template and owned solely by `lore graph backlinks-sync`, which re-derives it
   exactly from the wikilink graph — so a crash or an idempotent re-ingest can never inflate
-  it. Before extraction, `load_existing_concept_refs()` scans the vault's concept
-  directory + in-memory drafts and passes them as `existing_concepts` in the LLM
-  request, preventing duplicate concept creation.
+  it. Duplicate concept creation is prevented skill-side: `/lore-process` loads the
+  on-disk concept registry (`lore wiki concepts`) and reuses an established name instead
+  of forking a variant — the pipeline embeds no registry in the task.
 - **`theme` vs `topic` are deliberately distinct, not drift.** A weekly-synthesis
   `Theme` (`identify_themes`) is a cross-source cluster spanning a whole week; a work-log
   `topic_summary`/`topic_heading` is a single day's per-source activity grouping. They sit

@@ -61,10 +61,8 @@ impl ConceptDrafts {
         reader: &dyn VaultStore,
         dirs: &VaultDirs,
     ) -> Result<(), PipelineError> {
-        let Some(safe_slug) = slugify(&concept.name) else {
-            tracing::warn!(name = %concept.name, "skipping concept with empty slug");
-            return Ok(());
-        };
+        let safe_slug = slugify(&concept.name)
+            .expect("concepts are slug-filtered via has_valid_slug before merge");
 
         if let Some(draft) = self.drafts.get_mut(&safe_slug) {
             draft.observe(date);
@@ -165,13 +163,6 @@ impl ConceptDrafts {
         draft.observe(date);
         self.drafts.insert(safe_slug, draft);
         Ok(())
-    }
-
-    pub fn known_concepts(&self) -> Vec<(String, String, Vec<String>)> {
-        self.drafts
-            .values()
-            .map(|d| (d.slug.clone(), d.name.clone(), d.preserved_aliases.clone()))
-            .collect()
     }
 
     pub fn render_pages(

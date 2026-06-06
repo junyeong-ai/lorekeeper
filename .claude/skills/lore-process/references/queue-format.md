@@ -66,7 +66,7 @@ AGENTS.md) the pipeline wrote, resolved from i18n at queue time. Always use this
 locate key — never hardcode headings per `target.kind`.
 
 `cache_hash` is BLAKE3-128 (32 hex chars) of the cache-identity subset of `input`
-(excludes registry hints like `existing_concepts`). It equals the value the pipeline wrote
+(it excludes `source_type`, which scopes extraction but doesn't shape output). It equals the value the pipeline wrote
 into `target.vault_path`'s `llm_inputs.<key>` frontmatter at queue time. The skill MUST
 verify the page's current frontmatter matches before writing — see the Stale-task guard in
 the skill body.

@@ -13,12 +13,12 @@ knows about; provider choice is config-driven (`build_llm_client` in lk-cli).
   no-op implementation so noop/mock clients work without overriding it. `flush` is the
   transactional commit point for buffered side-effects. (Classification is deterministic
   in the pipeline — keyword rules, no LLM task — so the trait has no `classify`.)
-- **Concept dedup context**: `ExtractConceptsRequest` carries `existing_concepts:
-  Vec<ExistingConceptRef>` (slug + name + registered aliases of vault concepts, so an
-  alias-only surface form is matched to the existing concept instead of forking a
-  duplicate page) and `categories:
-  Vec<CategoryRef>` (config-driven category list). The queue serializes both into the
-  task `input` for `/lore-process`.
+- **Concept dedup is skill-side, not per-task**: the queue task carries no concept
+  registry. `/lore-process` loads the on-disk registry once per run (`lore wiki concepts`
+  — slugs, names, aliases) and reuses an established name instead of forking a variant, so
+  the per-task payload stays O(1) as the vault grows. `ExtractConceptsRequest` carries only
+  `categories: Vec<CategoryRef>` (config-driven category list), serialized into the task
+  `input` for `/lore-process`.
 - **`focus`** (`Option<String>` on both requests, from `SourceConfig.focus`) is a
   source's natural-language relevance criterion. The queue serializes it into the
   task `input` so `/lore-process` applies the filter. `None` = no filtering.
@@ -33,16 +33,13 @@ knows about; provider choice is config-driven (`build_llm_client` in lk-cli).
   `target.anchor` instead of a hardcoded kind→heading table.
 - **Each request type exposes two JSON projections.**
   - `task_input()` — payload serialized into the queue file. Carries every field
-    `/lore-process` needs to do its work, including dedup/registry hints
-    (`existing_concepts`).
+    `/lore-process` needs to do its work (`source_type` plus the cache-identity fields).
   - `cache_identity()` — the subset hashed for caching. Restricted to fields that
     actually shape the LLM's output: `summarize` hashes `text` + `max_sentences` +
     `locale` + `focus`; `extract-concepts` hashes `text` + `source_id` + `date` + `focus`
     + `categories` (`source_id`/`date` scope a concept extraction to one source+day).
-    Hints that help the LLM phrase its answer but don't change semantic correctness are
-    excluded — `existing_concepts` and `source_type` are in `task_input` but NOT the
-    identity, so adding a concept anywhere in the vault does NOT invalidate every other
-    concept-extraction cache entry. `categories` is sorted by `id` so configuration field
+    `source_type` is in `task_input` but NOT the identity — it scopes extraction without
+    shaping the prompt's semantic output. `categories` is sorted by `id` so configuration field
     order can't perturb the hash. `target` is excluded — it describes where the result
     lands, not the prompt.
 - **`Request::cache_hash()`** (BLAKE3-128, 32 hex of `cache_identity()`) is

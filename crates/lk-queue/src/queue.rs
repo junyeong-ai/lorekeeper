@@ -54,9 +54,8 @@ pub struct QueueTask {
     /// mismatch forever.
     ///
     /// Note this hashes `cache_identity()`, NOT the `input` field below — `input`
-    /// carries extra task hints (the `existing_concepts` dedup registry and the
-    /// originating `source_type`) that intentionally do not participate in cache
-    /// identity.
+    /// carries the originating `source_type`, which intentionally does not participate
+    /// in cache identity.
     pub cache_hash: String,
     pub input: serde_json::Value,
     pub target: TaskTarget,
@@ -383,7 +382,6 @@ mod tests {
                 kind: TargetKind::DailyConcepts,
                 anchor: "## Related Concepts".into(),
             },
-            existing_concepts: vec![],
             categories: vec![],
         };
         let concepts = client.extract_concepts(req).await.unwrap();
@@ -415,7 +413,6 @@ mod tests {
                     kind: TargetKind::DailyConcepts,
                     anchor: "## Related Concepts".into(),
                 },
-                existing_concepts: vec![],
                 categories: vec![],
             })
             .await
@@ -480,9 +477,8 @@ mod tests {
     #[tokio::test]
     async fn cache_hash_is_stable_across_field_order() {
         // The cache identity must produce the same hash regardless of the order
-        // existing_concepts and categories arrive in — categories are sorted before
-        // hashing and existing_concepts is excluded from the identity entirely.
-        use crate::{CategoryRef, ExistingConceptRef};
+        // categories arrive in — they are sorted before hashing.
+        use crate::CategoryRef;
         let date = jiff::civil::date(2026, 5, 23);
         let a = ExtractConceptsRequest {
             text: "x".into(),
@@ -495,18 +491,6 @@ mod tests {
                 kind: TargetKind::DailyConcepts,
                 anchor: "## c".into(),
             },
-            existing_concepts: vec![
-                ExistingConceptRef {
-                    slug: "alpha".into(),
-                    name: "Alpha".into(),
-                    aliases: vec![],
-                },
-                ExistingConceptRef {
-                    slug: "beta".into(),
-                    name: "Beta".into(),
-                    aliases: vec![],
-                },
-            ],
             categories: vec![
                 CategoryRef {
                     id: "ai-ml".into(),
@@ -519,7 +503,6 @@ mod tests {
             ],
         };
         let mut b = a.clone();
-        b.existing_concepts.reverse();
         b.categories.reverse();
         assert_eq!(a.cache_hash(), b.cache_hash());
     }

@@ -197,12 +197,6 @@ impl Pipeline {
         // Normalize once: blank focus = no filter, identical across every provider path.
         let focus = config.normalized_focus();
 
-        let existing_concepts = if config.extract_concepts {
-            self.load_existing_concept_refs().await?
-        } else {
-            vec![]
-        };
-
         let strings = self.ctx.locale.strings();
         let summary_heading = strings.summary;
         let events_heading = config.source_type.events_heading(strings);
@@ -328,7 +322,6 @@ impl Pipeline {
                         kind: lk_queue::TargetKind::DailyConcepts,
                         anchor: format!("## {concepts_heading}"),
                     },
-                    existing_concepts: existing_concepts.clone(),
                     categories: self.ctx.concept_categories.clone(),
                 };
                 let decision = llm_cache::lookup(
@@ -511,12 +504,6 @@ impl Pipeline {
 
         let focus = config.normalized_focus();
 
-        let existing_concepts = if config.extract_concepts {
-            self.load_existing_concept_refs().await?
-        } else {
-            vec![]
-        };
-
         let strings = self.ctx.locale.strings();
         let summary_heading = strings.summary;
         let concepts_heading = strings.related_concepts;
@@ -672,7 +659,6 @@ impl Pipeline {
                         kind: lk_queue::TargetKind::DocumentConcepts,
                         anchor: format!("## {concepts_heading}"),
                     },
-                    existing_concepts: existing_concepts.clone(),
                     categories: self.ctx.concept_categories.clone(),
                 };
                 let decision = llm_cache::lookup(
@@ -765,68 +751,6 @@ impl Pipeline {
             daily_pages: vec![],
             document_pages,
         })
-    }
-
-    async fn load_existing_concept_refs(
-        &self,
-    ) -> Result<Vec<lk_queue::ExistingConceptRef>, PipelineError> {
-        let concept_dir = lk_core::vault_path::concepts_dir(&self.ctx.dirs);
-        // Missing concepts directory is the legitimate "no concepts yet" state, not
-        // an error. `list_markdown` already returns Ok(vec![]) in that case, so any
-        // error returned here is a real I/O or permission failure worth surfacing.
-        let files = self.reader.list_markdown(&concept_dir).await?;
-
-        let mut refs = Vec::with_capacity(files.len());
-        for file in &files {
-            let Some(page) = self.reader.read_page(file).await? else {
-                // Race: file appeared in listing but vanished before we could read it.
-                // Skip rather than fail the whole ingest.
-                continue;
-            };
-            let slug = page
-                .frontmatter
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-            let name = page
-                .frontmatter
-                .get("title")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-            // Registered synonyms beyond the title (the title is already carried as `name`),
-            // so the LLM recognizes an alias-only surface form as this concept.
-            let aliases = page
-                .frontmatter
-                .get("aliases")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str())
-                        .filter(|s| *s != name)
-                        .map(String::from)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            if !slug.is_empty() && !name.is_empty() {
-                refs.push(lk_queue::ExistingConceptRef {
-                    slug: slug.to_string(),
-                    name: name.to_string(),
-                    aliases,
-                });
-            }
-        }
-
-        for (slug, name, aliases) in self.concept_drafts.known_concepts() {
-            if !refs.iter().any(|r| r.slug == slug) {
-                refs.push(lk_queue::ExistingConceptRef {
-                    slug,
-                    name,
-                    aliases,
-                });
-            }
-        }
-
-        Ok(refs)
     }
 }
 

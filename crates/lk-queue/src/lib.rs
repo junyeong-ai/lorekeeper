@@ -176,20 +176,6 @@ pub struct SummarizeRequest {
     pub target: TaskTarget,
 }
 
-/// Compact reference to an existing concept, passed to the LLM so it can reuse
-/// established names instead of creating duplicates with variant spellings.
-/// `aliases` carries the registered synonyms/abbreviations (e.g. `RAG` for
-/// `retrieval-augmented-generation`) beyond the title, so a surface form that only
-/// matches an alias is recognized as the existing concept rather than re-created under
-/// a new slug — without aliases here, the merge/audit alias machinery would resolve old
-/// links but not stop a fresh extraction from forking a duplicate page.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExistingConceptRef {
-    pub slug: String,
-    pub name: String,
-    pub aliases: Vec<String>,
-}
-
 /// Category definition passed to the LLM for concept classification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CategoryRef {
@@ -211,9 +197,6 @@ pub struct ExtractConceptsRequest {
     /// items in a broad source never pollute the knowledge graph.
     pub focus: Option<String>,
     pub target: TaskTarget,
-    /// Existing concept slugs+names. The LLM should reuse an existing entry when
-    /// the extracted entity matches, preventing duplicate concept pages.
-    pub existing_concepts: Vec<ExistingConceptRef>,
     /// Valid category IDs the LLM may assign to each concept. Empty = no categorization.
     pub categories: Vec<CategoryRef>,
 }
@@ -235,15 +218,14 @@ pub fn cache_hash(identity: &serde_json::Value) -> String {
 // Each request type exposes two JSON projections:
 //
 // - `task_input()` — what the queue serializes for `/lore-process`. Carries every
-//   field the skill needs to do its work: the cache identity PLUS payload hints
-//   that steer HOW the skill works but don't change the output's cache identity
-//   (the existing-concepts dedup registry; the originating `source_type` used to
-//   pick a synthesis strategy).
+//   field the skill needs to do its work: the cache identity PLUS the originating
+//   `source_type` — a payload field that steers HOW the skill extracts (per-source-type
+//   scoping) but doesn't change the output's cache identity.
 // - `cache_identity()` — what `cache_hash` digests. Restricted to the fields that
 //   determine WHETHER the output would differ. Per-page-invariant context
-//   (`source_type` never changes for a given page) and registry hints are excluded,
-//   so they can't cause spurious cache misses (and excluding `source_type` avoids a
-//   full re-hash of every page just to record a value that never varies per page).
+//   (`source_type` never changes for a given page) is excluded, so it can't cause
+//   spurious cache misses and never triggers a full re-hash to record a value that
+//   never varies per page.
 
 impl SummarizeRequest {
     pub fn task_input(&self) -> serde_json::Value {
@@ -277,13 +259,9 @@ impl SummarizeRequest {
 }
 
 impl ExtractConceptsRequest {
-    /// Queue payload: identity fields PLUS the source type and existing-concepts
-    /// registry hint the skill needs to apply source-type-aware extraction and reuse
-    /// slugs instead of inventing variants.
+    /// Queue payload: identity fields PLUS the source type the skill needs to apply
+    /// source-type-aware extraction.
     pub fn task_input(&self) -> serde_json::Value {
-        let mut existing = self.existing_concepts.clone();
-        existing.sort_by(|a, b| a.slug.cmp(&b.slug));
-
         let mut v = match self.cache_identity() {
             serde_json::Value::Object(m) => m,
             _ => unreachable!("cache_identity always returns an object"),
@@ -292,19 +270,11 @@ impl ExtractConceptsRequest {
             "source_type".into(),
             serde_json::to_value(self.source_type).expect("serializable"),
         );
-        if !existing.is_empty() {
-            v.insert(
-                "existing_concepts".into(),
-                serde_json::to_value(&existing).expect("serializable"),
-            );
-        }
         serde_json::Value::Object(v)
     }
 
     /// Hashable identity. `categories` is sorted by `id` so configuration ordering
-    /// can't perturb the hash. `existing_concepts` is excluded by design — it is a
-    /// dedup hint, not part of the prompt's identity. Including it would invalidate
-    /// every cache hit as soon as ANY new concept appears in the vault.
+    /// can't perturb the hash.
     pub fn cache_identity(&self) -> serde_json::Value {
         let mut categories = self.categories.clone();
         categories.sort_by(|a, b| a.id.cmp(&b.id));
@@ -391,65 +361,5 @@ pub trait LlmClient: Send + Sync {
     /// leave this as the default no-op.
     async fn flush(&self) -> Result<(), LlmError> {
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn concept_req(existing: Vec<ExistingConceptRef>) -> ExtractConceptsRequest {
-        ExtractConceptsRequest {
-            text: "body".into(),
-            source_id: "s".into(),
-            source_type: SourceType::Rss,
-            date: jiff::civil::date(2026, 5, 23),
-            focus: None,
-            target: TaskTarget {
-                vault_path: "daily/s/2026-05-23.md".into(),
-                kind: TargetKind::DailyConcepts,
-                anchor: "## Concepts".into(),
-            },
-            existing_concepts: existing,
-            categories: vec![],
-        }
-    }
-
-    #[test]
-    fn existing_concepts_are_payload_only_and_sorted() {
-        let with = concept_req(vec![
-            ExistingConceptRef {
-                slug: "zeta".into(),
-                name: "Zeta".into(),
-                aliases: vec!["ZZ".into()],
-            },
-            ExistingConceptRef {
-                slug: "alpha".into(),
-                name: "Alpha".into(),
-                aliases: vec![],
-            },
-        ]);
-        let without = concept_req(vec![]);
-
-        // Registry hints — including aliases — never shape the cache identity: a growing
-        // concept registry (or a newly registered alias) must not invalidate unrelated
-        // extraction caches.
-        assert_eq!(with.cache_hash(), without.cache_hash());
-        assert!(with.cache_identity().get("existing_concepts").is_none());
-
-        // …but the skill payload carries them, sorted by slug so the queue file is
-        // byte-deterministic regardless of registry scan order, and the aliases ride along
-        // so an alias-only surface form is matched instead of forking a duplicate page.
-        let input = with.task_input();
-        let refs = input["existing_concepts"].as_array().unwrap();
-        let slugs: Vec<&str> = refs.iter().map(|c| c["slug"].as_str().unwrap()).collect();
-        assert_eq!(slugs, ["alpha", "zeta"]);
-        let zeta_aliases: Vec<&str> = refs[1]["aliases"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|a| a.as_str().unwrap())
-            .collect();
-        assert_eq!(zeta_aliases, ["ZZ"]);
     }
 }

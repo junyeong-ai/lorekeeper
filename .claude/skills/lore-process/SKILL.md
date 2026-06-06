@@ -87,7 +87,10 @@ The essentials: a visible `.jsonl` is fully written and every
 
 1. **Discover the vault root.** Read `vault.root` from `config.yaml`
    (auto-discovered at `./config.yaml` → `~/.config/lorekeeper/config.yaml`).
-   The user may override with `--vault <path>`.
+   The user may override with `--vault <path>`. Then load the concept registry
+   for this run: `lore wiki concepts` (slugs, names, aliases) — the queue task
+   carries no concept registry, so this on-disk snapshot plus a created-this-run
+   set is the full dedup baseline (see `shared/concept-dedup.md`).
 
 2. **List unprocessed queue files** in `<vault>/.lorekeeper/queue/` (top
    level only — `processed/` is the archive):
@@ -173,8 +176,7 @@ The essentials: a visible `.jsonl` is fully written and every
 
       Concept pages created or merged along the way follow the shared
       convergence algorithm in
-      `${CLAUDE_SKILL_DIR}/../shared/concept-dedup.md` plus the queue-mode
-      addition in processing-kinds.md (`input.existing_concepts` union).
+      `${CLAUDE_SKILL_DIR}/../shared/concept-dedup.md`.
 
    e. **On task failure** (page not found, edit error, malformed task):
       record the failed `task_id` and the reason. **Abort processing of
