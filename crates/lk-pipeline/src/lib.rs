@@ -188,7 +188,11 @@ impl Pipeline {
         }
 
         let mut daily_pages: Vec<RenderResult> = Vec::new();
-        let mut all_concepts: Vec<ExtractedConcept> = Vec::new();
+        // Concepts are staged per date and merged into the run-level accumulator only after
+        // the whole source plan succeeds, so a mid-source render failure (`?`) contributes
+        // nothing to the cross-source concept pages — the same commit-on-success contract the
+        // queue gives buffered tasks.
+        let mut staged_concepts: Vec<(ExtractedConcept, jiff::civil::Date)> = Vec::new();
 
         // Normalize once: blank focus = no filter, identical across every provider path.
         let focus = config.normalized_focus();
@@ -424,14 +428,18 @@ impl Pipeline {
                 ),
             }
 
-            // Merge into the run-level accumulator (shared across all sources) so a
-            // concept mentioned by multiple sources aggregates into one page.
-            for concept in &day_concepts {
-                self.concept_drafts
-                    .merge(concept, *date, self.reader.as_ref(), &self.ctx.dirs)
-                    .await?;
-            }
-            all_concepts.extend(day_concepts);
+            staged_concepts.extend(day_concepts.into_iter().map(|c| (c, *date)));
+        }
+
+        // Commit staged concepts into the run-level accumulator (shared across all sources,
+        // so a concept mentioned by several sources aggregates into one page) now that every
+        // page rendered.
+        let mut all_concepts = Vec::with_capacity(staged_concepts.len());
+        for (concept, date) in staged_concepts {
+            self.concept_drafts
+                .merge(&concept, date, self.reader.as_ref(), &self.ctx.dirs)
+                .await?;
+            all_concepts.push(concept);
         }
 
         Ok(IngestResult {
@@ -514,7 +522,14 @@ impl Pipeline {
         let concepts_heading = strings.related_concepts;
 
         let mut document_pages: Vec<RenderResult> = Vec::new();
-        let mut all_concepts: Vec<lk_core::concept::ExtractedConcept> = Vec::new();
+        // Run-level state (slug claims, concept drafts) is staged locally and committed to
+        // `self` only after the whole source plan succeeds, so a mid-source render failure
+        // (which returns `Err` and is rolled back by the CLI) never poisons the shared slug
+        // namespace nor leaks half a source's concepts — the same commit-on-success contract
+        // the queue's begin_source/rollback_source gives buffered tasks.
+        let mut claimed_slugs: Vec<String> = Vec::new();
+        let mut staged_concepts: Vec<(lk_core::concept::ExtractedConcept, jiff::civil::Date)> =
+            Vec::new();
         // Two documents can share a title — and therefore a base slug — whether in one batch
         // or across two sources in the same run. Disambiguate a collision by the document's
         // OWN stable identity (the trailing hash of its `EventId`), so a same-titled later
@@ -552,7 +567,8 @@ impl Pipeline {
             // URL-sourced document). Used to decide whether an existing page at a candidate
             // slug is THIS document (reuse it idempotently) or a DIFFERENT one (disambiguate)
             // — so a later same-titled document never overwrites an earlier one's page,
-            // ACROSS runs, not just within this batch (`used_slugs` can't see prior-run pages).
+            // ACROSS runs too: the in-memory slug claims only cover this run, so the on-disk
+            // owner check is what catches a prior run's page.
             let identity = event
                 .metadata
                 .get("source_file")
@@ -577,7 +593,8 @@ impl Pipeline {
                     // the candidate never saturates, so the loop always reaches a free slug.
                     Some(n) => format!("{base_slug}-{hash}-{}", n - hash.len()),
                 };
-                if !self.document_slugs.contains(&candidate) {
+                if !self.document_slugs.contains(&candidate) && !claimed_slugs.contains(&candidate)
+                {
                     let path = lk_core::vault_path::VaultPath::document(&self.ctx.dirs, &candidate)
                         .to_string();
                     let existing = self.reader.read_page(Path::new(&path)).await?;
@@ -598,7 +615,7 @@ impl Pipeline {
                 }
                 suffix_len = Some(suffix_len.map_or(6, |n| n + 2));
             };
-            self.document_slugs.insert(slug.clone());
+            claimed_slugs.push(slug.clone());
 
             let vault_path =
                 lk_core::vault_path::VaultPath::document(&self.ctx.dirs, &slug).to_string();
@@ -726,14 +743,20 @@ impl Pipeline {
                 ),
             }
 
-            // Merge concepts into run-level accumulator.
-            for concept in &doc_concepts {
-                self.concept_drafts
-                    .merge(concept, event.date, self.reader.as_ref(), &self.ctx.dirs)
-                    .await?;
-            }
-            all_concepts.extend(doc_concepts);
+            staged_concepts.extend(doc_concepts.into_iter().map(|c| (c, event.date)));
         }
+
+        // Commit staged run-level state now that every page rendered. Concept merges
+        // (fallible — they read existing pages) run before the infallible slug commit, so a
+        // merge error leaves neither half-committed.
+        let mut all_concepts = Vec::with_capacity(staged_concepts.len());
+        for (concept, date) in staged_concepts {
+            self.concept_drafts
+                .merge(&concept, date, self.reader.as_ref(), &self.ctx.dirs)
+                .await?;
+            all_concepts.push(concept);
+        }
+        self.document_slugs.extend(claimed_slugs);
 
         Ok(IngestResult {
             source_id: source_id.into(),
