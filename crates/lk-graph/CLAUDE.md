@@ -12,9 +12,6 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
   operation outcomes are `*Result` (`ClusterResult`, `SuggestResult`, `MergeResult`,
   `BacklinksSyncResult`). A domain `*Result` may be wrapped by an `output.rs` `*Report`
   for display (e.g. `BacklinksSyncResult` → `BacklinksSyncReport`).
-- **Domain rules are single-sourced**: slug normalization = `lk_core::slugify` (NFKC),
-  frontmatter = `lk_core::frontmatter::parse_page`, wikilinks =
-  `lk_core::wikilink::extract_wikilinks`. No second implementation.
 - **Config**: `config.yaml` `graph:` section (`GraphConfig` in lk-core).
   `scope.dirs` (derived from `vault.dirs.wiki` when absent), `metrics.*`
   (`min_hub_degree`, `orphan_exclude`, `concept_near_duplicate_threshold`), `cluster.*`.

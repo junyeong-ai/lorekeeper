@@ -4,20 +4,14 @@ Deterministic transform stages between `lk-source` and `lk-vault`. Shares an
 `Arc<PipelineContext>` (engine, llm, dirs, perf, timezone, locale,
 concept_categories) with the `Synthesizer`.
 
-- **Streaming sources project their page from an event log.** A complete-refetch source
-  renders directly from the fetch. A STREAMING source (`SourceType::is_streaming` — only RSS:
-  a rolling, capped feed that can't reproduce a past day) instead projects from `event_log`,
-  a durable per-date record of its raw (pre-LLM) events (`.lorekeeper/events/{source}/{date}.jsonl`).
-  For those sources `plan` UNIONs the fetch with the stored log by `EventId`
-  (`event_log::merge_by_id`, fresh wins so a still-in-feed item picks up an in-place edit),
-  persists it (unless dry-run), and renders the page from the merged set — so an item that
-  scrolled out of the feed is never lost. This is NOT a suppression cache: it never blocks
-  regeneration, it enables it — a deleted page self-heals from the log and `--date` repairs
-  any day. The log holds RAW bodies, so a re-render always feeds refine raw text — no per-block
-  refine state, no skill change. `read` is STRICT on a corrupt line (errors, leaves the file
-  intact) — silently dropping it would re-write the reduced set and lose the event. `manual` is
-  exempt (document pages, one per inbox file). Duplication converges at the concept/graph layer
-  and is preserved at the raw layer, where every observation is provenance.
+- **Streaming sources project from the event log** (root invariant) — the crate mechanics:
+  for a `SourceType::is_streaming` source (RSS), `plan` UNIONs the fetch with that date's
+  `.lorekeeper/events/{source}/{date}.jsonl` by `EventId` (`event_log::merge_by_id`, fresh
+  wins so a still-in-feed item picks up an in-place edit), persists it (unless dry-run), and
+  renders from the merged set. The log holds RAW (pre-LLM) bodies, so a re-render always feeds
+  refine raw text — no per-block refine state. `event_log::read` is STRICT on a corrupt line
+  (errors, leaves the file intact) — silently dropping it would rewrite the reduced set and
+  lose the event. `manual` is exempt (document pages, one per inbox file).
 - **`Pipeline::plan` is per-source and takes `&mut self`**; one `Pipeline` owns one
   ingest run exclusively (no shared-ref concurrency). It returns that source's daily
   pages and merges any extracted concepts into a **run-level** `ConceptDrafts`
@@ -30,11 +24,9 @@ concept_categories) with the `Synthesizer`.
   wiki-links) is owned by the LLM via the queue and **preserved across re-renders**.
   `Pipeline::plan`, `work_log`, and `synthesis` all implement this with:
   1. Compute `Request::cache_hash()` for every LLM task that would fire.
-  2. Look up the previous render via the `VaultStore` (the pipeline's vault-read seam,
-     backed by `FsVault`; `lk_vault::InMemoryVault` is the in-memory double for store-level
-     tests and a future non-filesystem backend) and ask `llm_cache::lookup` whether
-     the same hash + a filled section body already exist on disk. If yes, skip the
-     LLM enqueue and stash the existing body as `preserved_body`.
+  2. Look up the previous render via the `VaultStore` seam (`FsVault`; `InMemoryVault` for
+     tests) and ask `llm_cache::lookup` whether the same hash + a filled section body already
+     exist on disk. If yes, skip the LLM enqueue and stash the existing body as `preserved_body`.
   3. Render the fresh template (heading is always emitted; the body is empty when the
      LLM hasn't produced it).
   4. `render::splice_preserved_sections` replaces each fresh empty body with its
@@ -78,31 +70,22 @@ concept_categories) with the `Synthesizer`.
   overlap); since `EventId` IS the identity, this is provably lossless — single-key dedup
   with first-wins can never drop a distinct observation, and has no transitivity gap.
   Nothing else is a merge signal: a shared url, title, or body does NOT merge. The same
-  article carried by two RSS feeds keeps both (each feed namespaces its `external_id`, so
-  the ids differ → distinct provenance); a recurring same-title event (a daily "Standup")
-  always survives. url/title are deliberately NOT dedup keys — a url is not a reliable
-  identity (shared meeting links, shared landing pages), so keying on it would false-merge.
-  Cross-RUN behaviour is owned by the event log, not by this dedup: an event's date pins it
-  to one `<daily>/{source}/{date}` page, the fetch is UNIONed with that date's log, and the
-  page re-renders IN FULL from the merged set — so re-runs are byte-identical and late- or
-  partially-arriving items accumulate (never deplete). Cross-SOURCE observations are
-  deliberately NOT suppressed — the same article in RSS and Slack appears on both source
-  timelines (provenance), and `concept-merge` / `backlinks-sync` / `near-duplicate-concepts`
-  converge the knowledge losslessly at the page layer.
-- **classify**: ownership is decided at the source. Each adapter sets `RawItem::is_self`
-  by comparing its structured authorship field (`From` address, message author id,
-  issue assignee account, calendar organizer/attendee) to `ExtractContext::identity` —
-  exact match, no text heuristics. `normalize` carries it to `Event::is_self`, and
-  `assign_personal(events, track_personal)` sets `is_personal` + the `personal` label
-  only when the source opts into `track_personal`. A recipient/CC/mention is never the
-  author, so it is never personal. `classify_by_keywords` reads `SourceConfig.classify`
-  (ordered `Vec<ClassifyRule>`, first match wins) and uses `contains_bounded`
-  (standard `\w` token boundary — ASCII-alphanumeric + `_`, so a keyword matches inside
-  hyphen/dot compounds like `AI`→`AI-powered`, `GPT`→`GPT-4`; CJK matches across attached
-  particles so `검토`→`검토를`/`재검토`) — keyword classification only. Keywords are
-  lowercased once per `classify_by_keywords` call, not per event. Classification is purely
-  deterministic; an event no rule matches stays uncategorized (general section /
-  `uncategorized` work-log) — a safe default with no LLM step.
+  article carried by two RSS feeds keeps both (each feed namespaces its `external_id`); a
+  recurring same-title event (a daily "Standup") always survives. url/title are deliberately
+  NOT dedup keys — a url is not a reliable identity (shared meeting/landing links), so keying
+  on it would false-merge. Cross-run (event log) and cross-source (concept/graph layer)
+  convergence is owned elsewhere: the same item on two sources stays on both timelines
+  (provenance) and converges at the page layer via `concept-merge` / `backlinks-sync` /
+  `near-duplicate-concepts`.
+- **classify**: ownership (`is_self`, root invariant; set by the adapter) is carried by
+  `normalize` to `Event::is_self`; `assign_personal(events, track_personal)` sets
+  `is_personal` + the `personal` label only when the source opts into `track_personal`.
+  `classify_by_keywords` reads `SourceConfig.classify` (ordered `Vec<ClassifyRule>`, first
+  match wins) and uses `contains_bounded` (standard `\w` token boundary — ASCII-alphanumeric
+  + `_`, so a keyword matches inside hyphen/dot compounds like `AI`→`AI-powered`,
+  `GPT`→`GPT-4`; CJK matches across attached particles so `검토`→`검토를`/`재검토`). Keywords
+  lowercased once per call. Deterministic; an unmatched event stays uncategorized (general
+  section / `uncategorized` work-log) — a safe default, no LLM step.
 - **Canonical event order is single-sourced.** Every page that materializes events sorts
   them through `Event::canonical_cmp` (newest first, ties broken by `id` for a total order)
   BEFORE any bucketing, hashing, or rendering — both the streaming event-log union

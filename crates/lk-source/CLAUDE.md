@@ -13,13 +13,11 @@ map to `RawItem`.
   target day's bounds in the configured timezone — never `now`. Time-windowed adapters
   must build their windows from it so `lore ingest --date <past>` backfills the right day
   (the pipeline still date-filters afterward).
-- **Ownership is the adapter's job.** Each adapter sets `RawItem::is_self` by comparing
-  its structured authorship field to `ExtractContext::identity` with an EXACT match —
-  Gmail `From` address vs `identity.email`, Slack message author id vs `identity.slack_id`,
-  Jira assignee account vs the authenticated account, Calendar organizer/attendee email
-  vs `identity.email`. Sources with no authorship notion (Drive/RSS/Manual) set `false`.
-  The pipeline never re-derives ownership from free-form text, so a recipient/CC/mention
-  is never mistaken for the user's own work.
+- **Ownership (root invariant) — the per-adapter exact-match fields**: each adapter sets
+  `RawItem::is_self` by EXACT-matching its structured authorship field to
+  `ExtractContext::identity` — Gmail `From` vs `identity.email`, Slack author id vs
+  `identity.slack_id`, Jira assignee vs the authenticated account, Calendar
+  organizer/attendee vs `identity.email`. No-authorship sources (Drive/RSS/Manual) set `false`.
 - Adapter gotchas (don't regress these):
   - **Drive**: `folder`/`file_pattern` go through `escape_drive_literal` (`\` and `'`)
     before interpolation into the query string.
