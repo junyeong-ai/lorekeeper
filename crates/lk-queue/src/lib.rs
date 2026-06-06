@@ -361,12 +361,12 @@ pub trait LlmClient: Send + Sync {
     /// plans a source. Buffered tasks accumulate across sources for one atomic flush, but
     /// a source whose plan fails PARTWAY has already buffered some tasks pointing at pages
     /// that will never be written — flushing them would break the invariant that a queued
-    /// task always targets a written page. Pairing this with [`rollback_source`] lets the
-    /// CLI discard exactly that source's tasks while keeping earlier sources' valid ones.
+    /// task always targets a written page. Pairing this with [`Self::rollback_source`] lets
+    /// the CLI discard exactly that source's tasks while keeping earlier sources' valid ones.
     /// Default no-op: providers that don't buffer (noop/mock) need no boundary.
     async fn begin_source(&self) {}
 
-    /// Discard every task buffered since the last [`begin_source`], used when a source's
+    /// Discard every task buffered since the last [`Self::begin_source`], used when a source's
     /// plan errors so its half-produced tasks never reach the flushed queue file. Default
     /// no-op.
     async fn rollback_source(&self) {}
