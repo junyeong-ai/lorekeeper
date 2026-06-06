@@ -86,8 +86,6 @@ impl EventLog {
         date: jiff::civil::Date,
         events: &[Event],
     ) -> Result<(), PipelineError> {
-        use std::io::Write as _;
-
         let path = self.path(source_id, date);
         let dir = path.parent().expect("log path always has a parent");
         std::fs::create_dir_all(dir)
@@ -101,14 +99,8 @@ impl EventLog {
             buf.push('\n');
         }
 
-        let tmp = path.with_extension(format!("jsonl.tmp-{}", std::process::id()));
-        let mut f = std::fs::File::create(&tmp)
-            .map_err(|e| PipelineError::EventLog(format!("create {}: {e}", tmp.display())))?;
-        f.write_all(buf.as_bytes())
-            .and_then(|_| f.sync_all())
-            .map_err(|e| PipelineError::EventLog(format!("write {}: {e}", tmp.display())))?;
-        std::fs::rename(&tmp, &path)
-            .map_err(|e| PipelineError::EventLog(format!("rename into {}: {e}", path.display())))?;
+        lk_core::fs::write_atomic(&path, buf.as_bytes(), None)
+            .map_err(|e| PipelineError::EventLog(format!("write {}: {e}", path.display())))?;
         Ok(())
     }
 }

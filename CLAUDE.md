@@ -30,7 +30,7 @@ Each crate has its own `CLAUDE.md` with the invariants for working inside it
 
 ```
 crates/
-  lk-core/      Domain types, config, i18n, slugify (NFKC), frontmatter, wikilink, vault paths
+  lk-core/      Domain types, config, i18n, slugify (NFKC), frontmatter, wikilink, vault paths, atomic write
   lk-vault/     Obsidian vault I/O: atomic write, templates (embedded), ingest log
   lk-source/    Source adapters + factory, markdown normalization (ADF/HTML/Slack→MD)
   lk-pipeline/  Pipeline (per-source plan), intra-batch dedup, classify, concepts, synthesis
@@ -74,7 +74,7 @@ Auto-discovered: `./config.yaml` → `~/.config/lorekeeper/config.yaml`.
 - **Idempotent ingest**: plan → write daily/concept → work-log → flush LLM queue → log, then an archive hook for the `manual` source. There is no commit step: a daily page is re-rendered in full each run, so any write or flush failure just leaves the affected pages for the next run to reproduce byte-identically. The `manual` archive runs only when every vault write and the queue flush succeeded — its knowledge is durably materialized by then, so another source's fetch failure doesn't block it, while any write/flush failure leaves inbox files for retry.
 - **Daily pages re-render in full each run; STREAMING sources project from an event log.** A complete-refetch source (Gmail/Jira/Calendar/Slack/Drive) reproduces its whole window on demand and renders from the fetch. A streaming source (RSS — `SourceType::is_streaming`, a rolling capped feed) can't, so it projects from a durable per-date event log (`.lorekeeper/events/{source}/{date}.jsonl`, raw pre-LLM events): each run UNIONs fetch + stored log (`EventId` key, fresh wins), so a scrolled-out item is never lost and a deleted page self-heals (`lore ingest --date <past>` repairs any day). Raw-layer duplication is provenance; convergence happens at the concept/graph layer (one concept = one page).
 - **Daily pages are materialized views**: structural fields (frontmatter, raw event list, headings) are re-rendered every ingest; semantic fields (summary, refined events, concept wiki-links) are LLM-owned, preserved across re-renders, and invalidated by a BLAKE3-128 hash in the page's `llm_inputs` frontmatter — so re-ingesting unchanged data enqueues zero LLM tasks. Completion detection and cache-shape mechanics live in `lk-pipeline`.
-- **Domain logic single-sourced in lk-core**: slugify (NFKC), frontmatter, wikilink, blank-line collapsing. Zero duplicate implementations across crates. (Rich-text→Markdown conversion — ADF/HTML/Slack — is single-sourced separately in `lk-source::markdown`.)
+- **Domain logic single-sourced in lk-core**: slugify (NFKC), frontmatter, wikilink, blank-line collapsing, atomic file write (`fs::write_atomic` — temp+fsync+rename+dir-fsync with a per-writer-unique temp; the one sync atomic writer every crate uses, `lk_vault::VaultWriter` being its async sibling). Zero duplicate implementations across crates. (Rich-text→Markdown conversion — ADF/HTML/Slack — is single-sourced separately in `lk-source::markdown`.)
 - **i18n single source of truth**: `vault.locale` (ko/en) switches all labels. Templates use `{{ i18n.* }}`. `lore schema` generates `<wiki>/AGENTS.md` from the i18n bundle. Source content is never translated.
 - **`--dry-run` is side-effect-free**: no vault writes, no log.
 

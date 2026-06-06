@@ -4,7 +4,9 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
 
 - **`VaultWriter::write_page` is atomic**: writes to a per-process-unique temp file
   (`pid + sequence`) then renames onto the final path. Never write the final path
-  directly, and never share a temp name across writers.
+  directly, and never share a temp name across writers. It is the
+  ASYNC (tokio) sibling of `lk_core::fs::write_atomic` (the sync single-source) and follows
+  the same per-writer-unique-temp invariant.
 - **Frontmatter parsing is line-based** (`frontmatter::parse_page`): a `---` is a
   delimiter only when it's the standalone first line and a later standalone `---` line.
   A leading BOM is stripped; CRLF is normalized to LF. A substring scan would

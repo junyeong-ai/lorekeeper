@@ -41,6 +41,12 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
 - **`wikilink::extract_wikilinks`** skips fenced code blocks and inline code spans
   to prevent false edges in the wiki graph. Closing fence detection requires no info
   string after the marker (per CommonMark). Single source consumed by lk-graph.
+- **`fs::write_atomic(path, contents, mode)`** is the single sync atomic file write:
+  a per-writer-unique temp (pid + process-global sequence) in the same dir, fsync,
+  optional `chmod`, rename, dir-fsync — then temp cleanup on failure. Every sync writer
+  (queue files, credentials `0600`, graph cache, event log) goes through it so the
+  durability + unique-temp invariant can't drift; `lk_vault::VaultWriter` is the async
+  sibling. The temp keeps `path`'s extension before `.tmp` so suffix sweeps still match.
 - **`text::collapse_blank_lines`** squeezes 3+ newlines to a paragraph break,
   strips `\r`. Single source consumed by lk-vault, lk-pipeline, lk-source.
 - **`frontmatter::field`** single-sources this system's PRIVATE machine-coordination

@@ -93,20 +93,9 @@ impl Credentials {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| SourceError::Auth(format!("serialize credentials: {e}")))?;
 
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, json)
+        // Atomic + `0600` so the secret is owner-only and never half-written.
+        lk_core::fs::write_atomic(&path, json.as_bytes(), Some(0o600))
             .map_err(|e| SourceError::Auth(format!("write credentials: {e}")))?;
-        // Restrict to the owner before publishing — a credentials file is secret.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-                .map_err(|e| SourceError::Auth(format!("chmod credentials: {e}")))?;
-        }
-        std::fs::rename(&tmp, &path).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            SourceError::Auth(format!("publish credentials: {e}"))
-        })?;
         Ok(path)
     }
 

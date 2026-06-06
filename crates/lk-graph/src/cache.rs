@@ -47,11 +47,8 @@ pub fn save(path: &Path, cache: &ScanCache) -> Result<(), GraphError> {
     let json = serde_json::to_string_pretty(cache)
         .map_err(|e| GraphError::Io(format!("serialize cache: {e}")))?;
 
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json.as_bytes())
-        .map_err(|e| GraphError::Io(format!("write cache tmp {}: {e}", tmp.display())))?;
-    std::fs::rename(&tmp, path)
-        .map_err(|e| GraphError::Io(format!("rename cache {}: {e}", path.display())))?;
+    lk_core::fs::write_atomic(path, json.as_bytes(), None)
+        .map_err(|e| GraphError::Io(format!("write cache {}: {e}", path.display())))?;
     Ok(())
 }
 

@@ -5,6 +5,7 @@ pub mod document;
 pub mod error;
 pub mod event;
 pub mod frontmatter;
+pub mod fs;
 pub mod i18n;
 pub mod markdown;
 pub mod math;

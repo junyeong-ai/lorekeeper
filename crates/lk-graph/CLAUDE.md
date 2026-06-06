@@ -3,7 +3,7 @@
 Wikilink graph analysis. Pure deterministic — no HTTP, no LLM. The only vault
 writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
 `backlinks-sync` without `--dry-run`) and the mtime scan cache
-(`<vault>/.lorekeeper/graph-cache.json`, atomic temp+rename).
+(`<vault>/.lorekeeper/graph-cache.json`, via `lk_core::fs::write_atomic`).
 
 - **deps**: `lk-core` (slugify, frontmatter, wikilink) + `petgraph` + `rayon` +
   `walkdir`. No reqwest/tokio — independent of the ingestion stack.

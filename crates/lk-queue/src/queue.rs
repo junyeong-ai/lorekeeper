@@ -84,49 +84,21 @@ impl TaskKind {
     }
 }
 
-/// Write `tasks` as JSONL to `final_path` atomically (temp + fsync + rename),
-/// cleaning up the temp file if the rename fails. The single writer implementation
-/// for queue files: `QueueLlmClient::flush` creates them through it and
-/// `lore queue prune` rewrites them through it, so every queue file on disk —
-/// fresh or pruned — has identical durability and encoding guarantees.
+/// Serialize `tasks` to JSONL and write them to `final_path` atomically. The single
+/// writer for queue files: `QueueLlmClient::flush` creates them through it and `lore
+/// queue prune` rewrites them through it, so every queue file on disk — fresh or pruned
+/// — has identical durability and encoding. Delegates the temp + fsync + rename +
+/// dir-fsync + per-writer-unique-temp mechanics to `lk_core::fs::write_atomic` (the one
+/// sync atomic write in the workspace); a `.jsonl` path yields a `*.jsonl.tmp` temp the
+/// ingest startup sweep still reaps.
 pub fn write_tasks_atomic(final_path: &Path, tasks: &[QueueTask]) -> std::io::Result<()> {
-    use std::io::Write;
-
-    // Per-writer-unique temp name (pid + process-global sequence), so two writers
-    // targeting the same `final_path` — e.g. two concurrent `lore queue prune` runs
-    // rewriting one file — never share and truncate each other's temp. The `.jsonl.tmp`
-    // suffix is preserved so the ingest startup sweep still reaps stranded temps.
-    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
-    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp_path = final_path.with_extension(format!("{}.{seq}.jsonl.tmp", std::process::id()));
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&tmp_path)?;
+    let mut buf = String::with_capacity(tasks.len() * 256);
     for task in tasks {
         let line = serde_json::to_string(task).map_err(std::io::Error::other)?;
-        writeln!(file, "{line}")?;
+        buf.push_str(&line);
+        buf.push('\n');
     }
-    file.flush()?;
-    file.sync_all()?;
-    drop(file);
-
-    if let Err(e) = std::fs::rename(&tmp_path, final_path) {
-        // The rename error is the one the caller needs to see — deliberately
-        // discard the unlink error so a stale `.jsonl.tmp` never accumulates.
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(e);
-    }
-
-    // Make the rename itself crash-durable: the file's bytes are fsynced above,
-    // but the directory entry needs its own fsync or a power loss can roll the
-    // rename back. Unix-only — Windows cannot fsync a directory handle via std.
-    #[cfg(unix)]
-    if let Some(dir) = final_path.parent() {
-        std::fs::File::open(dir)?.sync_all()?;
-    }
-    Ok(())
+    lk_core::fs::write_atomic(final_path, buf.as_bytes(), None)
 }
 
 impl QueueLlmClient {
