@@ -178,9 +178,10 @@ pub fn set_frontmatter_field(content: &str, key: &str, value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    /// Test-only mirror of the pipeline's "is this section filled?" check
-    /// (`llm_cache` owns the production form). Kept here so the fence/heading
-    /// boundary cases below stay expressed in terms of a filled-section predicate.
+    /// Test-only predicate over `section_body`, used to express the fence/heading
+    /// boundary cases below as "is there body text under this heading?". Note the
+    /// pipeline cache does NOT use section emptiness for completion — that is
+    /// marker-signalled (`llm_cache`) — so this is purely a `section_body` boundary test.
     fn section_is_filled(content: &str, heading: &str) -> bool {
         super::section_body(content, heading).is_some_and(|b| !b.trim().is_empty())
     }

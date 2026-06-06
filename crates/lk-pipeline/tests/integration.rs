@@ -1919,10 +1919,10 @@ mod materialized_view {
         );
     }
 
-    /// Simulate `/lore-process`: fill each LLM-owned section AND stamp the
-    /// `refine_events` frontmatter (which the pipeline deliberately leaves `null`
-    /// for an in-place rewrite — the skill owns that completion marker). The
-    /// stamp must equal the enqueued refine-events task's `cache_hash`.
+    /// Simulate `/lore-process`: fill each LLM-owned section AND stamp its
+    /// `<key>_done` completion marker (the skill owns the markers; the pipeline only
+    /// pre-stamps the input keys). Each stamp must equal the enqueued task's
+    /// `cache_hash` so the next ingest is a cache hit.
     async fn fill_llm_sections_with_dummy_bodies(
         vault: &std::path::Path,
         result: &lk_pipeline::IngestResult,

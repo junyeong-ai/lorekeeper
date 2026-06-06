@@ -23,8 +23,9 @@ allowed-tools: |
 # lore-process — Drain the Lorekeeper LLM queue
 
 The Rust `lore ingest` pipeline, when configured with `llm.provider: queue`,
-defers all semantic work (summarization, concept extraction) by writing JSONL
-task files into `<vault>/.lorekeeper/queue/{run-timestamp}-pid{PID}.jsonl`.
+defers all semantic work (summaries, refined events, concepts, themes, reviews)
+by writing JSONL task files into
+`<vault>/.lorekeeper/queue/{run-timestamp}-pid{PID}.jsonl`.
 Each task points at a vault page written with an empty section awaiting LLM
 content. This skill consumes those tasks: read the queue, perform the LLM
 work in your own session, edit the target pages' sections in place, then move

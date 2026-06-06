@@ -130,7 +130,7 @@ Claude Code Skills        Semantic Plane             (same vault)
 
 ## LLM provider modes
 
-`llm.provider` in `config.yaml` selects how semantic work (summarize, concept extraction) is performed:
+`llm.provider` in `config.yaml` selects how semantic work (summaries, refined events, concepts, themes, reviews) is performed:
 
 | Mode | Default | Best for |
 |------|:-------:|---------|

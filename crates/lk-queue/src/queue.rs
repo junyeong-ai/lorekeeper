@@ -92,7 +92,13 @@ impl TaskKind {
 pub fn write_tasks_atomic(final_path: &Path, tasks: &[QueueTask]) -> std::io::Result<()> {
     use std::io::Write;
 
-    let tmp_path = final_path.with_extension("jsonl.tmp");
+    // Per-writer-unique temp name (pid + process-global sequence), so two writers
+    // targeting the same `final_path` — e.g. two concurrent `lore queue prune` runs
+    // rewriting one file — never share and truncate each other's temp. The `.jsonl.tmp`
+    // suffix is preserved so the ingest startup sweep still reaps stranded temps.
+    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = final_path.with_extension(format!("{}.{seq}.jsonl.tmp", std::process::id()));
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -252,6 +258,15 @@ mod tests {
     use super::*;
     use crate::TargetKind;
     use tempfile::TempDir;
+
+    /// Any stranded `*.jsonl.tmp` left in `dir` (the temp name is per-writer-unique,
+    /// so tests assert on the suffix rather than a fixed path).
+    fn any_tmp_in(dir: &std::path::Path) -> bool {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().ends_with(".jsonl.tmp"))
+    }
 
     #[test]
     fn as_str_matches_wire_encoding() {
@@ -455,8 +470,7 @@ mod tests {
             !client.queue_path().exists(),
             "empty buffer must not produce a queue file"
         );
-        let tmp = client.queue_path().with_extension("jsonl.tmp");
-        assert!(!tmp.exists(), "temp file must not linger");
+        assert!(!any_tmp_in(dir.path()), "temp file must not linger");
     }
 
     #[tokio::test]
@@ -662,9 +676,8 @@ mod tests {
 
         let result = client.flush().await;
         assert!(result.is_err(), "rename onto a directory must fail");
-        let tmp = client.queue_path().with_extension("jsonl.tmp");
         assert!(
-            !tmp.exists(),
+            !any_tmp_in(dir.path()),
             "temp file must be cleaned up on rename failure"
         );
     }
