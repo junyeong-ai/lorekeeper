@@ -41,7 +41,11 @@ compacted since you last read it.
 
 1. **Process only `current` tasks.** `lore queue status --json` is the
    authoritative classifier — never edit a page for a `stale` or
-   `missing-target` task.
+   `missing-target` task. Note it classifies by the INPUT key (`cache_hash`
+   vs `llm_inputs.<key>`) and deliberately ignores the `<key>_done` marker, so
+   a task you have already filled and stamped still reads `current` while its
+   file is pending — that is expected. The only "this run is done" signal is the
+   queue file moving to `processed/`, not `queue status` reaching zero.
 2. **Locate sections only by `target.anchor`** (the exact `## …` heading the
    pipeline wrote, resolved from i18n at queue time). Never hardcode a
    heading per `target.kind`.
