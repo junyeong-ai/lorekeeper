@@ -7,35 +7,27 @@
 //!   preserved across re-renders, and invalidated by the BLAKE3-128 hash of the LLM
 //!   input recorded in the page's `llm_inputs` frontmatter.
 //!
-//! On each ingest the pipeline computes the hash of the LLM input it WOULD send. If
-//! that hash matches the one already recorded in the existing page AND the section is
-//! filled, no LLM task is enqueued; the new render splices the existing body back in.
-//! Otherwise the task is enqueued and the section is left empty for `/lore-process`
-//! to fill.
+//! Completion is uniformly **marker-signalled** (see `TargetKind::completion_key`). On
+//! each ingest the pipeline pre-stamps `llm_inputs.<key>` with the hash of the LLM input
+//! it WOULD send — the stale-task reference point — and `/lore-process` stamps the
+//! companion `llm_inputs.<key>_done` once it has finished, even when the result is empty.
+//! [`lookup`] returns cached exactly when that `*_done` marker equals the current input
+//! hash, **never consulting the body**: so an empty-but-done result (an extraction that
+//! found nothing, a focus-filtered summary, a trivial-only work-log) stays cached instead
+//! of re-enqueueing forever. There is no body-emptiness completion signal anywhere — that
+//! would require a per-kind "can this be empty?" judgment, and any kind misjudged
+//! "always non-empty" would re-enqueue every empty result forever.
 //!
-//! **Two cache shapes** (see `TargetKind::cache_shape`):
-//! - `BodySignalsDone` (summary, review narratives): the section starts empty and a
-//!   real result is never empty, so a non-empty body IS the completion signal. The
-//!   pipeline pre-stamps the hash in `llm_inputs.<key>` at render time and [`lookup`]
-//!   returns cached when that hash matches and the body is filled.
-//! - `MarkerSignalsDone` (the daily event refine, concept extraction, weekly themes):
-//!   the body can't signal completion — the event refine is structurally non-empty from
-//!   render, and an extraction can legitimately find nothing, so an empty body is a
-//!   valid *finished* result. The pipeline still pre-stamps `llm_inputs.<key>` with the
-//!   *current-input* hash (the stale-task reference point, identical in role to the
-//!   body-signalled case), but completion is tracked by a SECOND field (`completion_key`)
-//!   that `/lore-process` writes once it has finished. [`lookup_marked`] returns cached
-//!   only when that completion stamp equals the current-input hash — never consulting the
-//!   body, so an empty-but-done extraction stays cached instead of re-enqueueing forever.
+//! On a cache hit the new render splices the existing body back in (preserving the
+//! LLM-owned content) and re-emits the `*_done` marker; on a miss the task is enqueued,
+//! the section is left empty for the skill, and a stale marker is dropped rather than
+//! carried forward. `llm_inputs.<key>` always equals the current input's hash, so a
+//! queued task whose `cache_hash` differs is unambiguously stale (a newer ingest
+//! re-rendered the page) and is dropped — never a window where a stale task is
+//! indistinguishable from a current one.
 //!
-//! The single page-side invariant either shape upholds: `llm_inputs.<key>` always
-//! equals the current input's hash, so a queued task whose `cache_hash` differs is
-//! unambiguously stale (a newer ingest re-rendered the page) and is dropped — there is
-//! never a window where a stale task is indistinguishable from a current one.
-//!
-//! Manual re-processing is mechanism-free: deleting the section body (body-signalled) or
-//! the `completion_key` line (marker-signalled) forces a re-enqueue on the next ingest.
-//! No `--force-llm` flag, no out-of-band cache invalidation API.
+//! Manual re-processing is mechanism-free: delete the `*_done` line to force a re-enqueue
+//! on the next ingest. No `--force-llm` flag, no out-of-band cache invalidation API.
 
 use lk_core::frontmatter::{VaultPage, field};
 use lk_vault::section_body;
@@ -73,65 +65,17 @@ pub fn stored_hash<'a>(existing: Option<&'a VaultPage>, key: &str) -> Option<&'a
         .and_then(|v| v.as_str())
 }
 
-/// Decide whether the LLM task identified by `(key, heading, hash)` can be skipped
-/// because the existing page already carries an identical hash and a filled body.
+/// Decide whether the LLM task for this section can be skipped because the existing
+/// page already carries the `completion_key` marker equal to the current input `hash`.
 /// `heading` is the text after `## ` — the same form `lk_vault::section` functions
 /// accept everywhere.
+///
+/// Body emptiness is deliberately NOT consulted: completion is the marker alone, so a
+/// legitimately-empty result (an extraction that found nothing, a focus-filtered
+/// summary, a trivial-only work-log) stays cached instead of re-enqueueing forever.
+/// The single re-run lever is deleting the marker line, which lands in the uncached
+/// branch. On a hit the existing body is preserved and spliced over the fresh render.
 pub fn lookup(
-    existing: Option<&VaultPage>,
-    key: &str,
-    heading: &str,
-    hash: String,
-) -> SectionDecision {
-    let Some(page) = existing else {
-        return SectionDecision {
-            hash,
-            cached: false,
-            preserved_body: None,
-        };
-    };
-
-    if stored_hash(Some(page), key) != Some(&hash) {
-        return SectionDecision {
-            hash,
-            cached: false,
-            preserved_body: None,
-        };
-    }
-
-    let Some(body) = section_body(&page.body, heading) else {
-        return SectionDecision {
-            hash,
-            cached: false,
-            preserved_body: None,
-        };
-    };
-
-    let trimmed = body.trim_matches('\n');
-    if trimmed.trim().is_empty() {
-        return SectionDecision {
-            hash,
-            cached: false,
-            preserved_body: None,
-        };
-    }
-
-    SectionDecision {
-        hash,
-        cached: true,
-        preserved_body: Some(trimmed.to_string()),
-    }
-}
-
-/// Cache decision for a `MarkerSignalsDone` section (see `TargetKind::cache_shape`).
-/// The body can't gate completion — it is either structurally non-empty from the
-/// render (the event refine) or legitimately empty (an extraction that found nothing),
-/// so — unlike [`lookup`] — emptiness is never consulted. The sole signal is
-/// `completion_key`: the task is
-/// cached exactly when `/lore-process` has stamped it equal to the current-input
-/// `hash`. On a hit the current (already-rewritten) body is preserved and spliced
-/// back over the fresh render.
-pub fn lookup_marked(
     existing: Option<&VaultPage>,
     completion_key: &str,
     heading: &str,
@@ -145,22 +89,16 @@ pub fn lookup_marked(
         };
     }
 
-    // Completion stamp matches the current input → the on-disk body is the refined
-    // one; preserve it. Body emptiness is deliberately NOT consulted (the section is
-    // structurally non-empty), so — unlike a fill-empty section — clearing the body
-    // does not force a re-run. The single re-run lever is deleting the completion
-    // line, which drops the stamp and lands us in the uncached branch above.
     let Some(body) = existing.and_then(|p| section_body(&p.body, heading)) else {
-        // Stamp says done, but the section heading isn't present — the rendered
-        // heading drifted from the one the stamp was written against (e.g. a custom
-        // `--template-dir` renamed it). Reporting a hit would freeze the raw,
-        // unrefined event list forever (the task is never re-enqueued, and with no
-        // preserved body the splice-site drift warning never fires either). Force a
-        // re-run and surface it.
+        // Marker says done, but the section heading isn't present — the rendered
+        // heading drifted from the one the marker was written against (e.g. a custom
+        // `--template-dir` renamed it). Reporting a hit would freeze the stale body
+        // forever (the task is never re-enqueued, and with no preserved body the
+        // splice-site drift warning never fires either). Force a re-run and surface it.
         tracing::warn!(
             completion_key,
             heading,
-            "in-place section marked done but heading not found (custom-template drift?); re-enqueueing"
+            "section marked done but heading not found (custom-template drift?); re-enqueueing"
         );
         return SectionDecision {
             hash,
@@ -188,87 +126,66 @@ mod tests {
 
     #[test]
     fn missing_page_is_uncached() {
-        let d = lookup(None, "summary", "요약", "abc".into());
+        let d = lookup(None, "summary_done", "요약", "abc".into());
         assert!(d.enqueue());
         assert!(d.preserved_body.is_none());
     }
 
     #[test]
-    fn missing_llm_inputs_frontmatter_is_uncached() {
-        let page = page_with("id: x\n", "## 요약\n\nbody\n");
-        let d = lookup(Some(&page), "summary", "요약", "abc".into());
+    fn missing_marker_is_uncached() {
+        // Input hash present but the `*_done` marker absent — the skill hasn't
+        // finished this input yet.
+        let page = page_with("id: x\nllm_inputs:\n  summary: abc\n", "## 요약\n\nbody\n");
+        let d = lookup(Some(&page), "summary_done", "요약", "abc".into());
         assert!(d.enqueue());
     }
 
     #[test]
-    fn mismatched_hash_is_uncached() {
+    fn mismatched_marker_is_uncached() {
         let page = page_with(
-            "id: x\nllm_inputs:\n  summary: stale\n",
+            "id: x\nllm_inputs:\n  summary: fresh\n  summary_done: stale\n",
             "## 요약\n\nbody\n",
         );
-        let d = lookup(Some(&page), "summary", "요약", "fresh".into());
+        let d = lookup(Some(&page), "summary_done", "요약", "fresh".into());
         assert!(d.enqueue());
     }
 
     #[test]
-    fn matching_hash_with_empty_body_is_uncached() {
-        // Section heading present but body empty — user manually cleared it to
-        // force a re-run. The empty body must NOT count as cached.
+    fn matching_marker_with_filled_body_hits_cache() {
         let page = page_with(
-            "id: x\nllm_inputs:\n  summary: abc\n",
-            "## 요약\n\n\n## 출처\n",
-        );
-        let d = lookup(Some(&page), "summary", "요약", "abc".into());
-        assert!(d.enqueue());
-    }
-
-    #[test]
-    fn matching_hash_with_filled_body_hits_cache() {
-        let page = page_with(
-            "id: x\nllm_inputs:\n  summary: abc\n",
+            "id: x\nllm_inputs:\n  summary: abc\n  summary_done: abc\n",
             "## 요약\n\nreal content\n\n## 출처\n",
         );
-        let d = lookup(Some(&page), "summary", "요약", "abc".into());
+        let d = lookup(Some(&page), "summary_done", "요약", "abc".into());
         assert!(!d.enqueue());
         assert_eq!(d.preserved_body.as_deref(), Some("real content"));
     }
 
     #[test]
-    fn whitespace_only_body_is_uncached() {
+    fn matching_marker_with_empty_body_hits_cache() {
+        // The whole point of marker-signalled completion: an empty result (a
+        // focus-filtered summary that matched nothing, an extraction that found
+        // nothing) is DONE once its marker is stamped. Body emptiness is never
+        // consulted, so it must NOT re-enqueue.
         let page = page_with(
-            "id: x\nllm_inputs:\n  summary: abc\n",
-            "## 요약\n\n   \n  \n\n## 출처\n",
+            "id: x\nllm_inputs:\n  concepts: abc\n  concepts_done: abc\n",
+            "## 관련 개념\n\n\n## 출처\n",
         );
-        let d = lookup(Some(&page), "summary", "요약", "abc".into());
-        assert!(d.enqueue());
+        let d = lookup(Some(&page), "concepts_done", "관련 개념", "abc".into());
+        assert!(!d.enqueue(), "empty-but-done section must stay cached");
+        assert_eq!(d.preserved_body.as_deref(), Some(""));
     }
 
     #[test]
-    fn in_place_matching_stamp_with_heading_hits_cache() {
-        let page = page_with(
-            "id: x\nllm_inputs:\n  refine_events: abc\n  refine_events_done: abc\n",
-            "## 주요 이벤트\n\n### A\n\nrefined body\n\n## 관련 개념\n",
-        );
-        let d = lookup_marked(
-            Some(&page),
-            "refine_events_done",
-            "주요 이벤트",
-            "abc".into(),
-        );
-        assert!(!d.enqueue());
-        assert_eq!(d.preserved_body.as_deref(), Some("### A\n\nrefined body"));
-    }
-
-    #[test]
-    fn in_place_stamp_set_but_heading_missing_is_uncached() {
-        // Completion stamp matches, but the events heading drifted (e.g. a custom
-        // template renamed it). This must NOT count as cached — otherwise the raw
-        // event list would freeze and the refine task would never re-enqueue.
+    fn marker_set_but_heading_missing_is_uncached() {
+        // Completion marker matches, but the section heading drifted (e.g. a custom
+        // template renamed it). This must NOT count as cached — otherwise the body
+        // would freeze and the task would never re-enqueue.
         let page = page_with(
             "id: x\nllm_inputs:\n  refine_events: abc\n  refine_events_done: abc\n",
             "## Key Events\n\n### A\n\nbody\n",
         );
-        let d = lookup_marked(
+        let d = lookup(
             Some(&page),
             "refine_events_done",
             "주요 이벤트",
@@ -282,27 +199,17 @@ mod tests {
     }
 
     #[test]
-    fn in_place_missing_stamp_is_uncached() {
+    fn multi_line_body_preserves_internal_blank_lines() {
         let page = page_with(
-            "id: x\nllm_inputs:\n  refine_events: abc\n",
-            "## 주요 이벤트\n\n### A\n\nbody\n",
+            "id: x\nllm_inputs:\n  refine_events: abc\n  refine_events_done: abc\n",
+            "## 주요 이벤트\n\n### A\n\nbody a\n\n### B\n\nbody b\n\n## 관련 개념\n",
         );
-        let d = lookup_marked(
+        let d = lookup(
             Some(&page),
             "refine_events_done",
             "주요 이벤트",
             "abc".into(),
         );
-        assert!(d.enqueue());
-    }
-
-    #[test]
-    fn multi_line_body_preserves_internal_blank_lines() {
-        let page = page_with(
-            "id: x\nllm_inputs:\n  refine_events: abc\n",
-            "## 주요 이벤트\n\n### A\n\nbody a\n\n### B\n\nbody b\n\n## 관련 개념\n",
-        );
-        let d = lookup(Some(&page), "refine_events", "주요 이벤트", "abc".into());
         assert!(!d.enqueue());
         let preserved = d.preserved_body.unwrap();
         assert!(preserved.contains("### A"));

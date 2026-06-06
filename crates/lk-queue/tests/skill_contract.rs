@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use lk_queue::{CacheShape, TargetKind, TaskKind};
+use lk_queue::{TargetKind, TaskKind};
 use strum::IntoEnumIterator;
 
 fn read_skill_file(rel: &str) -> String {
@@ -82,13 +82,11 @@ fn skill_key_table_maps_every_target_kind_to_its_llm_inputs_key() {
 fn skill_documents_every_completion_marker() {
     let doc = read_skill_file("SKILL.md");
     for kind in TargetKind::iter() {
-        if let CacheShape::MarkerSignalsDone { completion_key } = kind.cache_shape() {
-            let needle = format!("llm_inputs.{completion_key}");
-            assert!(
-                doc.contains(&needle),
-                "SKILL.md must document the completion marker {needle} \
-                 (cache_shape for TargetKind::{kind:?} changed without updating the skill?)"
-            );
-        }
+        let needle = format!("`{}`", kind.completion_key());
+        assert!(
+            doc.contains(&needle),
+            "SKILL.md must document the completion marker {needle} \
+             (completion_key for TargetKind::{kind:?} changed without updating the skill?)"
+        );
     }
 }

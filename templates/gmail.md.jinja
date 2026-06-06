@@ -8,6 +8,9 @@ event_count: {{ events | length }}
 action_required: {{ action_required_count }}
 llm_inputs:
   summary: {{ llm_inputs.summary | tojson }}
+{%- if llm_inputs.summary_done %}
+  summary_done: {{ llm_inputs.summary_done | tojson }}
+{%- endif %}
   refine_events: {{ llm_inputs.refine_events | tojson }}
 {%- if llm_inputs.refine_events_done %}
   refine_events_done: {{ llm_inputs.refine_events_done | tojson }}

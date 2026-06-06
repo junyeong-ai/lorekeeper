@@ -243,7 +243,7 @@ impl Pipeline {
             };
             let summary_decision = llm_cache::lookup(
                 existing.as_ref(),
-                summary_req.target.kind.llm_inputs_key(),
+                summary_req.target.kind.completion_key(),
                 summary_heading,
                 summary_req.cache_hash(),
             );
@@ -264,16 +264,8 @@ impl Pipeline {
                     anchor: format!("## {events_heading}"),
                 },
             };
-            // The event list is an in-place rewrite: the render populates it, so
-            // completion is tracked by a separate frontmatter key the skill stamps,
-            // not by the section being non-empty.
-            let refine_completion_key = refine_req
-                .target
-                .kind
-                .cache_shape()
-                .completion_key()
-                .expect("DailyRefineEvents completion is marker-signalled");
-            let refine_decision = llm_cache::lookup_marked(
+            let refine_completion_key = refine_req.target.kind.completion_key();
+            let refine_decision = llm_cache::lookup(
                 existing.as_ref(),
                 refine_completion_key,
                 events_heading,
@@ -324,16 +316,8 @@ impl Pipeline {
                     },
                     categories: self.ctx.concept_categories.clone(),
                 };
-                // Concept extraction can legitimately find nothing, so an empty
-                // section can't signal completion (that would re-enqueue forever) —
-                // completion is marker-signalled by `concepts_done`, like refine.
-                let concepts_completion_key = concepts_req
-                    .target
-                    .kind
-                    .cache_shape()
-                    .completion_key()
-                    .expect("concept extraction completion is marker-signalled");
-                let decision = llm_cache::lookup_marked(
+                let concepts_completion_key = concepts_req.target.kind.completion_key();
+                let decision = llm_cache::lookup(
                     existing.as_ref(),
                     concepts_completion_key,
                     concepts_heading,
@@ -373,12 +357,15 @@ impl Pipeline {
             };
 
             // `refine_events`/`concepts` are pre-stamped with the current-input hash
-            // (the stale-task reference point, like summary). A `*_done` completion
-            // marker is valid ONLY for the input it was stamped against, so emit it
-            // only on a cache hit — where `lookup_marked` proved it equals the current
-            // hash. A miss drops it (the skill re-stamps after processing), so a stale
-            // marker can never ride a changed-input render forward and later false-hit
-            // on a revert to the earlier input.
+            // `*` keys are pre-stamped with the current input hash (the stale-task
+            // reference). A `*_done` completion marker is valid ONLY for the input it
+            // was stamped against, so emit it only on a cache hit — where `lookup`
+            // proved it equals the current hash. A miss drops it (the skill re-stamps
+            // after processing), so a stale marker can never ride a changed-input render
+            // forward and later false-hit on a revert to the earlier input.
+            let summary_done = summary_decision
+                .cached
+                .then_some(summary_decision.hash.as_str());
             let refine_events_done = refine_decision
                 .cached
                 .then_some(refine_decision.hash.as_str());
@@ -389,6 +376,7 @@ impl Pipeline {
 
             let llm_inputs = render::DailyLlmInputHashes {
                 summary: &summary_decision.hash,
+                summary_done,
                 refine_events: &refine_decision.hash,
                 refine_events_done,
                 concepts: concepts_decision.as_ref().map(|d| d.hash.as_str()),
@@ -642,7 +630,7 @@ impl Pipeline {
             };
             let summary_decision = llm_cache::lookup(
                 existing.as_ref(),
-                summary_req.target.kind.llm_inputs_key(),
+                summary_req.target.kind.completion_key(),
                 summary_heading,
                 summary_req.cache_hash(),
             );
@@ -680,16 +668,8 @@ impl Pipeline {
                     },
                     categories: self.ctx.concept_categories.clone(),
                 };
-                // Concept extraction can legitimately find nothing, so an empty
-                // section can't signal completion (that would re-enqueue forever) —
-                // completion is marker-signalled by `concepts_done`, like refine.
-                let concepts_completion_key = concepts_req
-                    .target
-                    .kind
-                    .cache_shape()
-                    .completion_key()
-                    .expect("concept extraction completion is marker-signalled");
-                let decision = llm_cache::lookup_marked(
+                let concepts_completion_key = concepts_req.target.kind.completion_key();
+                let decision = llm_cache::lookup(
                     existing.as_ref(),
                     concepts_completion_key,
                     concepts_heading,
@@ -720,13 +700,17 @@ impl Pipeline {
 
             let concept_names: Vec<String> = doc_concepts.iter().map(|c| c.name.clone()).collect();
 
-            // Completion marker is valid only on a cache hit — see the daily path.
+            // Completion markers are valid only on a cache hit — see the daily path.
+            let summary_done = summary_decision
+                .cached
+                .then_some(summary_decision.hash.as_str());
             let concepts_done = concepts_decision
                 .as_ref()
                 .filter(|d| d.cached)
                 .map(|d| d.hash.as_str());
             let llm_inputs = render::DocumentLlmInputHashes {
                 summary: &summary_decision.hash,
+                summary_done,
                 concepts: concepts_decision.as_ref().map(|d| d.hash.as_str()),
                 concepts_done,
             };

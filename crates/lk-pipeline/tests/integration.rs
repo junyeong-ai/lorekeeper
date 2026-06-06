@@ -618,8 +618,6 @@ async fn dry_run_does_not_write_the_event_log() {
 
 #[tokio::test]
 async fn queue_mode_emits_jsonl_tasks_with_targets() {
-    use lk_queue::QueueLlmClient;
-
     let dir = TempDir::new().unwrap();
     let vault = dir.path();
     let mut config = base_config(vault);
@@ -630,7 +628,7 @@ async fn queue_mode_emits_jsonl_tasks_with_targets() {
         .extract_concepts = true;
 
     let queue_dir = vault.join(".lorekeeper").join("queue");
-    let llm: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
+    let llm: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
     let ctx = make_ctx(&config, llm.clone());
     let mut pipeline = Pipeline::new(vault, ctx);
     let sc = config.sources.get("test-source").unwrap();
@@ -738,6 +736,94 @@ async fn weekly_synthesis_is_opt_in_via_include_sources() {
 }
 
 #[tokio::test]
+async fn empty_weekly_themes_is_cached_not_re_enqueued() {
+    // Themes extraction can legitimately find no cross-source theme. A stamped
+    // `themes_done` marks the empty section done; a re-render must NOT re-enqueue and
+    // must carry the marker through weekly-synthesis.md.jinja (guards the template
+    // emission). Were completion inferred from a non-empty body it would re-enqueue
+    // every ingest forever.
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let daily = vault.join("daily").join("test-source");
+    std::fs::create_dir_all(&daily).unwrap();
+    std::fs::write(
+        daily.join("2026-05-20.md"),
+        "---\nid: test-source-2026-05-20\n---\n\n# News\n\nbody\n",
+    )
+    .unwrap();
+    let mut config = base_config(vault);
+    config.synthesis.weekly.include_sources = vec!["test-source".into()];
+    let week = jiff::civil::date(2026, 5, 23);
+    let queue_dir = vault.join(".lorekeeper").join("queue");
+    let themes_heading = config.vault.locale().strings().key_themes_this_week;
+
+    let llm1: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
+    let synth1 = Synthesizer::new(
+        vault,
+        make_ctx(&config, llm1.clone()),
+        &config,
+        far_future(),
+    );
+    let out1 = synth1
+        .try_weekly_synthesis(week)
+        .await
+        .unwrap()
+        .expect("themes page produced");
+    let page_path = vault.join(out1.path.as_ref());
+    std::fs::create_dir_all(page_path.parent().unwrap()).unwrap();
+    std::fs::write(&page_path, &out1.content).unwrap();
+    llm1.flush().await.unwrap();
+
+    // Simulate the skill finding NO theme: leave the section empty, stamp themes_done.
+    let themes_hash = out1
+        .content
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("themes: "))
+        .map(|v| v.trim().trim_matches('"').to_string())
+        .expect("pipeline pre-stamps themes hash");
+    let stamped = out1.content.replace(
+        &format!("themes: \"{themes_hash}\""),
+        &format!("themes: \"{themes_hash}\"\n  themes_done: \"{themes_hash}\""),
+    );
+    std::fs::write(&page_path, &stamped).unwrap();
+    for entry in std::fs::read_dir(&queue_dir).unwrap().flatten() {
+        if entry.path().extension().and_then(|s| s.to_str()) == Some("jsonl") {
+            std::fs::remove_file(entry.path()).unwrap();
+        }
+    }
+
+    let llm2: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
+    let synth2 = Synthesizer::new(
+        vault,
+        make_ctx(&config, llm2.clone()),
+        &config,
+        far_future(),
+    );
+    let out2 = synth2
+        .try_weekly_synthesis(week)
+        .await
+        .unwrap()
+        .expect("themes page still produced");
+    llm2.flush().await.unwrap();
+
+    assert_eq!(
+        std::fs::read_dir(&queue_dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("jsonl"))
+            .count(),
+        0,
+        "an empty-but-done themes section must stay cached, not re-enqueue",
+    );
+    assert!(
+        out2.content.contains("themes_done"),
+        "the re-rendered themes page must carry themes_done through the template:\n{}",
+        out2.content
+    );
+    let _ = themes_heading;
+}
+
+#[tokio::test]
 async fn performance_enabled_gates_review_narratives() {
     let dir = TempDir::new().unwrap();
     let vault = dir.path();
@@ -831,8 +917,6 @@ async fn synthesis_excludes_pages_dated_after_today() {
 
 #[tokio::test]
 async fn synthesis_page_is_a_materialized_view() {
-    use lk_queue::QueueLlmClient;
-
     let dir = TempDir::new().unwrap();
     let vault = dir.path();
 
@@ -850,7 +934,7 @@ async fn synthesis_page_is_a_materialized_view() {
     let week_date = jiff::civil::date(2026, 5, 23);
 
     // First run: empty narrative + a queued task + llm_inputs.narrative hash stamped.
-    let llm1: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
+    let llm1: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
     let synth1 = Synthesizer::new(
         vault,
         make_ctx(&config, llm1.clone()),
@@ -874,11 +958,24 @@ async fn synthesis_page_is_a_materialized_view() {
     let queued_first = std::fs::read_dir(&queue_dir).unwrap().count();
     assert!(queued_first > 0, "first run must enqueue a synthesis task");
 
-    // Simulate /lore-process filling the narrative section.
-    let filled = lk_vault::replace_section(
+    // Simulate /lore-process filling the narrative section and stamping its
+    // completion marker (narratives are marker-signalled like every LLM section).
+    // The pipeline already pre-stamped `narrative: "<hash>"`; stamp `narrative_done`
+    // equal to it so the next ingest is a cache hit.
+    let narrative_hash = out1
+        .content
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("narrative: "))
+        .map(|v| v.trim().trim_matches('"').to_string())
+        .expect("pipeline pre-stamps narrative hash");
+    let narrative_filled = lk_vault::replace_section(
         &out1.content,
         strings.key_summary,
         "REAL-SYNTHESIS-NARRATIVE",
+    );
+    let filled = narrative_filled.replace(
+        &format!("narrative: \"{narrative_hash}\""),
+        &format!("narrative: \"{narrative_hash}\"\n  narrative_done: \"{narrative_hash}\""),
     );
     std::fs::write(&page_path, &filled).unwrap();
     for entry in std::fs::read_dir(&queue_dir).unwrap().flatten() {
@@ -888,7 +985,7 @@ async fn synthesis_page_is_a_materialized_view() {
     }
 
     // Second run, identical input: cache hit → no new task, narrative preserved.
-    let llm2: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
+    let llm2: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
     let synth2 = Synthesizer::new(
         vault,
         make_ctx(&config, llm2.clone()),
@@ -1272,7 +1369,7 @@ mod materialized_view {
 
         // First ingest: empty vault, queue receives the full task set.
         let queue_dir = vault.join(".lorekeeper").join("queue");
-        let llm1: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
+        let llm1: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let result1 = {
             let mut pipeline1 = Pipeline::new(vault, make_ctx(&config, llm1.clone()));
             let r = pipeline1
@@ -1315,7 +1412,7 @@ mod materialized_view {
 
         // Second ingest: same input, page exists with filled sections + matching hashes.
         // No tasks should be enqueued.
-        let llm2: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
+        let llm2: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let mut pipeline2 = Pipeline::new(vault, make_ctx(&config, llm2.clone()));
         let result2 = pipeline2
             .plan(
@@ -1385,7 +1482,7 @@ mod materialized_view {
 
         // First run: the topic-synthesis task is enqueued and the rendered page
         // pre-stamps the current input hash.
-        let llm1: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
+        let llm1: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let pages1 = {
             let pipeline = Pipeline::new(vault, make_ctx(&config, llm1.clone()));
             pipeline
@@ -1415,7 +1512,7 @@ mod materialized_view {
         clear_queue_dir(&queue_dir).await;
 
         // Second run, same events: cache hit — nothing enqueued, body preserved.
-        let llm2: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
+        let llm2: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let pages2 = {
             let pipeline = Pipeline::new(vault, make_ctx(&config, llm2.clone()));
             pipeline
@@ -1448,7 +1545,7 @@ mod materialized_view {
         // A day of only trivial events (calendar accepts, approvals) groups into
         // categories — so the page exists — but the skill skips them all, leaving an
         // empty topic summary. A stamped `topic_summary_done` marks it done; a re-render
-        // must NOT re-enqueue. Under body-signalled completion the empty section would
+        // must NOT re-enqueue. Were completion inferred from a non-empty body, the empty section would
         // re-enqueue every ingest forever.
         let dir = TempDir::new().unwrap();
         let vault = dir.path();
@@ -1474,7 +1571,7 @@ mod materialized_view {
         };
 
         let queue_dir = vault.join(".lorekeeper").join("queue");
-        let llm1: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
+        let llm1: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let pages1 = {
             let pipeline = Pipeline::new(vault, make_ctx(&config, llm1.clone()));
             pipeline
@@ -1497,7 +1594,7 @@ mod materialized_view {
         tokio::fs::write(&abs, content).await.unwrap();
         clear_queue_dir(&queue_dir).await;
 
-        let llm2: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
+        let llm2: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let _pages2 = {
             let pipeline = Pipeline::new(vault, make_ctx(&config, llm2.clone()));
             pipeline
@@ -1523,7 +1620,7 @@ mod materialized_view {
         let initial = vec![raw_item("Event A", "Body A", "E1", ts)];
 
         let queue_dir = vault.join(".lorekeeper").join("queue");
-        let llm1: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
+        let llm1: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let result1 = {
             let mut pipeline1 = Pipeline::new(vault, make_ctx(&config, llm1.clone()));
             let r = pipeline1
@@ -1552,7 +1649,7 @@ mod materialized_view {
             raw_item("Event A", "Body A", "E1", ts),
             raw_item("Event B", "Body B (new!)", "E2", ts),
         ];
-        let llm2: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
+        let llm2: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let mut pipeline2 = Pipeline::new(vault, make_ctx(&config, llm2.clone()));
         let _ = pipeline2
             .plan(
@@ -1601,7 +1698,7 @@ mod materialized_view {
         let queue_dir = vault.join(".lorekeeper").join("queue");
 
         // Ingest 1 + simulate /lore-process (fill bodies + stamp refine_events_done).
-        let llm1: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
+        let llm1: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let result1 = {
             let mut pipeline1 = Pipeline::new(vault, make_ctx(&config, llm1.clone()));
             let r = pipeline1
@@ -1625,7 +1722,7 @@ mod materialized_view {
         clear_queue_dir(&queue_dir).await;
 
         // Ingest 2: add an event → the refine input changes.
-        let llm2: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
+        let llm2: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let result2 = {
             let mut pipeline2 = Pipeline::new(vault, make_ctx(&config, llm2.clone()));
             let r = pipeline2
@@ -1686,9 +1783,11 @@ mod materialized_view {
     }
 
     #[tokio::test]
-    async fn deleting_section_body_forces_re_enqueue() {
-        // Mechanism-free override path: a vault editor wipes the section body and the
-        // next ingest re-queues without any flag.
+    async fn deleting_completion_marker_forces_re_enqueue() {
+        // Mechanism-free override path: deleting a section's `*_done` completion marker
+        // re-queues on the next ingest, no flag needed. (Wiping the body alone does NOT,
+        // by design — completion is the marker, never the body; see
+        // `wiping_section_body_does_not_re_enqueue`.)
         let dir = TempDir::new().unwrap();
         let vault = dir.path();
         let config = base_config(vault);
@@ -1698,7 +1797,7 @@ mod materialized_view {
         let items = vec![raw_item("Event A", "Body A", "E1", ts)];
 
         let queue_dir = vault.join(".lorekeeper").join("queue");
-        let llm1: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
+        let llm1: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let result1 = {
             let mut pipeline1 = Pipeline::new(vault, make_ctx(&config, llm1.clone()));
             let r = pipeline1
@@ -1720,7 +1819,76 @@ mod materialized_view {
         };
         fill_llm_sections_with_dummy_bodies(vault, &result1).await;
 
-        // Wipe the summary section body manually (frontmatter hash stays).
+        // Delete the summary completion marker line (body and input hash stay).
+        let page_path = vault.join(result1.daily_pages[0].path.as_ref());
+        let body = tokio::fs::read_to_string(&page_path).await.unwrap();
+        let edited: String = body
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("summary_done:"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        tokio::fs::write(&page_path, edited).await.unwrap();
+
+        clear_queue_dir(&queue_dir).await;
+
+        let llm2: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
+        let mut pipeline2 = Pipeline::new(vault, make_ctx(&config, llm2.clone()));
+        let _ = pipeline2
+            .plan(
+                "test-source",
+                sc,
+                items.clone(),
+                &IngestOptions {
+                    target_date: None,
+                    today: far_future(),
+                    dry_run: false,
+                },
+            )
+            .await
+            .unwrap();
+        llm2.flush().await.unwrap();
+        assert!(
+            queue_task_kinds_for_source(&queue_dir).contains("summarize"),
+            "deleting the completion marker must trigger re-enqueue",
+        );
+    }
+
+    #[tokio::test]
+    async fn wiping_section_body_does_not_re_enqueue() {
+        // Counterpart to the marker-deletion test: completion is tracked by the marker,
+        // not the body, so blanking the body (an empty result is valid for many kinds)
+        // leaves the section DONE — no re-enqueue. The user must delete the marker.
+        let dir = TempDir::new().unwrap();
+        let vault = dir.path();
+        let config = base_config(vault);
+        let sc = config.sources.get("test-source").unwrap();
+
+        let ts: jiff::Timestamp = "2026-05-23T10:00:00Z".parse().unwrap();
+        let items = vec![raw_item("Event A", "Body A", "E1", ts)];
+
+        let queue_dir = vault.join(".lorekeeper").join("queue");
+        let llm1: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
+        let result1 = {
+            let mut pipeline1 = Pipeline::new(vault, make_ctx(&config, llm1.clone()));
+            let r = pipeline1
+                .plan(
+                    "test-source",
+                    sc,
+                    items.clone(),
+                    &IngestOptions {
+                        target_date: None,
+                        today: far_future(),
+                        dry_run: false,
+                    },
+                )
+                .await
+                .unwrap();
+            write_to_vault(vault, &r).await;
+            llm1.flush().await.unwrap();
+            r
+        };
+        fill_llm_sections_with_dummy_bodies(vault, &result1).await;
+
         let strings = lk_core::i18n::Locale::Ko.strings();
         let page_path = vault.join(result1.daily_pages[0].path.as_ref());
         let body = tokio::fs::read_to_string(&page_path).await.unwrap();
@@ -1729,9 +1897,9 @@ mod materialized_view {
 
         clear_queue_dir(&queue_dir).await;
 
-        let llm2: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
+        let llm2: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let mut pipeline2 = Pipeline::new(vault, make_ctx(&config, llm2.clone()));
-        let _ = pipeline2
+        pipeline2
             .plan(
                 "test-source",
                 sc,
@@ -1745,10 +1913,9 @@ mod materialized_view {
             .await
             .unwrap();
         llm2.flush().await.unwrap();
-        let kinds = queue_task_kinds_for_source(&queue_dir);
         assert!(
-            kinds.contains("summarize"),
-            "emptied section must trigger re-enqueue without any flag",
+            !queue_task_kinds_for_source(&queue_dir).contains("summarize"),
+            "an emptied body with its marker intact stays done; only marker deletion re-enqueues",
         );
     }
 
@@ -1776,9 +1943,12 @@ mod materialized_view {
                 "- [[REAL-CONCEPT-WIKILINK]]",
             );
             // The pipeline pre-stamped the input keys; the skill owns the completion
-            // markers. Stamp each equal to its input hash so the next ingest is a
-            // cache hit (refine-events and concepts are both marker-signalled).
+            // markers. Stamp each equal to its input hash so the next ingest is a cache
+            // hit (completion is uniformly marker-signalled).
             let page_path = page.path.to_string();
+            if let Some(hash) = task_hash_for_page(&queue_dir, &page_path, "summarize") {
+                content = stamp_completion(&content, "summary", &hash);
+            }
             if let Some(hash) = task_hash_for_page(&queue_dir, &page_path, "refine-events") {
                 content = stamp_completion(&content, "refine_events", &hash);
             }
@@ -1841,10 +2011,9 @@ mod materialized_view {
     }
 
     #[tokio::test]
-    async fn deleting_llm_inputs_frontmatter_line_forces_re_enqueue() {
-        // Twin of `deleting_section_body_forces_re_enqueue`. Both override paths must
-        // work: body deletion AND frontmatter-hash deletion. The user picks whichever
-        // is more convenient — only one is needed to invalidate the cache.
+    async fn deleting_one_completion_marker_re_enqueues_only_that_section() {
+        // Marker deletion is per-section: dropping `summary_done` re-enqueues the
+        // summary alone, while sections whose markers are untouched stay cached.
         let dir = TempDir::new().unwrap();
         let vault = dir.path();
         let config = base_config(vault);
@@ -1854,7 +2023,7 @@ mod materialized_view {
         let items = vec![raw_item("Event A", "Body A", "E1", ts)];
 
         let queue_dir = vault.join(".lorekeeper").join("queue");
-        let llm1: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
+        let llm1: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let result1 = {
             let mut pipeline1 = Pipeline::new(vault, make_ctx(&config, llm1.clone()));
             let r = pipeline1
@@ -1876,20 +2045,21 @@ mod materialized_view {
         };
         fill_llm_sections_with_dummy_bodies(vault, &result1).await;
 
-        // Strip the `summary:` line from `llm_inputs:`. The body stays intact, the
-        // hash is gone — the lookup should see "no cached hash" and re-enqueue.
+        // Strip only the `summary_done` marker from `llm_inputs:`. The body and the
+        // refine/concepts markers stay intact — the lookup should re-enqueue summary
+        // alone.
         let page_path = vault.join(result1.daily_pages[0].path.as_ref());
         let body = tokio::fs::read_to_string(&page_path).await.unwrap();
         let edited: String = body
             .lines()
-            .filter(|line| !line.trim_start().starts_with("summary:"))
+            .filter(|line| !line.trim_start().starts_with("summary_done:"))
             .collect::<Vec<_>>()
             .join("\n");
         tokio::fs::write(&page_path, edited).await.unwrap();
 
         clear_queue_dir(&queue_dir).await;
 
-        let llm2: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
+        let llm2: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let mut pipeline2 = Pipeline::new(vault, make_ctx(&config, llm2.clone()));
         let _ = pipeline2
             .plan(
@@ -1908,16 +2078,16 @@ mod materialized_view {
         let kinds = queue_task_kinds_for_source(&queue_dir);
         assert!(
             kinds.contains("summarize"),
-            "removing the summary hash must trigger re-enqueue: got {kinds:?}",
+            "removing summary_done must trigger re-enqueue: got {kinds:?}",
         );
-        // The OTHER hashes are still present, so their tasks should NOT re-enqueue.
+        // The OTHER markers are still present, so their tasks should NOT re-enqueue.
         assert!(
             !kinds.contains("refine-events"),
-            "refine-events hash was untouched; must remain cached: got {kinds:?}",
+            "refine_events_done was untouched; must remain cached: got {kinds:?}",
         );
         assert!(
             !kinds.contains("extract-concepts"),
-            "concepts hash was untouched; must remain cached: got {kinds:?}",
+            "concepts_done was untouched; must remain cached: got {kinds:?}",
         );
     }
 
@@ -1926,7 +2096,7 @@ mod materialized_view {
         // Regression guard: concept extraction can legitimately find NOTHING (a
         // low-signal page). The concepts section then stays empty — but a stamped
         // `concepts_done` marks it done, so a re-ingest of identical input must NOT
-        // re-enqueue. Under body-signalled completion an empty section would
+        // re-enqueue. Were completion inferred from a non-empty body, the empty section would
         // re-enqueue forever, burning LLM work every ingest for every concept-less page.
         let dir = TempDir::new().unwrap();
         let vault = dir.path();
@@ -1937,7 +2107,7 @@ mod materialized_view {
         let items = vec![raw_item("Event A", "Body A", "E1", ts)];
 
         let queue_dir = vault.join(".lorekeeper").join("queue");
-        let llm1: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
+        let llm1: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let result1 = {
             let mut pipeline1 = Pipeline::new(vault, make_ctx(&config, llm1.clone()));
             let r = pipeline1
@@ -1965,9 +2135,12 @@ mod materialized_view {
         let abs = vault.join(&page_path_rel);
         let strings = lk_core::i18n::Locale::Ko.strings();
         let mut content = tokio::fs::read_to_string(&abs).await.unwrap();
-        // Summary is body-signalled: filling its body is its completion signal.
+        // Fill + complete summary and refine to isolate the concepts assertion.
         content = lk_vault::replace_section(&content, strings.summary, "REAL-SUMMARY");
         content = lk_vault::replace_section(&content, strings.key_events, "REAL-REFINED");
+        if let Some(h) = task_hash_for_page(&queue_dir, &page_path_rel, "summarize") {
+            content = stamp_completion(&content, "summary", &h);
+        }
         if let Some(h) = task_hash_for_page(&queue_dir, &page_path_rel, "refine-events") {
             content = stamp_completion(&content, "refine_events", &h);
         }
@@ -1978,7 +2151,7 @@ mod materialized_view {
 
         clear_queue_dir(&queue_dir).await;
 
-        let llm2: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
+        let llm2: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let mut pipeline2 = Pipeline::new(vault, make_ctx(&config, llm2.clone()));
         let result2 = pipeline2
             .plan(
@@ -2027,7 +2200,7 @@ mod materialized_view {
         let queue_dir = vault.join(".lorekeeper").join("queue");
 
         // Ingest A, simulate the skill stamping concepts_done for input A.
-        let llm1: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
+        let llm1: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let result1 = {
             let mut p = Pipeline::new(vault, make_ctx(&config, llm1.clone()));
             let r = p
@@ -2050,6 +2223,9 @@ mod materialized_view {
         let page_rel = result1.daily_pages[0].path.to_string();
         let abs = vault.join(&page_rel);
         let mut content = tokio::fs::read_to_string(&abs).await.unwrap();
+        if let Some(h) = task_hash_for_page(&queue_dir, &page_rel, "summarize") {
+            content = stamp_completion(&content, "summary", &h);
+        }
         if let Some(h) = task_hash_for_page(&queue_dir, &page_rel, "extract-concepts") {
             content = stamp_completion(&content, "concepts", &h);
         }
@@ -2057,7 +2233,7 @@ mod materialized_view {
         clear_queue_dir(&queue_dir).await;
 
         // Ingest B with DIFFERENT content → concepts input hash changes → miss.
-        let llm2: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
+        let llm2: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let mut p2 = Pipeline::new(vault, make_ctx(&config, llm2.clone()));
         let result2 = p2
             .plan(
@@ -2103,7 +2279,7 @@ mod materialized_view {
         // refine-events task whose cache_hash `/lore-process` would stamp), then seed a
         // concept page on disk directly so the on-disk registry is non-empty on run 2.
         let queue_dir = vault.join(".lorekeeper").join("queue");
-        let llm1: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
+        let llm1: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let result1 = {
             let mut pipeline1 = Pipeline::new(vault, make_ctx(&config, llm1.clone()));
             let r = pipeline1
@@ -2139,7 +2315,8 @@ mod materialized_view {
         // Second run with QueueLlmClient and IDENTICAL input. Vault now has one
         // concept on disk — the cache identity is the input text/source/date/categories
         // only, so nothing fires.
-        let llm_queue: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
+        let llm_queue: Arc<dyn LlmClient> =
+            Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let mut pipeline2 = Pipeline::new(vault, make_ctx(&config, llm_queue.clone()));
         let _ = pipeline2
             .plan(
@@ -2178,7 +2355,7 @@ mod materialized_view {
         let items = vec![raw_item("Event A", "Body A", "E1", ts)];
 
         let queue_dir = vault.join(".lorekeeper").join("queue");
-        let llm: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
+        let llm: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         {
             let mut pipeline = Pipeline::new(vault, make_ctx(&config, llm.clone()));
             let r = pipeline
@@ -2399,7 +2576,7 @@ mod materialized_view {
         let strings = lk_core::i18n::Locale::Ko.strings();
 
         // First ingest: empty document page + queued summary/concepts tasks.
-        let llm1: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
+        let llm1: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let result1 = {
             let mut pipeline = Pipeline::new(vault, make_ctx(&config, llm1.clone()));
             let r = pipeline
@@ -2446,8 +2623,11 @@ mod materialized_view {
         content = lk_vault::replace_section(&content, strings.summary, "REAL-DOC-SUMMARY");
         content =
             lk_vault::replace_section(&content, strings.related_concepts, "- [[REAL-DOC-CONCEPT]]");
-        // document-concepts is marker-signalled; stamp concepts_done like the skill does.
+        // Completion is uniformly marker-signalled; stamp each marker like the skill does.
         let doc_page_path = result1.document_pages[0].path.to_string();
+        if let Some(hash) = task_hash_for_page(&queue_dir, &doc_page_path, "summarize") {
+            content = stamp_completion(&content, "summary", &hash);
+        }
         if let Some(hash) = task_hash_for_page(&queue_dir, &doc_page_path, "extract-concepts") {
             content = stamp_completion(&content, "concepts", &hash);
         }
@@ -2455,7 +2635,7 @@ mod materialized_view {
         clear_queue_dir(&queue_dir).await;
 
         // Re-ingest identical input → cache hit: zero re-enqueue, bodies preserved.
-        let llm2: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
+        let llm2: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let mut pipeline2 = Pipeline::new(vault, make_ctx(&config, llm2.clone()));
         let result2 = pipeline2
             .plan(

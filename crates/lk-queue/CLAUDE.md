@@ -56,17 +56,18 @@ knows about; provider choice is config-driven (`build_llm_client` in lk-cli).
   `/lore-process` consults that classification and processes only `current` tasks
   rather than re-deriving the hash check in prose.
 - **`TargetKind::llm_inputs_key`** is the single source of truth mapping each task
-  kind to its `llm_inputs.<key>` frontmatter field; **`TargetKind::cache_shape`** is
-  the companion source for HOW completion is detected: `BodySignalsDone` (a non-empty
-  body, for generative sections never legitimately empty) or `MarkerSignalsDone {
-  completion_key }` (a second frontmatter key the skill stamps). The marker shape covers
-  every section whose body can't signal done: `daily-refine-events` (structurally
-  non-empty from render) and the can-be-empty results `daily-concepts`/`document-concepts`/
-  `weekly-synthesis-themes` (extractions that may find nothing) and `work-log-synthesis`
-  (topic grouping that skips trivial events) — for all of these a body-signalled empty
-  result would re-enqueue forever. `CacheShape::completion_key()` exposes the marker. The
-  pipeline, work-log, and synthesis derive both from these; the skill's key table
-  mirrors them. Adding a `TargetKind` is compiler-forced to choose a key and a shape.
+  kind to its `llm_inputs.<key>` input field; **`TargetKind::completion_key`** is the
+  companion source for its `llm_inputs.<key>_done` completion marker. Completion is
+  UNIFORMLY marker-signalled — every kind has a `*_done` marker, always `llm_inputs_key()`
+  + `_done`. There is no body-emptiness completion path: a non-empty body never means
+  "done", because too many sections can be legitimately empty (a focus-filtered summary,
+  an extraction that found nothing, a trivial-only work-log, an empty-period review). A
+  per-kind "can this be empty?" judgment proved intractable (it was wrong for concepts,
+  themes, work-log, summaries, and narratives in turn), so the model removes the judgment
+  entirely: the pipeline pre-stamps the input key as the stale-task reference and the
+  skill stamps the marker when done; a cache hit is `marker == input key`, never inferred
+  from the body. The pipeline, work-log, and synthesis derive both keys from these.
+  Adding a `TargetKind` is compiler-forced to choose both.
   The skill-side mirror is enforced too: `tests/skill_contract.rs` iterates the full
   kind space via `strum::EnumIter` (macro-generated from the variant list, so the
   iteration can never drift from the enum — never hand-maintain a variant array) and

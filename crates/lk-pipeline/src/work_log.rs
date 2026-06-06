@@ -94,14 +94,11 @@ pub async fn render_work_log(
 
         // The topic synthesis groups events and skips trivial ones, so a day of only
         // trivial activity yields an empty topic summary — a valid finished result, not
-        // "not done". Completion is therefore marker-signalled (`topic_summary_done`),
-        // never inferred from an empty body.
-        let completion_key = kind
-            .cache_shape()
-            .completion_key()
-            .expect("work-log synthesis completion is marker-signalled");
+        // "not done". Completion is marker-signalled (`topic_summary_done`), like every
+        // LLM section, never inferred from an empty body.
+        let completion_key = kind.completion_key();
         let existing = reader.read_page(Path::new(&vault_path)).await?;
-        let decision: SectionDecision = llm_cache::lookup_marked(
+        let decision: SectionDecision = llm_cache::lookup(
             existing.as_ref(),
             completion_key,
             topic_heading,
@@ -122,9 +119,9 @@ pub async fn render_work_log(
             }
         }
 
-        // Re-emit the completion marker only on a cache hit (where `lookup_marked`
-        // proved it equals the current hash); a miss drops a stale marker rather than
-        // riding a changed-input render forward.
+        // Re-emit the completion marker only on a cache hit (where `lookup` proved it
+        // equals the current hash); a miss drops a stale marker rather than riding a
+        // changed-input render forward.
         let mut llm_inputs = llm_inputs_map(&[(kind, Some(&hash))]);
         if decision.cached {
             llm_inputs.insert(completion_key.to_string(), hash.clone().into());

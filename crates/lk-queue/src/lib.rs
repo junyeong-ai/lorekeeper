@@ -84,70 +84,29 @@ impl TargetKind {
         }
     }
 
-    /// What signals this section is done — its body, or a separate marker field.
+    /// The `llm_inputs.<key>_done` frontmatter field that marks this section finished.
     ///
-    /// The axis is whether an empty body can ever be the *finished* state. A
-    /// generative section (summary, review narrative, work-log topic) is non-empty
-    /// whenever there is anything to write, so a non-empty body IS the completion
-    /// signal (`BodySignalsDone`) and the pipeline simply pre-stamps the input hash.
-    /// Two kinds of section break that: the in-place event refine is structurally
-    /// non-empty from the first render, and an extraction (concepts, weekly themes)
-    /// can legitimately find nothing — for both, an empty (or pre-filled) body cannot
-    /// mean "not done", so a separate `completion_key` the skill stamps does
-    /// (`MarkerSignalsDone`). The pipeline still pre-stamps `llm_inputs_key()` with the
-    /// current input hash as the stale-task reference; cache hit ⟺ the marker equals it.
-    pub fn cache_shape(self) -> CacheShape {
-        // Exhaustive (no wildcard) so a new kind is compiler-forced to declare its
-        // shape — a new extraction must not silently default to BodySignalsDone and
-        // re-enqueue forever whenever it legitimately produces an empty result.
+    /// Completion is uniformly marker-signalled: the pipeline pre-stamps `llm_inputs_key()`
+    /// with the current input hash (the stale-task reference), and `/lore-process` stamps
+    /// this companion `*_done` key once it has finished — **even when the result is empty**.
+    /// A cache hit is `*_done == llm_inputs_key()`, never inferred from the body being
+    /// non-empty. This is the single completion model precisely because emptiness is not a
+    /// reliable "not done" signal: an extraction (concepts, themes) can find nothing, a
+    /// focus-filtered summary can match nothing, the work-log skips trivial events, a
+    /// review narrative can be empty when its inputs are, and the event refine is non-empty
+    /// from the first render. Tying completion to a body would re-enqueue every such empty
+    /// result forever, so no kind does. Always `llm_inputs_key()` + `_done`.
+    pub fn completion_key(self) -> &'static str {
         match self {
-            TargetKind::DailyRefineEvents => CacheShape::MarkerSignalsDone {
-                completion_key: "refine_events_done",
-            },
-            TargetKind::DailyConcepts | TargetKind::DocumentConcepts => {
-                CacheShape::MarkerSignalsDone {
-                    completion_key: "concepts_done",
-                }
-            }
-            TargetKind::WeeklySynthesisThemes => CacheShape::MarkerSignalsDone {
-                completion_key: "themes_done",
-            },
-            // The work-log groups the day's events by topic and SKIPS trivial ones
-            // (calendar accepts, approvals), so a day of only trivial activity yields an
-            // empty topic summary on a page that still exists — an extraction-style
-            // empty result, not "not done".
-            TargetKind::WorkLogSynthesis => CacheShape::MarkerSignalsDone {
-                completion_key: "topic_summary_done",
-            },
-            TargetKind::DailySummary
-            | TargetKind::WeeklyReviewNarrative
+            TargetKind::DailySummary | TargetKind::DocumentSummary => "summary_done",
+            TargetKind::DailyRefineEvents => "refine_events_done",
+            TargetKind::DailyConcepts | TargetKind::DocumentConcepts => "concepts_done",
+            TargetKind::WorkLogSynthesis => "topic_summary_done",
+            TargetKind::WeeklySynthesisThemes => "themes_done",
+            TargetKind::WeeklyReviewNarrative
             | TargetKind::MonthlyReviewNarrative
             | TargetKind::QuarterlyReviewNarrative
-            | TargetKind::AnnualReviewNarrative
-            | TargetKind::DocumentSummary => CacheShape::BodySignalsDone,
-        }
-    }
-}
-
-/// How a task's section reaches "done" — see [`TargetKind::cache_shape`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CacheShape {
-    /// A non-empty body == done; the pipeline pre-stamps the input hash and a
-    /// non-empty section is the completion signal. For generative sections whose
-    /// result is never legitimately empty.
-    BodySignalsDone,
-    /// The body can't signal completion (structurally pre-filled, OR an empty result
-    /// is valid), so a separate `completion_key` frontmatter field — stamped by
-    /// `/lore-process` when it finishes, even with an empty result — marks it done.
-    MarkerSignalsDone { completion_key: &'static str },
-}
-
-impl CacheShape {
-    /// The completion-marker key, when completion is marker-signalled.
-    pub fn completion_key(self) -> Option<&'static str> {
-        match self {
-            CacheShape::MarkerSignalsDone { completion_key } => Some(completion_key),
-            CacheShape::BodySignalsDone => None,
+            | TargetKind::AnnualReviewNarrative => "narrative_done",
         }
     }
 }

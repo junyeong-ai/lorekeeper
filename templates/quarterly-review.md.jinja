@@ -6,6 +6,9 @@ labels: ["personal", "strategy"]
 period: "{{ year }}-Q{{ quarter }}"
 llm_inputs:
   narrative: {{ llm_inputs.narrative | tojson }}
+{%- if llm_inputs.narrative_done %}
+  narrative_done: {{ llm_inputs.narrative_done | tojson }}
+{%- endif %}
 ---
 
 # {{ title }}

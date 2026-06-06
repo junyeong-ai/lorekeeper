@@ -7,6 +7,9 @@ period: "{{ year }}-W{{ "%02d" | format(week) }}"
 days_logged: {{ days_logged }}
 llm_inputs:
   narrative: {{ llm_inputs.narrative | tojson }}
+{%- if llm_inputs.narrative_done %}
+  narrative_done: {{ llm_inputs.narrative_done | tojson }}
+{%- endif %}
 ---
 
 # {{ title }}

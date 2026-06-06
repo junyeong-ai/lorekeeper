@@ -42,29 +42,27 @@ concept_categories) with the `Synthesizer`.
   Manual override: a vault editor deleting either the section body or the
   `llm_inputs.<key>` line invalidates the cache for the next run — no flag, no
   skill argument, no out-of-band invalidation API.
-  **Two cache shapes (`TargetKind::cache_shape`).** `BodySignalsDone` kinds (summary,
-  review narratives) follow steps 1–5 exactly: the section starts empty and a real
-  result is never empty, so a non-empty body is the completion signal and the pipeline
-  pre-stamps the hash. `MarkerSignalsDone` kinds can't let the body signal done — the
-  daily event refine is structurally non-empty from render, while concept/theme
-  extraction and the work-log topic grouping (which skips trivial events) can
-  legitimately find NOTHING, so an empty section is a valid finished result (a
-  body-signalled empty section would re-enqueue every ingest forever). For
-  these the pipeline pre-stamps `llm_inputs.<input key>` (`refine_events`/`concepts`/
-  `themes`/`topic_summary`) with the current-input hash (the stale-task reference point — `llm_inputs.
-  <key>` always equals the current input for every kind), and `/lore-process` writes the
-  companion `llm_inputs.<key>_done` marker once it has finished, even with an empty
-  result. The render re-emits each `*_done` marker ONLY on a cache hit (where
-  `lookup_marked` proved it equals the current input hash), so it round-trips when valid
-  and a stale marker is dropped on a miss instead of riding a changed-input render
-  forward. Every template that has a marked section emits its `*_done` key conditionally
-  (mirroring the input key), so the marker the pipeline provides reaches the page —
-  `materialized_view::empty_concept_result_is_cached_not_re_enqueued` guards that the
-  template doesn't silently drop it. `llm_cache::lookup_marked` returns cached only when
-  the marker equals the current hash, never consulting the body. Because the input key
-  is always current, a queued marker task whose `cache_hash` differs is unambiguously
-  stale and dropped; a first run, a crash before flush, an unprocessed page, OR a
-  changed-input re-ingest all converge. Force a re-run by deleting the `*_done` line.
+  **Completion is uniformly marker-signalled (`TargetKind::completion_key`).** Every
+  LLM-owned section has an input key (`summary`/`refine_events`/`concepts`/`themes`/
+  `topic_summary`/`narrative`) pre-stamped with the current-input hash (the stale-task
+  reference — `llm_inputs.<key>` always equals the current input), and a companion
+  `llm_inputs.<key>_done` marker `/lore-process` writes when it finishes, EVEN with an
+  empty result. There is NO body-emptiness completion signal: a non-empty body never
+  means "done", because too many sections can be legitimately empty (a focus-filtered
+  summary that matched nothing, an extraction that found nothing, a trivial-only
+  work-log, an empty-period review) — a per-kind "can this be empty?" judgment proved
+  intractable, so no kind makes it. `llm_cache::lookup` returns cached only when the
+  marker equals the current hash, never consulting the body, so an empty-but-done result
+  stays cached instead of re-enqueueing forever. The render re-emits each `*_done` marker
+  ONLY on a cache hit (where `lookup` proved it equals the current input hash), so a stale
+  marker is dropped on a miss instead of riding a changed-input render forward. Every
+  template emits its section's `*_done` key conditionally (mirroring the input key), so
+  the marker reaches the page — `materialized_view::empty_*_is_cached_not_re_enqueued`
+  tests guard that the template doesn't silently drop it. A queued task whose `cache_hash`
+  differs from the input key is unambiguously stale and dropped; a first run, a crash
+  before flush, an unprocessed page, OR a changed-input re-ingest all converge. Force a
+  re-run by deleting the `*_done` line — wiping the body alone does NOT (it is data, not
+  completion state).
 - **Cache identity vs queue payload**: `Request::cache_identity()` in `lk-queue` is the
   hashable subset that shapes the LLM's output; `Request::task_input()` is the queue
   payload (identity PLUS `source_type`). `cache_hash()` BLAKE3-128s the identity;

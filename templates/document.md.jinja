@@ -13,6 +13,9 @@ source_file: {{ source_file | tojson }}
 tags: {{ tags | tojson }}
 llm_inputs:
   summary: {{ llm_inputs.summary | tojson }}
+{%- if llm_inputs.summary_done %}
+  summary_done: {{ llm_inputs.summary_done | tojson }}
+{%- endif %}
 {%- if llm_inputs.concepts %}
   concepts: {{ llm_inputs.concepts | tojson }}
 {%- endif %}

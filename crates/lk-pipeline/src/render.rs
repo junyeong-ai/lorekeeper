@@ -32,21 +32,19 @@ pub struct RenderResult {
 /// re-ingests read these back to decide whether each LLM task is still necessary.
 /// `concepts` is optional because not every source extracts concepts.
 pub struct DailyLlmInputHashes<'a> {
+    /// Current-input hash for each LLM section — pre-stamped every render, so it is
+    /// always the stale-task reference point.
     pub summary: &'a str,
-    /// Current-input hash for the event list — pre-stamped every render, exactly like
-    /// `summary`, so it is always the stale-task reference point.
     pub refine_events: &'a str,
-    /// Completion stamp for the in-place event rewrite, owned by `/lore-process`.
-    /// `Some` ONLY when the refine task is a cache hit (the on-disk marker equals the
-    /// current input hash); `None` on a miss, so a stale marker is dropped rather than
-    /// riding a changed-input render forward. The render→splice cycle preserves it (and
-    /// the refined body) on a cache hit.
-    pub refine_events_done: Option<&'a str>,
     pub concepts: Option<&'a str>,
-    /// Completion stamp for concept extraction, owned by `/lore-process`. Mirrors
-    /// `refine_events_done` (cache-hit only): concept extraction can legitimately find
-    /// nothing, so an empty `## Related Concepts` body can't signal completion — this
-    /// marker does.
+    /// Completion stamp for each section, owned by `/lore-process`. `Some` ONLY when the
+    /// task is a cache hit (the on-disk marker equals the current input hash); `None` on
+    /// a miss, so a stale marker is dropped rather than riding a changed-input render
+    /// forward. Completion is uniformly marker-tracked — a non-empty body never signals
+    /// done — so a legitimately-empty result (focus-filtered summary, empty extraction)
+    /// stays cached instead of re-enqueueing forever.
+    pub summary_done: Option<&'a str>,
+    pub refine_events_done: Option<&'a str>,
     pub concepts_done: Option<&'a str>,
 }
 
@@ -110,9 +108,9 @@ pub fn render_daily_page(
         })
         .collect();
 
-    // Pre-stamp the current-input hashes; then splice in the marker-completion
-    // stamps the skill owns (`refine_events_done`, `concepts_done`), each keyed off
-    // the single-source `cache_shape`. Absent on a first ingest (skill hasn't run yet).
+    // Pre-stamp the current-input hashes; then splice in each section's `*_done`
+    // completion stamp (owned by the skill), keyed off the single-source
+    // `completion_key`. Absent on a first ingest (skill hasn't run yet).
     let mut llm_inputs_json = llm_inputs_map(&[
         (TargetKind::DailySummary, Some(llm_inputs.summary)),
         (
@@ -122,11 +120,12 @@ pub fn render_daily_page(
         (TargetKind::DailyConcepts, llm_inputs.concepts),
     ]);
     for (kind, done) in [
+        (TargetKind::DailySummary, llm_inputs.summary_done),
         (TargetKind::DailyRefineEvents, llm_inputs.refine_events_done),
         (TargetKind::DailyConcepts, llm_inputs.concepts_done),
     ] {
-        if let (Some(key), Some(stamp)) = (kind.cache_shape().completion_key(), done) {
-            llm_inputs_json.insert(key.to_string(), stamp.into());
+        if let Some(stamp) = done {
+            llm_inputs_json.insert(kind.completion_key().to_string(), stamp.into());
         }
     }
 
@@ -181,8 +180,8 @@ pub fn render_daily_page(
 pub struct DocumentLlmInputHashes<'a> {
     pub summary: &'a str,
     pub concepts: Option<&'a str>,
-    /// Completion stamp for concept extraction, owned by `/lore-process` — see
-    /// [`DailyLlmInputHashes::concepts_done`].
+    /// Completion stamps, owned by `/lore-process` — see [`DailyLlmInputHashes`].
+    pub summary_done: Option<&'a str>,
     pub concepts_done: Option<&'a str>,
 }
 
@@ -233,11 +232,13 @@ pub fn render_document_page(
         (TargetKind::DocumentSummary, Some(llm_inputs.summary)),
         (TargetKind::DocumentConcepts, llm_inputs.concepts),
     ]);
-    if let (Some(key), Some(stamp)) = (
-        TargetKind::DocumentConcepts.cache_shape().completion_key(),
-        llm_inputs.concepts_done,
-    ) {
-        llm_inputs_json.insert(key.to_string(), stamp.into());
+    for (kind, done) in [
+        (TargetKind::DocumentSummary, llm_inputs.summary_done),
+        (TargetKind::DocumentConcepts, llm_inputs.concepts_done),
+    ] {
+        if let Some(stamp) = done {
+            llm_inputs_json.insert(kind.completion_key().to_string(), stamp.into());
+        }
     }
 
     let context = serde_json::json!({

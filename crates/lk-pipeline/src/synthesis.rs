@@ -137,11 +137,10 @@ impl Synthesizer {
         }
     }
 
-    /// Cache lookup for one synthesis page's LLM-owned section. Dispatches on the
-    /// kind's `cache_shape` (single source of truth): a generative narrative signals
-    /// completion by a non-empty body, while theme extraction — which can legitimately
-    /// find nothing — is marker-signalled, so an empty themes section can't be mistaken
-    /// for "not done" and re-enqueued forever.
+    /// Cache lookup for one synthesis page's LLM-owned section. Completion is uniformly
+    /// marker-signalled (`completion_key`): a narrative — or weekly themes — can be empty
+    /// (an empty period, no cross-source theme), so an empty section must never be
+    /// mistaken for "not done" and re-enqueued forever.
     async fn lookup(
         &self,
         path: &VaultPath,
@@ -150,12 +149,12 @@ impl Synthesizer {
         hash: String,
     ) -> Result<SectionDecision, PipelineError> {
         let existing = self.reader.read_page(path.as_ref()).await?;
-        Ok(match kind.cache_shape().completion_key() {
-            Some(completion_key) => {
-                llm_cache::lookup_marked(existing.as_ref(), completion_key, heading, hash)
-            }
-            None => llm_cache::lookup(existing.as_ref(), kind.llm_inputs_key(), heading, hash),
-        })
+        Ok(llm_cache::lookup(
+            existing.as_ref(),
+            kind.completion_key(),
+            heading,
+            hash,
+        ))
     }
 
     /// Render a synthesis/personal template, injecting localized labels as `i18n.*`
@@ -176,14 +175,15 @@ impl Synthesizer {
                 .map_err(|e| PipelineError::Render(e.to_string()))?;
             map.insert("i18n".to_string(), i18n);
             let mut llm_inputs = llm_inputs_map(&[(kind, Some(&decision.hash))]);
-            // For a marker-signalled kind (themes), re-emit the completion stamp so it
-            // round-trips. On a cache hit `lookup_marked` proved the on-disk marker
-            // equals this hash, so re-stamping `decision.hash` preserves it; on a miss
-            // there is no valid marker yet and the skill writes it after processing.
-            if let Some(completion_key) = kind.cache_shape().completion_key()
-                && decision.cached
-            {
-                llm_inputs.insert(completion_key.to_string(), decision.hash.clone().into());
+            // Re-emit the completion marker so it round-trips. On a cache hit `lookup`
+            // proved the on-disk marker equals this hash, so re-stamping `decision.hash`
+            // preserves it; on a miss there is no valid marker yet and the skill writes
+            // it after processing.
+            if decision.cached {
+                llm_inputs.insert(
+                    kind.completion_key().to_string(),
+                    decision.hash.clone().into(),
+                );
             }
             map.insert(
                 field::LLM_INPUTS.to_string(),
