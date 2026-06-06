@@ -231,7 +231,7 @@ sources:
 
   # Manual curation — drop files into the <vault>/inbox/ directory and they become
   # individual wiki/documents/{slug}.md document pages (LLM summary + concept extraction included).
-  # HTML is run through the readability crate to extract the body, then converted to Markdown.
+  # HTML is run through a readability extractor to extract the body, then converted to Markdown.
   # After processing, files move to inbox/archived/{date}/ (post-run, safe).
   manual-inbox:
     type: manual

@@ -37,7 +37,7 @@ struct FeedParams {
     id: String,
     url: String,
     /// When true, fetch the full article HTML from each entry's link URL and
-    /// extract readable content via `readability`, replacing the feed summary.
+    /// extract readable content via `dom_smoothie`, replacing the feed summary.
     #[serde(default)]
     fetch_full_text: bool,
 }

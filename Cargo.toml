@@ -4,7 +4,7 @@ members = ["crates/*"]
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.95"
+rust-version = "1.96"
 license = "MIT"
 
 [workspace.dependencies]
@@ -32,7 +32,7 @@ strsim = "0.11"
 blake3 = "1"
 htmd = "0.5"
 feed-rs = "2"
-readability = { version = "0.3", default-features = false }
+dom_smoothie = "0.17"
 url = "2"
 base64 = "0.22"
 dialoguer = "0.12"

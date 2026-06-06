@@ -295,7 +295,7 @@ cargo fmt                                              # Format
 
 ## Dependencies
 
-Rust 1.95 / 2024 edition. Key crates:
+Rust 1.96 / 2024 edition. Key crates:
 
 - `tokio` (async runtime)
 - `reqwest` (HTTP)

@@ -31,19 +31,26 @@ pub fn html_to_markdown(html: &str) -> String {
 }
 
 /// Extract the readable article core from a full HTML page and convert it to
-/// Markdown, stripping boilerplate (nav, ads, footers) via `readability`.
+/// Markdown, stripping boilerplate (nav, ads, footers) via `dom_smoothie`.
 ///
-/// Returns `None` when readability fails or yields empty content — it is heuristic
+/// Returns `None` when extraction fails or yields empty content — it is heuristic
 /// and mis-extracts on non-article pages (a sidebar, a near-empty node). The caller
 /// owns the fallback because the right one differs: a feed reader keeps its
 /// known-clean summary, an importer of a user-chosen file converts the whole page.
 /// Folding a full-page fallback in here would let boilerplate longer than a clean
 /// summary silently replace it.
 pub fn readable_html_to_markdown(html: &str, base_url: &url::Url) -> Option<String> {
-    let mut cursor = std::io::Cursor::new(html.as_bytes());
-    match readability::extractor::extract(&mut cursor, base_url) {
-        Ok(product) => {
-            let extracted = html_to_markdown(&product.content);
+    let mut readability = match dom_smoothie::Readability::new(html, Some(base_url.as_str()), None)
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(url = %base_url, error = %e, "readability extraction failed");
+            return None;
+        }
+    };
+    match readability.parse() {
+        Ok(article) => {
+            let extracted = html_to_markdown(&article.content);
             if extracted.trim().is_empty() {
                 tracing::warn!(url = %base_url, "readability extracted empty content");
                 None
