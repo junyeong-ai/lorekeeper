@@ -1,6 +1,6 @@
 ---
 name: lore-ingest
-description: Daily knowledge ingestion pipeline — collects from Gmail, Google Drive, Google Calendar, Slack, Jira, RSS, and a manual inbox into an Obsidian vault. Deduplicates, classifies, extracts concepts, writes structured pages. Tracks personal work for performance reviews. Atomic phased ingest with a no-data-loss guarantee.
+description: Daily knowledge ingestion pipeline — collects from Gmail, Google Drive, Google Calendar, Slack, Jira, RSS, and a manual inbox into an Obsidian vault. Deduplicates, classifies, extracts concepts, writes structured pages. Tracks personal work for performance reviews. Idempotent, phased ingest with a no-data-loss guarantee.
 argument-hint: "<subcommand> [args]"
 disable-model-invocation: true
 allowed-tools: |
@@ -72,26 +72,27 @@ Templates are embedded in the binary. Override with `--template-dir`.
 Default provider is `queue` (buffers tasks to JSONL for `/lore-process`).
 `provider: noop` selects `NoopLlmClient` (no summarisation/concepts).
 
-## Atomic ingest flow
+## Ingest flow
 
-The atomic write→commit sequence is all-or-nothing per source, followed by a
-post-commit cleanup hook:
+There is no commit step. A daily page is re-rendered in full every run, so any
+write or flush failure just leaves the affected pages for the next run to reproduce
+byte-identically (idempotent — that is the no-data-loss guarantee). Per-source
+transactionality applies only to the LLM queue: each source opens a queue boundary
+and a source whose plan fails rolls back its own buffered tasks, so the flushed
+queue never references an unwritten page.
 
-1. **Plan** — fetch, normalize, dedup-check, classify
-2. **Write page bodies** — atomic per-file (tmp + rename). Time-windowed
-   sources (Gmail/Slack/Jira/Calendar/RSS) write `<daily>/{source-id}/DATE.md`;
-   the `manual` source writes `<wiki>/documents/{slug}.md` instead (curated
-   documents, not a dated feed). Concept pages are a cross-source aggregate,
+1. **Plan each source** — fetch, normalize, intra-batch dedup, classify. A source
+   that fails is recorded and skipped; the run continues with the rest.
+2. **Write pages** — atomic per file (tmp + rename). Complete-refetch sources
+   (Gmail/Slack/Jira/Calendar/RSS) write `<daily>/{source-id}/DATE.md`; `manual`
+   writes `<wiki>/documents/{slug}.md`. Concept pages are a cross-source aggregate,
    rendered once after all sources plan.
-3. **Write work-log** — aggregate personal events across sources (only events a
-   source-adapter marked `is_self`; `manual`/RSS/Drive have no authorship, so
-   they never produce work-log entries even with `track_personal: true`).
-4. **Flush LLM queue** — atomic JSONL task file (queue mode)
-5. **Commit dedup** — only if all writes + flush succeeded
-6. **Post-commit archive** — `manual` inbox files move to `archived/{date}/`,
-   only after a successful commit, so a mid-run failure leaves them for retry.
-
-Crash between flush and commit → next run re-processes (no data loss).
+3. **Write work-log** — personal events only (a source-adapter `is_self` match;
+   `manual`/RSS/Drive have no authorship, so never produce work-log entries even
+   with `track_personal: true`).
+4. **Flush LLM queue** — one atomic JSONL task file (queue mode).
+5. **Archive** — `manual` inbox files move to `archived/{date}/`, only after every
+   vault write and the queue flush succeeded, so a mid-run failure leaves them for retry.
 
 In **queue mode** (the default), phases 1–5 leave summary/concept/work-log
 sections empty and emit JSONL tasks. They are NOT knowledge yet — run
