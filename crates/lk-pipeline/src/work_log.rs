@@ -92,10 +92,18 @@ pub async fn render_work_log(
         let hash = req.cache_hash();
         let kind = req.target.kind;
 
+        // The topic synthesis groups events and skips trivial ones, so a day of only
+        // trivial activity yields an empty topic summary — a valid finished result, not
+        // "not done". Completion is therefore marker-signalled (`topic_summary_done`),
+        // never inferred from an empty body.
+        let completion_key = kind
+            .cache_shape()
+            .completion_key()
+            .expect("work-log synthesis completion is marker-signalled");
         let existing = reader.read_page(Path::new(&vault_path)).await?;
-        let decision: SectionDecision = llm_cache::lookup(
+        let decision: SectionDecision = llm_cache::lookup_marked(
             existing.as_ref(),
-            kind.llm_inputs_key(),
+            completion_key,
             topic_heading,
             hash.clone(),
         );
@@ -114,13 +122,21 @@ pub async fn render_work_log(
             }
         }
 
+        // Re-emit the completion marker only on a cache hit (where `lookup_marked`
+        // proved it equals the current hash); a miss drops a stale marker rather than
+        // riding a changed-input render forward.
+        let mut llm_inputs = llm_inputs_map(&[(kind, Some(&hash))]);
+        if decision.cached {
+            llm_inputs.insert(completion_key.to_string(), hash.clone().into());
+        }
+
         let context = serde_json::json!({
             "date": date.to_string(),
             "categories": categories,
             "sources": sources,
             "daily_dir": ctx.dirs.daily,
             "i18n": locale.strings(),
-            (field::LLM_INPUTS): llm_inputs_map(&[(kind, Some(&hash))]),
+            (field::LLM_INPUTS): llm_inputs,
         });
 
         // The work-log template is embedded, so it always resolves.

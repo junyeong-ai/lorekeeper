@@ -1400,13 +1400,17 @@ mod materialized_view {
             "first run enqueues the topic synthesis"
         );
 
-        // Persist the page and simulate `/lore-process` filling the topic section.
+        // Persist the page and simulate `/lore-process` filling the topic section and
+        // stamping its completion marker (topic synthesis is marker-signalled).
         let abs = vault.join(pages1[0].path.as_ref());
         tokio::fs::create_dir_all(abs.parent().unwrap())
             .await
             .unwrap();
-        let filled =
+        let mut filled =
             lk_vault::replace_section(&pages1[0].content, topic_heading, "REAL-TOPIC-BODY");
+        if let Some(h) = task_hash_for_page(&queue_dir, &pages1[0].path.to_string(), "summarize") {
+            filled = stamp_completion(&filled, "topic_summary", &h);
+        }
         tokio::fs::write(&abs, filled).await.unwrap();
         clear_queue_dir(&queue_dir).await;
 
@@ -1429,6 +1433,82 @@ mod materialized_view {
             pages2[0].content.contains("REAL-TOPIC-BODY"),
             "the skill-authored topic body must survive the re-render:\n{}",
             pages2[0].content
+        );
+        // The marker must round-trip through the work-log template, or an empty-but-done
+        // topic summary (a day of only trivial events) would re-enqueue forever.
+        assert!(
+            pages2[0].content.contains("topic_summary_done"),
+            "the re-rendered work-log must carry topic_summary_done through:\n{}",
+            pages2[0].content
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_work_log_topic_summary_is_cached_not_re_enqueued() {
+        // A day of only trivial events (calendar accepts, approvals) groups into
+        // categories — so the page exists — but the skill skips them all, leaving an
+        // empty topic summary. A stamped `topic_summary_done` marks it done; a re-render
+        // must NOT re-enqueue. Under body-signalled completion the empty section would
+        // re-enqueue every ingest forever.
+        let dir = TempDir::new().unwrap();
+        let vault = dir.path();
+        let config = base_config(vault);
+        let today = jiff::civil::date(2026, 6, 4);
+
+        let event = lk_core::event::Event {
+            id: lk_core::event::EventId::new("test-source", jiff::civil::date(2026, 5, 20), "x"),
+            source_id: "test-source".into(),
+            source_type: SourceType::Gmail,
+            timestamp: jiff::Timestamp::UNIX_EPOCH,
+            date: jiff::civil::date(2026, 5, 20),
+            title: "calendar accept".into(),
+            body: "trivial".into(),
+            url: None,
+            author: None,
+            labels: vec!["personal".into()],
+            category: None,
+            performance_category: None,
+            is_self: true,
+            is_personal: true,
+            metadata: serde_json::Value::Null,
+        };
+
+        let queue_dir = vault.join(".lorekeeper").join("queue");
+        let llm1: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
+        let pages1 = {
+            let pipeline = Pipeline::new(vault, make_ctx(&config, llm1.clone()));
+            pipeline
+                .render_work_log(std::slice::from_ref(&event), today)
+                .await
+                .unwrap()
+        };
+        llm1.flush().await.unwrap();
+
+        // Simulate the skill skipping every event as trivial: leave the topic section
+        // EMPTY but stamp topic_summary_done.
+        let abs = vault.join(pages1[0].path.as_ref());
+        tokio::fs::create_dir_all(abs.parent().unwrap())
+            .await
+            .unwrap();
+        let mut content = pages1[0].content.clone();
+        if let Some(h) = task_hash_for_page(&queue_dir, &pages1[0].path.to_string(), "summarize") {
+            content = stamp_completion(&content, "topic_summary", &h);
+        }
+        tokio::fs::write(&abs, content).await.unwrap();
+        clear_queue_dir(&queue_dir).await;
+
+        let llm2: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
+        let _pages2 = {
+            let pipeline = Pipeline::new(vault, make_ctx(&config, llm2.clone()));
+            pipeline
+                .render_work_log(std::slice::from_ref(&event), today)
+                .await
+                .unwrap()
+        };
+        llm2.flush().await.unwrap();
+        assert!(
+            !queue_task_kinds_for_source(&queue_dir).contains("summarize"),
+            "an empty-but-done work-log topic summary must stay cached, not re-enqueue",
         );
     }
 

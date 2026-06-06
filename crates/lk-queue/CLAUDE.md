@@ -61,9 +61,10 @@ knows about; provider choice is config-driven (`build_llm_client` in lk-cli).
   body, for generative sections never legitimately empty) or `MarkerSignalsDone {
   completion_key }` (a second frontmatter key the skill stamps). The marker shape covers
   every section whose body can't signal done: `daily-refine-events` (structurally
-  non-empty from render) and the extractions `daily-concepts`/`document-concepts`/
-  `weekly-synthesis-themes` (an empty result is valid — a body-signalled empty extraction
-  would re-enqueue forever). `CacheShape::completion_key()` exposes the marker. The
+  non-empty from render) and the can-be-empty results `daily-concepts`/`document-concepts`/
+  `weekly-synthesis-themes` (extractions that may find nothing) and `work-log-synthesis`
+  (topic grouping that skips trivial events) — for all of these a body-signalled empty
+  result would re-enqueue forever. `CacheShape::completion_key()` exposes the marker. The
   pipeline, work-log, and synthesis derive both from these; the skill's key table
   mirrors them. Adding a `TargetKind` is compiler-forced to choose a key and a shape.
   The skill-side mirror is enforced too: `tests/skill_contract.rs` iterates the full

@@ -55,7 +55,8 @@ compacted since you last read it.
    *Completion markers* below): `daily-refine-events` stamps
    `llm_inputs.refine_events_done`; `daily-concepts`/`document-concepts` stamp
    `llm_inputs.concepts_done`; `weekly-synthesis-themes` stamps
-   `llm_inputs.themes_done`. Concept pages the skill creates or merges are not
+   `llm_inputs.themes_done`; `work-log-synthesis` stamps
+   `llm_inputs.topic_summary_done`. Concept pages the skill creates or merges are not
    the target page — their frontmatter follows the concept page format and the
    shared dedup algorithm (alias appends allowed).
 
@@ -74,9 +75,10 @@ sole obligation to that machinery is to write **only** LLM-produced content
 into the target sections, never structural artifacts. Completion is read back
 two ways (see the completion models under step 3c): a body-signalled section
 (summary, review narratives) is done once its body is non-empty; a
-marker-signalled task (event refine, concept extraction, weekly themes) instead
-stamps an `llm_inputs.*_done` marker — because its body can't signal done, being
-either structurally non-empty from render or legitimately empty when the
+marker-signalled task (event refine, concept extraction, weekly themes, work-log
+topic grouping) instead stamps an `llm_inputs.*_done` marker — because its body
+can't signal done, being either structurally non-empty from render or
+legitimately empty when the
 extraction found nothing.
 
 ## Queue format & recovery
@@ -160,18 +162,20 @@ The essentials: a visible `.jsonl` is fully written and every
       status` classifies it; never invent a different outcome here.
 
       **Marker-signalled** (`daily-refine-events`, `daily-concepts`,
-      `document-concepts`, `weekly-synthesis-themes`): the body can't signal
-      completion — the event refine is structurally non-empty from render, and
-      concept/theme extraction can legitimately find **nothing**, so an empty
-      section is a valid *finished* result. Completion is tracked by a SECOND
-      `llm_inputs` field **you own and MUST stamp**, even when the result is
-      empty (otherwise the task re-enqueues every ingest forever):
+      `document-concepts`, `weekly-synthesis-themes`, `work-log-synthesis`): the
+      body can't signal completion — the event refine is structurally non-empty
+      from render, while concept/theme extraction and the work-log topic
+      grouping (which skips trivial events) can legitimately produce **nothing**,
+      so an empty section is a valid *finished* result. Completion is tracked by
+      a SECOND `llm_inputs` field **you own and MUST stamp**, even when the result
+      is empty (otherwise the task re-enqueues every ingest forever):
 
       | kind | input key (pipeline-owned) | completion marker (you stamp) |
       |------|----------------------------|-------------------------------|
       | `daily-refine-events` | `refine_events` | `refine_events_done` |
       | `daily-concepts`, `document-concepts` | `concepts` | `concepts_done` |
       | `weekly-synthesis-themes` | `themes` | `themes_done` |
+      | `work-log-synthesis` | `topic_summary` | `topic_summary_done` |
 
       Resolve with the input key and marker for that row:
 
@@ -272,7 +276,8 @@ depends on the section's completion model:
 - **Body-signalled** (summary, review narratives): delete the body OR the
   `llm_inputs.<key>` line.
 - **Marker-signalled** (`daily-refine-events`, `daily-concepts`,
-  `document-concepts`, `weekly-synthesis-themes`): delete the matching
-  `llm_inputs.*_done` line (`refine_events_done`, `concepts_done`,
-  `themes_done`). Emptying the body does NOT force a re-run — completion is
-  tracked only by the marker, so an empty-but-done extraction stays cached.
+  `document-concepts`, `weekly-synthesis-themes`, `work-log-synthesis`): delete
+  the matching `llm_inputs.*_done` line (`refine_events_done`, `concepts_done`,
+  `themes_done`, `topic_summary_done`). Emptying the body does NOT force a re-run
+  — completion is tracked only by the marker, so an empty-but-done result stays
+  cached.

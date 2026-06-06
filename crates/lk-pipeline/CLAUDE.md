@@ -46,11 +46,12 @@ concept_categories) with the `Synthesizer`.
   review narratives) follow steps 1–5 exactly: the section starts empty and a real
   result is never empty, so a non-empty body is the completion signal and the pipeline
   pre-stamps the hash. `MarkerSignalsDone` kinds can't let the body signal done — the
-  daily event refine is structurally non-empty from render, and concept/theme
-  extraction can legitimately find NOTHING, so an empty section is a valid finished
-  result (a body-signalled empty section would re-enqueue every ingest forever). For
+  daily event refine is structurally non-empty from render, while concept/theme
+  extraction and the work-log topic grouping (which skips trivial events) can
+  legitimately find NOTHING, so an empty section is a valid finished result (a
+  body-signalled empty section would re-enqueue every ingest forever). For
   these the pipeline pre-stamps `llm_inputs.<input key>` (`refine_events`/`concepts`/
-  `themes`) with the current-input hash (the stale-task reference point — `llm_inputs.
+  `themes`/`topic_summary`) with the current-input hash (the stale-task reference point — `llm_inputs.
   <key>` always equals the current input for every kind), and `/lore-process` writes the
   companion `llm_inputs.<key>_done` marker once it has finished, even with an empty
   result. The render re-emits each `*_done` marker ONLY on a cache hit (where

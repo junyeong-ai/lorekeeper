@@ -112,12 +112,18 @@ impl TargetKind {
             TargetKind::WeeklySynthesisThemes => CacheShape::MarkerSignalsDone {
                 completion_key: "themes_done",
             },
+            // The work-log groups the day's events by topic and SKIPS trivial ones
+            // (calendar accepts, approvals), so a day of only trivial activity yields an
+            // empty topic summary on a page that still exists — an extraction-style
+            // empty result, not "not done".
+            TargetKind::WorkLogSynthesis => CacheShape::MarkerSignalsDone {
+                completion_key: "topic_summary_done",
+            },
             TargetKind::DailySummary
             | TargetKind::WeeklyReviewNarrative
             | TargetKind::MonthlyReviewNarrative
             | TargetKind::QuarterlyReviewNarrative
             | TargetKind::AnnualReviewNarrative
-            | TargetKind::WorkLogSynthesis
             | TargetKind::DocumentSummary => CacheShape::BodySignalsDone,
         }
     }

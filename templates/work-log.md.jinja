@@ -7,6 +7,9 @@ categories: {{ categories | tojson }}
 sources: {{ sources | tojson }}
 llm_inputs:
   topic_summary: {{ llm_inputs.topic_summary | tojson }}
+{%- if llm_inputs.topic_summary_done %}
+  topic_summary_done: {{ llm_inputs.topic_summary_done | tojson }}
+{%- endif %}
 ---
 
 # {{ i18n.work_log_title }} {{ date }}
