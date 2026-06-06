@@ -50,11 +50,14 @@ compacted since you last read it.
 4. **Move a queue file to `processed/` only when every task in it
    succeeded.** On any failure, leave the file in place and stop processing
    that file.
-5. **The target page's frontmatter is read-only**, with one exception:
-   `daily-refine-events` stamps `llm_inputs.refine_events_done`. Concept
-   pages the skill creates or merges are not the target page — their
-   frontmatter follows the concept page format and the shared dedup
-   algorithm (alias appends allowed).
+5. **The target page's frontmatter is read-only**, except for the completion
+   markers you own and MUST stamp when a task finishes (detailed under
+   *Completion markers* below): `daily-refine-events` stamps
+   `llm_inputs.refine_events_done`; `daily-concepts`/`document-concepts` stamp
+   `llm_inputs.concepts_done`; `weekly-synthesis-themes` stamps
+   `llm_inputs.themes_done`. Concept pages the skill creates or merges are not
+   the target page — their frontmatter follows the concept page format and the
+   shared dedup algorithm (alias appends allowed).
 
 ## Materialized-view contract
 
@@ -69,10 +72,12 @@ The pipeline decides what needs work before the queue file exists: a task is
 enqueued only when its section is missing or its inputs changed. This skill's
 sole obligation to that machinery is to write **only** LLM-produced content
 into the target sections, never structural artifacts. Completion is read back
-two ways (see Cache shapes below): a fill-empty section (summary, concepts) is
-done once its body is non-empty; the in-place event refine instead stamps the
-`llm_inputs.refine_events_done` marker, since its section is non-empty from the
-first render.
+two ways (see the completion models under step 3c): a body-signalled section
+(summary, review narratives) is done once its body is non-empty; a
+marker-signalled task (event refine, concept extraction, weekly themes) instead
+stamps an `llm_inputs.*_done` marker — because its body can't signal done, being
+either structurally non-empty from render or legitimately empty when the
+extraction found nothing.
 
 ## Queue format & recovery
 
@@ -128,7 +133,12 @@ The essentials: a visible `.jsonl` is fully written and every
       | `weekly-review-narrative`, `monthly-review-narrative`   | `narrative`     |
       | `quarterly-review-narrative`, `annual-review-narrative` | `narrative`     |
 
-      Three outcomes, in order:
+      Two completion models exist; pick by `target.kind`.
+
+      **Body-signalled** (`daily-summary`, `document-summary`, and the
+      `*-review-narrative` kinds): the section is empty until done and a real
+      result is never empty, so the body itself signals completion. Three
+      outcomes, in order:
 
       1. **Stale (page rewrote with a different input):**
          `page.llm_inputs.<key>` present but ≠ `task.cache_hash`. A later
@@ -149,22 +159,33 @@ The essentials: a visible `.jsonl` is fully written and every
       **Drop as stale, no edit** *(outcome 1)* — exactly how `lore queue
       status` classifies it; never invent a different outcome here.
 
-      **Refine-events completion contract.** `daily-refine-events` rewrites
-      the raw event bodies *in place*, so the events section is non-empty
-      from the first render — emptiness can't signal "done." Completion is
-      tracked by a SECOND field, `llm_inputs.refine_events_done`, which
-      **you own.** Resolve the outcomes like this:
+      **Marker-signalled** (`daily-refine-events`, `daily-concepts`,
+      `document-concepts`, `weekly-synthesis-themes`): the body can't signal
+      completion — the event refine is structurally non-empty from render, and
+      concept/theme extraction can legitimately find **nothing**, so an empty
+      section is a valid *finished* result. Completion is tracked by a SECOND
+      `llm_inputs` field **you own and MUST stamp**, even when the result is
+      empty (otherwise the task re-enqueues every ingest forever):
 
-      - `task.cache_hash` ≠ `page.refine_events` → **drop** as stale, no
-        edit. *(outcome 1)*
-      - `task.cache_hash` = `page.refine_events` AND
-        `page.refine_events_done` = `page.refine_events` → already refined
-        for this exact input → **skip**, no edit. *(outcome 2)*
-      - `task.cache_hash` = `page.refine_events` AND `refine_events_done`
-        is absent or ≠ `refine_events` → **process**, then set
-        `llm_inputs.refine_events_done` = `task.cache_hash`, copied
-        verbatim (a 32-char hex string). Leave `llm_inputs.refine_events`
-        untouched — the pipeline owns it. *(outcome 3)*
+      | kind | input key (pipeline-owned) | completion marker (you stamp) |
+      |------|----------------------------|-------------------------------|
+      | `daily-refine-events` | `refine_events` | `refine_events_done` |
+      | `daily-concepts`, `document-concepts` | `concepts` | `concepts_done` |
+      | `weekly-synthesis-themes` | `themes` | `themes_done` |
+
+      Resolve with the input key and marker for that row:
+
+      - `task.cache_hash` ≠ `page.<input key>` → **drop** as stale, no edit.
+        *(outcome 1)*
+      - `task.cache_hash` = `page.<input key>` AND `page.<marker>` =
+        `page.<input key>` → already done for this exact input → **skip**, no
+        edit. *(outcome 2)*
+      - `task.cache_hash` = `page.<input key>` AND `<marker>` is absent or ≠
+        the input key → **process** (extract; for concepts/themes a genuinely
+        empty result is fine — write no wikilinks rather than invent low-value
+        ones), then set `llm_inputs.<marker>` = `task.cache_hash`, copied
+        verbatim (a 32-char hex string). Leave the pipeline-owned input key
+        untouched. *(outcome 3)*
 
    d. **Edit the target page** — the markdown file at `target.vault_path`,
       using the Edit tool (section replace):
@@ -174,8 +195,8 @@ The essentials: a visible `.jsonl` is fully written and every
       3. Replace the body between this heading and the next `## ` heading
          (or EOF) with the generated content
       4. Preserve frontmatter and every other section unchanged
-         (`daily-refine-events` additionally stamps its completion field —
-         see above)
+         (a marker-signalled task additionally stamps its `*_done` completion
+         field — see the table under 3c)
 
       Concept pages created or merged along the way follow the shared
       convergence algorithm in
@@ -246,11 +267,12 @@ To regenerate a section that was already filled, invalidate its cache and
 re-ingest that day (`lore ingest --date <day>`). The pipeline sees the cache
 miss, re-queues the task, and `/lore-process` fills it on the next run. No
 flag, no skill argument — the page itself is the cache key. How to invalidate
-depends on the section's cache shape:
+depends on the section's completion model:
 
-- **Fill-empty sections** (summary, concepts, narratives): delete the body
-  OR the `llm_inputs.<key>` line.
-- **In-place rewrite** (`daily-refine-events`): delete the
-  `llm_inputs.refine_events_done` line. Emptying the event body does NOT
-  force a re-run — the event list is structural and the pipeline re-renders
-  it, so completion is tracked only by `refine_events_done`.
+- **Body-signalled** (summary, review narratives): delete the body OR the
+  `llm_inputs.<key>` line.
+- **Marker-signalled** (`daily-refine-events`, `daily-concepts`,
+  `document-concepts`, `weekly-synthesis-themes`): delete the matching
+  `llm_inputs.*_done` line (`refine_events_done`, `concepts_done`,
+  `themes_done`). Emptying the body does NOT force a re-run — completion is
+  tracked only by the marker, so an empty-but-done extraction stays cached.

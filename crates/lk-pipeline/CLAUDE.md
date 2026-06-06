@@ -42,21 +42,23 @@ concept_categories) with the `Synthesizer`.
   Manual override: a vault editor deleting either the section body or the
   `llm_inputs.<key>` line invalidates the cache for the next run — no flag, no
   skill argument, no out-of-band invalidation API.
-  **Two cache shapes (`TargetKind::cache_shape`).** `FillEmpty` kinds (summary,
-  concepts, narratives) follow steps 1–5 exactly: the section starts empty, so a
-  non-empty body is the completion signal and the pipeline pre-stamps the hash. The
-  daily event list is the sole `InPlace` rewrite: its section is non-empty from the
-  first render (the raw event list is structural), so completion is tracked by a
-  SECOND frontmatter field. The pipeline still pre-stamps `llm_inputs.refine_events`
-  with the current-input hash (the stale-task reference point — `llm_inputs.<key>`
-  always equals the current input for every kind), and `/lore-process` writes
-  `llm_inputs.refine_events_done` once it has rewritten the bodies.
-  `llm_cache::lookup_in_place` returns cached only when `refine_events_done` equals
-  that current hash. Because `refine_events` is always current, a queued refine task
-  whose `cache_hash` differs is unambiguously stale and dropped; a first run, a crash
-  before flush, an unprocessed page, OR a changed-input re-ingest all converge (the
-  matching task processes, stale ones drop). Force a re-run by deleting the
-  `refine_events_done` line.
+  **Two cache shapes (`TargetKind::cache_shape`).** `BodySignalsDone` kinds (summary,
+  review narratives) follow steps 1–5 exactly: the section starts empty and a real
+  result is never empty, so a non-empty body is the completion signal and the pipeline
+  pre-stamps the hash. `MarkerSignalsDone` kinds can't let the body signal done — the
+  daily event refine is structurally non-empty from render, and concept/theme
+  extraction can legitimately find NOTHING, so an empty section is a valid finished
+  result (a body-signalled empty section would re-enqueue every ingest forever). For
+  these the pipeline pre-stamps `llm_inputs.<input key>` (`refine_events`/`concepts`/
+  `themes`) with the current-input hash (the stale-task reference point — `llm_inputs.
+  <key>` always equals the current input for every kind), and `/lore-process` writes the
+  companion `llm_inputs.<key>_done` marker once it has finished, even with an empty
+  result. The render→splice cycle reads each `*_done` marker off the existing page and
+  re-emits it so it round-trips. `llm_cache::lookup_in_place` returns cached only when
+  the marker equals the current hash, never consulting the body. Because the input key
+  is always current, a queued marker task whose `cache_hash` differs is unambiguously
+  stale and dropped; a first run, a crash before flush, an unprocessed page, OR a
+  changed-input re-ingest all converge. Force a re-run by deleting the `*_done` line.
 - **Cache identity vs queue payload**: `Request::cache_identity()` in `lk-queue` is the
   hashable subset that shapes the LLM's output; `Request::task_input()` is the queue
   payload (identity PLUS `source_type`). `cache_hash()` BLAKE3-128s the identity;

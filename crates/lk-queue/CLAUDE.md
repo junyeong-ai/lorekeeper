@@ -57,15 +57,19 @@ knows about; provider choice is config-driven (`build_llm_client` in lk-cli).
   rather than re-deriving the hash check in prose.
 - **`TargetKind::llm_inputs_key`** is the single source of truth mapping each task
   kind to its `llm_inputs.<key>` frontmatter field; **`TargetKind::cache_shape`** is
-  the companion source for HOW completion is detected: `FillEmpty` (non-empty body)
-  or `InPlace { completion_key }` (a second frontmatter key the skill stamps, used
-  by `daily-refine-events` because its section is non-empty from render). The
+  the companion source for HOW completion is detected: `BodySignalsDone` (a non-empty
+  body, for generative sections never legitimately empty) or `MarkerSignalsDone {
+  completion_key }` (a second frontmatter key the skill stamps). The marker shape covers
+  every section whose body can't signal done: `daily-refine-events` (structurally
+  non-empty from render) and the extractions `daily-concepts`/`document-concepts`/
+  `weekly-synthesis-themes` (an empty result is valid — a body-signalled empty extraction
+  would re-enqueue forever). `CacheShape::completion_key()` exposes the marker. The
   pipeline, work-log, and synthesis derive both from these; the skill's key table
   mirrors them. Adding a `TargetKind` is compiler-forced to choose a key and a shape.
   The skill-side mirror is enforced too: `tests/skill_contract.rs` iterates the full
   kind space via `strum::EnumIter` (macro-generated from the variant list, so the
   iteration can never drift from the enum — never hand-maintain a variant array) and
-  requires every wire name and in-place completion key to appear in the `/lore-process`
+  requires every wire name and marker completion key to appear in the `/lore-process`
   skill files, with each kind's `llm_inputs` key on the same table row as its wire
   name — renaming or adding a kind fails the test until the skill documentation is
   updated.

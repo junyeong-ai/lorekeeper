@@ -267,12 +267,12 @@ impl Pipeline {
             // The event list is an in-place rewrite: the render populates it, so
             // completion is tracked by a separate frontmatter key the skill stamps,
             // not by the section being non-empty.
-            let refine_completion_key = match refine_req.target.kind.cache_shape() {
-                lk_queue::CacheShape::InPlace { completion_key } => completion_key,
-                lk_queue::CacheShape::FillEmpty => {
-                    unreachable!("DailyRefineEvents is an in-place rewrite")
-                }
-            };
+            let refine_completion_key = refine_req
+                .target
+                .kind
+                .cache_shape()
+                .completion_key()
+                .expect("DailyRefineEvents completion is marker-signalled");
             let refine_decision = llm_cache::lookup_in_place(
                 existing.as_ref(),
                 refine_completion_key,
@@ -324,9 +324,18 @@ impl Pipeline {
                     },
                     categories: self.ctx.concept_categories.clone(),
                 };
-                let decision = llm_cache::lookup(
+                // Concept extraction can legitimately find nothing, so an empty
+                // section can't signal completion (that would re-enqueue forever) —
+                // completion is marker-signalled by `concepts_done`, like refine.
+                let concepts_completion_key = concepts_req
+                    .target
+                    .kind
+                    .cache_shape()
+                    .completion_key()
+                    .expect("concept extraction completion is marker-signalled");
+                let decision = llm_cache::lookup_in_place(
                     existing.as_ref(),
-                    concepts_req.target.kind.llm_inputs_key(),
+                    concepts_completion_key,
                     concepts_heading,
                     concepts_req.cache_hash(),
                 );
@@ -363,17 +372,19 @@ impl Pipeline {
                 set.into_iter().collect()
             };
 
-            // `refine_events` is pre-stamped with the current-input hash (the
-            // stale-task reference point, like summary); `refine_events_done` is the
-            // skill-owned completion stamp, passed through from disk.
+            // `refine_events`/`concepts` are pre-stamped with the current-input hash
+            // (the stale-task reference point, like summary); `*_done` are the
+            // skill-owned completion stamps, passed through from disk unchanged.
             let refine_done_stamp =
                 llm_cache::stored_hash(existing.as_ref(), refine_completion_key);
+            let concepts_done_stamp = llm_cache::stored_hash(existing.as_ref(), "concepts_done");
 
             let llm_inputs = render::DailyLlmInputHashes {
                 summary: &summary_decision.hash,
                 refine_events: &refine_decision.hash,
                 refine_events_done: refine_done_stamp,
                 concepts: concepts_decision.as_ref().map(|d| d.hash.as_str()),
+                concepts_done: concepts_done_stamp,
             };
 
             let fresh = render::render_daily_page(
@@ -661,9 +672,18 @@ impl Pipeline {
                     },
                     categories: self.ctx.concept_categories.clone(),
                 };
-                let decision = llm_cache::lookup(
+                // Concept extraction can legitimately find nothing, so an empty
+                // section can't signal completion (that would re-enqueue forever) —
+                // completion is marker-signalled by `concepts_done`, like refine.
+                let concepts_completion_key = concepts_req
+                    .target
+                    .kind
+                    .cache_shape()
+                    .completion_key()
+                    .expect("concept extraction completion is marker-signalled");
+                let decision = llm_cache::lookup_in_place(
                     existing.as_ref(),
-                    concepts_req.target.kind.llm_inputs_key(),
+                    concepts_completion_key,
                     concepts_heading,
                     concepts_req.cache_hash(),
                 );
@@ -692,9 +712,11 @@ impl Pipeline {
 
             let concept_names: Vec<String> = doc_concepts.iter().map(|c| c.name.clone()).collect();
 
+            let concepts_done_stamp = llm_cache::stored_hash(existing.as_ref(), "concepts_done");
             let llm_inputs = render::DocumentLlmInputHashes {
                 summary: &summary_decision.hash,
                 concepts: concepts_decision.as_ref().map(|d| d.hash.as_str()),
+                concepts_done: concepts_done_stamp,
             };
 
             let fresh = render::render_document_page(

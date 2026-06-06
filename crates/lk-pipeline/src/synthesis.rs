@@ -137,9 +137,11 @@ impl Synthesizer {
         }
     }
 
-    /// Cache lookup for one synthesis page's LLM-owned section. The frontmatter key
-    /// is derived from the task kind (single source of truth), so the page and the
-    /// queue task agree by construction.
+    /// Cache lookup for one synthesis page's LLM-owned section. Dispatches on the
+    /// kind's `cache_shape` (single source of truth): a generative narrative signals
+    /// completion by a non-empty body, while theme extraction — which can legitimately
+    /// find nothing — is marker-signalled, so an empty themes section can't be mistaken
+    /// for "not done" and re-enqueued forever.
     async fn lookup(
         &self,
         path: &VaultPath,
@@ -148,12 +150,12 @@ impl Synthesizer {
         hash: String,
     ) -> Result<SectionDecision, PipelineError> {
         let existing = self.reader.read_page(path.as_ref()).await?;
-        Ok(llm_cache::lookup(
-            existing.as_ref(),
-            kind.llm_inputs_key(),
-            heading,
-            hash,
-        ))
+        Ok(match kind.cache_shape().completion_key() {
+            Some(completion_key) => {
+                llm_cache::lookup_in_place(existing.as_ref(), completion_key, heading, hash)
+            }
+            None => llm_cache::lookup(existing.as_ref(), kind.llm_inputs_key(), heading, hash),
+        })
     }
 
     /// Render a synthesis/personal template, injecting localized labels as `i18n.*`
@@ -173,9 +175,19 @@ impl Synthesizer {
             let i18n = serde_json::to_value(self.ctx.locale.strings())
                 .map_err(|e| PipelineError::Render(e.to_string()))?;
             map.insert("i18n".to_string(), i18n);
+            let mut llm_inputs = llm_inputs_map(&[(kind, Some(&decision.hash))]);
+            // For a marker-signalled kind (themes), re-emit the completion stamp so it
+            // round-trips. On a cache hit `lookup_in_place` proved the on-disk marker
+            // equals this hash, so re-stamping `decision.hash` preserves it; on a miss
+            // there is no valid marker yet and the skill writes it after processing.
+            if let Some(completion_key) = kind.cache_shape().completion_key()
+                && decision.cached
+            {
+                llm_inputs.insert(completion_key.to_string(), decision.hash.clone().into());
+            }
             map.insert(
                 field::LLM_INPUTS.to_string(),
-                serde_json::Value::Object(llm_inputs_map(&[(kind, Some(&decision.hash))])),
+                serde_json::Value::Object(llm_inputs),
             );
         }
         let rendered = self

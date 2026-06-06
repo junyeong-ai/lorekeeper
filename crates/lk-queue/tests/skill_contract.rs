@@ -79,10 +79,10 @@ fn skill_key_table_maps_every_target_kind_to_its_llm_inputs_key() {
 }
 
 #[test]
-fn skill_documents_every_in_place_completion_key() {
+fn skill_documents_every_completion_marker() {
     let doc = read_skill_file("SKILL.md");
     for kind in TargetKind::iter() {
-        if let CacheShape::InPlace { completion_key } = kind.cache_shape() {
+        if let CacheShape::MarkerSignalsDone { completion_key } = kind.cache_shape() {
             let needle = format!("llm_inputs.{completion_key}");
             assert!(
                 doc.contains(&needle),

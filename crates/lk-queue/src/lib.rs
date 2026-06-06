@@ -84,34 +84,41 @@ impl TargetKind {
         }
     }
 
-    /// Whether this task fills an initially-empty section (`FillEmpty`) or rewrites
-    /// a section that the deterministic render already populates (`InPlace`).
+    /// What signals this section is done — its body, or a separate marker field.
     ///
-    /// This distinction is the whole reason the cache has two shapes. A fill-empty
-    /// section signals completion by being non-empty, so the pipeline records its
-    /// hash in `llm_inputs_key()` at render time. An in-place rewrite (the daily
-    /// event list) is structurally non-empty from the first render, so emptiness
-    /// can't signal completion: the pipeline still pre-stamps `llm_inputs_key()`
-    /// with the *current-input* hash (the stale-task reference point), and
-    /// `/lore-process` writes `completion_key()` once it has actually rewritten the
-    /// bodies. Cache hit ⟺ the two keys agree.
+    /// The axis is whether an empty body can ever be the *finished* state. A
+    /// generative section (summary, review narrative, work-log topic) is non-empty
+    /// whenever there is anything to write, so a non-empty body IS the completion
+    /// signal (`BodySignalsDone`) and the pipeline simply pre-stamps the input hash.
+    /// Two kinds of section break that: the in-place event refine is structurally
+    /// non-empty from the first render, and an extraction (concepts, weekly themes)
+    /// can legitimately find nothing — for both, an empty (or pre-filled) body cannot
+    /// mean "not done", so a separate `completion_key` the skill stamps does
+    /// (`MarkerSignalsDone`). The pipeline still pre-stamps `llm_inputs_key()` with the
+    /// current input hash as the stale-task reference; cache hit ⟺ the marker equals it.
     pub fn cache_shape(self) -> CacheShape {
         // Exhaustive (no wildcard) so a new kind is compiler-forced to declare its
-        // shape — a new in-place rewrite must not silently default to FillEmpty.
+        // shape — a new extraction must not silently default to BodySignalsDone and
+        // re-enqueue forever whenever it legitimately produces an empty result.
         match self {
-            TargetKind::DailyRefineEvents => CacheShape::InPlace {
+            TargetKind::DailyRefineEvents => CacheShape::MarkerSignalsDone {
                 completion_key: "refine_events_done",
             },
+            TargetKind::DailyConcepts | TargetKind::DocumentConcepts => {
+                CacheShape::MarkerSignalsDone {
+                    completion_key: "concepts_done",
+                }
+            }
+            TargetKind::WeeklySynthesisThemes => CacheShape::MarkerSignalsDone {
+                completion_key: "themes_done",
+            },
             TargetKind::DailySummary
-            | TargetKind::DailyConcepts
-            | TargetKind::WeeklySynthesisThemes
             | TargetKind::WeeklyReviewNarrative
             | TargetKind::MonthlyReviewNarrative
             | TargetKind::QuarterlyReviewNarrative
             | TargetKind::AnnualReviewNarrative
             | TargetKind::WorkLogSynthesis
-            | TargetKind::DocumentSummary
-            | TargetKind::DocumentConcepts => CacheShape::FillEmpty,
+            | TargetKind::DocumentSummary => CacheShape::BodySignalsDone,
         }
     }
 }
@@ -119,11 +126,24 @@ impl TargetKind {
 /// How a task's section reaches "done" — see [`TargetKind::cache_shape`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CacheShape {
-    /// Section starts empty; non-empty body == done. Pipeline pre-stamps the hash.
-    FillEmpty,
-    /// Section starts populated by the render; a separate `completion_key`
-    /// frontmatter field, written by `/lore-process`, marks the rewrite done.
-    InPlace { completion_key: &'static str },
+    /// A non-empty body == done; the pipeline pre-stamps the input hash and a
+    /// non-empty section is the completion signal. For generative sections whose
+    /// result is never legitimately empty.
+    BodySignalsDone,
+    /// The body can't signal completion (structurally pre-filled, OR an empty result
+    /// is valid), so a separate `completion_key` frontmatter field — stamped by
+    /// `/lore-process` when it finishes, even with an empty result — marks it done.
+    MarkerSignalsDone { completion_key: &'static str },
+}
+
+impl CacheShape {
+    /// The completion-marker key, when completion is marker-signalled.
+    pub fn completion_key(self) -> Option<&'static str> {
+        match self {
+            CacheShape::MarkerSignalsDone { completion_key } => Some(completion_key),
+            CacheShape::BodySignalsDone => None,
+        }
+    }
 }
 
 /// Where the result of a semantic task should land in the vault. Carried through the

@@ -3,7 +3,7 @@ use lk_core::event::Event;
 use lk_core::frontmatter::field;
 use lk_core::i18n::Locale;
 use lk_core::vault_path::VaultPath;
-use lk_queue::{CacheShape, TargetKind};
+use lk_queue::TargetKind;
 use lk_vault::{TemplateEngine, replace_section, section_body};
 
 use crate::PipelineError;
@@ -42,6 +42,10 @@ pub struct DailyLlmInputHashes<'a> {
     /// preserves it (and the refined body) on a cache hit.
     pub refine_events_done: Option<&'a str>,
     pub concepts: Option<&'a str>,
+    /// Completion stamp for concept extraction, owned by `/lore-process`. Mirrors
+    /// `refine_events_done`: concept extraction can legitimately find nothing, so an
+    /// empty `## Related Concepts` body can't signal completion — this marker does.
+    pub concepts_done: Option<&'a str>,
 }
 
 pub struct DailyRenderContext<'a> {
@@ -104,9 +108,9 @@ pub fn render_daily_page(
         })
         .collect();
 
-    // Pre-stamp the current-input hashes; then splice in the in-place completion
-    // stamp (`refine_events_done`) the skill owns, keyed off the single-source
-    // `cache_shape`. Absent on a first ingest (skill hasn't refined yet).
+    // Pre-stamp the current-input hashes; then splice in the marker-completion
+    // stamps the skill owns (`refine_events_done`, `concepts_done`), each keyed off
+    // the single-source `cache_shape`. Absent on a first ingest (skill hasn't run yet).
     let mut llm_inputs_json = llm_inputs_map(&[
         (TargetKind::DailySummary, Some(llm_inputs.summary)),
         (
@@ -115,11 +119,13 @@ pub fn render_daily_page(
         ),
         (TargetKind::DailyConcepts, llm_inputs.concepts),
     ]);
-    if let (CacheShape::InPlace { completion_key }, Some(done)) = (
-        TargetKind::DailyRefineEvents.cache_shape(),
-        llm_inputs.refine_events_done,
-    ) {
-        llm_inputs_json.insert(completion_key.to_string(), done.into());
+    for (kind, done) in [
+        (TargetKind::DailyRefineEvents, llm_inputs.refine_events_done),
+        (TargetKind::DailyConcepts, llm_inputs.concepts_done),
+    ] {
+        if let (Some(key), Some(stamp)) = (kind.cache_shape().completion_key(), done) {
+            llm_inputs_json.insert(key.to_string(), stamp.into());
+        }
     }
 
     let mut context = serde_json::json!({
@@ -173,6 +179,9 @@ pub fn render_daily_page(
 pub struct DocumentLlmInputHashes<'a> {
     pub summary: &'a str,
     pub concepts: Option<&'a str>,
+    /// Completion stamp for concept extraction, owned by `/lore-process` — see
+    /// [`DailyLlmInputHashes::concepts_done`].
+    pub concepts_done: Option<&'a str>,
 }
 
 pub struct DocumentRenderContext<'a> {
@@ -218,10 +227,16 @@ pub fn render_document_page(
     let mut tags = vec!["document".to_string()];
     tags.extend(event.labels.iter().cloned());
 
-    let llm_inputs_json = llm_inputs_map(&[
+    let mut llm_inputs_json = llm_inputs_map(&[
         (TargetKind::DocumentSummary, Some(llm_inputs.summary)),
         (TargetKind::DocumentConcepts, llm_inputs.concepts),
     ]);
+    if let (Some(key), Some(stamp)) = (
+        TargetKind::DocumentConcepts.cache_shape().completion_key(),
+        llm_inputs.concepts_done,
+    ) {
+        llm_inputs_json.insert(key.to_string(), stamp.into());
+    }
 
     let context = serde_json::json!({
         "slug": slug,

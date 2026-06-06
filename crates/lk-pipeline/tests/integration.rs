@@ -1695,14 +1695,15 @@ mod materialized_view {
                 strings.related_concepts,
                 "- [[REAL-CONCEPT-WIKILINK]]",
             );
-            // The pipeline already pre-stamped `refine_events` with this hash; the
-            // skill owns the completion marker `refine_events_done`. Stamp it equal
-            // so the next ingest is a cache hit (done == refine_events).
-            if let Some(hash) = refine_hash_for_page(&queue_dir, &page.path.to_string()) {
-                content = content.replace(
-                    &format!("refine_events: \"{hash}\""),
-                    &format!("refine_events: \"{hash}\"\n  refine_events_done: \"{hash}\""),
-                );
+            // The pipeline pre-stamped the input keys; the skill owns the completion
+            // markers. Stamp each equal to its input hash so the next ingest is a
+            // cache hit (refine-events and concepts are both marker-signalled).
+            let page_path = page.path.to_string();
+            if let Some(hash) = task_hash_for_page(&queue_dir, &page_path, "refine-events") {
+                content = stamp_completion(&content, "refine_events", &hash);
+            }
+            if let Some(hash) = task_hash_for_page(&queue_dir, &page_path, "extract-concepts") {
+                content = stamp_completion(&content, "concepts", &hash);
             }
             tokio::fs::write(&abs, content).await.unwrap();
         }
@@ -1710,6 +1711,15 @@ mod materialized_view {
 
     /// The `cache_hash` of the enqueued `refine-events` task targeting `page_path`.
     fn refine_hash_for_page(queue_dir: &std::path::Path, page_path: &str) -> Option<String> {
+        task_hash_for_page(queue_dir, page_path, "refine-events")
+    }
+
+    /// The `cache_hash` of the enqueued task of `kind` targeting `page_path`.
+    fn task_hash_for_page(
+        queue_dir: &std::path::Path,
+        page_path: &str,
+        kind: &str,
+    ) -> Option<String> {
         let entries = std::fs::read_dir(queue_dir).ok()?;
         for entry in entries.flatten() {
             if entry.path().extension().and_then(|s| s.to_str()) != Some("jsonl") {
@@ -1718,14 +1728,25 @@ mod materialized_view {
             let content = std::fs::read_to_string(entry.path()).ok()?;
             for line in content.lines() {
                 let task: serde_json::Value = serde_json::from_str(line).ok()?;
-                if task["kind"] == "refine-events"
-                    && task["target"]["vault_path"].as_str() == Some(page_path)
+                if task["kind"] == kind && task["target"]["vault_path"].as_str() == Some(page_path)
                 {
                     return task["cache_hash"].as_str().map(str::to_string);
                 }
             }
         }
         None
+    }
+
+    /// Simulate `/lore-process` stamping a marker-signalled task's completion field:
+    /// `concepts`/`refine_events` are pre-stamped by the pipeline, and the skill sets
+    /// `<key>_done` equal to that hash once it has filled the section (even when the
+    /// result is empty). Without this stamp the task re-enqueues on every ingest.
+    fn stamp_completion(content: &str, input_key: &str, hash: &str) -> String {
+        let done_key = format!("{input_key}_done");
+        content.replace(
+            &format!("{input_key}: \"{hash}\""),
+            &format!("{input_key}: \"{hash}\"\n  {done_key}: \"{hash}\""),
+        )
     }
 
     async fn clear_queue_dir(queue_dir: &std::path::Path) {
@@ -1817,6 +1838,87 @@ mod materialized_view {
         assert!(
             !kinds.contains("extract-concepts"),
             "concepts hash was untouched; must remain cached: got {kinds:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_concept_result_is_cached_not_re_enqueued() {
+        // Regression guard: concept extraction can legitimately find NOTHING (a
+        // low-signal page). The concepts section then stays empty — but a stamped
+        // `concepts_done` marks it done, so a re-ingest of identical input must NOT
+        // re-enqueue. Under body-signalled completion an empty section would
+        // re-enqueue forever, burning LLM work every ingest for every concept-less page.
+        let dir = TempDir::new().unwrap();
+        let vault = dir.path();
+        let config = base_config(vault);
+        let sc = config.sources.get("test-source").unwrap();
+
+        let ts: jiff::Timestamp = "2026-05-23T10:00:00Z".parse().unwrap();
+        let items = vec![raw_item("Event A", "Body A", "E1", ts)];
+
+        let queue_dir = vault.join(".lorekeeper").join("queue");
+        let llm1: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
+        let result1 = {
+            let mut pipeline1 = Pipeline::new(vault, make_ctx(&config, llm1.clone()));
+            let r = pipeline1
+                .plan(
+                    "test-source",
+                    sc,
+                    items.clone(),
+                    &IngestOptions {
+                        target_date: None,
+                        today: far_future(),
+                        dry_run: false,
+                    },
+                )
+                .await
+                .unwrap();
+            write_to_vault(vault, &r).await;
+            llm1.flush().await.unwrap();
+            r
+        };
+
+        // Simulate `/lore-process` finding NO concepts: stamp `concepts_done` but
+        // leave the `## Related Concepts` body empty. (Summary + refine are stamped so
+        // they don't muddy the assertion.)
+        let page_path_rel = result1.daily_pages[0].path.to_string();
+        let abs = vault.join(&page_path_rel);
+        let strings = lk_core::i18n::Locale::Ko.strings();
+        let mut content = tokio::fs::read_to_string(&abs).await.unwrap();
+        // Summary is body-signalled: filling its body is its completion signal.
+        content = lk_vault::replace_section(&content, strings.summary, "REAL-SUMMARY");
+        content = lk_vault::replace_section(&content, strings.key_events, "REAL-REFINED");
+        if let Some(h) = task_hash_for_page(&queue_dir, &page_path_rel, "refine-events") {
+            content = stamp_completion(&content, "refine_events", &h);
+        }
+        if let Some(h) = task_hash_for_page(&queue_dir, &page_path_rel, "extract-concepts") {
+            content = stamp_completion(&content, "concepts", &h);
+        }
+        tokio::fs::write(&abs, content).await.unwrap();
+
+        clear_queue_dir(&queue_dir).await;
+
+        let llm2: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir.clone()));
+        let mut pipeline2 = Pipeline::new(vault, make_ctx(&config, llm2.clone()));
+        pipeline2
+            .plan(
+                "test-source",
+                sc,
+                items,
+                &IngestOptions {
+                    target_date: None,
+                    today: far_future(),
+                    dry_run: false,
+                },
+            )
+            .await
+            .unwrap();
+        llm2.flush().await.unwrap();
+
+        let kinds = queue_task_kinds_for_source(&queue_dir);
+        assert!(
+            !kinds.contains("extract-concepts"),
+            "an empty-but-done concepts section must stay cached, not re-enqueue: got {kinds:?}",
         );
     }
 
@@ -2180,6 +2282,11 @@ mod materialized_view {
         content = lk_vault::replace_section(&content, strings.summary, "REAL-DOC-SUMMARY");
         content =
             lk_vault::replace_section(&content, strings.related_concepts, "- [[REAL-DOC-CONCEPT]]");
+        // document-concepts is marker-signalled; stamp concepts_done like the skill does.
+        let doc_page_path = result1.document_pages[0].path.to_string();
+        if let Some(hash) = task_hash_for_page(&queue_dir, &doc_page_path, "extract-concepts") {
+            content = stamp_completion(&content, "concepts", &hash);
+        }
         tokio::fs::write(&doc_path, content).await.unwrap();
         clear_queue_dir(&queue_dir).await;
 

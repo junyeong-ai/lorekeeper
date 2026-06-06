@@ -14,26 +14,28 @@
 //! to fill.
 //!
 //! **Two cache shapes** (see `TargetKind::cache_shape`):
-//! - `FillEmpty` (summary, concepts, narratives): the section starts empty, so a
-//!   non-empty body IS the completion signal. The pipeline pre-stamps the hash in
-//!   `llm_inputs.<key>` at render time and [`lookup`] returns cached when that hash
-//!   matches and the body is filled.
-//! - `InPlace` (the daily event list): the render already populates the section, so
-//!   it is non-empty from the first ingest and emptiness cannot mean "not done". The
-//!   pipeline still pre-stamps `llm_inputs.<key>` with the *current-input* hash — this
-//!   is the stale-task reference point, identical in role to the fill-empty case — but
-//!   completion is tracked by a SECOND field (`completion_key`) that `/lore-process`
-//!   writes once it has actually rewritten the bodies. [`lookup_in_place`] returns
-//!   cached only when that completion stamp equals the current-input hash.
+//! - `BodySignalsDone` (summary, review narratives): the section starts empty and a
+//!   real result is never empty, so a non-empty body IS the completion signal. The
+//!   pipeline pre-stamps the hash in `llm_inputs.<key>` at render time and [`lookup`]
+//!   returns cached when that hash matches and the body is filled.
+//! - `MarkerSignalsDone` (the daily event refine, concept extraction, weekly themes):
+//!   the body can't signal completion — the event refine is structurally non-empty from
+//!   render, and an extraction can legitimately find nothing, so an empty body is a
+//!   valid *finished* result. The pipeline still pre-stamps `llm_inputs.<key>` with the
+//!   *current-input* hash (the stale-task reference point, identical in role to the
+//!   body-signalled case), but completion is tracked by a SECOND field (`completion_key`)
+//!   that `/lore-process` writes once it has finished. [`lookup_in_place`] returns cached
+//!   only when that completion stamp equals the current-input hash — never consulting the
+//!   body, so an empty-but-done extraction stays cached instead of re-enqueueing forever.
 //!
 //! The single page-side invariant either shape upholds: `llm_inputs.<key>` always
 //! equals the current input's hash, so a queued task whose `cache_hash` differs is
 //! unambiguously stale (a newer ingest re-rendered the page) and is dropped — there is
 //! never a window where a stale task is indistinguishable from a current one.
 //!
-//! Manual re-processing is mechanism-free: deleting the section body (fill-empty) or
-//! the `completion_key` line (in-place) forces a re-enqueue on the next ingest. No
-//! `--force-llm` flag, no out-of-band cache invalidation API.
+//! Manual re-processing is mechanism-free: deleting the section body (body-signalled) or
+//! the `completion_key` line (marker-signalled) forces a re-enqueue on the next ingest.
+//! No `--force-llm` flag, no out-of-band cache invalidation API.
 
 use lk_core::frontmatter::{VaultPage, field};
 use lk_vault::section_body;
@@ -121,9 +123,11 @@ pub fn lookup(
     }
 }
 
-/// Cache decision for an `InPlace` rewrite (see `TargetKind::cache_shape`). The
-/// section is structurally non-empty from the render, so — unlike [`lookup`] —
-/// emptiness can't gate completion. The sole signal is `completion_key`: the task is
+/// Cache decision for a `MarkerSignalsDone` section (see `TargetKind::cache_shape`).
+/// The body can't gate completion — it is either structurally non-empty from the
+/// render (the event refine) or legitimately empty (an extraction that found nothing),
+/// so — unlike [`lookup`] — emptiness is never consulted. The sole signal is
+/// `completion_key`: the task is
 /// cached exactly when `/lore-process` has stamped it equal to the current-input
 /// `hash`. On a hit the current (already-rewritten) body is preserved and spliced
 /// back over the fresh render.
