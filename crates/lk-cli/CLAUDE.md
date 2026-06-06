@@ -16,7 +16,9 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   a relative `vault.root` against an absolute config dir, making `vault.root` — and every
   path derived from it in every crate — CWD-independent by construction (lk-core needs no
   `current_dir`).
-- **`build_llm_client`** maps `llm.provider` to a client (`queue` or `noop`).
+- **`build_llm_client`** maps `llm.provider` to a client: `queue` buffers pending tasks
+  to `<vault>/.lorekeeper/queue/*.jsonl` for `/lore-process` to fill via the LLM; `noop`
+  discards them (dry-run, CI, or ingest-only runs with no LLM work).
 - **`lore ingest`** owns the ingest phase flow and the exit code: any source/extract/pipeline
   failure (`had_failure`) or write/flush failure returns non-zero — including under
   `--dry-run`. Dry-run plans normally but skips every vault write, the tmp sweep, and the

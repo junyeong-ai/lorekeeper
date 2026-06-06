@@ -18,7 +18,7 @@ map to `RawItem`.
   `ExtractContext::identity` — Gmail `From` vs `identity.email`, Slack author id vs
   `identity.slack_id`, Jira assignee vs the authenticated account, Calendar
   organizer/attendee vs `identity.email`. No-authorship sources (Drive/RSS/Manual) set `false`.
-- Adapter gotchas (don't regress these):
+- Adapter contracts (invariants that define correctness):
   - **Drive**: `folder`/`file_pattern` go through `escape_drive_literal` (`\` and `'`)
     before interpolation into the query string.
   - **Calendar**: `calendar_id` is percent-encoded via `Url::path_segments_mut`; all-day
