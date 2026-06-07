@@ -45,8 +45,8 @@ each as an independent source, and report the aggregate results.
    (`note`|`report`|`data`; the source's nature goes in `tags`), and link the
    extracted concepts as `[[wikilinks]]` in the related-concepts section.
 4. Extract every named entity, technology, and topic as concepts (typically
-   several per source). Converge each one through the shared dedup algorithm —
-   `${CLAUDE_SKILL_DIR}/../lore-shared/concept-dedup.md` — which covers loading the
+   several per source). Converge each one through the **Concept convergence**
+   section of the vault's `AGENTS.md` — which covers loading the
    registry (`lore wiki concepts`), tracking concepts created earlier in this
    add, alias registration, and the machine-owned `## Sources`/`source_count`
    fields. Fill the Synthesis section with a 1-2 sentence definition for a new

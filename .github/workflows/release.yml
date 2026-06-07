@@ -138,9 +138,8 @@ jobs:
           set -euo pipefail
           # One archive per skill, named `{skill}-skill-v{version}.tar.gz` to match
           # what scripts/install.sh and install.ps1 download. Each contains the
-          # skill directory. `shared` ships the same way: skills reference
-          # `../lore-shared/concept-dedup.md`, so it must land beside them.
-          for skill in lore-ingest lore-process lore-setup lore-wiki lore-capture lore-extract lore-shared; do
+          # skill directory.
+          for skill in lore-ingest lore-process lore-setup lore-wiki lore-capture lore-extract; do
             archive="${skill}-skill-v${VERSION}.tar.gz"
             tar -czf "$archive" -C .claude/skills "$skill"
             sha256sum "$archive" > "${archive}.sha256"

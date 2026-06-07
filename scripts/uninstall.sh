@@ -3,7 +3,7 @@
 set -euo pipefail
 
 BINARY_NAME="lore"
-SKILL_NAMES=("lore-ingest" "lore-process" "lore-setup" "lore-wiki" "lore-capture" "lore-extract" "lore-shared")
+SKILL_NAMES=("lore-ingest" "lore-process" "lore-setup" "lore-wiki" "lore-capture" "lore-extract")
 
 INSTALL_DIR="${LORE_INSTALL_DIR:-$HOME/.local/bin}"
 DATA_DIR="${LORE_INSTALL_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/lorekeeper}"

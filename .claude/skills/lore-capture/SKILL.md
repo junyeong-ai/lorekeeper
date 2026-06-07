@@ -107,8 +107,8 @@ the insight's nature (troubleshooting, constraint, pattern) belongs in
 
 ### 5. Create/merge concepts
 
-For each technology, pattern, or constraint, follow the shared convergence
-algorithm — `${CLAUDE_SKILL_DIR}/../lore-shared/concept-dedup.md` — matching
+For each technology, pattern, or constraint, follow the **Concept convergence**
+section of the vault's `AGENTS.md` — matching
 against the registry loaded in step 2, with the concepts you already created
 in this capture as the created-this-run set. Then:
 

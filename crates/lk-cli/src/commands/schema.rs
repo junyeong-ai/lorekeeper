@@ -322,6 +322,76 @@ pub fn render_agents_md(locale: Locale, dirs: &lk_core::config::VaultDirs) -> St
         }
     }
 
+    // The convergence contract is schema, not skill lore: it states binary-owned
+    // invariants (slugify, backlinks-sync field ownership) and must reference the
+    // LOCALIZED headings, so it is generated here rather than shipped as prose.
+    let sources_heading = strings.concept_sources;
+    let related_concepts_heading = strings.related_concepts;
+    writeln!(out).unwrap();
+    writeln!(out, "## Concept convergence").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "One concept = one page. Every agent that creates or merges concept pages \
+         follows this exact algorithm, so the wiki converges instead of accumulating \
+         variants."
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "1. **Load the registry** at the start of the run: `lore wiki concepts` — the \
+         on-disk truth at run start (slugs, names, aliases)."
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "2. **Maintain a created-this-run set.** Every minted page or newly registered \
+         alias joins your in-context set BEFORE the next item is processed. The \
+         run-start registry cannot see same-run changes — without the running set, two \
+         items independently mint `RAG` and `Retrieval-Augmented-Generation`."
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "3. **Match each extracted concept** against the union (registry + \
+         created-this-run) by slug-equivalence OR semantic equivalence. On a match, \
+         reuse the existing slug + name — never create a variant. When in doubt, prefer \
+         the established broader concept over a narrow variant."
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "4. **Register surface forms as aliases.** When a source's surface form differs \
+         from the canonical name, append it to the concept's `aliases` frontmatter so a \
+         bare `[[surface]]` resolves to the one page. A surface form containing `/` \
+         cannot be linked bare (`[[async/await]]` resolves as a vault path) — link it \
+         piped: `[[async-await|async/await]]`. An alias edit is metadata-only: it never \
+         renames the page and is not, by itself, a reason to rewrite the body. \
+         `lore graph lint` surfaces any alias that collides with another concept or \
+         shadows a real page."
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "5. **Slug normalization** is `lore`'s slugify, exactly: NFKC → lowercase → \
+         non-alphanumeric to hyphen → collapse runs → trim edges."
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "Machine-owned citation fields — never hand-write them: a NEW concept page \
+         starts with an empty `## {sources_heading}` body and `source_count: 0`; on an \
+         EXISTING page leave both exactly as found. Record citations as forward \
+         `[[wikilink]]`s on the ORIGIN page (its `## {related_concepts_heading}` \
+         section); `lore graph backlinks-sync` re-derives every concept's \
+         `## {sources_heading}` + `source_count` from those forward links wholesale — \
+         an entry not backed by a forward link is wiped. Finish any batch that minted \
+         concepts with `lore graph backlinks-sync`, then `lore wiki index`."
+    )
+    .unwrap();
+
     out
 }
 
@@ -403,6 +473,21 @@ mod tests {
                 "missing page type: {type_name}"
             );
         }
+    }
+
+    #[test]
+    fn agents_md_carries_concept_convergence() {
+        // The convergence contract is part of the schema: agents that create concept
+        // pages read it here, and its heading references must be the LOCALIZED
+        // machine-owned headings, never hardcoded English.
+        let ko = render_agents_md(Locale::Ko, &lk_core::config::VaultDirs::default());
+        assert!(ko.contains("## Concept convergence"));
+        assert!(ko.contains("created-this-run"));
+        assert!(ko.contains("`lore wiki concepts`"));
+        assert!(ko.contains("backlinks-sync"));
+
+        let en = render_agents_md(Locale::En, &lk_core::config::VaultDirs::default());
+        assert!(en.contains("## Concept convergence"));
     }
 
     #[test]

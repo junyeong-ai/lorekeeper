@@ -97,7 +97,7 @@ The essentials: a visible `.jsonl` is fully written and every
    The user may override with `--vault <path>`. Then load the concept registry
    for this run: `lore wiki concepts` (slugs, names, aliases) — the queue task
    carries no concept registry, so this on-disk snapshot plus a created-this-run
-   set is the full dedup baseline (see `lore-shared/concept-dedup.md`).
+   set is the full dedup baseline (see the vault AGENTS.md § Concept convergence).
 
 2. **List unprocessed queue files** in `<vault>/.lorekeeper/queue/` (top
    level only — `processed/` is the archive):
@@ -170,9 +170,8 @@ The essentials: a visible `.jsonl` is fully written and every
       4. Preserve frontmatter and every other section unchanged, then stamp the
          task's `llm_inputs.<key>_done` completion marker (the table under 3c)
 
-      Concept pages created or merged along the way follow the shared
-      convergence algorithm in
-      `${CLAUDE_SKILL_DIR}/../lore-shared/concept-dedup.md`.
+      Concept pages created or merged along the way follow the
+      **Concept convergence** section of the vault's `AGENTS.md`.
 
    e. **On task failure** (page not found, edit error, malformed task):
       record the failed `task_id` and the reason. **Abort processing of

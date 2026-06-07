@@ -229,8 +229,8 @@ Extract knowledge using the manifest. Requires a prior scan.
       frontmatter `concepts` array. These forward links are what the Finalize
       `backlinks-sync` reads to populate each concept's `## Sources`.
 
-   h. Create/merge concept pages per AGENTS.md, following the shared
-      convergence algorithm — `${CLAUDE_SKILL_DIR}/../lore-shared/concept-dedup.md` —
+   h. Create/merge concept pages per AGENTS.md, following its
+      **Concept convergence** section —
       matching against the registry loaded in step 3, with the concepts already
       created earlier in this run as the created-this-run set (a batch
       processes many documents, so that set is what closes same-run gaps).
