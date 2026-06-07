@@ -338,7 +338,9 @@ concepts:
 #               Code's native LLM session — no API key, no separate billing.
 #               Workflow: `lore ingest` writes structural pages + queue; then run
 #               `/lore-process` in Claude Code to fill summaries and concepts.
-#               For unattended cron: `lore ingest && claude -p "/lore-process"`
+#               For unattended cron: `lore ingest; claude -p "/lore-process"`
+#               (`;` not `&&`: a partial source failure exits non-zero, and the
+#               healthy sources' queued tasks should still drain)
 #   noop      — no LLM work; daily pages render without summary/concept content.
 #               Useful for development, CI, or vault-only sources.
 llm:

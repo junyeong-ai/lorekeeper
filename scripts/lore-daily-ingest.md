@@ -47,7 +47,7 @@ fi
 
 ### Step 1.5: Inbox binary file preprocessing
 
-Scan `<vault>/inbox/` for non-text files and convert:
+Scan `<vault>/inbox/` for files the manual source can't ingest and convert:
 
 | Extension | Method |
 |-----------|--------|
