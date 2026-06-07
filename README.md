@@ -147,9 +147,11 @@ the skills) to `~/.claude/scheduled-tasks/`; point your cron or remote-agent run
 
 - **`lore-daily-ingest`** (weekday mornings) — chains ingest → `/lore-process` → graph
   reconcile (backlinks + catalog + structural lint). Source: [`scripts/lore-daily-ingest.md`](scripts/lore-daily-ingest.md).
-- **`lore-weekly-ingest`** (Monday) — weekly synthesis (cross-source themes + personal
-  review) and a knowledge audit (dormancy, contradiction worklist, near-duplicate
-  review). Source: [`scripts/lore-weekly-ingest.md`](scripts/lore-weekly-ingest.md).
+- **`lore-weekly-ingest`** (Monday) — synthesis of every period (weekly themes +
+  personal review always; monthly/quarterly/annual materialise in the week their
+  period closes, idempotent re-renders otherwise), a knowledge audit (dormancy,
+  contradiction worklist, near-duplicate review), and the retention janitors
+  (`lore maintenance`, `lore queue prune`). Source: [`scripts/lore-weekly-ingest.md`](scripts/lore-weekly-ingest.md).
 
 The daily task keeps the graph structurally consistent every day; the weekly task adds
 the slower, judgment-bearing passes (synthesis + semantic audit) on a weekly cadence.

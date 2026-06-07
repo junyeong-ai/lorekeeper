@@ -147,8 +147,8 @@ function Install-Skill($level, $src, $skillName) {
 
 # Autonomous scheduled tasks — user-level Claude Code agents the user's scheduler
 # fires: `lore-daily-ingest` chains `lore ingest` -> /lore-process -> graph reconcile;
-# `lore-weekly-ingest` runs Monday weekly synthesis + knowledge audit. Installed only
-# with the skills (they drive them).
+# `lore-weekly-ingest` runs every synthesis period + knowledge audit + retention
+# janitors on Mondays. Installed only with the skills (they drive them).
 $ScheduledTasks = @('lore-daily-ingest', 'lore-weekly-ingest')
 
 function Install-ScheduledTasks($level, $version, $repoDir) {

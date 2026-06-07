@@ -63,7 +63,8 @@ lore synthesis annual --previous
 - Run all four EVERY week, no boundary check: each page is an idempotent
   materialized view, so outside the first week after its period closes the command
   re-renders the same bytes and queues zero LLM work — and in the week a
-  month/quarter/year closes, its review materialises on its own.
+  month/quarter/year closes, its review materialises on its own. (Zero re-queueing
+  assumes the previous cycle's queue was drained; Step 2 does that every run.)
 - In queue mode the pages are written with empty LLM sections plus queued
   narrative/theme tasks (each command flushes the queue file before returning).
 - If a period has no data, the command writes nothing — report it and continue.

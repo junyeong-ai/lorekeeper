@@ -342,8 +342,8 @@ install_skill() {
 
 # Autonomous scheduled tasks: Claude Code agent definitions the user's cron /
 # remote-agent runner fires. `lore-daily-ingest` chains `lore ingest` →
-# /lore-process → graph reconcile; `lore-weekly-ingest` runs Monday weekly synthesis
-# + knowledge audit. They are user-level agents (always under ~/.claude/scheduled-tasks/,
+# /lore-process → graph reconcile; `lore-weekly-ingest` runs every synthesis period
+# + knowledge audit + retention janitors on Mondays. They are user-level agents (always under ~/.claude/scheduled-tasks/,
 # never project) and drive the skills, so they install only alongside them
 # (skill_level != none). This just places the definitions where the runner looks.
 SCHEDULED_TASKS="lore-daily-ingest lore-weekly-ingest"

@@ -313,8 +313,12 @@ pub async fn run(
 
     // Phase 3: Render the work-log — ONLY on a full ingest (no source filter). The work-log
     // is a cross-source daily aggregate; a filtered `lore ingest <id>` sees a subset of
-    // personal events, so rendering it would overwrite the complete page with a partial
-    // view. Scheduled ingest is always full (`lore schedule` emits one `lore ingest`).
+    // personal events BY CONSTRUCTION, so rendering it would silently freeze a structural
+    // partial into the page. A transient fetch failure inside a full run is different and
+    // deliberately does NOT block this write: the failure is loud (non-zero exit, named in
+    // the report) and the next full run re-renders the page complete — blocking here would
+    // trade that self-healing one-day gap for a work-log frozen by any persistently
+    // failing source, news feeds included.
     // (`render_work_log` separately gates the whole subsystem on performance.enabled.)
     if !any_write_failed && source.is_none() && !all_personal.is_empty() {
         let work_logs = pipeline

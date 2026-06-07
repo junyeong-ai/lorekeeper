@@ -105,6 +105,7 @@ On success, queue files move to `queue/processed/`.
 ### Step 5: Backlinks + index rebuild + graph health check (daily)
 
 ```bash
+lore schema                 # regenerate wiki/AGENTS.md (idempotent; changes only after an upgrade or locale switch)
 lore graph backlinks-sync   # re-derive ## 출처 + source_count from incoming citations
 lore wiki index             # rebuild wiki/index.md catalog from disk
 lore graph lint             # read-only health report
