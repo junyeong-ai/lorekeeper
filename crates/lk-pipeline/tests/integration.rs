@@ -18,7 +18,6 @@ fn base_config(vault_root: &std::path::Path) -> Config {
         SourceConfig {
             source_type: SourceType::Gmail,
             enabled: true,
-            schedule: None,
             params: serde_json::Value::Object(Default::default()),
             classify: Default::default(),
             labels: vec!["test".into()],
@@ -29,6 +28,7 @@ fn base_config(vault_root: &std::path::Path) -> Config {
     );
 
     Config {
+        ingest: Default::default(),
         vault: VaultConfig {
             root: vault_root.to_string_lossy().into(),
             dirs: VaultDirs::default(),
@@ -301,7 +301,6 @@ async fn concept_accumulates_across_sources_in_one_run() {
         SourceConfig {
             source_type: SourceType::Gmail,
             enabled: true,
-            schedule: None,
             params: serde_json::Value::Object(Default::default()),
             classify: Default::default(),
             labels: vec![],

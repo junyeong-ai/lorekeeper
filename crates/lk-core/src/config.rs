@@ -30,6 +30,11 @@ pub struct Config {
     pub vault: VaultConfig,
     pub identity: Identity,
     pub sources: BTreeMap<String, SourceConfig>,
+    /// When ingestion runs. A single daily `lore ingest` (all sources) is the scheduling
+    /// unit: the work-log aggregates personal events across every source for a day, so all
+    /// sources must be ingested in one run for it to be complete.
+    #[serde(default)]
+    pub ingest: IngestConfig,
     #[serde(default)]
     pub performance: PerformanceConfig,
     #[serde(default)]
@@ -272,11 +277,9 @@ impl Config {
             }
         }
 
-        for (id, sc) in &self.sources {
-            if let Some(ref sched) = sc.schedule {
-                validate_cron(sched)
-                    .map_err(|e| ConfigError::Validation(format!("sources.{id}.schedule: {e}")))?;
-            }
+        if let Some(ref sched) = self.ingest.schedule {
+            validate_cron(sched)
+                .map_err(|e| ConfigError::Validation(format!("ingest.schedule: {e}")))?;
         }
         for (period, sched) in self.synthesis.schedules() {
             validate_cron(sched).map_err(|e| {
@@ -589,8 +592,6 @@ pub struct SourceConfig {
     pub source_type: SourceType,
     #[serde(default = "yes")]
     pub enabled: bool,
-    #[serde(default)]
-    pub schedule: Option<String>,
     #[serde(default = "empty_object")]
     pub params: serde_json::Value,
     /// Ordered rules for deterministic keyword classification. A source-level
@@ -996,6 +997,17 @@ impl Default for MaintenanceConfig {
     }
 }
 
+/// When `lore ingest` runs. Ingestion is scheduled as ONE run over every enabled source,
+/// never per source: the work-log is a cross-source daily aggregate, so a per-source run
+/// would render it from a subset and overwrite the complete page.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct IngestConfig {
+    /// Optional cron expression; when set, `lore schedule` emits a single crontab line
+    /// running `lore ingest` (all sources). Absent → no scheduled ingest line.
+    pub schedule: Option<String>,
+}
+
 /// Wikilink graph analysis configuration, consumed by `lore graph` / `lk-graph`.
 /// Splits into analysis `scope`, structural `metrics`, and `cluster` settings.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1120,7 +1132,6 @@ mod tests {
         let mk = |f: Option<&str>| SourceConfig {
             source_type: SourceType::Rss,
             enabled: true,
-            schedule: None,
             params: empty_object(),
             classify: vec![],
             labels: vec![],
@@ -1322,7 +1333,8 @@ identity:
 sources:
   s1:
     type: gmail
-    schedule: "0 7 *"
+ingest:
+  schedule: "0 7 *"
 "#;
         let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(config.validate().is_err());
@@ -1339,7 +1351,8 @@ identity:
 sources:
   s1:
     type: gmail
-    schedule: "0 25 * * *"
+ingest:
+  schedule: "0 25 * * *"
 "#;
         let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(config.validate().is_err(), "hour=25 should be rejected");
@@ -1356,7 +1369,8 @@ identity:
 sources:
   s1:
     type: gmail
-    schedule: "*/0 * * * *"
+ingest:
+  schedule: "*/0 * * * *"
 "#;
         let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(config.validate().is_err());
@@ -1373,7 +1387,8 @@ identity:
 sources:
   s1:
     type: gmail
-    schedule: "0-29/foo * * * *"
+ingest:
+  schedule: "0-29/foo * * * *"
 "#;
         let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(config.validate().is_err());
@@ -1444,7 +1459,8 @@ identity:
 sources:
   s1:
     type: gmail
-    schedule: "0 7 * * 1-5"
+ingest:
+  schedule: "0 7 * * 1-5"
 "#;
         let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(config.validate().is_ok());

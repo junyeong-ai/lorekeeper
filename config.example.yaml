@@ -31,6 +31,13 @@ identity:
   # (Jira needs nothing here: ownership is derived from the authenticated account.)
   slack_id: "U0123456789"
 
+# ─── Ingestion schedule ───────────────────────────────────
+# A single daily run over ALL enabled sources. `lore schedule` emits ONE `lore ingest`
+# crontab line from this. Ingestion is not scheduled per source: the work-log aggregates
+# personal events across every source for a day, so a single run keeps it complete.
+ingest:
+  schedule: "0 7 * * *"          # every day 07:00 (sources use lookback windows)
+
 # ─── Source definitions ───────────────────────────────────
 # key = source ID = subdirectory name under daily/
 # You can define several sources of the same type.
@@ -41,7 +48,6 @@ sources:
   drive-briefings:
     type: google-drive
     enabled: false
-    schedule: "0 7 * * 1-5"
     params:
       folder: "AI-Briefing/briefings"
       file_pattern: "briefing-{date}.md"
@@ -56,7 +62,6 @@ sources:
   team-slack:
     type: slack-channel
     enabled: true
-    schedule: "0 9 * * 1-5"
     params:
       # a single `channel`, or channels: ["C0123…", "#name"] (multiple, ids and names mixed)
       channels: ["#aix-team-digest"]
@@ -74,7 +79,6 @@ sources:
   my-tasks:
     type: jira
     enabled: true
-    schedule: "0 9 * * 1-5"
     params:
       # Issues changed (= worked on) that day = a work-history snapshot. Due/start dates are
       # shown on the page as their values as-of that day, but the search key is `updated`
@@ -91,7 +95,6 @@ sources:
   my-schedule:
     type: google-calendar
     enabled: true
-    schedule: "0 8 * * 1-5"
     params:
       calendar_id: primary
       lookback_hours: 24
@@ -104,7 +107,6 @@ sources:
   email-digest:
     type: gmail
     enabled: true
-    schedule: "30 8 * * 1-5"
     params:
       lookback_hours: 24
       # max_messages: 200 # (optional) per-day fetch cap; raise for busy accounts or backfills
@@ -138,7 +140,6 @@ sources:
   slack-trends:
     type: slack-search
     enabled: true
-    schedule: "0 10 * * 1-5"
     params:
       queries:
         - channel: "#ai-general"
@@ -160,7 +161,6 @@ sources:
   ai-news:
     type: rss
     enabled: false
-    schedule: "0 7 * * *"
     params:
       lookback_hours: 24
       max_items_per_feed: 50
@@ -196,7 +196,6 @@ sources:
   tech-news:
     type: rss
     enabled: false
-    schedule: "0 7 * * *"
     params:
       lookback_hours: 24
       max_items_per_feed: 25
@@ -220,7 +219,6 @@ sources:
   ai-newsletters:
     type: gmail
     enabled: false
-    schedule: "0 7 * * *"
     params:
       lookback_hours: 24
       include_queries:
@@ -236,7 +234,6 @@ sources:
   manual-inbox:
     type: manual
     enabled: false
-    schedule: "0 11 * * *"
     params:
       inbox_dir: ~/Documents/Obsidian Vault/inbox
       extensions: [md, txt, markdown, html, htm]

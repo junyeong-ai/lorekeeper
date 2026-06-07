@@ -27,7 +27,6 @@ won't be shown).
 my-tasks:
   type: jira
   enabled: true
-  schedule: "0 9 * * 1-5"
   params:
     # Only issues changed that day (= worked on) = a work-history snapshot. Do NOT search by due/start date.
     jql: >

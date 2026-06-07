@@ -24,7 +24,6 @@ A high thread ratio means `include_threads: true` matters (the real discussion i
 team-slack:
   type: slack-channel
   enabled: true
-  schedule: "0 9 * * 1-5"
   params:
     channels: ["C0A7G194EH0", "C0A8A0XC5BJ"]   # team channels (whole channel = team activity)
     lookback_hours: 24

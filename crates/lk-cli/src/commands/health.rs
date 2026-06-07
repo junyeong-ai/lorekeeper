@@ -7,15 +7,17 @@ pub async fn run(opts: &super::GlobalOptions, strict: bool) -> miette::Result<()
     let log = lk_vault::IngestLog::new(vault_root.join(".lorekeeper").join("ingest.jsonl"));
 
     let now = jiff::Timestamp::now();
-    // A source is stale once TWO scheduled fires have come due since its last success
+    // A source is stale once TWO ingest fires have come due since its last success
     // (one missed run of grace) — anchored at `last_success`, NOT at `now`, so the window
     // follows the real schedule sequence including weekend/off-day gaps. For `0 9 * * 1-5`
     // a Friday-morning success is not stale over the weekend (the next fire is Monday);
-    // it only goes stale once Tuesday's fire has also passed unfilled. A source with no
-    // schedule (manual/on-demand) falls back to a flat 48h window.
+    // it only goes stale once Tuesday's fire has also passed unfilled. Ingestion is a
+    // single all-source run (`ingest.schedule`), so every source shares one cadence; when
+    // it is unset, a flat 48h window applies.
     const DEFAULT_STALE_AFTER_SECS: i64 = 48 * 3600;
-    let is_stale = |sc: &lk_core::config::SourceConfig, last: jiff::Timestamp| -> bool {
-        match sc.schedule.as_deref() {
+    let ingest_schedule = config.ingest.schedule.as_deref();
+    let is_stale = |last: jiff::Timestamp| -> bool {
+        match ingest_schedule {
             Some(expr) => {
                 match lk_core::cron::next_fire_after(expr, last, &tz)
                     .and_then(|first| lk_core::cron::next_fire_after(expr, first, &tz))
@@ -41,7 +43,7 @@ pub async fn run(opts: &super::GlobalOptions, strict: bool) -> miette::Result<()
         match last {
             Some(entry) => {
                 let hours = (now.as_second() - entry.timestamp.as_second()) / 3600;
-                if is_stale(sc, entry.timestamp) {
+                if is_stale(entry.timestamp) {
                     eprintln!("⚠ {id} ({}) — {}h ago, STALE", sc.source_type, hours);
                     stale += 1;
                 } else {

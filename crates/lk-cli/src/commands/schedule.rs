@@ -29,11 +29,8 @@ pub async fn run(opts: &super::GlobalOptions, bin: &str) -> miette::Result<()> {
     println!("# Working dir: {}", cwd.display());
     println!();
 
-    for (id, sc) in config.enabled_sources() {
-        if let Some(ref sched) = sc.schedule {
-            let id_escaped = shell_escape(id);
-            println!("{sched} cd {cwd_str} && {bin_escaped}{flags} ingest {id_escaped}");
-        }
+    if let Some(ref sched) = config.ingest.schedule {
+        println!("{sched} cd {cwd_str} && {bin_escaped}{flags} ingest");
     }
 
     for (period, sched) in config.synthesis.schedules() {

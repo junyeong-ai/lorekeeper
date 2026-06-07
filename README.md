@@ -104,7 +104,7 @@ Claude Code Skills        Semantic Plane             (same vault)
 | `lore synthesis quarterly` | Generate quarterly performance review |
 | `lore synthesis annual` | Generate annual performance review |
 | `lore status` | Show last ingest time per source |
-| `lore health` | Check staleness per source's schedule (stale after 2 missed scheduled fires; 48h fallback when unscheduled; exit 0 on first install) |
+| `lore health` | Check staleness against `ingest.schedule` (stale after 2 missed fires; 48h fallback when unscheduled; exit 0 on first install) |
 | `lore health --strict` | Also exit 1 if any source has never been ingested |
 | `lore performance` | Show performance category distribution |
 | `lore schedule` | Print crontab entries (uses plain `lore` for PATH lookup) |
@@ -232,7 +232,9 @@ lore schedule > /tmp/lore-cron.txt
 crontab /tmp/lore-cron.txt
 ```
 
-Each source's `schedule:` field in config.yaml uses standard cron syntax. Each enabled synthesis period (weekly/monthly/quarterly/annual) emits its own cron line from `synthesis.<period>.schedule`. With `maintenance.schedule` set, two more lines are emitted — `lore maintenance` and `lore queue prune` — so retention pruning and dead-task cleanup run unattended.
+`ingest.schedule` emits a single `lore ingest` line that runs every enabled source in one process — the unit of scheduling, because the work-log aggregates personal events across all sources for a day and a per-source run would render it from a subset. Each enabled synthesis period (weekly/monthly/quarterly/annual) emits its own cron line from `synthesis.<period>.schedule`. With `maintenance.schedule` set, two more lines are emitted — `lore maintenance` and `lore queue prune` — so retention pruning and dead-task cleanup run unattended.
+
+A manual `lore ingest <source>` (single source) refreshes only that source's pages and deliberately does not rewrite the cross-source work-log; run `lore ingest` (all sources) to rebuild it.
 
 ## Credentials
 

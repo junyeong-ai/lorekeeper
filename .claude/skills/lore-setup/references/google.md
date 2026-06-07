@@ -11,7 +11,6 @@ Usually `primary` (your own default calendar). For a shared/team calendar, use i
 my-schedule:
   type: google-calendar
   enabled: true
-  schedule: "0 8 * * 1-5"
   params: {calendar_id: primary, lookback_hours: 24, lookahead_hours: 24}
   labels: [personal]
   extract_concepts: false
@@ -33,7 +32,6 @@ Usually only `category:primary` is work mail; the rest is bots/marketing. Recomm
 email-digest:
   type: gmail
   enabled: true
-  schedule: "30 8 * * 1-5"
   params:
     lookback_hours: 24
     include_queries: ["category:primary"]   # exclude bots/notifications (GitHub etc.), work mail only

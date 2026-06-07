@@ -48,7 +48,7 @@ enum Command {
     },
     /// Show last ingest time per source
     Status,
-    /// Check pipeline health (warn if a source is overdue vs its schedule; 48h fallback when unscheduled)
+    /// Check pipeline health (warn if a source is overdue vs ingest.schedule; 48h fallback when unscheduled)
     Health {
         /// Treat first-install (all "never") as failure as well
         #[arg(long)]
@@ -58,7 +58,7 @@ enum Command {
     Performance,
     /// Validate config file
     Validate,
-    /// Print crontab entries for all scheduled sources
+    /// Print crontab entries (ingest, synthesis, maintenance)
     Schedule {
         /// Override the binary name in cron lines (default: "lore")
         #[arg(long, default_value = "lore")]

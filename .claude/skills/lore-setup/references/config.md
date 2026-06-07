@@ -15,11 +15,15 @@ identity:                            # basis for personal split + performance tr
   slack_id: "U0..."                  # my Slack messages → work-log
                                      # (Jira self-detects from the authenticated account — no config)
 
+ingest:
+  schedule: "0 9 * * *"              # ONE daily `lore ingest` over every enabled source
+                                     # (never per source: the work-log is a cross-source
+                                     # daily aggregate, so one run keeps it complete)
+
 sources:                             # key = source id = <daily>/{id}/ directory name
   <id>:
     type: gmail | google-calendar | google-drive | slack-channel | slack-search | jira | rss | manual
     enabled: true
-    schedule: "0 9 * * 1-5"          # cron (used by `lore schedule`)
     params: { ... }                  # per-type (see each reference)
     focus: "..."                     # optional natural-language relevance filter (LLM-applied)
     classify:                        # optional ordered rules, first match wins

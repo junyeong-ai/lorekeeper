@@ -311,10 +311,12 @@ pub async fn run(
         }
     }
 
-    // Phase 3: Render work-log pages. Whether the subsystem runs at all is gated
-    // inside render_work_log by performance.enabled — distinct from per-source
-    // track_personal, which only flags personal events on their daily pages.
-    if !any_write_failed && !all_personal.is_empty() {
+    // Phase 3: Render the work-log — ONLY on a full ingest (no source filter). The work-log
+    // is a cross-source daily aggregate; a filtered `lore ingest <id>` sees a subset of
+    // personal events, so rendering it would overwrite the complete page with a partial
+    // view. Scheduled ingest is always full (`lore schedule` emits one `lore ingest`).
+    // (`render_work_log` separately gates the whole subsystem on performance.enabled.)
+    if !any_write_failed && source.is_none() && !all_personal.is_empty() {
         let work_logs = pipeline
             .render_work_log(&all_personal, today)
             .await
@@ -328,6 +330,11 @@ pub async fn run(
             total_pages += 1;
             eprintln!("▸ work-log → {}", wl.path);
         }
+    } else if source.is_some() && !all_personal.is_empty() {
+        eprintln!(
+            "  work-log not refreshed: partial ingest of '{}'. Run `lore ingest` (all sources) to rebuild the day's work-log.",
+            source.as_deref().unwrap_or_default()
+        );
     }
 
     // Phase 4: Persist queued LLM tasks atomically. The queue file is the durability
