@@ -622,8 +622,9 @@ main() {
     fi
 
     if [ "$skill_level" != "none" ]; then
-        # Install all bundled skills.
-        for skill in "lore-ingest" "lore-process" "lore-setup" "lore-wiki" "lore-capture" "lore-extract"; do
+        # Install all bundled skills, plus `lore-shared` — the cross-skill reference dir
+        # (`../lore-shared/concept-dedup.md`) that must land beside them.
+        for skill in "lore-ingest" "lore-process" "lore-setup" "lore-wiki" "lore-capture" "lore-extract" "lore-shared"; do
             local skill_src=""
             if [ -n "$repo_dir" ] && [ -d "$repo_dir/.claude/skills/$skill" ]; then
                 skill_src="$repo_dir/.claude/skills/$skill"

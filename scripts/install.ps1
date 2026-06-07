@@ -17,7 +17,8 @@ Set-StrictMode -Version Latest
 
 $Repo = 'junyeong-ai/lorekeeper'
 $BinaryName = 'lore'
-$SkillNames = @('lore-ingest', 'lore-process', 'lore-setup', 'lore-wiki', 'lore-capture', 'lore-extract')
+# `lore-shared` is the cross-skill reference dir (`../lore-shared/concept-dedup.md`) — ships beside the skills.
+$SkillNames = @('lore-ingest', 'lore-process', 'lore-setup', 'lore-wiki', 'lore-capture', 'lore-extract', 'lore-shared')
 $ReleaseBase = "https://github.com/$Repo/releases/download"
 $LatestUrl = "https://github.com/$Repo/releases/latest"
 
@@ -217,8 +218,8 @@ Write-Host 'Review' -ForegroundColor White
 Write-Host "  binary    $(Join-Path $InstallDir "$BinaryName.exe") (v$version, $method)"
 Write-Host "  templates $(Join-Path $DataDir 'templates')"
 switch ($Skill) {
-    'user'    { Write-Host "  skills    $env:USERPROFILE\.claude\skills\{lore-ingest,lore-process,lore-setup,lore-wiki,lore-capture,lore-extract}" }
-    'project' { Write-Host "  skills    .\.claude\skills\{lore-ingest,lore-process,lore-setup,lore-wiki,lore-capture,lore-extract}" }
+    'user'    { Write-Host "  skills    $env:USERPROFILE\.claude\skills\{lore-ingest,lore-process,lore-setup,lore-wiki,lore-capture,lore-extract,lore-shared}" }
+    'project' { Write-Host "  skills    .\.claude\skills\{lore-ingest,lore-process,lore-setup,lore-wiki,lore-capture,lore-extract,lore-shared}" }
     'none'    { Write-Host '  skills    (skipped)' }
 }
 if ($Skill -ne 'none') {
