@@ -90,6 +90,7 @@ pub fn render_daily_page(
 
     let path = VaultPath::daily(dirs, source_id, date);
 
+    // Exactly the fields the per-type templates consume — no speculative aliases.
     let events_json: Vec<serde_json::Value> = events
         .iter()
         .map(|e| {
@@ -98,12 +99,6 @@ pub fn render_daily_page(
                 "body": e.body,
                 "author": e.author,
                 "url": e.url,
-                "category": e.category,
-                "labels": e.labels,
-                "is_personal": e.is_personal,
-                "subject": e.title,
-                "sender": e.author,
-                "summary": e.body,
             })
         })
         .collect();
@@ -297,6 +292,14 @@ where
     Some(out)
 }
 
+/// A highlight bucket item is a POINTER — subject + sender only, never the body.
+/// Buckets are STRUCTURAL (re-rendered every ingest, never LLM-refined), so any
+/// body text here would pin the raw source (quoted thread, signature PII) into
+/// the page permanently; the event's content lives once, in the Key Events list,
+/// where the LLM refines it. The body key is absent from the item entirely (not
+/// blanked), so no bucket rendering path can carry it — the raw body reaches a
+/// page only through the `events` context, which every template routes through
+/// the LLM-refined Key Events section.
 fn filter_by_category(events: &[&Event], category: &str) -> Vec<serde_json::Value> {
     events
         .iter()
@@ -305,7 +308,6 @@ fn filter_by_category(events: &[&Event], category: &str) -> Vec<serde_json::Valu
             serde_json::json!({
                 "subject": e.title,
                 "sender": e.author,
-                "body": e.body,
             })
         })
         .collect()
@@ -314,6 +316,43 @@ fn filter_by_category(events: &[&Event], category: &str) -> Vec<serde_json::Valu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lk_core::config::SourceType;
+    use lk_core::event::{Event, EventId};
+
+    /// A highlight bucket item must be a POINTER — subject + sender only — so a
+    /// structural (never-LLM-refined) section can never pin a raw source body into
+    /// the page. Locked here because the leak it prevents is invisible until a real
+    /// multi-paragraph body lands in a bucket.
+    #[test]
+    fn highlight_bucket_items_never_carry_a_body() {
+        let ev = Event {
+            id: EventId::new("s", jiff::civil::date(2026, 6, 7), "x"),
+            source_id: "s".into(),
+            source_type: SourceType::Gmail,
+            timestamp: jiff::Timestamp::UNIX_EPOCH,
+            date: jiff::civil::date(2026, 6, 7),
+            title: "Subject".into(),
+            body: "A quoted thread\nwith a signature and PII.".into(),
+            url: None,
+            author: Some("a@x.com".into()),
+            labels: vec![],
+            category: Some("action_required".into()),
+            performance_category: None,
+            is_self: false,
+            is_personal: false,
+            metadata: serde_json::Value::Null,
+        };
+        let items = filter_by_category(&[&ev], "action_required");
+        let obj = items[0].as_object().expect("bucket item is an object");
+        for forbidden in ["body", "summary", "content"] {
+            assert!(
+                !obj.contains_key(forbidden),
+                "bucket item must not expose `{forbidden}` (raw-body leak vector): {obj:?}"
+            );
+        }
+        assert_eq!(obj.get("subject").and_then(|v| v.as_str()), Some("Subject"));
+        assert_eq!(obj.get("sender").and_then(|v| v.as_str()), Some("a@x.com"));
+    }
 
     fn cached(body: &str) -> SectionDecision {
         SectionDecision {

@@ -256,7 +256,12 @@ impl Source for GmailSource {
                 }
             };
 
-            if let Some(item) = map_message(msg, ctx.identity.email.trim(), p.exclude.as_ref()) {
+            if let Some(item) = map_message(
+                msg,
+                ctx.identity.email.trim(),
+                p.exclude.as_ref(),
+                ctx.locale.strings(),
+            ) {
                 items.push(item);
             }
         }
@@ -279,6 +284,7 @@ fn map_message(
     msg: Message,
     identity_email: &str,
     exclude: Option<&ExcludeParams>,
+    strings: &lk_core::i18n::Strings,
 ) -> Option<RawItem> {
     if let Some(exc) = exclude
         && GmailSource::should_exclude(&msg, exc)
@@ -290,7 +296,12 @@ fn map_message(
         return None;
     }
 
-    let subject = GmailSource::header(&msg, "Subject").unwrap_or("(no subject)");
+    // An absent or whitespace-only Subject gets the same `untitled` placeholder
+    // every adapter uses (Calendar summary, Jira summary).
+    let subject = GmailSource::header(&msg, "Subject")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(strings.untitled);
     let from = GmailSource::header(&msg, "From").unwrap_or_default();
     let snippet = msg.snippet.as_deref().unwrap_or_default();
 
@@ -433,10 +444,23 @@ fn decode_base64url(data: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Message, header_email, map_message};
+    use super::{Message, header_email, map_message as map_message_inner};
 
     fn msg_from(json: serde_json::Value) -> Message {
         serde_json::from_value(json).expect("message fixture parses")
+    }
+
+    fn map_message(
+        msg: Message,
+        identity_email: &str,
+        exclude: Option<&super::ExcludeParams>,
+    ) -> Option<lk_core::event::RawItem> {
+        map_message_inner(
+            msg,
+            identity_email,
+            exclude,
+            lk_core::i18n::Locale::default().strings(),
+        )
     }
 
     // base64url(no-pad) of "Hello body".
@@ -479,6 +503,23 @@ mod tests {
         let item = map_message(msg, "me@x.com", None).expect("maps");
         assert_eq!(item.body, "just the snippet");
         assert!(!item.is_self);
+    }
+
+    #[test]
+    fn map_message_blank_subject_gets_untitled_placeholder() {
+        // A whitespace-only Subject header is the same as no Subject at all —
+        // both land on the shared i18n `untitled` placeholder, never an empty
+        // or whitespace-led title.
+        let msg = msg_from(serde_json::json!({
+            "id": "m4",
+            "internalDate": "1769158800000",
+            "payload": {"headers": [{"name": "Subject", "value": "   "}]}
+        }));
+        let item = map_message(msg, "me@x.com", None).expect("maps");
+        assert_eq!(
+            item.title,
+            lk_core::i18n::Locale::default().strings().untitled
+        );
     }
 
     #[test]

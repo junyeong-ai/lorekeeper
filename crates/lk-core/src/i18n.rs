@@ -120,7 +120,6 @@ pub struct Strings {
     pub source_count: &'static str,
     pub original_message: &'static str,
     // Inline field labels (adapters / renderers)
-    pub from: &'static str,
     pub status: &'static str,
     pub period: &'static str,
     pub location: &'static str,
@@ -188,7 +187,6 @@ static KO: Strings = Strings {
     last_seen: "최근 등장",
     source_count: "참조 횟수",
     original_message: "원본 메시지",
-    from: "발신",
     status: "상태",
     period: "기간",
     location: "위치",
@@ -248,7 +246,6 @@ static EN: Strings = Strings {
     last_seen: "Last seen",
     source_count: "References",
     original_message: "Original message",
-    from: "from",
     status: "Status",
     period: "Period",
     location: "Location",

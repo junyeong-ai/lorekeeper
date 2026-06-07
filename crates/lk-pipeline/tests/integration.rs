@@ -1183,9 +1183,12 @@ async fn work_log_excludes_future_dated_contribution() {
 async fn gmail_daily_page_renders_category_highlights() {
     // Gmail's daily page surfaces an email-triage highlight section for a curated set of
     // categories ABOVE the full event list. A `classify` rule routes a matching event into
-    // a highlight bucket; the event must appear BOTH in its highlight section AND in the
-    // full Key Events list — the buckets are an additive highlight, never a replacement,
-    // so an event is never hidden by its category.
+    // a highlight bucket; the bucket entry is a POINTER (subject + sender, one bullet line)
+    // — the event's body renders ONLY in the full Key Events list, where the LLM later
+    // refines it. Buckets are an additive highlight, never a replacement, so an event is
+    // never hidden by its category; and they are structural (re-rendered raw every ingest,
+    // never LLM-refined), so any body text here would pin the raw source — quoted thread,
+    // signature PII — into the page permanently.
     let dir = TempDir::new().unwrap();
     let vault = dir.path();
     let mut config = base_config(vault);
@@ -1203,16 +1206,12 @@ async fn gmail_daily_page_renders_category_highlights() {
     let mut pipeline = Pipeline::new(vault, make_ctx(&config, llm));
 
     let ts: jiff::Timestamp = "2026-05-23T10:00:00Z".parse().unwrap();
+    let body = "Ship by Friday.\n\nQuoted thread with a phone number and a signature.";
     let result = pipeline
         .plan(
             "test-source",
             config.sources.get("test-source").unwrap(),
-            vec![raw_item(
-                "Project deadline moved",
-                "Ship by Friday.",
-                "MSG-1",
-                ts,
-            )],
+            vec![raw_item("Project deadline moved", body, "MSG-1", ts)],
             &IngestOptions {
                 target_date: None,
                 today: far_future(),
@@ -1237,12 +1236,17 @@ async fn gmail_daily_page_renders_category_highlights() {
         "the frontmatter action_required count must reflect the one bucketed event:\n{content}"
     );
     assert!(
-        content.contains("Project deadline moved"),
-        "the bucketed event must appear in the highlight:\n{content}"
+        content.contains("- **Project deadline moved** — alice@example.com"),
+        "the bucket entry is a subject+sender pointer bullet:\n{content}"
     );
     assert!(
         content.contains(&format!("## {key_events_heading}")),
         "the full Key Events list must always render regardless of category:\n{content}"
+    );
+    assert_eq!(
+        content.matches("Ship by Friday.").count(),
+        1,
+        "the body renders ONLY in Key Events — a bucket must never carry it:\n{content}"
     );
 }
 

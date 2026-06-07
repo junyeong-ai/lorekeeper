@@ -23,17 +23,25 @@ pub fn normalize_events(
             let zoned = item.timestamp.to_zoned(timezone.clone());
             let date = zoned.date();
 
-            // Without an external_id, identity is derived from title + body. Serialize
-            // them as a JSON array so the field boundary is unambiguous — a plain
-            // concatenation would collide (title "ab" + body "c" == title "a" + body "bc").
+            // Text hygiene is owned HERE, once for every adapter: titles arrive with
+            // wire noise (a Subject header's leading space) that would corrupt the
+            // markdown the templates build around them (`**{title}**`, `### {title}`).
+            let title = item.title.trim().to_string();
+            let body = demote_headings(&collapse_blank_lines(&item.body), BODY_HEADING_FLOOR);
+
+            // Identity prefers the adapter's stable `external_id`. The fallback —
+            // hashing the NORMALIZED title + body — is intentionally lossy: two raw
+            // items differing only in wire whitespace collapse to one observation.
+            // An adapter whose items have genuine distinct identity (a real message
+            // id) MUST supply `external_id`; this path is for sources that have none.
+            // The fields are a JSON array so the boundary is unambiguous — a plain
+            // concatenation would collide (title "ab" + body "c" == "a" + "bc").
             let hash_input = match &item.external_id {
                 Some(id) => id.clone(),
-                None => serde_json::json!([item.title, item.body]).to_string(),
+                None => serde_json::json!([title, body]).to_string(),
             };
 
             let id = EventId::new(source_id, date, &hash_input);
-            let title = item.title;
-            let body = demote_headings(&collapse_blank_lines(&item.body), BODY_HEADING_FLOOR);
 
             Event {
                 id,
@@ -145,6 +153,103 @@ mod tests {
             "H2 should demote to H4:\n{}",
             events[0].body
         );
+    }
+
+    #[test]
+    fn title_wire_whitespace_is_trimmed() {
+        // A Subject header arriving as " [Action] …" would render as `** [Action]…**`
+        // — CommonMark refuses `**` followed by whitespace, so the bold breaks.
+        // Normalize owns title hygiene for every adapter.
+        let tz = jiff::tz::TimeZone::UTC;
+        let item = RawItem {
+            external_id: Some("X".into()),
+            title: "  [Action] subject \n".into(),
+            body: String::new(),
+            url: None,
+            author: None,
+            timestamp: jiff::Timestamp::now(),
+            is_self: false,
+            metadata: serde_json::Value::Null,
+        };
+        let events = normalize_events("s", SourceType::Gmail, vec![item], &tz);
+        assert_eq!(events[0].title, "[Action] subject");
+    }
+
+    #[test]
+    fn whitespace_only_difference_is_the_same_identity_without_external_id() {
+        // Identity hashes the NORMALIZED title/body, so wire whitespace can't fork
+        // two EventIds for the same observation.
+        let tz = jiff::tz::TimeZone::UTC;
+        let ts = jiff::Timestamp::now();
+        let mk = |title: &str| RawItem {
+            external_id: None,
+            title: title.into(),
+            body: "b".into(),
+            url: None,
+            author: None,
+            timestamp: ts,
+            is_self: false,
+            metadata: serde_json::Value::Null,
+        };
+        let a = normalize_events("s", SourceType::Gmail, vec![mk("T")], &tz);
+        let b = normalize_events("s", SourceType::Gmail, vec![mk(" T ")], &tz);
+        assert_eq!(a[0].id, b[0].id);
+    }
+
+    // Adversarial property tests: assert the normalization guarantees hold for ANY
+    // source item, closing the "messy source field reaches the page" class by
+    // contract rather than by example.
+    mod properties {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn raw(title: &str, body: &str) -> RawItem {
+            RawItem {
+                external_id: None,
+                title: title.into(),
+                body: body.into(),
+                url: None,
+                author: None,
+                timestamp: jiff::Timestamp::UNIX_EPOCH,
+                is_self: false,
+                metadata: serde_json::Value::Null,
+            }
+        }
+
+        proptest! {
+            #[test]
+            fn title_is_always_edge_trimmed(title in r#"[\PC]{0,60}"#) {
+                // A normalized title never carries leading/trailing whitespace, so the
+                // markdown the templates wrap around it (`**{title}**`, `### {title}`)
+                // can never be broken by wire padding.
+                let tz = jiff::tz::TimeZone::UTC;
+                let ev = normalize_events("s", SourceType::Gmail, vec![raw(&title, "b")], &tz);
+                let t = &ev[0].title;
+                prop_assert_eq!(t.as_str(), t.trim(), "title not edge-trimmed: {:?}", t);
+            }
+
+            #[test]
+            fn body_headings_never_collide_with_page_structure(
+                level in 1usize..=6,
+                heading in r#"[ \PC]{0,30}"#,
+            ) {
+                // Any source-body heading is demoted to at least H4, so it can never be
+                // mistaken for a page/section/event heading (H1–H3) by `lk-vault::section`.
+                let tz = jiff::tz::TimeZone::UTC;
+                let body = format!("{} Heading {}\n\nbody\n", "#".repeat(level), heading);
+                let ev = normalize_events("s", SourceType::Gmail, vec![raw("t", &body)], &tz);
+                for line in ev[0].body.lines() {
+                    let hashes = line.chars().take_while(|c| *c == '#').count();
+                    let is_heading = (1..=6).contains(&hashes)
+                        && line[hashes..].starts_with(' ');
+                    prop_assert!(
+                        !(is_heading && hashes < 4),
+                        "body heading shallower than H4 survived: {:?}",
+                        line
+                    );
+                }
+            }
+        }
     }
 
     #[test]

@@ -23,11 +23,64 @@ pub fn html_to_markdown(html: &str) -> String {
             bullet_list_marker: htmd::options::BulletListMarker::Dash,
             ..Default::default()
         })
+        .add_handler(vec!["img"], img_without_data_uris)
         .build();
     converter
         .convert(html)
         .map(|md| md.trim().to_string())
         .unwrap_or_default()
+}
+
+/// Whether a URL is a `data:` URI, tested on the prefix of a borrowed `&str` so a
+/// multi-kilobyte base64 payload is never copied just to classify it (the case this
+/// exists for). Case-insensitive and tolerant of leading whitespace, matching the
+/// leniency browsers apply to the scheme.
+fn is_data_uri(url: &str) -> bool {
+    let url = url.trim_start();
+    url.len() >= 5 && url.as_bytes()[..5].eq_ignore_ascii_case(b"data:")
+}
+
+/// `img` handler that drops `data:` URIs — upholding the `lk_core::markdown`
+/// cleanliness contract (`scan_defects` finds no `InlineDataUri`) at the conversion
+/// boundary. An inlined base64 image (HTML email trackers, embedded logos) converts
+/// to a multi-kilobyte single line that bloats vault pages and LLM task inputs while
+/// carrying zero retrievable knowledge — so it degrades to its alt text (the
+/// loss-averse rule: keep the text content). A fetchable `http(s)` image keeps the
+/// standard `![alt](src "title")` form.
+fn img_without_data_uris(
+    _: &dyn htmd::element_handler::Handlers,
+    element: htmd::Element,
+) -> Option<htmd::element_handler::HandlerResult> {
+    let attr = |name: &str| {
+        element
+            .attrs
+            .iter()
+            .find(|a| &a.name.local == name)
+            .map(|a| a.value.as_ref())
+    };
+    let src = attr("src")?;
+    let alt = attr("alt").unwrap_or_default();
+
+    // A data: URI degrades to its alt text as PLAIN body content — not inside
+    // `![…]` — so it is emitted verbatim. Markdown escaping here would surface as
+    // literal backslashes in the rendered text.
+    if is_data_uri(src) {
+        return Some(alt.to_string().into());
+    }
+
+    // A fetchable image: emit `![alt](src "title")`. Escape only what the syntax
+    // demands — parens in the URL, a space-bearing URL wrapped in `<…>`, and the
+    // `"`-delimited title's own quotes.
+    let src = src.replace('(', "\\(").replace(')', "\\)");
+    let (open, close) = if src.contains(' ') {
+        ("<", ">")
+    } else {
+        ("", "")
+    };
+    let title = attr("title").map_or(String::new(), |t| {
+        format!(" \"{}\"", t.replace('"', "\\\""))
+    });
+    Some(format!("![{alt}]({open}{src}{title}{close})").into())
 }
 
 /// Extract the readable article core from a full HTML page and convert it to
@@ -887,6 +940,61 @@ mod tests {
     }
 
     #[test]
+    fn html_img_data_uri_degrades_to_alt_text() {
+        // Exercised on `html_to_markdown` directly — the single seam every HTML-consuming
+        // adapter (Gmail, RSS, Calendar, Manual) shares — so the policy holds for all of
+        // them, not just the Gmail path where the bloat was first observed.
+        // An inlined base64 image (an HTML email's embedded logo/table art) would
+        // otherwise become a multi-kilobyte single markdown line. It carries no
+        // retrievable knowledge — only its alt text survives.
+        let md = html_to_markdown(
+            r#"<p>before</p><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUg" alt="회사 로고"><p>after</p>"#,
+        );
+        assert!(!md.contains("data:"), "data: URI must be dropped:\n{md}");
+        assert!(md.contains("회사 로고"), "alt text must survive:\n{md}");
+        assert!(md.contains("before") && md.contains("after"));
+
+        // Without alt text the image vanishes entirely.
+        let bare = html_to_markdown(r#"<img src="data:image/gif;base64,R0lGOD">"#);
+        assert_eq!(bare, "");
+    }
+
+    #[test]
+    fn html_img_http_src_keeps_standard_markdown() {
+        let md = html_to_markdown(r#"<img src="https://x.io/a.png" alt="chart" title="Q2">"#);
+        assert_eq!(md, "![chart](https://x.io/a.png \"Q2\")");
+        // Parentheses in the URL are escaped, as in htmd's built-in handler.
+        let parens = html_to_markdown(r#"<img src="https://x.io/a(1).png">"#);
+        assert!(parens.contains("![](https://x.io/a\\(1\\).png)"));
+    }
+
+    #[test]
+    fn html_img_title_quote_is_escaped_so_markdown_stays_valid() {
+        // A quote inside the title would otherwise close the `"`-delimited title
+        // early and emit broken markdown — it must be escaped. (Single-quoted HTML
+        // attribute so the inner double quotes are real, not attribute delimiters.)
+        let md = html_to_markdown(r#"<img src='https://x.io/a.png' title='he said "hi"'>"#);
+        assert_eq!(md, r#"![](https://x.io/a.png "he said \"hi\"")"#);
+    }
+
+    #[test]
+    fn html_img_data_uri_with_leading_space_and_caps_is_dropped() {
+        // The scheme test tolerates leading whitespace and case, so a `  DATA:`
+        // payload can't slip through as a giant inline blob.
+        let md = html_to_markdown(r#"<img src="  DATA:image/png;base64,AAAA" alt="x">"#);
+        assert_eq!(md, "x");
+    }
+
+    #[test]
+    fn html_img_data_uri_alt_is_plain_text_not_markdown_escaped() {
+        // The degraded alt becomes PLAIN body text (not inside `![…]`), so a quote in
+        // it must appear verbatim — escaping it here would leak a literal backslash
+        // into the rendered prose.
+        let md = html_to_markdown(r#"<img src='data:image/png;base64,AAAA' alt='he said "hi"'>"#);
+        assert_eq!(md, r#"he said "hi""#);
+    }
+
+    #[test]
     fn empty_inputs_are_empty() {
         assert_eq!(html_to_markdown("   "), "");
         assert_eq!(slack_to_markdown("", &no_users()), "");
@@ -912,5 +1020,65 @@ mod tests {
         );
         let extracted = readable_html_to_markdown(&html, &base).expect("article extracted");
         assert!(extracted.contains("substantial paragraph"));
+    }
+
+    // Adversarial property tests: throw randomized hostile HTML at the converter and
+    // assert the vault-text cleanliness contract holds for ANY input — closing the
+    // whole "raw source bytes leak into a page" class instead of one example at a
+    // time. The invariant is `lk_core::markdown::scan_defects` (the SAME predicate
+    // `lore doctor` checks at rest), so code-side and data-side can't drift.
+    mod properties {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// A fragment of attacker-controlled base64-ish payload.
+        fn base64_blob() -> impl Strategy<Value = String> {
+            "[A-Za-z0-9+/]{0,300}"
+        }
+
+        /// Arbitrary alt/surrounding text. Excludes only `<`, `>`, and `]` — the
+        /// characters that START a defect signature (`<data:`, `](data:`) — so the
+        /// adversarial text can never itself spell a data: URI and produce a FALSE
+        /// positive. Everything else (quotes, parens, colons, `data:` as a word) is
+        /// fair game, because the property under test is "the CONVERTER never
+        /// introduces a data: URI", not "no input ever mentions one".
+        fn loose_text() -> impl Strategy<Value = String> {
+            r#"[\PC]{0,40}"#.prop_map(|s| s.replace(['<', '>', ']'], ""))
+        }
+
+        proptest! {
+            #[test]
+            fn html_to_markdown_never_emits_a_data_uri(
+                blob in base64_blob(),
+                alt in loose_text(),
+                lead in loose_text(),
+            ) {
+                // An inlined base64 image embedded anywhere in a fragment must never
+                // survive into the output, regardless of alt text or surrounding prose.
+                let html = format!(
+                    "<p>{lead}</p><img src=\"data:image/png;base64,{blob}\" alt=\"{alt}\">"
+                );
+                let md = html_to_markdown(&html);
+                prop_assert!(
+                    lk_core::markdown::scan_defects(&md).is_empty(),
+                    "data: URI survived conversion:\n{md}"
+                );
+            }
+
+            #[test]
+            fn html_to_markdown_keeps_fetchable_image_links(
+                blob in base64_blob(),
+            ) {
+                // A real http(s) image is knowledge-bearing and must be preserved as a
+                // standard link — proving the filter targets data: URIs specifically,
+                // not all images (which would be an over-broad, lossy constraint).
+                let html = format!("<img src=\"https://x.io/{blob}.png\" alt=\"chart\">");
+                let md = html_to_markdown(&html);
+                if !blob.is_empty() {
+                    prop_assert!(md.contains("https://x.io/"), "http image dropped:\n{md}");
+                }
+                prop_assert!(lk_core::markdown::scan_defects(&md).is_empty());
+            }
+        }
     }
 }

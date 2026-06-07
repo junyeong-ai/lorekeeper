@@ -26,6 +26,7 @@ miette = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 dialoguer = { workspace = true }
+walkdir = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

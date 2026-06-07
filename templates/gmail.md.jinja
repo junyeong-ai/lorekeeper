@@ -33,7 +33,7 @@ llm_inputs:
 ## {{ i18n.action_required }}
 
 {% for item in action_required_items %}
-- **{{ item.subject }}** {{ i18n.from }} {{ item.sender }} — {{ item.body }}
+- **{{ item.subject }}**{% if item.sender %} — {{ item.sender }}{% endif %}
 {% endfor %}
 
 {% endif %}
@@ -41,7 +41,7 @@ llm_inputs:
 ## {{ i18n.decisions }}
 
 {% for item in decisions_items %}
-- **{{ item.subject }}** — {{ item.body }}
+- **{{ item.subject }}**{% if item.sender %} — {{ item.sender }}{% endif %}
 {% endfor %}
 
 {% endif %}
@@ -49,7 +49,7 @@ llm_inputs:
 ## {{ i18n.project_updates }}
 
 {% for item in project_updates_items %}
-- **{{ item.subject }}** — {{ item.body }}
+- **{{ item.subject }}**{% if item.sender %} — {{ item.sender }}{% endif %}
 {% endfor %}
 
 {% endif %}
@@ -57,7 +57,7 @@ llm_inputs:
 ## {{ i18n.knowledge_sharing }}
 
 {% for item in knowledge_sharing_items %}
-- **{{ item.subject }}** — {{ item.body }}
+- **{{ item.subject }}**{% if item.sender %} — {{ item.sender }}{% endif %}
 {% endfor %}
 
 {% endif %}
@@ -65,7 +65,7 @@ llm_inputs:
 ## {{ i18n.meeting_followup }}
 
 {% for item in meeting_followup_items %}
-- **{{ item.subject }}** — {{ item.body }}
+- **{{ item.subject }}**{% if item.sender %} — {{ item.sender }}{% endif %}
 {% endfor %}
 
 {% endif %}

@@ -1,7 +1,59 @@
-//! Markdown structure primitives shared across crates: fenced-code tracking and
-//! heading demotion. Single source of truth — `lk-vault::section` (section
-//! locate/replace) and `lk-pipeline::normalize` (source-body sanitisation) both
-//! build on these instead of re-implementing fence/heading parsing.
+//! Markdown structure primitives shared across crates: fenced-code tracking,
+//! heading demotion, and the vault-text cleanliness contract. Single source of
+//! truth — `lk-vault::section` (section locate/replace) and
+//! `lk-pipeline::normalize` (source-body sanitisation) build on the fence/heading
+//! parsing instead of re-implementing it, and the `scan_defects` contract is shared
+//! by the converters that uphold it, the property tests that assert it, and
+//! `lore doctor` that checks it on pages at rest.
+
+/// A way a materialized vault page violates the text-cleanliness contract the
+/// pipeline guarantees. Each variant names an EXACT property — never a heuristic
+/// guess — so a hit is always a real defect: text no honest converter could emit,
+/// or a page written before the guarantee existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextDefect {
+    /// An inlined `data:` URI. Every rich-text converter degrades these to alt text
+    /// because an embedded base64 payload is encoded bytes, not retrievable
+    /// knowledge, and bloats both the page and every LLM task that reads it.
+    InlineDataUri,
+}
+
+impl TextDefect {
+    /// One-line human description for `lore doctor` output.
+    pub fn description(self) -> &'static str {
+        match self {
+            TextDefect::InlineDataUri => {
+                "inlined data: URI — encoded bytes, not knowledge; converters strip these"
+            }
+        }
+    }
+}
+
+/// Scan a materialized page's text for cleanliness-contract violations, returning
+/// each defect with its 1-based line number (empty result = clean). The SINGLE
+/// SOURCE OF TRUTH for the contract: the rich-text converters uphold it
+/// (`lk_source::markdown::html_to_markdown` degrades data: URIs to alt text),
+/// property tests assert it on converter output, and `lore doctor` checks it on
+/// pages at rest — all three call THIS, so they can never disagree about what
+/// "clean vault text" means. New invariants are added as `TextDefect` variants,
+/// extending every enforcement point at once.
+pub fn scan_defects(text: &str) -> Vec<(usize, TextDefect)> {
+    text.lines()
+        .enumerate()
+        .filter(|(_, line)| has_inline_data_uri(line))
+        .map(|(i, _)| (i + 1, TextDefect::InlineDataUri))
+        .collect()
+}
+
+/// Exact `data:`-URI signatures with zero false positives on prose: a markdown
+/// image/link target (`](data:`) and an autolink (`<data:`) — the only shapes a
+/// converter could emit. Matched case-insensitively to mirror the conversion-time
+/// `lk_source::markdown` `is_data_uri` check (which strips `DATA:` too), so the
+/// checker and the converter never disagree about a page's cleanliness.
+fn has_inline_data_uri(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("](data:") || lower.contains("<data:")
+}
 
 /// Tracks whether a line walker is currently inside a fenced code block. Per
 /// CommonMark, an opening fence is 3+ consecutive `` ` `` or `~` characters (with
@@ -224,5 +276,45 @@ mod tests {
             demote_headings("## Heading text here\n", 4),
             "#### Heading text here\n"
         );
+    }
+
+    #[test]
+    fn scan_flags_inline_data_uri_image_with_line_number() {
+        let page = "# Page\n\nintro\n\n![logo](data:image/png;base64,AAAA)\n\nmore\n";
+        assert_eq!(scan_defects(page), vec![(5, TextDefect::InlineDataUri)]);
+    }
+
+    #[test]
+    fn scan_flags_data_uri_autolink() {
+        assert_eq!(
+            scan_defects("see <data:text/plain,hi>\n"),
+            vec![(1, TextDefect::InlineDataUri)]
+        );
+    }
+
+    #[test]
+    fn scan_clean_page_has_no_defects() {
+        // A fetchable http image and the bare word "data" are both fine — only an
+        // inlined data: URI target is a defect.
+        let page = "# Page\n\n![chart](https://x.io/a.png)\n\nthe data shows growth\n";
+        assert!(scan_defects(page).is_empty());
+    }
+
+    #[test]
+    fn scan_is_case_insensitive_on_the_scheme() {
+        // The converter strips `DATA:` (case-insensitive), so the checker must catch it
+        // too — otherwise a page the pipeline cleaned could still read as defective.
+        assert_eq!(
+            scan_defects("![x](DATA:image/png;base64,AA)\n"),
+            vec![(1, TextDefect::InlineDataUri)]
+        );
+    }
+
+    #[test]
+    fn scan_reports_correct_line_across_crlf_and_bom() {
+        // `str::lines` strips a trailing `\r`, and a leading BOM rides on line 1, so the
+        // reported line number is stable regardless of encoding quirks.
+        let page = "\u{feff}# Page\r\n\r\nintro\r\n![x](data:text/plain,a)\r\n";
+        assert_eq!(scan_defects(page), vec![(4, TextDefect::InlineDataUri)]);
     }
 }

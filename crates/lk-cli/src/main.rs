@@ -54,6 +54,8 @@ enum Command {
         #[arg(long)]
         strict: bool,
     },
+    /// Audit materialized vault pages against the text-cleanliness contract (exits non-zero on any defect)
+    Doctor,
     /// Show personal performance category distribution
     Performance,
     /// Validate config file
@@ -154,6 +156,7 @@ async fn main() -> miette::Result<()> {
         } => commands::ingest::run(&opts, source, date, dry_run).await,
         Command::Synthesis { period } => commands::synthesis::run(&opts, period).await,
         Command::Health { strict } => commands::health::run(&opts, strict).await,
+        Command::Doctor => commands::doctor::run(&opts).await,
         Command::Performance => commands::performance::run(&opts).await,
         Command::Schedule { bin } => commands::schedule::run(&opts, &bin).await,
         Command::Maintenance => commands::maintenance::run(&opts).await,
