@@ -367,9 +367,10 @@ pub fn render_agents_md(locale: Locale, dirs: &lk_core::config::VaultDirs) -> St
          bare `[[surface]]` resolves to the one page. A surface form containing `/` \
          cannot be linked bare (`[[async/await]]` resolves as a vault path) — link it \
          piped: `[[async-await|async/await]]`. An alias edit is metadata-only: it never \
-         renames the page and is not, by itself, a reason to rewrite the body. \
-         `lore graph lint` surfaces any alias that collides with another concept or \
-         shadows a real page."
+         renames the page and is not, by itself, a reason to rewrite the body (whether a \
+         merge also enriches the synthesis body is the consuming workflow's own \
+         judgment). `lore graph lint` surfaces any alias that collides with another \
+         concept or shadows a real page."
     )
     .unwrap();
     writeln!(
@@ -387,8 +388,10 @@ pub fn render_agents_md(locale: Locale, dirs: &lk_core::config::VaultDirs) -> St
          `[[wikilink]]`s on the ORIGIN page (its `## {related_concepts_heading}` \
          section); `lore graph backlinks-sync` re-derives every concept's \
          `## {sources_heading}` + `source_count` from those forward links wholesale — \
-         an entry not backed by a forward link is wiped. Finish any batch that minted \
-         concepts with `lore graph backlinks-sync`, then `lore wiki index`."
+         an entry not backed by a forward link is wiped, and a concept cited by several \
+         pages in one batch is counted correctly where hand-written one-ref-per-item \
+         entries would undercount. Finish any batch that created concept pages OR \
+         citations with `lore graph backlinks-sync`, then `lore wiki index`."
     )
     .unwrap();
 
