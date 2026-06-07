@@ -158,7 +158,7 @@ impl Pipeline {
         // in the log keeps its already-correct frozen page rather than being churned.
         // Complete-refetch sources reproduce their whole window on demand, so they render
         // directly from the fetch and keep no log (nothing to accumulate).
-        if config.source_type.is_streaming() {
+        if config.source_type.descriptor().streaming {
             events =
                 self.accumulate_with_log(source_id, events, options.target_date, options.dry_run)?;
         }
@@ -199,7 +199,7 @@ impl Pipeline {
 
         let strings = self.ctx.locale.strings();
         let summary_heading = strings.summary;
-        let events_heading = config.source_type.events_heading(strings);
+        let events_heading = config.source_type.descriptor().item_kind.heading(strings);
         let concepts_heading = strings.related_concepts;
 
         for (date, day_indices) in &by_date {

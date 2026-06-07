@@ -14,7 +14,7 @@ use crate::PipelineError;
 /// from the depleted fetch alone would silently drop it. So `plan` UNIONs each fetch with
 /// the stored log (`merge_by_id`) and the page projects the merged set: nothing observed
 /// is ever lost. Complete-refetch sources (Gmail/Jira/Calendar/Slack/Drive) reproduce
-/// their whole window on demand and keep NO log — see `SourceType::is_streaming`.
+/// their whole window on demand and keep NO log — see `SourceDescriptor::streaming`.
 ///
 /// This is the OPPOSITE of a suppression cache: it never blocks regeneration, it ENABLES
 /// it. Delete a page → the next render reproduces it from the log (self-heal); `--date`

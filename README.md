@@ -296,15 +296,6 @@ cargo fmt                                              # Format
 
 ## Dependencies
 
-Rust 1.96 / 2024 edition. Key crates:
-
-- `tokio` (async runtime)
-- `reqwest` (HTTP)
-- `serde` / `serde_yaml_ng` / `serde_json` (serialization)
-- `clap` (CLI)
-- `jiff` (date/time)
-- `minijinja` (templates)
-- `strsim` (concept near-duplicate detection)
-- `blake3` (event ID hashing)
-- `thiserror` / `miette` (errors)
-- `tracing` / `tracing-subscriber` (structured logging)
+Rust 1.96, 2024 edition. Built on `tokio`/`reqwest` (async source adapters), `jiff`
+(timezone-correct dates), `minijinja` (templates), `petgraph` (wikilink graph), and
+`blake3` (event/cache hashing). See `Cargo.toml` for the full dependency set.

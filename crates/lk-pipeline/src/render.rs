@@ -147,7 +147,7 @@ pub fn render_daily_page(
     let obj = context
         .as_object_mut()
         .expect("daily render context is a json object");
-    for category in source_type.highlight_categories() {
+    for category in source_type.descriptor().highlight_categories {
         let items = filter_by_category(events, category);
         obj.insert(
             format!("{category}_count"),
@@ -157,7 +157,7 @@ pub fn render_daily_page(
     }
 
     let source_template = format!("{source_id}.md.jinja");
-    let type_template = source_type.default_template_name();
+    let type_template = source_type.descriptor().default_template;
 
     // A per-source override is honored only when the user actually placed a
     // `{source_id}.md.jinja` in their template dir; otherwise render the embedded

@@ -10,9 +10,12 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   `Identity`, `SourceConfig`, `PerformanceConfig`) as well as the nested ones — carries
   `#[serde(deny_unknown_fields)]`, so a typo'd key fails at load instead of being silently
   ignored.
-- **`SourceType` is a closed enum** with `default_template_name()` and `is_streaming()`
-  co-located on it. Adding a source type is a compiler-checked change here + a `lk-source`
-  adapter/factory arm; set `is_streaming()` true only if the source CANNOT completely
+- **`SourceType` is a closed enum**; its static per-variant traits live in one place,
+  `SourceType::descriptor() -> SourceDescriptor` (`streaming`, `default_template`,
+  `highlight_categories`, `item_kind`). The match is exhaustive with NO catch-all, so adding
+  a source type is a compiler-forced complete decision here (+ a `lk-source` adapter/factory
+  arm) — no trait can silently default (a new streaming source quietly flagged non-streaming
+  would lose scrolled-out items). Set `streaming: true` only if the source CANNOT completely
   re-fetch a past day (a rolling/capped feed like RSS) — that gates the per-date event-log
   accumulation in `lk-pipeline`. Don't replace the enum with a runtime registry —
   exhaustive matching is the point.

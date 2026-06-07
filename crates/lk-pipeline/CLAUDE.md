@@ -5,7 +5,7 @@ Deterministic transform stages between `lk-source` and `lk-vault`. Shares an
 concept_categories) with the `Synthesizer`.
 
 - **Streaming sources project from the event log** (root invariant) — the crate mechanics:
-  for a `SourceType::is_streaming` source (RSS), `plan` UNIONs the fetch with that date's
+  for a streaming source (`SourceType::descriptor().streaming`, RSS), `plan` UNIONs the fetch with that date's
   `.lorekeeper/events/{source}/{date}.jsonl` by `EventId` (`event_log::merge_by_id`, fresh
   wins so a still-in-feed item picks up an in-place edit), persists it (unless dry-run), and
   renders from the merged set. The log holds RAW (pre-LLM) bodies, so a re-render always feeds

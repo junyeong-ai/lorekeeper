@@ -651,61 +651,112 @@ pub enum SourceType {
     Manual,
 }
 
+/// Whether a source's items read as "messages" (Slack) or "events" (everything
+/// else). Selects the daily-page event-list heading from the i18n bundle — the one
+/// per-variant trait that resolves against the active locale rather than a static
+/// literal, so it carries its own resolver instead of widening `SourceDescriptor`
+/// with an i18n dependency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ItemKind {
+    Message,
+    Event,
+}
+
+impl ItemKind {
+    pub fn heading(self, strings: &crate::i18n::Strings) -> &'static str {
+        match self {
+            ItemKind::Message => strings.key_messages,
+            ItemKind::Event => strings.key_events,
+        }
+    }
+}
+
+/// Static, per-variant traits of a source type, declared in one exhaustive place
+/// (`SourceType::descriptor`). Every field is set per variant with no catch-all, so
+/// adding a `SourceType` fills one struct literal the compiler forces complete — a
+/// new variant can never silently inherit a default (e.g. a streaming source quietly
+/// flagged non-streaming would lose scrolled-out items).
+#[derive(Debug, Clone, Copy)]
+pub struct SourceDescriptor {
+    /// A rolling/capped feed that CANNOT completely re-fetch a past day (RSS). Such a
+    /// source projects its daily pages from the per-date event log (accumulate, never
+    /// deplete): an item observed on day N is gone from the feed before a later run
+    /// re-renders page N, so rendering from the fetch alone would silently lose it.
+    /// Complete-refetch sources reproduce their whole window on demand and keep no log;
+    /// `Manual` produces document pages (one per inbox file), not a daily aggregation.
+    pub streaming: bool,
+    /// Type-level fallback Jinja template. A user `{source-id}.md.jinja` overrides it at
+    /// render time.
+    pub default_template: &'static str,
+    /// Categories surfaced as dedicated highlight sections ABOVE the full event list. For
+    /// each entry the renderer exposes `{category}_items` (events whose `Event::category`
+    /// matches) and `{category}_count`. Every event still renders in the full list, so a
+    /// category outside this set is highlighted-or-not, never hidden. `&[]` renders
+    /// straight from the event list and pays for no filtering — no per-type branching.
+    pub highlight_categories: &'static [&'static str],
+    /// Whether items read as messages or events (daily-page heading terminology).
+    pub item_kind: ItemKind,
+}
+
 impl SourceType {
-    pub fn events_heading(self, strings: &crate::i18n::Strings) -> &'static str {
+    /// The single source of truth for this variant's static traits. One exhaustive
+    /// `match`, no catch-all: adding a `SourceType` is a compiler-forced, complete decision.
+    pub const fn descriptor(self) -> SourceDescriptor {
         match self {
-            SourceType::SlackChannel | SourceType::SlackSearch => strings.key_messages,
-            _ => strings.key_events,
-        }
-    }
-
-    /// Whether the source fetches a rolling, capped window that CANNOT completely
-    /// re-fetch a past day. An RSS feed drops old entries as new ones arrive, so an item
-    /// observed on day N is gone from the feed before a later run re-renders page N —
-    /// rendering from the fetch alone would silently lose it. Streaming sources therefore
-    /// project their daily pages from the per-date event log (accumulate, never deplete).
-    ///
-    /// Complete-refetch sources (Gmail/Jira/Calendar/Slack/Drive) reproduce their whole
-    /// window on demand via date-range queries, so they render directly from the fetch and
-    /// keep no log — there is nothing to accumulate. `Manual` is neither: it produces
-    /// document pages (one per inbox file), not a daily aggregation.
-    pub fn is_streaming(self) -> bool {
-        matches!(self, SourceType::Rss)
-    }
-
-    /// Default Jinja template filename for this source type. User overrides
-    /// (`{source-id}.md.jinja`) take precedence at render time; this is the
-    /// type-level fallback.
-    pub fn default_template_name(self) -> &'static str {
-        match self {
-            SourceType::Gmail => "gmail.md.jinja",
-            SourceType::GoogleDrive => "google-drive.md.jinja",
-            SourceType::GoogleCalendar => "google-calendar.md.jinja",
-            SourceType::SlackChannel => "slack-channel.md.jinja",
-            SourceType::SlackSearch => "slack-search.md.jinja",
-            SourceType::Jira => "jira.md.jinja",
-            SourceType::Rss => "rss.md.jinja",
-            SourceType::Manual => "document.md.jinja",
-        }
-    }
-
-    /// Categories surfaced as dedicated highlight sections ABOVE the full event list on
-    /// this source's daily page. For each entry the renderer exposes `{category}_items`
-    /// (events whose `Event::category` matches) and `{category}_count` to the template.
-    /// Every event still renders under the full event list regardless of category, so a
-    /// category outside this set is never hidden — the buckets are a highlight view, not
-    /// a filter. A source that returns `&[]` renders straight from the event list and
-    /// pays for no filtering; the renderer carries no per-type branching.
-    pub fn highlight_categories(self) -> &'static [&'static str] {
-        match self {
-            SourceType::Gmail => &[
-                "action_required",
-                "decisions",
-                "project_updates",
-                "knowledge_sharing",
-                "meeting_followup",
-            ],
-            _ => &[],
+            SourceType::GoogleDrive => SourceDescriptor {
+                streaming: false,
+                default_template: "google-drive.md.jinja",
+                highlight_categories: &[],
+                item_kind: ItemKind::Event,
+            },
+            SourceType::Gmail => SourceDescriptor {
+                streaming: false,
+                default_template: "gmail.md.jinja",
+                highlight_categories: &[
+                    "action_required",
+                    "decisions",
+                    "project_updates",
+                    "knowledge_sharing",
+                    "meeting_followup",
+                ],
+                item_kind: ItemKind::Event,
+            },
+            SourceType::SlackChannel => SourceDescriptor {
+                streaming: false,
+                default_template: "slack-channel.md.jinja",
+                highlight_categories: &[],
+                item_kind: ItemKind::Message,
+            },
+            SourceType::SlackSearch => SourceDescriptor {
+                streaming: false,
+                default_template: "slack-search.md.jinja",
+                highlight_categories: &[],
+                item_kind: ItemKind::Message,
+            },
+            SourceType::Jira => SourceDescriptor {
+                streaming: false,
+                default_template: "jira.md.jinja",
+                highlight_categories: &[],
+                item_kind: ItemKind::Event,
+            },
+            SourceType::GoogleCalendar => SourceDescriptor {
+                streaming: false,
+                default_template: "google-calendar.md.jinja",
+                highlight_categories: &[],
+                item_kind: ItemKind::Event,
+            },
+            SourceType::Rss => SourceDescriptor {
+                streaming: true,
+                default_template: "rss.md.jinja",
+                highlight_categories: &[],
+                item_kind: ItemKind::Event,
+            },
+            SourceType::Manual => SourceDescriptor {
+                streaming: false,
+                default_template: "document.md.jinja",
+                highlight_categories: &[],
+                item_kind: ItemKind::Event,
+            },
         }
     }
 }
