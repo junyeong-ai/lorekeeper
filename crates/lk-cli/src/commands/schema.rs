@@ -488,6 +488,16 @@ mod tests {
 
         let en = render_agents_md(Locale::En, &lk_core::config::VaultDirs::default());
         assert!(en.contains("## Concept convergence"));
+
+        // The section's machine-owned-heading references must be LOCALIZED, never
+        // hardcoded English — the same difference-proof as
+        // agents_md_headings_never_hardcoded, scoped to the convergence section.
+        let ko_section = ko.split("## Concept convergence").nth(1).unwrap();
+        assert!(ko_section.contains("`## 출처`"));
+        assert!(!ko_section.contains("`## Sources`"));
+        let en_section = en.split("## Concept convergence").nth(1).unwrap();
+        assert!(en_section.contains("`## Sources`"));
+        assert!(!en_section.contains("`## 출처`"));
     }
 
     #[test]

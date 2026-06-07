@@ -117,7 +117,7 @@ in this capture as the created-this-run set. Then:
 2. Existing → update `updated` and enrich the synthesis if warranted.
 3. Assign category from config.yaml `concepts.categories`.
 
-`## Sources` / `source_count` stay machine-owned (see the shared reference) —
+`## Sources` / `source_count` stay machine-owned (AGENTS.md § Concept convergence) —
 `backlinks-sync` re-derives both in step 6 from the document's forward link
 (step 4), the source of truth.
 

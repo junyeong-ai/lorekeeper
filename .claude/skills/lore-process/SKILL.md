@@ -60,7 +60,7 @@ compacted since you last read it.
    finishes (the per-kind key is in the step 3c table). Concept pages the skill
    creates or merges are not
    the target page — their frontmatter follows the concept page format and the
-   shared dedup algorithm (alias appends allowed).
+   Concept convergence contract (alias appends allowed).
 
 ## Materialized-view contract
 
@@ -94,7 +94,9 @@ The essentials: a visible `.jsonl` is fully written and every
 
 1. **Discover the vault root.** Read `vault.root` from `config.yaml`
    (auto-discovered at `./config.yaml` → `~/.config/lorekeeper/config.yaml`).
-   The user may override with `--vault <path>`. Then load the concept registry
+   The user may override with `--vault <path>`. The wiki dir is
+   `vault.dirs.wiki` (default `wiki`); its `AGENTS.md` carries the page formats
+   and the Concept convergence contract. Then load the concept registry
    for this run: `lore wiki concepts` (slugs, names, aliases) — the queue task
    carries no concept registry, so this on-disk snapshot plus a created-this-run
    set is the full dedup baseline (see the vault AGENTS.md § Concept convergence).

@@ -236,7 +236,7 @@ Extract knowledge using the manifest. Requires a prior scan.
       processes many documents, so that set is what closes same-run gaps).
       New concept → fill the Synthesis section, emit `## Related` empty
       (human/audit-curated, never machine-written). `## Sources` / `source_count`
-      stay machine-owned (see the shared reference); the Finalize
+      stay machine-owned (AGENTS.md § Concept convergence); the Finalize
       `backlinks-sync` re-derives both from the document's forward
       `[[wikilink]]` (step g), the single source of truth. If no configured
       category fits a transferable concept, omit the `category` field (leave it
