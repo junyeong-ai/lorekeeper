@@ -236,6 +236,11 @@ crontab /tmp/lore-cron.txt
 
 A manual `lore ingest <source>` (single source) refreshes only that source's pages and deliberately does not rewrite the cross-source work-log; run `lore ingest` (all sources) to rebuild it.
 
+Two ways to own the timing:
+
+- **cron** — `lore schedule` projects the config's cron expressions (`ingest.schedule`, `synthesis.<period>.schedule`, `maintenance.schedule`) into crontab lines, as above.
+- **Claude scheduled tasks** — the installer's `lore-daily-ingest` / `lore-weekly-ingest` routines own the timing themselves and cover everything between them: daily ingest + queue drain + graph reconcile; weekly synthesis of every period (idempotent materialized views make running monthly/quarterly/annual weekly free) + knowledge audit + retention janitors. In this mode the config cron expressions only inform `lore health` staleness.
+
 ## Credentials
 
 Two ways to provide credentials, env vars take precedence over file:

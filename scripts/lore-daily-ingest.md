@@ -54,6 +54,7 @@ Scan `<vault>/inbox/` for non-text files and convert:
 | `.pdf` | Read tool (pages param) → key summary |
 | `.png` `.jpg` `.jpeg` `.webp` `.gif` | Vision → content description |
 | `.docx` `.pptx` `.xlsx` | `pandoc {file} -t markdown` → full conversion |
+| `.json` | Read → key-point summary `.md` (the manual source deliberately skips raw JSON) |
 
 Pandoc failure (encrypted, legacy OLE):
 - Run `file {path}` to identify actual format
@@ -64,7 +65,7 @@ For each file:
 1. Write converted/summarised result to `inbox/{original-name}.md`
 2. Move original binary to `inbox/archived/{date}/`
 
-Text files (.md, .txt, .html, .json) are left for `lore ingest`.
+Text files (.md, .txt, .markdown, .html, .htm) are left for `lore ingest`.
 Skip if inbox is empty or has no binary files.
 
 ### Step 2: Refresh yesterday's pages
@@ -84,7 +85,8 @@ lore ingest --date "$YESTERDAY"
 lore ingest
 ```
 
-- All enabled sources (email-digest, my-schedule, my-tasks, team-slack)
+- All enabled sources from config.yaml — work sources, news feeds, and the manual
+  inbox alike (one full run keeps the cross-source work-log complete)
 - Calendar `lookahead_hours: 24` captures today's upcoming events
 - Idempotent on same-day re-runs: every page re-renders in full from the source
   window, and the LLM cache skips unchanged content

@@ -1,6 +1,6 @@
 ---
 name: lore-weekly-ingest
-description: Autonomous weekly Lorekeeper deepening — synthesise last week (cross-source themes + personal review), fill the synthesis queue, reconcile the graph, then run a knowledge audit (dormancy, contradiction worklist, near-duplicate review). Runs on Mondays after the daily ingest.
+description: Autonomous weekly Lorekeeper deepening — synthesise last week (cross-source themes + personal review) plus any monthly/quarterly/annual review whose period just closed, fill the synthesis queue, reconcile the graph, run a knowledge audit (dormancy, contradiction worklist, near-duplicate review), then run the retention janitors. Runs on Mondays after the daily ingest.
 ---
 
 ## Role
@@ -22,7 +22,10 @@ run the same day a concept is created. This weekly task adds the two things that
 change slowly and would be noise (and LLM cost) run daily:
 
 - **Synthesis** — a week of work compressed into cross-source themes and a personal
-  review. Needs a full week of data; meaningless daily.
+  review. Needs a full week of data; meaningless daily. The longer periods
+  (monthly/quarterly/annual) ride this same cadence: each is an idempotent
+  materialized view, so invoking it weekly costs nothing outside the first week
+  after its period closes — no date-gating logic anywhere.
 - **Knowledge audit** — dormancy (`lore graph stale`), the contradiction worklist
   (`lore graph audit-candidates`), near-duplicate merge candidates, and
   relationship-gap suggestions. These accumulate gradually; a weekly review keeps the
@@ -32,10 +35,11 @@ change slowly and would be noise (and LLM cost) run daily:
 
 The final assistant text message MUST be one of:
 
-- **(A) Success report** — weekly synthesis paths (cross-source + personal), queue
-  tasks drained, graph-sync changed-page counts, and the audit summary: dormant-page /
-  contradiction-candidate / near-duplicate counts, any contradictions flagged, and any
-  merges recommended for human action. 5-10 lines.
+- **(A) Success report** — synthesis pages written this run (weekly always;
+  monthly/quarterly/annual when their period just closed), queue tasks drained,
+  graph-sync changed-page counts, the audit summary (dormant-page /
+  contradiction-candidate / near-duplicate counts, contradictions flagged, merges
+  recommended for human action), and janitor prune counts. 5-10 lines.
 
 - **(B) Partial failure** — which steps succeeded, which failed, and the recovery
   command (`lore synthesis weekly --previous`).
@@ -44,18 +48,25 @@ Idle termination with tool calls only and no text = failure.
 
 ## Procedure
 
-### Step 1: Weekly synthesis
+### Step 1: Periodic synthesis
 
 ```bash
 lore synthesis weekly --previous
+lore synthesis monthly --previous
+lore synthesis quarterly --previous
+lore synthesis annual --previous
 ```
 
-- `--previous` synthesises last week (Mon-Sun) → `synthesis/weekly/` (cross-source
-  themes) and `me/weekly/` (personal review) pages.
+- `--previous` targets the period that just closed: last week (Mon-Sun) →
+  `synthesis/weekly/` (cross-source themes) + `me/weekly/` (personal review); last
+  month/quarter/year → `me/{monthly,quarterly,annual}/` reviews.
+- Run all four EVERY week, no boundary check: each page is an idempotent
+  materialized view, so outside the first week after its period closes the command
+  re-renders the same bytes and queues zero LLM work — and in the week a
+  month/quarter/year closes, its review materialises on its own.
 - In queue mode the pages are written with empty LLM sections plus queued
-  narrative/theme tasks (the command flushes the queue file before returning).
-- If last week has no data, the command writes nothing — report "no weekly data" and
-  continue to the audit (Step 4).
+  narrative/theme tasks (each command flushes the queue file before returning).
+- If a period has no data, the command writes nothing — report it and continue.
 
 ### Step 2: Drain the synthesis queue
 
@@ -87,7 +98,17 @@ Invoke `/lore-wiki audit` (no arguments) for the weekly semantic review.
   is reported as a recommendation for human action, not auto-run. A missed week
   never corrupts the vault — it only defers review.
 
-### Step 5: Report
+### Step 5: Retention janitors
+
+```bash
+lore maintenance   # prune ingest log, drained queue files, old streaming event logs
+lore queue prune   # drop stale / missing-target tasks from the pending queue
+```
+
+Both are deterministic and idempotent; the weekly cadence keeps operational history
+bounded without a separate scheduler entry.
+
+### Step 6: Report
 
 Output (A) or (B) as defined in the output contract.
 
@@ -103,14 +124,16 @@ Output (A) or (B) as defined in the output contract.
 ## Failure recovery
 
 Every step is idempotent — safe to re-run:
-- Step 1 synthesis: re-run overwrites the same week's pages
+- Step 1 synthesis: re-run overwrites the same period's pages (longer periods
+  re-render byte-identically outside their first week)
 - Step 2 lore-process: section replace + concept merge are idempotent
 - Step 3 backlinks-sync / wiki index: deterministic, re-run is a no-op
 - Step 4 audit: `audit-mark` is set-once-per-source-state and an already-flagged
   contradiction is not re-flagged, so a repeated run adds no duplicate callouts
+- Step 5 janitors: prune past a retention horizon, re-run is a no-op
 
 Manual recovery:
 ```bash
-lore synthesis weekly --previous
+lore synthesis weekly --previous   # plus monthly/quarterly/annual --previous as needed
 # then invoke /lore-process, then /lore-wiki audit
 ```
