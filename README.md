@@ -140,7 +140,7 @@ Claude Code Skills        Semantic Plane             (same vault)
 Workflow:
 1. `lore ingest` (cron-scheduled) — fetches sources, re-renders structural pages, queues semantic tasks
 2. `/lore-process` (run in Claude Code) — drains the queue, fills summaries, creates/merges concept pages
-3. For unattended cron: `lore ingest && claude -p "/lore-process"`
+3. For unattended cron: `lore ingest; claude -p "/lore-process"` (`;` not `&&` — a partial source failure still exits non-zero, and the healthy sources' queued tasks should drain regardless)
 
 For unattended operation the installer ships two scheduled-task definitions (alongside
 the skills) to `~/.claude/scheduled-tasks/`; point your cron or remote-agent runner at them:

@@ -23,6 +23,14 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   failure (`had_failure`) or write/flush failure returns non-zero — including under
   `--dry-run`. Dry-run plans normally but skips every vault write, the tmp sweep, and the
   ingest log, so it leaves the vault untouched.
+- **Work-log gate**: the work-log renders only on a FULL ingest (`source.is_none()`) — a
+  filtered `lore ingest <id>` sees a structural subset of personal events and must never
+  rewrite the cross-source page (it prints why instead). A transient source failure inside
+  a full run still writes: the failure is loud (non-zero exit) and the next full run
+  re-renders the page complete, while blocking on `had_failure` would freeze the work-log
+  on any persistently failing source, news feeds included.
+- **`lore schedule`** emits ONE all-source `lore ingest` line from `ingest.schedule` —
+  never per source — plus synthesis/maintenance/queue-prune lines from their own keys.
 - **`lore ingest` startup** sweeps stale `*.jsonl.tmp` (>1h) from crashed runs and
   warns if pending queue files exist (run `/lore-process` first to avoid duplicate
   LLM work).
