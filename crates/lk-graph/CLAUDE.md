@@ -8,7 +8,7 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
 - **deps**: `lk-core` (slugify, frontmatter, wikilink) + `petgraph` + `rayon` +
   `walkdir`. No reqwest/tokio — independent of the ingestion stack.
 - **Output type naming**: CLI-facing presentation structs in `output.rs` are `*Report`
-  (`HubsReport`, `StaleReport`, `BacklinksSyncReport`, …). Domain-module computation/
+  (`HubsReport`, `LintReport`, `BacklinksSyncReport`, …). Domain-module computation/
   operation outcomes are `*Result` (`ClusterResult`, `SuggestResult`, `MergeResult`,
   `BacklinksSyncResult`). A domain `*Result` may be wrapped by an `output.rs` `*Report`
   for display (e.g. `BacklinksSyncResult` → `BacklinksSyncReport`).
@@ -58,13 +58,11 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
 - **Mutations gated**: `index_drift::fix()`, `normalize::apply()`, and
   `backlinks::sync_concept_backlinks` touch the filesystem — the first two only
   with `--fix`, backlinks only without `--dry-run`. All renames pre-checked.
-- **`stale::find_stale`**: reports pages that are **old AND dormant** — `updated`
-  (or `created` fallback) older than the threshold AND no incoming citation from a
-  page that is itself recent. Liveness is derived from the full-vault wikilink graph
-  (so a concept cited by this week's daily pages is live, not stale), which is why
-  the CLI scans every page dir but reports only the configured scope. Distinguishes
-  "old" from "actually dormant" deterministically — no heuristic. Groups by path
-  prefix. Pure read.
+- **Age is not a signal.** There is deliberately no staleness/decay check: reference
+  knowledge does not expire by going unmentioned, so "old and uncited" identifies
+  nothing actionable and would misdirect curator attention. A concept becomes due for
+  review when its EVIDENCE changes (`audit`, below) or its structure is defective
+  (`lint`) — never because time passed.
 - **`audit`** — the contradiction worklist. `find_audit_candidates` (`graph
   audit-candidates`, pure read): a concept is a candidate iff `source_count >= 2` AND
   the BLAKE3-128 hash of its canonical `## Sources` body differs from the

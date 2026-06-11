@@ -18,7 +18,6 @@ pub mod merge;
 pub mod normalize;
 pub mod output;
 pub mod scan;
-pub mod stale;
 
 use std::path::PathBuf;
 

@@ -4,7 +4,7 @@ use lk_core::config::{ConceptCategory, GraphConfig, VaultDirs};
 use lk_core::i18n::Locale;
 use lk_graph::{
     alias, audit, backlinks, cache, cluster, concept_lint, export, graph, index_drift, merge,
-    normalize, output, scan, stale,
+    normalize, output, scan,
 };
 
 use super::GlobalOptions;
@@ -12,7 +12,6 @@ use super::GlobalOptions;
 struct ResolvedConfig {
     root: PathBuf,
     graph: GraphConfig,
-    timezone: jiff::tz::TimeZone,
     locale: Locale,
     vault_dirs: VaultDirs,
     concept_categories: Vec<ConceptCategory>,
@@ -64,12 +63,6 @@ pub enum GraphCmd {
         /// Minimum community size for suggestions (overrides config)
         #[arg(long)]
         min_community_size: Option<usize>,
-    },
-    /// Report pages whose `updated`/`created` frontmatter is older than N days
-    Stale {
-        /// Threshold in days (default: 90)
-        #[arg(long, default_value_t = 90)]
-        days: u32,
     },
     /// List concept pages due for a contradiction (re-)audit: multiply-cited, with a
     /// source set that changed since the last `/lore-wiki audit` (tracked by the
@@ -135,12 +128,9 @@ fn run_inner(
     root_override: Option<PathBuf>,
     incremental: bool,
 ) -> Result<bool, String> {
-    // `stale` and `backlinks-sync` need timezone/locale from the full config —
+    // `backlinks-sync` and the audit/merge commands need locale from the full config —
     // dispatch them up front before paying the graph-build cost.
     match cmd {
-        GraphCmd::Stale { days } => {
-            return run_stale(opts, root_override, json, days, incremental);
-        }
         GraphCmd::AuditCandidates => {
             return run_audit_candidates(opts, root_override, json);
         }
@@ -421,8 +411,7 @@ fn run_inner(
         }
         // Dispatched at the top of `run_inner` because they need full-vault scope
         // and/or config that doesn't touch the in-scope WikiGraph.
-        GraphCmd::Stale { .. }
-        | GraphCmd::AuditCandidates
+        GraphCmd::AuditCandidates
         | GraphCmd::AuditMark { .. }
         | GraphCmd::BacklinksSync { .. }
         | GraphCmd::Merge { .. } => {
@@ -437,84 +426,6 @@ fn run_inner(
     }
 
     Ok(has_findings)
-}
-
-fn run_stale(
-    opts: &GlobalOptions,
-    root_override: Option<PathBuf>,
-    json: bool,
-    days: u32,
-    incremental: bool,
-) -> Result<bool, String> {
-    let mut rc = resolve_config_full(opts, root_override)?;
-
-    // Staleness is reported for the analysis scope (the evergreen wiki by default),
-    // but liveness — "is this page still cited by recent activity?" — is derived from
-    // the WHOLE vault, so a concept reinforced by this week's daily pages is not
-    // flagged. Scan every page dir (the full-vault view backlinks-sync uses) and
-    // filter the report set back down to the configured scope.
-    let report_scope = rc.graph.scope.dirs.clone();
-    // Liveness needs the whole vault, but a custom `scope.dirs` outside the standard
-    // page dirs must still be scanned and reported — union them (the same helper the
-    // integrity commands use), then filter the report back to `report_scope`.
-    rc.graph.scope.dirs = command_scan_dirs(
-        true,
-        &report_scope,
-        vault_page_dirs(&rc.root, &rc.vault_dirs),
-    );
-
-    if incremental {
-        let cp = cache::cache_path(&rc.root);
-        if let Some(cached) = cache::load(&cp) {
-            let dirty = cache::is_dirty(
-                &rc.root,
-                &rc.graph.scope.dirs,
-                rc.graph.scope.follow_links,
-                &cached,
-            )
-            .map_err(|e| format!("{e}"))?;
-            if !dirty {
-                eprintln!("No changes since last scan");
-                return Ok(false);
-            }
-        }
-    }
-
-    let all_pages = scan::scan_vault(&rc.root, &rc.graph).map_err(|e| format!("{e}"))?;
-    let candidates: Vec<scan::ScannedPage> = all_pages
-        .iter()
-        .filter(|p| report_scope.iter().any(|d| p.path.starts_with(d)))
-        .cloned()
-        .collect();
-
-    let today = jiff::Timestamp::now().to_zoned(rc.timezone).date();
-
-    let stale_pages = stale::find_stale(
-        &candidates,
-        &all_pages,
-        &rc.root,
-        today,
-        days,
-        &rc.vault_dirs,
-    );
-    let count = stale_pages.len();
-    let report = output::StaleReport {
-        threshold_days: days,
-        stale: stale_pages,
-        count,
-    };
-
-    if json {
-        output::print_json(&report)?;
-    } else {
-        output::print_stale(&report, &rc.vault_dirs);
-    }
-
-    if incremental {
-        save_cache_best_effort(&rc.root, &rc.graph.scope.dirs, rc.graph.scope.follow_links);
-    }
-
-    Ok(count > 0)
 }
 
 fn run_audit_candidates(
@@ -697,7 +608,6 @@ fn resolve_config_full(
         return Ok(ResolvedConfig {
             root,
             graph,
-            timezone: jiff::tz::TimeZone::system(),
             locale: Locale::default(),
             vault_dirs,
             concept_categories: Vec::new(),
@@ -708,7 +618,6 @@ fn resolve_config_full(
     let config = super::load_config(&config_path).map_err(|e| format!("{e}"))?;
     Ok(ResolvedConfig {
         root: config.vault.root_path(),
-        timezone: config.vault.timezone(),
         locale: config.vault.locale(),
         vault_dirs: config.vault.dirs.clone(),
         graph: config.graph,

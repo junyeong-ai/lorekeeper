@@ -302,8 +302,8 @@ pub(crate) fn is_concept_page(path: &Path, dirs: &VaultDirs) -> bool {
 /// work-log, synthesis, document, or exploration page where a concept appearance is
 /// meaningful provenance. Concept-to-concept links and navigation pages are excluded:
 /// cross-references between concepts are curated structure (`## Related`), not activity.
-/// Single-sourced here so `backlinks` (what fills `## Sources`) and `stale` (what counts
-/// as recent reinforcement for liveness) share ONE definition of "a real source".
+/// Single-sourced here as THE definition of "a real source" — `backlinks` (what fills
+/// `## Sources`) resolves citations through it.
 pub(crate) fn is_valid_source(path: &Path, dirs: &VaultDirs) -> bool {
     let s = path.to_string_lossy().replace('\\', "/");
     s.starts_with(&format!("{}/", dirs.daily))

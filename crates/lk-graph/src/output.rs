@@ -1,4 +1,3 @@
-use lk_core::config::VaultDirs;
 use serde::Serialize;
 
 use crate::alias::{AliasConflict, AliasConflictKind};
@@ -9,7 +8,6 @@ use crate::concept_lint::{InvalidCategoryConcept, NearDuplicateConcept, Unresolv
 use crate::export::GraphExport;
 use crate::graph::{BrokenLink, HubPageRef};
 use crate::merge::MergeResult;
-use crate::stale::{PageKind, StalePage};
 
 #[derive(Debug, Serialize)]
 pub struct HubsReport {
@@ -320,45 +318,6 @@ pub fn print_audit_candidates(r: &AuditCandidatesReport) {
         );
     }
     println!("\n{} concept(s) to audit", r.count);
-}
-
-#[derive(Debug, Serialize)]
-pub struct StaleReport {
-    pub threshold_days: u32,
-    pub stale: Vec<StalePage>,
-    pub count: usize,
-}
-
-pub fn print_stale(r: &StaleReport, dirs: &VaultDirs) {
-    println!("=== Stale pages (>= {} days) ===", r.threshold_days);
-
-    if r.stale.is_empty() {
-        println!("\nNo stale pages.");
-        return;
-    }
-
-    // Bucket by page kind, preserving the input ordering (oldest first) within
-    // each bucket. `PageKind` derives `Ord`, so the outer iteration is also
-    // deterministic.
-    let mut buckets: std::collections::BTreeMap<PageKind, Vec<&StalePage>> =
-        std::collections::BTreeMap::new();
-    for page in &r.stale {
-        buckets.entry(page.kind).or_default().push(page);
-    }
-
-    for (kind, entries) in &buckets {
-        println!("\n{} ({}):", kind.label(dirs), entries.len());
-        for entry in entries {
-            println!(
-                "  {:>4} days  {}  (updated: {})",
-                entry.days_old,
-                entry.path.display(),
-                entry.updated
-            );
-        }
-    }
-
-    println!("\nTotal: {} stale page(s)", r.count);
 }
 
 #[derive(Debug, Serialize)]
