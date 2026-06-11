@@ -34,9 +34,10 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
 - **`lore ingest` startup** sweeps stale `*.jsonl.tmp` (>1h) from crashed runs and
   warns if pending queue files exist (run `/lore-process` first to avoid duplicate
   LLM work).
-- **`lore maintenance`** prunes the ingest log, drained `queue/processed/` files, and the
-  streaming `events/{source}/{date}.jsonl` logs past `maintenance.retention_days` (default
-  90; event logs prune by the recorded day, parsed from the filename). It never touches
+- **`lore maintenance`** prunes the ingest log and drained `queue/processed/` files past
+  `maintenance.retention_days` (default 90) — operational history only. The streaming
+  `events/{source}/{date}.jsonl` logs are the permanent raw layer (`lore ingest --date
+  <past>` re-projects any day from them) and are NEVER pruned. It also never touches
   live `*.jsonl.tmp` — the ingest startup sweep does. With `maintenance.schedule` set,
   `lore schedule` emits crontab lines for it and for `lore queue prune`, so both
   janitors run unattended.

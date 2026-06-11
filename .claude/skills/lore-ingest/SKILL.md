@@ -31,7 +31,7 @@ an Obsidian vault. All commands accept `--config <path>` to override.
 | `lore health [--strict]` | Warn if any source is overdue vs `ingest.schedule` (2 missed fires; 48h fallback) |
 | `lore performance` | Performance category distribution |
 | `lore schedule [--bin <path>]` | Print crontab entries |
-| `lore maintenance` | Prune operational history (ingest log, drained queue files, streaming event logs) past `maintenance.retention_days` (default 90d) |
+| `lore maintenance` | Prune operational history (ingest log, drained queue files) past `maintenance.retention_days` (default 90d); streaming event logs are permanent |
 | `lore queue prune [--dry-run]` | Drop dead pending tasks (stale / missing-target) without an LLM session |
 
 ## Trigger mapping

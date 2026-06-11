@@ -976,11 +976,11 @@ pub struct ConceptCategory {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MaintenanceConfig {
-    /// Retention horizon (days) for `lore maintenance`: prunes the ingest log, drained
-    /// `queue/processed/` files, and per-date streaming event logs older than this.
-    /// User-facing pages are permanent — this only trims operational history. Dropping a
-    /// streaming source's long-past event log forfeits re-projecting that day, never live
-    /// data: the frozen page already holds its items.
+    /// Retention horizon (days) for `lore maintenance`: prunes the ingest log and drained
+    /// `queue/processed/` files older than this. Operational history only — user-facing
+    /// pages AND the per-date streaming event logs (`.lorekeeper/events/`) are permanent.
+    /// The event log is the raw layer a streaming source re-projects from; pruning it
+    /// would silently break `lore ingest --date <past>` self-healing for those days.
     pub retention_days: i64,
     /// Optional cron expression; when set, `lore schedule` emits crontab lines for
     /// `lore maintenance` and `lore queue prune`, so retention pruning and dead-task

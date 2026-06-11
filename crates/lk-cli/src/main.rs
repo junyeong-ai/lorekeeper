@@ -72,7 +72,7 @@ enum Command {
         #[arg(long)]
         root: Option<PathBuf>,
     },
-    /// Prune the ingest log, drained queue files, and streaming event logs past the configured retention (default 90 days)
+    /// Prune the ingest log and drained queue files past the configured retention (default 90 days); streaming event logs are permanent
     Maintenance,
     /// Wikilink graph analysis for the vault
     Graph {

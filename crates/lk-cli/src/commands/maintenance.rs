@@ -10,14 +10,6 @@ fn prune_cutoff_secs(now_secs: i64, retention_days: i64) -> i64 {
         .max(0)
 }
 
-/// True if an event-log file stem (`{date}`) records a day strictly before `cutoff`, so it
-/// is safe to prune. A stem that isn't a date is KEPT — never delete a file we can't date.
-fn event_log_expired(file_stem: Option<&str>, cutoff: jiff::civil::Date) -> bool {
-    file_stem
-        .and_then(|s| s.parse::<jiff::civil::Date>().ok())
-        .is_some_and(|d| d < cutoff)
-}
-
 pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
     let config = load_config(&find_config(opts)?)?;
     let vault_root = config.vault.root_path();
@@ -109,61 +101,19 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
     // Stale `.jsonl.tmp` files left over from crashes mid-flush are NOT pruned here —
     // `lore ingest` does that at startup, where it's guaranteed not to race a concurrent
     // ingest's active flush. Maintenance touches only post-rename artifacts.
-
-    // 3. Prune the per-date streaming event log past retention. Each file is
-    // `.lorekeeper/events/{source}/{date}.jsonl`; the date is in the name, so prune by the
-    // day it records (semantic), not mtime. A frozen page already holds those items, so
-    // dropping its long-past log only forfeits re-projecting that day — never live data.
-    let events_dir = vault_root.join(".lorekeeper").join("events");
-    if events_dir.exists() {
-        let today = jiff::Timestamp::now()
-            .to_zoned(config.vault.timezone())
-            .date();
-        let cutoff_date = today.saturating_sub(jiff::Span::new().days(retention_days));
-        let mut pruned = 0usize;
-        let mut sources = tokio::fs::read_dir(&events_dir)
-            .await
-            .map_err(|e| miette::miette!("read events dir: {e}"))?;
-        while let Some(src) = sources
-            .next_entry()
-            .await
-            .map_err(|e| miette::miette!("events source entry: {e}"))?
-        {
-            if !src.path().is_dir() {
-                continue;
-            }
-            let mut days = tokio::fs::read_dir(src.path())
-                .await
-                .map_err(|e| miette::miette!("read {}: {e}", src.path().display()))?;
-            while let Some(day) = days
-                .next_entry()
-                .await
-                .map_err(|e| miette::miette!("events day entry: {e}"))?
-            {
-                let path = day.path();
-                let too_old = path.extension().is_some_and(|e| e == "jsonl")
-                    && event_log_expired(path.file_stem().and_then(|s| s.to_str()), cutoff_date);
-                if too_old {
-                    tokio::fs::remove_file(&path)
-                        .await
-                        .map_err(|e| miette::miette!("remove {}: {e}", path.display()))?;
-                    pruned += 1;
-                }
-            }
-        }
-        eprintln!(
-            "events: pruned {pruned} log file(s) recording days older than {retention_days}d."
-        );
-    } else {
-        eprintln!("events: no event log to maintain.");
-    }
+    //
+    // The per-date streaming event logs (`.lorekeeper/events/{source}/{date}.jsonl`) are
+    // NEVER pruned: they are the permanent raw layer a streaming source projects its daily
+    // pages from, so `lore ingest --date <past>` can re-render ANY day — a deleted or
+    // damaged page self-heals only as far back as the log exists. Knowledge layers are
+    // permanent; retention applies to operational history only.
 
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{event_log_expired, prune_cutoff_secs};
+    use super::prune_cutoff_secs;
 
     #[test]
     fn cutoff_is_now_minus_retention() {
@@ -176,27 +126,5 @@ mod tests {
         // never a negative value that would wrap to a huge u64 and wipe the cache.
         assert_eq!(prune_cutoff_secs(1_000_000, 1_000_000), 0);
         assert_eq!(prune_cutoff_secs(i64::MAX / 2, i64::MAX), 0);
-    }
-
-    #[test]
-    fn event_log_expiry_is_strict_and_date_aware() {
-        let cutoff = jiff::civil::date(2026, 3, 1);
-        assert!(
-            event_log_expired(Some("2026-02-28"), cutoff),
-            "before cutoff → prune"
-        );
-        assert!(
-            !event_log_expired(Some("2026-03-01"), cutoff),
-            "on cutoff → keep"
-        );
-        assert!(
-            !event_log_expired(Some("2026-03-02"), cutoff),
-            "after cutoff → keep"
-        );
-        assert!(
-            !event_log_expired(Some("not-a-date"), cutoff),
-            "unparseable → keep"
-        );
-        assert!(!event_log_expired(None, cutoff), "no stem → keep");
     }
 }
