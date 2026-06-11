@@ -98,8 +98,6 @@ fn default_max_thread_messages() -> usize {
 struct HistoryData {
     messages: Option<Vec<SlackMessage>>,
     #[serde(default)]
-    has_more: bool,
-    #[serde(default)]
     response_metadata: Option<ResponseMetadata>,
 }
 
@@ -161,11 +159,11 @@ impl SlackChannelSource {
             "conversations.replies",
             &[("channel", channel_id), ("ts", root_ts), ("limit", "100")],
             max_messages,
+            "max_thread_messages",
             |data| {
                 (
                     data.messages.unwrap_or_default(),
                     ResponseMetadata::cursor(data.response_metadata),
-                    data.has_more,
                 )
             },
         )
@@ -208,11 +206,11 @@ impl Source for SlackChannelSource {
                     ("limit", "100"),
                 ],
                 p.max_messages_per_channel,
+                "max_messages_per_channel",
                 |data| {
                     (
                         data.messages.unwrap_or_default(),
                         ResponseMetadata::cursor(data.response_metadata),
-                        data.has_more,
                     )
                 },
             )

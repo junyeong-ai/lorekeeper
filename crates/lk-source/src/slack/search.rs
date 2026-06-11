@@ -18,10 +18,16 @@ struct SlackSearchParams {
     queries: Vec<QueryParams>,
     #[serde(default = "default_lookback")]
     lookback_hours: u32,
+    #[serde(default = "default_max_matches")]
+    max_matches_per_query: usize,
 }
 
 fn default_lookback() -> u32 {
     24
+}
+
+fn default_max_matches() -> usize {
+    200
 }
 
 #[derive(Debug, Deserialize)]
@@ -33,7 +39,13 @@ struct QueryParams {
 
 /// Validate this source's params at config-load time, before any network work.
 pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
-    crate::parse_params::<SlackSearchParams>(params).map(|_| ())
+    let p: SlackSearchParams = crate::parse_params(params)?;
+    if p.max_matches_per_query == 0 {
+        return Err(SourceError::InvalidParams(
+            "slack-search `max_matches_per_query` must be > 0".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -44,6 +56,13 @@ struct SearchData {
 #[derive(Deserialize)]
 struct SearchMessages {
     matches: Option<Vec<SearchMatch>>,
+    paging: Option<SearchPaging>,
+}
+
+#[derive(Deserialize)]
+struct SearchPaging {
+    page: Option<u32>,
+    pages: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -103,19 +122,77 @@ impl Source for SlackSearchSource {
             let kw = spec.keywords.join(" OR ");
             let query = format!("in:#{channel_name} after:{after_str} before:{before_str} {kw}");
 
-            let data: SearchData = slack_post(
-                &self.http,
-                &self.token,
-                "search.messages",
-                &[
-                    ("query", query.as_str()),
-                    ("sort", "timestamp"),
-                    ("count", "50"),
-                ],
-            )
-            .await?;
+            // Paginate the search to the end of the day window (complete-refetch
+            // contract: the daily page is re-rendered from this fetch, so a match
+            // beyond one page is silently lost knowledge). `search.messages`
+            // paginates by page number (`messages.paging.page` of `.pages`), not a
+            // cursor, so it loops here rather than through the cursor-flavored
+            // `paginate` helper — termination is still the shared
+            // `paging::page_step` rule.
+            // Requested page size; the server may return fewer (or zero) per page.
+            const PAGE_SIZE: usize = 100;
+            let page_size = PAGE_SIZE.to_string();
 
-            let matches = data.messages.and_then(|m| m.matches).unwrap_or_default();
+            let mut matches: Vec<SearchMatch> = Vec::new();
+            // The page number doubles as the fetched-page count: it starts at 1
+            // and increments only after a fetch, so at each decision point
+            // exactly `page` pages have been fetched.
+            let mut page = 1u32;
+
+            loop {
+                let page_str = page.to_string();
+                let data: SearchData = slack_post(
+                    &self.http,
+                    &self.token,
+                    "search.messages",
+                    &[
+                        ("query", query.as_str()),
+                        ("sort", "timestamp"),
+                        ("count", page_size.as_str()),
+                        ("page", page_str.as_str()),
+                    ],
+                )
+                .await?;
+
+                let (page_matches, paging) = match data.messages {
+                    Some(m) => (m.matches.unwrap_or_default(), m.paging),
+                    None => (Vec::new(), None),
+                };
+                matches.extend(page_matches);
+
+                // A missing paging envelope reads as "no further pages" — Slack
+                // always includes it on multi-page results, so this never
+                // under-fetches; it only ends cleanly on the single-page case.
+                let has_next = paging
+                    .map(|pg| pg.page.unwrap_or(page) < pg.pages.unwrap_or(page))
+                    .unwrap_or(false);
+
+                match crate::paging::page_step(
+                    matches.len(),
+                    p.max_matches_per_query,
+                    has_next,
+                    page as usize,
+                ) {
+                    crate::paging::PageStep::Continue => page += 1,
+                    crate::paging::PageStep::Stop { dropped } => {
+                        matches.truncate(p.max_matches_per_query);
+                        if dropped {
+                            tracing::warn!(
+                                max = p.max_matches_per_query,
+                                "slack-search: match cap hit, some matches may have been dropped; raise max_matches_per_query"
+                            );
+                        }
+                        break;
+                    }
+                    crate::paging::PageStep::Exhausted => {
+                        tracing::warn!(
+                            pages = crate::paging::MAX_PAGES,
+                            "slack-search: page budget exhausted before the search completed; results may be incomplete"
+                        );
+                        break;
+                    }
+                }
+            }
 
             tracing::info!(
                 count = matches.len(),
@@ -190,5 +267,26 @@ impl Source for SlackSearchSource {
         }
 
         Ok(all_items)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn max_matches_defaults_and_rejects_zero() {
+        let base = serde_json::json!({
+            "queries": [{"channel": "#x", "keywords": ["a"]}]
+        });
+        let params: SlackSearchParams = serde_json::from_value(base.clone()).unwrap();
+        assert_eq!(params.max_matches_per_query, 200);
+        // A zero cap would silently fetch nothing; validation must refuse it up front.
+        let mut zero = base.clone();
+        zero["max_matches_per_query"] = serde_json::json!(0);
+        assert!(validate_params(&zero).is_err());
+        let mut one = base;
+        one["max_matches_per_query"] = serde_json::json!(1);
+        assert!(validate_params(&one).is_ok());
     }
 }

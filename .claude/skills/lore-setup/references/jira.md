@@ -33,7 +33,8 @@ my-tasks:
       project = OYAI AND assignee = currentUser()
       AND updated >= -1d
       ORDER BY updated DESC
-    max_results: 50
+    # max_issues: 200                     # optional per-run cap; the fetch paginates the
+                                          # whole JQL result and warns if it drops issues
     start_date_field: customfield_10015   # optional: show the start date
   labels: [personal]
   extract_concepts: false

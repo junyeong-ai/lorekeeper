@@ -29,11 +29,19 @@ struct GoogleCalendarParams {
     lookahead_hours: u32,
     #[serde(default)]
     fetch_meeting_notes: bool,
+    #[serde(default = "default_max_events")]
+    max_events: usize,
 }
 
 /// Validate this source's params at config-load time, before any network work.
 pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
-    crate::parse_params::<GoogleCalendarParams>(params).map(|_| ())
+    let p: GoogleCalendarParams = crate::parse_params(params)?;
+    if p.max_events == 0 {
+        return Err(SourceError::InvalidParams(
+            "calendar `max_events` must be > 0".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn default_calendar() -> String {
@@ -45,10 +53,15 @@ fn default_lookback() -> u32 {
 fn default_lookahead() -> u32 {
     24
 }
+fn default_max_events() -> usize {
+    500
+}
 
 #[derive(Deserialize)]
 struct EventList {
     items: Option<Vec<CalEvent>>,
+    #[serde(rename = "nextPageToken")]
+    next_page_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -178,24 +191,61 @@ impl Source for GoogleCalendarSource {
             .push(&p.calendar_id)
             .push("events");
 
-        let resp = check_response(
-            self.http
-                .get(url)
-                .bearer_auth(&token)
-                .query(&[
-                    ("timeMin", &time_min.to_string()),
-                    ("timeMax", &time_max.to_string()),
-                    ("singleEvents", &"true".to_string()),
-                    ("orderBy", &"startTime".to_string()),
-                    ("maxResults", &"50".to_string()),
-                ])
-                .send()
-                .await?,
-        )
-        .await?;
+        // Paginate to the end of the window (complete-refetch contract: the daily page is
+        // re-rendered from this fetch, so a dropped event is silently lost knowledge).
+        // Requested page size; the server may return fewer (or zero) per page.
+        // Termination is `paging::page_step` — the rule all listing adapters share.
+        const PAGE_SIZE: usize = 250;
+        let page_size = PAGE_SIZE.to_string();
 
-        let list: EventList = resp.json().await?;
-        let events = list.items.unwrap_or_default();
+        let mut events: Vec<CalEvent> = Vec::new();
+        let mut page_token: Option<String> = None;
+        let mut pages_fetched = 0usize;
+
+        loop {
+            let mut req = self.http.get(url.clone()).bearer_auth(&token).query(&[
+                ("timeMin", &time_min.to_string()),
+                ("timeMax", &time_max.to_string()),
+                ("singleEvents", &"true".to_string()),
+                ("orderBy", &"startTime".to_string()),
+                ("maxResults", &page_size),
+            ]);
+            if let Some(ref pt) = page_token {
+                req = req.query(&[("pageToken", pt.as_str())]);
+            }
+
+            let resp = check_response(req.send().await?).await?;
+            let list: EventList = resp.json().await?;
+
+            events.extend(list.items.unwrap_or_default());
+            pages_fetched += 1;
+
+            match crate::paging::page_step(
+                events.len(),
+                p.max_events,
+                list.next_page_token.is_some(),
+                pages_fetched,
+            ) {
+                crate::paging::PageStep::Continue => page_token = list.next_page_token,
+                crate::paging::PageStep::Stop { dropped } => {
+                    events.truncate(p.max_events);
+                    if dropped {
+                        tracing::warn!(
+                            max = p.max_events,
+                            "calendar: event cap hit, some events may have been dropped; raise max_events"
+                        );
+                    }
+                    break;
+                }
+                crate::paging::PageStep::Exhausted => {
+                    tracing::warn!(
+                        pages = crate::paging::MAX_PAGES,
+                        "calendar: page budget exhausted before the window completed; results may be incomplete"
+                    );
+                    break;
+                }
+            }
+        }
 
         tracing::info!(count = events.len(), "calendar: events found");
 
@@ -512,5 +562,14 @@ mod tests {
         let params: GoogleCalendarParams =
             serde_json::from_value(serde_json::json!({"fetch_meeting_notes": true})).unwrap();
         assert!(params.fetch_meeting_notes);
+    }
+
+    #[test]
+    fn max_events_defaults_and_rejects_zero() {
+        let params: GoogleCalendarParams = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(params.max_events, 500);
+        // A zero cap would silently fetch nothing; validation must refuse it up front.
+        assert!(validate_params(&serde_json::json!({"max_events": 0})).is_err());
+        assert!(validate_params(&serde_json::json!({"max_events": 1})).is_ok());
     }
 }

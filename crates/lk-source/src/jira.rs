@@ -22,7 +22,7 @@ struct JiraParams {
     #[serde(default = "default_fields")]
     fields: Vec<String>,
     #[serde(default = "default_max")]
-    max_results: u32,
+    max_issues: u32,
     /// Jira "start date" custom-field id (instance-specific, e.g. `customfield_10015`).
     /// Unset → start date is simply not shown. Avoids guessing a field id that means
     /// something different on another Jira instance.
@@ -32,7 +32,13 @@ struct JiraParams {
 
 /// Validate this source's params at config-load time, before any network work.
 pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
-    crate::parse_params::<JiraParams>(params).map(|_| ())
+    let p: JiraParams = crate::parse_params(params)?;
+    if p.max_issues == 0 {
+        return Err(SourceError::InvalidParams(
+            "jira `max_issues` must be > 0".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn default_fields() -> Vec<String> {
@@ -52,12 +58,14 @@ fn default_fields() -> Vec<String> {
 }
 
 fn default_max() -> u32 {
-    50
+    200
 }
 
 #[derive(Deserialize)]
 struct SearchResult {
     issues: Option<Vec<Issue>>,
+    #[serde(rename = "nextPageToken")]
+    next_page_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -174,35 +182,81 @@ impl Source for JiraSource {
 
         let my_account_id = self.account_id().await?;
 
-        let max_results = p.max_results.to_string();
-        let resp = crate::retry::send_with_retry(|| {
-            self.http
-                .get(&url)
-                .basic_auth(&self.creds.email, Some(&self.creds.api_token))
-                .query(&[
-                    ("jql", p.jql.as_str()),
-                    ("maxResults", max_results.as_str()),
-                    ("fields", fields_csv.as_str()),
-                ])
-                .send()
-        })
-        .await?;
+        // Paginate to the end of the JQL result (complete-refetch contract: the daily page
+        // is re-rendered from this fetch, so an issue beyond one page is silently lost
+        // knowledge). `/search/jql` paginates by `nextPageToken`, not the legacy `startAt`.
+        // Requested page size; the server may return fewer (or zero) per page.
+        // Termination is `paging::page_step` — the rule all listing adapters share.
+        const PAGE_SIZE: usize = 100;
+        let page_size = PAGE_SIZE.to_string();
+        let cap = p.max_issues as usize;
 
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(SourceError::Api {
-                status,
-                message: format!("Jira search failed: {body}"),
-            });
+        let mut issues: Vec<Issue> = Vec::new();
+        let mut page_token: Option<String> = None;
+        let mut pages_fetched = 0usize;
+
+        loop {
+            let resp = crate::retry::send_with_retry(|| {
+                let mut req = self
+                    .http
+                    .get(&url)
+                    .basic_auth(&self.creds.email, Some(&self.creds.api_token))
+                    .query(&[
+                        ("jql", p.jql.as_str()),
+                        ("maxResults", page_size.as_str()),
+                        ("fields", fields_csv.as_str()),
+                    ]);
+                if let Some(ref pt) = page_token {
+                    req = req.query(&[("nextPageToken", pt.as_str())]);
+                }
+                req.send()
+            })
+            .await?;
+
+            if !resp.status().is_success() {
+                let status = resp.status().as_u16();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(SourceError::Api {
+                    status,
+                    message: format!("Jira search failed: {body}"),
+                });
+            }
+
+            let result: SearchResult = resp
+                .json()
+                .await
+                .map_err(|e| SourceError::Parse(e.to_string()))?;
+
+            issues.extend(result.issues.unwrap_or_default());
+            pages_fetched += 1;
+
+            match crate::paging::page_step(
+                issues.len(),
+                cap,
+                result.next_page_token.is_some(),
+                pages_fetched,
+            ) {
+                crate::paging::PageStep::Continue => page_token = result.next_page_token,
+                crate::paging::PageStep::Stop { dropped } => {
+                    issues.truncate(cap);
+                    if dropped {
+                        tracing::warn!(
+                            max = p.max_issues,
+                            "jira: issue cap hit, some issues may have been dropped; raise max_issues"
+                        );
+                    }
+                    break;
+                }
+                crate::paging::PageStep::Exhausted => {
+                    tracing::warn!(
+                        pages = crate::paging::MAX_PAGES,
+                        "jira: page budget exhausted before the search completed; results may be incomplete"
+                    );
+                    break;
+                }
+            }
         }
 
-        let result: SearchResult = resp
-            .json()
-            .await
-            .map_err(|e| SourceError::Parse(e.to_string()))?;
-
-        let issues = result.issues.unwrap_or_default();
         tracing::info!(count = issues.len(), "jira: issues found");
 
         let base = self.creds.base_url.trim_end_matches('/');
@@ -474,20 +528,31 @@ mod tests {
     #[test]
     fn missing_required_field_rejected() {
         // `jql` is required; omitting it must fail validation, not at runtime.
-        let params = serde_json::json!({ "max_results": 10 });
+        let params = serde_json::json!({ "max_issues": 10 });
         assert!(validate_params(&params).is_err());
     }
 
     #[test]
     fn wrong_type_rejected() {
-        let params = serde_json::json!({ "jql": "x", "max_results": "fifty" });
+        let params = serde_json::json!({ "jql": "x", "max_issues": "fifty" });
         assert!(validate_params(&params).is_err());
     }
 
     #[test]
     fn typo_key_rejected() {
-        // `deny_unknown_fields` catches misspelled params (max_result vs max_results).
-        let params = serde_json::json!({ "jql": "x", "max_result": 10 });
+        // `deny_unknown_fields` catches misspelled params (max_issue vs max_issues).
+        let params = serde_json::json!({ "jql": "x", "max_issue": 10 });
         assert!(validate_params(&params).is_err());
+    }
+
+    #[test]
+    fn max_issues_defaults_and_rejects_zero() {
+        let params: JiraParams = serde_json::from_value(serde_json::json!({"jql": "x"})).unwrap();
+        assert_eq!(params.max_issues, 200);
+        // A zero cap would silently fetch nothing; validation must refuse it up front.
+        let params = serde_json::json!({ "jql": "x", "max_issues": 0 });
+        assert!(validate_params(&params).is_err());
+        let params = serde_json::json!({ "jql": "x", "max_issues": 1 });
+        assert!(validate_params(&params).is_ok());
     }
 }

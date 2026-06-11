@@ -3,6 +3,7 @@ mod google;
 mod jira;
 mod manual;
 pub(crate) mod markdown;
+pub(crate) mod paging;
 pub(crate) mod retry;
 mod rss;
 mod slack;

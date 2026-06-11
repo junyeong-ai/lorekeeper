@@ -51,6 +51,8 @@ sources:
     params:
       folder: "AI-Briefing/briefings"
       file_pattern: "briefing-{date}.md"
+      # max_files: 200            # (optional) per-run cap; the fetch paginates the whole
+                                  # folder listing and warns if this cap actually drops files
     labels: [ai-industry]
     extract_concepts: true
     track_personal: false
@@ -87,7 +89,8 @@ sources:
         assignee = currentUser()
         AND updated >= -1d
         ORDER BY updated DESC
-      max_results: 50
+      # max_issues: 200           # (optional) per-run cap; the fetch paginates the whole
+                                  # JQL result and warns if this cap actually drops issues
     labels: [personal]
     extract_concepts: true
     track_personal: true
@@ -100,6 +103,8 @@ sources:
       lookback_hours: 24
       lookahead_hours: 24
       fetch_meeting_notes: true  # auto-extract meeting notes from Google Drive links
+      # max_events: 500           # (optional) per-run cap; the fetch paginates the whole
+                                  # window and warns if this cap actually drops events
     labels: [personal]
     extract_concepts: true
     track_personal: true
@@ -147,6 +152,8 @@ sources:
         - channel: "#dev-talk"
           keywords: [MCP, RAG, vector, embedding]
       lookback_hours: 24
+      # max_matches_per_query: 200 # (optional) per-query cap; the search paginates all
+                                   # result pages and warns if this cap drops matches
     labels: [ai-internal, strategy]
     extract_concepts: true
     track_personal: false
@@ -322,8 +329,8 @@ concepts:
 #     suggest_min_shared_neighbors: 2  # suggest-links floor: min shared neighbors per pair (cuts co-citation noise)
 
 # ─── Maintenance ──────────────────────────────────────────
-# Retention horizon for `lore maintenance` pruning (ingest log + drained queue files +
-# streaming event logs).
+# Retention horizon for `lore maintenance` pruning (ingest log + drained queue files).
+# Streaming event logs (`.lorekeeper/events/`) are the permanent raw layer — never pruned.
 # Fully optional — omit the block to use the default.
 # maintenance:
 #   retention_days: 90               # how long pruned history (ingest log entries,

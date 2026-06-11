@@ -177,10 +177,13 @@ impl Source for GmailSource {
             max.as_second()
         );
 
+        // Requested page size; the server may return fewer (or zero) per page.
+        // Termination is `paging::page_step` — the rule all listing adapters share.
         const PAGE_SIZE: usize = 50;
 
         let mut refs: Vec<MessageRef> = Vec::new();
         let mut page_token: Option<String> = None;
+        let mut pages_fetched = 0usize;
 
         loop {
             let mut req = self
@@ -198,32 +201,33 @@ impl Source for GmailSource {
             let resp = check_response(req.send().await?).await?;
             let list: ListResponse = resp.json().await?;
 
-            let page = list.messages.unwrap_or_default();
-            let page_empty = page.is_empty();
-            refs.extend(page);
+            refs.extend(list.messages.unwrap_or_default());
+            pages_fetched += 1;
 
-            // Stop at the cap. Only warn when messages were actually dropped — either this
-            // page overshot the cap, or another page is still pending. Fetching exactly
-            // `max_messages` with no further page drops nothing, so it must stay silent
-            // (a "dropped" warning there would be a false alarm).
-            if refs.len() >= p.max_messages {
-                let dropped = refs.len() > p.max_messages || list.next_page_token.is_some();
-                refs.truncate(p.max_messages);
-                if dropped {
-                    tracing::warn!(
-                        max = p.max_messages,
-                        "gmail: message cap hit, some messages were dropped; raise max_messages"
-                    );
+            match crate::paging::page_step(
+                refs.len(),
+                p.max_messages,
+                list.next_page_token.is_some(),
+                pages_fetched,
+            ) {
+                crate::paging::PageStep::Continue => page_token = list.next_page_token,
+                crate::paging::PageStep::Stop { dropped } => {
+                    refs.truncate(p.max_messages);
+                    if dropped {
+                        tracing::warn!(
+                            max = p.max_messages,
+                            "gmail: message cap hit, some messages may have been dropped; raise max_messages"
+                        );
+                    }
+                    break;
                 }
-                break;
-            }
-            if page_empty {
-                break;
-            }
-
-            match list.next_page_token {
-                Some(pt) => page_token = Some(pt),
-                None => break,
+                crate::paging::PageStep::Exhausted => {
+                    tracing::warn!(
+                        pages = crate::paging::MAX_PAGES,
+                        "gmail: page budget exhausted before the listing completed; results may be incomplete"
+                    );
+                    break;
+                }
             }
         }
 

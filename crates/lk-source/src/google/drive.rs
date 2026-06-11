@@ -20,6 +20,8 @@ pub struct GoogleDriveSource {
 struct GoogleDriveParams {
     folder: String,
     file_pattern: String,
+    #[serde(default = "default_max_files")]
+    max_files: usize,
 }
 
 /// Validate this source's params at config-load time, before any network work.
@@ -35,7 +37,16 @@ pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
             "drive `file_pattern` must not be empty".into(),
         ));
     }
+    if p.max_files == 0 {
+        return Err(SourceError::InvalidParams(
+            "drive `max_files` must be > 0".into(),
+        ));
+    }
     Ok(())
+}
+
+fn default_max_files() -> usize {
+    200
 }
 
 /// Escape a value for inclusion inside a single-quoted Drive query string literal.
@@ -48,6 +59,8 @@ fn escape_drive_literal(s: &str) -> String {
 #[derive(Deserialize)]
 struct FileList {
     files: Option<Vec<FileMeta>>,
+    #[serde(rename = "nextPageToken")]
+    next_page_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -121,22 +134,68 @@ impl Source for GoogleDriveSource {
             folder_id
         );
 
-        let resp = check_response(
-            self.http
+        // Paginate to the end of the listing (complete-refetch contract: the daily page is
+        // re-rendered from this fetch, so a file beyond one page is silently lost
+        // knowledge). `fields` must request `nextPageToken` explicitly — a `files(...)`
+        // selector alone strips it from the response and pagination would silently stop.
+        // Requested page size; the server may return fewer (or zero) per page.
+        // Termination is `paging::page_step` — the rule all listing adapters share.
+        const PAGE_SIZE: usize = 100;
+        let page_size = PAGE_SIZE.to_string();
+
+        let mut files: Vec<FileMeta> = Vec::new();
+        let mut page_token: Option<String> = None;
+        let mut pages_fetched = 0usize;
+
+        loop {
+            let mut req = self
+                .http
                 .get(format!("{BASE}/files"))
                 .bearer_auth(&token)
                 .query(&[
                     ("q", q.as_str()),
-                    ("fields", "files(id,name,mimeType,modifiedTime)"),
-                    ("pageSize", "10"),
-                ])
-                .send()
-                .await?,
-        )
-        .await?;
+                    (
+                        "fields",
+                        "nextPageToken, files(id,name,mimeType,modifiedTime)",
+                    ),
+                    ("pageSize", page_size.as_str()),
+                ]);
+            if let Some(ref pt) = page_token {
+                req = req.query(&[("pageToken", pt.as_str())]);
+            }
 
-        let list: FileList = resp.json().await?;
-        let files = list.files.unwrap_or_default();
+            let resp = check_response(req.send().await?).await?;
+            let list: FileList = resp.json().await?;
+
+            files.extend(list.files.unwrap_or_default());
+            pages_fetched += 1;
+
+            match crate::paging::page_step(
+                files.len(),
+                p.max_files,
+                list.next_page_token.is_some(),
+                pages_fetched,
+            ) {
+                crate::paging::PageStep::Continue => page_token = list.next_page_token,
+                crate::paging::PageStep::Stop { dropped } => {
+                    files.truncate(p.max_files);
+                    if dropped {
+                        tracing::warn!(
+                            max = p.max_files,
+                            "drive: file cap hit, some files may have been dropped; raise max_files"
+                        );
+                    }
+                    break;
+                }
+                crate::paging::PageStep::Exhausted => {
+                    tracing::warn!(
+                        pages = crate::paging::MAX_PAGES,
+                        "drive: page budget exhausted before the listing completed; results may be incomplete"
+                    );
+                    break;
+                }
+            }
+        }
 
         tracing::info!(count = files.len(), folder = %p.folder, "drive: files found");
 
@@ -203,5 +262,18 @@ mod tests {
         assert_eq!(escape_drive_literal("Team's Docs"), r"Team\'s Docs");
         assert_eq!(escape_drive_literal(r"a\b"), r"a\\b");
         assert_eq!(escape_drive_literal("plain"), "plain");
+    }
+
+    #[test]
+    fn max_files_defaults_and_rejects_zero() {
+        let params: GoogleDriveParams =
+            serde_json::from_value(serde_json::json!({"folder": "f", "file_pattern": "p"}))
+                .unwrap();
+        assert_eq!(params.max_files, 200);
+        // A zero cap would silently fetch nothing; validation must refuse it up front.
+        let zero = serde_json::json!({"folder": "f", "file_pattern": "p", "max_files": 0});
+        assert!(validate_params(&zero).is_err());
+        let one = serde_json::json!({"folder": "f", "file_pattern": "p", "max_files": 1});
+        assert!(validate_params(&one).is_ok());
     }
 }

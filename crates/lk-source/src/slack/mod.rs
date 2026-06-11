@@ -103,53 +103,67 @@ impl ResponseMetadata {
 }
 
 /// Drive Slack cursor pagination for a read `method`, collecting every item up to
-/// `max_total`. `decode` maps one decoded page to `(items, next_cursor, has_more)`.
-/// The loop owns the termination logic — empty page, cap reached, empty cursor,
-/// `has_more == false` — so the collect-all call sites can never disagree on it.
+/// `max_total` (the cap set by the config param named `cap_param` — quoted in the
+/// truncation warning so the operator knows which knob to raise). `decode` maps one
+/// decoded page to `(items, next_cursor)`.
+/// Continuation is a non-empty `next_cursor` — Slack's one authoritative signal
+/// (`has_more` is advisory and deliberately not consulted: trusting it could end a
+/// listing the cursor says is unfinished). Termination is `paging::page_step` —
+/// the rule all listing adapters share (a page may arrive empty mid-listing, so
+/// only the cursor's absence ends it) — single-sourced so the collect-all call
+/// sites can never disagree on it.
 pub(crate) async fn paginate<Page, Item, F>(
     http: &reqwest::Client,
     token: &str,
     method: &str,
     base_params: &[(&str, &str)],
     max_total: usize,
+    cap_param: &str,
     mut decode: F,
 ) -> Result<Vec<Item>, SourceError>
 where
     Page: serde::de::DeserializeOwned,
-    F: FnMut(Page) -> (Vec<Item>, String, bool),
+    F: FnMut(Page) -> (Vec<Item>, String),
 {
     let mut out: Vec<Item> = Vec::new();
     let mut cursor = String::new();
+    let mut pages_fetched = 0usize;
     loop {
         let mut params: Vec<(&str, &str)> = base_params.to_vec();
         if !cursor.is_empty() {
             params.push(("cursor", cursor.as_str()));
         }
         let page: Page = slack_post(http, token, method, &params).await?;
-        let (items, next, has_more) = decode(page);
-        let page_empty = items.is_empty();
+        let (items, next) = decode(page);
         out.extend(items);
-        if out.len() >= max_total {
-            // Hit the safety cap with more pages available — make the silent
-            // truncation observable so a very busy channel/thread/workspace is
-            // visible rather than quietly losing items.
-            out.truncate(max_total);
-            if !next.is_empty() && has_more {
+        pages_fetched += 1;
+
+        let has_next = !next.is_empty();
+        match crate::paging::page_step(out.len(), max_total, has_next, pages_fetched) {
+            crate::paging::PageStep::Continue => cursor = next,
+            crate::paging::PageStep::Stop { dropped } => {
+                out.truncate(max_total);
+                if dropped {
+                    // Make the cap truncation observable so a very busy
+                    // channel/thread/workspace is visible rather than quietly
+                    // losing items.
+                    tracing::warn!(
+                        method,
+                        max = max_total,
+                        "slack: message cap hit, some messages may have been dropped; raise {cap_param}"
+                    );
+                }
+                break;
+            }
+            crate::paging::PageStep::Exhausted => {
                 tracing::warn!(
                     method,
-                    max_total,
-                    "Slack pagination hit cap; results truncated"
+                    pages = crate::paging::MAX_PAGES,
+                    "slack: page budget exhausted before the listing completed; results may be incomplete"
                 );
+                break;
             }
-            break;
         }
-        if page_empty {
-            break;
-        }
-        if next.is_empty() || !has_more {
-            break;
-        }
-        cursor = next;
     }
     Ok(out)
 }

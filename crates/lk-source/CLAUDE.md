@@ -27,7 +27,8 @@ map to `RawItem`.
   - **Gmail**: uses epoch-second `after:`/`before:` from `day_window` (timezone-exact);
     the `include_queries` OR group is parenthesized so the bounds bind to every term.
   - **Jira**: current `GET /rest/api/3/search/jql` (the old `/search` was removed, returns
-    410). `description` is ADF JSON → `markdown::adf_to_markdown`. The user supplies a
+    410), paginated via `nextPageToken` (NOT the legacy `startAt`). `description` is ADF
+    JSON → `markdown::adf_to_markdown`. The user supplies a
     `jql` query string directly in config; convention is to search by `updated` for daily
     work snapshots. `duedate` + `customfield_10015` (start date) render as a status/period
     header. The authenticated `accountId` (the exact ownership key) is fetched from
@@ -59,13 +60,27 @@ map to `RawItem`.
     summary is kept, so boilerplate never overwrites it.
   - **Error isolation**: individual item failures (thread fetch, file download, timestamp
     parse) are caught with `tracing::warn!` and skipped — one inaccessible thread or file
-    does not abort the entire source. Gmail and Slack history use cursor pagination with
-    configurable caps (`slack-channel` exposes `max_messages_per_channel`/`max_thread_messages`,
-    defaults 500/200; `gmail` exposes `max_messages`, default 200 — all validated `> 0`).
-    slack-channel enforces its cap in the shared `paginate` helper and Gmail in its own
-    fetch loop; both `tracing::warn!` when they actually drop messages, so a very busy
-    source is observable and the operator can raise the cap; other adapters issue bounded
-    single requests.
+    does not abort the entire source.
+  - **No silent truncation (complete-refetch contract)**: every windowed/listing adapter
+    paginates to the END of its window or listing — a single-page fetch would silently
+    lose knowledge the daily page is re-rendered from. Termination is single-sourced in
+    `paging::page_step`: a listing ends ONLY when the continuation signal is absent — a
+    page may legitimately arrive EMPTY with a token still present (server-side
+    filtering), so an empty page never terminates; a hard page budget (`paging::MAX_PAGES`)
+    keeps an unattended ingest finite against a server streaming tokens without progress
+    (loud warn when it trips). Caps are guards against pathological volume, all
+    config-exposed and validated `> 0`: `slack-channel`
+    `max_messages_per_channel`/`max_thread_messages` (500/200), `slack-search`
+    `max_matches_per_query` (200), `gmail` `max_messages` (200), `google-calendar`
+    `max_events` (500), `google-drive` `max_files` (200), `jira` `max_issues` (200).
+    Every adapter `tracing::warn!`s ONLY when the cap may have dropped items (overshoot
+    or a pending next page — never a false alarm at an exact-cap fetch; "may have been
+    dropped" because a pending page can turn out empty), so truncation is always
+    observable and the operator can raise the cap. slack-channel routes through the
+    shared `paginate` helper (cursor continuation; a non-empty `next_cursor` is the one
+    authoritative signal — `has_more` is advisory and not consulted); slack-search
+    paginates `search.messages` by page number (`messages.paging.page` of `.pages`);
+    Gmail/Calendar/Drive/Jira each loop with `page_step` directly.
   - **Transient-failure retry**: Slack retries inside `slack_post`; Google (token refresh)
     and Jira (`/myself`, search) wrap idempotent requests in `retry::send_with_retry`
     (bounded retries on 429/5xx + connect/timeout, honoring numeric `Retry-After`), so a
