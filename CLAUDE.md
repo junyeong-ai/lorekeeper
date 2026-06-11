@@ -18,9 +18,9 @@ Calendar ──────┤          ├─ Concepts (LLM)          <wiki>/co
 RSS/Atom ──────┤          ├─ Render (templates)      <wiki>/documents/
 Manual inbox ──┘          ├─ Wiki index (catalog)    <wiki>/index.md (by-topic)
                           ├─ Wiki log (timeline)     <wiki>/log.md (by-time)
-                          └─ Graph (lint, stale,     <wiki>/AGENTS.md
-                               cluster, backlinks,
-                               alias, audit)
+                          └─ Graph (lint, cluster,   <wiki>/AGENTS.md
+                               suggest-links, merge,
+                               backlinks-sync, …)
 ```
 
 ## Workspace
@@ -52,6 +52,7 @@ lore ingest ai-news                # run a single source
 lore schema                        # generate <wiki>/AGENTS.md
 lore wiki concepts                 # list all concept pages
 lore graph lint                    # structural health check
+lore doctor                        # vault text-cleanliness audit (non-zero on defects)
 lore queue status                  # classify pending LLM tasks (current/stale/missing)
 ```
 

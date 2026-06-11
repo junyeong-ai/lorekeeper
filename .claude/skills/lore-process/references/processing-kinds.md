@@ -61,10 +61,10 @@ and descriptions in `input.locale` language; default to Korean if absent.
 Identify the key named entities, topics, and concepts (whatever the source's
 domain — the focus, if present, names it). Output a list of concept names (in
 the source language). Each concept also produces a concept page (create if
-missing, merge if exists). Fill the origin page's `## Related Concepts` with
-a `[[concept]]` forward link — the single source of truth `backlinks-sync`
-reads; leave the concept's `## Sources` / `source_count` to it. Use the
-concept path pattern from AGENTS.md.
+missing, merge if exists). Fill the origin page's related-concepts section
+(the task's `target.anchor` heading) with a `[[concept]]` forward link — the
+single source of truth `backlinks-sync` reads; leave the concept's sources
+section / `source_count` to it. Use the concept path pattern from AGENTS.md.
 
 **What counts as a concept** (keep the graph high-signal, not noisy): extract
 durable, reusable knowledge nodes — technologies, named methods,
@@ -111,11 +111,13 @@ tags: ["{category-id}"]
 ---
 ```
 
-Do NOT add any keys beyond those listed above. Emit all three body sections in
-the AGENTS.md concept format: `## Synthesis` (you fill — see below), `## Sources`
-(leave EMPTY), and `## Related` (leave EMPTY). `## Sources` and `source_count: 0`
-are machine-owned (AGENTS.md § Concept convergence); `## Related` is human/audit-
-curated and never machine-written, so emit the heading with no bullets.
+Do NOT add any keys beyond those listed above. Emit all three body sections with
+headings EXACTLY as AGENTS.md defines for the concept page type (they are
+locale-dependent — never assume English): the synthesis section (you fill — see
+below), the sources section (leave EMPTY), and the related section (leave EMPTY).
+The sources section and `source_count: 0` are machine-owned (AGENTS.md § Concept
+convergence); the related section is human/audit-curated and never
+machine-written, so emit its heading with no bullets.
 
 **When creating a new concept page**, fill the Synthesis section (heading
 from AGENTS.md) with a 1-2 sentence definition/context of the concept based

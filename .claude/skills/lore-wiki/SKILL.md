@@ -48,7 +48,7 @@ each as an independent source, and report the aggregate results.
    several per source). Converge each one through the **Concept convergence**
    section of the vault's `AGENTS.md` — which covers loading the
    registry (`lore wiki concepts`), tracking concepts created earlier in this
-   add, alias registration, and the machine-owned `## Sources`/`source_count`
+   add, alias registration, and the machine-owned sources section/`source_count`
    fields. Fill the Synthesis section with a 1-2 sentence definition for a new
    concept; the document's forward `[[wikilink]]` from step 3 is what
    `backlinks-sync` counts as the citation.
@@ -89,7 +89,7 @@ Answer a question grounded in vault content, with compounding.
 ### `/lore-wiki audit`
 
 Five-layer health check: structural lint, missing cross-references,
-contradictions, frontiers, concept lifecycle. Surface findings for human
+contradictions, frontiers, concept convergence. Surface findings for human
 review — never auto-resolve.
 
 Follow the full procedure in [references/audit.md](references/audit.md) —

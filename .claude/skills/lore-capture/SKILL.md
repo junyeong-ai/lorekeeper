@@ -88,8 +88,8 @@ This skill writes a COMPLETE page directly — no ingest pipeline runs
 afterward. AGENTS.md's `Owner` column describes the *automated* pipeline
 (`machine` = filled by `lore ingest`, `LLM` = filled by `/lore-process`);
 for a hand-authored capture there is no such later pass, so you fill EVERY
-section yourself, including the ones marked `machine` (`## Content`, the
-related-concepts section). The only exception is each concept's `## Sources`
+section yourself, including the ones marked `machine` (the content and
+related-concepts sections). The only exception is each concept's sources section
 + `source_count`, which `backlinks-sync` re-derives in step 6 (leave empty).
 Omit the `llm_inputs` frontmatter block entirely — it belongs to the
 pipeline cache, not to directly-authored pages. An in-the-moment capture has
@@ -98,7 +98,7 @@ only when the insight came from a concrete file or link you can cite).
 
 Link the relevant concepts as `[[wikilink]]`s in the document's
 related-concepts section (heading from AGENTS.md) — these forward links are
-what `backlinks-sync` reads to derive each concept's `## Sources` in step 6.
+what `backlinks-sync` reads to derive each concept's sources section in step 6.
 
 `document_type` is a FORMAT value from the AGENTS.md vocabulary
 (`note` for prose/markdown, `report` for HTML, `data` for structured) —
@@ -117,7 +117,7 @@ in this capture as the created-this-run set. Then:
 2. Existing → update `updated` and enrich the synthesis if warranted.
 3. Assign category from config.yaml `concepts.categories`.
 
-`## Sources` / `source_count` stay machine-owned (AGENTS.md § Concept convergence) —
+The sources section / `source_count` stay machine-owned (AGENTS.md § Concept convergence) —
 `backlinks-sync` re-derives both in step 6 from the document's forward link
 (step 4), the source of truth.
 

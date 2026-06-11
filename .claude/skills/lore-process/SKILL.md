@@ -49,7 +49,7 @@ compacted since you last read it.
 2. **Locate sections only by `target.anchor`** (the exact `## …` heading the
    pipeline wrote, resolved from i18n at queue time). Never hardcode a
    heading per `target.kind`.
-3. **Never hand-write a concept's `## Sources` body or `source_count`** —
+3. **Never hand-write a concept's sources-section body or `source_count`** —
    both are machine-owned; `lore graph backlinks-sync` re-derives them from
    forward `[[wikilink]]`s on origin pages.
 4. **Move a queue file to `processed/` only when every task in it
@@ -188,7 +188,7 @@ The essentials: a visible `.jsonl` is fully written and every
    mv "$file" "$VAULT/.lorekeeper/queue/processed/"
    ```
 
-5. **Finalize** — concept `## Sources` / `source_count` were left empty on
+5. **Finalize** — concept sources sections / `source_count` were left empty on
    purpose; reconcile them from the wikilink graph, then refresh the catalog:
    ```bash
    lore graph backlinks-sync   # re-derive every concept's ## Sources + source_count
@@ -216,7 +216,7 @@ succeeded. Failure rules:
   - Section edits replace the body — repeating the edit produces identical
     content. No drift.
   - Concept page merging preserves the original `created` and reuses the
-    existing slug; the `## Sources` body is never written during processing
+    existing slug; the sources-section body is never written during processing
     (it stays empty for `backlinks-sync` to own), so a re-run touches
     nothing there.
   - `source_count` is never written by processing — new pages start at `0`,

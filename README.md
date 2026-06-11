@@ -76,9 +76,9 @@ Calendar ──────┤          ├─ Concepts (LLM)          wiki/conc
 RSS/Atom ──────┤          ├─ Render (templates)      wiki/documents/
 Manual inbox ──┘          ├─ Wiki index (catalog)    wiki/index.md (by-topic)
                           ├─ Wiki log (timeline)     wiki/log.md (by-time)
-                          └─ Graph (lint, stale,     wiki/AGENTS.md
-                               cluster, backlinks,
-                               alias, audit)
+                          └─ Graph (lint, cluster,   wiki/AGENTS.md
+                               suggest-links, merge,
+                               backlinks-sync, …)
 
 Claude Code Skills        Semantic Plane             (same vault)
 ──────────────────        ──────────────             ────────────
@@ -109,7 +109,8 @@ Claude Code Skills        Semantic Plane             (same vault)
 | `lore performance` | Show performance category distribution |
 | `lore schedule` | Print crontab entries (uses plain `lore` for PATH lookup) |
 | `lore schedule --bin /full/path/lore` | Override bin path in cron lines |
-| `lore maintenance` | Prune ingest log, drained queue files, and streaming event logs past `maintenance.retention_days` (default 90) |
+| `lore maintenance` | Prune ingest log and drained queue files past `maintenance.retention_days` (default 90) — operational history only; streaming event logs are the permanent raw layer and are never pruned |
+| `lore doctor` | Audit materialized vault pages against the text-cleanliness contract (exits non-zero on any defect) |
 | `lore schema` | Generate `wiki/AGENTS.md` (page format schema from locale) |
 | `lore graph lint` | Structural health: orphans, broken links, hubs, invalid categories, near-duplicates, alias conflicts, unresolved conflicts, index drift |
 | `lore graph suggest-links` | Community-based cross-reference suggestions |
@@ -119,7 +120,6 @@ Claude Code Skills        Semantic Plane             (same vault)
 | `lore graph index-sync [--fix]` | Check `wiki/index.md` against disk pages; `--fix` adds missing entries |
 | `lore graph normalize [--fix]` | Check slug normalization; `--fix` renames files and updates wikilinks |
 | `lore graph merge <from> <into>` | Fold a duplicate concept into a canonical one (rewires wikilinks, deletes `from`) |
-| `lore graph stale --days N` | Report pages that are old AND no longer cited by recent activity (dormant, not just old) |
 | `lore graph audit-candidates` | Concepts whose source set changed since their last contradiction audit |
 | `lore graph audit-mark <slug>` | Record a concept as audited (drops it from `audit-candidates` until its sources change) |
 | `lore wiki index` | Rebuild `wiki/index.md` — by-topic catalog |
@@ -149,8 +149,8 @@ the skills) to `~/.claude/scheduled-tasks/`; point your cron or remote-agent run
   reconcile (backlinks + catalog + structural lint). Source: [`scripts/lore-daily-ingest.md`](scripts/lore-daily-ingest.md).
 - **`lore-weekly-ingest`** (Monday) — synthesis of every period (weekly themes +
   personal review always; monthly/quarterly/annual materialise in the week their
-  period closes, idempotent re-renders otherwise), a knowledge audit (dormancy,
-  contradiction worklist, near-duplicate review), and the retention janitors
+  period closes, idempotent re-renders otherwise), a knowledge audit (contradiction
+  worklist, near-duplicate review, relationship gaps), and the retention janitors
   (`lore maintenance`, `lore queue prune`). Source: [`scripts/lore-weekly-ingest.md`](scripts/lore-weekly-ingest.md).
 
 The daily task keeps the graph structurally consistent every day; the weekly task adds

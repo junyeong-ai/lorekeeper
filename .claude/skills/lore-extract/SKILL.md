@@ -41,10 +41,10 @@ This skill writes COMPLETE pages directly — no ingest pipeline runs over
 them. AGENTS.md's `Owner` column describes the *automated* pipeline
 (`machine`/`LLM` = filled by `lore ingest` / `/lore-process`); since this
 skill is the author, you fill EVERY section yourself, including ones marked
-`machine` (a document's `## Content` and related-concepts section). The sole
-exception is each concept's `## Sources` + `source_count`, re-derived by the
-Finalize `backlinks-sync`. Omit the `llm_inputs` frontmatter block — it is
-the pipeline's cache, not part of a directly-authored page.
+`machine` (a document's content and related-concepts sections). The sole
+exception is each concept's sources section + `source_count`, re-derived by
+the Finalize `backlinks-sync`. Omit the `llm_inputs` frontmatter block — it
+is the pipeline's cache, not part of a directly-authored page.
 
 ## Extraction manifest
 
@@ -183,11 +183,12 @@ Extract knowledge using the manifest. Requires a prior scan.
    c. Final T-level judgment. Skip T4.
 
    d. **Transform** source → knowledge document. The document's top-level headings are
-      ONLY those AGENTS.md defines (`## Summary`, `## Content`, `## Related Concepts`) —
-      never invent new `##` sections. The labels below are `###` sub-sections nested
-      under `## Content`; map each source part to its sub-section:
+      ONLY those AGENTS.md defines for the document page type — read them there (they
+      are locale-dependent), never invent new `##` sections. The labels below are `###`
+      sub-sections nested under the document's content section; map each source part to
+      its sub-section:
 
-      | Source kind | `### sub-section under ## Content` |
+      | Source kind | `###` sub-section under the content section |
       |------------|----------------|
       | ADR Context | → Background & Constraints |
       | ADR Decision | → Key Findings |
@@ -227,15 +228,16 @@ Extract knowledge using the manifest. Requires a prior scan.
       Link the extracted concepts as `[[wikilinks]]` in the document's
       related-concepts body section (heading per AGENTS.md), NOT in a
       frontmatter `concepts` array. These forward links are what the Finalize
-      `backlinks-sync` reads to populate each concept's `## Sources`.
+      `backlinks-sync` reads to populate each concept's sources section.
 
    h. Create/merge concept pages per AGENTS.md, following its
       **Concept convergence** section —
       matching against the registry loaded in step 3, with the concepts already
       created earlier in this run as the created-this-run set (a batch
       processes many documents, so that set is what closes same-run gaps).
-      New concept → fill the Synthesis section, emit `## Related` empty
-      (human/audit-curated, never machine-written). `## Sources` / `source_count`
+      New concept → fill the Synthesis section, emit the related-concepts
+      section empty (human/audit-curated, never machine-written). The sources
+      section / `source_count`
       stay machine-owned (AGENTS.md § Concept convergence); the Finalize
       `backlinks-sync` re-derives both from the document's forward
       `[[wikilink]]` (step g), the single source of truth. If no configured

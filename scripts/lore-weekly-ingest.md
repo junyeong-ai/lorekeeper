@@ -1,6 +1,6 @@
 ---
 name: lore-weekly-ingest
-description: Autonomous weekly Lorekeeper deepening — synthesise last week (cross-source themes + personal review) plus any monthly/quarterly/annual review whose period just closed, fill the synthesis queue, reconcile the graph, run a knowledge audit (dormancy, contradiction worklist, near-duplicate review), then run the retention janitors. Runs on Mondays after the daily ingest.
+description: Autonomous weekly Lorekeeper deepening — synthesise last week (cross-source themes + personal review) plus any monthly/quarterly/annual review whose period just closed, fill the synthesis queue, reconcile the graph, run a knowledge audit (contradiction worklist, near-duplicate review, relationship gaps), then run the retention janitors. Runs on Mondays after the daily ingest.
 ---
 
 ## Role
@@ -26,10 +26,10 @@ change slowly and would be noise (and LLM cost) run daily:
   (monthly/quarterly/annual) ride this same cadence: each is an idempotent
   materialized view, so invoking it weekly costs nothing outside the first week
   after its period closes — no date-gating logic anywhere.
-- **Knowledge audit** — dormancy (`lore graph stale`), the contradiction worklist
-  (`lore graph audit-candidates`), near-duplicate merge candidates, and
-  relationship-gap suggestions. These accumulate gradually; a weekly review keeps the
-  worklist low-noise and the vault pristine without daily churn.
+- **Knowledge audit** — the contradiction worklist (`lore graph audit-candidates`),
+  near-duplicate merge candidates, and relationship-gap suggestions. These accumulate
+  gradually; a weekly review keeps the worklist low-noise and the vault pristine
+  without daily churn.
 
 ## Output contract (violation = task failure)
 
@@ -37,9 +37,9 @@ The final assistant text message MUST be one of:
 
 - **(A) Success report** — synthesis pages written this run (weekly always;
   monthly/quarterly/annual when their period just closed), queue tasks drained,
-  graph-sync changed-page counts, the audit summary (dormant-page /
-  contradiction-candidate / near-duplicate counts, contradictions flagged, merges
-  recommended for human action), and janitor prune counts. 5-10 lines.
+  graph-sync changed-page counts, the audit summary (contradiction-candidate /
+  near-duplicate counts, contradictions flagged, merges recommended for human
+  action), and janitor prune counts. 5-10 lines.
 
 - **(B) Partial failure** — which steps succeeded, which failed, and the recovery
   command (`lore synthesis weekly --previous`).
@@ -89,9 +89,8 @@ no-op. This leaves the graph fully consistent before the audit reads it.
 
 Invoke `/lore-wiki audit` (no arguments) for the weekly semantic review.
 
-- It runs the dormancy check (`lore graph stale`), the contradiction worklist
-  (`lore graph audit-candidates`), near-duplicate detection, and relationship-gap
-  suggestions, then applies judgment to each.
+- It runs the contradiction worklist (`lore graph audit-candidates`), near-duplicate
+  detection, and relationship-gap suggestions, then applies judgment to each.
 - **Autonomous-safe.** The audit *surfaces and flags*, never destroys: it writes
   `> [!conflict]` callouts for genuine contradictions (reversible, in the LLM-owned
   synthesis body) and records `audit-mark` so a reviewed concept stays off the
@@ -102,7 +101,7 @@ Invoke `/lore-wiki audit` (no arguments) for the weekly semantic review.
 ### Step 5: Retention janitors
 
 ```bash
-lore maintenance   # prune ingest log, drained queue files, old streaming event logs
+lore maintenance   # prune ingest log and drained queue files (event logs are permanent)
 lore queue prune   # drop stale / missing-target tasks from the pending queue
 ```
 

@@ -8,7 +8,7 @@ resolve section headings before inspecting pages.
    `unresolved_conflicts`, and index drift (`missing_from_index`/`_from_disk`).
    Surface every non-empty list. NOTE: a clean lint (`findings: 0`) means no
    structural FAULTS — it does NOT mean the wiki is well-connected. Empty
-   `## Related` sections are never a lint finding; only `suggest-links` (layer 2)
+   related-concepts sections are never a lint finding; only `suggest-links` (layer 2)
    reveals that gap, so never equate "lint clean" with "healthy".
 2. **Missing cross-references** — run `lore graph --json suggest-links` (never
    exits non-zero — always inspect the pairs), then confirm topical relatedness
@@ -40,7 +40,7 @@ resolve section headings before inspecting pages.
      long before the recent reference burst.
    This layer is LLM judgment, not a deterministic check. Surface as questions
    for human review, never auto-create pages.
-5. **Concept lifecycle** — two parts:
+5. **Concept convergence** — two parts:
    - **Near-duplicates** from layer 1's `near_duplicate_concepts`: for a true
      variant-spelling pair (`vector-db` ~ `vector-database`), recommend consolidating
      it with `lore graph merge <from> <into>` followed by `lore graph backlinks-sync`
@@ -62,8 +62,8 @@ resolve section headings before inspecting pages.
      same principle, not a contradiction: there the source text disambiguates the term, so
      a concept-creating skill that confidently recognizes the synonym registers the alias
      directly. Confidence comes from context; a context-free registry match doesn't have it.)
-   - **Staleness**: run `lore graph stale --days 90`, filter concept entries.
-     `stale` already excludes concepts still cited by recent activity (liveness is
-     graph-derived), so an entry here is genuinely dormant — no manual recency grep
-     needed. For a dormant concept with low `source_count`, suggest
-     `status: archived` in frontmatter — do NOT auto-archive.
+
+A page's age or citation recency is never an audit signal: reference knowledge does
+not expire by going unmentioned, so "old and uncited" identifies nothing actionable.
+What makes a concept due for review is a CHANGE in its evidence (layer 3's source-set
+hash) or a defect in its structure (layer 1) — both already covered above.

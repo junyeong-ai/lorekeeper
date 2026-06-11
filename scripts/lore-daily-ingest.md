@@ -14,8 +14,8 @@ Combines the `lore` binary + `/lore-process` skill:
 - **Drain queue** — `/lore-process` fills summaries, concepts, work-log topic synthesis
 - **Graph health (daily)** — `backlinks-sync` re-derives `## 출처` + `source_count` from real citations; `lore wiki index` rebuilds the catalog; `lore graph lint` (read-only) surfaces orphans/broken/near-duplicate/conflict/invalid-category/index-drift
 
-Weekly synthesis and the knowledge audit (dormancy, contradiction worklist,
-near-duplicate review) are a separate cadence — see the `lore-weekly-ingest` task.
+Weekly synthesis and the knowledge audit (contradiction worklist, near-duplicate
+review, relationship gaps) are a separate cadence — see the `lore-weekly-ingest` task.
 
 ## Output contract (violation = task failure)
 
@@ -118,8 +118,8 @@ lore graph lint             # read-only health report
   concepts created on every ingest.
 - `graph lint` is pure read — no vault writes. Surfaces orphans, broken
   wikilinks, near-duplicate concepts, unresolved contradictions, invalid
-  concept categories, and index drift. Dormancy (`graph stale`) and the
-  contradiction worklist belong to the weekly task, not here. Exit code 1 means
+  concept categories, and index drift. The contradiction worklist
+  (`graph audit-candidates`) belongs to the weekly task, not here. Exit code 1 means
   findings exist (NOT an error); capture the counts for the report and
   continue regardless.
 
