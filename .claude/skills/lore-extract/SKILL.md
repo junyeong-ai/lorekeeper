@@ -218,7 +218,8 @@ Extract knowledge using the manifest. Requires a prior scan.
       updated: {today}
       document_type: note          # FORMAT only (note|report|data); the knowledge's
                                    # nature (project-knowledge, guide, ADR) goes in tags
-      source_url: {repo-url}
+      source_url: {repo-remote-url}  # the repo's REMOTE url; OMIT for a local-only repo —
+                                     # a local/temp path is unstable provenance, worse than none
       source_file:
         - {path-within-repo}
         - {path-within-repo}
