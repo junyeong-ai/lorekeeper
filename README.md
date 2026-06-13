@@ -1,310 +1,359 @@
 # Lorekeeper
 
-Config-driven knowledge ingestion pipeline for Obsidian wikis.
+[![Rust](https://img.shields.io/badge/rust-1.96%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
+[![DeepWiki](https://img.shields.io/badge/DeepWiki-junyeong--ai%2Florekeeper-blue?style=flat-square)](https://deepwiki.com/junyeong-ai/lorekeeper)
 
-Collects daily data from heterogeneous sources (Gmail, Google Drive, Slack, Jira, Google Calendar, RSS/Atom feeds), deduplicates, classifies, extracts concepts via LLM, and writes structured markdown pages to an Obsidian vault. Also tracks personal work for performance reviews (weekly / monthly / quarterly / annual).
+> **[English](README.en.md)** | **한국어**
 
-## Install
+**흩어진 일상의 작업을 스스로 자라는 지식 위키로.**
+Gmail·Slack·Jira·캘린더·RSS·메모를 매일 모아 중복을 없애고, 개념을 추출하고, Obsidian 마크다운으로 정리합니다. LLM이 *정리·연결·갱신(부기)* 을 대신하니 지식은 방치되지 않고 **복리로 쌓입니다.**
 
-**macOS / Linux** (one-liner — downloads prebuilt binary, templates, and Claude Code skills):
+---
+
+## 왜 Lorekeeper인가?
+
+메모·위키가 실패하는 진짜 이유는 *읽기·생각하기*가 아니라 **부기(bookkeeping)** — 교차참조 갱신, 중복 정리, 분류, 모순 점검 — 의 부담입니다. 사람이 이걸 못 버텨서 위키를 방치하죠. Lorekeeper는 그 부기를 LLM에게 맡깁니다.
+
+| | |
+|---|---|
+| 📥 **설정 한 번 → 매일 자동** | 8가지 소스에서 어제의 활동·지식을 수집 |
+| 🧹 **노이즈 제거** | 중복 차단, 관련 없는 항목 필터, 내 일은 work-log로 자동 분리 |
+| 🧩 **개념 자산화** | 같은 개념은 한 페이지로 수렴(`Vector DB` = `vector-database`), 카테고리·연관관계 정리 |
+| 🔗 **연결되는 지식 그래프** | wikilink·역링크·클러스터로 개념이 서로 이어짐 |
+| 📈 **복리** | 주간·월간·분기·연간 합성으로 시간이 갈수록 가치↑ |
+| 🔑 **API 키 불필요** | Claude Code 세션이 직접 LLM 작업 수행 (별도 과금 없음) |
+
+> 💡 영감: Andrej Karpathy의 *"LLM이 관리하는 위키"* — **원본은 불변**, **위키는 LLM이 작성·유지**, **스키마(config)가 워크플로를 정의**. 사람은 소스를 고르고 질문하고, LLM은 부기를 한다.
+
+---
+
+## 한눈에 보기
+
+```mermaid
+flowchart LR
+    subgraph SRC["📡 데이터 소스"]
+        direction TB
+        G["Gmail"]
+        S["Slack"]
+        J["Jira"]
+        C["Calendar"]
+        R["RSS"]
+        M["메모 inbox"]
+    end
+    SRC --> L["⚙️ lore (Rust CLI)"]
+    L --> P["수집 · 정규화 · 중복제거<br/>분류 · 렌더 · 그래프"]
+    P --> V[("🗂️ Obsidian Vault<br/>daily · concepts · documents")]
+    L -. "LLM 작업 큐" .-> CC["🤖 Claude Code<br/>/lore-process"]
+    CC -. "요약 · 개념 · 합성" .-> V
+```
+
+`lore`(결정론적 Rust 바이너리)가 구조를 만들고, `/lore-process`(Claude Code 스킬)가 요약·개념 같은 *판단이 필요한 부분*을 채웁니다. API 키 없이 Claude Code의 LLM 세션을 그대로 씁니다.
+
+---
+
+## 빠른 시작 (5분)
+
 ```bash
+# 1) 설치 — 바이너리 + 템플릿 + Claude Code 스킬을 한 번에
 curl -fsSL https://raw.githubusercontent.com/junyeong-ai/lorekeeper/main/scripts/install.sh | bash
-```
 
-**Windows** (PowerShell):
-```powershell
-irm https://raw.githubusercontent.com/junyeong-ai/lorekeeper/main/scripts/install.ps1 | iex
-```
+# 2) 설정 — 예시를 복사해 내 환경에 맞게 편집
+cp ~/.config/lorekeeper/config.example.yaml ~/.config/lorekeeper/config.yaml
+$EDITOR ~/.config/lorekeeper/config.yaml
+#    (어떤 값을 넣어야 할지 모르겠다면 Claude Code에서 `/lore-setup` — 채널/프로젝트 ID를 직접 찾아줍니다)
 
-The installer:
-- Downloads the prebuilt `lore` binary to `~/.local/bin` (configurable)
-- Installs `templates/` to `$XDG_DATA_HOME/lorekeeper/templates/`
-- Installs the Claude Code skills (`lore-ingest`, `lore-process`, `lore-setup`, `lore-wiki`, `lore-capture`, `lore-extract`) to `~/.claude/skills/`
-- Verifies SHA256 checksums
-- Adds quarantine strip + ad-hoc codesign on macOS
-- Checks `PATH` and prints next steps
-
-Install flags: `--version`, `--install-dir`, `--data-dir`, `--skill {user,project,none}`,
-`--from-source`, `--force`, `--yes`, `--dry-run`. Env vars: `LORE_INSTALL_*`.
-
-Uninstall: `./scripts/uninstall.sh [--yes] [--keep-data]`.
-
-## Quick Start
-
-```bash
-# 1. Install (see above)
-
-# 2. Create your config — auto-discovered at ./config.yaml (repo) or
-#    ~/.config/lorekeeper/config.yaml (binary-only install). Override with --config/LORE_CONFIG.
-cp config.example.yaml config.yaml                                  # from a repo
-# cp ~/.config/lorekeeper/config.example.yaml ~/.config/lorekeeper/config.yaml   # binary install
-$EDITOR config.yaml
-
-# 3. Set credentials — easiest is the interactive wizard:
+# 3) 자격증명 — 대화형 마법사 (Google 토큰은 브라우저로 자동 발급)
 lore init credentials
-#    (or env vars / <vault>/.lorekeeper/credentials.json by hand)
 
-# 4. Verify
+# 4) 검증 — 네트워크 없이 설정만 점검
 lore validate
 
-# 5. Run
-lore ingest
+# 5) 수집 → 채우기
+lore ingest                       # 소스 수집 + 구조 페이지 작성 + LLM 작업 큐잉
+#    이어서 Claude Code에서:  /lore-process     ← 요약·개념을 채움
 
-# 6. Register schedule
+# 6) 매일 자동으로
+lore schedule | crontab -         # config의 cron을 crontab으로
+```
+
+> Obsidian이 없어도 됩니다 — 결과물은 평범한 마크다운 + 폴더라 그냥 텍스트로 읽힙니다. Obsidian은 그래프 탐색을 예쁘게 보여줄 뿐.
+
+---
+
+## 실제로 어떤 결과가 나오나요?
+
+가상의 시나리오로 따라가 봅니다. AI 엔지니어 **수민**이 RAG 트러블슈팅을 정리한 메모를 vault의 `inbox/`에 떨어뜨립니다.
+
+### 📝 입력 — `inbox/rag-검색-품질.md`
+
+```markdown
+# RAG 파이프라인: 낮은 recall 검색 고치기
+
+문제: 질의의 30%가 무관한 청크를 검색해 생성기가 환각을 일으켰다.
+원인: (1) 청크가 2000토큰으로 너무 커서 임베딩이 여러 주제의 평균이 됨.
+      (2) 대화형 질문("그 다른 거는?")을 그대로 임베딩.
+해결: 청크를 ~400토큰으로 줄이고, 질문을 standalone 쿼리로 rewrite하고,
+      유사도를 L2→cosine으로 변경. Recall@5: 0.62 → 0.91.
+```
+
+### ▶️ 실행
+
+```console
+$ lore ingest
+▸ notes (manual)
+  extracted: 1 items
+  ✓ wrote: wiki/documents/rag-파이프라인-낮은-recall-검색-고치기.md (document)
+Done. 1 page written.
+
+# 이어서 Claude Code 세션에서:
+$ /lore-process
+  ✓ summary  → rag-파이프라인-…       (요약 작성)
+  ✓ concepts → +6 concept pages       (RAG, 벡터 DB, 임베딩, 청킹, 질의 재작성, 코사인 유사도)
+  queue: 0 remaining
+```
+
+### ✅ 결과 ① — 문서 페이지 (요약 + 개념 링크가 채워짐)
+
+```markdown
+---
+id: rag-파이프라인-낮은-recall-검색-고치기
+title: "RAG 파이프라인: 낮은 recall 검색 고치기"
+created: 2026-06-13
+tags: ["document", "knowledge"]
+---
+
+## 요약
+청크를 2000→400 토큰으로 줄이고, 대화형 질문을 standalone 쿼리로 재작성하고,
+유사도를 L2→cosine으로 바꿔 Recall@5를 0.62 → 0.91로 끌어올렸다. 핵심 교훈:
+검색 품질은 임베딩 모델 선택보다 **청크 단위와 질문 형식**에 좌우된다.
+
+## 본문
+… (원본을 정규화해 보존) …
+
+## 관련 개념
+- [[Retrieval-Augmented Generation]]
+- [[벡터 데이터베이스]]
+- [[청킹]]
+- [[질의 재작성]]
+```
+
+### ✅ 결과 ② — 개념 페이지가 **수렴**합니다 (핵심 가치)
+
+며칠 뒤 수민이 *"프로덕션 벡터 DB 선택"* 메모를 또 드롭합니다. "벡터 데이터베이스"는 두 메모 모두에 등장하지만 — **새 페이지를 만들지 않고 기존 개념에 합류**합니다:
+
+```markdown
+---
+id: vector-database
+title: "벡터 데이터베이스"
+aliases: ["벡터 데이터베이스", "Vector DB"]
+category: ai-ml
+source_count: 2          # ← 두 문서가 이 한 개념을 인용
+---
+
+## 핵심
+벡터 데이터베이스는 고차원 임베딩을 저장하고 근사 최근접 탐색(ANN)을 제공한다.
+선택은 쿼리 지연시간보다 **운영 단순성**에 좌우되는 경우가 많다 — 관계형 데이터
+옆에 벡터를 두면(pgvector) 별도 stateful 시스템을 피할 수 있다.
+
+## 출처
+- [[프로덕션-벡터-db-선택]]
+- [[rag-파이프라인-낮은-recall-검색-고치기]]
+```
+
+> `Vector DB`라고 쓰든 `벡터 데이터베이스`라고 쓰든 **한 페이지**로 모입니다(alias로 등록). 같은 지식이 흩어지지 않는 것 — 이게 "복리로 쌓인다"의 핵심입니다.
+
+### ✅ 결과 ③ — 주제별 인덱스 (`wiki/index.md`)
+
+```markdown
+# Wiki Index
+
+## 개념 (16)
+
+### ai-ml (6)
+- [[vector-database|벡터 데이터베이스]] — 고차원 임베딩을 저장하고 ANN 탐색을 제공. 선택은 쿼리 지연보다 운영 단순성에 좌우…
+- [[retrieval-augmented-generation|RAG]] — 외부 코퍼스 검색 문맥에 LM 출력을 grounding. 답 품질은 임베딩 모델보다 검색 단계가 지배…
+- [[chunking|청킹]] — 문서를 임베딩·검색 단위로 쪼개는 것. 입도가 검색 품질을 크게 좌우…
+
+### infrastructure (10)
+- [[kubernetes|Kubernetes]] — 컨테이너 오케스트레이션. 안정 운영은 pod 메모리·재시작 지표 관찰에 달림…
+```
+
+### ✅ 결과 ④ — 지식 그래프가 형성됩니다
+
+`lore graph suggest-links`·`cluster`가 개념 사이의 관계를 발견합니다(공동인용을 차수로 정규화한 Adamic-Adar 점수):
+
+```mermaid
+graph TD
+    RAG["RAG"]:::ai
+    VDB["벡터 데이터베이스"]:::ai
+    EMB["임베딩"]:::ai
+    CHK["청킹"]:::ai
+    QR["질의 재작성"]:::ai
+    COS["코사인 유사도"]:::ai
+    PG["pgvector"]:::infra
+    HN["HNSW"]:::infra
+
+    RAG --- VDB
+    RAG --- CHK
+    RAG --- QR
+    VDB --- EMB
+    VDB --- PG
+    VDB --- HN
+    EMB --- COS
+    CHK --- EMB
+
+    classDef ai fill:#eef2ff,stroke:#6366f1,color:#1e1b4b
+    classDef infra fill:#ecfeff,stroke:#06b6d4,color:#083344
+```
+
+### 📈 시간이 지나면 — 복리
+
+```mermaid
+flowchart LR
+    D["매일<br/>일일 수집 + 개념 축적"] --> W["주간<br/>테마 합성 · 성과 리뷰"]
+    W --> Mo["월간<br/>리뷰"]
+    Mo --> Q["분기<br/>리뷰"]
+    Q --> Y["연간<br/>리뷰"]
+    style D fill:#f0fdf4,stroke:#22c55e
+    style Y fill:#fef2f2,stroke:#ef4444
+```
+
+매일의 수집이 개념 그래프를 키우고, 합성이 그것을 점점 높은 고도에서 요약합니다. 일일 → 주간 → 분기 → 연간으로 갈수록 **이미 쌓인 것을 다시 쓰지 않고** 그 위에 누적됩니다.
+
+---
+
+## 소스 (8가지)
+
+| 타입 | 용도 | 인증 |
+|---|---|---|
+| `gmail` | 메일 다이제스트 (라벨/발신자로 필터) | Google OAuth |
+| `slack-channel` | 채널 전체 = 팀 활동 (스레드·봇필터·watch_users) | Slack 토큰 |
+| `slack-search` | 키워드 트렌드 검색 | Slack user 토큰 |
+| `jira` | 그날 작업한 이슈 스냅샷 (ADF→Markdown) | Jira API |
+| `google-calendar` | 일정 + 회의록(Drive 링크 자동 추출) | Google OAuth |
+| `google-drive` | Drive 폴더의 큐레이션 문서 | Google OAuth |
+| `rss` | 벤더 블로그·뉴스 → 개념 (인증 불필요, 다중 피드) | 없음 |
+| `manual` | `inbox/`에 드롭한 파일(md·txt·html) | 없음 |
+
+소스 키 = vault의 하위 폴더 이름. 같은 타입을 여러 개 정의할 수 있습니다(예: `team-slack`, `ai-news`). 전체 예시는 [`config.example.yaml`](config.example.yaml).
+
+---
+
+## 핵심 개념
+
+- **결과물은 평범한 마크다운** — `daily/{소스}/`(원본 타임라인), `wiki/concepts/`(개념), `wiki/documents/`(문서), `me/`(work-log·성과리뷰), `synthesis/`(주간 테마).
+- **자료화된 뷰(materialized view)** — 페이지는 두 층. **구조 층**(frontmatter·원본·헤딩)은 매 수집마다 재생성, **의미 층**(요약·개념·합성)은 LLM 소유이며 재렌더에도 보존됩니다. 입력이 안 바뀌면 LLM 작업 0건(BLAKE3 해시로 판정).
+- **무손실** — 재실행은 멱등(byte-identical). 스트리밍 소스(RSS)는 영구 이벤트 로그로 스크롤아웃된 항목도 보존.
+- **현재만 실체화** — 미래 날짜는 페이지를 만들지 않음(forecast는 지식이 아님). 날짜가 오면 지식이 됩니다.
+- **그래프가 부기를 한다** — `backlinks-sync`(인용 카운트 재도출), `lint`(고아·깨진링크·근접중복), `merge`(중복 개념 통합), `cluster`/`suggest-links`(관계 발견).
+
+---
+
+## 명령어
+
+```bash
+lore validate                 # config 점검 (네트워크 없음)
+lore ingest [소스]            # 수집 (전체 또는 단일 소스)
+lore ingest --dry-run         # vault 변경 없이 미리보기
+lore ingest --date 2026-06-01 # 특정 날짜 재실체화(백필/복구)
+lore synthesis weekly         # 주간 합성 + 개인 리뷰 (monthly/quarterly/annual)
+lore schedule | crontab -     # cron 발행
+lore wiki concepts            # 개념 목록
+lore wiki index / log         # 주제별 인덱스 / 시간순 타임라인 재생성
+lore graph lint               # 구조 건강검진(고아·깨진링크·근접중복·…)
+lore graph suggest-links      # 개념 간 관계 후보(Adamic-Adar)
+lore graph cluster            # 토픽 커뮤니티(Louvain)
+lore graph backlinks-sync     # 개념의 ## Sources·인용수 재도출
+lore graph merge <from> <into># 중복 개념 통합
+lore doctor                   # vault 텍스트 청결도 감사
+lore queue status / prune     # LLM 작업 큐 상태 / 죽은 작업 정리
+lore schema                   # wiki/AGENTS.md(페이지 포맷 스키마) 생성
+```
+
+---
+
+## Claude Code 스킬
+
+`lore` 바이너리(결정론)와 짝을 이루는 6개 스킬 — *판단이 필요한* 부분을 Claude Code의 LLM이 담당합니다.
+
+| 스킬 | 하는 일 |
+|---|---|
+| `/lore-process` | 수집 후 LLM 큐를 비움 — 요약·개념·테마·리뷰 채우기 |
+| `/lore-setup` | 워크스페이스를 들여다보며 config 작성 — Slack 채널·Jira 프로젝트·캘린더 ID 자동 발견 |
+| `/lore-wiki` | 시맨틱 질의(compounding) · 소스 추가 · 구조/의미 감사 |
+| `/lore-capture` | 작업 중 떠오른 인사이트를 즉시 vault에 포착 |
+| `/lore-extract` | 프로젝트 repo의 전이가능한 지식을 일괄 추출 (scan→run→audit) |
+| `/lore-ingest` | `lore` CLI 래퍼 (수집·합성·상태·스케줄) |
+
+> 예: `/lore-wiki query "RAG 검색 품질을 어떻게 올리지?"` → vault의 개념들을 교차 인용해 답하고, 좋은 답은 `wiki/explorations/`에 페이지로 환류합니다.
+
+---
+
+## LLM 제공자 모드
+
+`config.yaml`의 `llm.provider`:
+
+| 모드 | 기본 | 설명 |
+|---|:---:|---|
+| `queue` | ✓ | `<vault>/.lorekeeper/queue/`에 JSONL 작업을 쌓고, `/lore-process`가 Claude Code 세션으로 처리 — **API 키·별도 과금 없음** |
+| `noop` | | LLM 작업 없음 — 개발·CI·템플릿만 필요할 때 |
+
+무인 cron: `lore ingest; claude -p "/lore-process"` (`&&`가 아닌 `;` — 일부 소스 실패해도 정상 소스의 큐는 처리되도록).
+
+---
+
+## 설치 · 빌드
+
+```bash
+# 원라인 설치 (macOS / Linux) — 바이너리·템플릿·스킬, SHA256 검증 포함
+curl -fsSL https://raw.githubusercontent.com/junyeong-ai/lorekeeper/main/scripts/install.sh | bash
+
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/junyeong-ai/lorekeeper/main/scripts/install.ps1 | iex
+
+# 소스에서 빌드
+cargo build --release && ./target/release/lore --help
+```
+
+설치 플래그: `--version`, `--install-dir`, `--skill {user,project,none}`, `--from-source`, `--yes`, `--dry-run`. 제거: `./scripts/uninstall.sh`.
+
+---
+
+## 자격증명
+
+환경변수 또는 `<vault>/.lorekeeper/credentials.json`(0600). 환경변수가 파일보다 우선.
+
+```bash
+lore init credentials   # 대화형 마법사 — Google 토큰은 브라우저 OAuth로 자동 발급
+```
+
+- **Google**: `LORE_GOOGLE_CLIENT_ID/SECRET/REFRESH_TOKEN` — Gmail/Drive/Calendar **읽기 전용** 스코프. "Desktop app" OAuth 클라이언트 필요.
+- **Slack**: `LORE_SLACK_TOKEN`(bot `xoxb-`) 또는 `LORE_SLACK_USER_TOKEN`(`xoxp-`). `slack-search`는 user 토큰 필수.
+- **Jira**: `LORE_JIRA_URL / EMAIL / TOKEN`.
+
+> 자격증명은 `credentials.json`(gitignored)에만 — repo에 절대 커밋되지 않습니다.
+
+---
+
+## 스케줄링
+
+```bash
 lore schedule | crontab -
 ```
 
-## Build from source
+`ingest.schedule`은 **전체 소스를 한 번에** 도는 `lore ingest` 한 줄을 발행합니다(work-log가 cross-source 일일 집계라 소스별 분할 실행은 페이지를 부분 덮어씀). 각 합성 주기(weekly/monthly/quarterly/annual)는 자기 cron을 발행하고, `maintenance.schedule`이 있으면 청소 작업도 자동화됩니다.
 
-```bash
-cargo build --release
-./target/release/lore --help
-```
+무인 운영용으로 설치 시 두 개의 Claude 예약작업 정의(`lore-daily-ingest`, `lore-weekly-ingest`)도 함께 제공됩니다 — 일일 수집+큐 처리+그래프 정합, 주간 합성+지식 감사.
 
-Or via the installer with `--from-source` (requires Rust toolchain).
+---
 
-## Architecture
+## 더 알아보기
 
-```
-Data Sources              lore (Rust CLI)            Obsidian Vault
-────────────              ───────────────            ──────────────
-Google Drive ──┐          ┌─ Extract (per-source)    daily/{source-id}/
-Gmail ─────────┤          ├─ Normalize → Event       me/work-log/
-Slack ─────────┼─ config ─┤  Collapse dup (intra-batch)me/{weekly,monthly,quarterly,annual}/
-Jira ──────────┤  .yaml   ├─ Classify (labels)       synthesis/{weekly}/
-Calendar ──────┤          ├─ Concepts (LLM)          wiki/concepts/
-RSS/Atom ──────┤          ├─ Render (templates)      wiki/documents/
-Manual inbox ──┘          ├─ Wiki index (catalog)    wiki/index.md (by-topic)
-                          ├─ Wiki log (timeline)     wiki/log.md (by-time)
-                          └─ Graph (lint, cluster,   wiki/AGENTS.md
-                               suggest-links, merge,
-                               backlinks-sync, …)
+- **설정 전체 레퍼런스** — [`config.example.yaml`](config.example.yaml) (모든 소스·옵션 주석 포함)
+- **페이지 포맷 스키마** — `lore schema`로 vault에 `wiki/AGENTS.md` 생성
+- **아키텍처 깊이 보기** — [DeepWiki](https://deepwiki.com/junyeong-ai/lorekeeper)
 
-Claude Code Skills        Semantic Plane             (same vault)
-──────────────────        ──────────────             ────────────
-/lore-ingest ────────── lore CLI wrapper ──────────→ daily/ me/ synthesis/ …
-/lore-process ───────── LLM queue drain ──────────→ summaries + concepts
-/lore-capture ───────── real-time capture ─────────→ wiki/documents/
-/lore-extract ───────── batch repo extraction ─────→ wiki/documents/
-/lore-wiki ──────────── query / audit / add ───────→ wiki/
-/lore-setup ─────────── config builder ────────────→ config.yaml
-```
+## 기술 스택
 
-## Commands
-
-| Command | Purpose |
-|---------|---------|
-| `lore init credentials` | Interactive wizard — writes `<vault>/.lorekeeper/credentials.json` |
-| `lore validate` | Verify config.yaml |
-| `lore ingest [source]` | Run ingestion (all enabled sources or single ID) |
-| `lore ingest --dry-run` | Preview without writing to vault |
-| `lore ingest --date YYYY-MM-DD` | Re-materialize a specific day (backfill / repair) |
-| `lore synthesis weekly` | Generate weekly cross-source synthesis + personal review |
-| `lore synthesis monthly` | Aggregate work-log into monthly review |
-| `lore synthesis quarterly` | Generate quarterly performance review |
-| `lore synthesis annual` | Generate annual performance review |
-| `lore status` | Show last ingest time per source |
-| `lore health` | Check staleness against `ingest.schedule` (stale after 2 missed fires; 48h fallback when unscheduled; exit 0 on first install) |
-| `lore health --strict` | Also exit 1 if any source has never been ingested |
-| `lore performance` | Show performance category distribution |
-| `lore schedule` | Print crontab entries (uses plain `lore` for PATH lookup) |
-| `lore schedule --bin /full/path/lore` | Override bin path in cron lines |
-| `lore maintenance` | Prune ingest log and drained queue files past `maintenance.retention_days` (default 90) — operational history only; streaming event logs are the permanent raw layer and are never pruned |
-| `lore doctor` | Audit materialized vault pages against the text-cleanliness contract (exits non-zero on any defect) |
-| `lore schema` | Generate `wiki/AGENTS.md` (page format schema from locale) |
-| `lore graph lint` | Structural health: orphans, broken links, hubs, invalid categories, near-duplicates, alias conflicts, unresolved conflicts, index drift |
-| `lore graph suggest-links` | Community-based cross-reference suggestions |
-| `lore graph cluster` | Topic communities via Louvain modularity |
-| `lore graph export [--with-clusters]` | Export the full node-link graph as JSON (optionally with community assignments) |
-| `lore graph backlinks-sync` | Re-derive each concept's `## Sources` + `source_count` from the wikilink graph (resolves `[[alias]]` citations to the canonical concept) |
-| `lore graph index-sync [--fix]` | Check `wiki/index.md` against disk pages; `--fix` adds missing entries |
-| `lore graph normalize [--fix]` | Check slug normalization; `--fix` renames files and updates wikilinks |
-| `lore graph merge <from> <into>` | Fold a duplicate concept into a canonical one (rewires wikilinks, deletes `from`) |
-| `lore graph audit-candidates` | Concepts whose source set changed since their last contradiction audit |
-| `lore graph audit-mark <slug>` | Record a concept as audited (drops it from `audit-candidates` until its sources change) |
-| `lore wiki index` | Rebuild `wiki/index.md` — by-topic catalog |
-| `lore wiki log` | Rebuild `wiki/log.md` — by-time knowledge timeline |
-| `lore wiki concepts` | List all concept pages |
-| `lore queue status` | Classify pending LLM tasks: current / stale / missing-target |
-| `lore queue prune` | Remove stale / missing-target tasks from the pending queue |
-
-## LLM provider modes
-
-`llm.provider` in `config.yaml` selects how semantic work (summaries, refined events, concepts, themes, reviews) is performed:
-
-| Mode | Default | Best for |
-|------|:-------:|---------|
-| `queue` | ✓ | Daily Claude Code users. Pipeline emits JSONL tasks to `<vault>/.lorekeeper/queue/`; `/lore-process` drains them using Claude Code's native LLM session — no API key, no separate billing. |
-| `noop` |  | Development, CI, or vault-only sources where you only need Rust templating without semantic enrichment. |
-
-Workflow:
-1. `lore ingest` (cron-scheduled) — fetches sources, re-renders structural pages, queues semantic tasks
-2. `/lore-process` (run in Claude Code) — drains the queue, fills summaries, creates/merges concept pages
-3. For unattended cron: `lore ingest; claude -p "/lore-process"` (`;` not `&&` — a partial source failure still exits non-zero, and the healthy sources' queued tasks should drain regardless)
-
-For unattended operation the installer ships two scheduled-task definitions (alongside
-the skills) to `~/.claude/scheduled-tasks/`; point your cron or remote-agent runner at them:
-
-- **`lore-daily-ingest`** (weekday mornings) — chains ingest → `/lore-process` → graph
-  reconcile (backlinks + catalog + structural lint). Source: [`scripts/lore-daily-ingest.md`](scripts/lore-daily-ingest.md).
-- **`lore-weekly-ingest`** (Monday) — synthesis of every period (weekly themes +
-  personal review always; monthly/quarterly/annual materialise in the week their
-  period closes, idempotent re-renders otherwise), a knowledge audit (contradiction
-  worklist, near-duplicate review, relationship gaps), and the retention janitors
-  (`lore maintenance`, `lore queue prune`). Source: [`scripts/lore-weekly-ingest.md`](scripts/lore-weekly-ingest.md).
-
-The daily task keeps the graph structurally consistent every day; the weekly task adds
-the slower, judgment-bearing passes (synthesis + semantic audit) on a weekly cadence.
-
-The skill is **fully idempotent**: re-running on a partially-processed queue file is safe because vault edits replace section content rather than append, and concept page merging preserves accumulated state.
-
-## Claude Code Skills
-
-These skills provide the Claude Code integration surface. All use the `lore-` prefix and are written in English (AI-native design).
-
-| Skill | Purpose | Model-invocable |
-|-------|---------|:---------------:|
-| `/lore-ingest` | Daily source ingestion — wraps the `lore` CLI for ingest, synthesis, status, health, schedule | No (manual trigger) |
-| `/lore-process` | Drain the LLM queue after ingest — fills summaries, extracts concepts, synthesises work-log topics | Yes |
-| `/lore-setup` | Interactive config builder — discovers Slack channel IDs, Jira projects, Google calendars via CLIs | Yes |
-| `/lore-wiki` | Semantic wiki operations — add sources, query with compounding, audit structural + semantic health | Yes |
-| `/lore-capture` | Real-time knowledge capture — grab insights from active troubleshooting before context fades | Yes |
-| `/lore-extract` | Batch project knowledge extraction — scan → manifest → run → audit workflow for existing docs | Yes |
-
-**`/lore-capture`** and **`/lore-extract`** are the project-knowledge harvesting pair:
-- **capture**: one insight at a time, during active work (high urgency, low volume)
-- **extract**: entire documentation corpus, planned batch operation (low urgency, high volume)
-
-Both write to `wiki/documents/` and `wiki/concepts/` (paths resolved from AGENTS.md), sharing the same concept dedup and graph infrastructure as daily ingestion.
-
-### Extraction manifest
-
-`/lore-extract` persists a manifest at `<vault>/.lorekeeper/extracts/<project>/manifest.yaml` during the scan phase. The manifest records discovered sources, transferability classifications, identifier strip patterns, and concept category mappings. Subsequent runs consume the manifest for consistency; re-scans diff against the previous state for incremental updates.
-
-## Workspace Structure
-
-```
-crates/
-  lk-core/      Domain types, config, error, vault path builder
-  lk-vault/     Obsidian vault I/O: read, write, frontmatter, templates, log
-  lk-source/    Source adapters: Gmail, Drive, Slack, Jira, Calendar, RSS, Manual
-  lk-pipeline/  Transform stages: normalize, intra-batch dedup, classify, render, synthesis
-  lk-queue/     Semantic task queue: LlmClient trait, JSONL queue, noop, test mock
-  lk-graph/     Wikilink graph analysis (lint, hubs, cluster, suggest-links)
-  lk-cli/       Binary entry point (lore)
-
-templates/      Jinja2 markdown templates (.md.jinja, embedded in the binary)
-```
-
-## Output Model
-
-**Primary** (per-source): `daily/{source-id}/YYYY-MM-DD.md` — one page per event date (events from multi-day batches are split correctly)
-
-**Derived** (cross-source):
-- `me/work-log/YYYY-MM-DD.md` — aggregated from sources with `track_personal: true`, grouped by date
-- `synthesis/weekly/YYYY-W{nn}.md` — cross-source weekly themes
-- `me/weekly/YYYY-W{nn}.md` — personal weekly review
-- `me/monthly/YYYY-MM.md` — personal monthly review
-- `me/quarterly/YYYY-Q{n}.md` — quarterly performance review
-- `me/annual/YYYY.md` — annual performance review
-- `wiki/concepts/{slug}.md` — extracted concepts; re-extraction merges in place (keeps `created`, title, and category; widens first/last-seen). `source_count` and the `## Sources` body are re-derived from the wikilink graph by `lore graph backlinks-sync` — there is no `sources` frontmatter array
-- `wiki/explorations/{slug}.md` — reusable Q&A syntheses filed by `/lore-wiki query`
-
-## Templates
-
-Templates live in `templates/` and use Jinja2 syntax (minijinja). Lookup order:
-
-1. `{source-id}.md.jinja` — user override per source ID (optional)
-2. `{source-type}.md.jinja` — default per source type (`gmail`, `google-drive`, `slack-channel`, `slack-search`, `jira`, `google-calendar`, `rss`; the `manual` source renders through `document`)
-3. Embedded fallback
-
-Periodic templates: `work-log`, `weekly-synthesis`, `weekly-review`, `monthly-review`, `quarterly-review`, `annual-review`, `concept`, `document`, `exploration`.
-
-## Timezone
-
-`vault.timezone` controls how `Timestamp → Date` is derived. Set to an IANA name (e.g., `Asia/Seoul`, `America/New_York`) or `system`. An item received at `2026-05-22T23:00:00Z` lands in:
-- `2026-05-22.md` with `timezone: UTC` or `timezone: Europe/London` (winter)
-- `2026-05-23.md` with `timezone: Asia/Seoul` (KST = UTC+9)
-
-## Scheduling
-
-```bash
-# Generate cron entries from config
-lore schedule > /tmp/lore-cron.txt
-crontab /tmp/lore-cron.txt
-```
-
-`ingest.schedule` emits a single `lore ingest` line that runs every enabled source in one process — the unit of scheduling, because the work-log aggregates personal events across all sources for a day and a per-source run would render it from a subset. Each enabled synthesis period (weekly/monthly/quarterly/annual) emits its own cron line from `synthesis.<period>.schedule`. With `maintenance.schedule` set, two more lines are emitted — `lore maintenance` and `lore queue prune` — so retention pruning and dead-task cleanup run unattended.
-
-A manual `lore ingest <source>` (single source) refreshes only that source's pages and deliberately does not rewrite the cross-source work-log; run `lore ingest` (all sources) to rebuild it.
-
-Two ways to own the timing:
-
-- **cron** — `lore schedule` projects the config's cron expressions (`ingest.schedule`, `synthesis.<period>.schedule`, `maintenance.schedule`) into crontab lines, as above.
-- **Claude scheduled tasks** — the installer's `lore-daily-ingest` / `lore-weekly-ingest` routines own the timing themselves and cover everything between them: daily ingest + queue drain + graph reconcile; weekly synthesis of every period (idempotent materialized views make running monthly/quarterly/annual weekly free) + knowledge audit + retention janitors. In this mode the config cron expressions only inform `lore health` staleness.
-
-## Credentials
-
-Two ways to provide credentials, env vars take precedence over file:
-
-**Environment variables** (recommended for development):
-- `LORE_GOOGLE_CLIENT_ID`, `LORE_GOOGLE_CLIENT_SECRET`, `LORE_GOOGLE_REFRESH_TOKEN`
-- `LORE_SLACK_TOKEN`
-- `LORE_JIRA_URL`, `LORE_JIRA_EMAIL`, `LORE_JIRA_TOKEN`
-
-**Interactive wizard** (easiest): `lore init credentials` prompts for each provider
-(skip the ones you don't use), masks secret entry, and writes
-`<vault>/.lorekeeper/credentials.json` with `0600` permissions. Re-running edits in
-place — press enter to keep an existing secret.
-
-For Google it can **mint the refresh token for you**: it opens the consent page in your
-browser, captures the redirect on a localhost port, and stores the resulting token — no
-OAuth Playground needed. This requires the OAuth client to be of type **"Desktop app"**
-(Google then allows the `http://127.0.0.1` redirect automatically); it requests the
-Gmail / Drive / Calendar **read-only** scopes.
-
-**Credentials file by hand** (one file instead of seven env vars). Copy the template
-and fill in values:
-```bash
-cp credentials.example.json "<vault_root>/.lorekeeper/credentials.json"
-chmod 600 "<vault_root>/.lorekeeper/credentials.json"
-$EDITOR "<vault_root>/.lorekeeper/credentials.json"
-```
-```json
-{
-  "google": { "client_id": "...", "client_secret": "...", "refresh_token": "..." },
-  "slack":  { "bot_token": "xoxb-...", "user_token": "xoxp-..." },
-  "jira":   { "base_url": "https://...", "email": "...", "api_token": "..." }
-}
-```
-All three blocks are optional — keep only the sources you use. Matching env vars
-(`LORE_GOOGLE_*`, `LORE_SLACK_TOKEN` / `LORE_SLACK_USER_TOKEN`, `LORE_JIRA_*`) override the file
-per service.
-
-**Slack tokens**: provide a bot token (`xoxb-`), a user token (`xoxp-`), or both. The
-channel reader (`slack-channel`) accepts either; the keyword-trend search
-(`slack-search`) requires a **user token** because Slack's `search.messages` API is not
-available to bot tokens.
-
-**Google `refresh_token`**: this is not shown in the Cloud Console alongside the
-client ID/secret — it's minted once by completing the OAuth consent flow with
-`access_type=offline`. Easiest: run `lore init credentials` and let it mint the token in
-your browser (needs a "Desktop app" OAuth client). Manual alternative: the
-[OAuth 2.0 Playground](https://developers.google.com/oauthplayground) with your own
-client ID/secret and the Gmail/Drive/Calendar read-only scopes. The pipeline then uses
-the refresh token to renew access tokens unattended.
-
-## Development
-
-```bash
-cargo check                                            # Type check
-cargo nextest run --workspace                          # Run all tests
-cargo clippy --workspace --all-targets -- -D warnings  # Lint (must be clean)
-cargo fmt                                              # Format
-```
-
-## Dependencies
-
-Rust 1.96, 2024 edition. Built on `tokio`/`reqwest` (async source adapters), `jiff`
-(timezone-correct dates), `minijinja` (templates), `petgraph` (wikilink graph), and
-`blake3` (event/cache hashing). See `Cargo.toml` for the full dependency set.
+Rust 1.96 · 2024 edition. `tokio`/`reqwest`(비동기 소스), `jiff`(타임존 정확 날짜), `minijinja`(템플릿), `petgraph`(wikilink 그래프), `blake3`(이벤트·캐시 해시). 라이선스: MIT.
