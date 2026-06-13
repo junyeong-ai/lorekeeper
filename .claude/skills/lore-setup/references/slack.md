@@ -4,13 +4,13 @@
 ```bash
 slack-cli channels "<name fragment>" --expand name,id,members -j
 ```
-Put the `id` (e.g. `C0A7G194EH0`) in `channels`. A name (`#name`) also works, but the id
+Put the `id` (e.g. `C0123456789`) in `channels`. A name (`#name`) also works, but the id
 is stable (unaffected by renames). Repeat the partial search for multiple channels.
 
 ## My user id (for the personal split)
 ```bash
 slack-cli auth status            # confirm workspace
-slack-cli users "<your name>" -j   # id e.g. U0AN3404QB0 → identity.slack_id
+slack-cli users "<your name>" -j   # id e.g. U0123456789 → identity.slack_id
 ```
 
 ## Gauge a channel's character (optional)
@@ -25,11 +25,11 @@ team-slack:
   type: slack-channel
   enabled: true
   params:
-    channels: ["C0A7G194EH0", "C0A8A0XC5BJ"]   # team channels (whole channel = team activity)
+    channels: ["C0123456789", "C0123456780"]   # team channels (whole channel = team activity)
     lookback_hours: 24
     include_threads: true     # include thread-reply context
     exclude_bots: true        # drop bots/integrations (default true)
-    # watch_users: ["U0AN3404QB0"]   # only threads a user authored/was mentioned in; empty = whole channel
+    # watch_users: ["U0123456789"]   # only threads a user authored/was mentioned in; empty = whole channel
   labels: [team-ops, personal]
   extract_concepts: true
   track_personal: true        # messages authored by identity.slack_id → split into the work-log

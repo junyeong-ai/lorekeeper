@@ -10,7 +10,7 @@
 atlassian-cli jira search "assignee = currentUser() ORDER BY updated DESC" \
   --limit 5 --fields summary,project,duedate
 ```
-Use the `project.key` (e.g. `OYAI`) in the JQL.
+Use the `project.key` (e.g. `PROJ`) in the JQL.
 
 ## Find the start-date custom-field id
 Jira's "Start date" is a per-instance custom field (commonly `customfield_10015`). Fetch
@@ -30,7 +30,7 @@ my-tasks:
   params:
     # Only issues changed that day (= worked on) = a work-history snapshot. Do NOT search by due/start date.
     jql: >
-      project = OYAI AND assignee = currentUser()
+      project = PROJ AND assignee = currentUser()
       AND updated >= -1d
       ORDER BY updated DESC
     # max_issues: 200                     # optional per-run cap; the fetch paginates the
