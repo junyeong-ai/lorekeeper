@@ -105,15 +105,20 @@ $ lore ingest
 ▸ notes (manual)
   extracted: 1 items
   ✓ wrote: wiki/documents/rag-pipeline-fixing-low-recall-retrieval.md (document)
-Done. 1 page written.
 
-# then in a Claude Code session:
-$ /lore-process
-  ✓ summary  → rag-pipeline-…          (wrote the summary)
-  ✓ concepts → +6 concept pages        (RAG, Vector Database, Embeddings, Chunking,
-                                        Query Rewriting, Cosine Similarity)
-  queue: 0 remaining
+Done. 1 pages written, 0 personal items tracked.
 ```
+
+The page exists, but its `## Summary` / `## Related Concepts` are still empty — `lore ingest` queued the LLM work:
+
+```console
+$ lore queue status
+  [current] sum-… (summarize)        → wiki/documents/rag-pipeline-…
+  [current] ext-… (extract-concepts) → wiki/documents/rag-pipeline-…
+queue: 2 current, 0 stale, 0 missing-target across 2 task(s)
+```
+
+Now, in a Claude Code session, run **`/lore-process`**. The skill drains that queue — writing each summary and extracting concepts — using Claude's own LLM (no API key). When it finishes, `lore queue status` reports `0 current` and the page is filled:
 
 ### ✅ Result ① — the document page (summary + concept links filled in)
 

@@ -104,14 +104,20 @@ $ lore ingest
 ▸ notes (manual)
   extracted: 1 items
   ✓ wrote: wiki/documents/rag-파이프라인-낮은-recall-검색-고치기.md (document)
-Done. 1 page written.
 
-# 이어서 Claude Code 세션에서:
-$ /lore-process
-  ✓ summary  → rag-파이프라인-…       (요약 작성)
-  ✓ concepts → +6 concept pages       (RAG, 벡터 DB, 임베딩, 청킹, 질의 재작성, 코사인 유사도)
-  queue: 0 remaining
+Done. 1 pages written, 0 personal items tracked.
 ```
+
+이 시점에 페이지는 만들어졌지만 `## 요약`·`## 관련 개념`은 비어 있습니다 — `lore ingest`가 LLM 작업을 큐에 넣었기 때문입니다:
+
+```console
+$ lore queue status
+  [current] sum-… (summarize)        → wiki/documents/rag-파이프라인-…
+  [current] ext-… (extract-concepts) → wiki/documents/rag-파이프라인-…
+queue: 2 current, 0 stale, 0 missing-target across 2 task(s)
+```
+
+이제 Claude Code 세션에서 **`/lore-process`** 를 실행합니다. 이 스킬이 큐를 비우며 — 각 요약을 쓰고 개념을 추출해 — Claude 자체 LLM으로 처리합니다(API 키 없음). 끝나면 `lore queue status`는 `0 current`가 되고 페이지가 채워집니다:
 
 ### ✅ 결과 ① — 문서 페이지 (요약 + 개념 링크가 채워짐)
 
@@ -128,7 +134,7 @@ tags: ["document", "knowledge"]
 유사도를 L2→cosine으로 바꿔 Recall@5를 0.62 → 0.91로 끌어올렸다. 핵심 교훈:
 검색 품질은 임베딩 모델 선택보다 **청크 단위와 질문 형식**에 좌우된다.
 
-## 본문
+## 내용
 … (원본을 정규화해 보존) …
 
 ## 관련 개념
