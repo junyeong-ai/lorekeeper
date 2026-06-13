@@ -115,16 +115,23 @@ sources:
     params:
       lookback_hours: 24
       # max_messages: 200 # (optional) per-day fetch cap; raise for busy accounts or backfills
-      # Work mail only. `-label:ai-news` splits newsletters out of the work-log — the
-      # ai-newsletters source below owns `label:ai-news`, so the two streams are mutually exclusive.
+      # Prefer a STABLE filter (recipient/sender) over `is:unread`: the daily page is a
+      # complete-refetch view, so a read-state filter makes it depend on what you've opened
+      # in Gmail — re-ingesting a past day would then yield a different result. Each line
+      # carries `-label:ai-news` so newsletters split out to the ai-newsletters source below.
       include_queries:
-        - "is:unread -category:promotions -category:social -category:updates -label:ai-news"
-        - "from:@oliveyoung.co.kr is:unread -label:ai-news"
-        - "from:@cj.net is:unread -label:ai-news"
+        - "to:gildong.hong@company.com -label:ai-news"
+        - "cc:gildong.hong@company.com -label:ai-news"
+        - "from:@company.com -label:ai-news"      # org broadcast / alias announcements
+        # `is:unread` is allowed but read-state-dependent — use it only if you deliberately
+        # want "mail I haven't read yet" and accept that re-ingest is not reproducible.
       exclude:
-        subjects: ["[Automated]", "noreply", "no-reply"]
-        senders: ["notifications@", "mailer-daemon@", "calendar-notification@"]
-        calendar_invites: true  # auto-exclude text/calendar attachments (invites/accepts/declines) (default true)
+        # Block only OBSERVED noise deterministically. Do NOT broadly block `noreply@` /
+        # `notifications@` — that false-blocks high-value automated mail (meeting notes, cloud
+        # action alerts). Name the specific senders you actually see as noise.
+        subjects: ["[Automated]"]
+        senders: ["mailer-daemon@", "notifications@github.com", "calendar-notification@"]
+        calendar_invites: true  # auto-exclude calendar invites (my-schedule owns the calendar) (default true)
     # keyword → category (source level, kept separate from params). Matched in order; first match wins.
     classify:
       - category: action_required
@@ -169,7 +176,8 @@ sources:
     type: rss
     enabled: false
     params:
-      lookback_hours: 24
+      lookback_hours: 72            # feeds (labs, newsletters) don't publish daily; a wider
+                                    # window + idempotent event-log union avoids missing posts
       max_items_per_feed: 50
       feeds:
         # Vendors — most include the full body in RSS, so fetch_full_text isn't needed
@@ -204,7 +212,7 @@ sources:
     type: rss
     enabled: false
     params:
-      lookback_hours: 24
+      lookback_hours: 72
       max_items_per_feed: 25
       feeds:
         # Aggregators (English/Korean)
