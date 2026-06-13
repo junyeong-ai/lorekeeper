@@ -86,17 +86,17 @@ enum Command {
         #[arg(long)]
         incremental: bool,
         #[command(subcommand)]
-        command: commands::graph::GraphCmd,
+        command: commands::graph::GraphCommand,
     },
     /// Wiki-level utilities (catalog generation, future maintenance ops)
     Wiki {
         #[command(subcommand)]
-        cmd: commands::wiki::WikiCmd,
+        cmd: commands::wiki::WikiCommand,
     },
     /// Inspect the LLM work queue (`/lore-process` consumes this)
     Queue {
         #[command(subcommand)]
-        command: commands::queue::QueueCmd,
+        command: commands::queue::QueueCommand,
     },
 }
 

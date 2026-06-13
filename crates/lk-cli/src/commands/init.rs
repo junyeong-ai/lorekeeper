@@ -28,7 +28,7 @@ pub async fn credentials(
     };
     // Seed defaults from the existing file, but never let a malformed file block the
     // wizard — fixing credentials is exactly its job.
-    let mut creds = Credentials::from_file(&vault_root).unwrap_or_else(|e| {
+    let mut creds = Credentials::load_file(&vault_root).unwrap_or_else(|e| {
         eprintln!("! existing credentials.json couldn't be parsed ({e}); starting fresh.");
         Credentials::default()
     });

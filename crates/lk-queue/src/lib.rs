@@ -16,16 +16,16 @@ use lk_core::concept::ExtractedConcept;
 use lk_core::config::SourceType;
 
 #[derive(Debug, Error)]
-pub enum LlmError {
+pub enum QueueError {
     #[error("{0}")]
     Api(String),
     #[error("queue I/O: {0}")]
     QueueIo(String),
 }
 
-impl LlmError {
+impl QueueError {
     pub fn is_fatal(&self) -> bool {
-        matches!(self, LlmError::QueueIo(_))
+        matches!(self, QueueError::QueueIo(_))
     }
 }
 
@@ -159,7 +159,7 @@ pub struct SummarizeRequest {
 
 /// Category definition passed to the LLM for concept classification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CategoryRef {
+pub struct CategoryReference {
     pub id: String,
     pub label: String,
 }
@@ -179,7 +179,7 @@ pub struct ExtractConceptsRequest {
     pub focus: Option<String>,
     pub target: TaskTarget,
     /// Valid category IDs the LLM may assign to each concept. Empty = no categorization.
-    pub categories: Vec<CategoryRef>,
+    pub categories: Vec<CategoryReference>,
 }
 
 /// Content-addressable hash of an LLM task's cache identity. The page-side
@@ -301,12 +301,12 @@ impl ThemeRequest {
 
 #[async_trait]
 pub trait LlmClient: Send + Sync {
-    async fn summarize(&self, req: SummarizeRequest) -> Result<String, LlmError>;
+    async fn summarize(&self, req: SummarizeRequest) -> Result<String, QueueError>;
 
     async fn extract_concepts(
         &self,
         req: ExtractConceptsRequest,
-    ) -> Result<Vec<ExtractedConcept>, LlmError>;
+    ) -> Result<Vec<ExtractedConcept>, QueueError>;
 
     /// Open a per-source transaction boundary. The CLI calls this immediately before it
     /// plans a source. Buffered tasks accumulate across sources for one atomic flush, but
@@ -326,7 +326,7 @@ pub trait LlmClient: Send + Sync {
     /// list of themes with titles and descriptions. The default returns an empty vec,
     /// which suffices for noop and mock clients; queue mode emits a deferred task and
     /// returns empty (the skill fills the section later).
-    async fn identify_themes(&self, _req: ThemeRequest) -> Result<Vec<Theme>, LlmError> {
+    async fn identify_themes(&self, _req: ThemeRequest) -> Result<Vec<Theme>, QueueError> {
         Ok(vec![])
     }
 
@@ -340,7 +340,7 @@ pub trait LlmClient: Send + Sync {
     /// requires single-call semantics rather than guarding internally, because there
     /// is no legitimate use case for a multi-flush ingest. Noop and mock clients
     /// leave this as the default no-op.
-    async fn flush(&self) -> Result<(), LlmError> {
+    async fn flush(&self) -> Result<(), QueueError> {
         Ok(())
     }
 }

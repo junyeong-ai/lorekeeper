@@ -5,7 +5,7 @@ use lk_queue::QueueTask;
 use super::{find_config, load_config};
 
 #[derive(clap::Subcommand)]
-pub enum QueueCmd {
+pub enum QueueCommand {
     /// Classify every pending queue task against its target page. `/lore-process`
     /// consults this instead of comparing hashes itself: it processes `current`
     /// tasks, drops `stale` ones (the page was re-rendered by a newer ingest), and
@@ -67,10 +67,10 @@ struct TaskReport {
     status: TaskStatus,
 }
 
-pub async fn run(opts: &super::GlobalOptions, cmd: QueueCmd) -> miette::Result<()> {
+pub async fn run(opts: &super::GlobalOptions, cmd: QueueCommand) -> miette::Result<()> {
     match cmd {
-        QueueCmd::Status { root, json } => status(opts, root, json).await,
-        QueueCmd::Prune {
+        QueueCommand::Status { root, json } => status(opts, root, json).await,
+        QueueCommand::Prune {
             root,
             json,
             dry_run,

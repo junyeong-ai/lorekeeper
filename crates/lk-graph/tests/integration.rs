@@ -88,7 +88,7 @@ fn index_sync_detects_drift() {
     let config = default_config();
     let pages = scan::scan_vault(&root, &config).unwrap();
     let g = graph::WikiGraph::build(&pages, &VaultDirs::default());
-    let existence = scan::VaultExistence::from_pages(&pages, &VaultDirs::default());
+    let existence = scan::VaultExistence::build(&pages, &VaultDirs::default());
     let drift = index_drift::diff(&g, &existence, &root, Path::new("wiki"), &[]).unwrap();
     // concept-c and orphan-page are missing from index.md
     assert!(!drift.is_in_sync());
@@ -108,7 +108,7 @@ fn index_sync_fix_mutates_and_idempotent() {
     let g = graph::WikiGraph::build(&pages, &VaultDirs::default());
 
     // Before fix.
-    let existence = scan::VaultExistence::from_pages(&pages, &VaultDirs::default());
+    let existence = scan::VaultExistence::build(&pages, &VaultDirs::default());
     let drift = index_drift::diff(&g, &existence, tmp.path(), Path::new("wiki"), &[]).unwrap();
     assert!(!drift.is_in_sync());
 
@@ -121,7 +121,7 @@ fn index_sync_fix_mutates_and_idempotent() {
     // After fix, re-scan to pick up potentially changed pages.
     let pages2 = scan::scan_vault(tmp.path(), &config).unwrap();
     let g2 = graph::WikiGraph::build(&pages2, &VaultDirs::default());
-    let existence2 = scan::VaultExistence::from_pages(&pages2, &VaultDirs::default());
+    let existence2 = scan::VaultExistence::build(&pages2, &VaultDirs::default());
     let drift2 = index_drift::diff(&g2, &existence2, tmp.path(), Path::new("wiki"), &[]).unwrap();
     assert!(drift2.is_in_sync());
 }
@@ -209,7 +209,7 @@ fn lint_combined_report() {
     let hubs = g.hubs(10, config.metrics.min_hub_degree);
     let orphans = g.orphans(&config.metrics.orphan_exclude, Path::new("wiki"));
     let broken = g.broken_links().to_vec();
-    let existence = scan::VaultExistence::from_pages(&pages, &VaultDirs::default());
+    let existence = scan::VaultExistence::build(&pages, &VaultDirs::default());
     let drift = index_drift::diff(&g, &existence, &root, Path::new("wiki"), &[]).unwrap();
 
     let findings = orphans.len()

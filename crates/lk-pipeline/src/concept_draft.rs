@@ -350,7 +350,7 @@ mod tests {
             preserved_related: None,
             preserved_aliases: Vec::new(),
         };
-        let engine = TemplateEngine::new(None).unwrap();
+        let engine = TemplateEngine::build(None).unwrap();
         let page = draft
             .render(&engine, &VaultDirs::default(), Locale::Ko)
             .unwrap();
@@ -386,7 +386,7 @@ mod tests {
             preserved_related: Some("- [[vector-search]]".into()),
             preserved_aliases: Vec::new(),
         };
-        let engine = TemplateEngine::new(None).unwrap();
+        let engine = TemplateEngine::build(None).unwrap();
         let page = draft
             .render(&engine, &VaultDirs::default(), Locale::Ko)
             .unwrap();
@@ -428,7 +428,7 @@ mod tests {
             preserved_related: None,
             preserved_aliases: Vec::new(),
         };
-        let engine = TemplateEngine::new(None).unwrap();
+        let engine = TemplateEngine::build(None).unwrap();
         let page = draft
             .render(&engine, &VaultDirs::default(), Locale::Ko)
             .unwrap();
@@ -461,7 +461,7 @@ mod tests {
             preserved_related: None,
             preserved_aliases: vec!["RAG".into()],
         };
-        let engine = TemplateEngine::new(None).unwrap();
+        let engine = TemplateEngine::build(None).unwrap();
         let page = draft
             .render(&engine, &VaultDirs::default(), Locale::Ko)
             .unwrap();

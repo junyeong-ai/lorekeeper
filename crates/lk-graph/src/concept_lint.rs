@@ -162,12 +162,15 @@ pub struct NearDuplicateConcept {
     /// The two concept slugs, ordered lexicographically for deterministic output.
     pub a: String,
     pub b: String,
-    /// Sørensen-Dice similarity of the two slugs, in `[threshold, 1.0)`.
+    /// Sørensen-Dice similarity of the two slugs, in `[threshold, 1.0]`. It reaches `1.0`
+    /// when two DISTINCT file stems reduce to the same deslugged string (`vector-db` and
+    /// `vectordb`) — a genuine variant pair, not the same file twice.
     pub similarity: f64,
 }
 
-/// Concept slug pairs whose Sørensen-Dice similarity is at or above `threshold` (and
-/// below 1.0 — exact duplicates can't co-exist as separate files). These are
+/// Concept slug pairs whose Sørensen-Dice similarity is at or above `threshold`. `1.0` is
+/// included: two distinct stems can deslug to the same string (`vector-db`/`vectordb`), and
+/// a short pair is flagged ONLY at an exact deslug match (see `SHORT_SLUG_LEN`). These are
 /// candidate merges: a variant spelling that fragments the concept graph. Read-only;
 /// the lint reports, a human decides. `threshold` outside `(0, 1]` yields nothing.
 pub fn find_near_duplicate_concepts(
@@ -229,7 +232,19 @@ pub fn find_near_duplicate_concepts(
             continue;
         }
         let similarity = sorensen_dice(&deslugged[i], &deslugged[j]);
-        if similarity >= threshold {
+        let shorter = deslugged[i]
+            .chars()
+            .count()
+            .min(deslugged[j].chars().count());
+        // Below SHORT_SLUG_LEN, Sørensen-Dice partial overlap is dominated by length, not
+        // meaning (`rag`/`raga` ≈ 0.8 on a single coincidental shared bigram), so a short
+        // pair is trusted only on an exact deslug match (`ai`/`a-i`, `vector-db`/`vectordb`).
+        let flagged = if shorter < SHORT_SLUG_LEN {
+            similarity >= 1.0
+        } else {
+            similarity >= threshold
+        };
+        if flagged {
             findings.push(NearDuplicateConcept {
                 a: pages[i].slug.clone(),
                 b: pages[j].slug.clone(),
@@ -239,6 +254,12 @@ pub fn find_near_duplicate_concepts(
     }
     findings
 }
+
+/// Below this deslugged length a slug carries ≤2 bigrams, so a single coincidental shared
+/// bigram already yields a 0.5+ Sørensen-Dice score — partial overlap is length noise, not
+/// meaning. Pairs shorter than this are flagged only on an exact deslug match, which keeps
+/// `rag`/`raga` (one shared bigram) off the list while still surfacing `ai`/`a-i`.
+const SHORT_SLUG_LEN: usize = 4;
 
 /// Slug with separators AND whitespace removed — the exact characters
 /// `strsim::sorensen_dice` scores on (it ignores whitespace internally). Used for
@@ -289,8 +310,14 @@ fn prefix_version_variant(a: &str, b: &str) -> bool {
     match suffix.strip_prefix('-') {
         // `-<segment>`: a version variant only when the segment is all digits.
         Some(rest) => !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()),
-        // Directly-attached suffix (no separator): a model-letter variant like `4o`.
-        None => true,
+        // Directly-attached suffix (no separator): a model-letter variant like `4o` — at
+        // most a letter or two. A longer attached run (`claude3beta`) names a different
+        // concept, so it is NOT a version variant and stays eligible for the scorer.
+        None => {
+            !suffix.is_empty()
+                && suffix.len() <= 2
+                && suffix.chars().all(|c| c.is_ascii_alphabetic())
+        }
     }
 }
 
@@ -572,6 +599,21 @@ mod tests {
     }
 
     #[test]
+    fn short_slug_partial_overlap_is_not_flagged() {
+        // `rag`/`raga` score ≈0.8 on one coincidental shared bigram — length-dominated
+        // noise, not a spelling variant. Below the short-slug length only an exact deslug
+        // match is trusted, so this must stay off the near-duplicate list.
+        let tmp = TempDir::new().unwrap();
+        write_concept(tmp.path(), "rag", "id: rag");
+        write_concept(tmp.path(), "raga", "id: raga");
+        let result = find_near_duplicate_concepts(&scan(tmp.path()), 0.6);
+        assert!(
+            result.is_empty(),
+            "short partial overlap must not be flagged: {result:?}"
+        );
+    }
+
+    #[test]
     fn bigram_blocking_finds_lone_near_dup_among_many_unrelated() {
         // The bigram-blocked scan must still surface a real variant-spelling pair when
         // it is buried among many concepts that share no bigram with it, and must not
@@ -668,6 +710,9 @@ mod tests {
         // NOT suppress them (they're simply distinct, scored normally).
         assert!(!is_version_variant("s3", "s3-bucket"));
         assert!(!is_version_variant("gpt-4", "gpt-4-api"));
+        // A directly-attached *word* after a digit (no separator) is a different concept,
+        // not a model-letter version — it must stay eligible for the near-duplicate scorer.
+        assert!(!is_version_variant("claude3", "claude3beta"));
         // Genuine version suffixes are still recognised.
         assert!(is_version_variant("gpt-4", "gpt-4o"));
         assert!(is_version_variant("claude-3", "claude-3-5"));

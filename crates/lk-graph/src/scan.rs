@@ -189,7 +189,7 @@ pub struct VaultExistence {
 impl VaultExistence {
     /// Derive the universe from a full-vault page scan. Resolution is done up
     /// front so `linked` holds resolved page ids, not raw target slugs.
-    pub fn from_pages(pages: &[ScannedPage], dirs: &VaultDirs) -> Self {
+    pub fn build(pages: &[ScannedPage], dirs: &VaultDirs) -> Self {
         let mut by_filename: HashMap<String, String> = HashMap::with_capacity(pages.len());
         let mut ids = HashSet::with_capacity(pages.len());
         for page in pages {
@@ -276,7 +276,7 @@ impl VaultExistence {
     }
 
     /// Whether a wikilink target resolves to any page in the vault.
-    pub fn resolves(&self, target: &str) -> bool {
+    pub fn is_resolvable(&self, target: &str) -> bool {
         self.resolve(target).is_some()
     }
 
@@ -290,7 +290,7 @@ impl VaultExistence {
 /// `[[name]]` wikilink targets the knowledge node, so a concept owns its filename
 /// slug over a same-named document or other page (which is always cited by its path
 /// form). Anchored to the configured `dirs.wiki` — never a hardcoded path segment —
-/// and is the single definition shared by the resolver (`from_pages`, `WikiGraph`)
+/// and is the single definition shared by the resolver (`build`, `WikiGraph`)
 /// and `backlinks`.
 pub(crate) fn is_concept_page(path: &Path, dirs: &VaultDirs) -> bool {
     let s = path.to_string_lossy().replace('\\', "/");
@@ -430,12 +430,12 @@ mod tests {
                 aliases: Vec::new(),
             },
         ];
-        let ex = VaultExistence::from_pages(&pages, &VaultDirs::default());
+        let ex = VaultExistence::build(&pages, &VaultDirs::default());
         // Both forms resolve: path id and bare filename.
-        assert!(ex.resolves("daily/team-slack/2026-05-22"));
-        assert!(ex.resolves("2026-05-22"));
-        assert!(ex.resolves("confluence-cloud"));
-        assert!(!ex.resolves("nope"));
+        assert!(ex.is_resolvable("daily/team-slack/2026-05-22"));
+        assert!(ex.is_resolvable("2026-05-22"));
+        assert!(ex.is_resolvable("confluence-cloud"));
+        assert!(!ex.is_resolvable("nope"));
         // A bare filename resolves to the concept's page id.
         assert_eq!(
             ex.resolve("confluence-cloud"),
@@ -468,7 +468,7 @@ mod tests {
                 aliases: vec![],
             },
         ];
-        let ex = VaultExistence::from_pages(&pages, &VaultDirs::default());
+        let ex = VaultExistence::build(&pages, &VaultDirs::default());
         assert_eq!(ex.resolve("k8s"), Some("wiki/concepts/kubernetes"));
         assert!(ex.is_linked("wiki/concepts/kubernetes"));
     }
@@ -493,7 +493,7 @@ mod tests {
                 aliases: vec![],
             },
         ];
-        let ex = VaultExistence::from_pages(&pages, &VaultDirs::default());
+        let ex = VaultExistence::build(&pages, &VaultDirs::default());
         assert_eq!(ex.resolve("k8s"), Some("wiki/concepts/k8s"));
     }
 
@@ -518,8 +518,8 @@ mod tests {
             aliases: vec!["fruit".to_owned()],
         };
         let forward =
-            VaultExistence::from_pages(&[apple.clone(), banana.clone()], &VaultDirs::default());
-        let reversed = VaultExistence::from_pages(&[banana, apple], &VaultDirs::default());
+            VaultExistence::build(&[apple.clone(), banana.clone()], &VaultDirs::default());
+        let reversed = VaultExistence::build(&[banana, apple], &VaultDirs::default());
         assert_eq!(forward.resolve("fruit"), Some("wiki/concepts/apple"));
         assert_eq!(
             reversed.resolve("fruit"),

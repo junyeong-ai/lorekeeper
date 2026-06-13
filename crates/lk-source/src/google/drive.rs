@@ -26,23 +26,28 @@ struct GoogleDriveParams {
 
 /// Validate this source's params at config-load time, before any network work.
 pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
-    let p: GoogleDriveParams = crate::parse_params(params)?;
-    if p.folder.trim().is_empty() {
-        return Err(SourceError::InvalidParams(
-            "drive `folder` must not be empty (use the Drive folder name or ID)".into(),
-        ));
+    crate::parse_validated::<GoogleDriveParams>(params).map(|_| ())
+}
+
+impl crate::ValidatedParams for GoogleDriveParams {
+    fn validate(&self) -> Result<(), SourceError> {
+        if self.folder.trim().is_empty() {
+            return Err(SourceError::InvalidParams(
+                "drive `folder` must not be empty (use the Drive folder name or ID)".into(),
+            ));
+        }
+        if self.file_pattern.trim().is_empty() {
+            return Err(SourceError::InvalidParams(
+                "drive `file_pattern` must not be empty".into(),
+            ));
+        }
+        if self.max_files == 0 {
+            return Err(SourceError::InvalidParams(
+                "drive `max_files` must be > 0".into(),
+            ));
+        }
+        Ok(())
     }
-    if p.file_pattern.trim().is_empty() {
-        return Err(SourceError::InvalidParams(
-            "drive `file_pattern` must not be empty".into(),
-        ));
-    }
-    if p.max_files == 0 {
-        return Err(SourceError::InvalidParams(
-            "drive `max_files` must be > 0".into(),
-        ));
-    }
-    Ok(())
 }
 
 fn default_max_files() -> usize {
@@ -119,7 +124,7 @@ impl Source for GoogleDriveSource {
         params: &serde_json::Value,
         ctx: &ExtractContext,
     ) -> Result<Vec<RawItem>, SourceError> {
-        let p: GoogleDriveParams = crate::parse_params(params)?;
+        let p: GoogleDriveParams = crate::parse_validated(params)?;
 
         let token = self.auth.access_token().await?;
         let folder_id = self.resolve_folder_id(&token, &p.folder).await?;

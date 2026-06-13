@@ -103,12 +103,32 @@ pub trait Source: Send + Sync {
 /// Deserialize a source's untyped `params` into its typed schema. Every params
 /// struct is `#[serde(deny_unknown_fields)]`, so this maps a missing key, wrong
 /// type, or unknown/typo'd key to `InvalidParams` with a uniform error shape. The
-/// single place JSON params become a typed struct — both `validate_params` and each
-/// adapter's `extract` route through it.
+/// single place JSON params become a typed struct; both `validate_params` and each
+/// adapter's `extract` reach it through [`parse_validated`].
 pub(crate) fn parse_params<T: serde::de::DeserializeOwned>(
     params: &serde_json::Value,
 ) -> Result<T, SourceError> {
     serde_json::from_value(params.clone()).map_err(|e| SourceError::InvalidParams(e.to_string()))
+}
+
+/// Semantic validation for an adapter's params, beyond what `#[serde(deny_unknown_fields)]`
+/// deserialization already enforces: caps `> 0`, required non-empty fields, value formats.
+/// Pure — no network, credentials, or filesystem — so `lore validate` runs it offline.
+pub(crate) trait ValidatedParams: serde::de::DeserializeOwned {
+    fn validate(&self) -> Result<(), SourceError>;
+}
+
+/// Deserialize AND semantically validate a source's params in one step. Every adapter's
+/// `validate_params` (the offline config check) and its `extract` (the runtime consumer)
+/// route through this, so "params are validated before use" holds BY CONSTRUCTION — an
+/// invariant can never be enforced in the config check yet skipped at consumption, and a
+/// new adapter inherits the guarantee the moment it implements [`ValidatedParams`].
+pub(crate) fn parse_validated<T: ValidatedParams>(
+    params: &serde_json::Value,
+) -> Result<T, SourceError> {
+    let typed: T = parse_params(params)?;
+    typed.validate()?;
+    Ok(typed)
 }
 
 /// Validate a source's `params` against its adapter's typed schema without any
@@ -258,7 +278,10 @@ mod tests {
                 serde_json::json!({"folder": "f", "file_pattern": "p-{date}.md"}),
             ),
             (SourceType::GoogleCalendar, serde_json::json!({})),
-            (SourceType::Gmail, serde_json::json!({"lookback_hours": 24})),
+            (
+                SourceType::Gmail,
+                serde_json::json!({"lookback_hours": 24, "include_queries": ["label:newsletters"]}),
+            ),
             (
                 SourceType::SlackChannel,
                 serde_json::json!({"channel": "#x"}),
@@ -271,6 +294,10 @@ mod tests {
             (
                 SourceType::Rss,
                 serde_json::json!({"feeds": [{"id": "openai", "url": "https://openai.com/news/rss.xml"}]}),
+            ),
+            (
+                SourceType::Manual,
+                serde_json::json!({"inbox_dir": "inbox", "extensions": ["md"]}),
             ),
         ];
         for (st, params) in cases {
@@ -291,6 +318,24 @@ mod tests {
             validate_params(
                 SourceType::Jira,
                 &serde_json::json!({"jql": "x", "typo": 1})
+            )
+            .is_err()
+        );
+        // Gmail with no include_queries: a read-state-dependent window is rejected so the
+        // complete-refetch guarantee can't be silently broken.
+        assert!(validate_params(SourceType::Gmail, &serde_json::json!({})).is_err());
+        // Gmail with a blank include_queries entry: it would assemble an empty `()` clause.
+        assert!(
+            validate_params(
+                SourceType::Gmail,
+                &serde_json::json!({"include_queries": [""]})
+            )
+            .is_err()
+        );
+        assert!(
+            validate_params(
+                SourceType::Gmail,
+                &serde_json::json!({"include_queries": ["label:x", "  "]})
             )
             .is_err()
         );

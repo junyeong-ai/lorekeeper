@@ -9,7 +9,7 @@ use lk_core::i18n::Locale;
 use super::{find_config, load_config};
 
 #[derive(clap::Subcommand)]
-pub enum WikiCmd {
+pub enum WikiCommand {
     /// Generate `<vault>/<wiki>/index.md` — hierarchical catalog of every vault page
     Index {
         /// Vault root override (default: vault.root from config)
@@ -31,11 +31,11 @@ pub enum WikiCmd {
     },
 }
 
-pub async fn run(opts: &super::GlobalOptions, cmd: WikiCmd) -> miette::Result<()> {
+pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Result<()> {
     match cmd {
-        WikiCmd::Index { root } => run_index(opts, root).await,
-        WikiCmd::Log { root } => run_log(opts, root).await,
-        WikiCmd::Concepts { json } => run_concepts(opts, json).await,
+        WikiCommand::Index { root } => run_index(opts, root).await,
+        WikiCommand::Log { root } => run_log(opts, root).await,
+        WikiCommand::Concepts { json } => run_concepts(opts, json).await,
     }
 }
 

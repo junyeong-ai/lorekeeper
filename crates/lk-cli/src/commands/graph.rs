@@ -18,7 +18,7 @@ struct ResolvedConfig {
 }
 
 #[derive(clap::Subcommand)]
-pub enum GraphCmd {
+pub enum GraphCommand {
     /// Run all graph checks in one pass
     Lint,
     /// Show top hub pages by wikilink degree
@@ -101,7 +101,7 @@ pub enum GraphCmd {
 /// Returns exit code: 0 = ok/no findings, 1 = findings, 2 = runtime error.
 pub fn run(
     opts: &GlobalOptions,
-    cmd: GraphCmd,
+    cmd: GraphCommand,
     json: bool,
     root_override: Option<PathBuf>,
     incremental: bool,
@@ -123,7 +123,7 @@ pub fn run(
 
 fn run_inner(
     opts: &GlobalOptions,
-    cmd: GraphCmd,
+    cmd: GraphCommand,
     json: bool,
     root_override: Option<PathBuf>,
     incremental: bool,
@@ -131,16 +131,16 @@ fn run_inner(
     // `backlinks-sync` and the audit/merge commands need locale from the full config —
     // dispatch them up front before paying the graph-build cost.
     match cmd {
-        GraphCmd::AuditCandidates => {
+        GraphCommand::AuditCandidates => {
             return run_audit_candidates(opts, root_override, json);
         }
-        GraphCmd::AuditMark { ref slug } => {
+        GraphCommand::AuditMark { ref slug } => {
             return run_audit_mark(opts, root_override, json, slug);
         }
-        GraphCmd::BacklinksSync { dry_run } => {
+        GraphCommand::BacklinksSync { dry_run } => {
             return run_backlinks(opts, root_override, json, dry_run, incremental);
         }
-        GraphCmd::Merge {
+        GraphCommand::Merge {
             ref from,
             ref into,
             dry_run,
@@ -158,7 +158,10 @@ fn run_inner(
     // `<daily>/` page that flips an orphan/broken-link result) is never missed.
     let integrity = matches!(
         cmd,
-        GraphCmd::Lint | GraphCmd::Broken | GraphCmd::Orphans | GraphCmd::IndexSync { .. }
+        GraphCommand::Lint
+            | GraphCommand::Broken
+            | GraphCommand::Orphans
+            | GraphCommand::IndexSync { .. }
     );
     let scan_dirs = command_scan_dirs(
         integrity,
@@ -184,7 +187,7 @@ fn run_inner(
     let mut scan_cfg = rc.graph.clone();
     scan_cfg.scope.dirs = scan_dirs.clone();
     let scanned = scan::scan_vault(&rc.root, &scan_cfg).map_err(|e| format!("{e}"))?;
-    let existence = scan::VaultExistence::from_pages(&scanned, &rc.vault_dirs);
+    let existence = scan::VaultExistence::build(&scanned, &rc.vault_dirs);
     let pages: Vec<scan::ScannedPage> = if integrity {
         scanned
             .into_iter()
@@ -196,7 +199,7 @@ fn run_inner(
     let g = graph::WikiGraph::build_with_existence(&pages, &existence, &rc.vault_dirs);
 
     let has_findings = match cmd {
-        GraphCmd::Lint => {
+        GraphCommand::Lint => {
             let hubs = g.hubs(10, rc.graph.metrics.min_hub_degree);
             let orphans = g.orphans(
                 &rc.graph.metrics.orphan_exclude,
@@ -261,7 +264,7 @@ fn run_inner(
             }
             findings > 0
         }
-        GraphCmd::Hubs { top } => {
+        GraphCommand::Hubs { top } => {
             let report = output::HubsReport {
                 hubs: g.hubs(top, 1),
             };
@@ -272,7 +275,7 @@ fn run_inner(
             }
             false
         }
-        GraphCmd::Orphans => {
+        GraphCommand::Orphans => {
             let orphans = g.orphans(
                 &rc.graph.metrics.orphan_exclude,
                 Path::new(&rc.vault_dirs.wiki),
@@ -287,7 +290,7 @@ fn run_inner(
             }
             has
         }
-        GraphCmd::Broken => {
+        GraphCommand::Broken => {
             let broken = g.broken_links().to_vec();
             let count = broken.len();
             let report = output::BrokenReport { broken, count };
@@ -299,7 +302,7 @@ fn run_inner(
             }
             has
         }
-        GraphCmd::Cluster { label, min_size } => {
+        GraphCommand::Cluster { label, min_size } => {
             if let Some(size) = min_size {
                 rc.graph.cluster.min_community_size = size;
             }
@@ -314,7 +317,7 @@ fn run_inner(
             }
             false
         }
-        GraphCmd::Export { with_clusters } => {
+        GraphCommand::Export { with_clusters } => {
             let cluster_result = if with_clusters {
                 Some(cluster::detect_communities(&g, &rc.graph))
             } else {
@@ -331,7 +334,7 @@ fn run_inner(
             }
             false
         }
-        GraphCmd::IndexSync { fix } => {
+        GraphCommand::IndexSync { fix } => {
             let drift = index_drift::diff(
                 &g,
                 &existence,
@@ -362,7 +365,7 @@ fn run_inner(
             }
             has && (fixed.is_none() || has_unfixable)
         }
-        GraphCmd::Normalize { fix } => {
+        GraphCommand::Normalize { fix } => {
             let renames = normalize::scan(&pages);
             let has = !renames.is_empty();
             let applied = if fix && has {
@@ -387,7 +390,7 @@ fn run_inner(
             }
             has && applied.is_none()
         }
-        GraphCmd::SuggestLinks { min_community_size } => {
+        GraphCommand::SuggestLinks { min_community_size } => {
             if let Some(size) = min_community_size {
                 rc.graph.cluster.min_community_size = size;
             }
@@ -411,10 +414,10 @@ fn run_inner(
         }
         // Dispatched at the top of `run_inner` because they need full-vault scope
         // and/or config that doesn't touch the in-scope WikiGraph.
-        GraphCmd::AuditCandidates
-        | GraphCmd::AuditMark { .. }
-        | GraphCmd::BacklinksSync { .. }
-        | GraphCmd::Merge { .. } => {
+        GraphCommand::AuditCandidates
+        | GraphCommand::AuditMark { .. }
+        | GraphCommand::BacklinksSync { .. }
+        | GraphCommand::Merge { .. } => {
             unreachable!()
         }
     };

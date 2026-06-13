@@ -143,9 +143,12 @@ concept_categories) with the `Synthesizer`.
   review is absent (`month_child_narrative`), and each quarter of a year falls back to
   its months — then weeks — when its quarterly review is absent (`quarter_child_narrative`).
   So a quarter whose latest month isn't summarized yet still includes that month rather
-  than omitting it. A `used_weeks` set dedups a boundary week shared by two adjacent
-  fallback months. Raw daily work-log is never fed to a higher-level synthesis (each
-  level reads only pre-summarized pages).
+  than omitting it. An ISO week straddling a month/quarter boundary is read by both
+  adjacent fallback periods: for a narrative rollup that mild redundancy is harmless (the
+  parent summary folds it) and dropping it would lose the later period's real activity,
+  while the numeric category table is computed separately from raw work-log over the exact
+  date range so counts are never double-tallied. Raw daily work-log is never fed to a
+  higher-level synthesis (each level reads only pre-summarized pages).
 - Fallback renderers must emit the same `##` anchors the templates use (so `/lore-process`
   can find the section) and the same frontmatter keys synthesis reads (e.g. work-log
   `categories`).

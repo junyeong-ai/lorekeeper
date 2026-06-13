@@ -76,7 +76,7 @@ mod tests {
     use lk_core::config::{GraphConfig, VaultDirs};
     use std::path::PathBuf;
 
-    fn make_page(id: &str, outgoing: &[&str]) -> ScannedPage {
+    fn build_page(id: &str, outgoing: &[&str]) -> ScannedPage {
         let name = id.rsplit('/').next().unwrap_or(id);
         ScannedPage {
             id: id.to_owned(),
@@ -90,9 +90,9 @@ mod tests {
     #[test]
     fn nodes_and_edges_are_present_and_sorted() {
         let pages = vec![
-            make_page("c", &["a"]),
-            make_page("a", &["b"]),
-            make_page("b", &["c"]),
+            build_page("c", &["a"]),
+            build_page("a", &["b"]),
+            build_page("b", &["c"]),
         ];
         let graph = WikiGraph::build(&pages, &VaultDirs::default());
         let export = export(&graph, None);
@@ -113,10 +113,10 @@ mod tests {
     fn community_field_included_when_cluster_present() {
         let config = GraphConfig::default();
         let pages = vec![
-            make_page("a", &["b"]),
-            make_page("b", &["a"]),
-            make_page("c", &["d"]),
-            make_page("d", &["c"]),
+            build_page("a", &["b"]),
+            build_page("b", &["a"]),
+            build_page("c", &["d"]),
+            build_page("d", &["c"]),
         ];
         let graph = WikiGraph::build(&pages, &VaultDirs::default());
         let cluster = detect_communities(&graph, &config);

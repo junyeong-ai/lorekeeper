@@ -59,21 +59,30 @@ fn default_archive() -> bool {
 
 /// Validate this source's params at config-load time, before any I/O.
 pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
-    let p: ManualParams = crate::parse_params(params)?;
-    validate_inbox_dir(&p.inbox_dir)?;
-    if p.extensions.is_empty() {
-        return Err(SourceError::InvalidParams(
-            "manual `extensions` must list at least one file extension".into(),
-        ));
-    }
-    for ext in &p.extensions {
-        if ext.starts_with('.') {
-            return Err(SourceError::InvalidParams(format!(
-                "manual `extensions` entries must not include leading dot (got '{ext}')"
-            )));
+    crate::parse_validated::<ManualParams>(params).map(|_| ())
+}
+
+impl crate::ValidatedParams for ManualParams {
+    fn validate(&self) -> Result<(), SourceError> {
+        // Enforced at consumption (both `extract` and `archive_consumed_files` route through
+        // `parse_validated`), not just at the config boundary: an `inbox_dir` of `.` would
+        // otherwise resolve to the vault root and the adapter would scan — and archive — vault
+        // pages themselves.
+        validate_inbox_dir(&self.inbox_dir)?;
+        if self.extensions.is_empty() {
+            return Err(SourceError::InvalidParams(
+                "manual `extensions` must list at least one file extension".into(),
+            ));
         }
+        for ext in &self.extensions {
+            if ext.starts_with('.') {
+                return Err(SourceError::InvalidParams(format!(
+                    "manual `extensions` entries must not include leading dot (got '{ext}')"
+                )));
+            }
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 /// Reject any `inbox_dir` that could resolve to — or above — the vault root, where
@@ -209,7 +218,7 @@ impl Source for ManualSource {
         params: &serde_json::Value,
         ctx: &ExtractContext,
     ) -> Result<Vec<RawItem>, SourceError> {
-        let p: ManualParams = crate::parse_params(params)?;
+        let p: ManualParams = crate::parse_validated(params)?;
 
         let inbox = resolve_inbox_dir(&p.inbox_dir, &ctx.vault_root)?;
         if !inbox.exists() {
@@ -358,7 +367,7 @@ pub fn archive_consumed_files(
     date: jiff::civil::Date,
     vault_root: &Path,
 ) -> Result<(), SourceError> {
-    let p: ManualParams = crate::parse_params(params)?;
+    let p: ManualParams = crate::parse_validated(params)?;
     if !p.archive_after_ingest || events.is_empty() {
         return Ok(());
     }
@@ -436,6 +445,28 @@ mod tests {
         let items = src.extract(&params, &ctx).await.unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].title, "my topic");
+    }
+
+    #[tokio::test]
+    async fn extract_rejects_unsafe_inbox_dir_at_consumption() {
+        // The `inbox_dir` invariant is enforced in `extract` itself, not only in the
+        // offline `validate_params`: `.` resolves to the vault root, where the adapter
+        // would scan — and archive — vault pages. `extract` routes params through
+        // `parse_validated`, so it rejects the unsafe config before touching the disk.
+        let src = ManualSource::new();
+        let params = serde_json::json!({ "inbox_dir": ".", "extensions": ["md"] });
+        let ctx = ExtractContext {
+            target_date: jiff::civil::date(2026, 5, 24),
+            timezone: jiff::tz::TimeZone::UTC,
+            locale: lk_core::i18n::Locale::default(),
+            identity: lk_core::config::Identity::default(),
+            vault_root: std::path::PathBuf::new(),
+        };
+        let err = src.extract(&params, &ctx).await.unwrap_err();
+        assert!(
+            matches!(err, SourceError::InvalidParams(_)),
+            "extract must reject an unsafe inbox_dir at consumption, got {err:?}"
+        );
     }
 
     #[tokio::test]

@@ -68,7 +68,7 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   `category` field). `ExtractedConcept` carries an optional `category` assigned by
   the LLM from this list; the pipeline drops unknown category IDs and `tracing::warn`s
   the drop (observable parity with the queue-path `graph lint`).
-  `index_split_threshold` (default 100) controls when `lore wiki index` splits
+  `index_split_threshold` controls when `lore wiki index` splits
   concepts into per-category sub-pages (`<wiki>/index/{category}.md`).
 - **`LlmConfig` defaults to `provider: queue`** (matches docs/example). Uses
   `deny_unknown_fields` so typos in config keys are caught at load time.

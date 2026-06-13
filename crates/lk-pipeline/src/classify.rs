@@ -84,7 +84,7 @@ mod tests {
     use lk_core::config::SourceType;
     use lk_core::event::EventId;
 
-    fn make_event(title: &str) -> Event {
+    fn build_event(title: &str) -> Event {
         Event {
             id: EventId::new("test", jiff::civil::date(2026, 5, 23), title),
             source_id: "test".into(),
@@ -106,14 +106,14 @@ mod tests {
 
     #[test]
     fn static_labels() {
-        let mut events = vec![make_event("Test")];
+        let mut events = vec![build_event("Test")];
         assign_labels(&mut events, &["ai-industry".into()]);
         assert_eq!(events[0].labels, vec!["ai-industry"]);
     }
 
     #[test]
     fn personal_follows_adapter_ownership_when_tracked() {
-        let mut events = vec![make_event("Mine"), make_event("Theirs")];
+        let mut events = vec![build_event("Mine"), build_event("Theirs")];
         events[0].is_self = true;
         assign_personal(&mut events, true);
         assert!(events[0].is_personal);
@@ -124,7 +124,7 @@ mod tests {
 
     #[test]
     fn personal_not_marked_when_tracking_off() {
-        let mut events = vec![make_event("Mine")];
+        let mut events = vec![build_event("Mine")];
         events[0].is_self = true;
         assign_personal(&mut events, false);
         assert!(!events[0].is_personal);
@@ -145,7 +145,7 @@ mod tests {
                 performance_category: None,
             },
         ];
-        let mut events = vec![make_event("Please review this PR")];
+        let mut events = vec![build_event("Please review this PR")];
         classify_by_keywords(&mut events, &rules);
         assert_eq!(events[0].category.as_deref(), Some("action_required"));
     }
@@ -167,7 +167,7 @@ mod tests {
                 performance_category: None,
             },
         ];
-        let mut bridged = vec![make_event("Change approved")];
+        let mut bridged = vec![build_event("Change approved")];
         classify_by_keywords(&mut bridged, &rules);
         assert_eq!(bridged[0].category.as_deref(), Some("decisions"));
         assert_eq!(
@@ -176,7 +176,7 @@ mod tests {
             "an opted-in rule bridges to the performance taxonomy"
         );
 
-        let mut grouping_only = vec![make_event("FYI: new doc")];
+        let mut grouping_only = vec![build_event("FYI: new doc")];
         classify_by_keywords(&mut grouping_only, &rules);
         assert_eq!(
             grouping_only[0].category.as_deref(),
@@ -198,8 +198,8 @@ mod tests {
 
         // "FAIR" and "MAIL" contain "AI" as a substring but not as a token.
         let mut events = vec![
-            make_event("FAIR conference recap"),
-            make_event("Check your MAIL inbox"),
+            build_event("FAIR conference recap"),
+            build_event("Check your MAIL inbox"),
         ];
         classify_by_keywords(&mut events, &rules);
         assert!(
@@ -212,7 +212,7 @@ mod tests {
         );
 
         // Standalone "AI" as a whole token matches.
-        let mut events2 = vec![make_event("AI research update")];
+        let mut events2 = vec![build_event("AI research update")];
         classify_by_keywords(&mut events2, &rules);
         assert_eq!(events2[0].category.as_deref(), Some("ai_topic"));
     }
@@ -227,7 +227,7 @@ mod tests {
             performance_category: None,
         }];
         for title in ["AI-powered platform", "GPT-4 launch", "node.js runtime"] {
-            let mut events = vec![make_event(title)];
+            let mut events = vec![build_event(title)];
             classify_by_keywords(&mut events, &rules);
             assert_eq!(
                 events[0].category.as_deref(),
@@ -248,7 +248,7 @@ mod tests {
         // of a different morpheme, not the same Latin-style token.
         for title in ["검토를 부탁드립니다", "재검토가 필요합니다", "검토중입니다"]
         {
-            let mut events = vec![make_event(title)];
+            let mut events = vec![build_event(title)];
             classify_by_keywords(&mut events, &rules);
             assert_eq!(
                 events[0].category.as_deref(),

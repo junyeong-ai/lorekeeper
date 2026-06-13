@@ -6,12 +6,12 @@ use crate::backlinks::{BacklinksSyncResult, ConceptUpdate};
 use crate::cluster::{ClusterResult, LinkSuggestion};
 use crate::concept_lint::{InvalidCategoryConcept, NearDuplicateConcept, UnresolvedConflict};
 use crate::export::GraphExport;
-use crate::graph::{BrokenLink, HubPageRef};
+use crate::graph::{BrokenLink, HubPageReference};
 use crate::merge::MergeResult;
 
 #[derive(Debug, Serialize)]
 pub struct HubsReport {
-    pub hubs: Vec<HubPageRef>,
+    pub hubs: Vec<HubPageReference>,
 }
 
 #[derive(Debug, Serialize)]
@@ -58,7 +58,7 @@ pub struct LintReport {
     pub pages: usize,
     pub wikilinks: usize,
     pub components: usize,
-    pub hubs: Vec<HubPageRef>,
+    pub hubs: Vec<HubPageReference>,
     pub orphans: Vec<String>,
     pub broken: Vec<BrokenLink>,
     pub index: IndexSyncReport,
@@ -290,8 +290,8 @@ pub fn print_suggest_links(r: &SuggestLinksReport) {
     }
     for s in &r.pairs {
         println!(
-            "  {} <-> {} (shared neighbors: {})",
-            s.a, s.b, s.shared_neighbors
+            "  {} <-> {} (score: {:.3}, shared neighbors: {})",
+            s.a, s.b, s.score, s.shared_neighbors
         );
     }
     println!("{} suggestion(s)", r.count);

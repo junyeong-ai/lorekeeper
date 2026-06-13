@@ -287,6 +287,10 @@ pub(crate) async fn resolve_users(http: &reqwest::Client, token: &str) -> HashMa
     const MAX_PAGES: usize = 50; // 50 × 200 = 10,000 users
     let mut map = HashMap::new();
     let mut cursor = String::new();
+    // True only if the loop runs the full budget without reaching the end of the list —
+    // i.e. the workspace has more users than the cap, so some IDs won't resolve. The
+    // error branch sets it false because it already warned.
+    let mut hit_cap = true;
     for _ in 0..MAX_PAGES {
         let mut params: Vec<(&str, &str)> = vec![("limit", "200")];
         if !cursor.is_empty() {
@@ -295,6 +299,7 @@ pub(crate) async fn resolve_users(http: &reqwest::Client, token: &str) -> HashMa
         match slack_post::<MembersPage>(http, token, "users.list", &params).await {
             Ok(page) => {
                 if page.members.is_empty() {
+                    hit_cap = false;
                     break;
                 }
                 for m in &page.members {
@@ -302,14 +307,23 @@ pub(crate) async fn resolve_users(http: &reqwest::Client, token: &str) -> HashMa
                 }
                 cursor = ResponseMetadata::cursor(page.response_metadata);
                 if cursor.is_empty() {
+                    hit_cap = false;
                     break;
                 }
             }
             Err(e) => {
                 tracing::warn!(error = %e, resolved = map.len(), "failed to resolve some Slack users; remaining fall back to raw IDs");
+                hit_cap = false;
                 break;
             }
         }
+    }
+    if hit_cap {
+        tracing::warn!(
+            resolved = map.len(),
+            cap = MAX_PAGES * 200,
+            "Slack user list exceeded the resolution budget; users beyond the cap fall back to raw IDs"
+        );
     }
     map
 }
@@ -335,6 +349,10 @@ async fn resolve_channel_id(
     // Paginate through the full channel list (large workspaces exceed 1000).
     const MAX_PAGES: usize = 25; // 25 × 200 = 5,000 channels
     let mut cursor = String::new();
+    // True only if the loop runs the full budget without reaching the end of the list:
+    // the channel was not in the first 5,000 but more remain unscanned, which is a
+    // different failure from "no such channel exists" and must not masquerade as it.
+    let mut budget_exhausted = true;
     for _ in 0..MAX_PAGES {
         let mut params: Vec<(&str, &str)> = vec![
             ("types", "public_channel,private_channel"),
@@ -347,6 +365,7 @@ async fn resolve_channel_id(
         let page: ChannelsPage = slack_post(http, token, "conversations.list", &params).await?;
 
         if page.channels.is_empty() {
+            budget_exhausted = false;
             break;
         }
         if let Some(ch) = page.channels.into_iter().find(|c| c.name == name) {
@@ -355,10 +374,17 @@ async fn resolve_channel_id(
 
         cursor = ResponseMetadata::cursor(page.response_metadata);
         if cursor.is_empty() {
+            budget_exhausted = false;
             break;
         }
     }
 
+    if budget_exhausted {
+        return Err(SourceError::Parse(format!(
+            "channel '{channel_ref}' not found within the first {} channels scanned (page budget {MAX_PAGES}); it may exist beyond the cap — pass the bare channel id (C…/G…/D…) to skip name resolution",
+            MAX_PAGES * 200
+        )));
+    }
     Err(SourceError::Parse(format!(
         "channel not found: {channel_ref}"
     )))

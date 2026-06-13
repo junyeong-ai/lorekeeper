@@ -33,7 +33,7 @@ pub struct BrokenLink {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct HubPageRef {
+pub struct HubPageReference {
     pub id: String,
     pub title: String,
     pub degree: usize,
@@ -48,7 +48,7 @@ impl WikiGraph {
     /// the convenient default for tests); for a narrowed scope whose links reach
     /// pages outside it, use [`Self::build_with_existence`].
     pub fn build(pages: &[ScannedPage], dirs: &VaultDirs) -> Self {
-        Self::build_with_existence(pages, &VaultExistence::from_pages(pages, dirs), dirs)
+        Self::build_with_existence(pages, &VaultExistence::build(pages, dirs), dirs)
     }
 
     /// Build the analysis graph over `pages` (the scope) while resolving
@@ -158,7 +158,7 @@ impl WikiGraph {
                     if source_idx != target_idx {
                         graph.add_edge(source_idx, target_idx, ());
                     }
-                } else if existence.resolves(target) {
+                } else if existence.is_resolvable(target) {
                     // Resolves to a page outside the analysis scope: not broken,
                     // and a vault-wide outbound connection for orphan purposes.
                     // No edge — the target node is not in the scope graph.
@@ -202,14 +202,14 @@ impl WikiGraph {
         petgraph::algo::connected_components(&self.graph)
     }
 
-    pub fn hubs(&self, top: usize, min_degree: usize) -> Vec<HubPageRef> {
-        let mut entries: Vec<HubPageRef> = self
+    pub fn hubs(&self, top: usize, min_degree: usize) -> Vec<HubPageReference> {
+        let mut entries: Vec<HubPageReference> = self
             .id_to_node
             .iter()
             .map(|(id, &idx)| {
                 let out = self.graph.edges_directed(idx, Direction::Outgoing).count();
                 let inc = self.graph.edges_directed(idx, Direction::Incoming).count();
-                HubPageRef {
+                HubPageReference {
                     id: id.clone(),
                     title: self.graph[idx].title.clone(),
                     degree: out + inc,
@@ -288,7 +288,8 @@ impl WikiGraph {
     }
 
     /// Sorted unique neighbor node indices (in or out) of `node`. Used by
-    /// `suggest_links` to rank candidate pairs by shared-neighbor count.
+    /// `suggest_links` to find shared neighbors and score candidate pairs by their
+    /// Adamic-Adar index (which weights each shared neighbor by 1/ln of its own degree).
     pub(crate) fn neighbors(&self, index: usize) -> Vec<usize> {
         let idx = NodeIndex::new(index);
         let mut ns: Vec<usize> = self
@@ -315,7 +316,7 @@ mod tests {
     use lk_core::config::GraphConfig;
     use std::path::PathBuf;
 
-    fn make_page(id: &str, outgoing: &[&str]) -> ScannedPage {
+    fn build_page(id: &str, outgoing: &[&str]) -> ScannedPage {
         let name = id.rsplit('/').next().unwrap_or(id);
         ScannedPage {
             id: id.to_owned(),
@@ -329,9 +330,9 @@ mod tests {
     #[test]
     fn basic_graph_construction() {
         let pages = vec![
-            make_page("wiki/alpha", &["beta"]),
-            make_page("wiki/beta", &["alpha"]),
-            make_page("wiki/gamma", &[]),
+            build_page("wiki/alpha", &["beta"]),
+            build_page("wiki/beta", &["alpha"]),
+            build_page("wiki/gamma", &[]),
         ];
         let g = WikiGraph::build(&pages, &VaultDirs::default());
 
@@ -343,8 +344,8 @@ mod tests {
     #[test]
     fn broken_links_detected() {
         let pages = vec![
-            make_page("wiki/alpha", &["nonexistent"]),
-            make_page("wiki/beta", &[]),
+            build_page("wiki/alpha", &["nonexistent"]),
+            build_page("wiki/beta", &[]),
         ];
         let g = WikiGraph::build(&pages, &VaultDirs::default());
 
@@ -356,10 +357,10 @@ mod tests {
     #[test]
     fn hubs_sorted_by_degree() {
         let pages = vec![
-            make_page("wiki/hub", &["a", "b", "c"]),
-            make_page("wiki/a", &["hub"]),
-            make_page("wiki/b", &["hub"]),
-            make_page("wiki/c", &[]),
+            build_page("wiki/hub", &["a", "b", "c"]),
+            build_page("wiki/a", &["hub"]),
+            build_page("wiki/b", &["hub"]),
+            build_page("wiki/c", &[]),
         ];
         let g = WikiGraph::build(&pages, &VaultDirs::default());
 
@@ -373,9 +374,9 @@ mod tests {
     fn orphans_detected() {
         let config = GraphConfig::default();
         let pages = vec![
-            make_page("wiki/connected", &["other"]),
-            make_page("wiki/other", &[]),
-            make_page("wiki/orphan", &[]),
+            build_page("wiki/connected", &["other"]),
+            build_page("wiki/other", &[]),
+            build_page("wiki/orphan", &[]),
         ];
         let g = WikiGraph::build(&pages, &VaultDirs::default());
 
@@ -389,9 +390,9 @@ mod tests {
         config.metrics.orphan_exclude = vec!["wiki/orphan".to_owned()];
 
         let pages = vec![
-            make_page("wiki/connected", &["other"]),
-            make_page("wiki/other", &[]),
-            make_page("wiki/orphan", &[]),
+            build_page("wiki/connected", &["other"]),
+            build_page("wiki/other", &[]),
+            build_page("wiki/orphan", &[]),
         ];
         let g = WikiGraph::build(&pages, &VaultDirs::default());
 
@@ -401,7 +402,7 @@ mod tests {
 
     #[test]
     fn self_links_excluded() {
-        let pages = vec![make_page("wiki/self", &["self"])];
+        let pages = vec![build_page("wiki/self", &["self"])];
         let g = WikiGraph::build(&pages, &VaultDirs::default());
 
         assert_eq!(g.edge_count(), 0);
@@ -410,8 +411,8 @@ mod tests {
     #[test]
     fn filename_resolution() {
         let pages = vec![
-            make_page("wiki/concept-a", &["concept-b"]),
-            make_page("wiki/concept-b", &[]),
+            build_page("wiki/concept-a", &["concept-b"]),
+            build_page("wiki/concept-b", &[]),
         ];
         let g = WikiGraph::build(&pages, &VaultDirs::default());
 
@@ -424,9 +425,9 @@ mod tests {
         // Two pages share the filename slug `alpha`; a `[[alpha]]` link resolves
         // to the first-inserted page (the second is shadowed, with a warning).
         let pages = vec![
-            make_page("wiki/alpha", &[]),
-            make_page("docs/alpha", &[]),
-            make_page("wiki/linker", &["alpha"]),
+            build_page("wiki/alpha", &[]),
+            build_page("docs/alpha", &[]),
+            build_page("wiki/linker", &["alpha"]),
         ];
         let g = WikiGraph::build(&pages, &VaultDirs::default());
 
@@ -449,9 +450,9 @@ mod tests {
         // of scan order (the document is listed first here) and with no ambiguity
         // warning. The document is reached only by its path form `[[wiki/documents/x]]`.
         let pages = vec![
-            make_page("wiki/documents/x", &[]),
-            make_page("wiki/concepts/x", &[]),
-            make_page("wiki/linker", &["x"]),
+            build_page("wiki/documents/x", &[]),
+            build_page("wiki/concepts/x", &[]),
+            build_page("wiki/linker", &["x"]),
         ];
         let g = WikiGraph::build(&pages, &VaultDirs::default());
         let edges: Vec<(String, String)> = g
@@ -471,8 +472,8 @@ mod tests {
         // `[[wiki/sub/b]]` (path form) resolves to the page whose id is
         // `wiki/sub/b`, not just the filename `b`.
         let pages = vec![
-            make_page("wiki/a", &["wiki/sub/b"]),
-            make_page("wiki/sub/b", &[]),
+            build_page("wiki/a", &["wiki/sub/b"]),
+            build_page("wiki/sub/b", &[]),
         ];
         let g = WikiGraph::build(&pages, &VaultDirs::default());
 
@@ -492,7 +493,7 @@ mod tests {
                 outgoing: vec![],
                 aliases: vec!["k8s".to_owned()],
             },
-            make_page("wiki/linker", &["k8s"]),
+            build_page("wiki/linker", &["k8s"]),
         ];
         let g = WikiGraph::build(&pages, &VaultDirs::default());
         assert_eq!(
@@ -508,19 +509,19 @@ mod tests {
         // A `wiki/` concept links a `daily/` page (out of the analysis scope).
         // Without the existence universe it reads as broken (legacy); with it,
         // the link resolves to an existing vault page and is exempt.
-        let scope = vec![make_page(
+        let scope = vec![build_page(
             "wiki/concepts/foo",
             &["daily/team-slack/2026-05-22"],
         )];
         let full = vec![
-            make_page("wiki/concepts/foo", &["daily/team-slack/2026-05-22"]),
-            make_page("daily/team-slack/2026-05-22", &[]),
+            build_page("wiki/concepts/foo", &["daily/team-slack/2026-05-22"]),
+            build_page("daily/team-slack/2026-05-22", &[]),
         ];
 
         let legacy = WikiGraph::build(&scope, &VaultDirs::default());
         assert_eq!(legacy.broken_links().len(), 1);
 
-        let existence = VaultExistence::from_pages(&full, &VaultDirs::default());
+        let existence = VaultExistence::build(&full, &VaultDirs::default());
         let g = WikiGraph::build_with_existence(&scope, &existence, &VaultDirs::default());
         assert!(g.broken_links().is_empty());
     }
@@ -530,10 +531,10 @@ mod tests {
         // A `wiki/` concept with no in-scope edges, linked only from a `daily/`
         // page (out of scope), is not a true orphan.
         let config = GraphConfig::default();
-        let scope = vec![make_page("wiki/concepts/bar", &[])];
+        let scope = vec![build_page("wiki/concepts/bar", &[])];
         let full = vec![
-            make_page("wiki/concepts/bar", &[]),
-            make_page("daily/team-slack/2026-05-22", &["bar"]),
+            build_page("wiki/concepts/bar", &[]),
+            build_page("daily/team-slack/2026-05-22", &["bar"]),
         ];
 
         let legacy = WikiGraph::build(&scope, &VaultDirs::default());
@@ -542,7 +543,7 @@ mod tests {
             vec!["wiki/concepts/bar"]
         );
 
-        let existence = VaultExistence::from_pages(&full, &VaultDirs::default());
+        let existence = VaultExistence::build(&full, &VaultDirs::default());
         let g = WikiGraph::build_with_existence(&scope, &existence, &VaultDirs::default());
         assert!(
             g.orphans(&config.metrics.orphan_exclude, Path::new("wiki"))
@@ -555,16 +556,16 @@ mod tests {
         // A `wiki/` concept that links out to an existing `daily/` page (and is
         // linked by nothing) is connected to the vault, not an orphan.
         let config = GraphConfig::default();
-        let scope = vec![make_page(
+        let scope = vec![build_page(
             "wiki/concepts/baz",
             &["daily/team-slack/2026-05-22"],
         )];
         let full = vec![
-            make_page("wiki/concepts/baz", &["daily/team-slack/2026-05-22"]),
-            make_page("daily/team-slack/2026-05-22", &[]),
+            build_page("wiki/concepts/baz", &["daily/team-slack/2026-05-22"]),
+            build_page("daily/team-slack/2026-05-22", &[]),
         ];
 
-        let existence = VaultExistence::from_pages(&full, &VaultDirs::default());
+        let existence = VaultExistence::build(&full, &VaultDirs::default());
         let g = WikiGraph::build_with_existence(&scope, &existence, &VaultDirs::default());
         assert!(
             g.orphans(&config.metrics.orphan_exclude, Path::new("wiki"))
@@ -577,7 +578,7 @@ mod tests {
         // A page whose only wikilink points at itself is disconnected; the
         // self-reference must not exempt it from orphan status.
         let config = GraphConfig::default();
-        let pages = vec![make_page("wiki/lonely", &["lonely"])];
+        let pages = vec![build_page("wiki/lonely", &["lonely"])];
         let g = WikiGraph::build(&pages, &VaultDirs::default());
 
         assert_eq!(
@@ -593,9 +594,9 @@ mod tests {
         // have exempted both.
         let config = GraphConfig::default();
         let pages = vec![
-            make_page("wiki/a/dup", &[]),
-            make_page("wiki/b/dup", &[]),
-            make_page("wiki/linker", &["dup"]),
+            build_page("wiki/a/dup", &[]),
+            build_page("wiki/b/dup", &[]),
+            build_page("wiki/linker", &["dup"]),
         ];
         let g = WikiGraph::build(&pages, &VaultDirs::default());
 
@@ -611,11 +612,11 @@ mod tests {
         // nothing links it and it links nothing that exists.
         let config = GraphConfig::default();
         let scope = vec![
-            make_page("wiki/connected", &["other"]),
-            make_page("wiki/other", &[]),
-            make_page("wiki/lonely", &[]),
+            build_page("wiki/connected", &["other"]),
+            build_page("wiki/other", &[]),
+            build_page("wiki/lonely", &[]),
         ];
-        let existence = VaultExistence::from_pages(&scope, &VaultDirs::default());
+        let existence = VaultExistence::build(&scope, &VaultDirs::default());
         let g = WikiGraph::build_with_existence(&scope, &existence, &VaultDirs::default());
 
         assert_eq!(

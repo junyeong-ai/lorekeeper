@@ -81,7 +81,7 @@ pub async fn run(
     let extract_target = target_date.unwrap_or(today);
 
     let ctx = Arc::new(
-        lk_pipeline::PipelineContext::new(opts.template_dir.as_deref(), llm.clone(), &config)
+        lk_pipeline::PipelineContext::build(opts.template_dir.as_deref(), llm.clone(), &config)
             .map_err(|e| miette::miette!("{e}"))?,
     );
     let mut pipeline = lk_pipeline::Pipeline::new(&vault_root, ctx);

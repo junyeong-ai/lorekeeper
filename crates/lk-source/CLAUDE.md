@@ -4,11 +4,17 @@ Source adapters. Each implements `Source::extract(params, ctx) -> Result<Vec<Raw
 `build_source(source_type, ..)` is the factory. No dedup/render here — just fetch +
 map to `RawItem`.
 
-- **`validate_params(source_type, params)`** deserializes into each adapter's typed
-  params struct, which carry `#[serde(deny_unknown_fields)]` (including nested structs).
-  `lore validate` calls this for every enabled source, so config typos fail before any
-  network call. Keep new params strict. `classify` is NOT a param — it's a top-level
-  `SourceConfig` field.
+- **Params are validated BY CONSTRUCTION, at consumption.** `parse_validated::<P>()` does
+  the two-step `parse_params` (deserialize into the `#[serde(deny_unknown_fields)]` struct)
+  then `P::validate()` (the `ValidatedParams` trait — semantic checks: caps `> 0`, required
+  non-empty fields, value formats; pure, no I/O). BOTH the offline `validate_params(source_type,
+  params)` dispatch (`lore validate`) AND every adapter's `extract` route through
+  `parse_validated`, so an invariant can never be enforced in the config check yet skipped at
+  runtime — a direct `extract` call can't reach the body with unvalidated params (e.g. gmail
+  could otherwise assemble `() after:…`; manual could scan/archive the vault root). A new
+  adapter inherits the guarantee the moment it `impl ValidatedParams for XParams` and parses
+  via `parse_validated` — never call `parse_params` directly from an adapter. `classify` is
+  NOT a param — it's a top-level `SourceConfig` field.
 - **`ExtractContext::day_window(lookback, lookahead)`** anchors a query window to the
   target day's bounds in the configured timezone — never `now`. Time-windowed adapters
   must build their windows from it so `lore ingest --date <past>` backfills the right day
@@ -26,12 +32,17 @@ map to `RawItem`.
     timestamps are skipped. `description` is HTML → `markdown::html_to_markdown`.
   - **Gmail**: uses epoch-second `after:`/`before:` from `day_window` (timezone-exact);
     the `include_queries` OR group is parenthesized so the bounds bind to every term.
+    `include_queries` is REQUIRED and each entry must be non-blank — `validate_params`
+    rejects an empty list AND any blank-after-trim entry (which would assemble an empty `()`
+    clause). With no stable filter the window would fall to mailbox read-state and the daily
+    page would drift between runs, breaking complete-refetch. Using `is:unread` *inside* an
+    explicit query is the operator's visible choice — only the silent empty default is forbidden.
   - **Jira**: current `GET /rest/api/3/search/jql` (the old `/search` was removed, returns
     410), paginated via `nextPageToken` (NOT the legacy `startAt`). `description` is ADF
     JSON → `markdown::adf_to_markdown`. The user supplies a
     `jql` query string directly in config; convention is to search by `updated` for daily
-    work snapshots. `duedate` + `customfield_10015` (start date) render as a status/period
-    header. The authenticated `accountId` (the exact ownership key) is fetched from
+    work snapshots. `duedate` + a configurable `start_date_field` (the Jira start-date
+    custom field, e.g. `customfield_10015`) render as a status/period header. The authenticated `accountId` (the exact ownership key) is fetched from
     `/myself` ONCE and cached on the source (`OnceCell`); a fetch failure is PROPAGATED,
     never degraded to "no owner" — silently marking every assigned issue not-self would
     erase a batch's personal contribution with no signal.
@@ -70,9 +81,9 @@ map to `RawItem`.
     keeps an unattended ingest finite against a server streaming tokens without progress
     (loud warn when it trips). Caps are guards against pathological volume, all
     config-exposed and validated `> 0`: `slack-channel`
-    `max_messages_per_channel`/`max_thread_messages` (500/200), `slack-search`
-    `max_matches_per_query` (200), `gmail` `max_messages` (200), `google-calendar`
-    `max_events` (500), `google-drive` `max_files` (200), `jira` `max_issues` (200).
+    `max_messages_per_channel`/`max_thread_messages`, `slack-search`
+    `max_matches_per_query`, `gmail` `max_messages`, `google-calendar`
+    `max_events`, `google-drive` `max_files`, `jira` `max_issues`.
     Every adapter `tracing::warn!`s ONLY when the cap may have dropped items (overshoot
     or a pending next page — never a false alarm at an exact-cap fetch; "may have been
     dropped" because a pending page can turn out empty), so truncation is always

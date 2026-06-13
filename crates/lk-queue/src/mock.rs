@@ -2,7 +2,7 @@ use async_trait::async_trait;
 
 use lk_core::concept::ExtractedConcept;
 
-use crate::{ExtractConceptsRequest, LlmClient, LlmError, SummarizeRequest, Theme, ThemeRequest};
+use crate::{ExtractConceptsRequest, LlmClient, QueueError, SummarizeRequest, Theme, ThemeRequest};
 
 #[derive(Default)]
 pub struct MockLlmClient {
@@ -30,9 +30,9 @@ impl MockLlmClient {
 
 #[async_trait]
 impl LlmClient for MockLlmClient {
-    async fn summarize(&self, _req: SummarizeRequest) -> Result<String, LlmError> {
+    async fn summarize(&self, _req: SummarizeRequest) -> Result<String, QueueError> {
         if self.fail {
-            return Err(LlmError::Api("mock failure".into()));
+            return Err(QueueError::Api("mock failure".into()));
         }
         Ok(self.summary.clone())
     }
@@ -40,16 +40,16 @@ impl LlmClient for MockLlmClient {
     async fn extract_concepts(
         &self,
         _req: ExtractConceptsRequest,
-    ) -> Result<Vec<ExtractedConcept>, LlmError> {
+    ) -> Result<Vec<ExtractedConcept>, QueueError> {
         if self.fail {
-            return Err(LlmError::Api("mock failure".into()));
+            return Err(QueueError::Api("mock failure".into()));
         }
         Ok(self.concepts.clone())
     }
 
-    async fn identify_themes(&self, _req: ThemeRequest) -> Result<Vec<Theme>, LlmError> {
+    async fn identify_themes(&self, _req: ThemeRequest) -> Result<Vec<Theme>, QueueError> {
         if self.fail {
-            return Err(LlmError::Api("mock failure".into()));
+            return Err(QueueError::Api("mock failure".into()));
         }
         Ok(self.themes.clone())
     }

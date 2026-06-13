@@ -35,7 +35,7 @@ pub enum PipelineError {
     #[error(transparent)]
     Vault(#[from] lk_vault::VaultError),
     #[error(transparent)]
-    Llm(#[from] lk_queue::LlmError),
+    Queue(#[from] lk_queue::QueueError),
 }
 
 pub struct IngestResult {
@@ -274,7 +274,7 @@ impl Pipeline {
             let summary = if summary_decision.enqueue() {
                 match self.ctx.llm.summarize(summary_req).await {
                     Ok(s) => s,
-                    Err(e) if e.is_fatal() => return Err(PipelineError::Llm(e)),
+                    Err(e) if e.is_fatal() => return Err(PipelineError::Queue(e)),
                     Err(e) => {
                         tracing::warn!(
                             error = %e,
@@ -294,7 +294,7 @@ impl Pipeline {
                 && let Err(e) = self.ctx.llm.summarize(refine_req).await
             {
                 if e.is_fatal() {
-                    return Err(PipelineError::Llm(e));
+                    return Err(PipelineError::Queue(e));
                 }
                 tracing::warn!(error = %e, "refine-events task failed; events stay as raw");
             } else if !refine_decision.enqueue() {
@@ -324,7 +324,7 @@ impl Pipeline {
                 let extracted = if decision.enqueue() {
                     match self.ctx.llm.extract_concepts(concepts_req).await {
                         Ok(c) => filter_valid_concepts(c, &self.ctx.concept_categories),
-                        Err(e) if e.is_fatal() => return Err(PipelineError::Llm(e)),
+                        Err(e) if e.is_fatal() => return Err(PipelineError::Queue(e)),
                         Err(e) => {
                             tracing::warn!(
                                 error = %e,
@@ -636,7 +636,7 @@ impl Pipeline {
             let summary = if summary_decision.enqueue() {
                 match self.ctx.llm.summarize(summary_req).await {
                     Ok(s) => s,
-                    Err(e) if e.is_fatal() => return Err(PipelineError::Llm(e)),
+                    Err(e) if e.is_fatal() => return Err(PipelineError::Queue(e)),
                     Err(e) => {
                         tracing::warn!(
                             error = %e,
@@ -675,7 +675,7 @@ impl Pipeline {
                 let extracted = if decision.enqueue() {
                     match self.ctx.llm.extract_concepts(concepts_req).await {
                         Ok(c) => filter_valid_concepts(c, &self.ctx.concept_categories),
-                        Err(e) if e.is_fatal() => return Err(PipelineError::Llm(e)),
+                        Err(e) if e.is_fatal() => return Err(PipelineError::Queue(e)),
                         Err(e) => {
                             tracing::warn!(
                                 error = %e,
@@ -785,7 +785,7 @@ fn empty_result(source_id: &str) -> IngestResult {
 /// sees a non-existent category.
 fn filter_valid_concepts(
     raw: Vec<ExtractedConcept>,
-    categories: &[lk_queue::CategoryRef],
+    categories: &[lk_queue::CategoryReference],
 ) -> Vec<ExtractedConcept> {
     let valid_cat_ids: Vec<&str> = categories.iter().map(|c| c.id.as_str()).collect();
     raw.into_iter()

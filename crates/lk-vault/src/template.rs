@@ -90,7 +90,7 @@ impl TemplateEngine {
     /// `user_dir: Some` overrides embedded templates per-file from that directory;
     /// `None` uses only the embedded defaults. There is no implicit directory search —
     /// the embedded copies are the source of truth.
-    pub fn new(user_dir: Option<&Path>) -> Result<Self, VaultError> {
+    pub fn build(user_dir: Option<&Path>) -> Result<Self, VaultError> {
         let mut env = Environment::new();
         let user_dir = user_dir.map(Path::to_path_buf);
         let dir = user_dir.clone();

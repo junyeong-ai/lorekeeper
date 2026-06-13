@@ -68,7 +68,7 @@ pub fn sync_concept_backlinks(
     // wikilink graph. Only non-concept content pages count as sources (`is_valid_source`);
     // a concept→concept link belongs in `## Related`, and navigation pages aren't sources.
     // BTreeMap/BTreeSet keep the rendered body deterministic.
-    let existence = VaultExistence::from_pages(pages, dirs);
+    let existence = VaultExistence::build(pages, dirs);
     let mut incoming: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for page in pages {
         if !is_valid_source(&page.path, dirs) {
@@ -241,7 +241,7 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn make_page(id: &str, rel: &str, outgoing: &[&str]) -> ScannedPage {
+    fn build_page(id: &str, rel: &str, outgoing: &[&str]) -> ScannedPage {
         ScannedPage {
             id: id.to_owned(),
             path: PathBuf::from(rel),
@@ -275,9 +275,9 @@ mod tests {
         write_concept(&dir, "oy365", &[]);
 
         let pages = vec![
-            make_page("wiki/concepts/oy365", "wiki/concepts/oy365.md", &[]),
+            build_page("wiki/concepts/oy365", "wiki/concepts/oy365.md", &[]),
             // A daily page that wikilinks the concept.
-            make_page(
+            build_page(
                 "daily/slack/2026-05-20",
                 "daily/slack/2026-05-20.md",
                 &["oy365"],
@@ -304,8 +304,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_concept(&dir, "oy365", &[]);
         let pages = vec![
-            make_page("wiki/concepts/oy365", "wiki/concepts/oy365.md", &[]),
-            make_page(
+            build_page("wiki/concepts/oy365", "wiki/concepts/oy365.md", &[]),
+            build_page(
                 "daily/slack/2026-05-20",
                 "daily/slack/2026-05-20.md",
                 &["wiki/concepts/oy365"],
@@ -336,7 +336,7 @@ mod tests {
                 outgoing: vec![],
                 aliases: vec!["k8s".to_owned()],
             },
-            make_page("daily/x/2026-05-20", "daily/x/2026-05-20.md", &["k8s"]),
+            build_page("daily/x/2026-05-20", "daily/x/2026-05-20.md", &["k8s"]),
         ];
         let report =
             sync_concept_backlinks(&pages, dir.path(), Locale::Ko, false, &VaultDirs::default())
@@ -373,7 +373,7 @@ mod tests {
                 outgoing: vec![],
                 aliases: vec!["fruit".to_owned()],
             },
-            make_page("daily/x/2026-05-20", "daily/x/2026-05-20.md", &["fruit"]),
+            build_page("daily/x/2026-05-20", "daily/x/2026-05-20.md", &["fruit"]),
         ];
         sync_concept_backlinks(&pages, dir.path(), Locale::Ko, false, &VaultDirs::default())
             .unwrap();
@@ -406,8 +406,8 @@ mod tests {
                 outgoing: vec![],
                 aliases: vec!["helm".to_owned()],
             },
-            make_page("wiki/documents/helm", "wiki/documents/helm.md", &[]),
-            make_page("daily/x/2026-05-20", "daily/x/2026-05-20.md", &["helm"]),
+            build_page("wiki/documents/helm", "wiki/documents/helm.md", &[]),
+            build_page("daily/x/2026-05-20", "daily/x/2026-05-20.md", &["helm"]),
         ];
         let report =
             sync_concept_backlinks(&pages, dir.path(), Locale::Ko, false, &VaultDirs::default())
@@ -428,7 +428,7 @@ mod tests {
         // links to it.
         write_concept(&dir, "oy365", &["daily/slack/2026-01-01"]);
 
-        let pages = vec![make_page(
+        let pages = vec![build_page(
             "wiki/concepts/oy365",
             "wiki/concepts/oy365.md",
             &[],
@@ -458,8 +458,8 @@ mod tests {
         .unwrap();
 
         let pages = vec![
-            make_page("wiki/concepts/oy365", "wiki/concepts/oy365.md", &[]),
-            make_page("daily/x/2026-05-20", "daily/x/2026-05-20.md", &["oy365"]),
+            build_page("wiki/concepts/oy365", "wiki/concepts/oy365.md", &[]),
+            build_page("daily/x/2026-05-20", "daily/x/2026-05-20.md", &["oy365"]),
         ];
 
         sync_concept_backlinks(&pages, dir.path(), Locale::Ko, false, &VaultDirs::default())
@@ -479,8 +479,8 @@ mod tests {
         let before = std::fs::read_to_string(dir.path().join("wiki/concepts/oy365.md")).unwrap();
 
         let pages = vec![
-            make_page("wiki/concepts/oy365", "wiki/concepts/oy365.md", &[]),
-            make_page("daily/x/2026-05-20", "daily/x/2026-05-20.md", &["oy365"]),
+            build_page("wiki/concepts/oy365", "wiki/concepts/oy365.md", &[]),
+            build_page("daily/x/2026-05-20", "daily/x/2026-05-20.md", &["oy365"]),
         ];
 
         let report =
@@ -499,8 +499,8 @@ mod tests {
         write_concept(&dir, "oy365", &[]);
 
         let pages = vec![
-            make_page("wiki/concepts/oy365", "wiki/concepts/oy365.md", &[]),
-            make_page("daily/x/2026-05-20", "daily/x/2026-05-20.md", &["oy365"]),
+            build_page("wiki/concepts/oy365", "wiki/concepts/oy365.md", &[]),
+            build_page("daily/x/2026-05-20", "daily/x/2026-05-20.md", &["oy365"]),
         ];
 
         // First run rewrites the page.
@@ -529,8 +529,8 @@ mod tests {
         .unwrap();
 
         let pages = vec![
-            make_page("wiki/concepts/oy365", "wiki/concepts/oy365.md", &[]),
-            make_page("daily/x/2026-05-20", "daily/x/2026-05-20.md", &["oy365"]),
+            build_page("wiki/concepts/oy365", "wiki/concepts/oy365.md", &[]),
+            build_page("daily/x/2026-05-20", "daily/x/2026-05-20.md", &["oy365"]),
         ];
 
         sync_concept_backlinks(&pages, dir.path(), Locale::En, false, &VaultDirs::default())
@@ -545,7 +545,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_concept(&dir, "oy365", &[]);
 
-        let pages = vec![make_page(
+        let pages = vec![build_page(
             "wiki/concepts/oy365",
             "wiki/concepts/oy365.md",
             &["oy365"],

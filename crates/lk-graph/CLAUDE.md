@@ -49,11 +49,13 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
   cache; `save()` persists atomically. The CLI skips the full scan when
   `is_dirty()` returns false.
 - **`suggest_links`**: pairs in the same Louvain community with no edge that share at
-  least `graph.cluster.suggest_min_shared_neighbors` neighbors (default 2), ranked by
-  shared-neighbor count. It runs on the analysis scope (`graph.scope.dirs`, the wiki by
-  default), so daily/personal pages are never nodes or neighbors here — the floor
-  suppresses in-scope co-citation noise: a single shared neighbor usually means
-  "co-cited by one document/exploration page", not a real relationship. Read-only,
+  least `graph.cluster.suggest_min_shared_neighbors` neighbors, ranked by their
+  **Adamic–Adar index** (Σ 1/ln|N(z)| over shared neighbors z), descending. It runs on the
+  analysis scope (`graph.scope.dirs`, the wiki by default), so daily/personal pages are
+  never nodes or neighbors here. Two filters stack: the count floor rejects the
+  single-shared-neighbor case outright, then Adamic–Adar discounts shared neighbors that are
+  high-degree hubs — so co-citation by one busy document/exploration page can never outrank a
+  real shared niche concept. Parameter-free weighting (no magic threshold). Read-only,
   deterministic.
 - **Mutations gated**: `index_drift::fix()`, `normalize::apply()`, and
   `backlinks::sync_concept_backlinks` touch the filesystem — the first two only
@@ -125,14 +127,18 @@ writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
   state.
 - **`concept_lint::find_near_duplicate_concepts`**: reports concept-slug pairs whose
   Sørensen-Dice similarity (on separator-stripped slugs) ≥
-  `graph.metrics.concept_near_duplicate_threshold` (default 0.6) — variant-spelling
-  duplicates (`vector-db` ~ `vector-database` = 0.6) the LLM dedup hint missed. Digit-boundary
+  `graph.metrics.concept_near_duplicate_threshold` — variant-spelling
+  duplicates (`vector-db` ~ `vector-database`) the LLM dedup hint missed. Digit-boundary
   version variants (`gpt-4`/`gpt-4o`, `claude-3`/`claude-3-5`) are deliberately distinct
   concepts and are skipped (`is_version_variant`) — that orthogonal exclusion is why the
-  threshold can favor recall at 0.6 without model-version false positives. Pairs are found
-  via a **character-bigram inverted index** (only slugs sharing a bigram are scored), so the
-  scan is near-linear, not O(n²), as the vault grows — safe because Sørensen-Dice > 0 implies
-  a shared bigram. Read-only merge candidates surfaced in `graph lint`; a human decides.
+  threshold can favor recall without model-version false positives. Short slugs
+  (deslugged length < `SHORT_SLUG_LEN`) are flagged only on an EXACT deslug match, never
+  on partial overlap: below that length a slug has only a bigram or two, so one coincidental
+  shared bigram inflates Dice (`rag`/`raga`) — length noise, not meaning — while exact matches
+  (`ai`/`a-i`) still surface. Pairs are found via a **character-bigram inverted index** (only
+  slugs sharing a bigram are scored), so the scan is near-linear, not O(n²), as the vault
+  grows — safe because Sørensen-Dice > 0 implies a shared bigram. Read-only merge candidates
+  surfaced in `graph lint`; a human decides.
 - **`concept_lint::find_unresolved_conflicts`**: reports concept pages whose body carries an
   unresolved `> [!conflict]` callout — a contradiction `/lore-wiki audit` flagged
   between cited sources. The marker lives in the LLM-owned synthesis body (NOT

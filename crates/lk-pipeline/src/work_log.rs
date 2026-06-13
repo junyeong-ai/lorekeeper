@@ -108,7 +108,7 @@ pub async fn render_work_log(
         if decision.enqueue() {
             match ctx.llm.summarize(req).await {
                 Ok(_) => {}
-                Err(e) if e.is_fatal() => return Err(PipelineError::Llm(e)),
+                Err(e) if e.is_fatal() => return Err(PipelineError::Queue(e)),
                 Err(e) => {
                     tracing::warn!(
                         error = %e,

@@ -20,6 +20,10 @@ pub struct GmailSource {
 struct GmailParams {
     #[serde(default = "default_lookback")]
     lookback_hours: u32,
+    /// At least one Gmail search query, OR-combined. Required: an empty list has no stable
+    /// filter, so the window would fall to mailbox read-state and the daily page would change
+    /// between runs — see `validate_params`. Use durable filters (labels, senders), never
+    /// read-state.
     #[serde(default)]
     include_queries: Vec<String>,
     #[serde(default)]
@@ -33,13 +37,37 @@ struct GmailParams {
 
 /// Validate this source's params at config-load time, before any network work.
 pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
-    let p: GmailParams = crate::parse_params(params)?;
-    if p.max_messages == 0 {
-        return Err(SourceError::InvalidParams(
-            "gmail `max_messages` must be > 0".into(),
-        ));
+    crate::parse_validated::<GmailParams>(params).map(|_| ())
+}
+
+impl crate::ValidatedParams for GmailParams {
+    fn validate(&self) -> Result<(), SourceError> {
+        // Enforced at consumption (via `parse_validated` in `extract`), not just at the
+        // config boundary: an empty `include_queries` would assemble `() after:…`, a
+        // silently malformed Gmail query, and a read-state-dependent window besides.
+        if self.include_queries.is_empty() {
+            return Err(SourceError::InvalidParams(
+                "gmail `include_queries` must list at least one query — with no stable filter the \
+                 daily page would depend on mailbox read-state and change between runs, breaking the \
+                 complete-refetch guarantee. Use a durable filter such as a label \
+                 (`label:newsletters`) or sender (`from:@example.com`)."
+                    .into(),
+            ));
+        }
+        if self.include_queries.iter().any(|q| q.trim().is_empty()) {
+            return Err(SourceError::InvalidParams(
+                "gmail `include_queries` entries must each be a non-blank query — a blank term \
+                 assembles an empty `()` clause and silently malforms the Gmail search."
+                    .into(),
+            ));
+        }
+        if self.max_messages == 0 {
+            return Err(SourceError::InvalidParams(
+                "gmail `max_messages` must be > 0".into(),
+            ));
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 fn default_lookback() -> u32 {
@@ -67,13 +95,13 @@ fn default_true() -> bool {
 
 #[derive(Deserialize)]
 struct ListResponse {
-    messages: Option<Vec<MessageRef>>,
+    messages: Option<Vec<MessageReference>>,
     #[serde(rename = "nextPageToken")]
     next_page_token: Option<String>,
 }
 
 #[derive(Deserialize)]
-struct MessageRef {
+struct MessageReference {
     id: String,
 }
 
@@ -155,7 +183,7 @@ impl Source for GmailSource {
         params: &serde_json::Value,
         ctx: &ExtractContext,
     ) -> Result<Vec<RawItem>, SourceError> {
-        let p: GmailParams = crate::parse_params(params)?;
+        let p: GmailParams = crate::parse_validated(params)?;
 
         let token = self.auth.access_token().await?;
 
@@ -164,15 +192,13 @@ impl Source for GmailSource {
         // Gmail's after:/before: accept epoch seconds, which (unlike YYYY/MM/DD) are
         // timezone-exact — the bounds come from day_window in the vault's timezone. The OR
         // group is parenthesized so the bounds apply to every include_query, not just the
-        // last term.
+        // last term. `parse_validated` ran `GmailParams::validate`, so `include_queries` is
+        // non-empty here and the window always carries a stable filter — never read-state,
+        // which would make the complete-refetch window drift between runs.
         let (min, max) = ctx.day_window(p.lookback_hours, 0)?;
-        let base = if p.include_queries.is_empty() {
-            "is:unread".to_string()
-        } else {
-            format!("({})", p.include_queries.join(" OR "))
-        };
         let query = format!(
-            "{base} after:{} before:{}",
+            "({}) after:{} before:{}",
+            p.include_queries.join(" OR "),
             min.as_second(),
             max.as_second()
         );
@@ -181,7 +207,7 @@ impl Source for GmailSource {
         // Termination is `paging::page_step` — the rule all listing adapters share.
         const PAGE_SIZE: usize = 50;
 
-        let mut refs: Vec<MessageRef> = Vec::new();
+        let mut refs: Vec<MessageReference> = Vec::new();
         let mut page_token: Option<String> = None;
         let mut pages_fetched = 0usize;
 

@@ -6,3 +6,6 @@ target/
 
 .claude/worktrees/
 .claude/scheduled_tasks.lock
+
+# Local tool store (symora)
+.symora/

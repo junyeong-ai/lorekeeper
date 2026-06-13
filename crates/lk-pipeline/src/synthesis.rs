@@ -89,7 +89,7 @@ impl Synthesizer {
     /// performance subsystem, gated by `performance.enabled`. Disabled → no review pages,
     /// even if work-log entries exist. The cross-source weekly themes page is independent
     /// and not gated here.
-    fn performance_enabled(&self) -> bool {
+    fn is_performance_enabled(&self) -> bool {
         self.ctx.perf.enabled
     }
 
@@ -129,7 +129,7 @@ impl Synthesizer {
         }
         match self.ctx.llm.summarize(req).await {
             Ok(narrative) => Ok(SynthesisSection::fresh(decision, narrative)),
-            Err(e) if e.is_fatal() => Err(PipelineError::Llm(e)),
+            Err(e) if e.is_fatal() => Err(PipelineError::Queue(e)),
             Err(e) => {
                 tracing::warn!(error = %e, what, "synthesis summarize failed; skipping page");
                 Ok(SynthesisSection::failed())
@@ -249,7 +249,7 @@ impl Synthesizer {
         let themes = if decision.enqueue() {
             match self.ctx.llm.identify_themes(req).await {
                 Ok(t) => t,
-                Err(e) if e.is_fatal() => return Err(PipelineError::Llm(e)),
+                Err(e) if e.is_fatal() => return Err(PipelineError::Queue(e)),
                 Err(e) => {
                     tracing::warn!(error = %e, "weekly theme extraction failed; skipping page");
                     return Ok(None);
@@ -285,7 +285,7 @@ impl Synthesizer {
         &self,
         date: jiff::civil::Date,
     ) -> Result<Option<RenderResult>, PipelineError> {
-        if !self.performance_enabled() {
+        if !self.is_performance_enabled() {
             return Ok(None);
         }
         let (year, week) = iso_year_week(date);
@@ -350,7 +350,7 @@ impl Synthesizer {
         year: i16,
         month: u8,
     ) -> Result<Option<RenderResult>, PipelineError> {
-        if !self.performance_enabled() {
+        if !self.is_performance_enabled() {
             return Ok(None);
         }
         let (start, end) = month_range(year, month)?;
@@ -413,7 +413,7 @@ impl Synthesizer {
         year: i16,
         quarter: u8,
     ) -> Result<Option<RenderResult>, PipelineError> {
-        if !self.performance_enabled() {
+        if !self.is_performance_enabled() {
             return Ok(None);
         }
         let (start, end) = quarter_range(year, quarter)?;
@@ -425,14 +425,10 @@ impl Synthesizer {
         let summary_heading = self.ctx.locale.strings().key_summary;
         let mut monthly_summaries: Vec<serde_json::Value> = Vec::new();
         let mut combined = String::new();
-        // Per-month fallback: a month without its own monthly review drops to its
-        // weekly reviews, so a quarter whose latest month isn't summarized yet still
-        // includes that month rather than silently omitting it.
-        let mut used_weeks: Vec<(i16, u8)> = Vec::new();
 
         for m in &months {
             let Some(narrative) = self
-                .month_child_narrative(year, *m, summary_heading, &mut used_weeks)
+                .month_child_narrative(year, *m, summary_heading)
                 .await?
             else {
                 continue;
@@ -499,21 +495,17 @@ impl Synthesizer {
         &self,
         year: i16,
     ) -> Result<Option<RenderResult>, PipelineError> {
-        if !self.performance_enabled() {
+        if !self.is_performance_enabled() {
             return Ok(None);
         }
         let mut period_summaries: Vec<serde_json::Value> = Vec::new();
         let mut combined = String::new();
         let strings = self.ctx.locale.strings();
         let summary_heading = strings.key_summary;
-        // Per-quarter fallback: a quarter without its own review drops to its months
-        // (each of which drops to weeks), so a year missing its latest quarter still
-        // includes that quarter rather than omitting it.
-        let mut used_weeks: Vec<(i16, u8)> = Vec::new();
 
         for q in 1..=4u8 {
             let Some(narrative) = self
-                .quarter_child_narrative(year, q, summary_heading, &mut used_weeks)
+                .quarter_child_narrative(year, q, summary_heading)
                 .await?
             else {
                 continue;
@@ -580,21 +572,17 @@ impl Synthesizer {
 
     /// Narrative standing in for one month of a quarterly/annual rollup: the monthly
     /// review if it exists, otherwise the month's weekly reviews concatenated. Each
-    /// level reads only pre-summarized child pages — never raw work-log. `used_weeks`
-    /// dedups a boundary ISO week shared by two adjacent *fallback* months so no weekly
-    /// review is counted twice. A month with its own monthly review returns early and
-    /// does NOT claim its weeks — so if a neighbouring month falls back, the shared
-    /// boundary week appears in both that month's monthly review and the neighbour's
-    /// weekly fallback. That is deliberate: for a narrative rollup, including a boundary
-    /// week's work in both is harmless, whereas dropping it would lose real activity.
-    /// (The numeric category table is computed separately from raw work-log over the
-    /// exact date range, so counts are never double-tallied.)
+    /// level reads only pre-summarized child pages — never raw work-log. An ISO week
+    /// straddling a month/quarter boundary is read by both adjacent fallback periods;
+    /// for a narrative rollup that mild redundancy is harmless (the parent summary folds
+    /// it), and dropping it instead would lose real activity from the later period. The
+    /// numeric category table is computed separately from raw work-log over the exact
+    /// date range, so counts are never double-tallied regardless.
     async fn month_child_narrative(
         &self,
         year: i16,
         month: u8,
         summary_heading: &str,
-        used_weeks: &mut Vec<(i16, u8)>,
     ) -> Result<Option<String>, PipelineError> {
         let monthly_dir = PathBuf::from(&self.ctx.dirs.personal).join(&self.ctx.dirs.monthly);
         let file = monthly_dir.join(format!("{year}-{month:02}.md"));
@@ -606,12 +594,8 @@ impl Synthesizer {
         let weekly_dir = PathBuf::from(&self.ctx.dirs.personal).join(&self.ctx.dirs.weekly);
         let mut parts = Vec::new();
         for (wy, ww) in iso_weeks_in_range(start, end)? {
-            if used_weeks.contains(&(wy, ww)) {
-                continue;
-            }
             let file = weekly_dir.join(format!("{wy}-W{ww:02}.md"));
             if let Some(page) = self.reader.read_page(&file).await? {
-                used_weeks.push((wy, ww));
                 parts.push(child_narrative(&page, summary_heading).to_string());
             }
         }
@@ -625,7 +609,6 @@ impl Synthesizer {
         year: i16,
         quarter: u8,
         summary_heading: &str,
-        used_weeks: &mut Vec<(i16, u8)>,
     ) -> Result<Option<String>, PipelineError> {
         let quarterly_dir = PathBuf::from(&self.ctx.dirs.personal).join(&self.ctx.dirs.quarterly);
         let file = quarterly_dir.join(format!("{year}-Q{quarter}.md"));
@@ -636,7 +619,7 @@ impl Synthesizer {
         let mut parts = Vec::new();
         for month in (quarter - 1) * 3 + 1..=quarter * 3 {
             if let Some(narrative) = self
-                .month_child_narrative(year, month, summary_heading, used_weeks)
+                .month_child_narrative(year, month, summary_heading)
                 .await?
             {
                 parts.push(narrative);

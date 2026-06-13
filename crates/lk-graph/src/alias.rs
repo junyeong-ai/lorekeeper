@@ -108,7 +108,7 @@ mod tests {
     }
 
     fn conflicts(pages: &[ScannedPage]) -> Vec<AliasConflict> {
-        let existence = VaultExistence::from_pages(pages, &VaultDirs::default());
+        let existence = VaultExistence::build(pages, &VaultDirs::default());
         find_alias_conflicts(pages, &existence, &VaultDirs::default())
     }
 

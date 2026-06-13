@@ -106,7 +106,7 @@ pub fn diff(
     // aren't false-flagged.
     let mut missing_from_disk: Vec<String> = index_links
         .iter()
-        .filter(|slug| !existence.resolves(slug))
+        .filter(|slug| !existence.is_resolvable(slug))
         .cloned()
         .collect();
     missing_from_disk.sort();
@@ -185,7 +185,7 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
 
-    fn make_page(id: &str, outgoing: &[&str]) -> ScannedPage {
+    fn build_page(id: &str, outgoing: &[&str]) -> ScannedPage {
         ScannedPage {
             id: id.to_owned(),
             path: PathBuf::from(format!("{id}.md")),
@@ -211,14 +211,14 @@ mod tests {
         setup_wiki(tmp.path());
 
         let pages = vec![
-            make_page("wiki/index", &["alpha", "beta"]),
-            make_page("wiki/alpha", &[]),
-            make_page("wiki/beta", &[]),
-            make_page("wiki/gamma", &[]),
+            build_page("wiki/index", &["alpha", "beta"]),
+            build_page("wiki/alpha", &[]),
+            build_page("wiki/beta", &[]),
+            build_page("wiki/gamma", &[]),
         ];
 
         let graph = WikiGraph::build(&pages, &VaultDirs::default());
-        let existence = VaultExistence::from_pages(&pages, &VaultDirs::default());
+        let existence = VaultExistence::build(&pages, &VaultDirs::default());
         let drift = diff(&graph, &existence, tmp.path(), Path::new("wiki"), &[]).unwrap();
 
         assert!(drift.missing_from_index.contains(&"wiki/gamma".to_owned()));
@@ -237,12 +237,12 @@ mod tests {
         .unwrap();
 
         let pages = vec![
-            make_page("wiki/index", &["alpha", "nonexistent"]),
-            make_page("wiki/alpha", &[]),
+            build_page("wiki/index", &["alpha", "nonexistent"]),
+            build_page("wiki/alpha", &[]),
         ];
 
         let graph = WikiGraph::build(&pages, &VaultDirs::default());
-        let existence = VaultExistence::from_pages(&pages, &VaultDirs::default());
+        let existence = VaultExistence::build(&pages, &VaultDirs::default());
         let drift = diff(&graph, &existence, tmp.path(), Path::new("wiki"), &[]).unwrap();
 
         assert!(drift.missing_from_disk.contains(&"nonexistent".to_owned()));
@@ -296,10 +296,10 @@ mod tests {
         let wiki = tmp.path().join("wiki");
         std::fs::create_dir_all(&wiki).unwrap();
 
-        let pages = vec![make_page("wiki/alpha", &[]), make_page("wiki/beta", &[])];
+        let pages = vec![build_page("wiki/alpha", &[]), build_page("wiki/beta", &[])];
 
         let graph = WikiGraph::build(&pages, &VaultDirs::default());
-        let existence = VaultExistence::from_pages(&pages, &VaultDirs::default());
+        let existence = VaultExistence::build(&pages, &VaultDirs::default());
         let drift = diff(&graph, &existence, tmp.path(), Path::new("wiki"), &[]).unwrap();
 
         assert!(!drift.is_in_sync());

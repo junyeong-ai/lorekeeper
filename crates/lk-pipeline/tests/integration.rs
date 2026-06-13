@@ -63,8 +63,8 @@ fn raw_item(title: &str, body: &str, external_id: &str, when: jiff::Timestamp) -
     }
 }
 
-fn make_ctx(config: &Config, llm: Arc<dyn LlmClient>) -> Arc<PipelineContext> {
-    Arc::new(PipelineContext::new(None, llm, config).unwrap())
+fn build_ctx(config: &Config, llm: Arc<dyn LlmClient>) -> Arc<PipelineContext> {
+    Arc::new(PipelineContext::build(None, llm, config).unwrap())
 }
 
 /// A `today` far enough ahead that no test event is a forecast, so the realized/forecast
@@ -85,7 +85,7 @@ async fn concept_pages_written_with_merge() {
     }];
 
     let llm: Arc<dyn LlmClient> = Arc::new(MockLlmClient::with_concepts(concepts));
-    let ctx = make_ctx(&config, llm);
+    let ctx = build_ctx(&config, llm);
     let mut pipeline = Pipeline::new(vault, ctx);
 
     let ts: jiff::Timestamp = "2026-05-23T10:00:00Z".parse().unwrap();
@@ -129,7 +129,7 @@ async fn concept_pages_written_with_merge() {
         name: "Claude Code".into(),
         category: None,
     }]));
-    let mut pipeline2 = Pipeline::new(vault, make_ctx(&config, llm2));
+    let mut pipeline2 = Pipeline::new(vault, build_ctx(&config, llm2));
     let ts2: jiff::Timestamp = "2026-05-24T10:00:00Z".parse().unwrap();
     let items2 = vec![raw_item("Anthropic releases v2", "...", "MSG-2", ts2)];
     pipeline2
@@ -184,7 +184,7 @@ async fn timezone_affects_vault_date() {
     config.vault.timezone = Some("Asia/Seoul".into());
 
     let llm: Arc<dyn LlmClient> = Arc::new(NoopLlmClient);
-    let ctx = make_ctx(&config, llm);
+    let ctx = build_ctx(&config, llm);
     let mut pipeline = Pipeline::new(vault, ctx);
 
     // 2026-05-22 23:00 UTC == 2026-05-23 08:00 KST
@@ -226,7 +226,7 @@ async fn target_date_filters_events() {
     let config = base_config(vault);
 
     let llm: Arc<dyn LlmClient> = Arc::new(NoopLlmClient);
-    let ctx = make_ctx(&config, llm);
+    let ctx = build_ctx(&config, llm);
     let mut pipeline = Pipeline::new(vault, ctx);
 
     let day1: jiff::Timestamp = "2026-05-23T10:00:00Z".parse().unwrap();
@@ -261,7 +261,7 @@ async fn multi_date_events_produce_multiple_daily_pages() {
     let config = base_config(vault);
 
     let llm: Arc<dyn LlmClient> = Arc::new(NoopLlmClient);
-    let ctx = make_ctx(&config, llm);
+    let ctx = build_ctx(&config, llm);
     let mut pipeline = Pipeline::new(vault, ctx);
 
     let day1: jiff::Timestamp = "2026-05-23T10:00:00Z".parse().unwrap();
@@ -314,7 +314,7 @@ async fn concept_accumulates_across_sources_in_one_run() {
         name: "Shared Concept".into(),
         category: None,
     }]));
-    let mut pipeline = Pipeline::new(vault, make_ctx(&config, llm));
+    let mut pipeline = Pipeline::new(vault, build_ctx(&config, llm));
 
     let ts: jiff::Timestamp = "2026-05-23T10:00:00Z".parse().unwrap();
     let opts = IngestOptions {
@@ -364,7 +364,7 @@ async fn llm_failure_does_not_break_pipeline() {
     let config = base_config(vault);
 
     let llm: Arc<dyn LlmClient> = Arc::new(MockLlmClient::failing());
-    let ctx = make_ctx(&config, llm);
+    let ctx = build_ctx(&config, llm);
     let mut pipeline = Pipeline::new(vault, ctx);
 
     let ts: jiff::Timestamp = "2026-05-23T10:00:00Z".parse().unwrap();
@@ -407,7 +407,7 @@ async fn write_failure_keeps_events_novel_for_retry() {
     let config = base_config(vault);
 
     let llm: Arc<dyn LlmClient> = Arc::new(NoopLlmClient);
-    let ctx = make_ctx(&config, llm);
+    let ctx = build_ctx(&config, llm);
     let mut pipeline = Pipeline::new(vault, ctx);
     let sc = config.sources.get("test-source").unwrap().clone();
 
@@ -475,7 +475,7 @@ async fn re_plan_reproduces_the_same_events_idempotently() {
     let vault = dir.path();
     let config = base_config(vault);
     let llm: Arc<dyn LlmClient> = Arc::new(NoopLlmClient);
-    let ctx = make_ctx(&config, llm);
+    let ctx = build_ctx(&config, llm);
     let mut pipeline = Pipeline::new(vault, ctx);
     let sc = config.sources.get("test-source").unwrap().clone();
 
@@ -513,7 +513,7 @@ async fn intra_batch_duplicates_collapse_in_one_plan() {
     let vault = dir.path();
     let config = base_config(vault);
     let llm: Arc<dyn LlmClient> = Arc::new(NoopLlmClient);
-    let ctx = make_ctx(&config, llm);
+    let ctx = build_ctx(&config, llm);
     let mut pipeline = Pipeline::new(vault, ctx);
     let sc = config.sources.get("test-source").unwrap().clone();
 
@@ -558,7 +558,7 @@ async fn daily_page_accumulates_across_feed_depletion() {
     };
 
     // Run 1: the feed carries A and B.
-    let mut p1 = Pipeline::new(vault, make_ctx(&config, Arc::new(NoopLlmClient)));
+    let mut p1 = Pipeline::new(vault, build_ctx(&config, Arc::new(NoopLlmClient)));
     let r1 = p1
         .plan(
             "test-source",
@@ -572,7 +572,7 @@ async fn daily_page_accumulates_across_feed_depletion() {
     drop(p1);
 
     // Run 2: the feed now returns ONLY A (B scrolled off). The page must still carry B.
-    let mut p2 = Pipeline::new(vault, make_ctx(&config, Arc::new(NoopLlmClient)));
+    let mut p2 = Pipeline::new(vault, build_ctx(&config, Arc::new(NoopLlmClient)));
     let r2 = p2
         .plan("test-source", &sc, vec![raw_item("A", "", "A", ts)], &opts)
         .await
@@ -594,7 +594,7 @@ async fn dry_run_does_not_write_the_event_log() {
     sc.source_type = SourceType::Rss; // streaming → would write the log if not dry-run
     let ts: jiff::Timestamp = "2026-05-23T10:00:00Z".parse().unwrap();
 
-    let mut pipeline = Pipeline::new(vault, make_ctx(&config, Arc::new(NoopLlmClient)));
+    let mut pipeline = Pipeline::new(vault, build_ctx(&config, Arc::new(NoopLlmClient)));
     pipeline
         .plan(
             "test-source",
@@ -628,7 +628,7 @@ async fn queue_mode_emits_jsonl_tasks_with_targets() {
 
     let queue_dir = vault.join(".lorekeeper").join("queue");
     let llm: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
-    let ctx = make_ctx(&config, llm.clone());
+    let ctx = build_ctx(&config, llm.clone());
     let mut pipeline = Pipeline::new(vault, ctx);
     let sc = config.sources.get("test-source").unwrap();
 
@@ -710,7 +710,12 @@ async fn weekly_synthesis_is_opt_in_via_include_sources() {
     // Empty include_sources → the source is NOT swept into a cross-source themes page,
     // even though its daily page sits in range. Knowledge feeds stay out of the digest.
     let config = base_config(vault);
-    let synth = Synthesizer::new(vault, make_ctx(&config, llm.clone()), &config, far_future());
+    let synth = Synthesizer::new(
+        vault,
+        build_ctx(&config, llm.clone()),
+        &config,
+        far_future(),
+    );
     assert!(
         synth
             .try_weekly_synthesis(jiff::civil::date(2026, 5, 23))
@@ -723,7 +728,7 @@ async fn weekly_synthesis_is_opt_in_via_include_sources() {
     // Listing the source opts it in → a themes page is produced.
     let mut config = base_config(vault);
     config.synthesis.weekly.include_sources = vec!["test-source".into()];
-    let synth = Synthesizer::new(vault, make_ctx(&config, llm), &config, far_future());
+    let synth = Synthesizer::new(vault, build_ctx(&config, llm), &config, far_future());
     assert!(
         synth
             .try_weekly_synthesis(jiff::civil::date(2026, 5, 23))
@@ -759,7 +764,7 @@ async fn empty_weekly_themes_is_cached_not_re_enqueued() {
     let llm1: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
     let synth1 = Synthesizer::new(
         vault,
-        make_ctx(&config, llm1.clone()),
+        build_ctx(&config, llm1.clone()),
         &config,
         far_future(),
     );
@@ -794,7 +799,7 @@ async fn empty_weekly_themes_is_cached_not_re_enqueued() {
     let llm2: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
     let synth2 = Synthesizer::new(
         vault,
-        make_ctx(&config, llm2.clone()),
+        build_ctx(&config, llm2.clone()),
         &config,
         far_future(),
     );
@@ -840,7 +845,12 @@ async fn performance_enabled_gates_review_narratives() {
 
     // performance.enabled: true → the personal weekly review is produced.
     let config = base_config(vault);
-    let synth = Synthesizer::new(vault, make_ctx(&config, llm.clone()), &config, far_future());
+    let synth = Synthesizer::new(
+        vault,
+        build_ctx(&config, llm.clone()),
+        &config,
+        far_future(),
+    );
     assert!(
         synth
             .try_weekly_review(jiff::civil::date(2026, 5, 23))
@@ -853,7 +863,7 @@ async fn performance_enabled_gates_review_narratives() {
     // performance.enabled: false → no review, even though the work-log page exists.
     let mut config = base_config(vault);
     config.performance.enabled = false;
-    let synth = Synthesizer::new(vault, make_ctx(&config, llm), &config, far_future());
+    let synth = Synthesizer::new(vault, build_ctx(&config, llm), &config, far_future());
     assert!(
         synth
             .try_weekly_review(jiff::civil::date(2026, 5, 23))
@@ -889,7 +899,7 @@ async fn synthesis_excludes_pages_dated_after_today() {
     // work-log and the review produces nothing.
     let synth = Synthesizer::new(
         vault,
-        make_ctx(&config, llm.clone()),
+        build_ctx(&config, llm.clone()),
         &config,
         jiff::civil::date(2026, 5, 20),
     );
@@ -903,7 +913,7 @@ async fn synthesis_excludes_pages_dated_after_today() {
     );
 
     // Once today has moved past that date the same page is realized and the review appears.
-    let synth = Synthesizer::new(vault, make_ctx(&config, llm), &config, far_future());
+    let synth = Synthesizer::new(vault, build_ctx(&config, llm), &config, far_future());
     assert!(
         synth
             .try_weekly_review(jiff::civil::date(2026, 5, 23))
@@ -936,7 +946,7 @@ async fn synthesis_page_is_a_materialized_view() {
     let llm1: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
     let synth1 = Synthesizer::new(
         vault,
-        make_ctx(&config, llm1.clone()),
+        build_ctx(&config, llm1.clone()),
         &config,
         far_future(),
     );
@@ -987,7 +997,7 @@ async fn synthesis_page_is_a_materialized_view() {
     let llm2: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
     let synth2 = Synthesizer::new(
         vault,
-        make_ctx(&config, llm2.clone()),
+        build_ctx(&config, llm2.clone()),
         &config,
         far_future(),
     );
@@ -1050,7 +1060,7 @@ async fn quarterly_review_includes_latest_unsummarized_month_via_weekly_fallback
 
     let llm: Arc<dyn LlmClient> =
         Arc::new(QueueLlmClient::new(vault.join(".lorekeeper").join("queue")));
-    let synth = Synthesizer::new(vault, make_ctx(&config, llm), &config, far_future());
+    let synth = Synthesizer::new(vault, build_ctx(&config, llm), &config, far_future());
     let out = synth
         .try_quarterly_review(2026, 2)
         .await
@@ -1065,6 +1075,56 @@ async fn quarterly_review_includes_latest_unsummarized_month_via_weekly_fallback
     assert!(
         out.content.contains("JUNE-WEEKLY-MARKER"),
         "June's weekly narrative must be the fallback content:\n{}",
+        out.content
+    );
+}
+
+#[tokio::test]
+async fn annual_review_keeps_boundary_week_in_both_fallback_quarters() {
+    use lk_queue::QueueLlmClient;
+
+    // 2026: neither Q1 nor Q2 has a quarterly OR monthly review, so both fall back through
+    // months to weeks. The ISO week of 2026-03-31 straddles the Q1/Q2 boundary (Mon Mar 30 –
+    // Sun Apr 5), so it belongs to both March's and April's week range. With no per-period
+    // week dedup, that boundary week's narrative must appear in BOTH quarters' fallback — not
+    // be claimed by whichever quarter is summarized first and silently dropped from the other.
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let config = base_config(vault);
+    let summary = lk_core::i18n::Locale::Ko.strings().key_summary;
+
+    let weekly = vault.join("me").join("weekly");
+    std::fs::create_dir_all(&weekly).unwrap();
+    let write_week = |date: jiff::civil::Date, marker: &str| {
+        let w = date.iso_week_date();
+        std::fs::write(
+            weekly.join(format!("{}-W{:02}.md", w.year(), w.week())),
+            format!("---\nid: w\n---\n\n## {summary}\n\n{marker}\n"),
+        )
+        .unwrap();
+    };
+    write_week(jiff::civil::date(2026, 2, 9), "Q1-ONLY-WK"); // wholly in Q1
+    write_week(jiff::civil::date(2026, 3, 31), "BOUNDARY-WK"); // ISO week spans Q1/Q2
+    write_week(jiff::civil::date(2026, 5, 11), "Q2-ONLY-WK"); // wholly in Q2
+
+    let llm: Arc<dyn LlmClient> =
+        Arc::new(QueueLlmClient::new(vault.join(".lorekeeper").join("queue")));
+    let synth = Synthesizer::new(vault, build_ctx(&config, llm), &config, far_future());
+    let out = synth
+        .try_annual_review(2026)
+        .await
+        .unwrap()
+        .expect("annual review produced");
+
+    assert!(
+        out.content.contains("Q1-ONLY-WK") && out.content.contains("Q2-ONLY-WK"),
+        "each quarter's own-week narrative must appear:\n{}",
+        out.content
+    );
+    assert_eq!(
+        out.content.matches("BOUNDARY-WK").count(),
+        2,
+        "the boundary ISO week must survive in BOTH fallback quarters, not be deduped away:\n{}",
         out.content
     );
 }
@@ -1096,7 +1156,7 @@ async fn work_log_generation_is_gated_by_performance_enabled() {
 
     // Enabled → the personal event yields a work-log page.
     let config = base_config(vault);
-    let pipeline = Pipeline::new(vault, make_ctx(&config, llm.clone()));
+    let pipeline = Pipeline::new(vault, build_ctx(&config, llm.clone()));
     assert!(
         !pipeline
             .render_work_log(std::slice::from_ref(&event), jiff::civil::date(2026, 6, 4))
@@ -1110,7 +1170,7 @@ async fn work_log_generation_is_gated_by_performance_enabled() {
     // Disabled → no work-log at the mechanism boundary, regardless of caller.
     let mut config = base_config(vault);
     config.performance.enabled = false;
-    let pipeline = Pipeline::new(vault, make_ctx(&config, llm));
+    let pipeline = Pipeline::new(vault, build_ctx(&config, llm));
     assert!(
         pipeline
             .render_work_log(std::slice::from_ref(&event), jiff::civil::date(2026, 6, 4))
@@ -1127,7 +1187,7 @@ async fn work_log_excludes_future_dated_contribution() {
     let vault = dir.path();
     let today = jiff::civil::date(2026, 6, 4);
 
-    let make_event = |date: jiff::civil::Date, title: &str| lk_core::event::Event {
+    let build_event = |date: jiff::civil::Date, title: &str| lk_core::event::Event {
         id: lk_core::event::EventId::new("my-schedule", date, title),
         source_id: "my-schedule".into(),
         source_type: SourceType::GoogleCalendar,
@@ -1147,11 +1207,11 @@ async fn work_log_excludes_future_dated_contribution() {
 
     let llm: Arc<dyn LlmClient> = Arc::new(NoopLlmClient);
     let config = base_config(vault);
-    let pipeline = Pipeline::new(vault, make_ctx(&config, llm));
+    let pipeline = Pipeline::new(vault, build_ctx(&config, llm));
 
     // A future-dated personal event (a calendar look-ahead meeting) is a commitment, not
     // work performed — it must never produce a work-log page.
-    let future = make_event(jiff::civil::date(2026, 6, 5), "tomorrow's meeting");
+    let future = build_event(jiff::civil::date(2026, 6, 5), "tomorrow's meeting");
     assert!(
         pipeline
             .render_work_log(std::slice::from_ref(&future), today)
@@ -1162,7 +1222,7 @@ async fn work_log_excludes_future_dated_contribution() {
     );
 
     // Mixed batch: only the date <= today entry yields a page; the future one is dropped.
-    let past = make_event(today, "today's standup");
+    let past = build_event(today, "today's standup");
     let pages = pipeline
         .render_work_log(&[past, future], today)
         .await
@@ -1203,7 +1263,7 @@ async fn gmail_daily_page_renders_category_highlights() {
     let key_events_heading = strings.key_events;
 
     let llm: Arc<dyn LlmClient> = Arc::new(NoopLlmClient);
-    let mut pipeline = Pipeline::new(vault, make_ctx(&config, llm));
+    let mut pipeline = Pipeline::new(vault, build_ctx(&config, llm));
 
     let ts: jiff::Timestamp = "2026-05-23T10:00:00Z".parse().unwrap();
     let body = "Ship by Friday.\n\nQuoted thread with a phone number and a signature.";
@@ -1266,7 +1326,7 @@ async fn forecast_date_is_not_materialized() {
         name: "Future Topic".into(),
         category: None,
     }]));
-    let mut pipeline = Pipeline::new(vault, make_ctx(&config, llm));
+    let mut pipeline = Pipeline::new(vault, build_ctx(&config, llm));
 
     let today = jiff::civil::date(2026, 6, 4);
     let realized_ts: jiff::Timestamp = "2026-06-04T09:00:00Z".parse().unwrap();
@@ -1374,7 +1434,7 @@ mod materialized_view {
         let queue_dir = vault.join(".lorekeeper").join("queue");
         let llm1: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let result1 = {
-            let mut pipeline1 = Pipeline::new(vault, make_ctx(&config, llm1.clone()));
+            let mut pipeline1 = Pipeline::new(vault, build_ctx(&config, llm1.clone()));
             let r = pipeline1
                 .plan(
                     "test-source",
@@ -1416,7 +1476,7 @@ mod materialized_view {
         // Second ingest: same input, page exists with filled sections + matching hashes.
         // No tasks should be enqueued.
         let llm2: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
-        let mut pipeline2 = Pipeline::new(vault, make_ctx(&config, llm2.clone()));
+        let mut pipeline2 = Pipeline::new(vault, build_ctx(&config, llm2.clone()));
         let result2 = pipeline2
             .plan(
                 "test-source",
@@ -1487,7 +1547,7 @@ mod materialized_view {
         // pre-stamps the current input hash.
         let llm1: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let pages1 = {
-            let pipeline = Pipeline::new(vault, make_ctx(&config, llm1.clone()));
+            let pipeline = Pipeline::new(vault, build_ctx(&config, llm1.clone()));
             pipeline
                 .render_work_log(std::slice::from_ref(&event), today)
                 .await
@@ -1517,7 +1577,7 @@ mod materialized_view {
         // Second run, same events: cache hit — nothing enqueued, body preserved.
         let llm2: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let pages2 = {
-            let pipeline = Pipeline::new(vault, make_ctx(&config, llm2.clone()));
+            let pipeline = Pipeline::new(vault, build_ctx(&config, llm2.clone()));
             pipeline
                 .render_work_log(std::slice::from_ref(&event), today)
                 .await
@@ -1576,7 +1636,7 @@ mod materialized_view {
         let queue_dir = vault.join(".lorekeeper").join("queue");
         let llm1: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let pages1 = {
-            let pipeline = Pipeline::new(vault, make_ctx(&config, llm1.clone()));
+            let pipeline = Pipeline::new(vault, build_ctx(&config, llm1.clone()));
             pipeline
                 .render_work_log(std::slice::from_ref(&event), today)
                 .await
@@ -1599,7 +1659,7 @@ mod materialized_view {
 
         let llm2: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let _pages2 = {
-            let pipeline = Pipeline::new(vault, make_ctx(&config, llm2.clone()));
+            let pipeline = Pipeline::new(vault, build_ctx(&config, llm2.clone()));
             pipeline
                 .render_work_log(std::slice::from_ref(&event), today)
                 .await
@@ -1625,7 +1685,7 @@ mod materialized_view {
         let queue_dir = vault.join(".lorekeeper").join("queue");
         let llm1: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let result1 = {
-            let mut pipeline1 = Pipeline::new(vault, make_ctx(&config, llm1.clone()));
+            let mut pipeline1 = Pipeline::new(vault, build_ctx(&config, llm1.clone()));
             let r = pipeline1
                 .plan(
                     "test-source",
@@ -1653,7 +1713,7 @@ mod materialized_view {
             raw_item("Event B", "Body B (new!)", "E2", ts),
         ];
         let llm2: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
-        let mut pipeline2 = Pipeline::new(vault, make_ctx(&config, llm2.clone()));
+        let mut pipeline2 = Pipeline::new(vault, build_ctx(&config, llm2.clone()));
         let _ = pipeline2
             .plan(
                 "test-source",
@@ -1703,7 +1763,7 @@ mod materialized_view {
         // Ingest 1 + simulate /lore-process (fill bodies + stamp refine_events_done).
         let llm1: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let result1 = {
-            let mut pipeline1 = Pipeline::new(vault, make_ctx(&config, llm1.clone()));
+            let mut pipeline1 = Pipeline::new(vault, build_ctx(&config, llm1.clone()));
             let r = pipeline1
                 .plan(
                     "test-source",
@@ -1727,7 +1787,7 @@ mod materialized_view {
         // Ingest 2: add an event → the refine input changes.
         let llm2: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let result2 = {
-            let mut pipeline2 = Pipeline::new(vault, make_ctx(&config, llm2.clone()));
+            let mut pipeline2 = Pipeline::new(vault, build_ctx(&config, llm2.clone()));
             let r = pipeline2
                 .plan(
                     "test-source",
@@ -1802,7 +1862,7 @@ mod materialized_view {
         let queue_dir = vault.join(".lorekeeper").join("queue");
         let llm1: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let result1 = {
-            let mut pipeline1 = Pipeline::new(vault, make_ctx(&config, llm1.clone()));
+            let mut pipeline1 = Pipeline::new(vault, build_ctx(&config, llm1.clone()));
             let r = pipeline1
                 .plan(
                     "test-source",
@@ -1835,7 +1895,7 @@ mod materialized_view {
         clear_queue_dir(&queue_dir).await;
 
         let llm2: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
-        let mut pipeline2 = Pipeline::new(vault, make_ctx(&config, llm2.clone()));
+        let mut pipeline2 = Pipeline::new(vault, build_ctx(&config, llm2.clone()));
         let _ = pipeline2
             .plan(
                 "test-source",
@@ -1872,7 +1932,7 @@ mod materialized_view {
         let queue_dir = vault.join(".lorekeeper").join("queue");
         let llm1: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let result1 = {
-            let mut pipeline1 = Pipeline::new(vault, make_ctx(&config, llm1.clone()));
+            let mut pipeline1 = Pipeline::new(vault, build_ctx(&config, llm1.clone()));
             let r = pipeline1
                 .plan(
                     "test-source",
@@ -1901,7 +1961,7 @@ mod materialized_view {
         clear_queue_dir(&queue_dir).await;
 
         let llm2: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
-        let mut pipeline2 = Pipeline::new(vault, make_ctx(&config, llm2.clone()));
+        let mut pipeline2 = Pipeline::new(vault, build_ctx(&config, llm2.clone()));
         pipeline2
             .plan(
                 "test-source",
@@ -2028,7 +2088,7 @@ mod materialized_view {
         let queue_dir = vault.join(".lorekeeper").join("queue");
         let llm1: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let result1 = {
-            let mut pipeline1 = Pipeline::new(vault, make_ctx(&config, llm1.clone()));
+            let mut pipeline1 = Pipeline::new(vault, build_ctx(&config, llm1.clone()));
             let r = pipeline1
                 .plan(
                     "test-source",
@@ -2063,7 +2123,7 @@ mod materialized_view {
         clear_queue_dir(&queue_dir).await;
 
         let llm2: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
-        let mut pipeline2 = Pipeline::new(vault, make_ctx(&config, llm2.clone()));
+        let mut pipeline2 = Pipeline::new(vault, build_ctx(&config, llm2.clone()));
         let _ = pipeline2
             .plan(
                 "test-source",
@@ -2112,7 +2172,7 @@ mod materialized_view {
         let queue_dir = vault.join(".lorekeeper").join("queue");
         let llm1: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let result1 = {
-            let mut pipeline1 = Pipeline::new(vault, make_ctx(&config, llm1.clone()));
+            let mut pipeline1 = Pipeline::new(vault, build_ctx(&config, llm1.clone()));
             let r = pipeline1
                 .plan(
                     "test-source",
@@ -2155,7 +2215,7 @@ mod materialized_view {
         clear_queue_dir(&queue_dir).await;
 
         let llm2: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
-        let mut pipeline2 = Pipeline::new(vault, make_ctx(&config, llm2.clone()));
+        let mut pipeline2 = Pipeline::new(vault, build_ctx(&config, llm2.clone()));
         let result2 = pipeline2
             .plan(
                 "test-source",
@@ -2205,7 +2265,7 @@ mod materialized_view {
         // Ingest A, simulate the skill stamping concepts_done for input A.
         let llm1: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let result1 = {
-            let mut p = Pipeline::new(vault, make_ctx(&config, llm1.clone()));
+            let mut p = Pipeline::new(vault, build_ctx(&config, llm1.clone()));
             let r = p
                 .plan(
                     "test-source",
@@ -2237,7 +2297,7 @@ mod materialized_view {
 
         // Ingest B with DIFFERENT content → concepts input hash changes → miss.
         let llm2: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
-        let mut p2 = Pipeline::new(vault, make_ctx(&config, llm2.clone()));
+        let mut p2 = Pipeline::new(vault, build_ctx(&config, llm2.clone()));
         let result2 = p2
             .plan(
                 "test-source",
@@ -2284,7 +2344,7 @@ mod materialized_view {
         let queue_dir = vault.join(".lorekeeper").join("queue");
         let llm1: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let result1 = {
-            let mut pipeline1 = Pipeline::new(vault, make_ctx(&config, llm1.clone()));
+            let mut pipeline1 = Pipeline::new(vault, build_ctx(&config, llm1.clone()));
             let r = pipeline1
                 .plan(
                     "test-source",
@@ -2320,7 +2380,7 @@ mod materialized_view {
         // only, so nothing fires.
         let llm_queue: Arc<dyn LlmClient> =
             Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
-        let mut pipeline2 = Pipeline::new(vault, make_ctx(&config, llm_queue.clone()));
+        let mut pipeline2 = Pipeline::new(vault, build_ctx(&config, llm_queue.clone()));
         let _ = pipeline2
             .plan(
                 "test-source",
@@ -2360,7 +2420,7 @@ mod materialized_view {
         let queue_dir = vault.join(".lorekeeper").join("queue");
         let llm: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         {
-            let mut pipeline = Pipeline::new(vault, make_ctx(&config, llm.clone()));
+            let mut pipeline = Pipeline::new(vault, build_ctx(&config, llm.clone()));
             let r = pipeline
                 .plan(
                     "test-source",
@@ -2466,7 +2526,7 @@ mod materialized_view {
 
         let queue_dir = vault.join(".lorekeeper").join("queue");
         let llm: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir));
-        let mut pipeline = Pipeline::new(vault, make_ctx(&config, llm.clone()));
+        let mut pipeline = Pipeline::new(vault, build_ctx(&config, llm.clone()));
         let r = pipeline
             .plan(
                 "test-source",
@@ -2528,7 +2588,7 @@ mod materialized_view {
 
         let queue_dir = vault.join(".lorekeeper").join("queue");
         let llm: Arc<dyn LlmClient> = Arc::new(QueueLlmClient::new(queue_dir));
-        let mut pipeline = Pipeline::new(vault, make_ctx(&config, llm.clone()));
+        let mut pipeline = Pipeline::new(vault, build_ctx(&config, llm.clone()));
         let r = pipeline
             .plan(
                 "test-source",
@@ -2581,7 +2641,7 @@ mod materialized_view {
         // First ingest: empty document page + queued summary/concepts tasks.
         let llm1: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         let result1 = {
-            let mut pipeline = Pipeline::new(vault, make_ctx(&config, llm1.clone()));
+            let mut pipeline = Pipeline::new(vault, build_ctx(&config, llm1.clone()));
             let r = pipeline
                 .plan(
                     "test-source",
@@ -2639,7 +2699,7 @@ mod materialized_view {
 
         // Re-ingest identical input → cache hit: zero re-enqueue, bodies preserved.
         let llm2: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
-        let mut pipeline2 = Pipeline::new(vault, make_ctx(&config, llm2.clone()));
+        let mut pipeline2 = Pipeline::new(vault, build_ctx(&config, llm2.clone()));
         let result2 = pipeline2
             .plan(
                 "test-source",

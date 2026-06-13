@@ -48,7 +48,7 @@ pub async fn run(opts: &super::GlobalOptions, period: Period) -> miette::Result<
     let llm = build_llm_client(&config, &vault_root)?;
 
     let ctx = Arc::new(
-        lk_pipeline::PipelineContext::new(opts.template_dir.as_deref(), llm.clone(), &config)
+        lk_pipeline::PipelineContext::build(opts.template_dir.as_deref(), llm.clone(), &config)
             .map_err(|e| miette::miette!("{e}"))?,
     );
 

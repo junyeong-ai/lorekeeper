@@ -24,8 +24,9 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   `## <heading>` section. `replace_section` rewrites it, `section_body` reads it
   as a `&str`. Both share `find_section`, which tracks fenced-code state so `## `
   lines inside ``` blocks are quoted content, not section boundaries, and trims
-  trailing whitespace from heading lines. (The pipeline's "is this section filled?"
-  predicate lives in `lk_pipeline::llm_cache`, built on `section_body`.)
+  trailing whitespace from heading lines. (`lk_pipeline::llm_cache` reads `section_body`
+  to splice a preserved LLM-owned body back on a cache hit; completion is marker-signalled,
+  never inferred from whether a section is empty.)
 - **`index::build_index`** generates `{wiki}/index.md` — a hierarchical page catalog
   grouped by category (concepts, documents, daily sources, work-log, synthesis).
   One-liner summaries are extracted from each page's type-specific `## ` section body

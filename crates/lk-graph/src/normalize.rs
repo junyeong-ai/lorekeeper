@@ -152,7 +152,7 @@ mod tests {
     use super::*;
     use crate::scan;
 
-    fn make_page(path: &str, outgoing: &[&str]) -> ScannedPage {
+    fn build_page(path: &str, outgoing: &[&str]) -> ScannedPage {
         let rel = PathBuf::from(path);
         ScannedPage {
             id: scan::path_slug(&rel),
@@ -166,9 +166,9 @@ mod tests {
     #[test]
     fn detect_denormalized() {
         let pages = vec![
-            make_page("wiki/good-name.md", &[]),
-            make_page("wiki/Bad_Name.md", &[]),
-            make_page("wiki/UPPER.md", &[]),
+            build_page("wiki/good-name.md", &[]),
+            build_page("wiki/Bad_Name.md", &[]),
+            build_page("wiki/UPPER.md", &[]),
         ];
         let renames = scan(&pages);
         assert_eq!(renames.len(), 2);
@@ -178,7 +178,7 @@ mod tests {
 
     #[test]
     fn normalized_slug_not_flagged() {
-        let pages = vec![make_page("wiki/already-normalized.md", &[])];
+        let pages = vec![build_page("wiki/already-normalized.md", &[])];
         let renames = scan(&pages);
         assert!(renames.is_empty());
     }
@@ -216,8 +216,8 @@ mod tests {
     #[test]
     fn scan_detects_collision() {
         let pages = vec![
-            make_page("wiki/Foo_Bar.md", &[]),
-            make_page("wiki/FOO-BAR.md", &[]),
+            build_page("wiki/Foo_Bar.md", &[]),
+            build_page("wiki/FOO-BAR.md", &[]),
         ];
         let renames = scan(&pages);
         assert_eq!(renames.len(), 1);
@@ -234,9 +234,9 @@ mod tests {
     #[test]
     fn reserved_files_skipped() {
         let pages = vec![
-            make_page("wiki/AGENTS.md", &[]),
-            make_page("wiki/index.md", &[]),
-            make_page("wiki/Bad_Name.md", &[]),
+            build_page("wiki/AGENTS.md", &[]),
+            build_page("wiki/index.md", &[]),
+            build_page("wiki/Bad_Name.md", &[]),
         ];
         let renames = scan(&pages);
         assert_eq!(renames.len(), 1);

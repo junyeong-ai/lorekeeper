@@ -15,21 +15,21 @@ pub struct PipelineContext {
     pub(crate) perf: PerformanceConfig,
     pub(crate) timezone: jiff::tz::TimeZone,
     pub(crate) locale: Locale,
-    pub(crate) concept_categories: Vec<lk_queue::CategoryRef>,
+    pub(crate) concept_categories: Vec<lk_queue::CategoryReference>,
 }
 
 impl PipelineContext {
-    pub fn new(
+    pub fn build(
         template_dir: Option<&Path>,
         llm: Arc<dyn LlmClient>,
         config: &Config,
     ) -> Result<Self, PipelineError> {
-        let engine = TemplateEngine::new(template_dir)?;
+        let engine = TemplateEngine::build(template_dir)?;
         let concept_categories = config
             .concepts
             .categories
             .iter()
-            .map(|c| lk_queue::CategoryRef {
+            .map(|c| lk_queue::CategoryReference {
                 id: c.id.clone(),
                 label: c.label.clone(),
             })

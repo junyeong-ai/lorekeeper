@@ -31,11 +31,11 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   on any persistently failing source, news feeds included.
 - **`lore schedule`** emits ONE all-source `lore ingest` line from `ingest.schedule` —
   never per source — plus synthesis/maintenance/queue-prune lines from their own keys.
-- **`lore ingest` startup** sweeps stale `*.jsonl.tmp` (>1h) from crashed runs and
+- **`lore ingest` startup** sweeps stale `*.jsonl.tmp` from crashed runs and
   warns if pending queue files exist (run `/lore-process` first to avoid duplicate
   LLM work).
 - **`lore maintenance`** prunes the ingest log and drained `queue/processed/` files past
-  `maintenance.retention_days` (default 90) — operational history only. The streaming
+  `maintenance.retention_days` — operational history only. The streaming
   `events/{source}/{date}.jsonl` logs are the permanent raw layer (`lore ingest --date
   <past>` re-projects any day from them) and are NEVER pruned. It also never touches
   live `*.jsonl.tmp` — the ingest startup sweep does. With `maintenance.schedule` set,
@@ -56,7 +56,7 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   same counts with zero writes.
 - **`lore init credentials`** (in `init.rs`) is the interactive credential wizard. UX
   (dialoguer prompts, masked secrets, TTY guard) lives here; the JSON shape + atomic
-  `0600` write live in `lk_source::credentials` (`from_file`/`save`). The Google branch
+  `0600` write live in `lk_source::credentials` (`load_file`/`load`/`save`). The Google branch
   can mint a refresh token via `lk_source::obtain_google_refresh_token` (browser OAuth
   loopback) or accept a pasted one. `Init` is a subcommand-of-subcommand so future
   scaffolders (`lore init config`) slot in cleanly.

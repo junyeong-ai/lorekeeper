@@ -64,18 +64,24 @@ impl SlackChannelParams {
 
 /// Validate this source's params at config-load time, before any network work.
 pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
-    let p: SlackChannelParams = crate::parse_params(params)?;
-    if p.channel_refs().is_empty() {
-        return Err(SourceError::InvalidParams(
-            "slack-channel requires `channel` or `channels`".into(),
-        ));
+    crate::parse_validated::<SlackChannelParams>(params).map(|_| ())
+}
+
+impl crate::ValidatedParams for SlackChannelParams {
+    fn validate(&self) -> Result<(), SourceError> {
+        if self.channel_refs().is_empty() {
+            return Err(SourceError::InvalidParams(
+                "slack-channel requires `channel` or `channels`".into(),
+            ));
+        }
+        if self.max_messages_per_channel == 0 || self.max_thread_messages == 0 {
+            return Err(SourceError::InvalidParams(
+                "slack-channel `max_messages_per_channel` and `max_thread_messages` must be > 0"
+                    .into(),
+            ));
+        }
+        Ok(())
     }
-    if p.max_messages_per_channel == 0 || p.max_thread_messages == 0 {
-        return Err(SourceError::InvalidParams(
-            "slack-channel `max_messages_per_channel` and `max_thread_messages` must be > 0".into(),
-        ));
-    }
-    Ok(())
 }
 
 fn default_lookback() -> u32 {
@@ -178,7 +184,7 @@ impl Source for SlackChannelSource {
         params: &serde_json::Value,
         ctx: &ExtractContext,
     ) -> Result<Vec<RawItem>, SourceError> {
-        let p: SlackChannelParams = crate::parse_params(params)?;
+        let p: SlackChannelParams = crate::parse_validated(params)?;
 
         let users = resolve_users(&self.http, &self.token).await;
 

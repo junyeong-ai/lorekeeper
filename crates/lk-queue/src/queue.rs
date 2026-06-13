@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use lk_core::concept::ExtractedConcept;
 
 use crate::{
-    ExtractConceptsRequest, LlmClient, LlmError, SummarizeRequest, TaskTarget, Theme, ThemeRequest,
+    ExtractConceptsRequest, LlmClient, QueueError, SummarizeRequest, TaskTarget, Theme,
+    ThemeRequest,
 };
 
 /// LlmClient that defers semantic work to a Claude Code skill. Buffers task records
@@ -155,7 +156,7 @@ impl LlmClient for QueueLlmClient {
         buffer.tasks.truncate(mark);
     }
 
-    async fn summarize(&self, req: SummarizeRequest) -> Result<String, LlmError> {
+    async fn summarize(&self, req: SummarizeRequest) -> Result<String, QueueError> {
         let kind = if req.target.kind == crate::TargetKind::DailyRefineEvents {
             TaskKind::RefineEvents
         } else {
@@ -181,7 +182,7 @@ impl LlmClient for QueueLlmClient {
     async fn extract_concepts(
         &self,
         req: ExtractConceptsRequest,
-    ) -> Result<Vec<ExtractedConcept>, LlmError> {
+    ) -> Result<Vec<ExtractedConcept>, QueueError> {
         let task = QueueTask {
             task_id: self.next_id("ext"),
             kind: TaskKind::ExtractConcepts,
@@ -194,7 +195,7 @@ impl LlmClient for QueueLlmClient {
         Ok(vec![])
     }
 
-    async fn identify_themes(&self, req: ThemeRequest) -> Result<Vec<Theme>, LlmError> {
+    async fn identify_themes(&self, req: ThemeRequest) -> Result<Vec<Theme>, QueueError> {
         let task = QueueTask {
             task_id: self.next_id("thm"),
             kind: TaskKind::IdentifyThemes,
@@ -207,18 +208,18 @@ impl LlmClient for QueueLlmClient {
         Ok(vec![])
     }
 
-    async fn flush(&self) -> Result<(), LlmError> {
+    async fn flush(&self) -> Result<(), QueueError> {
         let mut buffer = self.buffer.lock().await;
         if buffer.tasks.is_empty() {
             return Ok(());
         }
 
         std::fs::create_dir_all(&self.queue_dir)
-            .map_err(|e| LlmError::QueueIo(format!("create dir: {e}")))?;
+            .map_err(|e| QueueError::QueueIo(format!("create dir: {e}")))?;
 
         let final_path = self.queue_path();
         write_tasks_atomic(&final_path, &buffer.tasks)
-            .map_err(|e| LlmError::QueueIo(format!("write {}: {e}", final_path.display())))?;
+            .map_err(|e| QueueError::QueueIo(format!("write {}: {e}", final_path.display())))?;
 
         *buffer = Buffer::default();
         Ok(())
@@ -479,7 +480,7 @@ mod tests {
     async fn cache_hash_is_stable_across_field_order() {
         // The cache identity must produce the same hash regardless of the order
         // categories arrive in — they are sorted before hashing.
-        use crate::CategoryRef;
+        use crate::CategoryReference;
         let date = jiff::civil::date(2026, 5, 23);
         let a = ExtractConceptsRequest {
             text: "x".into(),
@@ -493,11 +494,11 @@ mod tests {
                 anchor: "## c".into(),
             },
             categories: vec![
-                CategoryRef {
+                CategoryReference {
                     id: "ai-ml".into(),
                     label: "AI/ML".into(),
                 },
-                CategoryRef {
+                CategoryReference {
                     id: "infra".into(),
                     label: "Infra".into(),
                 },

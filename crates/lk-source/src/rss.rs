@@ -52,35 +52,40 @@ fn default_max_items() -> usize {
 
 /// Validate this source's params at config-load time, before any network work.
 pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
-    let p: RssParams = crate::parse_params(params)?;
-    if p.feeds.is_empty() {
-        return Err(SourceError::InvalidParams(
-            "rss `feeds` must list at least one feed".into(),
-        ));
-    }
-    let mut seen_ids = std::collections::HashSet::new();
-    for f in &p.feeds {
-        if f.id.trim().is_empty() {
+    crate::parse_validated::<RssParams>(params).map(|_| ())
+}
+
+impl crate::ValidatedParams for RssParams {
+    fn validate(&self) -> Result<(), SourceError> {
+        if self.feeds.is_empty() {
             return Err(SourceError::InvalidParams(
-                "rss feed `id` must not be empty".into(),
+                "rss `feeds` must list at least one feed".into(),
             ));
         }
-        if !(f.url.starts_with("http://") || f.url.starts_with("https://")) {
-            return Err(SourceError::InvalidParams(format!(
-                "rss feed `url` must be an http(s) URL, got '{}'",
-                f.url
-            )));
+        let mut seen_ids = std::collections::HashSet::new();
+        for f in &self.feeds {
+            if f.id.trim().is_empty() {
+                return Err(SourceError::InvalidParams(
+                    "rss feed `id` must not be empty".into(),
+                ));
+            }
+            if !(f.url.starts_with("http://") || f.url.starts_with("https://")) {
+                return Err(SourceError::InvalidParams(format!(
+                    "rss feed `url` must be an http(s) URL, got '{}'",
+                    f.url
+                )));
+            }
+            // Feed ids namespace every item's external id (see `map_entry`); a
+            // duplicate would let two feeds collide into one EventId.
+            if !seen_ids.insert(f.id.as_str()) {
+                return Err(SourceError::InvalidParams(format!(
+                    "rss feed `id` '{}' is duplicated; ids must be unique within a source",
+                    f.id
+                )));
+            }
         }
-        // Feed ids namespace every item's external id (see `map_entry`); a
-        // duplicate would let two feeds collide into one EventId.
-        if !seen_ids.insert(f.id.as_str()) {
-            return Err(SourceError::InvalidParams(format!(
-                "rss feed `id` '{}' is duplicated; ids must be unique within a source",
-                f.id
-            )));
-        }
+        Ok(())
     }
-    Ok(())
 }
 
 impl RssSource {
@@ -139,7 +144,7 @@ impl Source for RssSource {
         params: &serde_json::Value,
         ctx: &ExtractContext,
     ) -> Result<Vec<RawItem>, SourceError> {
-        let p: RssParams = crate::parse_params(params)?;
+        let p: RssParams = crate::parse_validated(params)?;
 
         // News is past-dated, so pad only the lower bound. The pipeline still
         // splits items onto their own publication date (multi-date batch).

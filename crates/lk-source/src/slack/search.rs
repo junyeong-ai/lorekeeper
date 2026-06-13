@@ -39,13 +39,18 @@ struct QueryParams {
 
 /// Validate this source's params at config-load time, before any network work.
 pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
-    let p: SlackSearchParams = crate::parse_params(params)?;
-    if p.max_matches_per_query == 0 {
-        return Err(SourceError::InvalidParams(
-            "slack-search `max_matches_per_query` must be > 0".into(),
-        ));
+    crate::parse_validated::<SlackSearchParams>(params).map(|_| ())
+}
+
+impl crate::ValidatedParams for SlackSearchParams {
+    fn validate(&self) -> Result<(), SourceError> {
+        if self.max_matches_per_query == 0 {
+            return Err(SourceError::InvalidParams(
+                "slack-search `max_matches_per_query` must be > 0".into(),
+            ));
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -93,7 +98,7 @@ impl Source for SlackSearchSource {
         params: &serde_json::Value,
         ctx: &ExtractContext,
     ) -> Result<Vec<RawItem>, SourceError> {
-        let p: SlackSearchParams = crate::parse_params(params)?;
+        let p: SlackSearchParams = crate::parse_validated(params)?;
 
         let users = resolve_users(&self.http, &self.token).await;
 

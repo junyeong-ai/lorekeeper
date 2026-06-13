@@ -182,7 +182,7 @@ mod tests {
     /// boundary cases below as "is there body text under this heading?". Note the
     /// pipeline cache does NOT use section emptiness for completion — that is
     /// marker-signalled (`llm_cache`) — so this is purely a `section_body` boundary test.
-    fn section_is_filled(content: &str, heading: &str) -> bool {
+    fn is_section_filled(content: &str, heading: &str) -> bool {
         super::section_body(content, heading).is_some_and(|b| !b.trim().is_empty())
     }
 
@@ -368,44 +368,44 @@ mod tests {
     #[test]
     fn is_filled_true_for_real_content() {
         let doc = "## Summary\n\nReal content here.\n\n## Meta\n";
-        assert!(section_is_filled(doc, "Summary"));
+        assert!(is_section_filled(doc, "Summary"));
     }
 
     #[test]
     fn is_filled_false_for_missing_heading() {
         let doc = "## Other\n\nbody\n";
-        assert!(!section_is_filled(doc, "Summary"));
+        assert!(!is_section_filled(doc, "Summary"));
     }
 
     #[test]
     fn is_filled_false_for_empty_body() {
         let doc = "## Summary\n\n## Meta\n";
-        assert!(!section_is_filled(doc, "Summary"));
+        assert!(!is_section_filled(doc, "Summary"));
     }
 
     #[test]
     fn is_filled_false_for_whitespace_only_body() {
         let doc = "## Summary\n\n   \n\t\n\n## Meta\n";
-        assert!(!section_is_filled(doc, "Summary"));
+        assert!(!is_section_filled(doc, "Summary"));
     }
 
     #[test]
     fn is_filled_false_when_heading_is_inside_fenced_code() {
         // The only `## Summary` is quoted code — there is no real section.
         let doc = "```\n## Summary\nquoted body\n```\n";
-        assert!(!section_is_filled(doc, "Summary"));
+        assert!(!is_section_filled(doc, "Summary"));
     }
 
     #[test]
     fn is_filled_true_when_real_heading_follows_a_quoted_one() {
         let doc = "```\n## Summary\nquoted\n```\n\n## Summary\n\nreal body\n";
-        assert!(section_is_filled(doc, "Summary"));
+        assert!(is_section_filled(doc, "Summary"));
     }
 
     #[test]
     fn is_filled_true_at_end_of_file() {
         let doc = "# Title\n\n## Summary\n\nbody at EOF\n";
-        assert!(section_is_filled(doc, "Summary"));
+        assert!(is_section_filled(doc, "Summary"));
     }
 
     #[test]
@@ -431,7 +431,7 @@ mod tests {
             "outer quad fence content must be replaced wholesale, not split by inner triple"
         );
         // And `## Inner` must not be findable as a real section.
-        assert!(!section_is_filled(doc, "Inner"));
+        assert!(!is_section_filled(doc, "Inner"));
     }
 
     #[test]
@@ -440,7 +440,7 @@ mod tests {
         let doc = "## Sources\n\n```\n~~~\n## Trap\n~~~\n```\n\n## Meta\n\n- v\n";
         let out = replace_section(doc, "Sources", "- [[new]]");
         assert!(out.contains("## Sources\n\n- [[new]]\n\n## Meta\n"));
-        assert!(!section_is_filled(doc, "Trap"));
+        assert!(!is_section_filled(doc, "Trap"));
     }
 
     #[test]
@@ -450,7 +450,7 @@ mod tests {
         // boundary rather than being swallowed as fenced content.
         let doc = "## A\n\nintro\n\n```not`a`fence\n\n## B\n\nbody B\n";
         assert!(
-            section_is_filled(doc, "B"),
+            is_section_filled(doc, "B"),
             "## B must be a real section, not swallowed by a fake fence"
         );
         // Replacing A leaves B intact, proving the boundary held.
@@ -466,7 +466,7 @@ mod tests {
         let doc = "## Sources\n\n```\nopen\n``` info string\n## Not a heading\n```\n\n## Meta\n";
         let out = replace_section(doc, "Sources", "- [[new]]");
         assert!(out.contains("## Sources\n\n- [[new]]\n\n## Meta\n"));
-        assert!(!section_is_filled(doc, "Not a heading"));
+        assert!(!is_section_filled(doc, "Not a heading"));
     }
 
     #[test]

@@ -10,7 +10,11 @@ use crate::{ExtractContext, Source, SourceError};
 
 const BASE: &str = "https://www.googleapis.com/calendar/v3";
 
-/// Maximum number of Drive files to fetch meeting notes from per calendar event.
+/// Per-event Drive fetch budget: a calendar event normally carries one notes doc plus a
+/// couple of attachments, so three covers the common case while bounding fan-out against
+/// an event that links many files (each is a separate Drive round-trip). Unlike the
+/// listing caps this is not a config knob — it guards per-event I/O, not window coverage —
+/// but an event that overshoots it is `tracing::warn!`ed so the truncation is observable.
 const MAX_DRIVE_FETCHES_PER_EVENT: usize = 3;
 
 pub struct GoogleCalendarSource {
@@ -35,13 +39,18 @@ struct GoogleCalendarParams {
 
 /// Validate this source's params at config-load time, before any network work.
 pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
-    let p: GoogleCalendarParams = crate::parse_params(params)?;
-    if p.max_events == 0 {
-        return Err(SourceError::InvalidParams(
-            "calendar `max_events` must be > 0".into(),
-        ));
+    crate::parse_validated::<GoogleCalendarParams>(params).map(|_| ())
+}
+
+impl crate::ValidatedParams for GoogleCalendarParams {
+    fn validate(&self) -> Result<(), SourceError> {
+        if self.max_events == 0 {
+            return Err(SourceError::InvalidParams(
+                "calendar `max_events` must be > 0".into(),
+            ));
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 fn default_calendar() -> String {
@@ -176,7 +185,7 @@ impl Source for GoogleCalendarSource {
         params: &serde_json::Value,
         ctx: &ExtractContext,
     ) -> Result<Vec<RawItem>, SourceError> {
-        let p: GoogleCalendarParams = crate::parse_params(params)?;
+        let p: GoogleCalendarParams = crate::parse_validated(params)?;
 
         let token = self.auth.access_token().await?;
 
@@ -261,6 +270,15 @@ impl Source for GoogleCalendarSource {
             // referenced in the event (description links + attachments). The candidate
             // list was computed purely in `map_event`; only the fetch is I/O here.
             if p.fetch_meeting_notes {
+                let linked = mapped.drive_files.len();
+                if linked > MAX_DRIVE_FETCHES_PER_EVENT {
+                    tracing::warn!(
+                        event_id = ?mapped.item.external_id,
+                        linked,
+                        cap = MAX_DRIVE_FETCHES_PER_EVENT,
+                        "calendar: event links more Drive files than the per-event fetch budget; the remainder are not expanded into meeting notes"
+                    );
+                }
                 for (file_id, att_title) in mapped
                     .drive_files
                     .into_iter()

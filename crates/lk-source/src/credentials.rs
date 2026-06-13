@@ -59,7 +59,7 @@ impl Credentials {
 
     /// Read the credentials file only (no env overlay). Missing file → all-None default.
     /// Used by the `lore init credentials` wizard to seed defaults from existing values.
-    pub fn from_file(vault_root: &Path) -> Result<Self, SourceError> {
+    pub fn load_file(vault_root: &Path) -> Result<Self, SourceError> {
         let path = Self::path(vault_root);
         if path.exists() {
             let content = std::fs::read_to_string(&path)
@@ -74,7 +74,7 @@ impl Credentials {
     /// File values with environment variables overlaid (env wins per service). This is
     /// what the pipeline uses at runtime.
     pub fn load(vault_root: &Path) -> Result<Self, SourceError> {
-        let mut creds = Self::from_file(vault_root)?;
+        let mut creds = Self::load_file(vault_root)?;
         creds.override_from_env();
         Ok(creds)
     }
@@ -162,7 +162,7 @@ mod tests {
         assert!(!raw.contains("bot_token"), "unset token omitted");
         assert!(!raw.contains("google"), "unset provider omitted");
 
-        let back = Credentials::from_file(dir.path()).unwrap();
+        let back = Credentials::load_file(dir.path()).unwrap();
         let slack = back.slack.unwrap();
         assert_eq!(slack.search_token(), Some("xoxp-abc"));
         assert_eq!(slack.history_token(), Some("xoxp-abc")); // falls back to user token

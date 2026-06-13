@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use lk_core::config::GraphConfig;
 use serde::Serialize;
@@ -323,6 +323,12 @@ pub struct LinkSuggestion {
     pub a: String,
     pub b: String,
     pub shared_neighbors: usize,
+    /// Adamic–Adar index over the shared neighbours: Σ 1/ln(|N(z)|). A neighbour cited by
+    /// few pages is strong evidence of a real relationship; a hub cited by everything
+    /// contributes almost nothing — so two pages sharing only hub neighbours rank far
+    /// below two sharing a niche one, even at equal raw counts. This is what separates a
+    /// genuine relationship from "both happened to be linked from the same survey page".
+    pub score: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -331,17 +337,20 @@ pub struct SuggestResult {
 }
 
 /// Suggest wikilinks to add: pairs of pages in the SAME Louvain community that have NO
-/// edge between them and share at least `min_shared_neighbors` neighbors, ranked by
-/// shared-neighbor count (descending). The floor suppresses co-citation noise (a single
-/// shared neighbor usually means "co-cited by one daily page", not a real relationship).
-/// Pure, deterministic, read-only — it reuses the community assignment passed in and
-/// never touches the vault.
+/// edge between them and share at least `min_shared_neighbors` neighbours, ranked by their
+/// Adamic–Adar index (descending). The count floor rejects the single-shared-neighbour case
+/// outright; the Adamic–Adar weighting then discounts shared neighbours that are high-degree
+/// hubs, so co-citation by one busy survey page can never outrank a real shared niche
+/// concept. Pure, deterministic, read-only — it reuses the community assignment passed in
+/// and never touches the vault.
 pub fn suggest_links(
     graph: &WikiGraph,
     cluster: &ClusterResult,
     min_shared_neighbors: usize,
 ) -> SuggestResult {
     let mut pairs: Vec<LinkSuggestion> = Vec::new();
+    // |N(z)| per shared-neighbour index, memoised across pairs (a hub recurs in many).
+    let mut degree: HashMap<usize, usize> = HashMap::new();
 
     for community in &cluster.communities {
         // Resolve members to node indices, dropping any that no longer resolve.
@@ -352,7 +361,7 @@ pub fn suggest_links(
             .collect();
         indices.sort_unstable();
 
-        // Precompute neighbor sets once per node for shared-neighbor counting.
+        // Precompute neighbour sets once per node for shared-neighbour counting.
         let neighbor_sets: Vec<Vec<usize>> = indices.iter().map(|&i| graph.neighbors(i)).collect();
 
         for i in 0..indices.len() {
@@ -361,24 +370,29 @@ pub fn suggest_links(
                 if graph.has_edge_between(a, b) {
                     continue;
                 }
-                let shared = shared_count(&neighbor_sets[i], &neighbor_sets[j]);
-                if shared < min_shared_neighbors.max(1) {
+                let shared = shared_indices(&neighbor_sets[i], &neighbor_sets[j]);
+                if shared.len() < min_shared_neighbors.max(1) {
                     continue;
                 }
+                let score = adamic_adar(graph, &shared, &mut degree);
                 let (id_a, id_b) = (graph.node_id(a).to_owned(), graph.node_id(b).to_owned());
                 pairs.push(LinkSuggestion {
                     a: id_a,
                     b: id_b,
-                    shared_neighbors: shared,
+                    shared_neighbors: shared.len(),
+                    score,
                 });
             }
         }
     }
 
-    // Most-shared first; ties broken lexicographically for deterministic output.
+    // Strongest Adamic–Adar first; ties broken by raw count then lexicographically so the
+    // order is total and deterministic (scores are finite positive, never NaN).
     pairs.sort_by(|x, y| {
-        y.shared_neighbors
-            .cmp(&x.shared_neighbors)
+        y.score
+            .partial_cmp(&x.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| y.shared_neighbors.cmp(&x.shared_neighbors))
             .then_with(|| x.a.cmp(&y.a))
             .then_with(|| x.b.cmp(&y.b))
     });
@@ -386,21 +400,35 @@ pub fn suggest_links(
     SuggestResult { pairs }
 }
 
-/// Count common elements of two sorted, deduped index slices.
-fn shared_count(a: &[usize], b: &[usize]) -> usize {
-    let (mut i, mut j, mut count) = (0, 0, 0);
+/// The common elements of two sorted, deduped index slices.
+fn shared_indices(a: &[usize], b: &[usize]) -> Vec<usize> {
+    let (mut i, mut j) = (0, 0);
+    let mut shared = Vec::new();
     while i < a.len() && j < b.len() {
         match a[i].cmp(&b[j]) {
             std::cmp::Ordering::Less => i += 1,
             std::cmp::Ordering::Greater => j += 1,
             std::cmp::Ordering::Equal => {
-                count += 1;
+                shared.push(a[i]);
                 i += 1;
                 j += 1;
             }
         }
     }
-    count
+    shared
+}
+
+/// Adamic–Adar index of a candidate pair: Σ over shared neighbours `z` of 1/ln(|N(z)|).
+/// A shared neighbour links to at least the two endpoints, so |N(z)| ≥ 2 and the log is
+/// strictly positive; the `.max(2)` is a defensive clamp for a degenerate graph.
+fn adamic_adar(graph: &WikiGraph, shared: &[usize], degree: &mut HashMap<usize, usize>) -> f64 {
+    shared
+        .iter()
+        .map(|&z| {
+            let d = *degree.entry(z).or_insert_with(|| graph.neighbors(z).len());
+            1.0 / (d.max(2) as f64).ln()
+        })
+        .sum()
 }
 
 #[cfg(test)]
@@ -410,7 +438,7 @@ mod tests {
     use lk_core::config::VaultDirs;
     use std::path::PathBuf;
 
-    fn make_page(id: &str, outgoing: &[&str]) -> ScannedPage {
+    fn build_page(id: &str, outgoing: &[&str]) -> ScannedPage {
         let name = id.rsplit('/').next().unwrap_or(id);
         ScannedPage {
             id: id.to_owned(),
@@ -434,10 +462,10 @@ mod tests {
     fn two_disconnected_components_form_two_communities() {
         let config = GraphConfig::default();
         let pages = vec![
-            make_page("a", &["b"]),
-            make_page("b", &["a"]),
-            make_page("c", &["d"]),
-            make_page("d", &["c"]),
+            build_page("a", &["b"]),
+            build_page("b", &["a"]),
+            build_page("c", &["d"]),
+            build_page("d", &["c"]),
         ];
         let graph = WikiGraph::build(&pages, &VaultDirs::default());
         let result = detect_communities(&graph, &config);
@@ -451,10 +479,10 @@ mod tests {
     fn dense_clique_forms_one_community() {
         let config = GraphConfig::default();
         let pages = vec![
-            make_page("a", &["b", "c", "d"]),
-            make_page("b", &["a", "c", "d"]),
-            make_page("c", &["a", "b", "d"]),
-            make_page("d", &["a", "b", "c"]),
+            build_page("a", &["b", "c", "d"]),
+            build_page("b", &["a", "c", "d"]),
+            build_page("c", &["a", "b", "d"]),
+            build_page("d", &["a", "b", "c"]),
         ];
         let graph = WikiGraph::build(&pages, &VaultDirs::default());
         let result = detect_communities(&graph, &config);
@@ -469,14 +497,14 @@ mod tests {
         // multi-level pass is fully deterministic).
         let config = GraphConfig::default();
         let pages = vec![
-            make_page("a1", &["a2", "a3", "a4"]),
-            make_page("a2", &["a1", "a3", "a4"]),
-            make_page("a3", &["a1", "a2", "a4"]),
-            make_page("a4", &["a1", "a2", "a3", "b1"]),
-            make_page("b1", &["b2", "b3", "b4"]),
-            make_page("b2", &["b1", "b3", "b4"]),
-            make_page("b3", &["b1", "b2", "b4"]),
-            make_page("b4", &["b1", "b2", "b3"]),
+            build_page("a1", &["a2", "a3", "a4"]),
+            build_page("a2", &["a1", "a3", "a4"]),
+            build_page("a3", &["a1", "a2", "a4"]),
+            build_page("a4", &["a1", "a2", "a3", "b1"]),
+            build_page("b1", &["b2", "b3", "b4"]),
+            build_page("b2", &["b1", "b3", "b4"]),
+            build_page("b3", &["b1", "b2", "b4"]),
+            build_page("b4", &["b1", "b2", "b3"]),
         ];
         let graph = WikiGraph::build(&pages, &VaultDirs::default());
         let result = detect_communities(&graph, &config);
@@ -491,11 +519,11 @@ mod tests {
         let mut config = GraphConfig::default();
         config.cluster.min_community_size = 3;
         let pages = vec![
-            make_page("a", &["b"]),
-            make_page("b", &["a"]),
-            make_page("c", &["d", "e"]),
-            make_page("d", &["c", "e"]),
-            make_page("e", &["c", "d"]),
+            build_page("a", &["b"]),
+            build_page("b", &["a"]),
+            build_page("c", &["d", "e"]),
+            build_page("d", &["c", "e"]),
+            build_page("e", &["c", "d"]),
         ];
         let graph = WikiGraph::build(&pages, &VaultDirs::default());
         let result = detect_communities(&graph, &config);
@@ -507,9 +535,9 @@ mod tests {
     fn labels_default_to_none() {
         let config = GraphConfig::default();
         let pages = vec![
-            make_page("a", &["b", "c"]),
-            make_page("b", &["a"]),
-            make_page("c", &["a"]),
+            build_page("a", &["b", "c"]),
+            build_page("b", &["a"]),
+            build_page("c", &["a"]),
         ];
         let graph = WikiGraph::build(&pages, &VaultDirs::default());
         let result = detect_communities(&graph, &config);
@@ -520,10 +548,10 @@ mod tests {
     fn label_communities_picks_highest_degree_member() {
         let config = GraphConfig::default();
         let pages = vec![
-            make_page("hub", &["leaf-1", "leaf-2", "leaf-3"]),
-            make_page("leaf-1", &["hub"]),
-            make_page("leaf-2", &["hub"]),
-            make_page("leaf-3", &["hub"]),
+            build_page("hub", &["leaf-1", "leaf-2", "leaf-3"]),
+            build_page("leaf-1", &["hub"]),
+            build_page("leaf-2", &["hub"]),
+            build_page("leaf-3", &["hub"]),
         ];
         let graph = WikiGraph::build(&pages, &VaultDirs::default());
         let mut result = detect_communities(&graph, &config);
@@ -536,11 +564,11 @@ mod tests {
     fn communities_sorted_by_size_with_sequential_ids() {
         let config = GraphConfig::default();
         let pages = vec![
-            make_page("a", &["b", "c"]),
-            make_page("b", &["a", "c"]),
-            make_page("c", &["a", "b"]),
-            make_page("x", &["y"]),
-            make_page("y", &["x"]),
+            build_page("a", &["b", "c"]),
+            build_page("b", &["a", "c"]),
+            build_page("c", &["a", "b"]),
+            build_page("x", &["y"]),
+            build_page("y", &["x"]),
         ];
         let graph = WikiGraph::build(&pages, &VaultDirs::default());
         let result = detect_communities(&graph, &config);
@@ -555,12 +583,12 @@ mod tests {
     fn modularity_positive_for_clear_structure() {
         let config = GraphConfig::default();
         let pages = vec![
-            make_page("a1", &["a2", "a3"]),
-            make_page("a2", &["a1", "a3"]),
-            make_page("a3", &["a1", "a2"]),
-            make_page("b1", &["b2", "b3"]),
-            make_page("b2", &["b1", "b3"]),
-            make_page("b3", &["b1", "b2"]),
+            build_page("a1", &["a2", "a3"]),
+            build_page("a2", &["a1", "a3"]),
+            build_page("a3", &["a1", "a2"]),
+            build_page("b1", &["b2", "b3"]),
+            build_page("b2", &["b1", "b3"]),
+            build_page("b3", &["b1", "b2"]),
         ];
         let graph = WikiGraph::build(&pages, &VaultDirs::default());
         let result = detect_communities(&graph, &config);
@@ -573,9 +601,9 @@ mod tests {
         // yet share neighbor `a` and sit in the same community → one suggestion.
         let config = GraphConfig::default();
         let pages = vec![
-            make_page("a", &["b", "c"]),
-            make_page("b", &["a"]),
-            make_page("c", &["a"]),
+            build_page("a", &["b", "c"]),
+            build_page("b", &["a"]),
+            build_page("c", &["a"]),
         ];
         let graph = WikiGraph::build(&pages, &VaultDirs::default());
         let cluster = detect_communities(&graph, &config);
@@ -592,9 +620,9 @@ mod tests {
         // co-citation-level signal is suppressed.
         let config = GraphConfig::default();
         let pages = vec![
-            make_page("a", &["b", "c"]),
-            make_page("b", &["a"]),
-            make_page("c", &["a"]),
+            build_page("a", &["b", "c"]),
+            build_page("b", &["a"]),
+            build_page("c", &["a"]),
         ];
         let graph = WikiGraph::build(&pages, &VaultDirs::default());
         let cluster = detect_communities(&graph, &config);
@@ -610,9 +638,9 @@ mod tests {
         // A complete triangle: every pair already has an edge → no suggestions.
         let config = GraphConfig::default();
         let pages = vec![
-            make_page("a", &["b", "c"]),
-            make_page("b", &["a", "c"]),
-            make_page("c", &["a", "b"]),
+            build_page("a", &["b", "c"]),
+            build_page("b", &["a", "c"]),
+            build_page("c", &["a", "b"]),
         ];
         let graph = WikiGraph::build(&pages, &VaultDirs::default());
         let cluster = detect_communities(&graph, &config);
@@ -621,24 +649,50 @@ mod tests {
     }
 
     #[test]
-    fn suggest_links_ranked_by_shared_neighbor_count() {
-        // hub1 and hub2 each connect to {x,y,z}; the leaves share more neighbors with
-        // each other than with the hubs.
+    fn suggest_links_ranked_by_adamic_adar_score() {
+        // hub1 and hub2 each connect to {x,y,z}; the leaves share more neighbours with
+        // each other than with the hubs. Output is ranked by Adamic–Adar score descending.
         let config = GraphConfig::default();
         let pages = vec![
-            make_page("hub1", &["x", "y", "z"]),
-            make_page("hub2", &["x", "y", "z"]),
-            make_page("x", &["hub1", "hub2"]),
-            make_page("y", &["hub1", "hub2"]),
-            make_page("z", &["hub1", "hub2"]),
+            build_page("hub1", &["x", "y", "z"]),
+            build_page("hub2", &["x", "y", "z"]),
+            build_page("x", &["hub1", "hub2"]),
+            build_page("y", &["hub1", "hub2"]),
+            build_page("z", &["hub1", "hub2"]),
         ];
         let graph = WikiGraph::build(&pages, &VaultDirs::default());
         let cluster = detect_communities(&graph, &config);
         let result = suggest_links(&graph, &cluster, 1);
         assert!(!result.pairs.is_empty());
-        // Output is sorted by shared_neighbors descending.
         for w in result.pairs.windows(2) {
-            assert!(w[0].shared_neighbors >= w[1].shared_neighbors);
+            assert!(w[0].score >= w[1].score, "ranked by Adamic–Adar score");
         }
+    }
+
+    #[test]
+    fn adamic_adar_discounts_high_degree_shared_neighbours() {
+        // A niche neighbour (degree 2) is far stronger evidence of relatedness than a hub
+        // (degree 5): sharing the niche must outscore sharing the hub at equal raw count.
+        let pages = vec![
+            build_page("niche", &["p1", "p2"]),
+            build_page("hub", &["q1", "q2", "q3", "q4", "q5"]),
+            build_page("p1", &[]),
+            build_page("p2", &[]),
+            build_page("q1", &[]),
+            build_page("q2", &[]),
+            build_page("q3", &[]),
+            build_page("q4", &[]),
+            build_page("q5", &[]),
+        ];
+        let graph = WikiGraph::build(&pages, &VaultDirs::default());
+        let niche = graph.node_index("niche").unwrap();
+        let hub = graph.node_index("hub").unwrap();
+        let mut degree = HashMap::new();
+        let niche_score = adamic_adar(&graph, &[niche], &mut degree);
+        let hub_score = adamic_adar(&graph, &[hub], &mut degree);
+        assert!(
+            niche_score > hub_score,
+            "a niche shared neighbour ({niche_score}) must outweigh a hub one ({hub_score})"
+        );
     }
 }
