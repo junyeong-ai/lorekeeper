@@ -98,7 +98,7 @@ pub fn build_index(
         + synthesis.len();
 
     let mut out = String::new();
-    writeln!(out, "# Wiki Index").unwrap();
+    writeln!(out, "# {}", strings.index_title).unwrap();
     writeln!(out).unwrap();
     // No timestamp: the index is a deterministic function of vault content, so an
     // unchanged vault re-renders byte-identical bytes and a re-run is a true no-op
@@ -596,11 +596,20 @@ mod tests {
     fn empty_vault_yields_header_only() {
         let tmp = TempDir::new().unwrap();
         let out = build_index(tmp.path(), Locale::Ko, &VaultDirs::default()).unwrap();
-        assert!(out.starts_with("# Wiki Index"));
+        assert!(out.starts_with("# 위키 인덱스"));
         assert!(out.contains("0 pages"));
         // No category sections should be rendered.
         assert!(!out.contains("## 개념"));
         assert!(!out.contains("## 문서"));
+    }
+
+    #[test]
+    fn index_h1_is_localized() {
+        let tmp = TempDir::new().unwrap();
+        let en = build_index(tmp.path(), Locale::En, &VaultDirs::default()).unwrap();
+        assert!(en.starts_with("# Wiki Index"), "EN H1 localized:\n{en}");
+        let ko = build_index(tmp.path(), Locale::Ko, &VaultDirs::default()).unwrap();
+        assert!(ko.starts_with("# 위키 인덱스"), "KO H1 localized:\n{ko}");
     }
 
     #[test]

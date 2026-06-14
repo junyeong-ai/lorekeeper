@@ -30,6 +30,7 @@ use std::path::Path;
 
 use lk_core::config::VaultDirs;
 use lk_core::frontmatter::parse_page;
+use lk_core::i18n::Locale;
 use lk_core::vault_path::{concepts_dir, documents_dir, explorations_dir};
 use walkdir::WalkDir;
 
@@ -49,7 +50,11 @@ struct TimelineEntry {
 /// `vault_root`, covering every durable knowledge node. A pure function of on-disk
 /// frontmatter — re-running on an unchanged vault yields identical bytes. Pages missing
 /// a parseable `created` date are skipped (they have no place on a timeline), never guessed.
-pub fn build_timeline(vault_root: &Path, dirs: &VaultDirs) -> Result<String, VaultError> {
+pub fn build_timeline(
+    vault_root: &Path,
+    locale: Locale,
+    dirs: &VaultDirs,
+) -> Result<String, VaultError> {
     let mut entries: Vec<TimelineEntry> = Vec::new();
     for dir in [
         concepts_dir(dirs),
@@ -69,7 +74,7 @@ pub fn build_timeline(vault_root: &Path, dirs: &VaultDirs) -> Result<String, Vau
     }
 
     let mut out = String::new();
-    writeln!(out, "# Knowledge Log").unwrap();
+    writeln!(out, "# {}", locale.strings().log_title).unwrap();
     writeln!(out).unwrap();
     // No timestamp: a deterministic function of vault content, so an unchanged vault
     // re-renders byte-identical and a re-run is a true no-op.
@@ -92,9 +97,10 @@ pub fn build_timeline(vault_root: &Path, dirs: &VaultDirs) -> Result<String, Vau
 /// vault-relative path written.
 pub fn write_timeline(
     vault_root: &Path,
+    locale: Locale,
     dirs: &VaultDirs,
 ) -> Result<std::path::PathBuf, VaultError> {
-    let content = build_timeline(vault_root, dirs)?;
+    let content = build_timeline(vault_root, locale, dirs)?;
     let rel = Path::new(&dirs.wiki).join("log.md");
     VaultWriter::new(vault_root).write_page_sync(&rel, &content)?;
     // Return the absolute path, matching `write_index`, so every `lore wiki` command
@@ -182,7 +188,7 @@ mod tests {
             "---\nid: report\ntitle: Report\ncreated: 2026-05-20\n---\n",
         );
 
-        let out = build_timeline(tmp.path(), &dirs).unwrap();
+        let out = build_timeline(tmp.path(), Locale::Ko, &dirs).unwrap();
         let h22 = out.find("## 2026-05-22").unwrap();
         let h20 = out.find("## 2026-05-20").unwrap();
         assert!(h22 < h20, "newer date must come first:\n{out}");
@@ -201,7 +207,7 @@ mod tests {
             "wiki/concepts/rag.md",
             "---\nid: rag\ntitle: RAG\ncreated: 2026-05-20\nupdated: 2026-09-01\n---\n",
         );
-        let out = build_timeline(tmp.path(), &VaultDirs::default()).unwrap();
+        let out = build_timeline(tmp.path(), Locale::Ko, &VaultDirs::default()).unwrap();
         assert!(out.contains("## 2026-05-20"), "must be placed by created");
         assert!(
             !out.contains("2026-09-01"),
@@ -218,7 +224,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         concept(tmp.path(), "ancient", "Ancient", "2020-01-01");
         concept(tmp.path(), "recent", "Recent", "2026-05-20");
-        let out = build_timeline(tmp.path(), &VaultDirs::default()).unwrap();
+        let out = build_timeline(tmp.path(), Locale::Ko, &VaultDirs::default()).unwrap();
         assert!(out.contains("|Recent]]"), "recent entry shown");
         assert!(
             out.contains("|Ancient]]"),
@@ -240,8 +246,8 @@ mod tests {
             "---\nid: x\ntitle: X\n---\n",
         ); // no created
         concept(tmp.path(), "y", "Y", "2026-05-20");
-        let first = build_timeline(tmp.path(), &VaultDirs::default()).unwrap();
-        let second = build_timeline(tmp.path(), &VaultDirs::default()).unwrap();
+        let first = build_timeline(tmp.path(), Locale::Ko, &VaultDirs::default()).unwrap();
+        let second = build_timeline(tmp.path(), Locale::Ko, &VaultDirs::default()).unwrap();
         assert_eq!(first, second, "build must be deterministic");
         assert!(first.contains("1 entries"));
         assert!(!first.contains("|X]]"), "undated page must be skipped");
@@ -250,8 +256,17 @@ mod tests {
     #[test]
     fn empty_vault_yields_just_the_header() {
         let tmp = TempDir::new().unwrap();
-        let out = build_timeline(tmp.path(), &VaultDirs::default()).unwrap();
-        assert!(out.contains("# Knowledge Log"));
+        let out = build_timeline(tmp.path(), Locale::Ko, &VaultDirs::default()).unwrap();
+        assert!(out.contains("# 지식 로그"));
         assert!(out.contains("0 entries"));
+    }
+
+    #[test]
+    fn timeline_h1_is_localized() {
+        let tmp = TempDir::new().unwrap();
+        let en = build_timeline(tmp.path(), Locale::En, &VaultDirs::default()).unwrap();
+        assert!(en.contains("# Knowledge Log"), "EN H1 localized:\n{en}");
+        let ko = build_timeline(tmp.path(), Locale::Ko, &VaultDirs::default()).unwrap();
+        assert!(ko.contains("# 지식 로그"), "KO H1 localized:\n{ko}");
     }
 }

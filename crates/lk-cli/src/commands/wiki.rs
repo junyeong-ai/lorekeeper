@@ -74,11 +74,11 @@ pub async fn run_log(
     opts: &super::GlobalOptions,
     root_override: Option<PathBuf>,
 ) -> miette::Result<()> {
-    let (vault_root, _locale, dirs, _graph) = resolve_wiki_context(opts, root_override)?;
+    let (vault_root, locale, dirs, _graph) = resolve_wiki_context(opts, root_override)?;
 
     tracing::info!(vault = %vault_root.display(), "building wiki knowledge log");
 
-    let path = lk_vault::write_timeline(&vault_root, &dirs)
+    let path = lk_vault::write_timeline(&vault_root, locale, &dirs)
         .map_err(|e| miette::miette!("write log.md: {e}"))?;
 
     eprintln!("Wrote {}", path.display());
