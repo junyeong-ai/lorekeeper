@@ -88,8 +88,8 @@ This skill writes a COMPLETE page directly — no ingest pipeline runs
 afterward. AGENTS.md's `Owner` column describes the *automated* pipeline
 (`machine` = filled by `lore ingest`, `LLM` = filled by `/lore-process`);
 for a hand-authored capture there is no such later pass, so you fill EVERY
-section yourself, including the ones marked `machine` (the content and
-related-concepts sections). The only exception is each concept's sources section
+section yourself, including the one marked `machine` (a document's content
+section). The only exception is each concept's sources section
 + `source_count`, which `backlinks-sync` re-derives in step 6 (leave empty).
 Omit the `llm_inputs` frontmatter block entirely — it belongs to the
 pipeline cache, not to directly-authored pages. An in-the-moment capture has

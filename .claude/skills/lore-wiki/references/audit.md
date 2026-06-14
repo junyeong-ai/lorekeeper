@@ -5,7 +5,8 @@ resolve section headings before inspecting pages.
 
 1. **Structural** — run `lore graph --json lint`. ONE pass returns ALL of:
    `orphans`, `broken`, `hubs`, `invalid_categories`, `near_duplicate_concepts`,
-   `unresolved_conflicts`, and index drift (`missing_from_index`/`_from_disk`).
+   `unresolved_conflicts`, `alias_conflicts`, and index drift
+   (`missing_from_index`/`_from_disk`).
    Surface every non-empty list. NOTE: a clean lint (`findings: 0`) means no
    structural FAULTS — it does NOT mean the wiki is well-connected. Empty
    related-concepts sections are never a lint finding; only `suggest-links` (layer 2)

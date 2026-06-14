@@ -40,8 +40,8 @@ frontmatter, and section headings. If missing, run `lore schema`.
 This skill writes COMPLETE pages directly — no ingest pipeline runs over
 them. AGENTS.md's `Owner` column describes the *automated* pipeline
 (`machine`/`LLM` = filled by `lore ingest` / `/lore-process`); since this
-skill is the author, you fill EVERY section yourself, including ones marked
-`machine` (a document's content and related-concepts sections). The sole
+skill is the author, you fill EVERY section yourself, including the one marked
+`machine` (a document's content section). The sole
 exception is each concept's sources section + `source_count`, re-derived by
 the Finalize `backlinks-sync`. Omit the `llm_inputs` frontmatter block — it
 is the pipeline's cache, not part of a directly-authored page.
