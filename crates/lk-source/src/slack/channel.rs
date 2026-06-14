@@ -80,6 +80,17 @@ impl crate::ValidatedParams for SlackChannelParams {
                     .into(),
             ));
         }
+        // An empty `watch_users` is the documented whole-channel mode, but a BLANK entry (`[""]`)
+        // is different: it switches the watch filter ON (the list is non-empty) yet matches no
+        // author id or `<@id>` mention, so the entire channel is silently filtered down to zero.
+        // A focus list needs real user ids.
+        if self.watch_users.iter().any(|u| u.trim().is_empty()) {
+            return Err(SourceError::InvalidParams(
+                "slack-channel `watch_users` entries must each be a non-blank user id — a blank \
+                 entry enables the watch filter but matches nothing, silently emptying the channel."
+                    .into(),
+            ));
+        }
         Ok(())
     }
 }
@@ -375,6 +386,23 @@ mod tests {
 
     fn no_users() -> HashMap<String, String> {
         HashMap::new()
+    }
+
+    #[test]
+    fn validate_rejects_blank_watch_user() {
+        // A blank entry switches the watch filter on but matches nothing → silent empty channel.
+        assert!(
+            validate_params(&serde_json::json!({"channel": "#a", "watch_users": [""]})).is_err()
+        );
+        assert!(
+            validate_params(&serde_json::json!({"channel": "#a", "watch_users": ["U1", "  "]}))
+                .is_err()
+        );
+        // Empty list (whole-channel mode) and real ids are both fine.
+        assert!(validate_params(&serde_json::json!({"channel": "#a", "watch_users": []})).is_ok());
+        assert!(
+            validate_params(&serde_json::json!({"channel": "#a", "watch_users": ["U1"]})).is_ok()
+        );
     }
 
     #[test]

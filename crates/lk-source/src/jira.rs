@@ -42,6 +42,17 @@ impl crate::ValidatedParams for JiraParams {
                 "jira `max_issues` must be > 0".into(),
             ));
         }
+        // A blank `jql` deserializes fine (it's a plain String) but Jira's search API treats an
+        // empty query as "match every issue", so a targeted daily snapshot
+        // (`assignee = currentUser() AND updated >= -1d`) would silently collapse into a full
+        // instance scrape — over-fetching unrelated issues and polluting ownership/work-log.
+        if self.jql.trim().is_empty() {
+            return Err(SourceError::InvalidParams(
+                "jira `jql` must not be blank — an empty JQL matches every issue in the instance, \
+                 turning a targeted daily snapshot into a full scrape."
+                    .into(),
+            ));
+        }
         Ok(())
     }
 }
@@ -535,6 +546,16 @@ mod tests {
         // `jql` is required; omitting it must fail validation, not at runtime.
         let params = serde_json::json!({ "max_issues": 10 });
         assert!(validate_params(&params).is_err());
+    }
+
+    #[test]
+    fn blank_jql_rejected() {
+        // A present-but-blank jql deserializes fine but Jira reads an empty JQL as "every issue";
+        // reject it so a daily snapshot can't silently become a full instance scrape.
+        assert!(validate_params(&serde_json::json!({ "jql": "" })).is_err());
+        assert!(validate_params(&serde_json::json!({ "jql": "   " })).is_err());
+        // A real query is accepted.
+        assert!(validate_params(&serde_json::json!({ "jql": "assignee = currentUser()" })).is_ok());
     }
 
     #[test]
