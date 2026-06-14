@@ -86,11 +86,11 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs, personal: bool) -> Vec<PageSc
                     |i| format!("{} / {}", i.key_events, i.key_messages),
                     Owner::Machine,
                 ),
-                s(
-                    "Concepts",
-                    |i| i.related_concepts.to_string(),
-                    Owner::Machine,
-                ),
+                // Concept wiki-links are EXTRACTED by the LLM (the `concepts` task, gated by
+                // its `concepts_done` marker) — the machine emits only the empty heading. So
+                // this is LLM-owned, exactly like Summary; only the raw Events list above is
+                // machine-owned (the LLM merely refines each event's body in place).
+                s("Concepts", |i| i.related_concepts.to_string(), Owner::Llm),
             ],
         },
         PageSchema {
@@ -113,10 +113,12 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs, personal: bool) -> Vec<PageSc
                     |i| i.document_content.to_string(),
                     Owner::Machine,
                 ),
+                // LLM-extracted (the `concepts` task), like the daily Concepts section — the
+                // machine emits only the heading.
                 s(
                     "Extracted Concepts",
                     |i| i.related_concepts.to_string(),
-                    Owner::Machine,
+                    Owner::Llm,
                 ),
             ],
         },
@@ -522,6 +524,31 @@ mod tests {
         assert!(en.contains("`## Synthesis`"));
         assert!(en.contains("`## Sources`"));
         assert!(en.contains("`## Related`"));
+    }
+
+    #[test]
+    fn concept_sections_are_advertised_as_llm_owned() {
+        // The daily "Concepts" and document "Extracted Concepts" sections are EXTRACTED by the
+        // LLM (`concepts` task, `concepts_done` marker), so AGENTS.md — the agent-facing
+        // contract — must label them LLM-owned, consistent with Summary. The raw Events list
+        // stays machine-owned (the LLM only refines each body in place).
+        let md = render_agents_md(Locale::En, &lk_core::config::VaultDirs::default(), false);
+        for line in md.lines() {
+            if line.starts_with("| Concepts ") || line.starts_with("| Extracted Concepts ") {
+                assert!(
+                    line.trim_end().ends_with("| LLM |"),
+                    "concept section must be advertised LLM-owned: {line}"
+                );
+            }
+        }
+        let events = md
+            .lines()
+            .find(|l| l.starts_with("| Events / Messages "))
+            .expect("daily Events row present");
+        assert!(
+            events.trim_end().ends_with("| machine |"),
+            "raw Events list stays machine-owned: {events}"
+        );
     }
 
     #[test]
