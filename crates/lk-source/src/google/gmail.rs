@@ -66,6 +66,22 @@ impl crate::ValidatedParams for GmailParams {
                 "gmail `max_messages` must be > 0".into(),
             ));
         }
+        // A blank exclude pattern is the mirror image of a blank include term: `str::contains`
+        // matches the empty string against EVERY subject/sender, so one stray `""` entry would
+        // silently drop the entire day's mail with no signal. Reject it at the same boundary.
+        if let Some(exclude) = &self.exclude
+            && exclude
+                .subjects
+                .iter()
+                .chain(exclude.senders.iter())
+                .any(|p| p.trim().is_empty())
+        {
+            return Err(SourceError::InvalidParams(
+                "gmail `exclude.subjects`/`exclude.senders` entries must each be non-blank — a blank \
+                 pattern matches every message and would silently drop the entire day's mail."
+                    .into(),
+            ));
+        }
         Ok(())
     }
 }
@@ -319,6 +335,7 @@ fn map_message(
     if let Some(exc) = exclude
         && GmailSource::is_excluded(&msg, exc)
     {
+        tracing::debug!(message_id = %msg.id, "gmail: skipping message matched by exclude rule");
         return None;
     }
     if exclude.is_none_or(|e| e.calendar_invites) && has_calendar_attachment(&msg) {
@@ -581,5 +598,25 @@ mod tests {
         assert!(!header_email("\"me@x.com via list\" <list@x.com>").eq_ignore_ascii_case(me));
         // A look-alike longer domain must not match.
         assert!(!header_email("<me@x.com.evil.com>").eq_ignore_ascii_case(me));
+    }
+
+    #[test]
+    fn validate_rejects_blank_exclude_pattern() {
+        use super::validate_params;
+        let with_exclude = |exclude: serde_json::Value| {
+            validate_params(&serde_json::json!({
+                "include_queries": ["label:newsletters"],
+                "exclude": exclude,
+            }))
+        };
+        // A blank subject/sender pattern `contains`-matches every message → silent total drop.
+        assert!(with_exclude(serde_json::json!({"subjects": [""]})).is_err());
+        assert!(with_exclude(serde_json::json!({"senders": ["  "]})).is_err());
+        // Real patterns are fine, and an absent exclude block is fine.
+        assert!(
+            with_exclude(serde_json::json!({"subjects": ["[ad]"], "senders": ["noreply@x.com"]}))
+                .is_ok()
+        );
+        assert!(validate_params(&serde_json::json!({"include_queries": ["label:x"]})).is_ok());
     }
 }

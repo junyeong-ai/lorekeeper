@@ -49,6 +49,29 @@ impl crate::ValidatedParams for SlackSearchParams {
                 "slack-search `max_matches_per_query` must be > 0".into(),
             ));
         }
+        if self.queries.is_empty() {
+            return Err(SourceError::InvalidParams(
+                "slack-search `queries` must list at least one query".into(),
+            ));
+        }
+        for q in &self.queries {
+            if q.channel.trim().is_empty() {
+                return Err(SourceError::InvalidParams(
+                    "slack-search query `channel` must not be blank".into(),
+                ));
+            }
+            // The query is assembled as `in:#<channel> after:… before:… <keywords joined by OR>`.
+            // Empty or blank keywords collapse the keyword clause to nothing, turning a targeted
+            // keyword-trend search into an unbounded whole-channel scrape — the opposite of this
+            // source's purpose, and a quota/noise hazard. A keyword search needs keywords.
+            if q.keywords.is_empty() || q.keywords.iter().any(|k| k.trim().is_empty()) {
+                return Err(SourceError::InvalidParams(
+                    "slack-search query `keywords` must list at least one non-blank keyword — \
+                     a blank keyword clause would search the whole channel instead of a trend."
+                        .into(),
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -278,6 +301,40 @@ impl Source for SlackSearchSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_rejects_empty_or_blank_keyword_clause() {
+        // No queries at all.
+        assert!(validate_params(&serde_json::json!({"queries": []})).is_err());
+        // Blank channel.
+        assert!(
+            validate_params(&serde_json::json!({
+                "queries": [{"channel": "  ", "keywords": ["a"]}]
+            }))
+            .is_err()
+        );
+        // Empty keyword list → the query would scrape the whole channel.
+        assert!(
+            validate_params(&serde_json::json!({
+                "queries": [{"channel": "#x", "keywords": []}]
+            }))
+            .is_err()
+        );
+        // Blank keyword entry → same collapsed clause.
+        assert!(
+            validate_params(&serde_json::json!({
+                "queries": [{"channel": "#x", "keywords": [" "]}]
+            }))
+            .is_err()
+        );
+        // A real keyword search is accepted.
+        assert!(
+            validate_params(&serde_json::json!({
+                "queries": [{"channel": "#x", "keywords": ["release"]}]
+            }))
+            .is_ok()
+        );
+    }
 
     #[test]
     fn max_matches_defaults_and_rejects_zero() {

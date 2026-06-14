@@ -62,6 +62,13 @@ impl crate::ValidatedParams for RssParams {
                 "rss `feeds` must list at least one feed".into(),
             ));
         }
+        // Every per-source cap is validated `> 0` (a `0` cap drops every item from the first
+        // entry on — an entire-feed silent loss, not a guard). RSS keeps that invariant.
+        if self.max_items_per_feed == 0 {
+            return Err(SourceError::InvalidParams(
+                "rss `max_items_per_feed` must be > 0".into(),
+            ));
+        }
         let mut seen_ids = std::collections::HashSet::new();
         for f in &self.feeds {
             if f.id.trim().is_empty() {
@@ -345,6 +352,25 @@ mod tests {
             validate_params(&serde_json::json!({
                 "feeds": [{"id": "openai", "url": "https://openai.com/news/rss.xml"}],
                 "lookback_hours": 24
+            }))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_rejects_zero_max_items_per_feed() {
+        // Every per-source cap is validated `> 0`; a `0` cap silently drops every entry.
+        assert!(
+            validate_params(&serde_json::json!({
+                "feeds": [{"id": "x", "url": "https://x"}],
+                "max_items_per_feed": 0
+            }))
+            .is_err()
+        );
+        // Omitted → default (50), valid.
+        assert!(
+            validate_params(&serde_json::json!({
+                "feeds": [{"id": "x", "url": "https://x"}]
             }))
             .is_ok()
         );

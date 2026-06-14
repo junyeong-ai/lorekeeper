@@ -585,9 +585,16 @@ fn validate_relative_vault_path(label: &str, value: &str) -> Result<(), ConfigEr
             "{label} must not be empty"
         )));
     }
+    // A `CurDir` segment (`.`/`./`) is tolerated only as noise around real segments
+    // (`./wiki` → `wiki`), because `normalize()` strips it. But a value that is ALL
+    // `CurDir` (`.`, `./`) would normalize to an empty string AFTER this check passes,
+    // silently aliasing the directory to the vault root. Require at least one real
+    // segment so the normalized path can never collapse to empty.
+    let mut has_named_segment = false;
     for component in Path::new(value).components() {
         match component {
-            Component::Normal(_) | Component::CurDir => {}
+            Component::Normal(_) => has_named_segment = true,
+            Component::CurDir => {}
             _ => {
                 return Err(ConfigError::Validation(format!(
                     "{label} ('{value}') must be a relative path inside the vault \
@@ -595,6 +602,11 @@ fn validate_relative_vault_path(label: &str, value: &str) -> Result<(), ConfigEr
                 )));
             }
         }
+    }
+    if !has_named_segment {
+        return Err(ConfigError::Validation(format!(
+            "{label} ('{value}') must name at least one directory segment, not just '.'"
+        )));
     }
     Ok(())
 }
@@ -1266,6 +1278,53 @@ sources:
             GraphMetricsConfig::default().concept_near_duplicate_threshold,
             0.6
         );
+    }
+
+    #[test]
+    fn validate_rejects_curdir_only_vault_dir() {
+        // "." survives the per-component check (CurDir is tolerated as noise around real
+        // segments, e.g. "./wiki"), but `normalize()` strips it to "", which would alias the
+        // directory to the vault root AFTER validation passed. Reject an all-CurDir value here
+        // so the normalized path can never collapse to empty.
+        let yaml = r#"
+vault:
+  root: /tmp/vault
+  dirs:
+    daily: "."
+identity:
+  name: test
+  email: test@test.com
+sources:
+  s1:
+    type: gmail
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(
+            config.validate().is_err(),
+            "'.' must be rejected (it normalizes to an empty path)"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_curdir_prefixed_vault_dir() {
+        // "./wiki" is fine: the CurDir is noise, normalize() yields "wiki", and a real segment
+        // remains. Only an ALL-CurDir value is rejected.
+        let yaml = r#"
+vault:
+  root: /tmp/vault
+  dirs:
+    wiki: "./wiki"
+identity:
+  name: test
+  email: test@test.com
+sources:
+  s1:
+    type: gmail
+"#;
+        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(config.validate().is_ok());
+        config.vault.dirs.normalize();
+        assert_eq!(config.vault.dirs.wiki, "wiki");
     }
 
     #[test]
