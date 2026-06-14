@@ -287,6 +287,13 @@ fn read_item(path: &Path) -> Result<RawItem, SourceError> {
     let raw = std::fs::read_to_string(path)
         .map_err(|e| SourceError::Parse(format!("read {}: {e}", path.display())))?;
 
+    // Integrity hash of the file's raw bytes AS READ HERE. `archive_consumed_files` re-reads
+    // the file and re-hashes before moving it: a mismatch means the file was swapped (same
+    // name, new content) between extract and archive, so the new content has NOT been
+    // materialized into the vault yet and must be left in the inbox for the next ingest —
+    // never archived away on the strength of the path merely still existing.
+    let source_hash = blake3::hash(raw.as_bytes()).to_hex().to_string();
+
     // Convert HTML to Markdown so the vault stores clean content, not raw tags.
     // The user dropped this file deliberately, so when readability can't isolate an
     // article core, convert the whole page — there is no cleaner source to keep.
@@ -334,6 +341,7 @@ fn read_item(path: &Path) -> Result<RawItem, SourceError> {
         is_self: false,
         metadata: serde_json::json!({
             "source_file": path.display().to_string(),
+            "source_hash": source_hash,
         }),
     })
 }
@@ -380,7 +388,20 @@ pub fn archive_consumed_files(
             continue;
         };
         let src = std::path::PathBuf::from(src_str);
-        if !src.exists() {
+        // Re-read and re-hash: only archive the EXACT bytes we extracted. If the file is gone,
+        // unreadable, or its content changed since extract (a same-name mid-run swap), skip it —
+        // the next ingest will pick up whatever is there now. This is what makes "archive only
+        // after the vault write succeeded" honest: we never evict content we didn't materialize.
+        let Ok(current) = std::fs::read_to_string(&src) else {
+            continue;
+        };
+        let expected_hash = event.metadata.get("source_hash").and_then(|v| v.as_str());
+        let current_hash = blake3::hash(current.as_bytes()).to_hex();
+        if expected_hash != Some(current_hash.as_str()) {
+            tracing::warn!(
+                file = %src.display(),
+                "manual: inbox file changed since extract; leaving it for the next ingest"
+            );
             continue;
         }
         let Some(name) = src.file_name() else {
@@ -566,6 +587,64 @@ mod tests {
         assert!(!tmp.path().join("two.md").exists());
         assert!(tmp.path().join("archived/2026-05-24/one.md").exists());
         assert!(tmp.path().join("archived/2026-05-24/two.md").exists());
+    }
+
+    #[tokio::test]
+    async fn archive_skips_file_swapped_since_extract() {
+        // A same-name file replaced with NEW content between extract and archive must NOT be
+        // archived — its new content was never materialized into the vault. The integrity hash
+        // catches the swap and leaves the file in the inbox for the next ingest.
+        let tmp = TempDir::new().unwrap();
+        write(&tmp.path().join("a.md"), "# A\n\noriginal");
+        let src = ManualSource::new();
+        let params = serde_json::json!({
+            "inbox_dir": tmp.path(),
+            "archive_after_ingest": true,
+        });
+        let ctx = ExtractContext {
+            target_date: jiff::civil::date(2026, 5, 24),
+            timezone: jiff::tz::TimeZone::UTC,
+            locale: lk_core::i18n::Locale::default(),
+            identity: lk_core::config::Identity::default(),
+            vault_root: std::path::PathBuf::new(),
+        };
+        let items = src.extract(&params, &ctx).await.unwrap();
+        let events: Vec<lk_core::event::Event> = items
+            .iter()
+            .map(|item| lk_core::event::Event {
+                id: lk_core::event::EventId::new("manual", ctx.target_date, &item.title),
+                source_id: "manual".into(),
+                source_type: lk_core::config::SourceType::Manual,
+                timestamp: item.timestamp,
+                date: ctx.target_date,
+                title: item.title.clone(),
+                body: item.body.clone(),
+                url: None,
+                author: None,
+                labels: vec![],
+                category: None,
+                performance_category: None,
+                is_self: false,
+                is_personal: false,
+                metadata: item.metadata.clone(),
+            })
+            .collect();
+
+        // Swap the file's content AFTER extract but BEFORE archive.
+        write(&tmp.path().join("a.md"), "# A\n\nedited after extract");
+
+        archive_consumed_files(&params, &events, ctx.target_date, std::path::Path::new(""))
+            .unwrap();
+
+        // The swapped file stays in the inbox (NOT archived); its new content is intact so the
+        // next ingest can materialize it.
+        assert!(
+            tmp.path().join("a.md").exists(),
+            "a file changed since extract must be left in the inbox"
+        );
+        assert!(!tmp.path().join("archived/2026-05-24/a.md").exists());
+        let kept = std::fs::read_to_string(tmp.path().join("a.md")).unwrap();
+        assert!(kept.contains("edited after extract"));
     }
 
     #[test]
