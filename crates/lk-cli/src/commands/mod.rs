@@ -59,11 +59,15 @@ fn locate_config(opts: &GlobalOptions) -> miette::Result<PathBuf> {
 }
 
 /// `$XDG_CONFIG_HOME/lorekeeper/config.yaml`, falling back to `~/.config/lorekeeper/...`.
+/// On Windows (no `HOME`) it falls back to `%USERPROFILE%\.config\lorekeeper\...` so a
+/// binary-only install auto-discovers its config there too — ONE config-location convention
+/// across platforms (install.ps1 drops config.example.yaml into the same dir to match).
 fn xdg_config_path() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .or_else(|| std::env::var_os("USERPROFILE").map(|h| PathBuf::from(h).join(".config")))?;
     Some(base.join("lorekeeper").join("config.yaml"))
 }
 

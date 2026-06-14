@@ -1143,15 +1143,22 @@ impl Default for GraphClusterConfig {
 /// Expand `~` / a leading `~/` to the user's home directory. The single source
 /// for tilde expansion in user-supplied config paths (`vault.root`, the manual
 /// source's `inbox_dir`) — config values are written by humans in a shell
-/// mindset, but nothing else expands `~` for us.
+/// mindset, but nothing else expands `~` for us. Home is `$HOME` on Unix and
+/// `%USERPROFILE%` on Windows (which has no `HOME`) — the SAME cross-platform home
+/// resolution as `xdg_config_path`, so `~/vault` in config expands on every platform.
 pub fn expand_tilde(path: &str) -> PathBuf {
+    let home = || {
+        std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .filter(|h| !h.is_empty())
+    };
     if path == "~"
-        && let Ok(home) = std::env::var("HOME")
+        && let Some(home) = home()
     {
         return PathBuf::from(home);
     }
     if let Some(rest) = path.strip_prefix("~/")
-        && let Ok(home) = std::env::var("HOME")
+        && let Some(home) = home()
     {
         return PathBuf::from(home).join(rest);
     }

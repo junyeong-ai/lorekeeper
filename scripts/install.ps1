@@ -104,6 +104,23 @@ function Install-Templates($srcDir, $destBase) {
     Write-Ok 'Templates installed'
 }
 
+# Drop config.example.yaml into the config dir `lore` auto-discovers on Windows
+# (`%XDG_CONFIG_HOME%\lorekeeper` else `%USERPROFILE%\.config\lorekeeper`), matching
+# install.sh — so a binary-only install gives the user a starting point to copy to config.yaml.
+function Get-ConfigDir {
+    if ($env:XDG_CONFIG_HOME) { Join-Path $env:XDG_CONFIG_HOME 'lorekeeper' }
+    else { Join-Path $env:USERPROFILE '.config\lorekeeper' }
+}
+
+function Install-ConfigExample($src) {
+    if (-not (Test-Path $src)) { return }
+    $dir = Get-ConfigDir
+    Write-Step "Installing config example to $dir"
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    Copy-Item -Path $src -Destination (Join-Path $dir 'config.example.yaml') -Force
+    Write-Ok "Config example -> $dir\config.example.yaml"
+}
+
 function Download-Skill($version, $skillName) {
     # Mirrors scripts/install.sh download_skill_tarball: fetch and verify
     # `{skill}-skill-v{version}.tar.gz`, extract, and return the skill dir path.
@@ -242,6 +259,7 @@ if ($method -eq 'prebuilt') {
     $stage = Join-Path $tmpDir "$BinaryName-v$version-$target"
     $binSrc = Join-Path $stage "$BinaryName.exe"
     $templatesSrc = Join-Path $stage 'templates'
+    $configExampleSrc = Join-Path $stage 'config.example.yaml'
 } else {
     if (-not $repoDir) { Die '--from-source requires running from a cloned repo' }
     Write-Step 'Building from source (cargo build --release --locked)'
@@ -250,10 +268,12 @@ if ($method -eq 'prebuilt') {
     finally { Pop-Location }
     $binSrc = Join-Path $repoDir 'target\release\lore.exe'
     $templatesSrc = Join-Path $repoDir 'templates'
+    $configExampleSrc = Join-Path $repoDir 'config.example.yaml'
 }
 
 Install-Binary $binSrc $InstallDir
 Install-Templates $templatesSrc $DataDir
+Install-ConfigExample $configExampleSrc
 
 if ($Skill -ne 'none') {
     foreach ($skillName in $SkillNames) {
@@ -280,8 +300,12 @@ if ($pathEnv -notlike "*$InstallDir*") {
 Write-Host ''
 Write-Host '✅ Installation complete' -ForegroundColor Green
 Write-Host ''
+$cfgDir = Get-ConfigDir
 Write-Host 'Next steps:'
-Write-Host "  $BinaryName validate              Verify config.yaml in current directory"
-Write-Host "  $BinaryName ingest --dry-run      Preview ingest without writing"
-Write-Host "  $BinaryName schedule              Generate scheduled task entries"
+Write-Host "  1. Create your config (auto-discovered, no repo needed):"
+Write-Host "       Copy-Item '$cfgDir\config.example.yaml' '$cfgDir\config.yaml'; notepad '$cfgDir\config.yaml'"
+Write-Host "  2. $BinaryName init credentials   Enter API tokens interactively"
+Write-Host "  3. $BinaryName validate           Verify config + credentials"
+Write-Host "  4. $BinaryName ingest --dry-run   Preview ingest without writing"
+Write-Host "  5. $BinaryName schedule           Generate scheduled task entries"
 Write-Host "  /lore-setup  /lore-ingest  /lore-process  /lore-wiki  /lore-capture  /lore-extract"
