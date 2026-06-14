@@ -184,7 +184,7 @@ source_count: 2          # ← 두 문서가 이 한 개념을 인용
 ### ✅ 결과 ③ — 주제별 인덱스 (`wiki/index.md`)
 
 ```markdown
-# Wiki Index
+# 위키 인덱스
 
 ## 개념 (16)
 

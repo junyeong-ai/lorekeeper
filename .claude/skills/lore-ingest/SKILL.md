@@ -88,8 +88,8 @@ queue never references an unwritten page.
 
 1. **Plan each source** — fetch, normalize, intra-batch dedup, classify. A source
    that fails is recorded and skipped; the run continues with the rest.
-2. **Write pages** — atomic per file (tmp + rename). Complete-refetch sources
-   (Gmail/Slack/Jira/Calendar/RSS) write `<daily>/{source-id}/DATE.md`; `manual`
+2. **Write pages** — atomic per file (tmp + rename). All daily sources
+   (Gmail/Slack/Jira/Calendar/Drive/RSS) write `<daily>/{source-id}/DATE.md`; `manual`
    writes `<wiki>/documents/{slug}.md`. Concept pages are a cross-source aggregate,
    rendered once after all sources plan.
 3. **Write work-log** — personal events only, and only when the optional `personal:`
