@@ -153,7 +153,17 @@ fn render_adf(node: &Value, out: &mut String) {
             out.push_str("\n\n");
         }
         "bulletList" => render_adf_list(node, out, None),
-        "orderedList" => render_adf_list(node, out, Some(1)),
+        "orderedList" => {
+            // ADF carries the list's first number in `attrs.order` (Confluence/Jira split a
+            // long list by starting the next block at N). Honor it so the number isn't lost;
+            // default to 1 when absent.
+            let start = node
+                .get("attrs")
+                .and_then(|a| a.get("order"))
+                .and_then(Value::as_u64)
+                .map_or(1, |n| n as usize);
+            render_adf_list(node, out, Some(start))
+        }
         "taskList" => {
             render_adf_children(node, out);
             out.push('\n');
@@ -696,6 +706,31 @@ mod tests {
             ]
         });
         assert_eq!(adf_to_markdown(&adf), "## Plan\n\n- first\n- second");
+    }
+
+    #[test]
+    fn adf_ordered_list_honors_start_number() {
+        // `attrs.order` is the list's first number (a split/continued list); honor it.
+        let adf = json!({
+            "type": "doc",
+            "content": [{"type": "orderedList", "attrs": {"order": 3}, "content": [
+                {"type": "listItem", "content": [
+                    {"type": "paragraph", "content": [{"type": "text", "text": "a"}]}]},
+                {"type": "listItem", "content": [
+                    {"type": "paragraph", "content": [{"type": "text", "text": "b"}]}]}
+            ]}]
+        });
+        assert_eq!(adf_to_markdown(&adf), "3. a\n4. b");
+
+        // No `order` attr → default first number 1.
+        let adf = json!({
+            "type": "doc",
+            "content": [{"type": "orderedList", "content": [
+                {"type": "listItem", "content": [
+                    {"type": "paragraph", "content": [{"type": "text", "text": "x"}]}]}
+            ]}]
+        });
+        assert_eq!(adf_to_markdown(&adf), "1. x");
     }
 
     #[test]
