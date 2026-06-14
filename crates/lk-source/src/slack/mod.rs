@@ -298,13 +298,12 @@ pub(crate) async fn resolve_users(http: &reqwest::Client, token: &str) -> HashMa
         }
         match slack_post::<MembersPage>(http, token, "users.list", &params).await {
             Ok(page) => {
-                if page.members.is_empty() {
-                    hit_cap = false;
-                    break;
-                }
                 for m in &page.members {
                     map.insert(m.id.clone(), display_name(m));
                 }
+                // Termination is signalled ONLY by an absent cursor — a page may legitimately
+                // arrive empty with a cursor still present (server-side filtering), so an empty
+                // page must NOT terminate or later members would be silently skipped.
                 cursor = ResponseMetadata::cursor(page.response_metadata);
                 if cursor.is_empty() {
                     hit_cap = false;
@@ -364,14 +363,13 @@ async fn resolve_channel_id(
         }
         let page: ChannelsPage = slack_post(http, token, "conversations.list", &params).await?;
 
-        if page.channels.is_empty() {
-            budget_exhausted = false;
-            break;
-        }
         if let Some(ch) = page.channels.into_iter().find(|c| c.name == name) {
             return Ok(ch.id);
         }
 
+        // Termination is signalled ONLY by an absent cursor — an empty page with a cursor
+        // present (server-side filtering) must NOT terminate, or a channel on a later page
+        // would silently fail to resolve.
         cursor = ResponseMetadata::cursor(page.response_metadata);
         if cursor.is_empty() {
             budget_exhausted = false;

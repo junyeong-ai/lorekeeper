@@ -170,6 +170,14 @@ impl Source for RssSource {
             let mut kept = 0usize;
             for entry in feed.entries {
                 if kept >= p.max_items_per_feed {
+                    // Observable truncation, like every other capped adapter: a later
+                    // in-window entry may have been dropped this fetch (the streaming event
+                    // log still preserves it across runs, but the operator should know).
+                    tracing::warn!(
+                        feed = %feed_cfg.id,
+                        max = p.max_items_per_feed,
+                        "rss: per-feed cap hit, later entries may have been dropped; raise max_items_per_feed"
+                    );
                     break;
                 }
                 let mut item = match map_entry(&feed_cfg.id, &feed_title, entry, min, max) {

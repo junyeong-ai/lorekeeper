@@ -71,6 +71,16 @@ pub fn load_config(path: &Path) -> miette::Result<lk_core::config::Config> {
     lk_core::config::Config::load(path).map_err(|e| miette::miette!("{e}"))
 }
 
+/// Atomically write `contents` to an absolute `path` from an async command handler.
+/// Routes through the single `lk_core::fs::write_atomic` (temp + fsync + rename) on the
+/// blocking pool — so command-level full-file rewrites (the ingest log, AGENTS.md) get the
+/// same durability/atomicity as every other writer, never a torn `tokio::fs::write`.
+pub(crate) async fn write_atomic(path: PathBuf, contents: Vec<u8>) -> std::io::Result<()> {
+    tokio::task::spawn_blocking(move || lk_core::fs::write_atomic(&path, &contents, None))
+        .await
+        .map_err(std::io::Error::other)?
+}
+
 pub fn build_llm_client(
     config: &lk_core::config::Config,
     vault_root: &Path,

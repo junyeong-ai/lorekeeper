@@ -44,7 +44,7 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
         }
 
         let new_content = kept.join("\n") + "\n";
-        tokio::fs::write(&log_path, new_content)
+        super::write_atomic(log_path.clone(), new_content.into_bytes())
             .await
             .map_err(|e| miette::miette!("write log: {e}"))?;
 

@@ -117,7 +117,7 @@ pub fn apply(renames: &[Rename], pages: &[ScannedPage], root: &Path) -> Result<u
         let updated = normalize_wikilinks(&content, &renamed_normalized);
 
         if updated != content {
-            std::fs::write(&abs_path, &updated).map_err(|e| {
+            lk_core::fs::write_atomic(&abs_path, updated.as_bytes(), None).map_err(|e| {
                 GraphError::Io(format!("failed to write {}: {e}", abs_path.display()))
             })?;
         }

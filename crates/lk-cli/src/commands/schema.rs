@@ -490,7 +490,7 @@ pub async fn run(
         .map_err(|e| miette::miette!("create wiki dir: {e}"))?;
 
     let agents_path = wiki_dir.join("AGENTS.md");
-    tokio::fs::write(&agents_path, &content)
+    super::write_atomic(agents_path.clone(), content.into_bytes())
         .await
         .map_err(|e| miette::miette!("write AGENTS.md: {e}"))?;
 
