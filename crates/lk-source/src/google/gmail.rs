@@ -228,19 +228,27 @@ impl Source for GmailSource {
         let mut pages_fetched = 0usize;
 
         loop {
-            let mut req = self
-                .http
-                .get(format!("{BASE}/messages"))
-                .bearer_auth(&token)
-                .query(&[
-                    ("q", query.as_str()),
-                    ("maxResults", &PAGE_SIZE.to_string()),
-                ]);
-            if let Some(ref pt) = page_token {
-                req = req.query(&[("pageToken", pt.as_str())]);
-            }
-
-            let resp = check_response(req.send().await?).await?;
+            // The listing GET is idempotent — retry transient 429/5xx so one provider hiccup
+            // doesn't abort an unattended ingest (the same guard Jira's search uses). The
+            // per-message fetch below stays warn-and-skip (one bad message ≠ whole-run failure).
+            let resp = check_response(
+                crate::retry::send_with_retry(|| {
+                    let mut req = self
+                        .http
+                        .get(format!("{BASE}/messages"))
+                        .bearer_auth(&token)
+                        .query(&[
+                            ("q", query.as_str()),
+                            ("maxResults", &PAGE_SIZE.to_string()),
+                        ]);
+                    if let Some(ref pt) = page_token {
+                        req = req.query(&[("pageToken", pt.as_str())]);
+                    }
+                    req.send()
+                })
+                .await?,
+            )
+            .await?;
             let list: ListResponse = resp.json().await?;
 
             refs.extend(list.messages.unwrap_or_default());

@@ -95,12 +95,14 @@ impl GoogleDriveSource {
                 parent_id
             );
             let resp = check_response(
-                self.http
-                    .get(format!("{BASE}/files"))
-                    .bearer_auth(token)
-                    .query(&[("q", &q), ("fields", &"files(id,name)".to_string())])
-                    .send()
-                    .await?,
+                crate::retry::send_with_retry(|| {
+                    self.http
+                        .get(format!("{BASE}/files"))
+                        .bearer_auth(token)
+                        .query(&[("q", &q), ("fields", &"files(id,name)".to_string())])
+                        .send()
+                })
+                .await?,
             )
             .await?;
 
@@ -153,23 +155,30 @@ impl Source for GoogleDriveSource {
         let mut pages_fetched = 0usize;
 
         loop {
-            let mut req = self
-                .http
-                .get(format!("{BASE}/files"))
-                .bearer_auth(&token)
-                .query(&[
-                    ("q", q.as_str()),
-                    (
-                        "fields",
-                        "nextPageToken, files(id,name,mimeType,modifiedTime)",
-                    ),
-                    ("pageSize", page_size.as_str()),
-                ]);
-            if let Some(ref pt) = page_token {
-                req = req.query(&[("pageToken", pt.as_str())]);
-            }
-
-            let resp = check_response(req.send().await?).await?;
+            // Idempotent listing GET → retry transient 429/5xx (same guard as Jira search);
+            // the per-file content download below keeps its warn-and-skip isolation.
+            let resp = check_response(
+                crate::retry::send_with_retry(|| {
+                    let mut req = self
+                        .http
+                        .get(format!("{BASE}/files"))
+                        .bearer_auth(&token)
+                        .query(&[
+                            ("q", q.as_str()),
+                            (
+                                "fields",
+                                "nextPageToken, files(id,name,mimeType,modifiedTime)",
+                            ),
+                            ("pageSize", page_size.as_str()),
+                        ]);
+                    if let Some(ref pt) = page_token {
+                        req = req.query(&[("pageToken", pt.as_str())]);
+                    }
+                    req.send()
+                })
+                .await?,
+            )
+            .await?;
             let list: FileList = resp.json().await?;
 
             files.extend(list.files.unwrap_or_default());

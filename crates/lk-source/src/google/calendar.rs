@@ -212,18 +212,25 @@ impl Source for GoogleCalendarSource {
         let mut pages_fetched = 0usize;
 
         loop {
-            let mut req = self.http.get(url.clone()).bearer_auth(&token).query(&[
-                ("timeMin", &time_min.to_string()),
-                ("timeMax", &time_max.to_string()),
-                ("singleEvents", &"true".to_string()),
-                ("orderBy", &"startTime".to_string()),
-                ("maxResults", &page_size),
-            ]);
-            if let Some(ref pt) = page_token {
-                req = req.query(&[("pageToken", pt.as_str())]);
-            }
-
-            let resp = check_response(req.send().await?).await?;
+            // Idempotent listing GET → retry transient 429/5xx (same guard as Jira search);
+            // the per-event Drive meeting-notes fetch keeps its warn-and-skip isolation.
+            let resp = check_response(
+                crate::retry::send_with_retry(|| {
+                    let mut req = self.http.get(url.clone()).bearer_auth(&token).query(&[
+                        ("timeMin", &time_min.to_string()),
+                        ("timeMax", &time_max.to_string()),
+                        ("singleEvents", &"true".to_string()),
+                        ("orderBy", &"startTime".to_string()),
+                        ("maxResults", &page_size),
+                    ]);
+                    if let Some(ref pt) = page_token {
+                        req = req.query(&[("pageToken", pt.as_str())]);
+                    }
+                    req.send()
+                })
+                .await?,
+            )
+            .await?;
             let list: EventList = resp.json().await?;
 
             events.extend(list.items.unwrap_or_default());
