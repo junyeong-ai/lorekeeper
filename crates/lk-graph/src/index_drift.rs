@@ -139,7 +139,7 @@ pub fn fix(drift: &IndexDrift, root: &Path, wiki_dir: &Path) -> Result<usize, Gr
         std::fs::create_dir_all(parent)
             .map_err(|e| GraphError::Io(format!("create {}: {e}", parent.display())))?;
     }
-    std::fs::write(&index_path, &content)
+    lk_core::fs::write_atomic(&index_path, content.as_bytes(), None)
         .map_err(|e| GraphError::Io(format!("failed to write {}: {e}", index_path.display())))?;
 
     Ok(added)

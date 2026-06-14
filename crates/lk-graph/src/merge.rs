@@ -134,7 +134,7 @@ pub fn merge_concepts(
         let (updated, count) = rewrite_links(&content, &from, &from_path_id, &into, &into_path_id);
         if count > 0 {
             if !dry_run && updated != content {
-                std::fs::write(&abs, &updated)
+                lk_core::fs::write_atomic(&abs, updated.as_bytes(), None)
                     .map_err(|e| GraphError::Io(format!("write {}: {e}", abs.display())))?;
             }
             rewritten.push(RewrittenPage {
@@ -239,7 +239,7 @@ fn apply_aliases(vault_root: &Path, into_rel: &Path, aliases: &[String]) -> Resu
     let value = serde_json::to_string(aliases)
         .map_err(|e| GraphError::Io(format!("serialize aliases: {e}")))?;
     let updated = lk_vault::set_frontmatter_field(&into_raw, "aliases", &value);
-    std::fs::write(vault_root.join(into_rel), updated)
+    lk_core::fs::write_atomic(&vault_root.join(into_rel), updated.as_bytes(), None)
         .map_err(|e| GraphError::Io(format!("write {}: {e}", into_rel.display())))?;
     Ok(())
 }
