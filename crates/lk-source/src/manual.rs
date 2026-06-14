@@ -407,7 +407,36 @@ pub fn archive_consumed_files(
         let Some(name) = src.file_name() else {
             continue;
         };
-        let dest = archive_dir.join(name);
+        let mut dest = archive_dir.join(name);
+        // `fs::rename` overwrites silently, so a name collision under the date dir needs care.
+        if dest.exists() {
+            // Same content already archived under this name → this drop is a duplicate that's
+            // already preserved. Just clear the inbox copy; a same-content re-drop is a true
+            // no-op for the archive (no duplicate file).
+            let same_content = std::fs::read_to_string(&dest)
+                .map(|existing| {
+                    blake3::hash(existing.as_bytes()).to_hex().as_str() == current_hash.as_str()
+                })
+                .unwrap_or(false);
+            if same_content {
+                if let Err(e) = std::fs::remove_file(&src) {
+                    tracing::warn!(file = %src.display(), error = %e, "manual: failed to remove duplicate inbox file");
+                }
+                continue;
+            }
+            // Different content, same name → a distinct same-day original (its own vault page
+            // via the content-fingerprinted id). Disambiguate with the fingerprint so it can't
+            // clobber the earlier original.
+            let stem = Path::new(name).file_stem().and_then(|s| s.to_str());
+            let ext = Path::new(name).extension().and_then(|s| s.to_str());
+            let fp = &current_hash.as_str()[..8];
+            let disambiguated = match (stem, ext) {
+                (Some(stem), Some(ext)) => format!("{stem}.{fp}.{ext}"),
+                (Some(stem), None) => format!("{stem}.{fp}"),
+                _ => format!("{}.{fp}", name.to_string_lossy()),
+            };
+            dest = archive_dir.join(disambiguated);
+        }
         if let Err(e) = std::fs::rename(&src, &dest) {
             tracing::warn!(file = %src.display(), error = %e, "manual: archive failed");
         }
@@ -645,6 +674,120 @@ mod tests {
         assert!(!tmp.path().join("archived/2026-05-24/a.md").exists());
         let kept = std::fs::read_to_string(tmp.path().join("a.md")).unwrap();
         assert!(kept.contains("edited after extract"));
+    }
+
+    #[tokio::test]
+    async fn archive_disambiguates_same_name_collision() {
+        // A same-name file already archived under this date must NOT be clobbered when a
+        // different-content file of the same name is consumed the same day — each is its own
+        // vault page (content-fingerprinted id), so both originals must be preserved.
+        let tmp = TempDir::new().unwrap();
+        let archived = tmp.path().join("archived/2026-05-24");
+        std::fs::create_dir_all(&archived).unwrap();
+        std::fs::write(archived.join("note.md"), "first original").unwrap();
+
+        write(&tmp.path().join("note.md"), "# Note\n\nsecond original");
+        let src = ManualSource::new();
+        let params = serde_json::json!({
+            "inbox_dir": tmp.path(),
+            "archive_after_ingest": true,
+        });
+        let ctx = ExtractContext {
+            target_date: jiff::civil::date(2026, 5, 24),
+            timezone: jiff::tz::TimeZone::UTC,
+            locale: lk_core::i18n::Locale::default(),
+            identity: lk_core::config::Identity::default(),
+            vault_root: std::path::PathBuf::new(),
+        };
+        let items = src.extract(&params, &ctx).await.unwrap();
+        let events: Vec<lk_core::event::Event> = items
+            .iter()
+            .map(|item| lk_core::event::Event {
+                id: lk_core::event::EventId::new("manual", ctx.target_date, &item.title),
+                source_id: "manual".into(),
+                source_type: lk_core::config::SourceType::Manual,
+                timestamp: item.timestamp,
+                date: ctx.target_date,
+                title: item.title.clone(),
+                body: item.body.clone(),
+                url: None,
+                author: None,
+                labels: vec![],
+                category: None,
+                performance_category: None,
+                is_self: false,
+                is_personal: false,
+                metadata: item.metadata.clone(),
+            })
+            .collect();
+        archive_consumed_files(&params, &events, ctx.target_date, std::path::Path::new(""))
+            .unwrap();
+
+        // The earlier archived original is intact; the new one is archived under a distinct
+        // (fingerprint-suffixed) name — two files, nothing overwritten.
+        assert_eq!(
+            std::fs::read_to_string(archived.join("note.md")).unwrap(),
+            "first original",
+            "pre-existing archived original must not be overwritten"
+        );
+        let archived_count = std::fs::read_dir(&archived).unwrap().count();
+        assert_eq!(archived_count, 2, "both originals preserved");
+        assert!(!tmp.path().join("note.md").exists(), "inbox emptied");
+    }
+
+    #[tokio::test]
+    async fn archive_same_content_redrop_is_a_noop() {
+        // The same file re-dropped after it was archived must NOT create a duplicate archive
+        // entry — the content is already preserved; only the inbox copy is cleared.
+        let tmp = TempDir::new().unwrap();
+        let archived = tmp.path().join("archived/2026-05-24");
+        std::fs::create_dir_all(&archived).unwrap();
+        std::fs::write(archived.join("note.md"), "# Note\n\nsame body").unwrap();
+
+        write(&tmp.path().join("note.md"), "# Note\n\nsame body");
+        let src = ManualSource::new();
+        let params = serde_json::json!({
+            "inbox_dir": tmp.path(),
+            "archive_after_ingest": true,
+        });
+        let ctx = ExtractContext {
+            target_date: jiff::civil::date(2026, 5, 24),
+            timezone: jiff::tz::TimeZone::UTC,
+            locale: lk_core::i18n::Locale::default(),
+            identity: lk_core::config::Identity::default(),
+            vault_root: std::path::PathBuf::new(),
+        };
+        let items = src.extract(&params, &ctx).await.unwrap();
+        let events: Vec<lk_core::event::Event> = items
+            .iter()
+            .map(|item| lk_core::event::Event {
+                id: lk_core::event::EventId::new("manual", ctx.target_date, &item.title),
+                source_id: "manual".into(),
+                source_type: lk_core::config::SourceType::Manual,
+                timestamp: item.timestamp,
+                date: ctx.target_date,
+                title: item.title.clone(),
+                body: item.body.clone(),
+                url: None,
+                author: None,
+                labels: vec![],
+                category: None,
+                performance_category: None,
+                is_self: false,
+                is_personal: false,
+                metadata: item.metadata.clone(),
+            })
+            .collect();
+        archive_consumed_files(&params, &events, ctx.target_date, std::path::Path::new(""))
+            .unwrap();
+
+        // Exactly one archived file (no duplicate), and the inbox copy is cleared.
+        assert_eq!(
+            std::fs::read_dir(&archived).unwrap().count(),
+            1,
+            "same-content re-drop must not add a duplicate archive entry"
+        );
+        assert!(!tmp.path().join("note.md").exists(), "inbox copy cleared");
     }
 
     #[test]
