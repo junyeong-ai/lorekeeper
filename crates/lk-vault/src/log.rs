@@ -50,7 +50,7 @@ impl IngestLog {
         Ok(())
     }
 
-    pub async fn last_success(&self, source_id: &str) -> Result<Option<LogEntry>, VaultError> {
+    pub async fn find_last_success(&self, source_id: &str) -> Result<Option<LogEntry>, VaultError> {
         let content = match tokio::fs::read_to_string(&self.path).await {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -71,25 +71,5 @@ impl IngestLog {
             }
         }
         Ok(None)
-    }
-
-    pub async fn all_entries(&self) -> Result<Vec<LogEntry>, VaultError> {
-        let content = match tokio::fs::read_to_string(&self.path).await {
-            Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
-            Err(e) => return Err(e.into()),
-        };
-
-        let mut entries = Vec::new();
-        for line in content.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            match serde_json::from_str(line) {
-                Ok(e) => entries.push(e),
-                Err(e) => tracing::warn!(error = %e, "skipping malformed ingest-log line"),
-            }
-        }
-        Ok(entries)
     }
 }

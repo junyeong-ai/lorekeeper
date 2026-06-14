@@ -9,6 +9,10 @@ use crate::VaultError;
 /// templates dir) always has every template and never falls back to ad-hoc rendering.
 const EMBEDDED: &[(&str, &str)] = &[
     (
+        "_daily_base.md.jinja",
+        include_str!("../../../templates/_daily_base.md.jinja"),
+    ),
+    (
         "annual-review.md.jinja",
         include_str!("../../../templates/annual-review.md.jinja"),
     ),
@@ -140,5 +144,141 @@ impl TemplateEngine {
             Ok(_) => Ok(true),
             Err(e) => Err(e.into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every `SourceType`'s `descriptor().default_template` must be an embedded template.
+    /// Adding a source type is compiler-forced everywhere EXCEPT here — the template file
+    /// and its `EMBEDDED` entry — so a missing one would otherwise only surface as a render
+    /// failure at runtime. Iterating `SourceType` (not a hand-list) keeps this drift-proof.
+    #[test]
+    fn every_source_type_default_template_is_embedded() {
+        use strum::IntoEnumIterator;
+        let engine = TemplateEngine::build(None).unwrap();
+        for st in lk_core::config::SourceType::iter() {
+            let name = st.descriptor().default_template;
+            assert!(
+                EMBEDDED.iter().any(|(n, _)| *n == name),
+                "{st:?}: default_template {name:?} is not in EMBEDDED"
+            );
+            engine
+                .env
+                .get_template(name)
+                .unwrap_or_else(|e| panic!("{st:?}: default_template {name:?} unresolved: {e}"));
+        }
+    }
+
+    /// Every daily template extends `_daily_base.md.jinja` via blocks, so a typo in any
+    /// child's `{% block %}` (or the base's `self.title()` wiring) only surfaces at render
+    /// time. Render each with a representative context to catch inheritance breakage —
+    /// the integration tests otherwise only exercise the Gmail and RSS templates.
+    #[test]
+    fn every_daily_template_renders_with_expected_frontmatter() {
+        let engine = TemplateEngine::build(None).unwrap();
+        let i18n = serde_json::to_value(lk_core::i18n::Locale::En.strings()).unwrap();
+        let context = serde_json::json!({
+            "source_id": "s",
+            "date": "2026-06-14",
+            "labels": ["x"],
+            "event_count": 1,
+            "events": [{"title": "T", "body": "B", "author": "a", "url": "https://x"}],
+            "summary": "sum",
+            "concepts": ["C1", "C2"],
+            "extract_concepts": true,
+            "highlights": [{"label": "HL", "items": [{"subject": "Subj", "sender": "me"}]}],
+            "i18n": i18n,
+            "llm_inputs": {"summary": "h1", "refine_events": "h2"},
+        });
+
+        // The daily-page frontmatter contract — kept in lockstep with lk-cli schema.rs's
+        // "daily" page type and lk-pipeline render.rs. A child that drifts the base
+        // frontmatter (adds/drops a key) fails here.
+        let expected_keys = [
+            "id:",
+            "title:",
+            "created:",
+            "labels:",
+            "source:",
+            "event_count:",
+        ];
+
+        for tmpl in [
+            "gmail",
+            "jira",
+            "slack-channel",
+            "slack-search",
+            "google-calendar",
+            "google-drive",
+            "rss",
+        ] {
+            let name = format!("{tmpl}.md.jinja");
+            let out = engine
+                .render(&name, &context)
+                .unwrap_or_else(|e| panic!("{name} failed to render: {e}"));
+
+            assert!(
+                out.starts_with("---\n"),
+                "{name}: missing frontmatter:\n{out}"
+            );
+            for key in expected_keys {
+                assert!(
+                    out.contains(key),
+                    "{name}: frontmatter missing `{key}`:\n{out}"
+                );
+            }
+            assert!(
+                out.contains(&format!(
+                    "## {}",
+                    lk_core::i18n::Locale::En.strings().summary
+                )),
+                "{name}: missing summary heading:\n{out}"
+            );
+            // The concept list is a TIGHT markdown list (no blank line between bullets) —
+            // uniform across all daily templates via the shared base loop.
+            assert!(
+                out.contains("- [[C1]]\n- [[C2]]"),
+                "{name}: concept wikilinks must render as a tight list:\n{out}"
+            );
+            assert_eq!(
+                out.matches("### T").count(),
+                1,
+                "{name}: event rendered the wrong number of times:\n{out}"
+            );
+        }
+    }
+
+    /// A configured highlight renders ABOVE the event list on any daily source — the loop
+    /// lives in the shared base, no longer a Gmail special-case.
+    #[test]
+    fn highlights_render_on_any_daily_source_from_the_base() {
+        let engine = TemplateEngine::build(None).unwrap();
+        let i18n = serde_json::to_value(lk_core::i18n::Locale::En.strings()).unwrap();
+        let context = serde_json::json!({
+            "source_id": "s",
+            "date": "2026-06-14",
+            "labels": [],
+            "event_count": 1,
+            "events": [{"title": "T", "body": "B", "author": null, "url": null}],
+            "summary": "sum",
+            "concepts": [],
+            "extract_concepts": false,
+            "highlights": [{"label": "Action Required", "items": [{"subject": "Ship it", "sender": "a@b"}]}],
+            "i18n": i18n,
+            "llm_inputs": {"summary": "h1", "refine_events": "h2"},
+        });
+        // jira (a non-Gmail source) proves highlights are a base feature.
+        let out = engine.render("jira.md.jinja", &context).unwrap();
+        assert!(
+            out.contains("## Action Required"),
+            "highlight section missing:\n{out}"
+        );
+        assert!(
+            out.contains("- **Ship it** — a@b"),
+            "highlight item missing:\n{out}"
+        );
     }
 }

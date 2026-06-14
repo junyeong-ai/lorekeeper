@@ -12,7 +12,7 @@ Combines the `lore` binary + `/lore-process` skill:
 - **Refresh yesterday** — `lore ingest --date <yesterday>` so Calendar scheduled→actual and Jira status changes are captured. Every page is a materialized view re-rendered in full from the source window, so the refresh is idempotent: unchanged data reproduces the same bytes (and skips LLM work via the cache), only genuine changes produce a diff.
 - **Ingest today** — lookahead events (Calendar 24h) + overnight activity (Slack/Gmail/Jira)
 - **Drain queue** — `/lore-process` fills summaries, concepts, work-log topic synthesis
-- **Graph health (daily)** — `backlinks-sync` re-derives `## 출처` + `source_count` from real citations; `lore wiki index` rebuilds the catalog; `lore graph lint` (read-only) surfaces orphans/broken/near-duplicate/conflict/invalid-category/index-drift
+- **Graph health (daily)** — `backlinks-sync` re-derives `## 출처` + `source_count` from real citations; `lore wiki index` rebuilds the catalog; `lore wiki map` rebuilds the citation-cluster navigation map; `lore graph lint` (read-only) surfaces orphans/broken/near-duplicate/conflict/invalid-category/index-drift
 
 Weekly synthesis and the knowledge audit (contradiction worklist, near-duplicate
 review, relationship gaps) are a separate cadence — see the `lore-weekly-ingest` task.
@@ -108,6 +108,7 @@ On success, queue files move to `queue/processed/`.
 lore schema                 # regenerate wiki/AGENTS.md (idempotent; changes only after an upgrade or locale switch)
 lore graph backlinks-sync   # re-derive ## 출처 + source_count from incoming citations
 lore wiki index             # rebuild wiki/index.md catalog from disk
+lore wiki map               # rebuild wiki/map.md citation-cluster navigation
 lore graph lint             # read-only health report
 ```
 

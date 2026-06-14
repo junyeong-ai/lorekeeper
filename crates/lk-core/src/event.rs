@@ -36,8 +36,8 @@ pub struct Event {
     /// issue assignee, calendar organizer/attendee). The deterministic ownership
     /// signal — never inferred downstream from free-form text.
     pub is_self: bool,
-    /// `is_self` gated by the source's `track_personal`: the event counts toward
-    /// the user's personal work-log and performance reviews.
+    /// `is_self` AND the source is in `personal.tracked_sources`: the event counts toward
+    /// the user's personal work-log and reviews. Always `false` without a `personal:` module.
     pub is_personal: bool,
     #[serde(default)]
     pub metadata: serde_json::Value,

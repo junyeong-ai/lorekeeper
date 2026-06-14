@@ -1,45 +1,11 @@
----
-id: {{ source_id }}-{{ date }}
-title: "{{ i18n.drive_title }} {{ date }}"
-created: {{ date }}
-labels: {{ labels | tojson }}
-source: {{ source_id }}
-event_count: {{ events | length }}
-llm_inputs:
-  summary: {{ llm_inputs.summary | tojson }}
-{%- if llm_inputs.summary_done %}
-  summary_done: {{ llm_inputs.summary_done | tojson }}
-{%- endif %}
-  refine_events: {{ llm_inputs.refine_events | tojson }}
-{%- if llm_inputs.refine_events_done %}
-  refine_events_done: {{ llm_inputs.refine_events_done | tojson }}
-{%- endif %}
-{%- if llm_inputs.concepts %}
-  concepts: {{ llm_inputs.concepts | tojson }}
-{%- endif %}
-{%- if llm_inputs.concepts_done %}
-  concepts_done: {{ llm_inputs.concepts_done | tojson }}
-{%- endif %}
----
-
-# {{ i18n.drive_title }} {{ date }}
-
-## {{ i18n.summary }}
-
-{{ summary }}
-
-## {{ i18n.key_events }}
-
+{% extends "_daily_base.md.jinja" %}
+{% block title %}{{ i18n.drive_title }}{% endblock %}
+{# Drive files are curated documents — no per-event source URL line. #}
+{% block events %}
 {% for event in events %}
 ### {{ event.title }}
 
 {{ event.body }}
 
 {% endfor %}
-{% if extract_concepts %}
-## {{ i18n.related_concepts }}
-
-{% for concept in concepts %}
-- [[{{ concept }}]]
-{% endfor %}
-{% endif %}
+{% endblock %}

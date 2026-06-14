@@ -43,26 +43,17 @@ pub fn diff(
         }
     };
 
-    // `build_index` catalogs every vault page: concepts by `[[slug|title]]`
-    // and daily/personal/synthesis pages by path (`[[daily/email-digest/2026-05-19]]`).
-    // Resolve both forms via `resolve_wikilink_target`.
+    // `build_index` catalogs pages by `[[slug|title]]` (concepts) or path
+    // (`[[daily/email-digest/2026-05-19]]`); resolve both via `resolve_wikilink_target`.
+    // Summaries are plain text (`index::strip_wikilinks`), so every `[[…]]` here is a real
+    // catalog entry, never a link embedded in summary prose. Drift is checked against the
+    // graph's `node_ids()` (the analysis scope, i.e. `<wiki>/`); daily/synthesis pages are
+    // catalogued too but live outside that scope, so they are not drift-tracked here.
     let mut index_links = HashSet::new();
     for page in wikilink::extract_wikilinks(&content) {
         let slug = resolve_wikilink_target(&page);
         if !slug.is_empty() {
             index_links.insert(slug);
-        }
-    }
-
-    let index_dir = root.join(wiki_dir).join("index");
-    if index_dir.is_dir() {
-        for sub_content in read_sub_page_contents(&index_dir)? {
-            for page in wikilink::extract_wikilinks(&sub_content) {
-                let slug = resolve_wikilink_target(&page);
-                if !slug.is_empty() {
-                    index_links.insert(slug);
-                }
-            }
         }
     }
 
@@ -73,19 +64,14 @@ pub fn diff(
     // a nested `vault.dirs.wiki` must not silently drop pages from the drift check.
     let index_dir_prefix = format!("{}/", scan::path_slug(wiki_dir));
 
-    // The index catalog and AGENTS.md schema are reserved meta pages, never
-    // cataloged (same exclusion the index builder applies).
-    let reserved: HashSet<String> = scan::reserved_page_ids(wiki_dir).into_iter().collect();
-
+    // Reserved meta pages (index/log/map/AGENTS) are excluded from the graph at
+    // construction, so `node_ids()` never yields them — no separate exclusion needed here.
     let disk_ids: HashSet<&str> = graph.node_ids().collect();
 
     let mut missing_from_index: Vec<String> = disk_ids
         .iter()
         .filter(|&&id| {
             if !id.starts_with(&index_dir_prefix) {
-                return false;
-            }
-            if reserved.contains(id) {
                 return false;
             }
             if exclude.contains(id) {
@@ -157,24 +143,6 @@ pub fn fix(drift: &IndexDrift, root: &Path, wiki_dir: &Path) -> Result<usize, Gr
         .map_err(|e| GraphError::Io(format!("failed to write {}: {e}", index_path.display())))?;
 
     Ok(added)
-}
-
-fn read_sub_page_contents(dir: &Path) -> Result<Vec<String>, GraphError> {
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir(dir)
-        .map_err(|e| GraphError::Io(format!("read dir {}: {e}", dir.display())))?
-    {
-        let entry =
-            entry.map_err(|e| GraphError::Io(format!("read entry in {}: {e}", dir.display())))?;
-        let path = entry.path();
-        if path.extension().and_then(|x| x.to_str()) == Some("md") {
-            out.push(
-                std::fs::read_to_string(&path)
-                    .map_err(|e| GraphError::Io(format!("read {}: {e}", path.display())))?,
-            );
-        }
-    }
-    Ok(out)
 }
 
 #[cfg(test)]

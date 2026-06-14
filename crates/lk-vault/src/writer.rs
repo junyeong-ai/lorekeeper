@@ -1,10 +1,12 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::VaultError;
 
-static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
-
+/// Atomic, durable writer for vault pages. Both methods publish through the single
+/// `lk_core::fs::write_atomic` (temp + fsync + rename + dir-fsync, per-writer-unique
+/// temp), so the durability and unique-temp guarantees are single-sourced — there is no
+/// second atomic-write implementation that could drift. `write_page` is the async ingest
+/// path; `write_page_sync` is the sync path (`lk-graph`).
 pub struct VaultWriter {
     root: PathBuf,
 }
@@ -16,53 +18,30 @@ impl VaultWriter {
 
     pub async fn write_page(&self, rel_path: &Path, content: &str) -> Result<(), VaultError> {
         let full = self.root.join(rel_path);
-
-        if let Some(parent) = full.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-
-        // Unique temp name (pid + process-global sequence) so two writers targeting the
-        // same page never share a temp file or rename each other's partial write. The
-        // rename onto the final path is the atomic publish step.
-        let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-        let tmp = full.with_extension(format!("md.{}.{seq}.tmp", std::process::id()));
-
-        match tokio::fs::write(&tmp, content).await {
-            Ok(()) => {}
-            Err(e) => {
-                let _ = tokio::fs::remove_file(&tmp).await;
-                return Err(e.into());
+        let content = content.to_owned();
+        // File I/O is blocking and `write_atomic` fsyncs, so publish on the blocking pool
+        // rather than reimplementing a non-fsyncing async variant (which is exactly the
+        // duplicate that would let the durability guarantee drift).
+        tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            if let Some(parent) = full.parent() {
+                std::fs::create_dir_all(parent)?;
             }
-        }
-        if let Err(e) = tokio::fs::rename(&tmp, &full).await {
-            let _ = tokio::fs::remove_file(&tmp).await;
-            return Err(e.into());
-        }
+            lk_core::fs::write_atomic(&full, content.as_bytes(), None)
+        })
+        .await
+        .map_err(std::io::Error::other)??;
         Ok(())
     }
 
     /// Sync sibling of [`Self::write_page`] for callers outside a tokio runtime
-    /// (e.g. `lk-graph`, which is purely sync). Same atomic temp + rename semantics
-    /// and the same per-process-unique temp naming, so the two can coexist without
-    /// stepping on each other's temp files.
+    /// (e.g. `lk-graph`, which is purely sync). Routes through the same
+    /// `lk_core::fs::write_atomic`, so it is not a second atomic-write implementation.
     pub fn write_page_sync(&self, rel_path: &Path, content: &str) -> Result<(), VaultError> {
         let full = self.root.join(rel_path);
-
         if let Some(parent) = full.parent() {
             std::fs::create_dir_all(parent)?;
         }
-
-        let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-        let tmp = full.with_extension(format!("md.{}.{seq}.tmp", std::process::id()));
-
-        if let Err(e) = std::fs::write(&tmp, content) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e.into());
-        }
-        if let Err(e) = std::fs::rename(&tmp, &full) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e.into());
-        }
+        lk_core::fs::write_atomic(&full, content.as_bytes(), None)?;
         Ok(())
     }
 }

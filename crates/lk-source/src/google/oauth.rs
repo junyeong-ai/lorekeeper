@@ -33,7 +33,7 @@ struct TokenResponse {
 }
 
 /// Run the loopback authorization-code flow and return a refresh token.
-pub async fn obtain_refresh_token(
+pub async fn build_refresh_token(
     http: &reqwest::Client,
     client_id: &str,
     client_secret: &str,

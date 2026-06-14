@@ -1,19 +1,19 @@
 //! Wikilink graph analysis for Obsidian vaults: hubs, orphans, community clustering,
 //! index-sync, slug normalization, and the JSON graph export.
 //!
-//! frontmatter parsing, wikilink extraction) are delegated to `lk-core`; this crate
-//! owns only the graph structure and I/O (walkdir/rayon vault scan, index-file fixup,
-//! file rename).
+//! Pure domain logic (slugify, frontmatter parsing, wikilink extraction) is delegated to
+//! `lk-core`; this crate owns only the graph structure and I/O (walkdir/rayon vault scan,
+//! index-file fixup, file rename).
 
 pub mod alias;
 pub mod audit;
 pub mod backlinks;
-pub mod cache;
 pub mod cluster;
 pub mod concept_lint;
 pub mod export;
 pub mod graph;
 pub mod index_drift;
+pub mod map;
 pub mod merge;
 pub mod normalize;
 pub mod output;

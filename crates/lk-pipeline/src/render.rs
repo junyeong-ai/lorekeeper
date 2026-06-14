@@ -1,4 +1,4 @@
-use lk_core::config::{SourceType, VaultDirs};
+use lk_core::config::{HighlightSection, SourceType, VaultDirs};
 use lk_core::event::Event;
 use lk_core::frontmatter::field;
 use lk_core::i18n::Locale;
@@ -60,6 +60,9 @@ pub struct DailyRenderContext<'a> {
     /// section only when true, so a source that opts out (`extract_concepts: false`,
     /// e.g. a personal work-log feed) doesn't carry a permanently-empty section.
     pub extract_concepts: bool,
+    /// Config-declared highlight sections for this source: each surfaces events whose
+    /// `Event::category` matches, under its own label, above the full event list.
+    pub highlights: &'a [HighlightSection],
     pub locale: Locale,
     pub llm_inputs: DailyLlmInputHashes<'a>,
 }
@@ -78,6 +81,7 @@ pub fn render_daily_page(
         summary,
         concepts,
         extract_concepts,
+        highlights,
         locale,
         llm_inputs,
     } = ctx;
@@ -136,20 +140,26 @@ pub fn render_daily_page(
         (field::LLM_INPUTS): llm_inputs_json,
     });
 
-    // Highlight buckets: for each category the source declares, expose `{category}_items`
-    // and `{category}_count` so its template can surface dedicated sections above the full
-    // event list. A source that declares none adds nothing and pays for no filtering.
-    let obj = context
+    // Highlight sections: each configured highlight surfaces the events whose category
+    // matches, under its own label, ABOVE the full event list (which still renders every
+    // event, so a highlight never hides anything). Config-driven and generic — the core
+    // branches on no source type. A source that declares none adds nothing.
+    let highlight_sections: Vec<serde_json::Value> = highlights
+        .iter()
+        .map(|h| {
+            serde_json::json!({
+                "label": h.label,
+                "items": filter_by_category(events, &h.category),
+            })
+        })
+        .collect();
+    context
         .as_object_mut()
-        .expect("daily render context is a json object");
-    for category in source_type.descriptor().highlight_categories {
-        let items = filter_by_category(events, category);
-        obj.insert(
-            format!("{category}_count"),
-            serde_json::Value::from(items.len()),
+        .expect("daily render context is a json object")
+        .insert(
+            "highlights".into(),
+            serde_json::Value::Array(highlight_sections),
         );
-        obj.insert(format!("{category}_items"), serde_json::Value::Array(items));
-    }
 
     let source_template = format!("{source_id}.md.jinja");
     let type_template = source_type.descriptor().default_template;

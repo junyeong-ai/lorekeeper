@@ -55,12 +55,11 @@ sources:
                                   # folder listing and warns if this cap actually drops files
     labels: [ai-industry]
     extract_concepts: true
-    track_personal: false
 
   # ── Team (team observation) ──
   # The whole channel = team activity. Messages you authored are split into the work-log
-  # automatically (track_personal + identity.slack_id). Most conversation is threaded, so
-  # include_threads pulls reply context too.
+  # automatically (this source is in personal.tracked_sources + identity.slack_id). Most
+  # conversation is threaded, so include_threads pulls reply context too.
   team-slack:
     type: slack-channel
     enabled: true
@@ -75,7 +74,6 @@ sources:
       # max_thread_messages: 200      # (optional) per-thread fetch cap (root message + replies)
     labels: [team-ops]
     extract_concepts: true
-    track_personal: true
 
   # ── Personal (my activity — collected directly) ──
   my-tasks:
@@ -93,7 +91,6 @@ sources:
                                   # JQL result and warns if this cap actually drops issues
     labels: [personal]
     extract_concepts: true
-    track_personal: true
 
   my-schedule:
     type: google-calendar
@@ -107,7 +104,6 @@ sources:
                                   # window and warns if this cap actually drops events
     labels: [personal]
     extract_concepts: true
-    track_personal: true
 
   email-digest:
     type: gmail
@@ -144,9 +140,18 @@ sources:
         keywords: ["공유드립니다", "FYI", "참고"]
       - category: meeting_followup
         keywords: ["회의록", "action items", "후속"]
+    # Surface chosen classify categories as dedicated highlight sections at the TOP of the
+    # daily page (above the full event list — never hiding anything). `category` must match a
+    # classify rule above; `label` is the heading, written in your vault's language. Omit
+    # `highlights` entirely (any source type) for a plain chronological page.
+    highlights:
+      - { category: action_required, label: "조치 필요" }
+      - { category: decisions, label: "의사결정" }
+      - { category: project_updates, label: "프로젝트 업데이트" }
+      - { category: knowledge_sharing, label: "지식 공유" }
+      - { category: meeting_followup, label: "미팅 후속" }
     labels: [personal, team-ops]
     extract_concepts: true
-    track_personal: true
 
   # ── Trends (trend analysis) ──
   slack-trends:
@@ -163,13 +168,12 @@ sources:
                                    # result pages and warns if this cap drops matches
     labels: [ai-internal, strategy]
     extract_concepts: true
-    track_personal: false
 
   # ── Knowledge (knowledge accumulation) ──
   # Accumulate external AI/tech news into wiki/concepts as a growing knowledge graph.
-  # track_personal:false keeps the work-log/performance reviews clean. Leave classify empty
-  # to avoid keyword misclassification; structuring is left to concept extraction +
-  # `lore graph cluster`/`suggest-links`.
+  # Keeping it out of personal.tracked_sources keeps the work-log/reviews clean. Leave
+  # classify empty to avoid keyword misclassification; structuring is left to concept
+  # extraction + `lore graph cluster`/`suggest-links`.
 
   # RSS/Atom feeds — poll vendor blogs and aggregators with no auth. One source handles many feeds.
   ai-news:
@@ -203,7 +207,6 @@ sources:
     labels: [ai-tech]
     extract_concepts: true
     focus: "AI/ML 모델·기법·아키텍처·인프라·도구·연구 등 AI 기술 주제."
-    track_personal: false
 
   # Broad tech trends + Korean — aggregators (HN/GeekNews) + domestic engineering blogs.
   # Aggregators mix in non-technical noise (obituaries/politics/lifestyle), so the focus
@@ -227,7 +230,6 @@ sources:
     labels: [tech]
     extract_concepts: true
     focus: "소프트웨어 엔지니어링·AI/ML·시스템·개발 도구·인프라 등 기술 주제만. 인물 부고·생활·정치·일반 시사 등 비기술 항목은 개념화하지 말 것."
-    track_personal: false
 
   # Email newsletters (subscriptions with no RSS) — routed in Gmail by the `ai-news` label (set the filter once).
   # email-digest excludes the same mail via `-label:ai-news`, so they aren't ingested twice.
@@ -240,7 +242,6 @@ sources:
         - "label:ai-news"
     labels: [ai-tech]
     extract_concepts: true
-    track_personal: false
 
   # Manual curation — drop files into the <vault>/inbox/ directory and they become
   # individual wiki/documents/{slug}.md document pages (LLM summary + concept extraction included).
@@ -256,12 +257,17 @@ sources:
     labels: [knowledge]
     extract_concepts: true
 
-# ─── Performance tracking ─────────────────────────────────
-performance:
-  # Master switch for the work-log/performance subsystem (work-log generation +
-  # weekly/monthly/quarterly/annual personal reviews). Off → none are produced, even
-  # if sources set track_personal (which only flags events on their daily pages).
-  enabled: true
+# ─── Personal module (OPTIONAL) ───────────────────────────
+# The personal-productivity module: the work-log + weekly/monthly/quarterly/annual personal
+# reviews + the contribution taxonomy. OMIT this whole `personal:` block for a pure,
+# domain-neutral knowledge engine — then no work-log, no reviews, and no performance
+# categories are produced. Its PRESENCE (not a flag) turns the subsystem on.
+personal:
+  # Sources whose own-authored events feed the work-log and reviews. A source not listed
+  # here still flows to the concept graph and daily pages — it just isn't "my activity".
+  # (Ownership within a tracked source is still exact: Slack uses identity.slack_id, Jira the
+  # authenticated account, Gmail/Calendar identity.email — recipients/mentions never count.)
+  tracked_sources: [team-slack, my-tasks, my-schedule, email-digest]
   performance_categories:
     - project-delivery
     - technical-leadership
@@ -276,20 +282,8 @@ performance:
   source_type_category_map:
     jira: project-delivery
     google-calendar: team-contribution
-
-# ─── Synthesis reports ────────────────────────────────────
-# weekly has two tracks: (1) a cross-source "weekly themes" page over include_sources (opt-in),
-# written to synthesis/weekly/; (2) a personal weekly review from me/work-log (me/weekly/).
-# (2) plus me/monthly/, me/quarterly/, me/annual/ are all work-log-based personal performance
-# reviews, toggled together by performance.enabled — knowledge/news sources are irrelevant to them.
-synthesis:
-  weekly:
-    enabled: true
-    schedule: "0 8 * * 1"           # Monday 08:00
-    # Work/communication sources only — the context where a weekly theme retro is valuable. Don't
-    # include knowledge feeds like news/RSS (they already accumulate continuously in the concept
-    # graph, so a weekly digest would be redundant).
-    include_sources: [team-slack, slack-trends]
+  # Monthly/quarterly/annual review schedules. The weekly review rides `lore synthesis
+  # weekly` (scheduled under synthesis.weekly below), so it has no separate schedule here.
   monthly:
     enabled: true
     schedule: "0 8 1 * *"           # 1st of month 08:00
@@ -299,6 +293,20 @@ synthesis:
   annual:
     enabled: true
     schedule: "0 8 1 1 *"           # Jan 1st 08:00
+
+# ─── Synthesis reports (cross-source themes) ──────────────
+# A cross-source "weekly themes" page over include_sources (opt-in), written to
+# synthesis/weekly/. This is domain-neutral knowledge synthesis, independent of the personal
+# module — though `lore synthesis weekly` also produces the personal weekly review when a
+# `personal:` block is configured above.
+synthesis:
+  weekly:
+    enabled: true
+    schedule: "0 8 * * 1"           # Monday 08:00
+    # Work/communication sources only — the context where a weekly theme retro is valuable. Don't
+    # include knowledge feeds like news/RSS (they already accumulate continuously in the concept
+    # graph, so a weekly digest would be redundant).
+    include_sources: [team-slack, slack-trends]
 
 # ─── Concept categorization ───────────────────────────────
 # Concept categorization for wiki/concepts/ pages.
@@ -316,7 +324,6 @@ concepts:
       label: "제품/서비스"
     - id: organization
       label: "조직/이벤트"
-  index_split_threshold: 100  # when concepts exceed this count, auto-split into per-category sub-pages
 
 # ─── Graph analysis ───────────────────────────────────────
 # Wikilink graph analysis (lore graph lint/cluster/suggest-links).

@@ -80,7 +80,7 @@ impl Schedule {
         })
     }
 
-    fn matches(&self, dt: jiff::civil::DateTime) -> bool {
+    fn is_due_at(&self, dt: jiff::civil::DateTime) -> bool {
         if !self.minute.contains(&(dt.minute() as u8))
             || !self.hour.contains(&(dt.hour() as u8))
             || !self.month.contains(&(dt.month() as u8))
@@ -132,7 +132,7 @@ pub fn next_fire_after(
     // Bound the search so a never-matching field combination can't loop forever.
     const MAX_MINUTES: i64 = 60 * 24 * 400;
     for _ in 0..MAX_MINUTES {
-        if schedule.matches(cursor.datetime()) {
+        if schedule.is_due_at(cursor.datetime()) {
             return Some(cursor.timestamp());
         }
         cursor = cursor.checked_add(jiff::Span::new().minutes(1)).ok()?;
@@ -170,6 +170,14 @@ mod tests {
         let tz = TimeZone::UTC;
         let next = next_fire_after("0 * * * *", ts("2026-05-23T00:30:00Z"), &tz).unwrap();
         assert_eq!(next, ts("2026-05-23T01:00:00Z"));
+    }
+
+    #[test]
+    fn stepped_star_in_a_comma_list_expands_over_the_field_range() {
+        // `0,*/15` must expand to {0,15,30,45} — `*` inside a comma member spans [min,max].
+        // The validator (`config::validate_cron_field`) accepts the same grammar; this locks
+        // the evaluator half of that single-sourced contract.
+        assert_eq!(parse_field("0,*/15", 0, 59), Some(vec![0, 15, 30, 45]));
     }
 
     #[test]

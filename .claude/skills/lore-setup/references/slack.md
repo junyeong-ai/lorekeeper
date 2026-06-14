@@ -32,7 +32,8 @@ team-slack:
     # watch_users: ["U0123456789"]   # only threads a user authored/was mentioned in; empty = whole channel
   labels: [team-ops, personal]
   extract_concepts: true
-  track_personal: true        # messages authored by identity.slack_id → split into the work-log
+  # To split your authored messages (identity.slack_id) into the work-log, add this
+  # source id to personal.tracked_sources (the optional personal: module).
 ```
 For keyword trends, add a separate `slack-search` source (below):
 ```yaml

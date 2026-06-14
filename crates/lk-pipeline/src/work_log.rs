@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use lk_core::config::PerformanceConfig;
+use lk_core::config::PersonalConfig;
 use lk_core::event::Event;
 use lk_core::frontmatter::field;
 use lk_core::i18n::Locale;
@@ -20,12 +20,13 @@ pub async fn render_work_log(
     ctx: &PipelineContext,
     reader: &dyn VaultStore,
 ) -> Result<Vec<RenderResult>, PipelineError> {
-    let perf = &ctx.perf;
+    // The work-log IS the personal module; an absent `config.personal` gates it at the
+    // mechanism boundary so no caller can produce one for a domain-neutral engine.
+    let Some(personal) = ctx.personal.as_ref() else {
+        return Ok(vec![]);
+    };
     let locale = ctx.locale;
-
-    // The work-log is the performance subsystem; `performance.enabled` gates it at the
-    // mechanism boundary so no caller can produce one while the subsystem is off.
-    if !perf.enabled || events.is_empty() {
+    if events.is_empty() {
         return Ok(vec![]);
     }
 
@@ -53,7 +54,7 @@ pub async fn render_work_log(
         // Sorting through the one comparator makes the page bytes and the cache hash
         // independent of it — zero spurious re-enqueue on an unchanged day.
         day_events.sort_by(Event::canonical_cmp);
-        let groups = group_by_category(&day_events, perf, locale);
+        let groups = group_by_category(&day_events, personal, locale);
         if groups.is_empty() {
             continue;
         }
@@ -159,10 +160,10 @@ struct WorkLogGroup {
 
 fn group_by_category(
     events: &[Event],
-    perf: &PerformanceConfig,
+    personal: &PersonalConfig,
     locale: Locale,
 ) -> Vec<WorkLogGroup> {
-    let mut groups: Vec<WorkLogGroup> = perf
+    let mut groups: Vec<WorkLogGroup> = personal
         .performance_categories
         .iter()
         .map(|c| WorkLogGroup {
@@ -172,20 +173,23 @@ fn group_by_category(
         .collect();
 
     groups.push(WorkLogGroup {
-        category: perf.uncategorized_label(locale).to_owned(),
+        category: personal.uncategorized_label(locale).to_owned(),
         count: 0,
     });
     let other_idx = groups.len() - 1;
 
     for event in events {
-        let category = perf.resolve_category(
+        let category = personal.resolve_category(
             &event.source_id,
             event.source_type,
             event.performance_category.as_deref(),
         );
 
         let idx = match category {
-            Some(cat) => perf.performance_categories.iter().position(|c| c == &cat),
+            Some(cat) => personal
+                .performance_categories
+                .iter()
+                .position(|c| c == &cat),
             None => None,
         };
 
@@ -223,9 +227,8 @@ mod tests {
         }
     }
 
-    fn perf(categories: &[&str]) -> PerformanceConfig {
-        PerformanceConfig {
-            enabled: true,
+    fn personal(categories: &[&str]) -> PersonalConfig {
+        PersonalConfig {
             performance_categories: categories.iter().map(|c| (*c).to_string()).collect(),
             ..Default::default()
         }
@@ -233,13 +236,13 @@ mod tests {
 
     #[test]
     fn group_by_category_buckets_in_config_order_and_drops_empty_groups() {
-        let perf = perf(&["project-delivery", "innovation", "team-contribution"]);
+        let personal = personal(&["project-delivery", "innovation", "team-contribution"]);
         let events = vec![
             event(Some("project-delivery")),
             event(Some("project-delivery")),
             event(Some("innovation")),
         ];
-        let groups = group_by_category(&events, &perf, Locale::En);
+        let groups = group_by_category(&events, &personal, Locale::En);
         let view: Vec<(&str, usize)> = groups
             .iter()
             .map(|g| (g.category.as_str(), g.count))
@@ -254,8 +257,8 @@ mod tests {
         // No explicit performance_category and no source/type mapping → the event
         // still counts, under the locale's uncategorized label — work is never
         // silently dropped from the work-log because classification didn't fire.
-        let perf = perf(&["project-delivery"]);
-        let groups = group_by_category(&[event(None)], &perf, Locale::En);
+        let personal = personal(&["project-delivery"]);
+        let groups = group_by_category(&[event(None)], &personal, Locale::En);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].category, Locale::En.strings().uncategorized);
         assert_eq!(groups[0].count, 1);
@@ -265,9 +268,9 @@ mod tests {
     fn group_by_category_never_invents_a_bucket_for_an_unconfigured_category() {
         // A classify rule carrying a performance_category outside the configured
         // list must not mint a new bucket — the event lands in uncategorized, so the
-        // work-log's section vocabulary stays exactly `performance.performance_categories`.
-        let perf = perf(&["project-delivery"]);
-        let groups = group_by_category(&[event(Some("not-configured"))], &perf, Locale::En);
+        // work-log's section vocabulary stays exactly `personal.performance_categories`.
+        let personal = personal(&["project-delivery"]);
+        let groups = group_by_category(&[event(Some("not-configured"))], &personal, Locale::En);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].category, Locale::En.strings().uncategorized);
         assert_eq!(groups[0].count, 1);

@@ -2,8 +2,8 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use dialoguer::{Confirm, Input, Password};
+use lk_source::build_google_refresh_token;
 use lk_source::credentials::{Credentials, GoogleCredentials, JiraCredentials, SlackCredentials};
-use lk_source::obtain_google_refresh_token;
 
 use super::{GlobalOptions, find_config, load_config};
 
@@ -125,7 +125,7 @@ async fn google_refresh_token(
         true,
     )? {
         let http = reqwest::Client::new();
-        obtain_google_refresh_token(&http, client_id, client_secret)
+        build_google_refresh_token(&http, client_id, client_secret)
             .await
             .map_err(|e| miette::miette!("{e}"))
     } else {

@@ -122,5 +122,5 @@ map to `RawItem`.
   LLM/vault input clean instead of ADF/HTML/token soup.
 - `google/oauth.rs` mints a Google refresh token via an OAuth loopback flow (consent
   URL + ephemeral `127.0.0.1` callback server + code exchange), re-exported as
-  `obtain_google_refresh_token` for the `lore init credentials` wizard. URL-building and
+  `build_google_refresh_token` for the `lore init credentials` wizard. URL-building and
   callback parsing are unit-tested; the live token exchange needs a real Google client.

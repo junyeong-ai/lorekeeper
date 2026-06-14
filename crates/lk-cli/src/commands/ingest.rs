@@ -319,7 +319,7 @@ pub async fn run(
     // the report) and the next full run re-renders the page complete — blocking here would
     // trade that self-healing one-day gap for a work-log frozen by any persistently
     // failing source, news feeds included.
-    // (`render_work_log` separately gates the whole subsystem on performance.enabled.)
+    // (`render_work_log` separately gates the whole subsystem on `config.personal` being set.)
     if !any_write_failed && source.is_none() && !all_personal.is_empty() {
         let work_logs = pipeline
             .render_work_log(&all_personal, today)

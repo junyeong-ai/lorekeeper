@@ -53,6 +53,19 @@ pub struct VaultPage {
     pub body: String,
 }
 
+/// True when `line` is a standalone frontmatter delimiter — exactly `---` once its line
+/// terminator (`\n`, or `\r\n`) is stripped. No other trailing-whitespace tolerance (a
+/// `--- ` with a space is NOT a delimiter), matching Obsidian/CommonMark strictness. The
+/// `\r` strip matters because `set_frontmatter_field` scans raw bytes line-by-line (it
+/// never normalizes CRLF, to round-trip a CRLF file faithfully), so it can hand this a
+/// `---\r\n` line. Single-sourced here so `parse_page` and
+/// `lk_vault::set_frontmatter_field` can never disagree on what closes a frontmatter block.
+pub fn is_delimiter_line(line: &str) -> bool {
+    let line = line.strip_suffix('\n').unwrap_or(line);
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    line == "---"
+}
+
 /// Parse a markdown page into its YAML frontmatter and body.
 ///
 /// Frontmatter is recognized only when the document's FIRST line is exactly `---`
@@ -76,7 +89,7 @@ pub fn parse_page(content: &str) -> Result<VaultPage, String> {
     let mut offset = 0usize;
     let mut closing = None;
     for line in rest.split_inclusive('\n') {
-        if line.strip_suffix('\n').unwrap_or(line) == "---" {
+        if is_delimiter_line(line) {
             closing = Some(offset);
             break;
         }
@@ -123,6 +136,19 @@ mod tests {
         let page = parse_page("# Just a heading\n\nContent.").unwrap();
         assert!(page.frontmatter.fields.is_empty());
         assert!(page.body.contains("Just a heading"));
+    }
+
+    #[test]
+    fn delimiter_predicate_is_exact_and_newline_tolerant_only() {
+        // Single source of truth for the `---` delimiter, shared with
+        // `lk_vault::set_frontmatter_field` so the two can't disagree. Exactly `---`
+        // (optionally with one trailing newline); no trailing-whitespace tolerance.
+        assert!(is_delimiter_line("---"));
+        assert!(is_delimiter_line("---\n"));
+        assert!(is_delimiter_line("---\r\n")); // CRLF: set_frontmatter_field scans raw bytes
+        assert!(!is_delimiter_line("--- ")); // trailing space is NOT a delimiter
+        assert!(!is_delimiter_line("----"));
+        assert!(!is_delimiter_line("---x"));
     }
 
     #[test]

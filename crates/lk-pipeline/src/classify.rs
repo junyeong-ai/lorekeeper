@@ -12,11 +12,11 @@ pub fn assign_labels(events: &mut [Event], labels: &[String]) {
 
 /// Promote the adapter's authorship signal to a tracked personal event. Ownership
 /// is decided at the source (where the structured author/assignee/organizer fields
-/// live) and carried on `Event::is_self`; here it is gated by the source's
-/// `track_personal` so only opted-in sources feed the work-log and performance
-/// reviews. No text matching — a recipient, CC, or mention is never the author.
-pub fn assign_personal(events: &mut [Event], track_personal: bool) {
-    if !track_personal {
+/// live) and carried on `Event::is_self`; here it is gated by `tracked` — whether the
+/// source is listed in `personal.tracked_sources` — so only opted-in sources feed the
+/// work-log and reviews. No text matching — a recipient, CC, or mention is never the author.
+pub fn assign_personal(events: &mut [Event], tracked: bool) {
+    if !tracked {
         return;
     }
     for event in events {

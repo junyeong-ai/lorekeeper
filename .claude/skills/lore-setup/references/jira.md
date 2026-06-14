@@ -38,7 +38,7 @@ my-tasks:
     start_date_field: customfield_10015   # optional: show the start date
   labels: [personal]
   extract_concepts: false
-  track_personal: true
+  # add this source id to personal.tracked_sources to feed your work-log
 ```
 The description is rendered ADF→Markdown, and status/period render as an as-of-that-day
 snapshot header.

@@ -1,8 +1,9 @@
 # lk-pipeline
 
 Deterministic transform stages between `lk-source` and `lk-vault`. Shares an
-`Arc<PipelineContext>` (engine, llm, dirs, perf, timezone, locale,
-concept_categories) with the `Synthesizer`.
+`Arc<PipelineContext>` (engine, llm, dirs, `personal: Option<PersonalConfig>`, timezone,
+locale, concept_categories) with the `Synthesizer`. `personal` is `None` for a
+domain-neutral engine — then no work-log, reviews, or `is_personal` are produced.
 
 - **Streaming sources project from the event log** (root invariant) — the crate mechanics:
   for a streaming source (`SourceType::descriptor().streaming`, RSS), `plan` UNIONs the fetch with that date's
@@ -59,8 +60,8 @@ concept_categories) with the `Synthesizer`.
   ONLY on a cache hit (where `lookup` proved it equals the current input hash), so a stale
   marker is dropped on a miss instead of riding a changed-input render forward. Every
   template emits its section's `*_done` key conditionally (mirroring the input key), so
-  the marker reaches the page — `materialized_view::empty_*_is_cached_not_re_enqueued`
-  tests guard that the template doesn't silently drop it. A queued task whose `cache_hash`
+  the marker reaches the page — the `empty_*_is_cached_not_re_enqueued` tests guard that
+  the template doesn't silently drop it. A queued task whose `cache_hash`
   differs from the input key is unambiguously stale and dropped; a first run, a crash
   before flush, an unprocessed page, OR a changed-input re-ingest all converge. Force a
   re-run by deleting the `*_done` line — wiping the body alone does NOT (it is data, not
@@ -85,8 +86,9 @@ concept_categories) with the `Synthesizer`.
   (provenance) and converges at the page layer via `concept-merge` / `backlinks-sync` /
   `near-duplicate-concepts`.
 - **classify**: ownership (`is_self`, root invariant; set by the adapter) is carried by
-  `normalize` to `Event::is_self`; `assign_personal(events, track_personal)` sets
-  `is_personal` + the `personal` label only when the source opts into `track_personal`.
+  `normalize` to `Event::is_self`; `assign_personal(events, tracked)` sets `is_personal` +
+  the `personal` label only when the source is in `personal.tracked_sources` (so an absent
+  personal module means no event is ever personal).
   `classify_by_keywords` reads `SourceConfig.classify` (ordered `Vec<ClassifyRule>`, first
   match wins) and uses `contains_bounded` (standard `\w` token boundary — ASCII-alphanumeric
   + `_`, so a keyword matches inside hyphen/dot compounds like `AI`→`AI-powered`,

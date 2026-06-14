@@ -15,9 +15,11 @@ Lorekeeper collects from Gmail, Slack, Jira, Calendar, RSS, and dropped notes ev
 
 Notes and wikis fail not because reading or thinking is hard, but because of the **bookkeeping** — updating cross-references, deduping, classifying, flagging contradictions. People can't keep up, so the wiki gets abandoned. Lorekeeper hands that bookkeeping to an LLM.
 
+> 📖 **New to the terms?** — **vault**: a folder of markdown files (i.e. your knowledge store) · **concept**: one page per topic · **wikilink**: a `[[another page]]` link between pages · **bookkeeping**: the chore of updating links, dedup, and categories by hand.
+
 | | |
 |---|---|
-| 📥 **Configure once → runs daily** | Collects yesterday's activity and knowledge from 8 source types |
+| 📥 **Configure once → runs daily** | Collects yesterday's activity and knowledge from email, chat, issues, calendar, feeds, and notes |
 | 🧹 **Cuts the noise** | Dedup, filters irrelevant items, splits *your* work into a work-log automatically |
 | 🧩 **Concepts as assets** | The same concept converges to one page (`Vector DB` = `vector-database`), categorized and related |
 | 🔗 **A connected knowledge graph** | Wikilinks, backlinks, and clusters link concepts to one another |
@@ -54,6 +56,14 @@ flowchart LR
 
 ## Quick start (5 minutes)
 
+> **Before you start, you'll need** — nothing exotic:
+> - 💻 **macOS or Linux** (Windows ships a PowerShell installer)
+> - 🤖 **Claude Code** — `/lore-process` fills in summaries & concepts (no separate API key or billing)
+> - 🔑 **Credentials only for the sources you enable** — e.g. Google sign-in for Gmail/Drive/Calendar, a token for Slack
+> - 🗂️ **(optional) Obsidian** — for pretty graph browsing. Without it, the output is still plain markdown
+>
+> 💡 **Want to try it key-free first?** Enable just `rss` and the note `inbox/` — neither needs auth, so it runs immediately.
+
 ```bash
 # 1) Install — binary + templates + Claude Code skills in one go
 curl -fsSL https://raw.githubusercontent.com/junyeong-ai/lorekeeper/main/scripts/install.sh | bash
@@ -85,6 +95,8 @@ lore schedule | crontab -         # project the config's cron into crontab
 ## What do you actually get?
 
 Let's walk through a hypothetical. **Sumin**, an AI engineer, drops a RAG troubleshooting note into the vault's `inbox/`.
+
+> The page examples below show **key fields only** — real files also carry housekeeping frontmatter such as `updated`.
 
 ### 📝 Input — `inbox/rag-retrieval-quality.md`
 
@@ -127,7 +139,7 @@ Now, in a Claude Code session, run **`/lore-process`**. The skill drains that qu
 id: rag-pipeline-fixing-low-recall-retrieval
 title: "RAG pipeline: fixing low-recall retrieval"
 created: 2026-06-13
-tags: ["document", "knowledge"]
+tags: ["document"]
 ---
 
 ## Summary
@@ -232,7 +244,7 @@ Each day's ingest grows the concept graph; synthesis summarizes it at ever-highe
 
 ---
 
-## Sources (8 types)
+## Sources
 
 | Type | Use for | Auth |
 |---|---|---|
@@ -243,7 +255,7 @@ Each day's ingest grows the concept graph; synthesis summarizes it at ever-highe
 | `google-calendar` | Schedule + meeting notes (auto-extracted from Drive links) | Google OAuth |
 | `google-drive` | Curated docs in a Drive folder | Google OAuth |
 | `rss` | Vendor blogs / news → concepts (no auth, multi-feed) | none |
-| `manual` | Files dropped in `inbox/` (md, txt, html) | none |
+| `manual` | Markdown, text, and HTML files dropped in `inbox/` | none |
 
 The source key becomes the vault subfolder name. You can define several of the same type (e.g. `team-slack`, `ai-news`). Full reference: [`config.example.yaml`](config.example.yaml).
 
@@ -269,7 +281,7 @@ lore ingest --date 2026-06-01 # re-materialize a specific day (backfill / repair
 lore synthesis weekly         # weekly synthesis + personal review (monthly/quarterly/annual too)
 lore schedule | crontab -     # emit cron lines
 lore wiki concepts            # list concepts
-lore wiki index / log         # rebuild the by-topic index / by-time timeline
+lore wiki index / log / map   # rebuild by-topic index / by-time timeline / citation-cluster map
 lore graph lint               # structural health (orphans, broken links, near-dupes, …)
 lore graph suggest-links      # concept-relationship candidates (Adamic-Adar)
 lore graph cluster            # topic communities (Louvain)
@@ -284,7 +296,7 @@ lore schema                   # generate wiki/AGENTS.md (the page-format schema)
 
 ## Claude Code skills
 
-Six skills that pair with the deterministic `lore` binary — the *judgment* parts run on Claude Code's LLM.
+Skills that pair with the deterministic `lore` binary — the *judgment* parts run on Claude Code's LLM.
 
 | Skill | What it does |
 |---|---|
@@ -325,7 +337,7 @@ irm https://raw.githubusercontent.com/junyeong-ai/lorekeeper/main/scripts/instal
 cargo build --release && ./target/release/lore --help
 ```
 
-Install flags: `--version`, `--install-dir`, `--skill {user,project,none}`, `--from-source`, `--yes`, `--dry-run`. Uninstall: `./scripts/uninstall.sh`.
+Install flags: `--version`, `--install-dir`, `--data-dir`, `--skill {user,project,none}`, `--from-source`, `--force`, `--yes`, `--dry-run` (`--help` lists them all). Uninstall: `./scripts/uninstall.sh`.
 
 ---
 

@@ -1,0 +1,58 @@
+---
+id: {{ source_id }}-{{ date }}
+title: "{% block title %}{{ i18n.summary }}{% endblock %} {{ date }}"
+created: {{ date }}
+labels: {{ labels | tojson }}
+source: {{ source_id }}
+event_count: {{ events | length }}
+llm_inputs:
+  summary: {{ llm_inputs.summary | tojson }}
+{%- if llm_inputs.summary_done %}
+  summary_done: {{ llm_inputs.summary_done | tojson }}
+{%- endif %}
+  refine_events: {{ llm_inputs.refine_events | tojson }}
+{%- if llm_inputs.refine_events_done %}
+  refine_events_done: {{ llm_inputs.refine_events_done | tojson }}
+{%- endif %}
+{%- if llm_inputs.concepts %}
+  concepts: {{ llm_inputs.concepts | tojson }}
+{%- endif %}
+{%- if llm_inputs.concepts_done %}
+  concepts_done: {{ llm_inputs.concepts_done | tojson }}
+{%- endif %}
+---
+
+# {{ self.title() }} {{ date }}
+
+## {{ i18n.summary }}
+
+{{ summary }}
+
+{% for h in highlights %}
+{% if h.items %}
+## {{ h.label }}
+
+{% for item in h.items %}
+- **{{ item.subject }}**{% if item.sender %} — {{ item.sender }}{% endif %}
+{% endfor %}
+
+{% endif %}
+{% endfor %}
+## {% block items_heading %}{{ i18n.key_events }}{% endblock %}
+
+{% block events %}
+{% for event in events %}
+### {{ event.title }}
+
+{{ event.body }}
+{% if event.url %}[🔗 {{ i18n.original_link }}]({{ event.url }}){% endif %}
+
+{% endfor %}
+{% endblock %}
+{% if extract_concepts %}
+## {{ i18n.related_concepts }}
+
+{% for concept in concepts -%}
+- [[{{ concept }}]]
+{% endfor %}
+{% endif %}

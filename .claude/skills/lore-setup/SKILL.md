@@ -49,7 +49,7 @@ channel IDs, project keys, and custom-field IDs.
   Start/due dates are display-only (`start_date_field` is instance-specific
   custom-field ID). Never query by date range.
 - **Slack = full channel** for team awareness. Personal messages auto-split
-  to work-log via `track_personal: true` + `identity.slack_id`.
+  to work-log when the source is in `personal.tracked_sources` (+ `identity.slack_id`).
   Use `watch_users` only to narrow to specific people.
 - **Gmail: recommend `category:primary`** — filters out bot/notification
   noise (GitHub, CI, etc.).

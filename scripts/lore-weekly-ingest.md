@@ -80,6 +80,7 @@ the next daily run.
 ```bash
 lore graph backlinks-sync   # credit any concept citations the synthesis added
 lore wiki index             # catalog the new synthesis pages
+lore wiki map               # refresh the citation-cluster navigation map
 ```
 
 Both are deterministic and idempotent (diff-based / full rebuild) — re-running is a

@@ -9,6 +9,11 @@ use crate::export::GraphExport;
 use crate::graph::{BrokenLink, HubPageReference};
 use crate::merge::MergeResult;
 
+/// Wraps the hub list so `--json` emits a named object (`{"hubs": [...]}`) consistent with
+/// the other graph reports, rather than a bare top-level array — the wrapper IS the JSON
+/// presentation structure, not an empty pass-through. No `count` field: `hubs` is already a
+/// top-N list, so (unlike Orphans/Broken, where the total is the salient number) a count
+/// would be redundant.
 #[derive(Debug, Serialize)]
 pub struct HubsReport {
     pub hubs: Vec<HubPageReference>,
@@ -45,12 +50,6 @@ pub struct NormalizeReport {
 pub struct RenameSuggestion {
     pub from: String,
     pub to: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ExportReport {
-    #[serde(flatten)]
-    pub graph: GraphExport,
 }
 
 #[derive(Debug, Serialize)]
@@ -117,7 +116,7 @@ pub fn print_broken(r: &BrokenReport) {
     println!("{} broken link(s)", r.count);
 }
 
-pub fn print_index_report(r: &IndexSyncReport) {
+pub fn print_index_sync(r: &IndexSyncReport) {
     if r.missing_from_index.is_empty() && r.missing_from_disk.is_empty() {
         println!("index.md is in sync");
         return;
@@ -171,10 +170,10 @@ pub fn print_cluster(r: &ClusterResult) {
     );
 }
 
-pub fn print_export(r: &ExportReport) {
-    println!("nodes: {}", r.graph.nodes.len());
-    println!("edges: {}", r.graph.edges.len());
-    let with_clusters = r.graph.nodes.iter().any(|n| n.community.is_some());
+pub fn print_export(r: &GraphExport) {
+    println!("nodes: {}", r.nodes.len());
+    println!("edges: {}", r.edges.len());
+    let with_clusters = r.nodes.iter().any(|n| n.community.is_some());
     if with_clusters {
         println!("clusters: included");
     }
@@ -365,7 +364,7 @@ pub fn print_merge(result: &MergeResult) {
     println!("  next: run `lore graph backlinks-sync` to re-derive sources + source_count");
 }
 
-pub fn print_backlinks_report(r: &BacklinksSyncReport) {
+pub fn print_backlinks(r: &BacklinksSyncReport) {
     println!("=== Backlinks sync ===");
 
     if r.sync.dry_run {

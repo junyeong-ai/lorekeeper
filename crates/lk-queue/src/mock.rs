@@ -13,14 +13,14 @@ pub struct MockLlmClient {
 }
 
 impl MockLlmClient {
-    pub fn with_concepts(concepts: Vec<ExtractedConcept>) -> Self {
+    pub fn build_with_concepts(concepts: Vec<ExtractedConcept>) -> Self {
         Self {
             concepts,
             ..Default::default()
         }
     }
 
-    pub fn failing() -> Self {
+    pub fn build_failing() -> Self {
         Self {
             fail: true,
             ..Default::default()

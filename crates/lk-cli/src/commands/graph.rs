@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use lk_core::config::{ConceptCategory, GraphConfig, VaultDirs};
 use lk_core::i18n::Locale;
 use lk_graph::{
-    alias, audit, backlinks, cache, cluster, concept_lint, export, graph, index_drift, merge,
-    normalize, output, scan,
+    alias, audit, backlinks, cluster, concept_lint, export, graph, index_drift, merge, normalize,
+    output, scan,
 };
 
 use super::GlobalOptions;
@@ -104,9 +104,8 @@ pub fn run(
     cmd: GraphCommand,
     json: bool,
     root_override: Option<PathBuf>,
-    incremental: bool,
 ) -> i32 {
-    match run_inner(opts, cmd, json, root_override, incremental) {
+    match run_inner(opts, cmd, json, root_override) {
         Ok(has_findings) => {
             if has_findings {
                 1
@@ -126,7 +125,6 @@ fn run_inner(
     cmd: GraphCommand,
     json: bool,
     root_override: Option<PathBuf>,
-    incremental: bool,
 ) -> Result<bool, String> {
     // `backlinks-sync` and the audit/merge commands need locale from the full config —
     // dispatch them up front before paying the graph-build cost.
@@ -138,7 +136,7 @@ fn run_inner(
             return run_audit_mark(opts, root_override, json, slug);
         }
         GraphCommand::BacklinksSync { dry_run } => {
-            return run_backlinks(opts, root_override, json, dry_run, incremental);
+            return run_backlinks(opts, root_override, json, dry_run);
         }
         GraphCommand::Merge {
             ref from,
@@ -153,9 +151,9 @@ fn run_inner(
 
     let mut rc = resolve_config_full(opts, root_override)?;
 
-    // The SINGLE definition of what this command reads — the `--incremental` cache
-    // watches and rebuilds exactly this set, so a change anywhere it reads (e.g. a
-    // `<daily>/` page that flips an orphan/broken-link result) is never missed.
+    // The SINGLE definition of what this command reads. Integrity commands resolve
+    // links against the full-vault existence universe (`scope.dirs` ∪ every page dir);
+    // analysis commands read `scope.dirs` only.
     let integrity = matches!(
         cmd,
         GraphCommand::Lint
@@ -168,18 +166,6 @@ fn run_inner(
         &rc.graph.scope.dirs,
         vault_page_dirs(&rc.root, &rc.vault_dirs),
     );
-
-    if incremental {
-        let cp = cache::cache_path(&rc.root);
-        if let Some(cached) = cache::load(&cp) {
-            let dirty = cache::is_dirty(&rc.root, &scan_dirs, rc.graph.scope.follow_links, &cached)
-                .map_err(|e| format!("{e}"))?;
-            if !dirty {
-                eprintln!("No changes since last scan");
-                return Ok(false);
-            }
-        }
-    }
 
     // One scan over `scan_dirs`. Integrity commands derive the full-vault existence
     // universe from it and the scope-subset graph nodes by filtering (no second walk);
@@ -201,10 +187,7 @@ fn run_inner(
     let has_findings = match cmd {
         GraphCommand::Lint => {
             let hubs = g.hubs(10, rc.graph.metrics.min_hub_degree);
-            let orphans = g.orphans(
-                &rc.graph.metrics.orphan_exclude,
-                Path::new(&rc.vault_dirs.wiki),
-            );
+            let orphans = g.orphans(&rc.graph.metrics.orphan_exclude);
             let broken = g.broken_links().to_vec();
             let drift = index_drift::diff(
                 &g,
@@ -276,10 +259,7 @@ fn run_inner(
             false
         }
         GraphCommand::Orphans => {
-            let orphans = g.orphans(
-                &rc.graph.metrics.orphan_exclude,
-                Path::new(&rc.vault_dirs.wiki),
-            );
+            let orphans = g.orphans(&rc.graph.metrics.orphan_exclude);
             let count = orphans.len();
             let report = output::OrphansReport { orphans, count };
             let has = report.count > 0;
@@ -324,13 +304,10 @@ fn run_inner(
                 None
             };
             let graph_export = export::export(&g, cluster_result.as_ref());
-            let report = output::ExportReport {
-                graph: graph_export,
-            };
             if json {
-                output::print_json(&report)?;
+                output::print_json(&graph_export)?;
             } else {
-                output::print_export(&report);
+                output::print_export(&graph_export);
             }
             false
         }
@@ -361,7 +338,7 @@ fn run_inner(
             if json {
                 output::print_json(&report)?;
             } else {
-                output::print_index_report(&report);
+                output::print_index_sync(&report);
             }
             has && (fixed.is_none() || has_unfixable)
         }
@@ -422,12 +399,6 @@ fn run_inner(
         }
     };
 
-    // Persist the mtime cache over the SAME set we scanned so the next `--incremental`
-    // run's dirty-check is consistent with what this command reads.
-    if incremental {
-        save_cache_best_effort(&rc.root, &scan_dirs, rc.graph.scope.follow_links);
-    }
-
     Ok(has_findings)
 }
 
@@ -473,28 +444,10 @@ fn run_backlinks(
     root_override: Option<PathBuf>,
     json: bool,
     dry_run: bool,
-    incremental: bool,
 ) -> Result<bool, String> {
     let mut rc = resolve_config_full(opts, root_override)?;
 
     rc.graph.scope.dirs = vault_page_dirs(&rc.root, &rc.vault_dirs);
-
-    if incremental {
-        let cp = cache::cache_path(&rc.root);
-        if let Some(cached) = cache::load(&cp) {
-            let dirty = cache::is_dirty(
-                &rc.root,
-                &rc.graph.scope.dirs,
-                rc.graph.scope.follow_links,
-                &cached,
-            )
-            .map_err(|e| format!("{e}"))?;
-            if !dirty {
-                eprintln!("No changes since last scan");
-                return Ok(false);
-            }
-        }
-    }
 
     let pages = scan::scan_vault(&rc.root, &rc.graph).map_err(|e| format!("{e}"))?;
 
@@ -507,11 +460,7 @@ fn run_backlinks(
     if json {
         output::print_json(&report)?;
     } else {
-        output::print_backlinks_report(&report);
-    }
-
-    if incremental && !dry_run {
-        save_cache_best_effort(&rc.root, &rc.graph.scope.dirs, rc.graph.scope.follow_links);
+        output::print_backlinks(&report);
     }
 
     Ok(false)
@@ -552,21 +501,8 @@ fn run_merge(
     Ok(false)
 }
 
-/// Best-effort cache save: build a fresh mtime snapshot and persist it. Warnings
-/// are printed to stderr but errors are not propagated — a failed cache save must
-/// not turn a successful graph command into a failure.
-fn save_cache_best_effort(root: &std::path::Path, scan_dirs: &[PathBuf], follow_links: bool) {
-    if let Ok(fresh) = cache::build(root, scan_dirs, follow_links) {
-        let cp = cache::cache_path(root);
-        if let Err(e) = cache::save(&cp, &fresh) {
-            eprintln!("warning: failed to save graph cache: {e}");
-        }
-    }
-}
-
-/// The directories a graph command reads — the single source of truth shared by the
-/// scan, the `--incremental` cache watch set, and the cache rebuild. Integrity
-/// commands (lint/broken/orphans/index-sync) resolve links against the full-vault
+/// The directories a graph command reads. Integrity commands
+/// (lint/broken/orphans/index-sync) resolve links against the full-vault
 /// existence universe, so they read `scope.dirs` ∪ every page dir; analysis commands
 /// (hubs/cluster/…) read `scope.dirs` only. `page_dirs` already in scope are not
 /// duplicated, preserving scope-first order.

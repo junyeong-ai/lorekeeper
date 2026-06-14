@@ -1,13 +1,13 @@
 //! Single-sourced atomic file write.
 //!
-//! The temp + fsync + rename + dir-fsync pattern lived as five divergent copies
-//! across the crates (queue, vault, credentials, graph cache, event log), three of
+//! The temp + fsync + rename + dir-fsync pattern lived as divergent copies
+//! across the crates (queue, vault, credentials, event log), several of
 //! which got the temp name wrong — a deterministic or pid-only temp that two writers
 //! targeting the same path share and truncate, corrupting the file. This is the one
-//! sync implementation; every sync atomic writer goes through it so the durability
-//! and per-writer-unique-temp guarantees can't drift per call site. (`VaultWriter`
-//! in `lk-vault` is the async sibling for the tokio ingest path, following the same
-//! invariant.)
+//! atomic-write implementation; every writer goes through it so the durability and
+//! per-writer-unique-temp guarantees can't drift per call site. `lk_vault::VaultWriter`
+//! delegates here from both its sync path and its async (tokio) path (the latter via
+//! `spawn_blocking`), so there is no second atomic-write implementation anywhere.
 
 use std::io::{self, Write};
 use std::path::Path;

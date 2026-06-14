@@ -7,12 +7,12 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   `vault.dirs.*` values that are absolute or contain `..` (path-traversal guard before any
   path is built). A relative `vault.root` is resolved against the config file's parent
   directory. Every config struct — top-level (`Config`, `VaultConfig`, `VaultDirs`,
-  `Identity`, `SourceConfig`, `PerformanceConfig`) as well as the nested ones — carries
+  `Identity`, `SourceConfig`, `PersonalConfig`) as well as the nested ones — carries
   `#[serde(deny_unknown_fields)]`, so a typo'd key fails at load instead of being silently
   ignored.
 - **`SourceType` is a closed enum**; its static per-variant traits live in one place,
   `SourceType::descriptor() -> SourceDescriptor` (`streaming`, `default_template`,
-  `highlight_categories`, `item_kind`). The match is exhaustive with NO catch-all, so adding
+  `item_kind`). The match is exhaustive with NO catch-all, so adding
   a source type is a compiler-forced complete decision here (+ a `lk-source` adapter/factory
   arm) — no trait can silently default (a new streaming source quietly flagged non-streaming
   would lose scrolled-out items). Set `streaming: true` only if the source CANNOT completely
@@ -24,13 +24,19 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   `deny_unknown_fields`. `ClassifyRule` itself is `deny_unknown_fields` too, so an
   unknown key in a rule fails at load instead of being silently ignored. Validation
   rejects rules with empty keywords.
+- **`SourceConfig.highlights`** (`Vec<HighlightSection { category, label }>`) are
+  config-driven daily-page sections: the renderer surfaces events whose `Event::category`
+  matches under `label`, ABOVE the full event list (additive — never hides an event). The
+  core branches on NO source type; a source declares its own buckets (or none — the empty
+  default). Validated: non-blank `category`+`label`, no duplicate `category` per source.
 - **Two orthogonal taxonomies, one explicit bridge.** `ClassifyRule.category` is a
-  daily-page *grouping* bucket (→ `Event::category`); `performance.performance_categories`
-  is the *contribution* taxonomy (→ work-log/reviews). They never share a value space.
-  A rule's optional `ClassifyRule.performance_category` (→ `Event::performance_category`)
-  is the ONLY explicit link between them — validated at load to be a real
-  `performance_categories` id.
-  `PerformanceConfig::resolve_category` precedence: `source_category_map[id]` →
+  daily-page *grouping* bucket (→ `Event::category`); `personal.performance_categories`
+  is the *contribution* taxonomy (→ work-log/reviews), and lives in the OPTIONAL personal
+  module. They never share a value space. A rule's optional `ClassifyRule.performance_category`
+  (→ `Event::performance_category`) is the ONLY explicit link between them — validated at
+  load to require a `personal:` section AND a real `personal.performance_categories` id (a
+  bridge with no `personal:` is a rejected contradiction).
+  `PersonalConfig::resolve_category` precedence: `source_category_map[id]` →
   `performance_category` (content signal) → `source_type_category_map[type]` (coarse
   fallback). The content signal deliberately OUTRANKS the per-type default so a genuine
   signal beats the "all Jira = project-delivery" blanket. No string-coincidence magic.
@@ -44,12 +50,13 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
 - **`wikilink::extract_wikilinks`** skips fenced code blocks and inline code spans
   to prevent false edges in the wiki graph. Closing fence detection requires no info
   string after the marker (per CommonMark). Single source consumed by lk-graph.
-- **`fs::write_atomic(path, contents, mode)`** is the single sync atomic file write:
+- **`fs::write_atomic(path, contents, mode)`** is the single atomic file write:
   a per-writer-unique temp (pid + process-global sequence) in the same dir, fsync,
-  optional `chmod`, rename, dir-fsync — then temp cleanup on failure. Every sync writer
-  (queue files, credentials `0600`, graph cache, event log) goes through it so the
-  durability + unique-temp invariant can't drift; `lk_vault::VaultWriter` is the async
-  sibling. The temp keeps `path`'s extension before `.tmp` so suffix sweeps still match.
+  optional `chmod`, rename, dir-fsync — then temp cleanup on failure. Every writer
+  (queue files, credentials `0600`, event log) goes through it so the durability +
+  unique-temp invariant can't drift; `lk_vault::VaultWriter` delegates here from both its
+  sync and its async (tokio `spawn_blocking`) paths — not a second implementation. The
+  temp keeps `path`'s extension before `.tmp` so suffix sweeps still match.
 - **`text::collapse_blank_lines`** squeezes 3+ newlines to a paragraph break,
   strips `\r`. Single source consumed by lk-vault, lk-pipeline, lk-source.
 - **`frontmatter::field`** single-sources this system's PRIVATE machine-coordination
@@ -67,14 +74,14 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   empty labels, no duplicate ids. Empty list = no categorization (concepts get no
   `category` field). `ExtractedConcept` carries an optional `category` assigned by
   the LLM from this list; the pipeline drops unknown category IDs and `tracing::warn`s
-  the drop (observable parity with the queue-path `graph lint`).
-  `index_split_threshold` controls when `lore wiki index` splits
-  concepts into per-category sub-pages (`<wiki>/index/{category}.md`).
+  the drop (observable parity with the queue-path `graph lint`). The categories also order
+  and label the `### {category}` groups in the single-file `lore wiki index` catalog.
 - **`LlmConfig` defaults to `provider: queue`** (matches docs/example). Uses
   `deny_unknown_fields` so typos in config keys are caught at load time.
 - **`VaultDirs` field name == default directory value** for every time period:
   `weekly`/`monthly`/`quarterly`/`annual` each default to a directory of the same
-  name. Personal performance paths nest under `dirs.personal`: `<personal>/weekly/`,
-  `<personal>/monthly/`, `<personal>/quarterly/`, `<personal>/annual/`. Team
-  synthesis lives under `dirs.synthesis`: `<synthesis>/weekly/`. The period names are
-  shared as subdirectory names within both `<personal>` and `<synthesis>`.
+  name. The personal reviews (OPTIONAL personal module) nest under `dirs.personal`:
+  `<personal>/weekly/`, `<personal>/monthly/`, `<personal>/quarterly/`,
+  `<personal>/annual/`. Cross-source weekly themes (core) live under `dirs.synthesis`:
+  `<synthesis>/weekly/`. The `weekly` subdir name is shared by both; the rest are
+  used only when the personal module is configured.

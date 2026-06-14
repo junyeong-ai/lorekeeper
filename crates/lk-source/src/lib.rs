@@ -26,7 +26,7 @@ use google::GoogleAuth;
 
 /// Mint a Google refresh token via an interactive OAuth loopback flow (used by
 /// `lore init credentials`).
-pub use google::oauth::obtain_refresh_token as obtain_google_refresh_token;
+pub use google::oauth::build_refresh_token as build_google_refresh_token;
 
 #[derive(Debug, Error)]
 pub enum SourceError {

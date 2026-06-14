@@ -7,7 +7,7 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
 
     for (id, sc) in config.enabled_sources() {
         let last = log
-            .last_success(id)
+            .find_last_success(id)
             .await
             .map_err(|e| miette::miette!("read ingest log: {e}"))?;
         match last {

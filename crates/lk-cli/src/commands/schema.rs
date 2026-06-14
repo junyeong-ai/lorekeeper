@@ -53,8 +53,8 @@ fn s(name: &'static str, heading: fn(&Strings) -> String, owner: Owner) -> Secti
     }
 }
 
-fn page_schemas(dirs: &lk_core::config::VaultDirs) -> Vec<PageSchema> {
-    vec![
+fn page_schemas(dirs: &lk_core::config::VaultDirs, personal: bool) -> Vec<PageSchema> {
+    let mut schemas = vec![
         PageSchema {
             type_name: "concept",
             path_pattern: format!("{}/{CONCEPTS_SUBDIR}/{{slug}}.md", dirs.wiki),
@@ -91,15 +91,6 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs) -> Vec<PageSchema> {
                     |i| i.related_concepts.to_string(),
                     Owner::Machine,
                 ),
-            ],
-        },
-        PageSchema {
-            type_name: "work-log",
-            path_pattern: format!("{}/{WORK_LOG_SUBDIR}/YYYY-MM-DD.md", dirs.personal),
-            frontmatter: &["id", "title", "created", "labels", "categories", "sources"],
-            sections: vec![
-                s("Topic Summary", |i| i.topic_summary.to_string(), Owner::Llm),
-                s("Sources", |i| i.concept_sources.to_string(), Owner::Machine),
             ],
         },
         PageSchema {
@@ -177,76 +168,99 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs) -> Vec<PageSchema> {
                 Owner::Llm,
             )],
         },
-        PageSchema {
-            type_name: "weekly-review",
-            path_pattern: format!("{}/{}/YYYY-Www.md", dirs.personal, dirs.weekly),
-            frontmatter: &["id", "title", "created", "labels", "period", "days_logged"],
-            sections: vec![
-                s("Period", |i| i.period.to_string(), Owner::Machine),
-                s("Summary", |i| i.key_summary.to_string(), Owner::Llm),
-                s(
-                    "Category Distribution",
-                    |i| i.category_distribution.to_string(),
-                    Owner::Machine,
-                ),
-            ],
-        },
-        PageSchema {
-            type_name: "monthly-review",
-            path_pattern: format!("{}/{}/YYYY-MM.md", dirs.personal, dirs.monthly),
-            frontmatter: &["id", "title", "created", "labels", "period", "days_logged"],
-            sections: vec![
-                s("Period", |i| i.period.to_string(), Owner::Machine),
-                s("Summary", |i| i.key_summary.to_string(), Owner::Llm),
-                s(
-                    "Category Distribution",
-                    |i| i.category_distribution.to_string(),
-                    Owner::Machine,
-                ),
-            ],
-        },
-        PageSchema {
-            type_name: "quarterly-review",
-            path_pattern: format!("{}/{}/YYYY-Qq.md", dirs.personal, dirs.quarterly),
-            frontmatter: &["id", "title", "created", "labels", "period"],
-            sections: vec![
-                s("Period", |i| i.period.to_string(), Owner::Machine),
-                s(
-                    "Category Distribution",
-                    |i| i.category_distribution.to_string(),
-                    Owner::Machine,
-                ),
-                s("Summary", |i| i.key_summary.to_string(), Owner::Llm),
-                s(
-                    "Monthly Breakdown",
-                    |i| i.monthly_breakdown.to_string(),
-                    Owner::Machine,
-                ),
-            ],
-        },
-        PageSchema {
-            type_name: "annual-review",
-            path_pattern: format!("{}/{}/YYYY.md", dirs.personal, dirs.annual),
-            frontmatter: &["id", "title", "created", "labels", "period"],
-            sections: vec![
-                s("Overview", |i| i.overall_summary.to_string(), Owner::Llm),
-                s(
-                    "Quarterly Breakdown",
-                    |i| i.quarterly_breakdown.to_string(),
-                    Owner::Machine,
-                ),
-                s(
-                    "Category Distribution",
-                    |i| i.category_distribution.to_string(),
-                    Owner::Machine,
-                ),
-            ],
-        },
-    ]
+    ];
+
+    // The work-log and the four reviews are the personal module's pages — documented in
+    // AGENTS.md only when `personal:` is configured, so a domain-neutral vault's format
+    // reference never describes pages it will never produce.
+    if personal {
+        schemas.extend([
+            PageSchema {
+                type_name: "work-log",
+                path_pattern: format!("{}/{WORK_LOG_SUBDIR}/YYYY-MM-DD.md", dirs.personal),
+                frontmatter: &["id", "title", "created", "labels", "categories", "sources"],
+                sections: vec![
+                    s("Topic Summary", |i| i.topic_summary.to_string(), Owner::Llm),
+                    s("Sources", |i| i.concept_sources.to_string(), Owner::Machine),
+                ],
+            },
+            PageSchema {
+                type_name: "weekly-review",
+                path_pattern: format!("{}/{}/YYYY-Www.md", dirs.personal, dirs.weekly),
+                frontmatter: &["id", "title", "created", "labels", "period", "days_logged"],
+                sections: vec![
+                    s("Period", |i| i.period.to_string(), Owner::Machine),
+                    s("Summary", |i| i.key_summary.to_string(), Owner::Llm),
+                    s(
+                        "Category Distribution",
+                        |i| i.category_distribution.to_string(),
+                        Owner::Machine,
+                    ),
+                ],
+            },
+            PageSchema {
+                type_name: "monthly-review",
+                path_pattern: format!("{}/{}/YYYY-MM.md", dirs.personal, dirs.monthly),
+                frontmatter: &["id", "title", "created", "labels", "period", "days_logged"],
+                sections: vec![
+                    s("Period", |i| i.period.to_string(), Owner::Machine),
+                    s("Summary", |i| i.key_summary.to_string(), Owner::Llm),
+                    s(
+                        "Category Distribution",
+                        |i| i.category_distribution.to_string(),
+                        Owner::Machine,
+                    ),
+                ],
+            },
+            PageSchema {
+                type_name: "quarterly-review",
+                path_pattern: format!("{}/{}/YYYY-Qq.md", dirs.personal, dirs.quarterly),
+                frontmatter: &["id", "title", "created", "labels", "period"],
+                sections: vec![
+                    s("Period", |i| i.period.to_string(), Owner::Machine),
+                    s(
+                        "Category Distribution",
+                        |i| i.category_distribution.to_string(),
+                        Owner::Machine,
+                    ),
+                    s("Summary", |i| i.key_summary.to_string(), Owner::Llm),
+                    s(
+                        "Monthly Breakdown",
+                        |i| i.monthly_breakdown.to_string(),
+                        Owner::Machine,
+                    ),
+                ],
+            },
+            PageSchema {
+                type_name: "annual-review",
+                path_pattern: format!("{}/{}/YYYY.md", dirs.personal, dirs.annual),
+                frontmatter: &["id", "title", "created", "labels", "period"],
+                sections: vec![
+                    s("Overview", |i| i.overall_summary.to_string(), Owner::Llm),
+                    s(
+                        "Quarterly Breakdown",
+                        |i| i.quarterly_breakdown.to_string(),
+                        Owner::Machine,
+                    ),
+                    s(
+                        "Category Distribution",
+                        |i| i.category_distribution.to_string(),
+                        Owner::Machine,
+                    ),
+                ],
+            },
+        ]);
+    }
+
+    schemas
 }
 
 /// Render the AGENTS.md content for a given locale and directory layout.
-pub fn render_agents_md(locale: Locale, dirs: &lk_core::config::VaultDirs) -> String {
+pub fn render_agents_md(
+    locale: Locale,
+    dirs: &lk_core::config::VaultDirs,
+    personal: bool,
+) -> String {
     let strings = locale.strings();
     let locale_tag = locale.tag();
 
@@ -278,7 +292,44 @@ pub fn render_agents_md(locale: Locale, dirs: &lk_core::config::VaultDirs) -> St
     )
     .unwrap();
 
-    for schema in page_schemas(dirs) {
+    writeln!(out).unwrap();
+    writeln!(out, "## Navigating this vault").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "Start from a navigation entry point and drill in — navigate, don't scan every file:"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "- `{}/map.md` — concepts grouped by citation cluster (the graph's emergent \
+         structure); start here to see what relates to a topic.",
+        dirs.wiki
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "- `{}/index.md` — catalog of every page, grouped by category, each with a \
+         first-sentence summary. Read it first to locate relevant concepts in one pass \
+         without opening each page.",
+        dirs.wiki
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "- `{}/log.md` — reverse-chronological timeline of when each knowledge node entered \
+         the vault.",
+        dirs.wiki
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "From an entry point, open the pages it links and follow their `[[wikilinks]]`. \
+         Regenerate the entry points with `lore wiki map` / `lore wiki index` / `lore wiki log`."
+    )
+    .unwrap();
+
+    for schema in page_schemas(dirs, personal) {
         writeln!(out).unwrap();
         writeln!(out, "## {} (`{}`)", schema.type_name, schema.path_pattern).unwrap();
         writeln!(out).unwrap();
@@ -391,7 +442,8 @@ pub fn render_agents_md(locale: Locale, dirs: &lk_core::config::VaultDirs) -> St
          an entry not backed by a forward link is wiped, and a concept cited by several \
          pages in one batch is counted correctly where hand-written one-ref-per-item \
          entries would undercount. Finish any batch that created concept pages OR \
-         citations with `lore graph backlinks-sync`, then `lore wiki index`."
+         citations with `lore graph backlinks-sync`, then `lore wiki index`, then \
+         `lore wiki map`."
     )
     .unwrap();
 
@@ -402,13 +454,21 @@ pub async fn run(
     opts: &super::GlobalOptions,
     root_override: Option<PathBuf>,
 ) -> miette::Result<()> {
-    let (vault_root, locale, dirs) = match root_override {
+    let (vault_root, locale, dirs, personal) = match root_override {
         Some(r) => {
-            let (locale, dirs) = match find_config(opts).and_then(|p| load_config(&p)) {
-                Ok(config) => (config.vault.locale(), config.vault.dirs.clone()),
-                Err(_) => (Locale::default(), lk_core::config::VaultDirs::default()),
+            let (locale, dirs, personal) = match find_config(opts).and_then(|p| load_config(&p)) {
+                Ok(config) => (
+                    config.vault.locale(),
+                    config.vault.dirs.clone(),
+                    config.personal.is_some(),
+                ),
+                Err(_) => (
+                    Locale::default(),
+                    lk_core::config::VaultDirs::default(),
+                    false,
+                ),
             };
-            (r, locale, dirs)
+            (r, locale, dirs, personal)
         }
         None => {
             let path = find_config(opts)?;
@@ -417,11 +477,12 @@ pub async fn run(
                 config.vault.root_path(),
                 config.vault.locale(),
                 config.vault.dirs.clone(),
+                config.personal.is_some(),
             )
         }
     };
 
-    let content = render_agents_md(locale, &dirs);
+    let content = render_agents_md(locale, &dirs, personal);
 
     let wiki_dir = vault_root.join(&dirs.wiki);
     tokio::fs::create_dir_all(&wiki_dir)
@@ -443,13 +504,13 @@ mod tests {
 
     #[test]
     fn agents_md_uses_locale_strings() {
-        let ko = render_agents_md(Locale::Ko, &lk_core::config::VaultDirs::default());
+        let ko = render_agents_md(Locale::Ko, &lk_core::config::VaultDirs::default(), true);
         assert!(ko.contains("locale: ko"));
         assert!(ko.contains("`## 핵심`"));
         assert!(ko.contains("`## 출처`"));
         assert!(ko.contains("`## 관련`"));
 
-        let en = render_agents_md(Locale::En, &lk_core::config::VaultDirs::default());
+        let en = render_agents_md(Locale::En, &lk_core::config::VaultDirs::default(), true);
         assert!(en.contains("locale: en"));
         assert!(en.contains("`## Synthesis`"));
         assert!(en.contains("`## Sources`"));
@@ -458,7 +519,7 @@ mod tests {
 
     #[test]
     fn agents_md_contains_all_page_types() {
-        let content = render_agents_md(Locale::Ko, &lk_core::config::VaultDirs::default());
+        let content = render_agents_md(Locale::Ko, &lk_core::config::VaultDirs::default(), true);
         for type_name in [
             "concept",
             "daily",
@@ -479,17 +540,48 @@ mod tests {
     }
 
     #[test]
+    fn agents_md_omits_personal_pages_when_module_absent() {
+        // A domain-neutral vault (no `personal:` module) must not document page formats it
+        // never produces — `lore schema` passes `personal = false` in that case.
+        let content = render_agents_md(Locale::En, &lk_core::config::VaultDirs::default(), false);
+        for core in [
+            "concept",
+            "daily",
+            "document",
+            "exploration",
+            "weekly-synthesis",
+        ] {
+            assert!(
+                content.contains(&format!("## {core}")),
+                "core page type must still be documented: {core}"
+            );
+        }
+        for personal in [
+            "work-log",
+            "weekly-review",
+            "monthly-review",
+            "quarterly-review",
+            "annual-review",
+        ] {
+            assert!(
+                !content.contains(&format!("## {personal}")),
+                "personal page type must be omitted when the module is absent: {personal}"
+            );
+        }
+    }
+
+    #[test]
     fn agents_md_carries_concept_convergence() {
         // The convergence contract is part of the schema: agents that create concept
         // pages read it here, and its heading references must be the LOCALIZED
         // machine-owned headings, never hardcoded English.
-        let ko = render_agents_md(Locale::Ko, &lk_core::config::VaultDirs::default());
+        let ko = render_agents_md(Locale::Ko, &lk_core::config::VaultDirs::default(), true);
         assert!(ko.contains("## Concept convergence"));
         assert!(ko.contains("created-this-run"));
         assert!(ko.contains("`lore wiki concepts`"));
         assert!(ko.contains("backlinks-sync"));
 
-        let en = render_agents_md(Locale::En, &lk_core::config::VaultDirs::default());
+        let en = render_agents_md(Locale::En, &lk_core::config::VaultDirs::default(), true);
         assert!(en.contains("## Concept convergence"));
 
         // The section's machine-owned-heading references must be LOCALIZED, never
@@ -507,8 +599,8 @@ mod tests {
     fn agents_md_headings_never_hardcoded() {
         // The Ko and En outputs must produce different headings for the same section,
         // proving they come from locale.strings() and not hardcoded strings.
-        let ko = render_agents_md(Locale::Ko, &lk_core::config::VaultDirs::default());
-        let en = render_agents_md(Locale::En, &lk_core::config::VaultDirs::default());
+        let ko = render_agents_md(Locale::Ko, &lk_core::config::VaultDirs::default(), true);
+        let en = render_agents_md(Locale::En, &lk_core::config::VaultDirs::default(), true);
         // concept Synthesis section differs
         assert!(ko.contains("`## 핵심`"));
         assert!(en.contains("`## Synthesis`"));

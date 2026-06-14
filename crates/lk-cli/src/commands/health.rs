@@ -8,7 +8,7 @@ pub async fn run(opts: &super::GlobalOptions, strict: bool) -> miette::Result<()
 
     let now = jiff::Timestamp::now();
     // A source is stale once TWO ingest fires have come due since its last success
-    // (one missed run of grace) — anchored at `last_success`, NOT at `now`, so the window
+    // (one missed run of grace) — anchored at the last success, NOT at `now`, so the window
     // follows the real schedule sequence including weekend/off-day gaps. For `0 9 * * 1-5`
     // a Friday-morning success is not stale over the weekend (the next fire is Monday);
     // it only goes stale once Tuesday's fire has also passed unfilled. Ingestion is a
@@ -37,7 +37,7 @@ pub async fn run(opts: &super::GlobalOptions, strict: bool) -> miette::Result<()
 
     for (id, sc) in config.enabled_sources() {
         let last = log
-            .last_success(id)
+            .find_last_success(id)
             .await
             .map_err(|e| miette::miette!("read ingest log: {e}"))?;
         match last {

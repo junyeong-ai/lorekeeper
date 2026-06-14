@@ -1022,6 +1022,26 @@ mod tests {
         assert!(extracted.contains("substantial paragraph"));
     }
 
+    #[test]
+    fn readable_absolutizes_relative_urls_against_base() {
+        // dom_smoothie resolves relative URLs against base_url during extraction. RSS
+        // full-text feeds rely on this (links/images must be clickable once detached from
+        // the feed). Locked here because the other readable_* tests don't assert on URLs, so
+        // a future dom_smoothie upgrade that changes URL resolution would otherwise pass CI.
+        let base = url::Url::parse("https://example.com/post").unwrap();
+        let para = "<p>This is a substantial paragraph of article prose with a \
+                    <a href=\"/rel/page\">relative link</a> worth extracting as content.</p>";
+        let html = format!(
+            "<html><body><article><h1>Title</h1>{}</article></body></html>",
+            para.repeat(6)
+        );
+        let extracted = readable_html_to_markdown(&html, &base).expect("article extracted");
+        assert!(
+            extracted.contains("https://example.com/rel/page"),
+            "relative link must be absolutized against base_url:\n{extracted}"
+        );
+    }
+
     // Adversarial property tests: throw randomized hostile HTML at the converter and
     // assert the vault-text cleanliness contract holds for ANY input — closing the
     // whole "raw source bytes leak into a page" class instead of one example at a

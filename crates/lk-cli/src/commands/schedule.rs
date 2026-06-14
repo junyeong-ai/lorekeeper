@@ -33,8 +33,15 @@ pub async fn run(opts: &super::GlobalOptions, bin: &str) -> miette::Result<()> {
         println!("{sched} cd {cwd_str} && {bin_escaped}{flags} ingest");
     }
 
-    for (period, sched) in config.synthesis.schedules() {
-        println!("{sched} cd {cwd_str} && {bin_escaped}{flags} synthesis {period} --previous");
+    if config.synthesis.weekly.enabled
+        && let Some(sched) = &config.synthesis.weekly.schedule
+    {
+        println!("{sched} cd {cwd_str} && {bin_escaped}{flags} synthesis weekly --previous");
+    }
+    if let Some(personal) = &config.personal {
+        for (period, sched) in personal.review_schedules() {
+            println!("{sched} cd {cwd_str} && {bin_escaped}{flags} synthesis {period} --previous");
+        }
     }
 
     if let Some(ref sched) = config.maintenance.schedule {

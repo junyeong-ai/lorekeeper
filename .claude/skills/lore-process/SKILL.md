@@ -25,7 +25,7 @@ allowed-tools: |
 The Rust `lore ingest` pipeline, when configured with `llm.provider: queue`,
 defers all semantic work (summaries, refined events, concepts, themes, reviews)
 by writing JSONL task files into
-`<vault>/.lorekeeper/queue/{run-timestamp}-pid{PID}.jsonl`.
+`<vault>/.lorekeeper/queue/{run-id}.jsonl` (run-id = `{timestamp}-pid{PID}-{seq}`).
 Each task points at a vault page written with an empty section awaiting LLM
 content. This skill consumes those tasks: read the queue, perform the LLM
 work in your own session, edit the target pages' sections in place, then move
@@ -33,9 +33,12 @@ the processed queue file to `.lorekeeper/queue/processed/`.
 
 The protocol below is the integrity contract — follow it exactly. The
 generation specs (what good output looks like per task kind) live in
-[references/processing-kinds.md](references/processing-kinds.md); read that
-file before processing tasks, and re-read it if this session has been
-compacted since you last read it.
+[references/processing-kinds.md](references/processing-kinds.md), and the
+per-source-type synthesis/extraction strategy (keyed on each task's
+`input.source_type`) lives in
+[references/source-types.md](references/source-types.md); read both before
+processing tasks, and re-read them if this session has been compacted since
+you last read them.
 
 ## Safety rules (never violate, even mid-session)
 
@@ -188,21 +191,28 @@ The essentials: a visible `.jsonl` is fully written and every
    mv "$file" "$VAULT/.lorekeeper/queue/processed/"
    ```
 
-5. **Finalize** — concept sources sections / `source_count` were left empty on
-   purpose; reconcile them from the wikilink graph, then refresh the catalog:
+5. **Finalize (mandatory — do not skip).** Concept `## Sources` sections and
+   `source_count` are deliberately left empty during processing; they are
+   machine-owned and reconciled here from the wikilink graph, then the catalog
+   is refreshed. Run both and confirm each exits 0:
    ```bash
    lore graph backlinks-sync   # re-derive every concept's ## Sources + source_count
    lore wiki index             # refresh the catalog
+   lore wiki map               # refresh the citation-cluster navigation map
    ```
-   `lore ingest` does NOT run these — always run them yourself after
-   `/lore-process`. (The `lore-daily-ingest` scheduled task chains
-   ingest → /lore-process → these for an automated daily run.)
+   Run these on EVERY `/lore-process` invocation that processed at least one
+   task — skipping them leaves new concepts with no `## Sources` and a stale
+   `source_count` until some later run happens to reconcile. If any command
+   exits non-zero, treat the run as failed and surface the error in step 6
+   instead of reporting success. `lore ingest` never runs these. (The
+   `lore-daily-ingest` scheduled task chains ingest → /lore-process → these.)
 
 6. **Report** to the user:
-   - On full success: number of files processed and tasks completed.
-   - On any failure: which file was left in place and the failed `task_id`s
-     with their error messages, then stop — leave remaining files for the
-     next run.
+   - On full success: number of files processed and tasks completed, and confirm
+     the step-5 Finalize ran (`backlinks-sync` + `index` + `map`, all exited 0).
+   - On any failure (including a non-zero Finalize command): which file was left
+     in place and the failed `task_id`s (or the failed command) with their error
+     messages, then stop — leave remaining files for the next run.
 
 ## Idempotency contract
 

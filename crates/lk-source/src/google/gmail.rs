@@ -159,7 +159,7 @@ impl GmailSource {
             .map(|h| h.value.as_str())
     }
 
-    fn should_exclude(msg: &Message, exclude: &ExcludeParams) -> bool {
+    fn is_excluded(msg: &Message, exclude: &ExcludeParams) -> bool {
         let subject = Self::header(msg, "Subject")
             .unwrap_or_default()
             .to_lowercase();
@@ -317,7 +317,7 @@ fn map_message(
     strings: &lk_core::i18n::Strings,
 ) -> Option<RawItem> {
     if let Some(exc) = exclude
-        && GmailSource::should_exclude(&msg, exc)
+        && GmailSource::is_excluded(&msg, exc)
     {
         return None;
     }

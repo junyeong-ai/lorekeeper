@@ -57,6 +57,6 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
 - **`lore init credentials`** (in `init.rs`) is the interactive credential wizard. UX
   (dialoguer prompts, masked secrets, TTY guard) lives here; the JSON shape + atomic
   `0600` write live in `lk_source::credentials` (`load_file`/`load`/`save`). The Google branch
-  can mint a refresh token via `lk_source::obtain_google_refresh_token` (browser OAuth
+  can mint a refresh token via `lk_source::build_google_refresh_token` (browser OAuth
   loopback) or accept a pasted one. `Init` is a subcommand-of-subcommand so future
   scaffolders (`lore init config`) slot in cleanly.

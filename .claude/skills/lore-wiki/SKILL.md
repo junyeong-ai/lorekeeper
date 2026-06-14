@@ -53,6 +53,7 @@ each as an independent source, and report the aggregate results.
    concept; the document's forward `[[wikilink]]` from step 3 is what
    `backlinks-sync` counts as the citation.
 5. **Finalize**: `lore graph backlinks-sync`, then `lore wiki index`, then
+   `lore wiki map` (refresh the citation-cluster navigation map), then
    `lore graph lint` to confirm no structural drift (index/broken links).
    Pre-existing review items (uncategorized, near-dup, open conflicts) may
    legitimately remain — they are not introduced by this add.
@@ -79,8 +80,9 @@ Answer a question grounded in vault content, with compounding.
      Grounding section. Then **finalize** so the new page leaves the graph clean:
      `lore graph backlinks-sync` (its Grounding wikilinks are real citations that
      raise each grounded concept's `source_count`), then `lore wiki index` (so the
-     exploration is catalogued and the next audit shows no index drift). Tell the
-     user where it landed.
+     exploration is catalogued and the next audit shows no index drift), then
+     `lore wiki map` (so the new exploration joins the navigation map and its links
+     compound the cluster structure). Tell the user where it landed.
    - **Ephemeral** (single-fact, navigational lookup) → do not file.
 
    The judgment is per-answer by the model. No frequency rule, no

@@ -37,7 +37,7 @@ path patterns from AGENTS.md.
 
 ```json
 {
-  "task_id": "sum-2026-05-23T07-00-00Z-000",
+  "task_id": "sum-2026-05-23T07-00-00Z-pid4211-0-000",
   "kind": "summarize",
   "created_at": "2026-05-23T07:00:00Z",
   "cache_hash": "0123456789abcdef0123456789abcdef",

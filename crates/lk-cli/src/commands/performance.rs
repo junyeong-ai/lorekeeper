@@ -4,8 +4,8 @@ use super::{find_config, load_config};
 
 pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
     let config = load_config(&find_config(opts)?)?;
-    if !config.performance.enabled {
-        eprintln!("Performance subsystem is disabled (performance.enabled: false).");
+    if config.personal.is_none() {
+        eprintln!("The personal module is not configured (no `personal:` section).");
         return Ok(());
     }
     let vault_root = config.vault.root_path();

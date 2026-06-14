@@ -4,7 +4,7 @@ use tempfile::TempDir;
 
 use lk_core::concept::ExtractedConcept;
 use lk_core::config::{
-    Config, Identity, PerformanceConfig, SourceConfig, SourceType, SynthesisConfig, VaultConfig,
+    Config, Identity, PersonalConfig, SourceConfig, SourceType, SynthesisConfig, VaultConfig,
     VaultDirs,
 };
 use lk_core::event::RawItem;
@@ -23,7 +23,7 @@ fn base_config(vault_root: &std::path::Path) -> Config {
             labels: vec!["test".into()],
             extract_concepts: true,
             focus: None,
-            track_personal: false,
+            highlights: vec![],
         },
     );
 
@@ -41,7 +41,7 @@ fn base_config(vault_root: &std::path::Path) -> Config {
             slack_id: None,
         },
         sources,
-        performance: PerformanceConfig::default(),
+        personal: Some(PersonalConfig::default()),
         synthesis: SynthesisConfig::default(),
         llm: Default::default(),
         concepts: Default::default(),
@@ -84,7 +84,7 @@ async fn concept_pages_written_with_merge() {
         category: None,
     }];
 
-    let llm: Arc<dyn LlmClient> = Arc::new(MockLlmClient::with_concepts(concepts));
+    let llm: Arc<dyn LlmClient> = Arc::new(MockLlmClient::build_with_concepts(concepts));
     let ctx = build_ctx(&config, llm);
     let mut pipeline = Pipeline::new(vault, ctx);
 
@@ -125,10 +125,11 @@ async fn concept_pages_written_with_merge() {
     // Re-ingest on a different date with a FRESH pipeline, so the merge reads the
     // on-disk concept page (exercising the created/updated round-trip).
     drop(pipeline);
-    let llm2: Arc<dyn LlmClient> = Arc::new(MockLlmClient::with_concepts(vec![ExtractedConcept {
-        name: "Claude Code".into(),
-        category: None,
-    }]));
+    let llm2: Arc<dyn LlmClient> =
+        Arc::new(MockLlmClient::build_with_concepts(vec![ExtractedConcept {
+            name: "Claude Code".into(),
+            category: None,
+        }]));
     let mut pipeline2 = Pipeline::new(vault, build_ctx(&config, llm2));
     let ts2: jiff::Timestamp = "2026-05-24T10:00:00Z".parse().unwrap();
     let items2 = vec![raw_item("Anthropic releases v2", "...", "MSG-2", ts2)];
@@ -306,14 +307,15 @@ async fn concept_accumulates_across_sources_in_one_run() {
             labels: vec![],
             extract_concepts: true,
             focus: None,
-            track_personal: false,
+            highlights: vec![],
         },
     );
 
-    let llm: Arc<dyn LlmClient> = Arc::new(MockLlmClient::with_concepts(vec![ExtractedConcept {
-        name: "Shared Concept".into(),
-        category: None,
-    }]));
+    let llm: Arc<dyn LlmClient> =
+        Arc::new(MockLlmClient::build_with_concepts(vec![ExtractedConcept {
+            name: "Shared Concept".into(),
+            category: None,
+        }]));
     let mut pipeline = Pipeline::new(vault, build_ctx(&config, llm));
 
     let ts: jiff::Timestamp = "2026-05-23T10:00:00Z".parse().unwrap();
@@ -363,7 +365,7 @@ async fn llm_failure_does_not_break_pipeline() {
     let vault = dir.path();
     let config = base_config(vault);
 
-    let llm: Arc<dyn LlmClient> = Arc::new(MockLlmClient::failing());
+    let llm: Arc<dyn LlmClient> = Arc::new(MockLlmClient::build_failing());
     let ctx = build_ctx(&config, llm);
     let mut pipeline = Pipeline::new(vault, ctx);
 
@@ -412,7 +414,7 @@ async fn write_failure_keeps_events_novel_for_retry() {
     let sc = config.sources.get("test-source").unwrap().clone();
 
     let ts: jiff::Timestamp = "2026-05-23T10:00:00Z".parse().unwrap();
-    let make_items = || vec![raw_item("Subject", "Body", "M1", ts)];
+    let build_items = || vec![raw_item("Subject", "Body", "M1", ts)];
 
     let opts = IngestOptions {
         target_date: None,
@@ -422,7 +424,7 @@ async fn write_failure_keeps_events_novel_for_retry() {
 
     // Phase 1: Plan succeeds
     let result = pipeline
-        .plan("test-source", &sc, make_items(), &opts)
+        .plan("test-source", &sc, build_items(), &opts)
         .await
         .unwrap();
     assert!(!result.daily_pages.is_empty());
@@ -457,7 +459,7 @@ async fn write_failure_keeps_events_novel_for_retry() {
     // The run is idempotent: a daily page is a projection of its event log, re-rendered
     // in full each run. A write that failed is simply reproduced on the next plan.
     let result2 = pipeline
-        .plan("test-source", &sc, make_items(), &opts)
+        .plan("test-source", &sc, build_items(), &opts)
         .await
         .unwrap();
     assert_eq!(
@@ -828,7 +830,7 @@ async fn empty_weekly_themes_is_cached_not_re_enqueued() {
 }
 
 #[tokio::test]
-async fn performance_enabled_gates_review_narratives() {
+async fn personal_module_gates_review_narratives() {
     let dir = TempDir::new().unwrap();
     let vault = dir.path();
 
@@ -843,7 +845,7 @@ async fn performance_enabled_gates_review_narratives() {
 
     let llm: Arc<dyn LlmClient> = Arc::new(NoopLlmClient);
 
-    // performance.enabled: true → the personal weekly review is produced.
+    // personal: configured → the personal weekly review is produced.
     let config = base_config(vault);
     let synth = Synthesizer::new(
         vault,
@@ -857,12 +859,12 @@ async fn performance_enabled_gates_review_narratives() {
             .await
             .unwrap()
             .is_some(),
-        "personal review should be produced when performance is enabled"
+        "personal review should be produced when the personal module is configured"
     );
 
-    // performance.enabled: false → no review, even though the work-log page exists.
+    // config.personal = None → no review, even though the work-log page exists.
     let mut config = base_config(vault);
-    config.performance.enabled = false;
+    config.personal = None;
     let synth = Synthesizer::new(vault, build_ctx(&config, llm), &config, far_future());
     assert!(
         synth
@@ -870,7 +872,7 @@ async fn performance_enabled_gates_review_narratives() {
             .await
             .unwrap()
             .is_none(),
-        "disabling performance must suppress personal reviews"
+        "dropping the personal module must suppress personal reviews"
     );
 }
 
@@ -1130,7 +1132,7 @@ async fn annual_review_keeps_boundary_week_in_both_fallback_quarters() {
 }
 
 #[tokio::test]
-async fn work_log_generation_is_gated_by_performance_enabled() {
+async fn work_log_generation_is_gated_by_personal_module() {
     let dir = TempDir::new().unwrap();
     let vault = dir.path();
 
@@ -1163,13 +1165,13 @@ async fn work_log_generation_is_gated_by_performance_enabled() {
             .await
             .unwrap()
             .is_empty(),
-        "work-log should be produced when performance is enabled"
+        "work-log should be produced when the personal module is configured"
     );
     drop(pipeline); // one Pipeline owns one ingest run; finish it before reopening
 
     // Disabled → no work-log at the mechanism boundary, regardless of caller.
     let mut config = base_config(vault);
-    config.performance.enabled = false;
+    config.personal = None;
     let pipeline = Pipeline::new(vault, build_ctx(&config, llm));
     assert!(
         pipeline
@@ -1177,7 +1179,7 @@ async fn work_log_generation_is_gated_by_performance_enabled() {
             .await
             .unwrap()
             .is_empty(),
-        "disabling performance must suppress work-log generation"
+        "dropping the personal module must suppress work-log generation"
     );
 }
 
@@ -1240,27 +1242,32 @@ async fn work_log_excludes_future_dated_contribution() {
 }
 
 #[tokio::test]
-async fn gmail_daily_page_renders_category_highlights() {
-    // Gmail's daily page surfaces an email-triage highlight section for a curated set of
-    // categories ABOVE the full event list. A `classify` rule routes a matching event into
-    // a highlight bucket; the bucket entry is a POINTER (subject + sender, one bullet line)
-    // — the event's body renders ONLY in the full Key Events list, where the LLM later
-    // refines it. Buckets are an additive highlight, never a replacement, so an event is
-    // never hidden by its category; and they are structural (re-rendered raw every ingest,
-    // never LLM-refined), so any body text here would pin the raw source — quoted thread,
-    // signature PII — into the page permanently.
+async fn daily_page_renders_configured_category_highlights() {
+    // A source's configured `highlights` surface matching events ABOVE the full event list.
+    // A `classify` rule routes a matching event into a `category`; the source's `highlights`
+    // config gives that category a heading label. The bucket entry is a POINTER (subject +
+    // sender, one bullet line) — the event's body renders ONLY in the full Key Events list,
+    // where the LLM later refines it. Buckets are an additive highlight, never a replacement,
+    // so an event is never hidden by its category; and they are structural (re-rendered raw
+    // every ingest, never LLM-refined), so any body text here would pin the raw source —
+    // quoted thread, signature PII — into the page permanently.
     let dir = TempDir::new().unwrap();
     let vault = dir.path();
     let mut config = base_config(vault);
-    config.sources.get_mut("test-source").unwrap().classify = vec![lk_core::config::ClassifyRule {
-        category: "action_required".into(),
-        keywords: vec!["deadline".into()],
-        performance_category: None,
-    }];
+    {
+        let source = config.sources.get_mut("test-source").unwrap();
+        source.classify = vec![lk_core::config::ClassifyRule {
+            category: "action_required".into(),
+            keywords: vec!["deadline".into()],
+            performance_category: None,
+        }];
+        source.highlights = vec![lk_core::config::HighlightSection {
+            category: "action_required".into(),
+            label: "Action Required".into(),
+        }];
+    }
 
-    let strings = config.vault.locale().strings();
-    let action_heading = strings.action_required;
-    let key_events_heading = strings.key_events;
+    let key_events_heading = config.vault.locale().strings().key_events;
 
     let llm: Arc<dyn LlmClient> = Arc::new(NoopLlmClient);
     let mut pipeline = Pipeline::new(vault, build_ctx(&config, llm));
@@ -1288,12 +1295,8 @@ async fn gmail_daily_page_renders_category_highlights() {
         .expect("gmail daily page rendered");
 
     assert!(
-        content.contains(&format!("## {action_heading}")),
-        "the action_required highlight section must render for a Gmail page:\n{content}"
-    );
-    assert!(
-        content.contains("action_required: 1"),
-        "the frontmatter action_required count must reflect the one bucketed event:\n{content}"
+        content.contains("## Action Required"),
+        "the configured highlight section must render under its config label:\n{content}"
     );
     assert!(
         content.contains("- **Project deadline moved** — alice@example.com"),
@@ -1322,10 +1325,11 @@ async fn forecast_date_is_not_materialized() {
 
     // The mock WOULD return a concept for any extraction — proving the date skip, not the
     // LLM, is what suppresses the forecast date.
-    let llm: Arc<dyn LlmClient> = Arc::new(MockLlmClient::with_concepts(vec![ExtractedConcept {
-        name: "Future Topic".into(),
-        category: None,
-    }]));
+    let llm: Arc<dyn LlmClient> =
+        Arc::new(MockLlmClient::build_with_concepts(vec![ExtractedConcept {
+            name: "Future Topic".into(),
+            category: None,
+        }]));
     let mut pipeline = Pipeline::new(vault, build_ctx(&config, llm));
 
     let today = jiff::civil::date(2026, 6, 4);

@@ -85,12 +85,11 @@ impl Synthesizer {
         }
     }
 
-    /// The review narratives (weekly/monthly/quarterly/annual) are the work-log
-    /// performance subsystem, gated by `performance.enabled`. Disabled → no review pages,
-    /// even if work-log entries exist. The cross-source weekly themes page is independent
-    /// and not gated here.
-    fn is_performance_enabled(&self) -> bool {
-        self.ctx.perf.enabled
+    /// The review narratives (weekly/monthly/quarterly/annual) are the personal module;
+    /// an absent `config.personal` → no review pages, even if work-log entries exist. The
+    /// cross-source weekly themes page is independent and not gated here.
+    fn is_personal_enabled(&self) -> bool {
+        self.ctx.personal.is_some()
     }
 
     /// A synthesis page is a materialized view exactly like a daily page: its one
@@ -285,7 +284,7 @@ impl Synthesizer {
         &self,
         date: jiff::civil::Date,
     ) -> Result<Option<RenderResult>, PipelineError> {
-        if !self.is_performance_enabled() {
+        if !self.is_personal_enabled() {
             return Ok(None);
         }
         let (year, week) = iso_year_week(date);
@@ -350,7 +349,7 @@ impl Synthesizer {
         year: i16,
         month: u8,
     ) -> Result<Option<RenderResult>, PipelineError> {
-        if !self.is_performance_enabled() {
+        if !self.is_personal_enabled() {
             return Ok(None);
         }
         let (start, end) = month_range(year, month)?;
@@ -413,7 +412,7 @@ impl Synthesizer {
         year: i16,
         quarter: u8,
     ) -> Result<Option<RenderResult>, PipelineError> {
-        if !self.is_performance_enabled() {
+        if !self.is_personal_enabled() {
             return Ok(None);
         }
         let (start, end) = quarter_range(year, quarter)?;
@@ -495,7 +494,7 @@ impl Synthesizer {
         &self,
         year: i16,
     ) -> Result<Option<RenderResult>, PipelineError> {
-        if !self.is_performance_enabled() {
+        if !self.is_personal_enabled() {
             return Ok(None);
         }
         let mut period_summaries: Vec<serde_json::Value> = Vec::new();
@@ -654,15 +653,19 @@ impl Synthesizer {
             }
         }
 
+        // Reached only from the review methods, which are gated on the personal module;
+        // bind it defensively so a stray call without it yields no table rather than panics.
+        let Some(personal) = self.ctx.personal.as_ref() else {
+            return Ok(vec![]);
+        };
+
         if total == 0 {
             // No work-log data → emit empty stats so the template omits the table
             // rather than rendering all-zero rows.
             return Ok(vec![]);
         }
 
-        let stats = self
-            .ctx
-            .perf
+        let stats = personal
             .performance_categories
             .iter()
             .filter_map(|cat| {

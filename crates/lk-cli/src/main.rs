@@ -82,9 +82,6 @@ enum Command {
         /// Output in JSON format (envelope: {"ok": true, "data": …})
         #[arg(long)]
         json: bool,
-        /// Skip full rescan when no files have changed (mtime-based cache)
-        #[arg(long)]
-        incremental: bool,
         #[command(subcommand)]
         command: commands::graph::GraphCommand,
     },
@@ -133,11 +130,10 @@ async fn main() -> miette::Result<()> {
     if let Command::Graph {
         root,
         json,
-        incremental,
         command,
     } = cli.command
     {
-        let code = commands::graph::run(&opts, command, json, root, incremental);
+        let code = commands::graph::run(&opts, command, json, root);
         std::process::exit(code);
     }
 

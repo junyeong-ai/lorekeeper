@@ -17,8 +17,15 @@ pub enum WikiCommand {
         root: Option<PathBuf>,
     },
     /// Generate `<vault>/<wiki>/log.md` — reverse-chronological knowledge timeline
-    /// (when each concept/document/exploration entered or was last refreshed)
+    /// (when each concept/document/exploration first entered the vault, by `created`)
     Log {
+        /// Vault root override (default: vault.root from config)
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// Generate `<vault>/<wiki>/map.md` — a navigable knowledge map: concepts grouped by
+    /// citation cluster (Louvain), hub-first, for agent/human traversal without embeddings
+    Map {
         /// Vault root override (default: vault.root from config)
         #[arg(long)]
         root: Option<PathBuf>,
@@ -35,16 +42,39 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
     match cmd {
         WikiCommand::Index { root } => run_index(opts, root).await,
         WikiCommand::Log { root } => run_log(opts, root).await,
+        WikiCommand::Map { root } => run_map(opts, root).await,
         WikiCommand::Concepts { json } => run_concepts(opts, json).await,
     }
+}
+
+pub async fn run_map(
+    opts: &super::GlobalOptions,
+    root_override: Option<PathBuf>,
+) -> miette::Result<()> {
+    let (vault_root, locale, dirs, graph_config) = resolve_wiki_context(opts, root_override)?;
+
+    tracing::info!(vault = %vault_root.display(), "building wiki knowledge map");
+
+    let pages = lk_graph::scan::scan_vault(&vault_root, &graph_config)
+        .map_err(|e| miette::miette!("scan vault: {e}"))?;
+    let graph = lk_graph::graph::WikiGraph::build(&pages, &dirs);
+    let content = lk_graph::map::build_map(&graph, &graph_config, &dirs, locale);
+
+    let rel = std::path::Path::new(&dirs.wiki).join("map.md");
+    lk_vault::VaultWriter::new(&vault_root)
+        .write_page(&rel, &content)
+        .await
+        .map_err(|e| miette::miette!("write map.md: {e}"))?;
+
+    eprintln!("Wrote {}", vault_root.join(&rel).display());
+    Ok(())
 }
 
 pub async fn run_log(
     opts: &super::GlobalOptions,
     root_override: Option<PathBuf>,
 ) -> miette::Result<()> {
-    let (vault_root, _locale, _threshold, dirs) =
-        resolve_vault_with_threshold(opts, root_override)?;
+    let (vault_root, _locale, dirs, _graph) = resolve_wiki_context(opts, root_override)?;
 
     tracing::info!(vault = %vault_root.display(), "building wiki knowledge log");
 
@@ -59,11 +89,11 @@ pub async fn run_index(
     opts: &super::GlobalOptions,
     root_override: Option<PathBuf>,
 ) -> miette::Result<()> {
-    let (vault_root, locale, threshold, dirs) = resolve_vault_with_threshold(opts, root_override)?;
+    let (vault_root, locale, dirs, _graph) = resolve_wiki_context(opts, root_override)?;
 
     tracing::info!(vault = %vault_root.display(), locale = ?locale, "building wiki index");
 
-    let path = lk_vault::write_index(&vault_root, locale, threshold, &dirs)
+    let path = lk_vault::write_index(&vault_root, locale, &dirs)
         .await
         .map_err(|e| miette::miette!("write index.md: {e}"))?;
 
@@ -71,25 +101,36 @@ pub async fn run_index(
     Ok(())
 }
 
-fn resolve_vault_with_threshold(
+/// Resolve the context every `lore wiki` page builder needs — vault root, locale, vault
+/// dirs, and the graph config (scope, with vault defaults applied). The single resolution
+/// path for `index`/`log`/`map`, so they behave identically: an explicit `--root` runs even
+/// without a config file (defaults fill in locale/dirs/graph), while the config-derived path
+/// surfaces a load error loudly.
+fn resolve_wiki_context(
     opts: &super::GlobalOptions,
     root_override: Option<PathBuf>,
-) -> miette::Result<(PathBuf, Locale, usize, lk_core::config::VaultDirs)> {
+) -> miette::Result<(
+    PathBuf,
+    Locale,
+    lk_core::config::VaultDirs,
+    lk_core::config::GraphConfig,
+)> {
     match root_override {
         Some(r) => {
-            let (locale, threshold, dirs) = match find_config(opts).and_then(|p| load_config(&p)) {
+            let (locale, dirs, graph) = match find_config(opts).and_then(|p| load_config(&p)) {
                 Ok(config) => (
                     config.vault.locale(),
-                    config.concepts.index_split_threshold,
                     config.vault.dirs.clone(),
+                    config.graph.clone(),
                 ),
-                Err(_) => (
-                    Locale::default(),
-                    100,
-                    lk_core::config::VaultDirs::default(),
-                ),
+                Err(_) => {
+                    let dirs = lk_core::config::VaultDirs::default();
+                    let mut graph = lk_core::config::GraphConfig::default();
+                    graph.apply_vault_defaults(&dirs);
+                    (Locale::default(), dirs, graph)
+                }
             };
-            Ok((r, locale, threshold, dirs))
+            Ok((r, locale, dirs, graph))
         }
         None => {
             let path = find_config(opts)?;
@@ -97,8 +138,8 @@ fn resolve_vault_with_threshold(
             Ok((
                 config.vault.root_path(),
                 config.vault.locale(),
-                config.concepts.index_split_threshold,
                 config.vault.dirs.clone(),
+                config.graph.clone(),
             ))
         }
     }

@@ -14,7 +14,7 @@ my-schedule:
   params: {calendar_id: primary, lookback_hours: 24, lookahead_hours: 24}
   labels: [personal]
   extract_concepts: false
-  track_personal: true
+  # add this source id to personal.tracked_sources to feed your work-log
 ```
 Event descriptions are converted HTML→Markdown automatically.
 
@@ -43,7 +43,7 @@ email-digest:
       keywords: ["승인", "결재 완료", "approved"]
   labels: [personal]
   extract_concepts: true
-  track_personal: true
+  # add this source id to personal.tracked_sources to feed your work-log
 ```
 
 ## When there is no refresh token

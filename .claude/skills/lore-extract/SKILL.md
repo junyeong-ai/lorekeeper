@@ -69,7 +69,7 @@ project:
 discovered_sources:
   - path: "docs/adr/*.md"
     kind: adr           # adr | learning | rule | guide | spec | other
-    count: 61
+    count: <discovered>
     transferability_default: T1
 
 domains:
@@ -253,6 +253,7 @@ Extract knowledge using the manifest. Requires a prior scan.
    ```bash
    lore graph backlinks-sync   # re-derive every concept's ## Sources + source_count
    lore wiki index             # rebuild the catalog (lint flags index drift until this runs)
+   lore wiki map               # refresh the citation-cluster navigation map
    lore graph lint             # confirm no structural drift; pre-existing review items may remain
    ```
 8. Report created/merged/skipped counts.

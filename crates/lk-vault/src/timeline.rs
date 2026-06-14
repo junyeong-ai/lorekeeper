@@ -97,7 +97,9 @@ pub fn write_timeline(
     let content = build_timeline(vault_root, dirs)?;
     let rel = Path::new(&dirs.wiki).join("log.md");
     VaultWriter::new(vault_root).write_page_sync(&rel, &content)?;
-    Ok(rel)
+    // Return the absolute path, matching `write_index`, so every `lore wiki` command
+    // reports the file it wrote uniformly.
+    Ok(vault_root.join(rel))
 }
 
 /// Walk one knowledge directory, parsing each page's `created`/`title` into a [`TimelineEntry`].

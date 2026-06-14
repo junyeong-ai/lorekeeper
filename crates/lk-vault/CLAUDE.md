@@ -2,11 +2,11 @@
 
 Obsidian vault I/O. All writes go through here so atomicity lives in one place.
 
-- **`VaultWriter::write_page` is atomic**: writes to a per-process-unique temp file
-  (`pid + sequence`) then renames onto the final path. Never write the final path
-  directly, and never share a temp name across writers. It is the
-  ASYNC (tokio) sibling of `lk_core::fs::write_atomic` (the sync single-source) and follows
-  the same per-writer-unique-temp invariant.
+- **`VaultWriter::write_page` is atomic + durable**: it delegates to
+  `lk_core::fs::write_atomic` (the single atomic-write implementation: per-writer-unique
+  temp → fsync → rename → dir-fsync) on the blocking pool via `spawn_blocking`, since file
+  I/O is blocking and must fsync. There is no second atomic-write implementation to drift —
+  never write the final path directly.
 - **Frontmatter parsing is line-based** (`frontmatter::parse_page`): a `---` is a
   delimiter only when it's the standalone first line and a later standalone `---` line.
   A leading BOM is stripped; CRLF is normalized to LF. A substring scan would
@@ -15,6 +15,15 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   that exists but fails to parse propagates `Err`. Callers must thread that through so a
   broken user template surfaces instead of silently falling back to the embedded
   renderer.
+- **Daily templates inherit from `_daily_base.md.jinja`** (`{% extends %}`): the base owns
+  the frontmatter (incl. the `llm_inputs` ladder, single-sourced) + summary, the generic
+  `highlights` loop (any source with configured highlight sections), the events/concepts
+  skeleton. Each per-type child (gmail/jira/slack-*/google-*/rss) is a thin override of
+  only `{% block title %}`, `{% block items_heading %}` (events vs messages), and
+  `{% block events %}` (item rendering). `_`-prefixed templates are partials — never a page
+  `default_template`. `template::tests::every_daily_template_renders_with_expected_frontmatter`
+  renders every embedded daily template so a child block typo (or the `self.title()` wiring)
+  fails at test time, not in production.
 - **`IngestLog`** distinguishes `NotFound` (→ empty/None, legitimate "never ingested")
   from real I/O errors (propagated). Malformed JSONL lines are `tracing::warn`-ed and
   skipped, not silently dropped — corruption stays observable without blanking history.
@@ -27,11 +36,13 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   trailing whitespace from heading lines. (`lk_pipeline::llm_cache` reads `section_body`
   to splice a preserved LLM-owned body back on a cache hit; completion is marker-signalled,
   never inferred from whether a section is empty.)
-- **`index::build_index`** generates `{wiki}/index.md` — a hierarchical page catalog
-  grouped by category (concepts, documents, daily sources, work-log, synthesis).
-  One-liner summaries are extracted from each page's type-specific `## ` section body
-  (concept synthesis, daily/document summary — heading resolved from the i18n bundle),
-  not the H1 title. `write_index` handles the atomic write.
+- **`index::build_index`** generates `{wiki}/index.md` — a single hierarchical page catalog
+  grouped by category (concepts, documents, daily sources, work-log, synthesis), NEVER split
+  into sub-pages (like `log.md`/`map.md`). Each entry is `[[link]] — first-sentence summary`,
+  the summary extracted from the page's type-specific `## ` section body (concept synthesis,
+  daily/document summary — heading resolved from the i18n bundle) and bounded by
+  `truncate_summary` (first sentence, `MAX_SUMMARY_BYTES` cap) so a line stays scannable and
+  the catalog grows linearly. `write_index` handles the atomic write.
 - **`timeline::build_timeline`** generates `{wiki}/log.md` — a reverse-chronological
   knowledge timeline (when each concept/document/exploration first entered the vault).
   A materialized view like the index (regenerate → byte-identical), with two rules:
@@ -45,5 +56,6 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   top-level (column-0) key — never an indented key nested under a mapping (e.g. `summary:`
   under `llm_inputs:`) — and recognizes a leading BOM. The single source of truth for
   `backlinks-sync`'s `source_count` and the audit marker's `audited_sources_hash`.
-- **`VaultWriter::write_page_sync`** is a sync wrapper around the same
-  atomic temp+rename flow. Used by graph commands (pure sync, no tokio runtime).
+- **`VaultWriter::write_page_sync`** calls `lk_core::fs::write_atomic` directly (no tokio
+  runtime). Used by graph commands — the same single atomic-write implementation as the
+  async path, not a separate one.

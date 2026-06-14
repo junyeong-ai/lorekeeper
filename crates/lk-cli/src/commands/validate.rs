@@ -21,7 +21,7 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
 
     // Check AGENTS.md drift — warn if missing or out of date.
     let locale = config.vault.locale();
-    let expected = render_agents_md(locale, &config.vault.dirs);
+    let expected = render_agents_md(locale, &config.vault.dirs, config.personal.is_some());
     let agents_path = config
         .vault
         .root_path()

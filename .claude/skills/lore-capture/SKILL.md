@@ -129,6 +129,7 @@ checks pass:
 ```bash
 lore graph backlinks-sync   # re-derive every concept's ## Sources + source_count
 lore wiki index             # rebuild the catalog so `lore graph lint` is clean
+lore wiki map               # refresh the citation-cluster navigation map
 lore graph lint             # confirm no structural drift (index/broken links); pre-existing review items (uncategorized, near-dup, open conflicts) may legitimately remain
 ```
 

@@ -15,9 +15,11 @@ Gmail·Slack·Jira·캘린더·RSS·메모를 매일 모아 중복을 없애고,
 
 메모·위키가 실패하는 진짜 이유는 *읽기·생각하기*가 아니라 **부기(bookkeeping)** — 교차참조 갱신, 중복 정리, 분류, 모순 점검 — 의 부담입니다. 사람이 이걸 못 버텨서 위키를 방치하죠. Lorekeeper는 그 부기를 LLM에게 맡깁니다.
 
+> 📖 **처음 보는 용어들** — **vault**: 마크다운 파일이 모인 폴더(곧 당신의 지식 저장소) · **개념(concept)**: 한 주제당 한 페이지 · **wikilink**: 페이지를 잇는 `[[다른 페이지]]` 링크 · **부기**: 링크·중복·분류를 손으로 갱신하는 그 잡일.
+
 | | |
 |---|---|
-| 📥 **설정 한 번 → 매일 자동** | 8가지 소스에서 어제의 활동·지식을 수집 |
+| 📥 **설정 한 번 → 매일 자동** | 메일·메신저·이슈·일정·피드·메모에서 어제의 활동·지식을 수집 |
 | 🧹 **노이즈 제거** | 중복 차단, 관련 없는 항목 필터, 내 일은 work-log로 자동 분리 |
 | 🧩 **개념 자산화** | 같은 개념은 한 페이지로 수렴(`Vector DB` = `vector-database`), 카테고리·연관관계 정리 |
 | 🔗 **연결되는 지식 그래프** | wikilink·역링크·클러스터로 개념이 서로 이어짐 |
@@ -54,6 +56,14 @@ flowchart LR
 
 ## 빠른 시작 (5분)
 
+> **시작하기 전에 준비물** — 어렵지 않습니다:
+> - 💻 **macOS 또는 Linux** (Windows는 PowerShell 설치 스크립트 제공)
+> - 🤖 **Claude Code** — `/lore-process`가 요약·개념을 채워줍니다 (별도 API 키·과금 없음)
+> - 🔑 **쓰려는 소스의 자격증명만** — 예: Gmail/Drive/Calendar는 Google 로그인, Slack은 토큰
+> - 🗂️ **(선택) Obsidian** — 그래프를 예쁘게 탐색용. 없어도 결과물은 평범한 마크다운입니다
+>
+> 💡 **키 없이 먼저 체험**하고 싶다면 `rss`와 메모 `inbox/`만 켜세요 — 인증이 필요 없어 바로 돌아갑니다.
+
 ```bash
 # 1) 설치 — 바이너리 + 템플릿 + Claude Code 스킬을 한 번에
 curl -fsSL https://raw.githubusercontent.com/junyeong-ai/lorekeeper/main/scripts/install.sh | bash
@@ -84,6 +94,8 @@ lore schedule | crontab -         # config의 cron을 crontab으로
 ## 실제로 어떤 결과가 나오나요?
 
 가상의 시나리오로 따라가 봅니다. AI 엔지니어 **수민**이 RAG 트러블슈팅을 정리한 메모를 vault의 `inbox/`에 떨어뜨립니다.
+
+> 아래 페이지 예시는 **핵심 필드만 발췌**했습니다 — 실제 파일에는 `updated` 같은 관리용 frontmatter도 함께 들어갑니다.
 
 ### 📝 입력 — `inbox/rag-검색-품질.md`
 
@@ -126,7 +138,7 @@ queue: 2 current, 0 stale, 0 missing-target across 2 task(s)
 id: rag-파이프라인-낮은-recall-검색-고치기
 title: "RAG 파이프라인: 낮은 recall 검색 고치기"
 created: 2026-06-13
-tags: ["document", "knowledge"]
+tags: ["document"]
 ---
 
 ## 요약
@@ -229,7 +241,7 @@ flowchart LR
 
 ---
 
-## 소스 (8가지)
+## 소스
 
 | 타입 | 용도 | 인증 |
 |---|---|---|
@@ -240,7 +252,7 @@ flowchart LR
 | `google-calendar` | 일정 + 회의록(Drive 링크 자동 추출) | Google OAuth |
 | `google-drive` | Drive 폴더의 큐레이션 문서 | Google OAuth |
 | `rss` | 벤더 블로그·뉴스 → 개념 (인증 불필요, 다중 피드) | 없음 |
-| `manual` | `inbox/`에 드롭한 파일(md·txt·html) | 없음 |
+| `manual` | `inbox/`에 드롭한 마크다운·텍스트·HTML 파일 | 없음 |
 
 소스 키 = vault의 하위 폴더 이름. 같은 타입을 여러 개 정의할 수 있습니다(예: `team-slack`, `ai-news`). 전체 예시는 [`config.example.yaml`](config.example.yaml).
 
@@ -266,7 +278,7 @@ lore ingest --date 2026-06-01 # 특정 날짜 재실체화(백필/복구)
 lore synthesis weekly         # 주간 합성 + 개인 리뷰 (monthly/quarterly/annual)
 lore schedule | crontab -     # cron 발행
 lore wiki concepts            # 개념 목록
-lore wiki index / log         # 주제별 인덱스 / 시간순 타임라인 재생성
+lore wiki index / log / map   # 주제별 인덱스 / 시간순 타임라인 / 인용 클러스터 맵 재생성
 lore graph lint               # 구조 건강검진(고아·깨진링크·근접중복·…)
 lore graph suggest-links      # 개념 간 관계 후보(Adamic-Adar)
 lore graph cluster            # 토픽 커뮤니티(Louvain)
@@ -281,7 +293,7 @@ lore schema                   # wiki/AGENTS.md(페이지 포맷 스키마) 생�
 
 ## Claude Code 스킬
 
-`lore` 바이너리(결정론)와 짝을 이루는 6개 스킬 — *판단이 필요한* 부분을 Claude Code의 LLM이 담당합니다.
+`lore` 바이너리(결정론)와 짝을 이루는 스킬 — *판단이 필요한* 부분을 Claude Code의 LLM이 담당합니다.
 
 | 스킬 | 하는 일 |
 |---|---|
@@ -322,7 +334,7 @@ irm https://raw.githubusercontent.com/junyeong-ai/lorekeeper/main/scripts/instal
 cargo build --release && ./target/release/lore --help
 ```
 
-설치 플래그: `--version`, `--install-dir`, `--skill {user,project,none}`, `--from-source`, `--yes`, `--dry-run`. 제거: `./scripts/uninstall.sh`.
+설치 플래그: `--version`, `--install-dir`, `--data-dir`, `--skill {user,project,none}`, `--from-source`, `--force`, `--yes`, `--dry-run` (`--help`로 전체 확인). 제거: `./scripts/uninstall.sh`.
 
 ---
 

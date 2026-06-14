@@ -1,8 +1,9 @@
 //! Vault scan: walk markdown files and build [`ScannedPage`] records.
 //!
-//! slug normalization, frontmatter parsing, and wikilink extraction — now live in
-//! `lk-core` (`slugify`, `frontmatter::parse_page`, `wikilink`). This module keeps only
-//! the I/O concerns: filesystem walking (walkdir + rayon) and assembling [`ScannedPage`]s.
+//! The pure domain logic — slug normalization, frontmatter parsing, and wikilink
+//! extraction — lives in `lk-core` (`slugify`, `frontmatter::parse_page`, `wikilink`).
+//! This module keeps only the I/O concerns: filesystem walking (walkdir + rayon) and
+//! assembling [`ScannedPage`]s.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -190,9 +191,17 @@ impl VaultExistence {
     /// Derive the universe from a full-vault page scan. Resolution is done up
     /// front so `linked` holds resolved page ids, not raw target slugs.
     pub fn build(pages: &[ScannedPage], dirs: &VaultDirs) -> Self {
+        // Navigation/catalog meta-files (index.md, log.md, map.md, AGENTS.md) are generated
+        // artifacts, not knowledge nodes: exclude them from the existence universe so their
+        // catalog links (index.md links every page) never mark a concept "linked" — which
+        // would otherwise defeat orphan detection — and so they never resolve as a target.
+        let is_reserved = reserved_page_predicate(Path::new(&dirs.wiki));
         let mut by_filename: HashMap<String, String> = HashMap::with_capacity(pages.len());
         let mut ids = HashSet::with_capacity(pages.len());
         for page in pages {
+            if is_reserved(page.id.as_str()) {
+                continue;
+            }
             ids.insert(page.id.clone());
         }
         // Concept pages claim their filename slug first (a bare `[[name]]` is a
@@ -201,7 +210,9 @@ impl VaultExistence {
         // document, independent of scan order.
         for concept_pass in [true, false] {
             for page in pages {
-                if is_concept_page(&page.path, dirs) != concept_pass {
+                if is_reserved(page.id.as_str())
+                    || is_concept_page(&page.path, dirs) != concept_pass
+                {
                     continue;
                 }
                 let slug = stem_slug(&page.path);
@@ -246,6 +257,9 @@ impl VaultExistence {
             linked: HashSet::new(),
         };
         for page in pages {
+            if is_reserved(page.id.as_str()) {
+                continue;
+            }
             for target in &page.outgoing {
                 if let Some(target_id) = existence.resolve(target).map(str::to_owned)
                     && target_id != page.id
@@ -342,8 +356,9 @@ pub fn resolve_wikilink_target(raw: &str) -> String {
     }
 }
 
-/// Page ids of Lorekeeper's reserved wiki meta files (the index catalog and the
-/// AGENTS.md schema doc) under `wiki_dir`, e.g. `wiki/index`, `wiki/agents`.
+/// Page ids of Lorekeeper's reserved wiki meta files (the index catalog, the time log,
+/// the navigation map, and the AGENTS.md schema doc) under `wiki_dir`, e.g. `wiki/index`,
+/// `wiki/log`, `wiki/map`, `wiki/agents`.
 /// Single-sourced from [`lk_core::vault_path::RESERVED_WIKI_FILES`] so the graph's
 /// orphan / index-drift checks exclude exactly what the index builder skips.
 pub fn reserved_page_ids(wiki_dir: &Path) -> Vec<String> {
@@ -357,6 +372,15 @@ pub fn reserved_page_ids(wiki_dir: &Path) -> Vec<String> {
             path_slug(&wiki_dir.join(stem))
         })
         .collect()
+}
+
+/// Returns a predicate matching any reserved navigation/catalog meta page
+/// (`index.md`/`log.md`/`map.md`/`AGENTS.md`) that must stay out of the analysis graph
+/// (nodes AND edges): they link every page, so as nodes they would be spurious mega-hubs
+/// that merge separate communities and mask real orphans.
+pub fn reserved_page_predicate(wiki_dir: &Path) -> impl Fn(&str) -> bool {
+    let ids: HashSet<String> = reserved_page_ids(wiki_dir).into_iter().collect();
+    move |id: &str| ids.contains(id)
 }
 
 /// Slug id for a vault-relative path: drop the extension, normalize separators to `/`,
@@ -385,6 +409,20 @@ fn build_exclude_set(patterns: &[String]) -> Result<GlobSet, GraphError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reserved_predicate_excludes_only_meta_files() {
+        let is_reserved = reserved_page_predicate(Path::new("wiki"));
+        assert!(is_reserved("wiki/index"));
+        assert!(is_reserved("wiki/log"));
+        assert!(is_reserved("wiki/map"));
+        assert!(is_reserved("wiki/agents"));
+        // Real knowledge nodes are NOT reserved.
+        assert!(!is_reserved("wiki/concepts/rag"));
+        assert!(!is_reserved("wiki/documents/report"));
+        // A concept whose slug merely contains "index" is not a meta page.
+        assert!(!is_reserved("wiki/concepts/index-fund"));
+    }
 
     #[test]
     fn resolve_wikilink_target_bare_vs_path() {

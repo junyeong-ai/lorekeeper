@@ -15,7 +15,7 @@ pub struct ClassifyRule {
     pub keywords: Vec<String>,
     /// Optional EXPLICIT bridge to the performance taxonomy: when set, a matching
     /// event also gets this `performance_category`, contributing to the work-log /
-    /// review distribution. Must be one of `performance.performance_categories`
+    /// review distribution. Must be one of `personal.performance_categories`
     /// (validated at load). Omitted = this rule is grouping-only and the event's
     /// performance category falls back to the per-source-type map. This keeps the two
     /// taxonomies orthogonal while making the content→performance link visible and
@@ -35,8 +35,13 @@ pub struct Config {
     /// sources must be ingested in one run for it to be complete.
     #[serde(default)]
     pub ingest: IngestConfig,
+    /// The personal-productivity module: work-log, performance reviews, and the
+    /// contribution taxonomy. ABSENT (the default) means a pure, domain-neutral knowledge
+    /// engine — no work-log, no reviews, no `is_personal`, no performance categories. Present
+    /// opts a single knowledge worker's own activity into tracking. The core never depends
+    /// on it; every personal behavior is gated on `config.personal.is_some()`.
     #[serde(default)]
-    pub performance: PerformanceConfig,
+    pub personal: Option<PersonalConfig>,
     #[serde(default)]
     pub synthesis: SynthesisConfig,
     #[serde(default)]
@@ -122,17 +127,28 @@ impl Config {
                         rule.category
                     )));
                 }
-                // The performance bridge must target a real performance category, or
-                // the work-log distribution would silently drop the rule's events into
-                // "uncategorized" — the same fail-fast contract as the source maps.
-                if let Some(pc) = &rule.performance_category
-                    && !self.performance.performance_categories.contains(pc)
-                {
-                    return Err(ConfigError::Validation(format!(
-                        "sources.{id}.classify: rule '{}' performance_category '{pc}' is not in \
-                         performance.performance_categories",
-                        rule.category
-                    )));
+                // The performance bridge targets the personal contribution taxonomy, so it
+                // requires a `personal:` section AND a real category there — else the rule's
+                // events would silently fall into "uncategorized". Fail-fast on both.
+                if let Some(pc) = &rule.performance_category {
+                    match &self.personal {
+                        None => {
+                            return Err(ConfigError::Validation(format!(
+                                "sources.{id}.classify: rule '{}' sets performance_category \
+                                 '{pc}' but there is no `personal:` section — add one (with this \
+                                 category in personal.performance_categories) or drop the bridge",
+                                rule.category
+                            )));
+                        }
+                        Some(personal) if !personal.performance_categories.contains(pc) => {
+                            return Err(ConfigError::Validation(format!(
+                                "sources.{id}.classify: rule '{}' performance_category '{pc}' is \
+                                 not in personal.performance_categories",
+                                rule.category
+                            )));
+                        }
+                        Some(_) => {}
+                    }
                 }
                 // Reachability proof: rules are first-match-wins, so this rule is dead
                 // config iff every event it would match is claimed by an earlier rule.
@@ -163,6 +179,32 @@ impl Config {
                     )));
                 }
                 earlier.extend(lowered.into_iter().map(|kw| (rule.category.as_str(), kw)));
+            }
+
+            let mut seen_highlight: Vec<&str> = Vec::new();
+            for h in &sc.highlights {
+                if h.category.trim().is_empty() || h.label.trim().is_empty() {
+                    return Err(ConfigError::Validation(format!(
+                        "sources.{id}.highlights: each entry needs a non-blank category and label"
+                    )));
+                }
+                if seen_highlight.contains(&h.category.as_str()) {
+                    return Err(ConfigError::Validation(format!(
+                        "sources.{id}.highlights: duplicate category '{}'",
+                        h.category
+                    )));
+                }
+                // A highlight surfaces events a `classify` rule routed into `category`; a
+                // category no rule produces renders a permanently-empty section, so reject
+                // the typo at load instead of failing silently.
+                if !sc.classify.iter().any(|r| r.category == h.category) {
+                    return Err(ConfigError::Validation(format!(
+                        "sources.{id}.highlights: category '{}' is not produced by any \
+                         classify rule on this source",
+                        h.category
+                    )));
+                }
+                seen_highlight.push(&h.category);
             }
         }
 
@@ -236,12 +278,6 @@ impl Config {
                 "graph.cluster.suggest_min_shared_neighbors must be >= 1".into(),
             ));
         }
-        if self.concepts.index_split_threshold == 0 {
-            return Err(ConfigError::Validation(
-                "concepts.index_split_threshold must be >= 1".into(),
-            ));
-        }
-
         if self.maintenance.retention_days <= 0 {
             return Err(ConfigError::Validation(
                 "maintenance.retention_days must be >= 1".into(),
@@ -256,24 +292,29 @@ impl Config {
             }
         }
 
-        for src_id in self.performance.source_category_map.keys() {
-            if !self.sources.contains_key(src_id) {
-                return Err(ConfigError::Validation(format!(
-                    "performance.source_category_map references unknown source: '{src_id}'"
-                )));
+        if let Some(personal) = &self.personal {
+            for src_id in personal
+                .tracked_sources
+                .iter()
+                .chain(personal.source_category_map.keys())
+            {
+                if !self.sources.contains_key(src_id) {
+                    return Err(ConfigError::Validation(format!(
+                        "personal references unknown source: '{src_id}'"
+                    )));
+                }
             }
-        }
-        for category in self
-            .performance
-            .source_category_map
-            .values()
-            .chain(self.performance.source_type_category_map.values())
-        {
-            if !self.performance.performance_categories.contains(category) {
-                return Err(ConfigError::Validation(format!(
-                    "category '{category}' in source mapping is not in \
-                     performance.performance_categories"
-                )));
+            for category in personal
+                .source_category_map
+                .values()
+                .chain(personal.source_type_category_map.values())
+            {
+                if !personal.performance_categories.contains(category) {
+                    return Err(ConfigError::Validation(format!(
+                        "category '{category}' in personal source mapping is not in \
+                         personal.performance_categories"
+                    )));
+                }
             }
         }
 
@@ -281,33 +322,22 @@ impl Config {
             validate_cron(sched)
                 .map_err(|e| ConfigError::Validation(format!("ingest.schedule: {e}")))?;
         }
-        for (period, sched) in self.synthesis.schedules() {
-            validate_cron(sched).map_err(|e| {
-                ConfigError::Validation(format!("synthesis.{period}.schedule: {e}"))
-            })?;
+        if self.synthesis.weekly.enabled
+            && let Some(sched) = &self.synthesis.weekly.schedule
+        {
+            validate_cron(sched)
+                .map_err(|e| ConfigError::Validation(format!("synthesis.weekly.schedule: {e}")))?;
+        }
+        if let Some(personal) = &self.personal {
+            for (period, sched) in personal.review_schedules() {
+                validate_cron(sched).map_err(|e| {
+                    ConfigError::Validation(format!("personal.{period}.schedule: {e}"))
+                })?;
+            }
         }
         if let Some(ref sched) = self.maintenance.schedule {
             validate_cron(sched)
                 .map_err(|e| ConfigError::Validation(format!("maintenance.schedule: {e}")))?;
-        }
-
-        // A scheduled personal-review period can never run while the performance
-        // subsystem is off; reject the contradiction rather than emit a no-op cron.
-        // (Weekly is exempt — its cross-source themes run independently of performance.)
-        if !self.performance.enabled {
-            for (period, cfg) in [
-                ("monthly", &self.synthesis.monthly),
-                ("quarterly", &self.synthesis.quarterly),
-                ("annual", &self.synthesis.annual),
-            ] {
-                if cfg.enabled && cfg.schedule.is_some() {
-                    return Err(ConfigError::Validation(format!(
-                        "synthesis.{period} is scheduled but performance.enabled is false — \
-                         the review can never run; enable performance or clear \
-                         synthesis.{period}.schedule"
-                    )));
-                }
-            }
         }
 
         {
@@ -344,12 +374,7 @@ impl Config {
         }
 
         for dir in &self.graph.scope.dirs {
-            let s = dir.to_string_lossy();
-            if s.is_empty() || dir.is_absolute() || s.contains("..") {
-                return Err(ConfigError::Validation(format!(
-                    "graph.scope.dirs entry '{s}' must be a relative path without '..'"
-                )));
-            }
+            validate_relative_vault_path("graph.scope.dirs entry", &dir.to_string_lossy())?;
         }
 
         Ok(())
@@ -381,16 +406,9 @@ fn validate_cron_field(field: &str, min: u8, max: u8) -> Result<(), String> {
     if field == "*" {
         return Ok(());
     }
-    if let Some(step_str) = field.strip_prefix("*/") {
-        let step: u8 = step_str
-            .parse()
-            .map_err(|_| format!("invalid step: '{field}'"))?;
-        if step == 0 {
-            return Err(format!("step cannot be zero: '{field}'"));
-        }
-        return Ok(());
-    }
-
+    // One code path for every member: a plain `*/n` is just a single-element list whose
+    // base is `*`, handled below — no separate whole-field branch (which used to mis-parse
+    // a list like `*/15,30` by treating `15,30` as one step number).
     for part in field.split(',') {
         let (base, step_part) = match part.split_once('/') {
             Some((b, s)) => (b, Some(s)),
@@ -402,7 +420,12 @@ fn validate_cron_field(field: &str, min: u8, max: u8) -> Result<(), String> {
                 return Err(format!("step cannot be zero: '{part}'"));
             }
         }
-        if let Some((start_str, end_str)) = base.split_once('-') {
+        if base == "*" {
+            // `*` (optionally stepped, e.g. `*/15`) is a valid list member: the evaluator
+            // (`crate::cron::parse_field`) expands `*` over [min,max] inside a comma list,
+            // so the validator must accept the same grammar instead of parsing `*` as a
+            // number (which would reject a schedule the engine can actually run).
+        } else if let Some((start_str, end_str)) = base.split_once('-') {
             let start: u8 = start_str
                 .parse()
                 .map_err(|_| format!("invalid range start: '{part}'"))?;
@@ -517,7 +540,7 @@ impl VaultDirs {
             ("wiki", &self.wiki),
         ];
         for (name, value) in fields {
-            validate_vault_dir(name, value)?;
+            validate_relative_vault_path(&format!("vault.dirs.{name}"), value)?;
         }
         Ok(())
     }
@@ -549,22 +572,25 @@ impl VaultDirs {
     }
 }
 
-fn validate_vault_dir(field: &str, value: &str) -> Result<(), ConfigError> {
+/// Validate that `value` is a non-empty relative path confined to the vault — no `..`,
+/// absolute, or drive-prefixed segments. `label` is the full config-key prefix for error
+/// messages. The single source for the vault-relative-path guard, shared by `vault.dirs.*`
+/// and `graph.scope.dirs` so the two can't drift to different (e.g. substring-vs-component)
+/// `..` checks.
+fn validate_relative_vault_path(label: &str, value: &str) -> Result<(), ConfigError> {
     use std::path::{Component, Path};
 
     if value.is_empty() {
         return Err(ConfigError::Validation(format!(
-            "vault.dirs.{field} must not be empty"
+            "{label} must not be empty"
         )));
     }
-    let path = Path::new(value);
-    for component in path.components() {
+    for component in Path::new(value).components() {
         match component {
-            Component::Normal(_) => {}
-            Component::CurDir => {}
+            Component::Normal(_) | Component::CurDir => {}
             _ => {
                 return Err(ConfigError::Validation(format!(
-                    "vault.dirs.{field} ('{value}') must be a relative path inside the vault \
+                    "{label} ('{value}') must be a relative path inside the vault \
                      (no '..', absolute, or drive-prefixed segments)"
                 )));
             }
@@ -609,8 +635,24 @@ pub struct SourceConfig {
     /// aggregator) contributes focused knowledge instead of off-topic noise.
     #[serde(default)]
     pub focus: Option<String>,
+    /// Daily-page highlight sections: each surfaces the events whose `Event::category`
+    /// matches `category` (set by this source's `classify` rules) under its own `label`
+    /// heading, above the full event list. The events still render in the full list, so a
+    /// highlight never hides anything. Empty (the default) renders straight from the event
+    /// list with no extra sections — no per-source-type branching in the core.
     #[serde(default)]
-    pub track_personal: bool,
+    pub highlights: Vec<HighlightSection>,
+}
+
+/// A daily-page highlight section: events classified into `category` (by this source's
+/// `classify` rules) are surfaced under `label` above the full event list.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HighlightSection {
+    /// The `Event::category` value (produced by a `classify` rule) to bucket here.
+    pub category: String,
+    /// The section heading rendered for this bucket.
+    pub label: String,
 }
 
 impl SourceConfig {
@@ -635,7 +677,22 @@ fn empty_object() -> serde_json::Value {
     serde_json::Value::Object(Default::default())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+// `EnumIter` lets the lk-vault template guard test assert every source type's
+// `descriptor().default_template` is embedded — the one part of the "add a source type"
+// checklist the compiler can't force (the same drift-proof pattern as `lk_queue::TargetKind`).
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    strum::EnumIter,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum SourceType {
     GoogleDrive,
@@ -689,12 +746,6 @@ pub struct SourceDescriptor {
     /// Type-level fallback Jinja template. A user `{source-id}.md.jinja` overrides it at
     /// render time.
     pub default_template: &'static str,
-    /// Categories surfaced as dedicated highlight sections ABOVE the full event list. For
-    /// each entry the renderer exposes `{category}_items` (events whose `Event::category`
-    /// matches) and `{category}_count`. Every event still renders in the full list, so a
-    /// category outside this set is highlighted-or-not, never hidden. `&[]` renders
-    /// straight from the event list and pays for no filtering — no per-type branching.
-    pub highlight_categories: &'static [&'static str],
     /// Whether items read as messages or events (daily-page heading terminology).
     pub item_kind: ItemKind,
 }
@@ -707,55 +758,41 @@ impl SourceType {
             SourceType::GoogleDrive => SourceDescriptor {
                 streaming: false,
                 default_template: "google-drive.md.jinja",
-                highlight_categories: &[],
                 item_kind: ItemKind::Event,
             },
             SourceType::Gmail => SourceDescriptor {
                 streaming: false,
                 default_template: "gmail.md.jinja",
-                highlight_categories: &[
-                    "action_required",
-                    "decisions",
-                    "project_updates",
-                    "knowledge_sharing",
-                    "meeting_followup",
-                ],
                 item_kind: ItemKind::Event,
             },
             SourceType::SlackChannel => SourceDescriptor {
                 streaming: false,
                 default_template: "slack-channel.md.jinja",
-                highlight_categories: &[],
                 item_kind: ItemKind::Message,
             },
             SourceType::SlackSearch => SourceDescriptor {
                 streaming: false,
                 default_template: "slack-search.md.jinja",
-                highlight_categories: &[],
                 item_kind: ItemKind::Message,
             },
             SourceType::Jira => SourceDescriptor {
                 streaming: false,
                 default_template: "jira.md.jinja",
-                highlight_categories: &[],
                 item_kind: ItemKind::Event,
             },
             SourceType::GoogleCalendar => SourceDescriptor {
                 streaming: false,
                 default_template: "google-calendar.md.jinja",
-                highlight_categories: &[],
                 item_kind: ItemKind::Event,
             },
             SourceType::Rss => SourceDescriptor {
                 streaming: true,
                 default_template: "rss.md.jinja",
-                highlight_categories: &[],
                 item_kind: ItemKind::Event,
             },
             SourceType::Manual => SourceDescriptor {
                 streaming: false,
                 default_template: "document.md.jinja",
-                highlight_categories: &[],
                 item_kind: ItemKind::Event,
             },
         }
@@ -772,10 +809,19 @@ impl std::fmt::Display for SourceType {
     }
 }
 
+/// The personal-productivity module (gated behind `Config.personal`). Owns the
+/// contribution taxonomy, which sources feed the work-log, and the monthly/quarterly/annual
+/// review schedules. Its mere PRESENCE enables the subsystem — there is no `enabled` flag,
+/// because an absent module is the domain-neutral default.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct PerformanceConfig {
-    pub enabled: bool,
+pub struct PersonalConfig {
+    /// Source IDs whose own-authored events feed the work-log and reviews. A source not
+    /// listed here never contributes to personal pages — its knowledge still flows to the
+    /// concept graph and daily pages. This is the single place "which activity is mine" is
+    /// declared (the core `SourceConfig` carries no personal concept).
+    pub tracked_sources: Vec<String>,
+    /// The contribution taxonomy: the work-log / review category buckets.
     pub performance_categories: Vec<String>,
     /// Per-source-ID category override (highest priority).
     pub source_category_map: BTreeMap<String, String>,
@@ -784,9 +830,19 @@ pub struct PerformanceConfig {
     /// Label used for events that match no category. When `None`, falls back
     /// to the locale-appropriate default via `uncategorized_label()`.
     pub uncategorized_label: Option<String>,
+    /// Monthly/quarterly/annual review enable + schedule. The weekly review rides the
+    /// weekly-synthesis run (`lore synthesis weekly`), so it has no separate schedule here.
+    pub monthly: PersonalReviewConfig,
+    pub quarterly: PersonalReviewConfig,
+    pub annual: PersonalReviewConfig,
 }
 
-impl PerformanceConfig {
+impl PersonalConfig {
+    /// Whether this source's own-authored events feed the work-log / reviews.
+    pub fn is_tracked(&self, source_id: &str) -> bool {
+        self.tracked_sources.iter().any(|s| s == source_id)
+    }
+
     /// Resolve the uncategorized label, falling back to the locale default.
     pub fn uncategorized_label(&self, locale: crate::i18n::Locale) -> &str {
         self.uncategorized_label
@@ -794,7 +850,7 @@ impl PerformanceConfig {
             .unwrap_or(locale.strings().uncategorized)
     }
 
-    /// Resolve the performance category for an event. Precedence, most to least
+    /// Resolve the contribution category for an event. Precedence, most to least
     /// specific:
     /// 1. `source_category_map[source_id]` — an explicit per-source intent.
     /// 2. `performance_category` — the event's own content signal, set by a
@@ -822,12 +878,28 @@ impl PerformanceConfig {
         }
         None
     }
+
+    /// `(period_name, cron)` for each enabled, scheduled personal review.
+    pub fn review_schedules(&self) -> impl Iterator<Item = (&'static str, &String)> {
+        let entries: [(&'static str, &PersonalReviewConfig); 3] = [
+            ("monthly", &self.monthly),
+            ("quarterly", &self.quarterly),
+            ("annual", &self.annual),
+        ];
+        entries.into_iter().filter_map(|(name, cfg)| {
+            if cfg.enabled {
+                cfg.schedule.as_ref().map(|s| (name, s))
+            } else {
+                None
+            }
+        })
+    }
 }
 
-impl Default for PerformanceConfig {
+impl Default for PersonalConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            tracked_sources: vec![],
             performance_categories: vec![
                 "project-delivery".into(),
                 "technical-leadership".into(),
@@ -838,44 +910,18 @@ impl Default for PerformanceConfig {
             source_category_map: BTreeMap::new(),
             source_type_category_map: BTreeMap::new(),
             uncategorized_label: None,
+            monthly: PersonalReviewConfig::default(),
+            quarterly: PersonalReviewConfig::default(),
+            annual: PersonalReviewConfig::default(),
         }
     }
 }
 
+/// Cross-source synthesis (domain-neutral knowledge synthesis, NOT personal review).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SynthesisConfig {
     pub weekly: WeeklySynthesisConfig,
-    pub monthly: PersonalReviewConfig,
-    pub quarterly: PersonalReviewConfig,
-    pub annual: PersonalReviewConfig,
-}
-
-impl SynthesisConfig {
-    /// Iterator of `(period_name, cron_expression)` for enabled synthesis periods only.
-    pub fn schedules(&self) -> impl Iterator<Item = (&'static str, &String)> {
-        let entries: [(&'static str, bool, Option<&String>); 4] = [
-            ("weekly", self.weekly.enabled, self.weekly.schedule.as_ref()),
-            (
-                "monthly",
-                self.monthly.enabled,
-                self.monthly.schedule.as_ref(),
-            ),
-            (
-                "quarterly",
-                self.quarterly.enabled,
-                self.quarterly.schedule.as_ref(),
-            ),
-            ("annual", self.annual.enabled, self.annual.schedule.as_ref()),
-        ];
-        entries.into_iter().filter_map(|(name, enabled, sched)| {
-            if enabled {
-                sched.map(|s| (name, s))
-            } else {
-                None
-            }
-        })
-    }
 }
 
 /// Weekly synthesis carries the cross-source themes page on top of the weekly review
@@ -947,23 +993,10 @@ pub enum LlmProvider {
     Noop,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ConceptConfig {
     pub categories: Vec<ConceptCategory>,
-    /// When the total concept count exceeds this threshold, the wiki index
-    /// splits into per-category sub-pages (`wiki/index/{category}.md`).
-    /// Below the threshold, all concepts render inline in `wiki/index.md`.
-    pub index_split_threshold: usize,
-}
-
-impl Default for ConceptConfig {
-    fn default() -> Self {
-        Self {
-            categories: Vec::new(),
-            index_split_threshold: 100,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1137,7 +1170,7 @@ mod tests {
             labels: vec![],
             extract_concepts: true,
             focus: f.map(str::to_owned),
-            track_personal: false,
+            highlights: vec![],
         };
         assert_eq!(mk(None).normalized_focus(), None);
         assert_eq!(mk(Some("")).normalized_focus(), None);
@@ -1201,6 +1234,26 @@ sources:
 "#;
         let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(config.validate().is_err(), "'..' segment must be rejected");
+    }
+
+    #[test]
+    fn graph_scope_dirs_shares_the_vault_dir_path_guard() {
+        // `graph.scope.dirs` and `vault.dirs.*` go through the SAME component-based guard, so
+        // a real `..` SEGMENT is rejected while a name merely CONTAINING `..` is allowed (the
+        // old substring check wrongly rejected the latter).
+        let base = |scope: &str| {
+            format!(
+                "vault:\n  root: /tmp/vault\nidentity:\n  name: t\n  email: t@t.com\n\
+                 sources:\n  s1:\n    type: gmail\ngraph:\n  scope:\n    dirs: [{scope}]\n"
+            )
+        };
+        let bad: Config = serde_yaml_ng::from_str(&base("\"../escape\"")).unwrap();
+        assert!(bad.validate().is_err(), "'..' segment must be rejected");
+        let ok: Config = serde_yaml_ng::from_str(&base("\"notes..old\"")).unwrap();
+        assert!(
+            ok.validate().is_ok(),
+            "a name merely containing '..' (no parent segment) must be allowed"
+        );
     }
 
     #[test]
@@ -1395,7 +1448,7 @@ ingest:
     }
 
     #[test]
-    fn schedules_excludes_disabled() {
+    fn review_schedules_excludes_disabled() {
         let yaml = r#"
 vault:
   root: /tmp/vault
@@ -1405,18 +1458,23 @@ identity:
 sources:
   s1:
     type: gmail
-synthesis:
-  weekly:
-    enabled: false
-    schedule: "0 8 * * 1"
+personal:
   monthly:
     enabled: true
     schedule: "0 8 1 * *"
+  quarterly:
+    enabled: false
+    schedule: "0 8 1 1 *"
 "#;
         let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         config.validate().unwrap();
-        let names: Vec<_> = config.synthesis.schedules().map(|(n, _)| n).collect();
-        assert_eq!(names, vec!["monthly"], "disabled weekly should be excluded");
+        let personal = config.personal.as_ref().unwrap();
+        let names: Vec<_> = personal.review_schedules().map(|(n, _)| n).collect();
+        assert_eq!(
+            names,
+            vec!["monthly"],
+            "disabled quarterly should be excluded"
+        );
     }
 
     #[test]
@@ -1467,6 +1525,19 @@ ingest:
     }
 
     #[test]
+    fn validate_accepts_stepped_star_in_a_comma_list() {
+        // `0,*/15` is valid in the evaluator (`cron::parse_field` expands `*` over the
+        // field range inside a comma list), so the validator must accept it too — the two
+        // grammars are single-sourced by contract. Regression for a validator that parsed
+        // the list member `*/15`'s base `*` as a number and rejected a runnable schedule.
+        assert!(validate_cron_field("*/15", 0, 59).is_ok()); // whole-field step (single member)
+        assert!(validate_cron_field("0,*/15", 0, 59).is_ok());
+        assert!(validate_cron_field("*/15,30", 0, 59).is_ok()); // `*/n` as a list member
+        assert!(validate_cron_field("*/0", 0, 59).is_err()); // zero step still rejected
+        assert!(validate_cron_field("99", 0, 59).is_err()); // out-of-range still rejected
+    }
+
+    #[test]
     fn validate_rejects_unknown_synthesis_source() {
         let yaml = r#"
 vault:
@@ -1486,7 +1557,9 @@ synthesis:
     }
 
     #[test]
-    fn validate_rejects_scheduled_review_when_performance_disabled() {
+    fn validate_rejects_performance_bridge_without_personal() {
+        // A classify `performance_category` bridge targets the personal taxonomy, so it is
+        // a contradiction with no `personal:` section — reject rather than silently no-op.
         let yaml = r#"
 vault:
   root: /tmp/vault
@@ -1496,16 +1569,15 @@ identity:
 sources:
   s1:
     type: gmail
-performance:
-  enabled: false
-synthesis:
-  monthly:
-    schedule: "0 8 1 * *"
+    classify:
+      - category: shipped
+        keywords: ["deployed"]
+        performance_category: project-delivery
 "#;
         let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(
             config.validate().is_err(),
-            "scheduling a personal review with performance disabled must be rejected"
+            "a performance_category bridge with no `personal:` section must be rejected"
         );
     }
 
@@ -1520,7 +1592,7 @@ identity:
 sources:
   s1:
     type: jira
-performance:
+personal:
   source_category_map:
     s1: nonexistent-category
 "#;
@@ -1529,8 +1601,56 @@ performance:
     }
 
     #[test]
+    fn validate_rejects_highlight_for_unproduced_category() {
+        // A highlight surfaces events a classify rule routed into `category`; a highlight
+        // for a category no rule produces would render a permanently-empty section, so it
+        // must fail at load rather than silently.
+        let yaml = r#"
+vault:
+  root: /tmp/vault
+identity:
+  name: test
+  email: test@test.com
+sources:
+  s1:
+    type: gmail
+    classify:
+      - category: action_required
+        keywords: ["deadline"]
+    highlights:
+      - { category: never_classified, label: "Oops" }
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(
+            config.validate().is_err(),
+            "a highlight category with no classify rule must be rejected"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_highlight_backed_by_classify_rule() {
+        let yaml = r#"
+vault:
+  root: /tmp/vault
+identity:
+  name: test
+  email: test@test.com
+sources:
+  s1:
+    type: gmail
+    classify:
+      - category: action_required
+        keywords: ["deadline"]
+    highlights:
+      - { category: action_required, label: "Action Required" }
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
     fn resolve_category_prefers_source_id() {
-        let mut perf = PerformanceConfig::default();
+        let mut perf = PersonalConfig::default();
         perf.source_category_map
             .insert("my-tasks".into(), "innovation".into());
         let cat = perf.resolve_category("my-tasks", SourceType::Jira, None);
@@ -1539,7 +1659,7 @@ performance:
 
     #[test]
     fn resolve_category_falls_back_to_source_type() {
-        let mut perf = PerformanceConfig::default();
+        let mut perf = PersonalConfig::default();
         perf.source_type_category_map
             .insert(SourceType::Jira, "project-delivery".into());
         let cat = perf.resolve_category("other-jira", SourceType::Jira, None);
@@ -1551,7 +1671,7 @@ performance:
         // A `performance_category` from a classify-rule bridge must win over the
         // coarse per-source-type default: a Jira issue the content marks as
         // `innovation` is innovation, not the blanket "all Jira = project-delivery".
-        let mut perf = PerformanceConfig::default();
+        let mut perf = PersonalConfig::default();
         perf.source_type_category_map
             .insert(SourceType::Jira, "project-delivery".into());
         assert_eq!(

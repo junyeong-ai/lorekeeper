@@ -144,7 +144,13 @@ impl Pipeline {
                 return Ok(empty_result(source_id));
             }
             classify::assign_labels(&mut events, &config.labels);
-            classify::assign_personal(&mut events, config.track_personal);
+            classify::assign_personal(
+                &mut events,
+                self.ctx
+                    .personal
+                    .as_ref()
+                    .is_some_and(|p| p.is_tracked(source_id)),
+            );
             classify::classify_by_keywords(&mut events, &config.classify);
             return self.plan_documents(source_id, config, events).await;
         }
@@ -179,7 +185,13 @@ impl Pipeline {
         // log stores pre-classification, pre-refine events: the source of truth, untouched
         // by the LLM, so a re-render always feeds refine raw text.
         classify::assign_labels(&mut events, &config.labels);
-        classify::assign_personal(&mut events, config.track_personal);
+        classify::assign_personal(
+            &mut events,
+            self.ctx
+                .personal
+                .as_ref()
+                .is_some_and(|p| p.is_tracked(source_id)),
+        );
         classify::classify_by_keywords(&mut events, &config.classify);
 
         let mut by_date: BTreeMap<jiff::civil::Date, Vec<usize>> = BTreeMap::new();
@@ -354,13 +366,13 @@ impl Pipeline {
                 set.into_iter().collect()
             };
 
-            // `refine_events`/`concepts` are pre-stamped with the current-input hash
-            // `*` keys are pre-stamped with the current input hash (the stale-task
-            // reference). A `*_done` completion marker is valid ONLY for the input it
-            // was stamped against, so emit it only on a cache hit — where `lookup`
-            // proved it equals the current hash. A miss drops it (the skill re-stamps
-            // after processing), so a stale marker can never ride a changed-input render
-            // forward and later false-hit on a revert to the earlier input.
+            // The `summary`/`refine_events`/`concepts` input keys are pre-stamped with the
+            // current-input hash (the stale-task reference). A `*_done` completion marker is
+            // valid ONLY for the input it was stamped against, so emit it only on a cache
+            // hit — where `lookup` proved it equals the current hash. A miss drops it (the
+            // skill re-stamps after processing), so a stale marker can never ride a
+            // changed-input render forward and later false-hit on a revert to the earlier
+            // input.
             let summary_done = summary_decision
                 .cached
                 .then_some(summary_decision.hash.as_str());
@@ -391,6 +403,7 @@ impl Pipeline {
                     summary: &summary,
                     concepts: &concept_names,
                     extract_concepts: config.extract_concepts,
+                    highlights: &config.highlights,
                     locale: self.ctx.locale,
                     llm_inputs,
                 },

@@ -285,11 +285,11 @@ fn deslug(slug: &str) -> String {
 ///    each other, so signature (1) alone misses them and the near-duplicate
 ///    lint would false-fire on every adjacent model generation.
 fn is_version_variant(a: &str, b: &str) -> bool {
-    prefix_version_variant(a, b) || sibling_version_variant(a, b)
+    is_prefix_version_variant(a, b) || is_sibling_version_variant(a, b)
 }
 
 /// Signature (1): one slug is the other extended by a pure version suffix.
-fn prefix_version_variant(a: &str, b: &str) -> bool {
+fn is_prefix_version_variant(a: &str, b: &str) -> bool {
     let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
     if short == long || !long.starts_with(short) {
         return false;
@@ -322,7 +322,7 @@ fn prefix_version_variant(a: &str, b: &str) -> bool {
 }
 
 /// Signature (2): both slugs end in a version token and share an identical base.
-fn sibling_version_variant(a: &str, b: &str) -> bool {
+fn is_sibling_version_variant(a: &str, b: &str) -> bool {
     match (version_split(a), version_split(b)) {
         (Some((base_a, ver_a)), Some((base_b, ver_b))) => base_a == base_b && ver_a != ver_b,
         _ => false,

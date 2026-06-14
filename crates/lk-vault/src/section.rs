@@ -134,7 +134,9 @@ pub fn set_frontmatter_field(content: &str, key: &str, value: &str) -> String {
     let mut first_line = true;
     let field_prefix = format!("{key}:");
     for line in body.split_inclusive('\n') {
-        let is_fence = line.strip_suffix('\n').unwrap_or(line).trim_end() == "---";
+        // Delimiter recognition is single-sourced with `parse_page` so the two can't
+        // disagree on what closes a frontmatter block (e.g. trailing-whitespace tolerance).
+        let is_fence = lk_core::frontmatter::is_delimiter_line(line);
         // The opening fence must be the document's FIRST line — same rule as
         // `frontmatter::parse_page` — so a body thematic break (`---`) in a page with no
         // frontmatter is never mistaken for a frontmatter opener.
@@ -208,6 +210,34 @@ mod tests {
         let once = set_frontmatter_field(doc, "h", "abc");
         let twice = set_frontmatter_field(&once, "h", "abc");
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn set_frontmatter_field_handles_crlf_delimiters() {
+        // `set_frontmatter_field` scans raw bytes line-by-line, so the shared
+        // `is_delimiter_line` must recognize a CRLF (`---\r\n`) delimiter — otherwise a
+        // Windows/`autocrlf`-edited page's frontmatter block is never found and the update
+        // silently no-ops inside what looks like body text. Regression guard for that.
+        let doc = "---\r\nid: x\r\nsource_count: 1\r\n---\r\n\r\n# X\r\n";
+        let out = set_frontmatter_field(doc, "source_count", "9");
+        // The field was updated INSIDE the frontmatter block (not appended/ignored), and the
+        // body survives — i.e. the CRLF delimiters were recognized.
+        assert!(
+            out.contains("source_count: 9"),
+            "field must be updated: {out:?}"
+        );
+        assert!(
+            !out.contains("source_count: 1"),
+            "old value must be gone: {out:?}"
+        );
+        assert!(out.contains("# X"), "body must survive: {out:?}");
+        let page = lk_core::frontmatter::parse_page(&out).unwrap();
+        assert_eq!(
+            page.frontmatter
+                .get("source_count")
+                .and_then(|v| v.as_i64()),
+            Some(9)
+        );
     }
 
     #[test]

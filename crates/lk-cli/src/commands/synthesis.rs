@@ -34,8 +34,11 @@ pub enum Period {
     },
     /// Personal annual performance review
     Annual {
+        // `i16` matches `jiff::civil::Date::year()` and `try_annual_review`'s domain, so an
+        // out-of-range `--year` is rejected by clap at parse time rather than silently
+        // truncated by an `as i16` downcast.
         #[arg(long, conflicts_with = "previous")]
-        year: Option<i32>,
+        year: Option<i16>,
         /// Synthesize the just-completed period (last year)
         #[arg(long)]
         previous: bool,
@@ -62,12 +65,14 @@ pub async fn run(opts: &super::GlobalOptions, period: Period) -> miette::Result<
     // buffer before ANY write happens. This decouples buffering from page writes:
     // if a write fails partway, we abort BEFORE flushing, so the buffered tasks are
     // dropped consistently — the same recovery story as `lore ingest`.
-    let perf_on = config.performance.enabled;
+    let personal_on = config.personal.is_some();
     let outputs: Vec<lk_pipeline::RenderResult> = match period {
-        // The personal-review periods are the performance subsystem; report the real
+        // The personal-review periods belong to the personal module; report the real
         // reason rather than letting the Synthesizer's empty result read as "no data".
-        Period::Monthly { .. } | Period::Quarterly { .. } | Period::Annual { .. } if !perf_on => {
-            eprintln!("Performance reviews are disabled (performance.enabled: false).");
+        Period::Monthly { .. } | Period::Quarterly { .. } | Period::Annual { .. }
+            if !personal_on =>
+        {
+            eprintln!("Personal reviews need a `personal:` section in config.yaml.");
             Vec::new()
         }
         Period::Weekly { date, previous } => {
@@ -88,10 +93,10 @@ pub async fn run(opts: &super::GlobalOptions, period: Period) -> miette::Result<
                 outs.push(out);
             }
             if outs.is_empty() {
-                if !perf_on && config.synthesis.weekly.include_sources.is_empty() {
+                if !personal_on && config.synthesis.weekly.include_sources.is_empty() {
                     eprintln!(
                         "Weekly synthesis produced nothing: include_sources is empty and \
-                         performance.enabled is false — nothing is configured to run."
+                         there is no `personal:` section — nothing is configured to run."
                     );
                 } else {
                     eprintln!("No source data found for week of {target}.");
@@ -131,7 +136,7 @@ pub async fn run(opts: &super::GlobalOptions, period: Period) -> miette::Result<
             let target_year = if previous {
                 today.year() - 1
             } else {
-                year.map(|y| y as i16).unwrap_or_else(|| today.year())
+                year.unwrap_or_else(|| today.year())
             };
             match synth
                 .try_annual_review(target_year)

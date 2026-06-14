@@ -233,7 +233,7 @@ struct ChannelInfo {
 
 /// A bare Slack channel id (`C…`/`G…`/`D…` + uppercase alphanumerics) — config may give
 /// either an id or a `#name`. Ids are used directly; only names need a lookup.
-fn looks_like_channel_id(s: &str) -> bool {
+fn is_channel_id(s: &str) -> bool {
     matches!(s.chars().next(), Some('C' | 'G' | 'D'))
         && s.len() >= 9
         && s.chars()
@@ -333,7 +333,7 @@ async fn resolve_channel_id(
     token: &str,
     channel_ref: &str,
 ) -> Result<String, SourceError> {
-    if looks_like_channel_id(channel_ref) {
+    if is_channel_id(channel_ref) {
         return Ok(channel_ref.to_string());
     }
     let name = channel_ref.strip_prefix('#').unwrap_or(channel_ref);

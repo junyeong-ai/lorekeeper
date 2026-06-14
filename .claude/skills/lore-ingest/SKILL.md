@@ -1,6 +1,6 @@
 ---
 name: lore-ingest
-description: Daily knowledge ingestion pipeline — collects from Gmail, Google Drive, Google Calendar, Slack, Jira, RSS, and a manual inbox into an Obsidian vault. Deduplicates, classifies, extracts concepts, writes structured pages. Tracks personal work for performance reviews. Idempotent, phased ingest with a no-data-loss guarantee.
+description: Daily knowledge ingestion pipeline — collects from Gmail, Google Drive, Google Calendar, Slack, Jira, RSS, and a manual inbox into an Obsidian vault. Deduplicates, classifies, extracts concepts, writes structured pages. Optionally tracks your own work into a work-log when the `personal:` module is configured. Idempotent, phased ingest with a no-data-loss guarantee.
 argument-hint: "<subcommand> [args]"
 disable-model-invocation: true
 allowed-tools: |
@@ -19,7 +19,7 @@ an Obsidian vault. All commands accept `--config <path>` to override.
 | Command | Purpose |
 |---------|---------|
 | `lore validate` | Parse + validate config, print summary |
-| `lore ingest` | Collect ALL enabled sources, write pages, render the cross-source work-log |
+| `lore ingest` | Collect ALL enabled sources, write pages; render the cross-source work-log when a `personal:` module is configured |
 | `lore ingest <source>` | Refresh one source's pages only — never rewrites the work-log (it sees a subset) |
 | `lore ingest --dry-run` | Preview without vault writes |
 | `lore ingest --date YYYY-MM-DD` | Re-materialize a specific day (backfill / repair) |
@@ -92,10 +92,11 @@ queue never references an unwritten page.
    (Gmail/Slack/Jira/Calendar/RSS) write `<daily>/{source-id}/DATE.md`; `manual`
    writes `<wiki>/documents/{slug}.md`. Concept pages are a cross-source aggregate,
    rendered once after all sources plan.
-3. **Write work-log** — personal events only (a source-adapter `is_self` match;
-   `manual`/RSS/Drive have no authorship, so never produce work-log entries even
-   with `track_personal: true`). FULL ingest only: a source-filtered run skips this
-   step — its event set is a structural subset and would overwrite the complete page.
+3. **Write work-log** — personal events only, and only when the optional `personal:`
+   module is configured (a source must be in `personal.tracked_sources` AND match its
+   adapter `is_self`; `manual`/RSS/Drive have no authorship, so never produce work-log
+   entries even if listed). FULL ingest only: a source-filtered run skips this step —
+   its event set is a structural subset and would overwrite the complete page.
 4. **Flush LLM queue** — one atomic JSONL task file (queue mode).
 5. **Archive** — `manual` inbox files move to `archived/{date}/`, only after every
    vault write and the queue flush succeeded, so a mid-run failure leaves them for retry.

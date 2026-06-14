@@ -130,7 +130,7 @@ impl SlackMessage {
     }
 
     /// True if this message was authored by, or mentions, one of `watch_users`.
-    fn matches(&self, watch_users: &[String]) -> bool {
+    fn is_watched(&self, watch_users: &[String]) -> bool {
         if let Some(u) = &self.user
             && watch_users.iter().any(|w| w == u)
         {
@@ -261,7 +261,8 @@ impl Source for SlackChannelSource {
 
                 // In watch mode keep the thread only if the focus users are involved
                 // anywhere in it (root or any reply); otherwise it's noise.
-                if !p.watch_users.is_empty() && !thread.iter().any(|m| m.matches(&p.watch_users)) {
+                if !p.watch_users.is_empty() && !thread.iter().any(|m| m.is_watched(&p.watch_users))
+                {
                     continue;
                 }
 
@@ -436,9 +437,9 @@ mod tests {
     #[test]
     fn matches_author_or_mention() {
         let watch = vec!["U1".to_string()];
-        assert!(msg("1", "U1", "hi").matches(&watch)); // author
-        assert!(msg("1", "U9", "cc <@U1>").matches(&watch)); // mention
-        assert!(!msg("1", "U9", "unrelated").matches(&watch));
+        assert!(msg("1", "U1", "hi").is_watched(&watch)); // author
+        assert!(msg("1", "U9", "cc <@U1>").is_watched(&watch)); // mention
+        assert!(!msg("1", "U9", "unrelated").is_watched(&watch));
     }
 
     #[test]

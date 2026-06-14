@@ -23,9 +23,34 @@ fn build_correct_page_count() {
     let config = default_config();
     let pages = scan::scan_vault(&root, &config).unwrap();
     let g = graph::WikiGraph::build(&pages, &VaultDirs::default());
-    assert_eq!(g.node_count(), 5);
+    // The fixture has 5 markdown files, but `index.md` is a reserved navigation/catalog
+    // meta-file — NOT a knowledge node — so the analysis graph has 4 nodes (3 concepts +
+    // orphan-page). A catalog page that links every concept must never become a graph node.
+    assert_eq!(g.node_count(), 4);
     assert!(g.edge_count() > 0);
     assert!(g.component_count() > 0);
+}
+
+#[test]
+fn reserved_meta_files_are_excluded_from_the_graph() {
+    // `index.md` (a reserved meta-file that links every concept) must not be a node — as a
+    // node it would be the top hub and would connect every otherwise-separate community.
+    let root = fixture_root();
+    let config = default_config();
+    let pages = scan::scan_vault(&root, &config).unwrap();
+    assert!(
+        pages.iter().any(|p| p.id == "wiki/index"),
+        "fixture includes index.md in the raw scan"
+    );
+    let g = graph::WikiGraph::build(&pages, &VaultDirs::default());
+    assert!(
+        g.node_ids().all(|id| id != "wiki/index"),
+        "index.md must be excluded from the analysis graph"
+    );
+    assert!(
+        g.hubs(10, 0).iter().all(|h| h.id != "wiki/index"),
+        "index.md must never appear as a hub"
+    );
 }
 
 // --- Hubs ---
@@ -48,7 +73,7 @@ fn orphans_detected() {
     let config = default_config();
     let pages = scan::scan_vault(&root, &config).unwrap();
     let g = graph::WikiGraph::build(&pages, &VaultDirs::default());
-    let orphans = g.orphans(&config.metrics.orphan_exclude, Path::new("wiki"));
+    let orphans = g.orphans(&config.metrics.orphan_exclude);
     assert!(!orphans.is_empty(), "fixture has orphan-page.md");
 }
 
@@ -207,7 +232,7 @@ fn lint_combined_report() {
     let g = graph::WikiGraph::build(&pages, &VaultDirs::default());
 
     let hubs = g.hubs(10, config.metrics.min_hub_degree);
-    let orphans = g.orphans(&config.metrics.orphan_exclude, Path::new("wiki"));
+    let orphans = g.orphans(&config.metrics.orphan_exclude);
     let broken = g.broken_links().to_vec();
     let existence = scan::VaultExistence::build(&pages, &VaultDirs::default());
     let drift = index_drift::diff(&g, &existence, &root, Path::new("wiki"), &[]).unwrap();
@@ -237,7 +262,8 @@ fn lint_combined_report() {
     };
 
     assert!(report.findings > 0);
-    assert_eq!(report.pages, 5);
+    // 4 knowledge nodes: index.md (reserved meta-file) is excluded from the graph.
+    assert_eq!(report.pages, 4);
 
     let json = serde_json::to_value(&report).unwrap();
     assert!(json["pages"].is_u64());

@@ -9,10 +9,10 @@ vault:
   timezone: Asia/Seoul               # IANA name or "system"
   locale: ko                         # label language: ko | en (source bodies kept as-is)
 
-identity:                            # basis for personal split + performance tracking
+identity:                            # basis for ownership (the personal split, when enabled)
   name: "..."
   email: "...@company.com"           # Gmail From / Calendar attendee match
-  slack_id: "U0..."                  # my Slack messages → work-log
+  slack_id: "U0..."                  # attributes my Slack posts (with personal.tracked_sources)
                                      # (Jira self-detects from the authenticated account — no config)
 
 ingest:
@@ -29,16 +29,20 @@ sources:                             # key = source id = <daily>/{id}/ directory
     classify:                        # optional ordered rules, first match wins
       - keywords: [deploy, incident]
         category: action_required    # daily-page grouping bucket
-        performance_category: project-delivery   # optional → performance taxonomy
+        performance_category: project-delivery   # optional → personal taxonomy (needs personal:)
+    highlights:                      # optional daily-page highlight sections (per category)
+      - { category: action_required, label: "Action Required" }
     labels: [ ... ]
     extract_concepts: true|false     # whether to run LLM concept extraction
-    track_personal: true|false       # whether to count toward the work-log
 
-performance: {...}                   # performance-category mapping (see config.example)
-synthesis: {weekly: {...}, monthly: {...}, quarterly: {...}, annual: {...}}
+personal:                            # OPTIONAL personal-productivity module (work-log +
+  tracked_sources: [<id>, ...]       # reviews + contribution taxonomy). OMIT for a pure
+  performance_categories: [ ... ]    # domain-neutral knowledge engine. Its presence = ON.
+  source_type_category_map: { ... }  # (see config.example for the full shape)
+  monthly:   {enabled: true, schedule: "..."}    # quarterly/annual likewise
+synthesis: {weekly: {...}}           # cross-source weekly themes (domain-neutral)
 concepts:                            # LLM concept-page taxonomy
-  categories: [{id: ..., label: ...}]
-  index_split_threshold: 100         # split index.md into per-category pages above this
+  categories: [{id: ..., label: ...}] # also orders/labels the `### category` index groups
 graph:                               # wikilink graph analysis (lore graph *)
   scope: {dirs: [...]}               # defaults to vault.dirs.wiki
   metrics: {min_hub_degree: 5, orphan_exclude: [], concept_near_duplicate_threshold: 0.6}
