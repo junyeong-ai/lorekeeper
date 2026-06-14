@@ -540,28 +540,33 @@ fn resolve_config_full(
     opts: &GlobalOptions,
     root_override: Option<PathBuf>,
 ) -> Result<ResolvedConfig, String> {
-    if let Some(root) = root_override {
-        let vault_dirs = VaultDirs::default();
-        let mut graph = GraphConfig::default();
-        graph.apply_vault_defaults(&vault_dirs);
-        return Ok(ResolvedConfig {
+    // Single override semantics (shared with `wiki`/`schema`): a present config drives
+    // dirs/locale/graph/categories even under `--root` (only the root is overridden) — falling
+    // back to defaults wholesale would scan the WRONG dirs, skip category lint, and resolve
+    // headings in the wrong locale. Defaults apply ONLY when no config file exists.
+    let super::RootConfig { root, config } =
+        super::resolve_root_config(opts, root_override).map_err(|e| format!("{e}"))?;
+    match config {
+        Some(config) => Ok(ResolvedConfig {
             root,
-            graph,
-            locale: Locale::default(),
-            vault_dirs,
-            concept_categories: Vec::new(),
-        });
+            locale: config.vault.locale(),
+            vault_dirs: config.vault.dirs.clone(),
+            graph: config.graph,
+            concept_categories: config.concepts.categories,
+        }),
+        None => {
+            let vault_dirs = VaultDirs::default();
+            let mut graph = GraphConfig::default();
+            graph.apply_vault_defaults(&vault_dirs);
+            Ok(ResolvedConfig {
+                root,
+                graph,
+                locale: Locale::default(),
+                vault_dirs,
+                concept_categories: Vec::new(),
+            })
+        }
     }
-
-    let config_path = super::find_config(opts).map_err(|e| format!("{e}"))?;
-    let config = super::load_config(&config_path).map_err(|e| format!("{e}"))?;
-    Ok(ResolvedConfig {
-        root: config.vault.root_path(),
-        locale: config.vault.locale(),
-        vault_dirs: config.vault.dirs.clone(),
-        graph: config.graph,
-        concept_categories: config.concepts.categories,
-    })
 }
 
 #[cfg(test)]

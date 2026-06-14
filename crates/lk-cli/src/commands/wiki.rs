@@ -115,40 +115,20 @@ fn resolve_wiki_context(
     lk_core::config::VaultDirs,
     lk_core::config::GraphConfig,
 )> {
-    match root_override {
-        Some(r) => {
-            // With an explicit `--root`, a MISSING config is fine (defaults fill in
-            // locale/dirs/graph so a binary-only install works). But a config that EXISTS and
-            // fails to parse/validate must surface loudly — silently falling back to default
-            // dirs would write index/log/map to the WRONG directories while hiding the user's
-            // real config mistake.
-            let (locale, dirs, graph) = match find_config(opts) {
-                Ok(path) => {
-                    let config = load_config(&path)?;
-                    (
-                        config.vault.locale(),
-                        config.vault.dirs.clone(),
-                        config.graph.clone(),
-                    )
-                }
-                Err(_) => {
-                    let dirs = lk_core::config::VaultDirs::default();
-                    let mut graph = lk_core::config::GraphConfig::default();
-                    graph.apply_vault_defaults(&dirs);
-                    (Locale::default(), dirs, graph)
-                }
-            };
-            Ok((r, locale, dirs, graph))
-        }
+    let super::RootConfig { root, config } = super::resolve_root_config(opts, root_override)?;
+    match config {
+        Some(config) => Ok((
+            root,
+            config.vault.locale(),
+            config.vault.dirs.clone(),
+            config.graph.clone(),
+        )),
+        // No config file at all (binary-only use under `--root`): defaults fill in.
         None => {
-            let path = find_config(opts)?;
-            let config = load_config(&path)?;
-            Ok((
-                config.vault.root_path(),
-                config.vault.locale(),
-                config.vault.dirs.clone(),
-                config.graph.clone(),
-            ))
+            let dirs = lk_core::config::VaultDirs::default();
+            let mut graph = lk_core::config::GraphConfig::default();
+            graph.apply_vault_defaults(&dirs);
+            Ok((root, Locale::default(), dirs, graph))
         }
     }
 }

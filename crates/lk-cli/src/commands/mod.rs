@@ -71,6 +71,46 @@ pub fn load_config(path: &Path) -> miette::Result<lk_core::config::Config> {
     lk_core::config::Config::load(path).map_err(|e| miette::miette!("{e}"))
 }
 
+/// A resolved vault root plus the config that governs it — the single source for every
+/// command that takes a `--root` override (`wiki`, `schema`, `graph`).
+pub(crate) struct RootConfig {
+    /// The effective vault root (the `--root` override, or `vault.root` from config).
+    pub root: PathBuf,
+    /// `None` ONLY when an explicit `--root` was given AND no config file exists at all
+    /// (binary-only use: run on the root with defaults). A config that EXISTS but fails to
+    /// parse/validate propagates the error instead of silently degrading to defaults —
+    /// otherwise a typo'd config would make the command read/write the WRONG dirs/locale.
+    pub config: Option<lk_core::config::Config>,
+}
+
+/// Resolve `(root, config)` for a `--root`-capable command. The ONE place the override
+/// semantics live, so every such command behaves identically: an explicit `--root` runs
+/// even without a config (defaults fill in), a present config always drives dirs/locale/etc.
+/// even under `--root` (only the root is overridden), and a present-but-broken config fails
+/// loudly. Without `--root`, a config is mandatory and its `vault.root` is used.
+pub(crate) fn resolve_root_config(
+    opts: &GlobalOptions,
+    root_override: Option<PathBuf>,
+) -> miette::Result<RootConfig> {
+    match root_override {
+        Some(root) => match find_config(opts) {
+            Ok(path) => Ok(RootConfig {
+                root,
+                config: Some(load_config(&path)?),
+            }),
+            Err(_) => Ok(RootConfig { root, config: None }),
+        },
+        None => {
+            let path = find_config(opts)?;
+            let config = load_config(&path)?;
+            Ok(RootConfig {
+                root: config.vault.root_path(),
+                config: Some(config),
+            })
+        }
+    }
+}
+
 /// Atomically write `contents` to an absolute `path` from an async command handler.
 /// Routes through the single `lk_core::fs::write_atomic` (temp + fsync + rename) on the
 /// blocking pool — so command-level full-file rewrites (the ingest log, AGENTS.md) get the
@@ -103,5 +143,79 @@ pub fn parse_date(
             .parse::<jiff::civil::Date>()
             .map_err(|e| miette::miette!("invalid date '{s}': {e}")),
         None => Ok(fallback),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    const VALID_CONFIG: &str = "\
+vault:
+  root: /tmp/v
+  dirs:
+    wiki: knowledge
+identity:
+  name: t
+  email: t@t.com
+sources:
+  s1:
+    type: gmail
+";
+
+    fn opts(config: Option<PathBuf>) -> GlobalOptions {
+        GlobalOptions {
+            config,
+            template_dir: None,
+        }
+    }
+
+    #[test]
+    fn root_override_keeps_a_present_config_not_defaults() {
+        // The bug this guards (was live in `graph --root`): an explicit `--root` must NOT
+        // discard a present config. Only the root is overridden; dirs/locale/etc. still come
+        // from the config — otherwise the command reads/writes the WRONG dirs in the WRONG locale.
+        let tmp = TempDir::new().unwrap();
+        let cfg = tmp.path().join("config.yaml");
+        std::fs::write(&cfg, VALID_CONFIG).unwrap();
+        let rc = resolve_root_config(&opts(Some(cfg)), Some(PathBuf::from("/override"))).unwrap();
+        assert_eq!(rc.root, PathBuf::from("/override"));
+        let config = rc
+            .config
+            .expect("a present config must be loaded, never dropped");
+        assert_eq!(
+            config.vault.dirs.wiki, "knowledge",
+            "config dirs must survive the --root override"
+        );
+    }
+
+    #[test]
+    fn root_override_with_a_broken_config_fails_loudly() {
+        // A config that EXISTS but fails to validate must error, never silently fall back to
+        // defaults (which would hide the user's mistake and act on the wrong dirs).
+        let tmp = TempDir::new().unwrap();
+        let cfg = tmp.path().join("config.yaml");
+        std::fs::write(
+            &cfg,
+            "vault:\n  root: /tmp/v\n  dirs:\n    wiki: \"../escape\"\n\
+             identity:\n  name: t\n  email: t@t.com\nsources:\n  s1:\n    type: gmail\n",
+        )
+        .unwrap();
+        assert!(
+            resolve_root_config(&opts(Some(cfg)), Some(PathBuf::from("/override"))).is_err(),
+            "a present-but-invalid config must propagate, not degrade to defaults"
+        );
+    }
+
+    #[test]
+    fn root_override_without_any_config_yields_none() {
+        // No config file at all → None, so the caller fills in defaults (binary-only use).
+        let tmp = TempDir::new().unwrap();
+        let missing = tmp.path().join("nope.yaml");
+        let rc =
+            resolve_root_config(&opts(Some(missing)), Some(PathBuf::from("/override"))).unwrap();
+        assert_eq!(rc.root, PathBuf::from("/override"));
+        assert!(rc.config.is_none());
     }
 }

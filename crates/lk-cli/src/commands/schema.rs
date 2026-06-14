@@ -6,8 +6,6 @@ use lk_core::vault_path::{
     CONCEPTS_SUBDIR, DOCUMENTS_SUBDIR, EXPLORATIONS_SUBDIR, WORK_LOG_SUBDIR,
 };
 
-use super::{find_config, load_config};
-
 /// Section ownership tag.
 #[derive(Clone, Copy)]
 enum Owner {
@@ -456,39 +454,24 @@ pub async fn run(
     opts: &super::GlobalOptions,
     root_override: Option<PathBuf>,
 ) -> miette::Result<()> {
-    let (vault_root, locale, dirs, personal) = match root_override {
-        Some(r) => {
-            // With an explicit `--root`, a MISSING config is fine (binary-only use: run on the
-            // root alone with defaults). But a config that EXISTS and fails to parse/validate
-            // must surface loudly — silently falling back to default locale/dirs would emit
-            // AGENTS.md describing the wrong page formats while hiding the user's real mistake.
-            let (locale, dirs, personal) = match find_config(opts) {
-                Ok(path) => {
-                    let config = load_config(&path)?;
-                    (
-                        config.vault.locale(),
-                        config.vault.dirs.clone(),
-                        config.personal.is_some(),
-                    )
-                }
-                Err(_) => (
-                    Locale::default(),
-                    lk_core::config::VaultDirs::default(),
-                    false,
-                ),
-            };
-            (r, locale, dirs, personal)
-        }
-        None => {
-            let path = find_config(opts)?;
-            let config = load_config(&path)?;
-            (
-                config.vault.root_path(),
-                config.vault.locale(),
-                config.vault.dirs.clone(),
-                config.personal.is_some(),
-            )
-        }
+    // Single override semantics (shared with `wiki`/`graph`): a present config drives
+    // locale/dirs/personal even under `--root`; defaults apply ONLY when no config file exists;
+    // a present-but-broken config fails loudly (never silently emit AGENTS.md for the wrong dirs).
+    let super::RootConfig {
+        root: vault_root,
+        config,
+    } = super::resolve_root_config(opts, root_override)?;
+    let (locale, dirs, personal) = match config {
+        Some(config) => (
+            config.vault.locale(),
+            config.vault.dirs.clone(),
+            config.personal.is_some(),
+        ),
+        None => (
+            Locale::default(),
+            lk_core::config::VaultDirs::default(),
+            false,
+        ),
     };
 
     let content = render_agents_md(locale, &dirs, personal);
