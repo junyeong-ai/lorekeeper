@@ -14,22 +14,49 @@ pub struct Credentials {
     pub jira: Option<JiraCredentials>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct GoogleCredentials {
     pub client_id: String,
     pub client_secret: String,
     pub refresh_token: String,
 }
 
+// Hand-written Debug so a secret never reaches a log/error string verbatim. `client_id` is
+// not a secret (it identifies the OAuth app, not its bearer); `client_secret`/`refresh_token`
+// are, so they redact. Keeps `?creds` debugging safe by construction, not by remembering not to.
+impl std::fmt::Debug for GoogleCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GoogleCredentials")
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"<redacted>")
+            .field("refresh_token", &"<redacted>")
+            .finish()
+    }
+}
+
 /// Slack accepts either a bot token (`xoxb-`) or a user token (`xoxp-`) — or both.
 /// `conversations.history` works with either; `search.messages` requires a user token,
 /// so the slack-search adapter needs `user_token`. At least one must be set.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct SlackCredentials {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bot_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_token: Option<String>,
+}
+
+// Redact token values but keep their presence visible (`Some("<redacted>")` / `None`), so a
+// "which token is set?" debug stays useful without leaking the secret itself.
+impl std::fmt::Debug for SlackCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SlackCredentials")
+            .field("bot_token", &self.bot_token.as_ref().map(|_| "<redacted>"))
+            .field(
+                "user_token",
+                &self.user_token.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 impl SlackCredentials {
@@ -44,11 +71,22 @@ impl SlackCredentials {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct JiraCredentials {
     pub base_url: String,
     pub email: String,
     pub api_token: String,
+}
+
+// `base_url`/`email` are not secrets; `api_token` is, so it redacts.
+impl std::fmt::Debug for JiraCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JiraCredentials")
+            .field("base_url", &self.base_url)
+            .field("email", &self.email)
+            .field("api_token", &"<redacted>")
+            .finish()
+    }
 }
 
 impl Credentials {
@@ -177,5 +215,39 @@ mod tests {
         let path = Credentials::default().save(dir.path()).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn debug_redacts_secrets_but_keeps_identifiers() {
+        let google = GoogleCredentials {
+            client_id: "app-123.apps".into(),
+            client_secret: "SHHH-secret".into(),
+            refresh_token: "1//refresh-shh".into(),
+        };
+        let g = format!("{google:?}");
+        assert!(
+            g.contains("app-123.apps"),
+            "non-secret client_id shown: {g}"
+        );
+        assert!(!g.contains("SHHH-secret"), "client_secret redacted: {g}");
+        assert!(!g.contains("1//refresh-shh"), "refresh_token redacted: {g}");
+
+        let jira = JiraCredentials {
+            base_url: "https://x.atlassian.net".into(),
+            email: "me@x.com".into(),
+            api_token: "JIRA-shh".into(),
+        };
+        let j = format!("{jira:?}");
+        assert!(j.contains("https://x.atlassian.net") && j.contains("me@x.com"));
+        assert!(!j.contains("JIRA-shh"), "api_token redacted: {j}");
+
+        let slack = SlackCredentials {
+            bot_token: Some("xoxb-shh".into()),
+            user_token: None,
+        };
+        let s = format!("{slack:?}");
+        assert!(!s.contains("xoxb-shh"), "bot_token value redacted: {s}");
+        // Presence is still observable (Some vs None) without leaking the value.
+        assert!(s.contains("bot_token: Some") && s.contains("user_token: None"));
     }
 }
