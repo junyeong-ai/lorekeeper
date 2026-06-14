@@ -10,7 +10,7 @@ mod writer;
 // public surface exposes the page types alongside the I/O that produces them.
 pub use lk_core::frontmatter::{Frontmatter, VaultPage, parse_page};
 
-pub use self::index::{build_index, first_line_under_heading, write_index};
+pub use self::index::{build_index, write_index};
 pub use self::log::{IngestLog, LogEntry, LogStatus};
 pub use self::section::{replace_section, section_body, set_frontmatter_field};
 pub use self::store::{FsVault, InMemoryVault, VaultStore};

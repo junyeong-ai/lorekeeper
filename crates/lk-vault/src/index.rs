@@ -496,7 +496,7 @@ fn first_sentence(s: &str) -> &str {
 ///
 /// Heading match is exact (no leading/trailing whitespace before `##`). Returns `None`
 /// if the heading isn't present or has no non-blank content before the next section.
-pub fn first_line_under_heading(body: &str, heading: &str) -> Option<String> {
+fn first_line_under_heading(body: &str, heading: &str) -> Option<String> {
     let target = format!("## {heading}");
     let mut in_section = false;
     for line in body.lines() {
