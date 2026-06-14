@@ -456,12 +456,19 @@ pub async fn run(
 ) -> miette::Result<()> {
     let (vault_root, locale, dirs, personal) = match root_override {
         Some(r) => {
-            let (locale, dirs, personal) = match find_config(opts).and_then(|p| load_config(&p)) {
-                Ok(config) => (
-                    config.vault.locale(),
-                    config.vault.dirs.clone(),
-                    config.personal.is_some(),
-                ),
+            // With an explicit `--root`, a MISSING config is fine (binary-only use: run on the
+            // root alone with defaults). But a config that EXISTS and fails to parse/validate
+            // must surface loudly — silently falling back to default locale/dirs would emit
+            // AGENTS.md describing the wrong page formats while hiding the user's real mistake.
+            let (locale, dirs, personal) = match find_config(opts) {
+                Ok(path) => {
+                    let config = load_config(&path)?;
+                    (
+                        config.vault.locale(),
+                        config.vault.dirs.clone(),
+                        config.personal.is_some(),
+                    )
+                }
                 Err(_) => (
                     Locale::default(),
                     lk_core::config::VaultDirs::default(),

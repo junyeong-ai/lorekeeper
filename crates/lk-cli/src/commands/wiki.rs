@@ -117,12 +117,20 @@ fn resolve_wiki_context(
 )> {
     match root_override {
         Some(r) => {
-            let (locale, dirs, graph) = match find_config(opts).and_then(|p| load_config(&p)) {
-                Ok(config) => (
-                    config.vault.locale(),
-                    config.vault.dirs.clone(),
-                    config.graph.clone(),
-                ),
+            // With an explicit `--root`, a MISSING config is fine (defaults fill in
+            // locale/dirs/graph so a binary-only install works). But a config that EXISTS and
+            // fails to parse/validate must surface loudly — silently falling back to default
+            // dirs would write index/log/map to the WRONG directories while hiding the user's
+            // real config mistake.
+            let (locale, dirs, graph) = match find_config(opts) {
+                Ok(path) => {
+                    let config = load_config(&path)?;
+                    (
+                        config.vault.locale(),
+                        config.vault.dirs.clone(),
+                        config.graph.clone(),
+                    )
+                }
                 Err(_) => {
                     let dirs = lk_core::config::VaultDirs::default();
                     let mut graph = lk_core::config::GraphConfig::default();
@@ -178,11 +186,17 @@ async fn run_concepts(opts: &super::GlobalOptions, json: bool) -> miette::Result
         }
         let content = match tokio::fs::read_to_string(&path).await {
             Ok(c) => c,
-            Err(_) => continue,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "wiki concepts: skipping unreadable concept page");
+                continue;
+            }
         };
         let page = match frontmatter::parse_page(&content) {
             Ok(p) => p,
-            Err(_) => continue,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "wiki concepts: skipping concept page with unparseable frontmatter");
+                continue;
+            }
         };
         let slug = page
             .frontmatter
