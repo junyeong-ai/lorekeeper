@@ -159,12 +159,24 @@ pub fn build_index(
     }
 
     if !synthesis.is_empty() {
+        // Synthesis/review pages: extract the NARRATIVE section (weekly themes / key summary /
+        // overall summary), not the body's first non-heading line — which on a review page is
+        // a `## 기간` date or a category-table row, not a summary.
+        let (key_summary, overall_summary, key_themes) = (
+            strings.key_summary,
+            strings.overall_summary,
+            strings.key_themes_this_week,
+        );
         render_group(
             &mut out,
             strings.index_synthesis,
             synthesis.len(),
             &synthesis,
-            first_non_blank_body_line,
+            move |body| {
+                first_line_under_heading(body, key_summary)
+                    .or_else(|| first_line_under_heading(body, overall_summary))
+                    .or_else(|| first_line_under_heading(body, key_themes))
+            },
         );
     }
 
@@ -542,26 +554,6 @@ fn first_subheading_under_heading(body: &str, heading: &str) -> Option<String> {
     None
 }
 
-/// Fallback extractor for synthesis pages: the first non-blank, non-heading body line.
-fn first_non_blank_body_line(body: &str) -> Option<String> {
-    for line in body.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if trimmed.starts_with('#') {
-            continue;
-        }
-        // Strip a leading list marker so the one-liner reads naturally.
-        let trimmed = trimmed
-            .strip_prefix("- ")
-            .or_else(|| trimmed.strip_prefix("* "))
-            .unwrap_or(trimmed);
-        return Some(trimmed.to_string());
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -665,21 +657,34 @@ mod tests {
     }
 
     #[test]
-    fn synthesis_section_merges_all_tiers() {
+    fn synthesis_section_uses_narrative_not_period_or_table() {
+        // Real review/themes structure: a monthly review leads with `## 기간` (date) and a
+        // `## 카테고리 분포` table BEFORE its `## 핵심 요약`. The index must extract the
+        // narrative section, not the body's first non-heading line (which would be the date).
         let tmp = TempDir::new().unwrap();
         write_file(
             tmp.path(),
             "synthesis/weekly/2026-W21.md",
-            "---\nid: w-syn\ntitle: Weekly\n---\n\n# Weekly\n\nThis week we focused on X.\n",
+            "---\nid: w-syn\ntitle: Weekly\n---\n\n# Weekly\n\n## 이번 주 핵심 주제\n\n\
+             ### 1. Focus\n\nThis week we focused on X.\n",
         );
         write_file(
             tmp.path(),
             "me/monthly/2026-05.md",
-            "---\nid: m\ntitle: May\n---\n\n# May\n\nMay summary.\n",
+            "---\nid: m\ntitle: May\n---\n\n# May\n\n## 기간\n\n2026-05-01 ~ 2026-05-31\n\n\
+             ## 핵심 요약\n\nMay summary.\n\n## 카테고리 분포\n\n| a | 1 | 100% |\n",
         );
         let out = build_index(tmp.path(), Locale::Ko, &VaultDirs::default()).unwrap();
         assert!(out.contains("## 종합 (2)"));
-        assert!(out.contains("[[me/monthly/2026-05]] — May summary."));
+        // The narrative `## 핵심 요약`, NOT the `## 기간` date that precedes it.
+        assert!(
+            out.contains("[[me/monthly/2026-05]] — May summary."),
+            "monthly index summary must be the narrative, not the period date:\n{out}"
+        );
+        assert!(
+            !out.contains("2026-05-01 ~"),
+            "period date must not be the summary:\n{out}"
+        );
         assert!(out.contains("[[synthesis/weekly/2026-W21]] — This week we focused on X."));
     }
 

@@ -1132,6 +1132,96 @@ async fn annual_review_keeps_boundary_week_in_both_fallback_quarters() {
 }
 
 #[tokio::test]
+async fn rollup_drops_queue_pending_child_without_leaking_its_table() {
+    use lk_queue::QueueLlmClient;
+
+    // A child monthly whose `## 핵심 요약` EXISTS but is empty — the normal queue-pending
+    // state after `synthesis monthly` runs before `/lore-process` fills it — plus a
+    // `## 카테고리 분포` table. The quarterly rollup must DROP it (empty narrative), never
+    // fall back to the child's whole body and leak its table/period into the parent.
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let config = base_config(vault);
+    let summary = lk_core::i18n::Locale::Ko.strings().key_summary;
+
+    let monthly = vault.join("me").join("monthly");
+    std::fs::create_dir_all(&monthly).unwrap();
+    // April filled; May queue-pending (empty narrative) with a table that must NOT leak.
+    std::fs::write(
+        monthly.join("2026-04.md"),
+        format!("---\nid: m-04\n---\n\n## {summary}\n\nAPR-FILLED\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        monthly.join("2026-05.md"),
+        format!("---\nid: m-05\n---\n\n## 기간\n\n2026-05\n\n## {summary}\n\n## 카테고리 분포\n\n| LEAK-ROW | 9 |\n"),
+    )
+    .unwrap();
+
+    let llm: Arc<dyn LlmClient> =
+        Arc::new(QueueLlmClient::new(vault.join(".lorekeeper").join("queue")));
+    let synth = Synthesizer::new(vault, build_ctx(&config, llm), &config, far_future());
+    let out = synth
+        .try_quarterly_review(2026, 2)
+        .await
+        .unwrap()
+        .expect("quarterly review produced");
+
+    assert!(
+        out.content.contains("APR-FILLED"),
+        "the filled month's narrative must appear:\n{}",
+        out.content
+    );
+    assert!(
+        !out.content.contains("LEAK-ROW"),
+        "a queue-pending child's distribution table must NEVER leak into the parent:\n{}",
+        out.content
+    );
+}
+
+#[tokio::test]
+async fn child_narrative_found_across_locale_switch() {
+    use lk_queue::QueueLlmClient;
+
+    // Vault locale is EN now, but a child monthly was authored under KO (`## 핵심 요약`).
+    // child_narrative searches every locale's heading, so it still extracts ONLY that
+    // narrative — not a whole-body fallback that would leak the KO page's period/table.
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let mut config = base_config(vault);
+    config.vault.locale = Some("en".into());
+    let ko_summary = lk_core::i18n::Locale::Ko.strings().key_summary;
+
+    let monthly = vault.join("me").join("monthly");
+    std::fs::create_dir_all(&monthly).unwrap();
+    std::fs::write(
+        monthly.join("2026-04.md"),
+        format!("---\nid: m-04\n---\n\n## 기간\n\n2026-04\n\n## {ko_summary}\n\nKO-NARRATIVE\n\n## 카테고리 분포\n\n| LEAK | 1 |\n"),
+    )
+    .unwrap();
+
+    let llm: Arc<dyn LlmClient> =
+        Arc::new(QueueLlmClient::new(vault.join(".lorekeeper").join("queue")));
+    let synth = Synthesizer::new(vault, build_ctx(&config, llm), &config, far_future());
+    let out = synth
+        .try_quarterly_review(2026, 2)
+        .await
+        .unwrap()
+        .expect("quarterly review produced");
+
+    assert!(
+        out.content.contains("KO-NARRATIVE"),
+        "a KO-heading child must still be found after a locale switch:\n{}",
+        out.content
+    );
+    assert!(
+        !out.content.contains("LEAK"),
+        "only the narrative section is extracted, never the whole body (period/table):\n{}",
+        out.content
+    );
+}
+
+#[tokio::test]
 async fn work_log_generation_is_gated_by_personal_module() {
     let dir = TempDir::new().unwrap();
     let vault = dir.path();

@@ -418,18 +418,14 @@ impl Synthesizer {
         let (start, end) = quarter_range(year, quarter)?;
         let months: Vec<u8> = ((quarter - 1) * 3 + 1..=quarter * 3).collect();
 
-        // A child review's narrative section only (`## key_summary`) — never its whole
-        // body, which would drag the child's own distribution table and metadata
-        // headings into the parent, producing duplicate tables and nested headings.
-        let summary_heading = self.ctx.locale.strings().key_summary;
+        // Each month's narrative section only (via `child_narrative`) — never its whole
+        // body, which would drag the child's own distribution table and metadata headings
+        // into the parent, producing duplicate tables and nested headings.
         let mut monthly_summaries: Vec<serde_json::Value> = Vec::new();
         let mut combined = String::new();
 
         for m in &months {
-            let Some(narrative) = self
-                .month_child_narrative(year, *m, summary_heading)
-                .await?
-            else {
+            let Some(narrative) = self.month_child_narrative(year, *m).await? else {
                 continue;
             };
             let label = format!("{year}-{m:02}");
@@ -500,13 +496,9 @@ impl Synthesizer {
         let mut period_summaries: Vec<serde_json::Value> = Vec::new();
         let mut combined = String::new();
         let strings = self.ctx.locale.strings();
-        let summary_heading = strings.key_summary;
 
         for q in 1..=4u8 {
-            let Some(narrative) = self
-                .quarter_child_narrative(year, q, summary_heading)
-                .await?
-            else {
+            let Some(narrative) = self.quarter_child_narrative(year, q).await? else {
                 continue;
             };
             combined.push_str(&format!("=== {year}-Q{q} ===\n"));
@@ -581,12 +573,14 @@ impl Synthesizer {
         &self,
         year: i16,
         month: u8,
-        summary_heading: &str,
     ) -> Result<Option<String>, PipelineError> {
         let monthly_dir = PathBuf::from(&self.ctx.dirs.personal).join(&self.ctx.dirs.monthly);
         let file = monthly_dir.join(format!("{year}-{month:02}.md"));
         if let Some(page) = self.reader.read_page(&file).await? {
-            return Ok(Some(child_narrative(&page, summary_heading).to_string()));
+            // An existing monthly whose narrative is still queue-pending (empty) yields no
+            // rollup contribution — drop it rather than fall back to its raw body.
+            let narrative = child_narrative(&page);
+            return Ok((!narrative.is_empty()).then(|| narrative.to_string()));
         }
 
         let (start, end) = month_range(year, month)?;
@@ -595,7 +589,10 @@ impl Synthesizer {
         for (wy, ww) in iso_weeks_in_range(start, end)? {
             let file = weekly_dir.join(format!("{wy}-W{ww:02}.md"));
             if let Some(page) = self.reader.read_page(&file).await? {
-                parts.push(child_narrative(&page, summary_heading).to_string());
+                let narrative = child_narrative(&page);
+                if !narrative.is_empty() {
+                    parts.push(narrative.to_string());
+                }
             }
         }
         Ok((!parts.is_empty()).then(|| parts.join("\n\n")))
@@ -607,20 +604,18 @@ impl Synthesizer {
         &self,
         year: i16,
         quarter: u8,
-        summary_heading: &str,
     ) -> Result<Option<String>, PipelineError> {
         let quarterly_dir = PathBuf::from(&self.ctx.dirs.personal).join(&self.ctx.dirs.quarterly);
         let file = quarterly_dir.join(format!("{year}-Q{quarter}.md"));
         if let Some(page) = self.reader.read_page(&file).await? {
-            return Ok(Some(child_narrative(&page, summary_heading).to_string()));
+            // Queue-pending quarterly (empty narrative) → no contribution, not its raw body.
+            let narrative = child_narrative(&page);
+            return Ok((!narrative.is_empty()).then(|| narrative.to_string()));
         }
 
         let mut parts = Vec::new();
         for month in (quarter - 1) * 3 + 1..=quarter * 3 {
-            if let Some(narrative) = self
-                .month_child_narrative(year, month, summary_heading)
-                .await?
-            {
+            if let Some(narrative) = self.month_child_narrative(year, month).await? {
                 parts.push(narrative);
             }
         }
@@ -710,16 +705,20 @@ impl Synthesizer {
     }
 }
 
-/// A child review page's narrative-section body (`## <summary_heading>`) only,
-/// falling back to the whole body if that section is absent or empty. Quarterly and
-/// annual rollups embed this rather than the child's full body, so the parent never
-/// inherits the child's own distribution table or metadata headings (which would
-/// otherwise render as duplicated tables and nested `##` headings on the parent page).
-fn child_narrative<'a>(page: &'a VaultPage, summary_heading: &str) -> &'a str {
-    section_body(&page.body, summary_heading)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| page.body.trim())
+/// A child review page's narrative section (`## key_summary`) ONLY — never its whole body,
+/// so a quarterly/annual rollup never inherits the child's own distribution table or metadata
+/// headings (which would render as duplicated tables and nested `##` on the parent).
+///
+/// Searches EVERY locale's heading (like `capture_section`/`backlinks`/`audit`) so a child
+/// authored before a `vault.locale` switch is still found by its old-language heading. A
+/// missing OR empty section yields `""` — there is NO whole-body fallback: an absent heading
+/// (a custom template, or a not-yet-summarized queue-pending child) returns empty and the
+/// caller drops it, rather than leaking the child's raw body into the parent.
+fn child_narrative(page: &VaultPage) -> &str {
+    lk_core::i18n::Locale::ALL
+        .iter()
+        .find_map(|l| section_body(&page.body, l.strings().key_summary))
+        .map_or("", str::trim)
 }
 
 fn iso_year_week(date: jiff::civil::Date) -> (i16, u8) {
