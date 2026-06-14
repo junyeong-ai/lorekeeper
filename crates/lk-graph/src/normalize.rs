@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 
 use lk_core::concept::slugify;
 use lk_core::vault_path::RESERVED_WIKI_FILES;
-use lk_core::wikilink::{self, WIKILINK_RE};
+use lk_core::wikilink;
+use regex::Captures;
 
 use crate::GraphError;
 use crate::scan::ScannedPage;
@@ -127,24 +128,24 @@ pub fn apply(renames: &[Rename], pages: &[ScannedPage], root: &Path) -> Result<u
 }
 
 fn normalize_wikilinks(content: &str, renamed_slugs: &HashSet<String>) -> String {
-    WIKILINK_RE
-        .replace_all(content, |caps: &regex::Captures| {
-            let full = &caps[0];
-            // One decomposition path for the whole workspace: page / anchor / alias,
-            // each preserved exactly once on rewrite. (`[[`/`]]` are ASCII — byte-safe.)
-            let (page_raw, anchor, alias) =
-                wikilink::split_wikilink_parts(&full[2..full.len() - 2]);
-            let Some(normalized) = slugify(page_raw) else {
-                return full.to_owned();
-            };
+    // Rewrite OUTSIDE code only: a `[[Foo Bar]]` shown inside a code fence/span is a code
+    // example, not a graph edge (`extract_wikilinks` ignores it), so normalizing it would
+    // corrupt the document. The shared helper applies the exact same fence/inline-skip rule.
+    wikilink::rewrite_wikilinks_outside_code(content, |caps: &Captures| {
+        let full = &caps[0];
+        // One decomposition path for the whole workspace: page / anchor / alias,
+        // each preserved exactly once on rewrite. (`[[`/`]]` are ASCII — byte-safe.)
+        let (page_raw, anchor, alias) = wikilink::split_wikilink_parts(&full[2..full.len() - 2]);
+        let Some(normalized) = slugify(page_raw) else {
+            return full.to_owned();
+        };
 
-            if renamed_slugs.contains(&normalized) && page_raw.trim() != normalized {
-                format!("[[{normalized}{anchor}{alias}]]")
-            } else {
-                full.to_owned()
-            }
-        })
-        .into_owned()
+        if renamed_slugs.contains(&normalized) && page_raw.trim() != normalized {
+            format!("[[{normalized}{anchor}{alias}]]")
+        } else {
+            full.to_owned()
+        }
+    })
 }
 
 #[cfg(test)]
@@ -229,6 +230,19 @@ mod tests {
         let content = "See [[Other Node]] here.";
         let updated = normalize_wikilinks(content, &slugs);
         assert_eq!(updated, content);
+    }
+
+    #[test]
+    fn wikilinks_inside_code_are_not_normalized() {
+        // A `[[Concept A]]` shown as a code example is not a graph edge, so normalize must
+        // leave it verbatim — only the real prose link is rewritten to the canonical slug.
+        let slugs: HashSet<String> = ["concept-a".to_owned()].into();
+        let content =
+            "Prose [[Concept A]].\n```\nexample [[Concept A]]\n```\nInline `[[Concept A]]`.\n";
+        let updated = normalize_wikilinks(content, &slugs);
+        assert!(updated.contains("Prose [[concept-a]]."));
+        assert!(updated.contains("example [[Concept A]]"));
+        assert!(updated.contains("Inline `[[Concept A]]`."));
     }
 
     #[test]

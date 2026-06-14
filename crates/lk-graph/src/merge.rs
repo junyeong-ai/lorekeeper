@@ -19,7 +19,8 @@ use std::path::{Path, PathBuf};
 
 use lk_core::concept::slugify;
 use lk_core::i18n::Locale;
-use lk_core::wikilink::{self, WIKILINK_RE};
+use lk_core::wikilink;
+use regex::Captures;
 use serde::Serialize;
 
 use crate::GraphError;
@@ -255,34 +256,34 @@ fn rewrite_links(
     into_path_id: &str,
 ) -> (String, usize) {
     let mut count = 0;
-    let out = WIKILINK_RE
-        .replace_all(content, |caps: &regex::Captures| {
-            let full = caps.get(0).unwrap().as_str();
-            // Decompose the FULL inner text (between `[[` and `]]`) into
-            // page / anchor / alias so each is preserved exactly once when the page is
-            // rewritten. `caps[1]` excludes the alias by regex design, so the full match
-            // is sliced instead — `[[` and `]]` are ASCII, so byte slicing is safe.
-            let (page_raw, anchor, alias) =
-                wikilink::split_wikilink_parts(&full[2..full.len() - 2]);
-            let trimmed = page_raw.trim();
+    // Rewrite OUTSIDE code only (shared helper): a `[[from]]` shown inside a code fence/span
+    // is a code example, not a graph edge — `extract_wikilinks`/`broken` ignore it, so it
+    // never dangles after the from page is deleted, and rewriting it would corrupt the doc.
+    let out = wikilink::rewrite_wikilinks_outside_code(content, |caps: &Captures| {
+        let full = caps.get(0).unwrap().as_str();
+        // Decompose the FULL inner text (between `[[` and `]]`) into
+        // page / anchor / alias so each is preserved exactly once when the page is
+        // rewritten. `caps[1]` excludes the alias by regex design, so the full match
+        // is sliced instead — `[[` and `]]` are ASCII, so byte slicing is safe.
+        let (page_raw, anchor, alias) = wikilink::split_wikilink_parts(&full[2..full.len() - 2]);
+        let trimmed = page_raw.trim();
 
-            // Does this link target the from concept? Resolve the target the SAME way the
-            // graph does (`resolve_wikilink_target`: per-segment slugify) so a non-normalized
-            // path link like `[[wiki/concepts/Vector DB]]` — which resolves to the from page
-            // and would dangle after deletion — is rewritten too, not just exact-id matches.
-            let resolved = crate::scan::resolve_wikilink_target(trimmed);
-            let is_bare = resolved == from_slug && !trimmed.contains('/');
-            let is_path = resolved == from_path_id;
-            if !is_bare && !is_path {
-                return full.to_owned();
-            }
-            count += 1;
-            // Bare links rewrite to the bare into slug; path links to the into path id,
-            // so each citation keeps its original form.
-            let new_target = if is_path { into_path_id } else { into_slug };
-            format!("[[{new_target}{anchor}{alias}]]")
-        })
-        .into_owned();
+        // Does this link target the from concept? Resolve the target the SAME way the
+        // graph does (`resolve_wikilink_target`: per-segment slugify) so a non-normalized
+        // path link like `[[wiki/concepts/Vector DB]]` — which resolves to the from page
+        // and would dangle after deletion — is rewritten too, not just exact-id matches.
+        let resolved = crate::scan::resolve_wikilink_target(trimmed);
+        let is_bare = resolved == from_slug && !trimmed.contains('/');
+        let is_path = resolved == from_path_id;
+        if !is_bare && !is_path {
+            return full.to_owned();
+        }
+        count += 1;
+        // Bare links rewrite to the bare into slug; path links to the into path id,
+        // so each citation keeps its original form.
+        let new_target = if is_path { into_path_id } else { into_slug };
+        format!("[[{new_target}{anchor}{alias}]]")
+    });
     (out, count)
 }
 
@@ -383,6 +384,49 @@ mod tests {
         assert_eq!(
             daily.as_str(),
             "- [[new]]\n- [[new#sec]]\n- [[new|Alias]]\n- [[new#sec|Alias]]\n"
+        );
+    }
+
+    #[test]
+    fn wikilinks_inside_code_are_not_rewritten() {
+        // A `[[old]]` shown inside a code fence or inline span is a code example, not a
+        // citation edge (`broken` ignores it too, so it never dangles after deletion). Merge
+        // rewires only the real citation, leaving the code verbatim.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        write(
+            root,
+            "wiki/concepts/old.md",
+            "---\nid: old\n---\n# Old\n## Sources\n",
+        );
+        write(
+            root,
+            "wiki/concepts/new.md",
+            "---\nid: new\n---\n# New\n## Sources\n",
+        );
+        write(
+            root,
+            "wiki/documents/doc.md",
+            "Cites [[old]].\n```\nexample [[old]]\n```\nInline `[[old]]`.\n",
+        );
+        let pages = vec![
+            page("wiki/concepts/old", "wiki/concepts/old.md", &[]),
+            page("wiki/concepts/new", "wiki/concepts/new.md", &[]),
+            page("wiki/documents/doc", "wiki/documents/doc.md", &["old"]),
+        ];
+        merge_concepts(&pages, root, "wiki", "old", "new", false, false).unwrap();
+        let doc = std::fs::read_to_string(root.join("wiki/documents/doc.md")).unwrap();
+        assert!(
+            doc.contains("Cites [[new]]."),
+            "real citation rewired:\n{doc}"
+        );
+        assert!(
+            doc.contains("example [[old]]"),
+            "fenced code untouched:\n{doc}"
+        );
+        assert!(
+            doc.contains("Inline `[[old]]`."),
+            "inline code untouched:\n{doc}"
         );
     }
 
