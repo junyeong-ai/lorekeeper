@@ -36,5 +36,9 @@ fn every_skill_version_matches_the_crate_version() {
         );
         checked += 1;
     }
-    assert!(checked > 0, "no skills found under {}", skills_dir.display());
+    assert!(
+        checked > 0,
+        "no skills found under {}",
+        skills_dir.display()
+    );
 }
