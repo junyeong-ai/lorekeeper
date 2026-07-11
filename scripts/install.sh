@@ -273,18 +273,6 @@ skill_sha256() {
     fi
 }
 
-# Backups live under the data dir, never beside the target: Claude Code loads any
-# directory carrying a SKILL.md inside ~/.claude/skills/ and ~/.claude/scheduled-tasks/,
-# so an in-place `<name>.backup_*` copy would surface as a phantom skill/task.
-backup_path() {
-    local target="$1"
-    [ -e "$target" ] || return 0
-    local backup_dir="${DATA_DIR}/backups/$(date +%Y%m%d_%H%M%S)_$$"
-    mkdir -p "$backup_dir"
-    cp -r "$target" "$backup_dir/"
-    log_info "Backup: ${backup_dir}/$(basename "$target")"
-}
-
 download_skill_tarball() {
     local version="$1" skill_name="$2"
     local archive="${skill_name}-skill-v${version}.tar.gz"
@@ -336,7 +324,6 @@ install_skill() {
                 return
             fi
         fi
-        backup_path "$target"
         rm -rf "$target"
     fi
     mkdir -p "$(dirname "$target")"
@@ -387,7 +374,6 @@ install_one_scheduled_task() {
                 return
             fi
         fi
-        backup_path "$(dirname "$target")"
     fi
     mkdir -p "$(dirname "$target")"
     cp "$src" "$target"
