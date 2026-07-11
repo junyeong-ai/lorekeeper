@@ -143,6 +143,10 @@ function Download-Skill($version, $skillName) {
     return (Join-Path $tmpDir $skillName)
 }
 
+function Get-SkillHash($path) {
+    if (Test-Path $path) { (Get-FileHash -Algorithm SHA256 $path).Hash } else { $null }
+}
+
 function Install-Skill($level, $src, $skillName) {
     if ($level -eq 'none') { Write-Host '  Skill install skipped' -ForegroundColor DarkGray; return }
     if (-not (Test-Path $src)) { Write-Warn "Skill source not found: $src (skipping)"; return }
@@ -152,6 +156,13 @@ function Install-Skill($level, $src, $skillName) {
     }
     Write-Step "Installing skill -> $target"
     if (Test-Path $target) {
+        # SKILL.md carries a `version:` stamp (release provenance), but the content
+        # hash is the change signal — it catches every edit, stamped or not.
+        $existing = Get-SkillHash (Join-Path $target 'SKILL.md')
+        if ($existing -and $existing -eq (Get-SkillHash (Join-Path $src 'SKILL.md')) -and -not $Force) {
+            Write-Host "  Skill '$skillName' already current; kept" -ForegroundColor DarkGray
+            return
+        }
         $backup = "${target}.backup_$(Get-Date -Format yyyyMMdd_HHmmss)"
         Copy-Item -Path $target -Destination $backup -Recurse -Force
         Write-Host "  Backup: $backup" -ForegroundColor DarkGray
@@ -193,6 +204,10 @@ function Install-OneScheduledTask($name, $version, $repoDir) {
     $target = Join-Path $env:USERPROFILE ".claude\scheduled-tasks\$name\SKILL.md"
     Write-Step "Installing scheduled task -> $target"
     if (Test-Path $target) {
+        if ((Get-SkillHash $target) -eq (Get-SkillHash $src) -and -not $Force) {
+            Write-Host "  Scheduled task '$name' already current; kept" -ForegroundColor DarkGray
+            return
+        }
         $backup = "$(Split-Path -Parent $target).backup_$(Get-Date -Format yyyyMMdd_HHmmss)"
         Copy-Item -Path (Split-Path -Parent $target) -Destination $backup -Recurse -Force
         Write-Host "  Backup: $backup" -ForegroundColor DarkGray

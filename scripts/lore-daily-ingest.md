@@ -38,11 +38,10 @@ Idle termination with tool calls only and no text = failure.
 TODAY=$(date +%Y-%m-%d)
 DOW=$(date +%u)  # 1=Mon, 5=Fri
 
-if [ "$DOW" = "1" ]; then
-    YESTERDAY=$(date -v-3d +%Y-%m-%d)  # Monday → last Friday
-else
-    YESTERDAY=$(date -v-1d +%Y-%m-%d)  # Tue-Fri → yesterday
-fi
+# Monday looks back to Friday. BSD (macOS) and GNU (Linux) date spell
+# "N days ago" differently, so try the BSD form and fall back to GNU.
+if [ "$DOW" = "1" ]; then BACK=3; else BACK=1; fi
+YESTERDAY=$(date -v-"${BACK}"d +%Y-%m-%d 2>/dev/null || date -d "$BACK days ago" +%Y-%m-%d)
 ```
 
 ### Step 1.5: Inbox binary file preprocessing

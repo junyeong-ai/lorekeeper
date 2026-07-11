@@ -52,6 +52,19 @@ if ((-not $KeepData) -and (Test-Path $templates)) {
     }
 }
 
+# Config example (installed artifact; config.yaml itself is user data and never touched)
+$configDir = if ($env:XDG_CONFIG_HOME) { Join-Path $env:XDG_CONFIG_HOME 'lorekeeper' }
+             else { Join-Path $env:USERPROFILE '.config\lorekeeper' }
+$configExample = Join-Path $configDir 'config.example.yaml'
+if ((-not $KeepData) -and (Test-Path $configExample)) {
+    if (Prompt-YesNo "Remove installed config example $configExample?") {
+        Write-Step "Removing $configExample"
+        Remove-Item -Force $configExample
+        Write-Ok 'Config example removed'
+        $removed++
+    }
+}
+
 # Skills (user-level and project-level for each installed skill name)
 foreach ($skillName in $SkillNames) {
     $skillUser = Join-Path $env:USERPROFILE ".claude\skills\$skillName"

@@ -10,7 +10,6 @@ RELEASE_BASE="https://github.com/${REPO}/releases/download"
 
 # ── settings (env wins over built-in default; flags win over env) ─────────
 EXPLICIT_INSTALL_DIR=0;  [ -n "${LORE_INSTALL_DIR:-}" ]         && EXPLICIT_INSTALL_DIR=1
-EXPLICIT_VERSION=0;      [ -n "${LORE_INSTALL_VERSION:-}" ]     && EXPLICIT_VERSION=1
 EXPLICIT_SKILL_LEVEL=0;  [ -n "${LORE_INSTALL_SKILL_LEVEL:-}" ] && EXPLICIT_SKILL_LEVEL=1
 EXPLICIT_FROM_SOURCE=0;  [ "${LORE_INSTALL_FROM_SOURCE:-0}" = "1" ] && EXPLICIT_FROM_SOURCE=1
 
@@ -156,7 +155,7 @@ resolve_version() {
 # ═════════════════════════════ DOWNLOAD/INSTALL ════════════════════════════
 
 download_archive() {
-    local version="$1" target="$2" archive_name="$3"
+    local version="$1" archive_name="$2"
     local url="${RELEASE_BASE}/v${version}/${archive_name}"
     render_step "Downloading ${archive_name}"
     curl -fL --retry 3 --retry-delay 2 --progress-bar \
@@ -232,7 +231,7 @@ install_templates() {
 }
 
 # Drop config.example.yaml into the XDG config dir so a binary-only install (no git
-# clone) has a template to copy to config.yaml. `wi` auto-discovers
+# clone) has a template to copy to config.yaml. `lore` auto-discovers
 # ~/.config/lorekeeper/config.yaml, so this is where users should put their real config.
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/lorekeeper"
 install_config_example() {
@@ -322,7 +321,8 @@ install_skill() {
 
     render_step "Installing skill → $target"
     if [ -d "$target" ]; then
-        # Agent Skills spec has no version field — content hash is the only signal.
+        # SKILL.md carries a `version:` stamp (release provenance), but the content
+        # hash is the change signal — it catches every edit, stamped or not.
         local existing new
         existing="$(skill_sha256 "$target/SKILL.md")"
         new="$(skill_sha256 "$src/SKILL.md")"
@@ -422,7 +422,7 @@ USAGE
 parse_args() {
     while [ $# -gt 0 ]; do
         case "$1" in
-            --version)       LORE_INSTALL_VERSION="$2"; EXPLICIT_VERSION=1; shift 2 ;;
+            --version)       LORE_INSTALL_VERSION="$2"; shift 2 ;;
             --install-dir)   INSTALL_DIR="$2"; EXPLICIT_INSTALL_DIR=1; shift 2 ;;
             --data-dir)      DATA_DIR="$2"; shift 2 ;;
             --skill)         LORE_INSTALL_SKILL_LEVEL="$2"; EXPLICIT_SKILL_LEVEL=1; shift 2 ;;
@@ -595,10 +595,8 @@ main() {
         fi
         case "$method" in
             prebuilt)
-                local ext archive
-                case "$platform" in *windows*) ext="zip" ;; *) ext="tar.gz" ;; esac
-                archive="${BINARY_NAME}-v${version}-${platform}.${ext}"
-                download_archive "$version" "$platform" "$archive"
+                local archive="${BINARY_NAME}-v${version}-${platform}.tar.gz"
+                download_archive "$version" "$archive"
                 verify_checksum "$archive"
                 extract_archive "$archive"
                 # The release archive contains a top-level `lore-v{ver}-{target}/` dir

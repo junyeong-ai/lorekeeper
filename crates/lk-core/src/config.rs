@@ -997,7 +997,7 @@ impl Default for LlmConfig {
 #[serde(rename_all = "kebab-case")]
 pub enum LlmProvider {
     /// Emit JSONL queue tasks under `<vault>/.lorekeeper/queue/`. A Claude Code skill
-    /// (`/lore-process`) consumes the queue and edits target pages via Obsidian MCP using
+    /// (`/lore-process`) consumes the queue and edits target pages in place using
     /// Claude Code's native LLM session (no API key, no separate billing).
     Queue,
     /// No LLM work. Daily pages render without summary/concepts sections. Useful for

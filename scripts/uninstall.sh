@@ -41,8 +41,10 @@ Usage:
 Removes:
   - $LORE_INSTALL_DIR/lore                        (binary)
   - $LORE_INSTALL_DATA_DIR/templates              (installed templates)
+  - ~/.config/lorekeeper/config.example.yaml       (installed config template)
   - ~/.claude/skills/lore-*                        (user-level skills)
   - ./.claude/skills/lore-*                        (project-level skills, if present)
+  - ~/.claude/scheduled-tasks/lore-*-ingest        (scheduled-task definitions)
 
 Flags:
   --yes, -y       Skip all confirmations
@@ -86,6 +88,17 @@ if [ "$KEEP_DATA" != "1" ] && [ -d "${DATA_DIR}/templates" ]; then
         # Remove parent if now empty
         rmdir "$DATA_DIR" 2>/dev/null || true
         log_ok "Templates removed"
+        removed=$((removed + 1))
+    fi
+fi
+
+# Config example (installed artifact; config.yaml itself is user data and never touched)
+config_example="${XDG_CONFIG_HOME:-$HOME/.config}/lorekeeper/config.example.yaml"
+if [ "$KEEP_DATA" != "1" ] && [ -f "$config_example" ]; then
+    if prompt_yesno "Remove installed config example $config_example?"; then
+        render_step "Removing $config_example"
+        rm -f "$config_example"
+        log_ok "Config example removed"
         removed=$((removed + 1))
     fi
 fi
