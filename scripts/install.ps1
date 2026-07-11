@@ -147,6 +147,17 @@ function Get-SkillHash($path) {
     if (Test-Path $path) { (Get-FileHash -Algorithm SHA256 $path).Hash } else { $null }
 }
 
+# Backups live under the data dir, never beside the target: Claude Code loads any
+# directory carrying a SKILL.md inside ~\.claude\skills\ and ~\.claude\scheduled-tasks\,
+# so an in-place `<name>.backup_*` copy would surface as a phantom skill/task.
+function Backup-Path($target) {
+    if (-not (Test-Path $target)) { return }
+    $backupDir = Join-Path $DataDir "backups\$(Get-Date -Format yyyyMMdd_HHmmss)_$PID"
+    New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+    Copy-Item -Path $target -Destination $backupDir -Recurse -Force
+    Write-Host "  Backup: $(Join-Path $backupDir (Split-Path -Leaf $target))" -ForegroundColor DarkGray
+}
+
 function Install-Skill($level, $src, $skillName) {
     if ($level -eq 'none') { Write-Host '  Skill install skipped' -ForegroundColor DarkGray; return }
     if (-not (Test-Path $src)) { Write-Warn "Skill source not found: $src (skipping)"; return }
@@ -163,9 +174,7 @@ function Install-Skill($level, $src, $skillName) {
             Write-Host "  Skill '$skillName' already current; kept" -ForegroundColor DarkGray
             return
         }
-        $backup = "${target}.backup_$(Get-Date -Format yyyyMMdd_HHmmss)"
-        Copy-Item -Path $target -Destination $backup -Recurse -Force
-        Write-Host "  Backup: $backup" -ForegroundColor DarkGray
+        Backup-Path $target
         Remove-Item -Path $target -Recurse -Force
     }
     New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
@@ -208,9 +217,7 @@ function Install-OneScheduledTask($name, $version, $repoDir) {
             Write-Host "  Scheduled task '$name' already current; kept" -ForegroundColor DarkGray
             return
         }
-        $backup = "$(Split-Path -Parent $target).backup_$(Get-Date -Format yyyyMMdd_HHmmss)"
-        Copy-Item -Path (Split-Path -Parent $target) -Destination $backup -Recurse -Force
-        Write-Host "  Backup: $backup" -ForegroundColor DarkGray
+        Backup-Path (Split-Path -Parent $target)
     }
     New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
     Copy-Item -Path $src -Destination $target -Force
