@@ -1,6 +1,6 @@
 # Lorekeeper
 
-[![Rust](https://img.shields.io/badge/rust-1.96%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.97%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 [![DeepWiki](https://img.shields.io/badge/DeepWiki-junyeong--ai%2Florekeeper-blue?style=flat-square)](https://deepwiki.com/junyeong-ai/lorekeeper)
 
@@ -374,4 +374,4 @@ lore schedule | crontab -
 
 ## 기술 스택
 
-Rust 1.96 · 2024 edition. `tokio`/`reqwest`(비동기 소스), `jiff`(타임존 정확 날짜), `minijinja`(템플릿), `petgraph`(wikilink 그래프), `blake3`(이벤트·캐시 해시). 라이선스: MIT.
+Rust 1.97 · 2024 edition. `tokio`/`reqwest`(비동기 소스), `jiff`(타임존 정확 날짜), `minijinja`(템플릿), `petgraph`(wikilink 그래프), `blake3`(이벤트·캐시 해시). 라이선스: MIT.
