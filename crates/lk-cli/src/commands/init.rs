@@ -124,7 +124,7 @@ async fn google_refresh_token(
         "  authorize in the browser now to mint a refresh_token? (No = paste one)",
         true,
     )? {
-        let http = reqwest::Client::new();
+        let http = lk_source::build_http_client().map_err(|e| miette::miette!("{e}"))?;
         build_google_refresh_token(&http, client_id, client_secret)
             .await
             .map_err(|e| miette::miette!("{e}"))

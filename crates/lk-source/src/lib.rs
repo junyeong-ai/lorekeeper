@@ -179,6 +179,20 @@ fn slack_creds(creds: &Credentials) -> Result<&credentials::SlackCredentials, So
     })
 }
 
+/// Build the shared HTTP client injected into every adapter (`build_source`) and the
+/// OAuth token flow. Connect and read timeouts bound a connection that stops making
+/// progress — reqwest has no default timeouts, so a provider that accepts the
+/// connection and then stalls would otherwise hang an unattended (cron) ingest
+/// indefinitely, and `retry`'s timeout branch would never fire. A total request
+/// timeout is deliberately not set: a transfer that is still delivering bytes is
+/// alive, and capping it would misclassify large-but-slow responses as dead.
+pub fn build_http_client() -> Result<reqwest::Client, SourceError> {
+    Ok(reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .read_timeout(std::time::Duration::from_secs(30))
+        .build()?)
+}
+
 pub fn build_source(
     source_type: SourceType,
     http: reqwest::Client,

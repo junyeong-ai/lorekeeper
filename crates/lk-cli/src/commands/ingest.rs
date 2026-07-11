@@ -122,7 +122,7 @@ pub async fn run(
         eprintln!("[date] only events on {td} will be processed");
     }
 
-    let http = reqwest::Client::new();
+    let http = lk_source::build_http_client().map_err(|e| miette::miette!("{e}"))?;
     let extract_ctx = lk_source::ExtractContext {
         target_date: extract_target,
         timezone: tz,
