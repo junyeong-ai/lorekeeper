@@ -249,6 +249,7 @@ fn rewrite_links(
     from_rel: &Path,
     into_rel: &Path,
 ) -> (String, usize) {
+    let from_id = crate::scan::path_slug(from_rel);
     let mut count = 0;
     // Rewrite OUTSIDE code only (shared helper): a from-link shown inside a code
     // fence/span is a code example, not a graph edge — `extract_dests`/`broken` ignore
@@ -256,12 +257,17 @@ fn rewrite_links(
     // corrupt the doc.
     let out = link::rewrite_links_outside_code(content, |text, raw_dest| {
         // Does this link target the from concept? Resolve the destination the SAME way
-        // the graph does (against this page's location), so any spelling that lands on
-        // the from page — `../concepts/from.md`, `./from.md`, the OKF absolute form —
-        // is rewritten, not just one canonical string.
+        // the graph does — `.md` destinations only, resolved against this page's
+        // location, then normalized to a page id — so exactly the spellings scan
+        // counts as citations (`../concepts/from.md`, `./from.md`, the OKF absolute
+        // form, case/punctuation variants) are rewritten, no more and no fewer.
         let (dest, anchor) = link::split_raw_dest(raw_dest);
-        let resolved = link::resolve_dest(page_path, &link::decode_dest(dest));
-        if resolved.as_deref() != Some(from_rel) {
+        let decoded = link::decode_dest(dest);
+        if !Path::new(&decoded).extension().is_some_and(|e| e == "md") {
+            return None;
+        }
+        let resolved = link::resolve_dest(page_path, &decoded)?;
+        if crate::scan::path_slug(&resolved) != from_id {
             return None;
         }
         count += 1;
@@ -473,6 +479,40 @@ mod tests {
         assert_eq!(
             daily,
             "See [V](../../wiki/concepts/vector-database.md) and [V](../../wiki/concepts/vector-database.md) and [V](../../wiki/concepts/vector-database.md).\n"
+        );
+    }
+
+    #[test]
+    fn case_variant_destination_is_repointed_like_the_graph_resolves_it() {
+        // scan matches links to pages by id (path_slug), so `[Old](../../wiki/concepts/OLD.md)`
+        // is a citation of `wiki/concepts/old.md`. The merge must repoint it too —
+        // a literal-path comparison would skip it and leave it dangling after the
+        // from page is deleted.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        write(root, "wiki/concepts/old.md", "---\nid: old\n---\n\n# old\n");
+        write(root, "wiki/concepts/new.md", "---\nid: new\n---\n\n# new\n");
+        write(
+            root,
+            "daily/x/d.md",
+            "See [Old](../../wiki/concepts/OLD.md) and [pdf](../../wiki/concepts/old.pdf).\n",
+        );
+        let pages = vec![
+            page("wiki/concepts/old", "wiki/concepts/old.md", &[]),
+            page("wiki/concepts/new", "wiki/concepts/new.md", &[]),
+            page("daily/x/d", "daily/x/d.md", &["wiki/concepts/old"]),
+        ];
+        let r = merge_concepts(&pages, root, "wiki", "old", "new", false, false).unwrap();
+        assert_eq!(r.rewritten.len(), 1);
+        assert_eq!(
+            r.rewritten[0].links, 1,
+            "only the .md citation is a graph edge"
+        );
+        let daily = std::fs::read_to_string(root.join("daily/x/d.md")).unwrap();
+        assert_eq!(
+            daily,
+            "See [Old](../../wiki/concepts/new.md) and [pdf](../../wiki/concepts/old.pdf).\n",
+            "the case-variant citation is repointed; the non-.md link is untouched"
         );
     }
 

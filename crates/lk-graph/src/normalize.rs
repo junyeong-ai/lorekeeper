@@ -12,7 +12,7 @@ use lk_core::link;
 use lk_core::vault_path::RESERVED_WIKI_FILES;
 
 use crate::GraphError;
-use crate::scan::ScannedPage;
+use crate::scan::{self, ScannedPage};
 
 #[derive(Debug, Clone)]
 pub struct Rename {
@@ -82,9 +82,18 @@ pub fn apply(renames: &[Rename], pages: &[ScannedPage], root: &Path) -> Result<u
         }
     }
 
-    let path_map: HashMap<&Path, &Path> = renames
+    // Two maps, two matching semantics. A page's OWN location is exact — the rename
+    // map is keyed by literal path so a just-renamed page is read at its new file.
+    // Link destinations are matched the way the graph matches them — by page id
+    // (`path_slug`) — so a case/punctuation variant spelling of a renamed file's path
+    // is repointed too: exactly the citations scan resolves to it.
+    let renamed_paths: HashMap<&Path, &Path> = renames
         .iter()
         .map(|r| (r.old_path.as_path(), r.new_path.as_path()))
+        .collect();
+    let renamed_ids: HashMap<String, &Path> = renames
+        .iter()
+        .map(|r| (scan::path_slug(&r.old_path), r.new_path.as_path()))
         .collect();
 
     for rename in renames {
@@ -102,7 +111,7 @@ pub fn apply(renames: &[Rename], pages: &[ScannedPage], root: &Path) -> Result<u
     for page in pages {
         // A renamed page keeps its directory (only the filename changes), so links
         // inside it still resolve from the same base — read it at its new path.
-        let rel_path = path_map
+        let rel_path = renamed_paths
             .get(page.path.as_path())
             .copied()
             .unwrap_or(&page.path);
@@ -111,7 +120,7 @@ pub fn apply(renames: &[Rename], pages: &[ScannedPage], root: &Path) -> Result<u
         let content = std::fs::read_to_string(&abs_path)
             .map_err(|e| GraphError::Io(format!("failed to read {}: {e}", abs_path.display())))?;
 
-        let updated = repoint_renamed_links(&content, rel_path, &path_map);
+        let updated = repoint_renamed_links(&content, rel_path, &renamed_ids);
 
         if updated != content {
             lk_core::fs::write_atomic(&abs_path, updated.as_bytes(), None).map_err(|e| {
@@ -124,18 +133,23 @@ pub fn apply(renames: &[Rename], pages: &[ScannedPage], root: &Path) -> Result<u
 }
 
 /// Repoint every link whose destination resolves to a renamed page at that page's new
-/// path. Rewrites OUTSIDE code only: a link shown inside a code fence/span is a code
-/// example, not a graph edge (`extract_dests` ignores it), so rewriting it would
-/// corrupt the document.
+/// path. Destinations are matched by page id (the graph's resolution), gated to `.md`
+/// like extraction. Rewrites OUTSIDE code only: a link shown inside a code fence/span
+/// is a code example, not a graph edge (`extract_dests` ignores it), so rewriting it
+/// would corrupt the document.
 fn repoint_renamed_links(
     content: &str,
     page_path: &Path,
-    path_map: &HashMap<&Path, &Path>,
+    path_map: &HashMap<String, &Path>,
 ) -> String {
     link::rewrite_links_outside_code(content, |text, raw_dest| {
         let (dest, anchor) = link::split_raw_dest(raw_dest);
-        let resolved = link::resolve_dest(page_path, &link::decode_dest(dest))?;
-        let new_path = path_map.get(resolved.as_path())?;
+        let decoded = link::decode_dest(dest);
+        if !Path::new(&decoded).extension().is_some_and(|e| e == "md") {
+            return None;
+        }
+        let resolved = link::resolve_dest(page_path, &decoded)?;
+        let new_path = path_map.get(&scan::path_slug(&resolved))?;
         // `text` arrives exactly as written (escapes included) — reassemble verbatim
         // rather than through `md_link`, which would escape it a second time.
         let new_dest = format!("{}{anchor}", link::relative_dest(page_path, new_path));
@@ -182,7 +196,7 @@ mod tests {
     fn link_repointing_preserves_text_and_anchor() {
         let old = PathBuf::from("wiki/Concept_A.md");
         let new = PathBuf::from("wiki/concept-a.md");
-        let path_map: HashMap<&Path, &Path> = [(old.as_path(), new.as_path())].into();
+        let path_map: HashMap<String, &Path> = [(scan::path_slug(&old), new.as_path())].into();
         let content = "See [A](Concept_A.md) and [A](Concept_A.md#part) and [B](other.md) here.";
         let updated = repoint_renamed_links(content, Path::new("wiki/linker.md"), &path_map);
         assert_eq!(
@@ -198,10 +212,23 @@ mod tests {
         // rewrite must follow.
         let old_p = PathBuf::from("wiki/Concept_A.md");
         let new_p = PathBuf::from("wiki/concept-a.md");
-        let path_map: HashMap<&Path, &Path> = [(old_p.as_path(), new_p.as_path())].into();
+        let path_map: HashMap<String, &Path> = [(scan::path_slug(&old_p), new_p.as_path())].into();
         let content = "See [A](Concept_A.md \"tip\") here.";
         let updated = repoint_renamed_links(content, Path::new("wiki/linker.md"), &path_map);
         assert_eq!(updated, "See [A](concept-a.md) here.");
+    }
+
+    #[test]
+    fn case_variant_destination_is_repointed_like_the_graph_resolves_it() {
+        // scan matches links to pages by id (path_slug), so `[A](concept_a.md)` is a
+        // citation of `wiki/Concept_A.md`. The rename repoint must match at the same
+        // level — a literal-path comparison would miss it and leave the link stale.
+        let old = PathBuf::from("wiki/Concept_A.md");
+        let new = PathBuf::from("wiki/concept-a.md");
+        let path_map: HashMap<String, &Path> = [(scan::path_slug(&old), new.as_path())].into();
+        let content = "See [A](concept_a.md) and [A](CONCEPT-A.md) here.";
+        let updated = repoint_renamed_links(content, Path::new("wiki/linker.md"), &path_map);
+        assert_eq!(updated, "See [A](concept-a.md) and [A](concept-a.md) here.");
     }
 
     #[test]
@@ -220,7 +247,7 @@ mod tests {
         // leave it verbatim — only the real prose link is repointed.
         let old = PathBuf::from("wiki/Concept A.md");
         let new = PathBuf::from("wiki/concept-a.md");
-        let path_map: HashMap<&Path, &Path> = [(old.as_path(), new.as_path())].into();
+        let path_map: HashMap<String, &Path> = [(scan::path_slug(&old), new.as_path())].into();
         let content = "Prose [A](Concept%20A.md).\n```\nexample [A](Concept%20A.md)\n```\nInline `[A](Concept%20A.md)`.\n";
         let updated = repoint_renamed_links(content, Path::new("wiki/linker.md"), &path_map);
         assert!(updated.contains("Prose [A](concept-a.md)."));

@@ -72,8 +72,9 @@ pub fn is_external(dest: &str) -> bool {
 }
 
 /// Percent-encode a destination path: the characters that would break an inline
-/// link's `(dest)` syntax (space, parens) plus `%` itself. Everything else — notably
-/// non-ASCII slugs — passes through verbatim, as CommonMark permits.
+/// link's `(dest)` syntax (space, parens), `%` itself, and `#` (which extraction
+/// would otherwise read as an anchor separator, truncating the path). Everything
+/// else — notably non-ASCII slugs — passes through verbatim, as CommonMark permits.
 pub fn encode_dest(path: &str) -> String {
     let mut out = String::with_capacity(path.len());
     for c in path.chars() {
@@ -82,6 +83,7 @@ pub fn encode_dest(path: &str) -> String {
             ' ' => out.push_str("%20"),
             '(' => out.push_str("%28"),
             ')' => out.push_str("%29"),
+            '#' => out.push_str("%23"),
             c => out.push(c),
         }
     }
@@ -153,8 +155,10 @@ pub fn relative_dest(from_page: &Path, to_page: &Path) -> String {
 /// Resolve a DECODED, anchor-free destination against the page that contains it,
 /// returning the vault-relative path it addresses. A `/`-leading destination is
 /// vault-root-relative (the OKF absolute form); anything else is relative to the
-/// page's directory. Purely lexical (`.` and `..` are folded); `None` when the
-/// destination escapes the vault root — such a link can't address a vault page.
+/// page's directory. Destinations are `/`-separated (a backslash is a literal path
+/// character, as in CommonMark and POSIX). Purely lexical (`.` and `..` are folded);
+/// `None` when the destination escapes the vault root — such a link can't address a
+/// vault page.
 pub fn resolve_dest(from_page: &Path, dest: &str) -> Option<PathBuf> {
     let (base, dest) = match dest.strip_prefix('/') {
         Some(rooted) => (Path::new(""), rooted),
@@ -394,6 +398,12 @@ Inline `[span](c.md)` and [live2](d.md).
         assert_eq!(decode_dest(&encoded), path);
         // A lone `%` stays literal.
         assert_eq!(decode_dest("100%.md"), "100%.md");
+        // `#` is encoded so a path containing it survives the anchor split.
+        let hashy = "wiki/a#b.md";
+        let encoded = encode_dest(hashy);
+        assert_eq!(encoded, "wiki/a%23b.md");
+        assert_eq!(split_raw_dest(&encoded), ("wiki/a%23b.md", ""));
+        assert_eq!(decode_dest(&encoded), hashy);
     }
 
     #[test]
