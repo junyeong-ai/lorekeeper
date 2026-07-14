@@ -101,6 +101,7 @@ category is assigned, use `tags: ["concept"]`.
 ```yaml
 ---
 id: {slug}
+type: concept
 title: "{Name}"
 aliases: ["{Name}"]
 created: {YYYY-MM-DD}
