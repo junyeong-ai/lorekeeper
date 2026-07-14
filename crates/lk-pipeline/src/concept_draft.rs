@@ -40,7 +40,7 @@ struct ConceptDraft {
     /// Extra `aliases` (beyond the page title itself) carried verbatim from the existing
     /// page. Aliases are established identity, not regenerated content: a human or
     /// `/lore-wiki audit` registers a synonym/abbreviation (e.g. `RAG` →
-    /// `retrieval-augmented-generation`) so a bare `[[RAG]]` resolves to the one page.
+    /// `retrieval-augmented-generation`) so every citation addresses the one page.
     /// An ingest re-render that re-emitted only `[title]` would silently erase them and
     /// break every link that relied on the alias — so they are preserved exactly like the
     /// title and category. The title seed is dropped here and re-added first at render.
@@ -187,7 +187,7 @@ impl Default for ConceptDrafts {
 impl ConceptDraft {
     /// Widen the observed [first_seen, last_seen] window. Citation counting is not
     /// done here — `lore graph backlinks-sync` is the sole owner of `source_count`,
-    /// re-deriving it exactly from the wikilink graph.
+    /// re-deriving it exactly from the link graph.
     fn observe(&mut self, date: jiff::civil::Date) {
         self.first_seen = self.first_seen.min(date);
         self.last_seen = self.last_seen.max(date);
@@ -382,8 +382,10 @@ mod tests {
                 "Retrieval-Augmented Generation enriches an LLM prompt with retrieved context."
                     .into(),
             ),
-            preserved_sources: Some("- [[daily/x/2026-05-01]]\n- [[daily/x/2026-05-02]]".into()),
-            preserved_related: Some("- [[vector-search]]".into()),
+            preserved_sources: Some(
+                "- [d1](../../daily/x/2026-05-01.md)\n- [d2](../../daily/x/2026-05-02.md)".into(),
+            ),
+            preserved_related: Some("- [Vector Search](vector-search.md)".into()),
             preserved_aliases: Vec::new(),
         };
         let engine = TemplateEngine::build(None).unwrap();
@@ -397,12 +399,12 @@ mod tests {
             page.content
         );
         assert!(
-            page.content.contains("- [[daily/x/2026-05-02]]"),
+            page.content.contains("- [d2](../../daily/x/2026-05-02.md)"),
             "sources body must survive re-render:\n{}",
             page.content
         );
         assert!(
-            page.content.contains("- [[vector-search]]"),
+            page.content.contains("- [Vector Search](vector-search.md)"),
             "related body must survive re-render:\n{}",
             page.content
         );
@@ -446,7 +448,7 @@ mod tests {
 
     #[test]
     fn preserved_aliases_survive_render() {
-        // A synonym registered by a human or `/lore-wiki audit` (so a bare `[[RAG]]`
+        // A synonym registered by a human or `/lore-wiki audit` (so the concept registry
         // resolves to the canonical page) must NOT be wiped when a later ingest re-renders
         // the concept. The title is always the first alias; preserved synonyms follow.
         let draft = ConceptDraft {

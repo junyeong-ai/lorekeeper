@@ -34,7 +34,7 @@ resolve section headings before inspecting pages.
    low-noise; skipping the mark makes every multi-source concept resurface.
 4. **Frontiers — data gaps + new directions**. Report:
    - Concepts mentioned in daily pages but missing a dedicated wiki page
-     (cross-check `[[...]]` wikilinks vs concept files from `lore wiki concepts`).
+     (cross-check body links vs concept files from `lore wiki concepts`).
    - Topics with high cross-source activity (3+ sources in a week) but shallow
      concept coverage (placeholder Synthesis or single source listed).
    - Stale concept syntheses — `updated` recent but Synthesis was written
@@ -45,7 +45,7 @@ resolve section headings before inspecting pages.
    - **Near-duplicates** from layer 1's `near_duplicate_concepts`: for a true
      variant-spelling pair (`vector-db` ~ `vector-database`), recommend consolidating
      it with `lore graph merge <from> <into>` followed by `lore graph backlinks-sync`
-     (the merge rewires every wikilink and deletes the `from` page; it refuses if `from`
+     (the merge rewires every link and deletes the `from` page; it refuses if `from`
      has authored prose unless `--force`, so any authored prose is salvaged into the
      survivor first). Like every audit finding the merge is **surfaced, not run** — it
      deletes a page, so a human makes the call. Leave deliberate model-version siblings

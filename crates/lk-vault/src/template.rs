@@ -187,7 +187,7 @@ mod tests {
             "event_count": 1,
             "events": [{"title": "T", "body": "B", "author": "a", "url": "https://x"}],
             "summary": "sum",
-            "concepts": ["C1", "C2"],
+            "concepts": ["[C1](../../wiki/concepts/c1.md)", "[C2](../../wiki/concepts/c2.md)"],
             "extract_concepts": true,
             "highlights": [{"label": "HL", "items": [{"subject": "Subj", "sender": "me"}]}],
             "i18n": i18n,
@@ -199,6 +199,7 @@ mod tests {
         // frontmatter (adds/drops a key) fails here.
         let expected_keys = [
             "id:",
+            "type: daily",
             "title:",
             "created:",
             "labels:",
@@ -238,10 +239,13 @@ mod tests {
                 "{name}: missing summary heading:\n{out}"
             );
             // The concept list is a TIGHT markdown list (no blank line between bullets) —
-            // uniform across all daily templates via the shared base loop.
+            // uniform across all daily templates via the shared base loop. Entries arrive
+            // prerendered (`render::concept_links`), so the template emits them verbatim.
             assert!(
-                out.contains("- [[C1]]\n- [[C2]]"),
-                "{name}: concept wikilinks must render as a tight list:\n{out}"
+                out.contains(
+                    "- [C1](../../wiki/concepts/c1.md)\n- [C2](../../wiki/concepts/c2.md)"
+                ),
+                "{name}: concept links must render as a tight list:\n{out}"
             );
             assert_eq!(
                 out.matches("### T").count(),

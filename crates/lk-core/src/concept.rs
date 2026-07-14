@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
 
 /// A concept the LLM surfaced from a source. The page filename is always
-/// `slugify(name)` — the same key a bare `[[name]]` wikilink resolves through — so a
-/// citation can never point at a file that doesn't exist.
+/// `slugify(name)`, so the address a concept link points at is derivable from the
+/// name alone — a citation and its page can never disagree on the slug.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractedConcept {
     pub name: String,

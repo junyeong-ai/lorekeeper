@@ -62,8 +62,8 @@ Identify the key named entities, topics, and concepts (whatever the source's
 domain — the focus, if present, names it). Output a list of concept names (in
 the source language). Each concept also produces a concept page (create if
 missing, merge if exists). Fill the origin page's related-concepts section
-(the task's `target.anchor` heading) with a `[[concept]]` forward link — the
-single source of truth `backlinks-sync` reads; leave the concept's sources
+(the task's `target.anchor` heading) with a forward markdown link per concept —
+the single source of truth `backlinks-sync` reads; leave the concept's sources
 section / `source_count` to it. Use the concept path pattern from AGENTS.md.
 
 **What counts as a concept** (keep the graph high-signal, not noisy): extract
@@ -127,13 +127,15 @@ the synthesis if the new source adds meaningful context; otherwise leave it.
 
 ## Per-kind target formatting
 
-- **`daily-concepts`**: replace the section body with
-  `- [[Concept Name 1]]\n- [[Concept Name 2]]\n...`. Create each concept page
-  (path from AGENTS.md) if it doesn't exist, following the concept page
-  format above. Crucially include `aliases: ["Concept Name"]` so the
-  `[[Concept Name]]` wikilinks resolve to the slug-named file. If a concept
-  name contains `/` (e.g. `async/await`), emit it piped — `[[async-await|async/await]]`
-  — because a bare `[[async/await]]` resolves as a vault path, never via the alias.
+- **`daily-concepts`**: replace the section body with one link per line —
+  `- [Concept Name]({target.concepts_dir}/{slug}.md)`. `target.concepts_dir` is
+  carried on every task (the precomputed relative path from the target page to
+  the concepts directory — concatenate, never compute paths yourself); `{slug}`
+  is the concept name slugified per AGENTS.md § Concept convergence. The display
+  text is the concept's name verbatim (any character is fine — the slug lives
+  only in the destination). Create each concept page (path from AGENTS.md) if it
+  doesn't exist, following the concept page format above, and include
+  `aliases: ["Concept Name"]` so the registry recognizes the surface form.
 
 - **`work-log-synthesis`**: the input text contains personal events from
   multiple sources, each prefixed with `[source_id]`. Instead of a plain

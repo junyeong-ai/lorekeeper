@@ -118,6 +118,7 @@ impl Synthesizer {
             source_type: None,
             target: lk_queue::TaskTarget {
                 vault_path: path.to_string(),
+                concepts_dir: crate::render::concepts_dir_dest(&path.to_string(), &self.ctx.dirs),
                 kind,
                 anchor: format!("## {heading}"),
             },
@@ -240,6 +241,7 @@ impl Synthesizer {
             locale: self.ctx.locale.tag().to_string(),
             target: lk_queue::TaskTarget {
                 vault_path: path.to_string(),
+                concepts_dir: crate::render::concepts_dir_dest(&path.to_string(), &self.ctx.dirs),
                 kind,
                 anchor: format!("## {heading}"),
             },

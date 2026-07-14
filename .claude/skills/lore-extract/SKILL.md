@@ -227,7 +227,7 @@ Extract knowledge using the manifest. Requires a prior scan.
       tags: [{technology}, {domain}]
       ```
 
-      Link the extracted concepts as `[[wikilinks]]` in the document's
+      Link the extracted concepts as relative markdown links (AGENTS.md § Links) in the document's
       related-concepts body section (heading per AGENTS.md), NOT in a
       frontmatter `concepts` array. These forward links are what the Finalize
       `backlinks-sync` reads to populate each concept's sources section.
@@ -242,7 +242,7 @@ Extract knowledge using the manifest. Requires a prior scan.
       section / `source_count`
       stay machine-owned (AGENTS.md § Concept convergence); the Finalize
       `backlinks-sync` re-derives both from the document's forward
-      `[[wikilink]]` (step g), the single source of truth. If no configured
+      forward link (step g), the single source of truth. If no configured
       category fits a transferable concept, omit the `category` field (leave it
       uncategorized) rather than forcing a wrong one.
 

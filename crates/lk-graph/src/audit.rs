@@ -145,7 +145,8 @@ pub fn mark_audited(
 /// Hash (BLAKE3-128 hex) of a concept's canonical `## Sources` body — the identity of
 /// its current source set. The heading is resolved under ANY locale (a page authored
 /// before a `vault.locale` switch keeps its old heading), mirroring `backlinks`. The
-/// body is `backlinks-sync`-canonical (sorted `- [[id]]`), so the hash is stable.
+/// body is `backlinks-sync`-canonical (sorted `- [title](relative-path)` lines), so the
+/// hash is stable.
 fn sources_hash(raw: &str, locale: Locale) -> String {
     let heading = Locale::ALL
         .iter()
@@ -168,7 +169,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let body = sources
             .iter()
-            .map(|s| format!("- [[{s}]]"))
+            .map(|s| format!("- [{s}](../../daily/x/{s}.md)"))
             .collect::<Vec<_>>()
             .join("\n");
         let content =
@@ -238,7 +239,7 @@ mod tests {
             .join("rag.md");
         let swapped = std::fs::read_to_string(&path)
             .unwrap()
-            .replace("- [[b]]", "- [[c]]");
+            .replace("- [b](../../daily/x/b.md)", "- [c](../../daily/x/c.md)");
         std::fs::write(&path, swapped).unwrap();
 
         let c = run(tmp.path());

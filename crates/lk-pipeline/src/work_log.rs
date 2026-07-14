@@ -88,6 +88,7 @@ pub async fn render_work_log(
                 vault_path: vault_path.clone(),
                 kind: TargetKind::WorkLogSynthesis,
                 anchor: format!("## {topic_heading}"),
+                concepts_dir: crate::render::concepts_dir_dest(&vault_path, &ctx.dirs),
             },
         };
         let hash = req.cache_hash();
@@ -128,11 +129,22 @@ pub async fn render_work_log(
             llm_inputs.insert(completion_key, hash.clone().into());
         }
 
+        // Each cited daily page renders as a `[source/date](relative)` link, destination
+        // computed from the work-log page's own location.
+        let source_links: Vec<String> = sources
+            .iter()
+            .map(|source| {
+                let daily = lk_core::vault_path::VaultPath::daily(&ctx.dirs, source, date);
+                let dest = lk_core::link::relative_dest(Path::new(&vault_path), daily.as_ref());
+                lk_core::link::md_link(&format!("{source}/{date}"), &dest)
+            })
+            .collect();
+
         let context = serde_json::json!({
             "date": date.to_string(),
             "categories": categories,
             "sources": sources,
-            "daily_dir": ctx.dirs.daily,
+            "source_links": source_links,
             "i18n": locale.strings(),
             (field::LLM_INPUTS): llm_inputs,
         });

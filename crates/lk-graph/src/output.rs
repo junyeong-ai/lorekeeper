@@ -1,6 +1,5 @@
 use serde::Serialize;
 
-use crate::alias::{AliasConflict, AliasConflictKind};
 use crate::audit::AuditCandidate;
 use crate::backlinks::{BacklinksSyncResult, ConceptUpdate};
 use crate::cluster::{ClusterResult, LinkSuggestion};
@@ -55,7 +54,7 @@ pub struct RenameSuggestion {
 #[derive(Debug, Serialize)]
 pub struct LintReport {
     pub pages: usize,
-    pub wikilinks: usize,
+    pub links: usize,
     pub components: usize,
     pub hubs: Vec<HubPageReference>,
     pub orphans: Vec<String>,
@@ -64,7 +63,6 @@ pub struct LintReport {
     pub invalid_categories: Vec<InvalidCategoryConcept>,
     pub near_duplicate_concepts: Vec<NearDuplicateConcept>,
     pub unresolved_conflicts: Vec<UnresolvedConflict>,
-    pub alias_conflicts: Vec<AliasConflict>,
     pub findings: usize,
 }
 
@@ -184,7 +182,7 @@ pub fn print_lint(r: &LintReport) {
     println!("=== Lint Report ===");
     println!(
         "pages: {}, links: {}, components: {}",
-        r.pages, r.wikilinks, r.components
+        r.pages, r.links, r.components
     );
 
     if !r.hubs.is_empty() {
@@ -257,24 +255,6 @@ pub fn print_lint(r: &LintReport) {
         }
     }
 
-    if !r.alias_conflicts.is_empty() {
-        println!("\nAlias conflicts ({}):", r.alias_conflicts.len());
-        for c in &r.alias_conflicts {
-            match c.kind {
-                AliasConflictKind::Duplicate => println!(
-                    "  [[{}]] claimed by {} — resolves to only one",
-                    c.alias,
-                    c.claimants.join(", ")
-                ),
-                AliasConflictKind::ShadowsRealPage => println!(
-                    "  [[{}]] on {} is inert — a real page already owns that slug",
-                    c.alias,
-                    c.claimants.join(", ")
-                ),
-            }
-        }
-    }
-
     if r.findings == 0 {
         println!("\nNo issues found");
     } else {
@@ -330,7 +310,7 @@ pub fn print_merge(result: &MergeResult) {
     let mode = if result.dry_run { " (dry-run)" } else { "" };
     let total: usize = result.rewritten.iter().map(|r| r.links).sum();
     println!(
-        "Merge{mode}: [[{}]] → [[{}]] — {total} link(s) across {} page(s)",
+        "Merge{mode}: {} → {} — {total} link(s) across {} page(s)",
         result.from_slug,
         result.into_slug,
         result.rewritten.len()

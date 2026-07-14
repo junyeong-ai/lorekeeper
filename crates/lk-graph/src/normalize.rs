@@ -1,16 +1,15 @@
 //! Slug normalization: detect filenames whose stem is not already a canonical slug,
-//! rename them, and rewrite wikilinks that point at the old slug.
+//! rename them, and repoint links that address the old path.
 //!
 //! The normalization rule itself is `lk_core::slugify` (NFKC-correct) — there is no
-//! local slug function here. This module only owns the rename plan + wikilink rewrite.
+//! local slug function here. This module only owns the rename plan + link rewrite.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use lk_core::concept::slugify;
+use lk_core::link;
 use lk_core::vault_path::RESERVED_WIKI_FILES;
-use lk_core::wikilink;
-use regex::Captures;
 
 use crate::GraphError;
 use crate::scan::ScannedPage;
@@ -83,11 +82,6 @@ pub fn apply(renames: &[Rename], pages: &[ScannedPage], root: &Path) -> Result<u
         }
     }
 
-    let renamed_normalized: HashSet<String> = renames
-        .iter()
-        .filter_map(|r| slugify(&r.old_slug))
-        .collect();
-
     let path_map: HashMap<&Path, &Path> = renames
         .iter()
         .map(|r| (r.old_path.as_path(), r.new_path.as_path()))
@@ -106,6 +100,8 @@ pub fn apply(renames: &[Rename], pages: &[ScannedPage], root: &Path) -> Result<u
     }
 
     for page in pages {
+        // A renamed page keeps its directory (only the filename changes), so links
+        // inside it still resolve from the same base — read it at its new path.
         let rel_path = path_map
             .get(page.path.as_path())
             .copied()
@@ -115,7 +111,7 @@ pub fn apply(renames: &[Rename], pages: &[ScannedPage], root: &Path) -> Result<u
         let content = std::fs::read_to_string(&abs_path)
             .map_err(|e| GraphError::Io(format!("failed to read {}: {e}", abs_path.display())))?;
 
-        let updated = normalize_wikilinks(&content, &renamed_normalized);
+        let updated = repoint_renamed_links(&content, rel_path, &path_map);
 
         if updated != content {
             lk_core::fs::write_atomic(&abs_path, updated.as_bytes(), None).map_err(|e| {
@@ -127,24 +123,23 @@ pub fn apply(renames: &[Rename], pages: &[ScannedPage], root: &Path) -> Result<u
     Ok(renames.len())
 }
 
-fn normalize_wikilinks(content: &str, renamed_slugs: &HashSet<String>) -> String {
-    // Rewrite OUTSIDE code only: a `[[Foo Bar]]` shown inside a code fence/span is a code
-    // example, not a graph edge (`extract_wikilinks` ignores it), so normalizing it would
-    // corrupt the document. The shared helper applies the exact same fence/inline-skip rule.
-    wikilink::rewrite_wikilinks_outside_code(content, |caps: &Captures| {
-        let full = &caps[0];
-        // One decomposition path for the whole workspace: page / anchor / alias,
-        // each preserved exactly once on rewrite. (`[[`/`]]` are ASCII — byte-safe.)
-        let (page_raw, anchor, alias) = wikilink::split_wikilink_parts(&full[2..full.len() - 2]);
-        let Some(normalized) = slugify(page_raw) else {
-            return full.to_owned();
-        };
-
-        if renamed_slugs.contains(&normalized) && page_raw.trim() != normalized {
-            format!("[[{normalized}{anchor}{alias}]]")
-        } else {
-            full.to_owned()
-        }
+/// Repoint every link whose destination resolves to a renamed page at that page's new
+/// path. Rewrites OUTSIDE code only: a link shown inside a code fence/span is a code
+/// example, not a graph edge (`extract_dests` ignores it), so rewriting it would
+/// corrupt the document.
+fn repoint_renamed_links(
+    content: &str,
+    page_path: &Path,
+    path_map: &HashMap<&Path, &Path>,
+) -> String {
+    link::rewrite_links_outside_code(content, |text, raw_dest| {
+        let (dest, anchor) = link::split_dest_anchor(raw_dest);
+        let resolved = link::resolve_dest(page_path, &link::decode_dest(dest))?;
+        let new_path = path_map.get(resolved.as_path())?;
+        // `text` arrives exactly as written (escapes included) — reassemble verbatim
+        // rather than through `md_link`, which would escape it a second time.
+        let new_dest = format!("{}{anchor}", link::relative_dest(page_path, new_path));
+        Some(format!("[{text}]({new_dest})"))
     })
 }
 
@@ -160,7 +155,6 @@ mod tests {
             path: rel,
             title: "test".to_owned(),
             outgoing: outgoing.iter().map(|s| (*s).to_string()).collect(),
-            aliases: Vec::new(),
         }
     }
 
@@ -185,32 +179,15 @@ mod tests {
     }
 
     #[test]
-    fn wikilink_normalization() {
-        let slugs: HashSet<String> = ["concept-a".to_owned()].into();
-        let content = "See [[Concept_A]] and [[Concept_A|Display Text]] here.";
-        let updated = normalize_wikilinks(content, &slugs);
+    fn link_repointing_preserves_text_and_anchor() {
+        let old = PathBuf::from("wiki/Concept_A.md");
+        let new = PathBuf::from("wiki/concept-a.md");
+        let path_map: HashMap<&Path, &Path> = [(old.as_path(), new.as_path())].into();
+        let content = "See [A](Concept_A.md) and [A](Concept_A.md#part) and [B](other.md) here.";
+        let updated = repoint_renamed_links(content, Path::new("wiki/linker.md"), &path_map);
         assert_eq!(
             updated,
-            "See [[concept-a]] and [[concept-a|Display Text]] here."
-        );
-    }
-
-    #[test]
-    fn wikilink_already_normalized_unchanged() {
-        let slugs: HashSet<String> = ["concept-a".to_owned()].into();
-        let content = "See [[concept-a]] here.";
-        let updated = normalize_wikilinks(content, &slugs);
-        assert_eq!(updated, content);
-    }
-
-    #[test]
-    fn wikilink_anchor_preserved() {
-        let slugs: HashSet<String> = ["concept-a".to_owned()].into();
-        let content = "See [[Concept_A#heading]] and [[Concept_A^block|Label]] here.";
-        let updated = normalize_wikilinks(content, &slugs);
-        assert_eq!(
-            updated,
-            "See [[concept-a#heading]] and [[concept-a^block|Label]] here."
+            "See [A](concept-a.md) and [A](concept-a.md#part) and [B](other.md) here."
         );
     }
 
@@ -225,24 +202,39 @@ mod tests {
     }
 
     #[test]
-    fn non_renamed_wikilinks_unchanged() {
-        let slugs: HashSet<String> = ["concept-a".to_owned()].into();
-        let content = "See [[Other Node]] here.";
-        let updated = normalize_wikilinks(content, &slugs);
-        assert_eq!(updated, content);
+    fn links_inside_code_are_not_repointed() {
+        // A link shown as a code example is not a graph edge, so normalize must
+        // leave it verbatim — only the real prose link is repointed.
+        let old = PathBuf::from("wiki/Concept A.md");
+        let new = PathBuf::from("wiki/concept-a.md");
+        let path_map: HashMap<&Path, &Path> = [(old.as_path(), new.as_path())].into();
+        let content = "Prose [A](Concept%20A.md).\n```\nexample [A](Concept%20A.md)\n```\nInline `[A](Concept%20A.md)`.\n";
+        let updated = repoint_renamed_links(content, Path::new("wiki/linker.md"), &path_map);
+        assert!(updated.contains("Prose [A](concept-a.md)."));
+        assert!(updated.contains("example [A](Concept%20A.md)"));
+        assert!(updated.contains("Inline `[A](Concept%20A.md)`."));
     }
 
     #[test]
-    fn wikilinks_inside_code_are_not_normalized() {
-        // A `[[Concept A]]` shown as a code example is not a graph edge, so normalize must
-        // leave it verbatim — only the real prose link is rewritten to the canonical slug.
-        let slugs: HashSet<String> = ["concept-a".to_owned()].into();
-        let content =
-            "Prose [[Concept A]].\n```\nexample [[Concept A]]\n```\nInline `[[Concept A]]`.\n";
-        let updated = normalize_wikilinks(content, &slugs);
-        assert!(updated.contains("Prose [[concept-a]]."));
-        assert!(updated.contains("example [[Concept A]]"));
-        assert!(updated.contains("Inline `[[Concept A]]`."));
+    fn apply_renames_and_repoints_across_vault() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wiki = tmp.path().join("wiki");
+        std::fs::create_dir_all(&wiki).unwrap();
+        std::fs::write(wiki.join("Bad_Name.md"), "# Bad\n").unwrap();
+        std::fs::write(wiki.join("linker.md"), "See [Bad](Bad_Name.md).\n").unwrap();
+
+        let pages = vec![
+            build_page("wiki/Bad_Name.md", &[]),
+            build_page("wiki/linker.md", &["wiki/bad-name"]),
+        ];
+        let renames = scan(&pages);
+        let applied = apply(&renames, &pages, tmp.path()).unwrap();
+        assert_eq!(applied, 1);
+
+        assert!(!wiki.join("Bad_Name.md").exists());
+        assert!(wiki.join("bad-name.md").exists());
+        let linker = std::fs::read_to_string(wiki.join("linker.md")).unwrap();
+        assert_eq!(linker, "See [Bad](bad-name.md).\n");
     }
 
     #[test]

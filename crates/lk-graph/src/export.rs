@@ -83,7 +83,6 @@ mod tests {
             path: PathBuf::from(format!("{id}.md")),
             title: name.to_owned(),
             outgoing: outgoing.iter().map(|s| (*s).to_string()).collect(),
-            aliases: Vec::new(),
         }
     }
 

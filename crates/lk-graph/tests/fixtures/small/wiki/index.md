@@ -1,8 +1,4 @@
----
-title: Index
----
-
 # Wiki Index
 
-- [[concept-a]]
-- [[concept-b]]
+- [Concept A](concept-a.md)
+- [Concept B](concept-b.md)

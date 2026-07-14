@@ -124,7 +124,7 @@ fn index_sync_fix_mutates_and_idempotent() {
     let tmp = tempfile::tempdir().unwrap();
     let wiki = tmp.path().join("wiki");
     std::fs::create_dir_all(&wiki).unwrap();
-    std::fs::write(wiki.join("index.md"), "# Index\n\n- [[alpha]]\n").unwrap();
+    std::fs::write(wiki.join("index.md"), "# Index\n\n- [alpha](alpha.md)\n").unwrap();
     std::fs::write(wiki.join("alpha.md"), "# Alpha\n").unwrap();
     std::fs::write(wiki.join("beta.md"), "# Beta\n").unwrap();
 
@@ -138,10 +138,10 @@ fn index_sync_fix_mutates_and_idempotent() {
     assert!(!drift.is_in_sync());
 
     // Fix.
-    let added = index_drift::fix(&drift, tmp.path(), Path::new("wiki")).unwrap();
+    let added = index_drift::fix(&drift, &pages, tmp.path(), Path::new("wiki")).unwrap();
     assert_eq!(added, 1);
     let content = std::fs::read_to_string(wiki.join("index.md")).unwrap();
-    assert!(content.contains("[[wiki/beta]]"));
+    assert!(content.contains("- [Beta](beta.md)"));
 
     // After fix, re-scan to pick up potentially changed pages.
     let pages2 = scan::scan_vault(tmp.path(), &config).unwrap();
@@ -168,7 +168,11 @@ fn normalize_fix_renames_and_rewrites() {
     let wiki = tmp.path().join("wiki");
     std::fs::create_dir_all(&wiki).unwrap();
     std::fs::write(wiki.join("Bad_Name.md"), "# Bad Name\n").unwrap();
-    std::fs::write(wiki.join("other.md"), "# Other\n\nSee [[Bad_Name]].\n").unwrap();
+    std::fs::write(
+        wiki.join("other.md"),
+        "# Other\n\nSee [Bad](Bad_Name.md).\n",
+    )
+    .unwrap();
 
     let config = default_config();
     let pages = scan::scan_vault(tmp.path(), &config).unwrap();
@@ -181,7 +185,7 @@ fn normalize_fix_renames_and_rewrites() {
     assert!(!wiki.join("Bad_Name.md").exists());
     assert!(wiki.join("bad-name.md").exists());
     let content = std::fs::read_to_string(wiki.join("other.md")).unwrap();
-    assert!(content.contains("[[bad-name]]"));
+    assert!(content.contains("[Bad](bad-name.md)"));
 }
 
 // --- Cluster ---
@@ -244,7 +248,7 @@ fn lint_combined_report() {
 
     let report = output::LintReport {
         pages: g.node_count(),
-        wikilinks: g.edge_count(),
+        links: g.edge_count(),
         components: g.component_count(),
         hubs,
         orphans,
@@ -257,7 +261,6 @@ fn lint_combined_report() {
         invalid_categories: Vec::new(),
         near_duplicate_concepts: Vec::new(),
         unresolved_conflicts: Vec::new(),
-        alias_conflicts: Vec::new(),
         findings,
     };
 

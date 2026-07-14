@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use lk_core::config::VaultDirs;
 use lk_core::frontmatter::parse_page;
 use lk_core::i18n::Locale;
+use lk_core::link;
 use lk_core::vault_path::{concepts_dir, documents_dir, explorations_dir, work_log_dir};
 use walkdir::WalkDir;
 
@@ -26,7 +27,7 @@ use crate::{VaultError, VaultWriter};
 /// section headings and the body-heading targets used by the one-line extractors.
 ///
 /// A single deterministic catalog: every page grouped by category under one `index.md`,
-/// each entry a `[[link]] — first-sentence summary`. Like `log.md`/`map.md` it is never
+/// each entry a `[title](relative-path) — first-sentence summary`. Like `log.md`/`map.md` it is never
 /// split — summaries are bounded to one sentence (see `truncate_summary`), so the catalog
 /// stays a scannable one-liner-per-page and grows linearly in node count.
 ///
@@ -40,13 +41,10 @@ pub fn build_index(
 ) -> Result<String, VaultError> {
     let strings = locale.strings();
 
-    let concept_rel = concepts_dir(dirs);
-    let concept_rel_str = concept_rel.to_string_lossy().replace('\\', "/");
-    let concepts =
-        collect_dir_grouped(vault_root, &concept_rel, "category", Some(&concept_rel_str));
+    let concepts = collect_dir_grouped(vault_root, &concepts_dir(dirs), "category");
     // Group documents by `document_type` — a field EVERY document carries — so the
     // catalog buckets consistently (vs `source_project`, which only some documents have).
-    let documents = collect_dir_grouped(vault_root, &documents_dir(dirs), "document_type", None);
+    let documents = collect_dir_grouped(vault_root, &documents_dir(dirs), "document_type");
     let explorations = collect_dir(vault_root, &explorations_dir(dirs));
 
     // daily/ holds one sub-directory per source ID. We keep them as separate groups so
@@ -65,7 +63,7 @@ pub fn build_index(
         sub_dirs.sort_by(|a, b| a.0.cmp(&b.0));
         for (source_id, dir) in sub_dirs {
             let rel = Path::new(&dirs.daily).join(&source_id);
-            let entries = collect_files(&rel, &dir, "category", None);
+            let entries = collect_files(&rel, &dir, "category");
             if !entries.is_empty() {
                 daily_groups.insert(source_id, entries);
             }
@@ -75,7 +73,7 @@ pub fn build_index(
     let work_log = collect_dir(vault_root, &work_log_dir(dirs));
 
     // Synthesis tiers are merged into one bucket so the index has a single "synthesis"
-    // section. Each entry keeps its full vault-relative path so the wikilink target is
+    // section. Each entry keeps its full vault-relative path so the link destination is
     // unambiguous.
     let mut synthesis: Vec<IndexEntry> = Vec::new();
     let synthesis_dirs = [
@@ -97,6 +95,9 @@ pub fn build_index(
         + work_log.len()
         + synthesis.len();
 
+    // Every entry destination is relative to the index's own location.
+    let index_rel = Path::new(&dirs.wiki).join("index.md");
+
     let mut out = String::new();
     writeln!(out, "# {}", strings.index_title).unwrap();
     writeln!(out).unwrap();
@@ -108,6 +109,7 @@ pub fn build_index(
     if !concepts.is_empty() {
         render_grouped_section(
             &mut out,
+            &index_rel,
             &concepts,
             |body| extract_across_locales(body, |s| s.concept_synthesis, first_line_under_heading),
             strings.index_concepts,
@@ -118,6 +120,7 @@ pub fn build_index(
     if !documents.is_empty() {
         render_grouped_section(
             &mut out,
+            &index_rel,
             &documents,
             |body| extract_across_locales(body, |s| s.summary, first_line_under_heading),
             strings.index_documents,
@@ -128,6 +131,7 @@ pub fn build_index(
     if !explorations.is_empty() {
         render_group(
             &mut out,
+            &index_rel,
             strings.index_explorations,
             explorations.len(),
             &explorations,
@@ -139,18 +143,28 @@ pub fn build_index(
 
     for (source_id, entries) in &daily_groups {
         let title = format!("{} — {}", strings.index_daily, source_id);
-        render_group(&mut out, &title, entries.len(), entries, |body| {
-            extract_across_locales(
-                body,
-                |s| s.summary,
-                |b, h| first_bullet_under_heading(b, h).or_else(|| first_line_under_heading(b, h)),
-            )
-        });
+        render_group(
+            &mut out,
+            &index_rel,
+            &title,
+            entries.len(),
+            entries,
+            |body| {
+                extract_across_locales(
+                    body,
+                    |s| s.summary,
+                    |b, h| {
+                        first_bullet_under_heading(b, h).or_else(|| first_line_under_heading(b, h))
+                    },
+                )
+            },
+        );
     }
 
     if !work_log.is_empty() {
         render_group(
             &mut out,
+            &index_rel,
             strings.index_work_log,
             work_log.len(),
             &work_log,
@@ -166,6 +180,7 @@ pub fn build_index(
         // on a review page is a `## 기간` date or a category-table row, not a summary.
         render_group(
             &mut out,
+            &index_rel,
             strings.index_synthesis,
             synthesis.len(),
             &synthesis,
@@ -226,41 +241,30 @@ pub async fn write_index(
     Ok(wiki_dir.join("index.md"))
 }
 
-/// A single catalog entry: vault-relative path, the slug used in the wikilink, and the
-/// raw page body (used to extract a per-category one-liner at render time).
+/// A single catalog entry: vault-relative path, the display title of the entry link,
+/// and the raw page body (used to extract a per-category one-liner at render time).
 struct IndexEntry {
     rel_path: String,
-    /// Wikilink target. Daily/work-log/synthesis pages use the full vault-relative
-    /// path (without `.md`); concepts use `slug|title` pipe format for correct
-    /// resolution by filename while preserving readable display in Obsidian.
-    link_target: String,
+    /// Display text of the entry's link — the page's `title` frontmatter, falling back
+    /// to the filename stem.
+    title: String,
     body: String,
     category: Option<String>,
 }
 
 fn collect_dir(vault_root: &Path, rel: &Path) -> Vec<IndexEntry> {
-    collect_dir_grouped(vault_root, rel, "category", None)
+    collect_dir_grouped(vault_root, rel, "category")
 }
 
-fn collect_dir_grouped(
-    vault_root: &Path,
-    rel: &Path,
-    group_field: &str,
-    concept_rel_dir: Option<&str>,
-) -> Vec<IndexEntry> {
+fn collect_dir_grouped(vault_root: &Path, rel: &Path, group_field: &str) -> Vec<IndexEntry> {
     let abs = vault_root.join(rel);
     if !abs.is_dir() {
         return Vec::new();
     }
-    collect_files(rel, &abs, group_field, concept_rel_dir)
+    collect_files(rel, &abs, group_field)
 }
 
-fn collect_files(
-    rel_dir: &Path,
-    abs_dir: &Path,
-    group_field: &str,
-    concept_rel_dir: Option<&str>,
-) -> Vec<IndexEntry> {
+fn collect_files(rel_dir: &Path, abs_dir: &Path, group_field: &str) -> Vec<IndexEntry> {
     let mut entries: Vec<IndexEntry> = Vec::new();
     for w in WalkDir::new(abs_dir).follow_links(false) {
         let w = match w {
@@ -311,7 +315,7 @@ fn collect_files(
             .unwrap_or("")
             .to_string();
         // `WalkDir` recurses, so a page may live in a subdirectory of `abs_dir`.
-        // Carry that nesting into the vault-relative path (and the wikilink target)
+        // Carry that nesting into the vault-relative path (and the link destination)
         // instead of flattening every page onto `rel_dir` — otherwise nested pages
         // with the same stem collide and links point at the wrong path.
         let nested = path
@@ -324,21 +328,14 @@ fn collect_files(
         };
         let rel_path = entry_rel_dir.join(format!("{stem}.md"));
         let rel_path = rel_path.to_string_lossy().replace('\\', "/");
-        let rel_dir_str = entry_rel_dir.to_string_lossy().replace('\\', "/");
 
-        let link_target = if concept_rel_dir.is_some_and(|c| rel_dir_str == c) {
-            let title = page
-                .frontmatter
-                .get("title")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty() && *s != stem);
-            match title {
-                Some(t) => format!("{stem}|{t}"),
-                None => stem.clone(),
-            }
-        } else {
-            format!("{rel_dir_str}/{stem}")
-        };
+        let title = page
+            .frontmatter
+            .get("title")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&stem)
+            .to_string();
 
         let category = page
             .frontmatter
@@ -349,7 +346,7 @@ fn collect_files(
 
         entries.push(IndexEntry {
             rel_path,
-            link_target,
+            title,
             body: page.body,
             category,
         });
@@ -360,6 +357,7 @@ fn collect_files(
 
 fn render_group(
     out: &mut String,
+    index_rel: &Path,
     title: &str,
     count: usize,
     entries: &[IndexEntry],
@@ -369,7 +367,7 @@ fn render_group(
     writeln!(out, "## {title} ({count})").unwrap();
     writeln!(out).unwrap();
     for entry in entries {
-        write_entry_line(out, entry, &extract);
+        write_entry_line(out, index_rel, entry, &extract);
     }
 }
 
@@ -378,6 +376,7 @@ fn render_group(
 /// `log.md`/`map.md`; summaries are bounded by `truncate_summary` to keep each line scannable.
 fn render_grouped_section(
     out: &mut String,
+    index_rel: &Path,
     entries: &[IndexEntry],
     extract: impl Fn(&str) -> Option<String>,
     section_title: &str,
@@ -403,54 +402,32 @@ fn render_grouped_section(
         writeln!(out, "### {group} ({})", group_entries.len()).unwrap();
         writeln!(out).unwrap();
         for entry in group_entries {
-            write_entry_line(out, entry, &extract);
+            write_entry_line(out, index_rel, entry, &extract);
         }
     }
 }
 
-/// One catalog line: `- [[link]] — first-sentence summary` (or just the link when the
-/// page has no extractable summary). The summary is reduced to PLAIN TEXT first
-/// (`strip_wikilinks`) so the only `[[…]]` on the line is the entry's own link — a wikilink
-/// sitting in a page's summary prose must not read as a second catalog link (it would skew
-/// `graph index-sync`).
+/// One catalog line: `- [title](relative-path) — first-sentence summary` (or just the
+/// link when the page has no extractable summary). The summary is reduced to PLAIN TEXT
+/// first ([`link::strip_links`]) so the only link on the line is the entry's own — a
+/// link sitting in a page's summary prose must not read as a second catalog link (it
+/// would skew `graph index-sync`). Destinations are relative to the index's own
+/// location (`{wiki}/index.md`).
 fn write_entry_line(
     out: &mut String,
+    index_rel: &Path,
     entry: &IndexEntry,
     extract: impl Fn(&str) -> Option<String>,
 ) {
+    let dest = link::relative_dest(index_rel, Path::new(&entry.rel_path));
+    let entry_link = link::md_link(&entry.title, &dest);
     match extract(&entry.body)
-        .map(|s| truncate_summary(&strip_wikilinks(&s)))
+        .map(|s| truncate_summary(&link::strip_links(&s)))
         .filter(|s| !s.is_empty())
     {
-        Some(summary) => writeln!(out, "- [[{}]] — {summary}", entry.link_target).unwrap(),
-        None => writeln!(out, "- [[{}]]", entry.link_target).unwrap(),
+        Some(summary) => writeln!(out, "- {entry_link} — {summary}").unwrap(),
+        None => writeln!(out, "- {entry_link}").unwrap(),
     }
-}
-
-/// Render a summary as plain prose: `[[target|display]]` → `display`, `[[target]]` →
-/// `target`. A catalog summary is a one-liner *about* a page, not a place for links — the
-/// entry's own `[[link]]` is the only navigable target on the line.
-fn strip_wikilinks(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(start) = rest.find("[[") {
-        out.push_str(&rest[..start]);
-        let after = &rest[start + 2..];
-        match after.find("]]") {
-            Some(end) => {
-                let inner = &after[..end];
-                out.push_str(inner.rsplit_once('|').map_or(inner, |(_, display)| display));
-                rest = &after[end + 2..];
-            }
-            None => {
-                // Unterminated `[[` — emit verbatim and stop.
-                out.push_str("[[");
-                rest = after;
-            }
-        }
-    }
-    out.push_str(rest);
-    out
 }
 
 /// Trim an extracted summary to its first sentence so a catalog entry stays a scannable
@@ -623,7 +600,7 @@ mod tests {
         );
         let out = build_index(tmp.path(), Locale::Ko, &VaultDirs::default()).unwrap();
         assert!(out.contains("## 개념 (1)"));
-        assert!(out.contains("[[agentic-ai|Agentic AI]]"));
+        assert!(out.contains("[Agentic AI](concepts/agentic-ai.md)"));
         assert!(out.contains("자율적으로 도구를 사용하는 AI 에이전트 패러다임."));
     }
 
@@ -640,7 +617,7 @@ mod tests {
         );
         let out = build_index(tmp.path(), Locale::En, &VaultDirs::default()).unwrap();
         assert!(
-            out.contains("[[rag|RAG]] — 검색 증강 생성."),
+            out.contains("[RAG](concepts/rag.md) — 검색 증강 생성."),
             "a KO-heading page must still yield its index summary after a locale switch:\n{out}"
         );
     }
@@ -656,7 +633,7 @@ mod tests {
         );
         let out = build_index(tmp.path(), Locale::En, &VaultDirs::default()).unwrap();
         assert!(out.contains("## Documents (1)"));
-        assert!(out.contains("[[wiki/documents/whitepaper]]"));
+        assert!(out.contains("[White Paper](documents/whitepaper.md)"));
         assert!(out.contains("A short overview of the paper."));
     }
 
@@ -676,8 +653,8 @@ mod tests {
         let out = build_index(tmp.path(), Locale::Ko, &VaultDirs::default()).unwrap();
         assert!(out.contains("## 일일 — email-digest (1)"));
         assert!(out.contains("## 일일 — team-slack (1)"));
-        assert!(out.contains("[[daily/email-digest/2026-05-22]] — 첫 번째 메일 요약"));
-        assert!(out.contains("[[daily/team-slack/2026-05-22]] — 슬랙 트렌드"));
+        assert!(out.contains("[Email](../daily/email-digest/2026-05-22.md) — 첫 번째 메일 요약"));
+        assert!(out.contains("[Slack](../daily/team-slack/2026-05-22.md) — 슬랙 트렌드"));
     }
 
     #[test]
@@ -690,7 +667,7 @@ mod tests {
         );
         let out = build_index(tmp.path(), Locale::Ko, &VaultDirs::default()).unwrap();
         assert!(out.contains("## 업무 로그 (1)"));
-        assert!(out.contains("[[me/work-log/2026-05-22]] — 태블로 MCP"));
+        assert!(out.contains("[Work](../me/work-log/2026-05-22.md) — 태블로 MCP"));
     }
 
     #[test]
@@ -704,7 +681,7 @@ mod tests {
         );
         let out = build_index(tmp.path(), Locale::Ko, &VaultDirs::default()).unwrap();
         assert!(out.contains("## 탐구 (1)"));
-        assert!(out.contains("[[wiki/explorations/api-replay]]"));
+        assert!(out.contains("[API Replay](explorations/api-replay.md)"));
         assert!(out.contains("API 호출만으로 자동화 가능한가?"));
     }
 
@@ -730,14 +707,16 @@ mod tests {
         assert!(out.contains("## 종합 (2)"));
         // The narrative `## 핵심 요약`, NOT the `## 기간` date that precedes it.
         assert!(
-            out.contains("[[me/monthly/2026-05]] — May summary."),
+            out.contains("[May](../me/monthly/2026-05.md) — May summary."),
             "monthly index summary must be the narrative, not the period date:\n{out}"
         );
         assert!(
             !out.contains("2026-05-01 ~"),
             "period date must not be the summary:\n{out}"
         );
-        assert!(out.contains("[[synthesis/weekly/2026-W21]] — This week we focused on X."));
+        assert!(
+            out.contains("[Weekly](../synthesis/weekly/2026-W21.md) — This week we focused on X.")
+        );
     }
 
     #[test]
@@ -756,7 +735,7 @@ mod tests {
         let out = build_index(tmp.path(), Locale::Ko, &VaultDirs::default()).unwrap();
         // Only the frontmatter-bearing page should show up.
         assert!(out.contains("## 개념 (1)"));
-        assert!(out.contains("[[with-front|X]] — Kept."));
+        assert!(out.contains("[X](concepts/with-front.md) — Kept."));
         assert!(!out.contains("no-front"));
     }
 
@@ -781,8 +760,8 @@ mod tests {
         );
         let out = build_index(tmp.path(), Locale::Ko, &VaultDirs::default()).unwrap();
         assert!(!out.contains("Old body"));
-        assert!(!out.contains("[[Agents]]"));
-        assert!(out.contains("[[x|X]]"));
+        assert!(!out.contains("(AGENTS.md)"));
+        assert!(out.contains("[X](concepts/x.md)"));
     }
 
     #[test]
@@ -805,26 +784,26 @@ mod tests {
         assert!(out.contains("## 개념 (2)"));
         assert!(out.contains("### ai-ml (1)"));
         assert!(out.contains("### infra (1)"));
-        assert!(out.contains("[[rag|RAG]] — 검색 증강 생성."));
+        assert!(out.contains("[RAG](concepts/rag.md) — 검색 증강 생성."));
         // No split sub-page directory is ever created.
         assert!(!tmp.path().join("wiki/index").exists());
     }
 
     #[test]
-    fn summary_wikilinks_are_rendered_as_plain_text() {
-        // A `[[…]]` in a page's summary prose must become plain text in the catalog, so the
+    fn summary_links_are_rendered_as_plain_text() {
+        // A link in a page's summary prose must become plain text in the catalog, so the
         // only link on the entry line is the entry's own — otherwise `graph index-sync`
         // would read the summary link as a second catalog entry.
         let tmp = TempDir::new().unwrap();
         write_file(
             tmp.path(),
             "wiki/concepts/x.md",
-            "---\nid: x\ntitle: \"X\"\ncategory: ai-ml\n---\n\n## 핵심\n\n[[벡터-db|벡터 DB]] 위에 구축한 [[rag]] 시스템.\n",
+            "---\nid: x\ntitle: \"X\"\ncategory: ai-ml\n---\n\n## 핵심\n\n[벡터 DB](벡터-db.md) 위에 구축한 [rag](rag.md) 시스템.\n",
         );
         let out = build_index(tmp.path(), Locale::Ko, &VaultDirs::default()).unwrap();
         assert!(
-            out.contains("- [[x|X]] — 벡터 DB 위에 구축한 rag 시스템."),
-            "summary wikilinks must be flattened to plain text:\n{out}"
+            out.contains("- [X](concepts/x.md) — 벡터 DB 위에 구축한 rag 시스템."),
+            "summary links must be flattened to plain text:\n{out}"
         );
     }
 
@@ -863,8 +842,14 @@ mod tests {
             "---\nid: b\n---\n\n## 핵심\n\nB spec.\n",
         );
         let out = build_index(tmp.path(), Locale::Ko, &VaultDirs::default()).unwrap();
-        assert!(out.contains("[[wiki/documents/team-a/spec]]"), "got: {out}");
-        assert!(out.contains("[[wiki/documents/team-b/spec]]"), "got: {out}");
+        assert!(
+            out.contains("[spec](documents/team-a/spec.md)"),
+            "got: {out}"
+        );
+        assert!(
+            out.contains("[spec](documents/team-b/spec.md)"),
+            "got: {out}"
+        );
     }
 
     #[test]
@@ -928,7 +913,7 @@ mod tests {
             .unwrap();
         assert!(path.ends_with("wiki/index.md"));
         let content = tokio::fs::read_to_string(&path).await.unwrap();
-        assert!(content.contains("[[x|X]]"));
+        assert!(content.contains("[X](concepts/x.md)"));
 
         // Ensure no `.index.md.*` temp leftovers in wiki/.
         let mut entries = tokio::fs::read_dir(tmp.path().join("wiki")).await.unwrap();
@@ -965,9 +950,9 @@ mod tests {
             "---\nid: ts\ntitle: \"W21\"\n---\n\n## Key Themes\n\nThemes.\n",
         );
         let out = build_index(tmp.path(), Locale::En, &dirs).unwrap();
-        assert!(out.contains("[[llm-wiki|LLM Wiki]]"));
-        assert!(out.contains("[[feed/ai-news/2026-05-20]]"));
-        assert!(out.contains("[[team-synth/weekly/2026-W21]]"));
+        assert!(out.contains("[LLM Wiki](concepts/llm-wiki.md)"));
+        assert!(out.contains("[News](../feed/ai-news/2026-05-20.md)"));
+        assert!(out.contains("[W21](../team-synth/weekly/2026-W21.md)"));
         assert!(!out.contains("wiki/"));
         assert!(!out.contains("daily/"));
     }

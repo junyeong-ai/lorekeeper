@@ -3,12 +3,11 @@ use petgraph::graph::{DiGraph, NodeIndex};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::collections::hash_map::Entry;
 use std::path::Path;
 
 use lk_core::config::VaultDirs;
 
-use crate::scan::{ScannedPage, VaultExistence, is_concept_page, stem_slug};
+use crate::scan::{ScannedPage, VaultExistence};
 
 pub struct WikiGraph {
     graph: DiGraph<NodeData, ()>,
@@ -43,7 +42,7 @@ pub struct HubPageReference {
 
 impl WikiGraph {
     /// Build the analysis graph over `pages`, treating that set as the whole
-    /// universe: a wikilink with no resolvable target is broken, and a page with
+    /// universe: a link with no resolvable target is broken, and a page with
     /// no edges is an orphan. The right model when the scope *is* the vault (and
     /// the convenient default for tests); for a narrowed scope whose links reach
     /// pages outside it, use [`Self::build_with_existence`].
@@ -57,7 +56,7 @@ impl WikiGraph {
     /// The graph itself — nodes and edges — stays scope-internal, so `hubs`,
     /// `cluster`, and `suggest_links` are unaffected. Only the two integrity
     /// checks consult `existence`:
-    /// - **broken links**: a wikilink leaving the scope is broken *only* if its
+    /// - **broken links**: a link leaving the scope is broken *only* if its
     ///   target does not exist anywhere in the vault.
     /// - **orphans**: a scope page is exempt when it links to, or is linked from,
     ///   any page in the vault (tracked in `cross_scope_connected`).
@@ -68,12 +67,6 @@ impl WikiGraph {
     ) -> Self {
         let mut graph = DiGraph::new();
         let mut id_to_node = HashMap::with_capacity(pages.len());
-        // Maps a bare-target filename slug to its node, tagging whether the owner is
-        // a concept page. A bare `[[name]]` is a knowledge-node reference, so a
-        // concept claims the slug over a same-named non-concept (deterministic, no
-        // warning); only a same-class collision is a genuine ambiguity worth warning.
-        let mut name_to_node: HashMap<String, (NodeIndex, bool)> =
-            HashMap::with_capacity(pages.len());
 
         // Navigation/catalog meta-files (index.md, log.md, map.md, AGENTS.md) are generated
         // artifacts, not knowledge nodes — keep them out of the analysis graph entirely
@@ -91,64 +84,6 @@ impl WikiGraph {
                 title: page.title.clone(),
             });
             id_to_node.insert(page.id.clone(), node);
-
-            let slug = stem_slug(&page.path);
-            if !slug.is_empty() {
-                let is_concept = is_concept_page(&page.path, dirs);
-                match name_to_node.entry(slug) {
-                    Entry::Vacant(e) => {
-                        e.insert((node, is_concept));
-                    }
-                    Entry::Occupied(mut e) => {
-                        let (existing_node, existing_is_concept) = *e.get();
-                        if is_concept && !existing_is_concept {
-                            // Concept claims the bare slug from a non-concept — intended.
-                            e.insert((node, true));
-                        } else if is_concept == existing_is_concept {
-                            // Same class (two documents in different dirs, etc.) — a real
-                            // ambiguity. Keep the first; warn through `tracing` (not
-                            // stdout) so it honours log config. A bare `[[slug]]` link
-                            // resolves to the kept page; the shadowed page stays reachable
-                            // by its path form.
-                            tracing::warn!(
-                                slug = %e.key(),
-                                kept = %graph[existing_node].id,
-                                shadowed = %page.id,
-                                "ambiguous bare slug: two same-class pages share it"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        // Aliases form the lowest-precedence resolution layer (after filename and id):
-        // a concept's declared `aliases` let a bare `[[synonym]]` link land on it, but
-        // never shadow a real page. When two concepts claim the same alias the smallest-id
-        // concept wins — order-independent and the SAME tiebreak `VaultExistence`/`backlinks`
-        // use, so all three resolvers pick the same concept. Real-page membership comes from
-        // the full-vault `existence` (not just the in-scope nodes), so this precedence
-        // matches even when the analysis scope is a strict subset of the vault.
-        let mut alias_to_node: HashMap<String, (&str, NodeIndex)> = HashMap::new();
-        for page in pages {
-            if !is_concept_page(&page.path, dirs) {
-                continue;
-            }
-            let node = id_to_node[&page.id];
-            for alias in &page.aliases {
-                if existence.is_real_page(alias) {
-                    continue;
-                }
-                alias_to_node
-                    .entry(alias.clone())
-                    .and_modify(|(cur_id, cur_node)| {
-                        if page.id.as_str() < *cur_id {
-                            *cur_id = page.id.as_str();
-                            *cur_node = node;
-                        }
-                    })
-                    .or_insert((page.id.as_str(), node));
-            }
         }
 
         let mut broken = Vec::new();
@@ -160,14 +95,9 @@ impl WikiGraph {
             }
             let source_idx = id_to_node[&page.id];
             for target in &page.outgoing {
-                // Resolve a bare target by filename slug, a path-style target by
-                // page id — the two forms `resolve_wikilink_target` produces.
-                let in_scope = name_to_node
-                    .get(target.as_str())
-                    .map(|(node, _)| *node)
-                    .or_else(|| id_to_node.get(target.as_str()).copied())
-                    .or_else(|| alias_to_node.get(target.as_str()).map(|(_, node)| *node));
-                if let Some(target_idx) = in_scope {
+                // `outgoing` targets are already resolved page ids (scan resolves each
+                // destination against its page's location), so an edge is a plain lookup.
+                if let Some(&target_idx) = id_to_node.get(target.as_str()) {
                     if source_idx != target_idx {
                         graph.add_edge(source_idx, target_idx, ());
                     }
@@ -337,15 +267,14 @@ mod tests {
             path: PathBuf::from(format!("{id}.md")),
             title: name.to_owned(),
             outgoing: outgoing.iter().map(|s| s.to_string()).collect(),
-            aliases: Vec::new(),
         }
     }
 
     #[test]
     fn basic_graph_construction() {
         let pages = vec![
-            build_page("wiki/alpha", &["beta"]),
-            build_page("wiki/beta", &["alpha"]),
+            build_page("wiki/alpha", &["wiki/beta"]),
+            build_page("wiki/beta", &["wiki/alpha"]),
             build_page("wiki/gamma", &[]),
         ];
         let g = WikiGraph::build(&pages, &VaultDirs::default());
@@ -358,22 +287,22 @@ mod tests {
     #[test]
     fn broken_links_detected() {
         let pages = vec![
-            build_page("wiki/alpha", &["nonexistent"]),
+            build_page("wiki/alpha", &["wiki/nonexistent"]),
             build_page("wiki/beta", &[]),
         ];
         let g = WikiGraph::build(&pages, &VaultDirs::default());
 
         assert_eq!(g.broken_links().len(), 1);
         assert_eq!(g.broken_links()[0].source, "wiki/alpha");
-        assert_eq!(g.broken_links()[0].target, "nonexistent");
+        assert_eq!(g.broken_links()[0].target, "wiki/nonexistent");
     }
 
     #[test]
     fn hubs_sorted_by_degree() {
         let pages = vec![
-            build_page("wiki/hub", &["a", "b", "c"]),
-            build_page("wiki/a", &["hub"]),
-            build_page("wiki/b", &["hub"]),
+            build_page("wiki/hub", &["wiki/a", "wiki/b", "wiki/c"]),
+            build_page("wiki/a", &["wiki/hub"]),
+            build_page("wiki/b", &["wiki/hub"]),
             build_page("wiki/c", &[]),
         ];
         let g = WikiGraph::build(&pages, &VaultDirs::default());
@@ -388,7 +317,7 @@ mod tests {
     fn orphans_detected() {
         let config = GraphConfig::default();
         let pages = vec![
-            build_page("wiki/connected", &["other"]),
+            build_page("wiki/connected", &["wiki/other"]),
             build_page("wiki/other", &[]),
             build_page("wiki/orphan", &[]),
         ];
@@ -404,7 +333,7 @@ mod tests {
         config.metrics.orphan_exclude = vec!["wiki/orphan".to_owned()];
 
         let pages = vec![
-            build_page("wiki/connected", &["other"]),
+            build_page("wiki/connected", &["wiki/other"]),
             build_page("wiki/other", &[]),
             build_page("wiki/orphan", &[]),
         ];
@@ -416,32 +345,20 @@ mod tests {
 
     #[test]
     fn self_links_excluded() {
-        let pages = vec![build_page("wiki/self", &["self"])];
+        let pages = vec![build_page("wiki/self", &["wiki/self"])];
         let g = WikiGraph::build(&pages, &VaultDirs::default());
 
         assert_eq!(g.edge_count(), 0);
     }
 
     #[test]
-    fn filename_resolution() {
-        let pages = vec![
-            build_page("wiki/concept-a", &["concept-b"]),
-            build_page("wiki/concept-b", &[]),
-        ];
-        let g = WikiGraph::build(&pages, &VaultDirs::default());
-
-        assert_eq!(g.edge_count(), 1);
-        assert!(g.broken_links().is_empty());
-    }
-
-    #[test]
-    fn duplicate_filename_keeps_first() {
-        // Two pages share the filename slug `alpha`; a `[[alpha]]` link resolves
-        // to the first-inserted page (the second is shadowed, with a warning).
+    fn same_stem_pages_stay_distinct() {
+        // Two pages share the filename stem `alpha`; each is addressed only by its
+        // own path, so a link to `docs/alpha` never lands on `wiki/alpha`.
         let pages = vec![
             build_page("wiki/alpha", &[]),
             build_page("docs/alpha", &[]),
-            build_page("wiki/linker", &["alpha"]),
+            build_page("wiki/linker", &["docs/alpha"]),
         ];
         let g = WikiGraph::build(&pages, &VaultDirs::default());
 
@@ -452,68 +369,7 @@ mod tests {
             .collect();
         assert_eq!(
             edges,
-            vec![("wiki/linker".to_owned(), "wiki/alpha".to_owned())]
-        );
-        assert!(g.broken_links().is_empty());
-    }
-
-    #[test]
-    fn concept_owns_bare_slug_over_same_named_document() {
-        // A document and a concept legitimately share the name `x`. A bare `[[x]]`
-        // is a knowledge-node reference, so it resolves to the CONCEPT — regardless
-        // of scan order (the document is listed first here) and with no ambiguity
-        // warning. The document is reached only by its path form `[[wiki/documents/x]]`.
-        let pages = vec![
-            build_page("wiki/documents/x", &[]),
-            build_page("wiki/concepts/x", &[]),
-            build_page("wiki/linker", &["x"]),
-        ];
-        let g = WikiGraph::build(&pages, &VaultDirs::default());
-        let edges: Vec<(String, String)> = g
-            .edge_pairs()
-            .map(|(s, t)| (g.node_id(s).to_owned(), g.node_id(t).to_owned()))
-            .collect();
-        assert_eq!(
-            edges,
-            vec![("wiki/linker".to_owned(), "wiki/concepts/x".to_owned())],
-            "bare [[x]] must resolve to the concept, not the same-named document"
-        );
-        assert!(g.broken_links().is_empty());
-    }
-
-    #[test]
-    fn path_style_link_resolves_to_page_id() {
-        // `[[wiki/sub/b]]` (path form) resolves to the page whose id is
-        // `wiki/sub/b`, not just the filename `b`.
-        let pages = vec![
-            build_page("wiki/a", &["wiki/sub/b"]),
-            build_page("wiki/sub/b", &[]),
-        ];
-        let g = WikiGraph::build(&pages, &VaultDirs::default());
-
-        assert_eq!(g.edge_count(), 1);
-        assert!(g.broken_links().is_empty());
-    }
-
-    #[test]
-    fn bare_alias_link_resolves_to_concept() {
-        // `[[k8s]]` where `k8s` is a declared alias of the kubernetes concept must
-        // form a real edge to that concept node (not a broken link).
-        let pages = vec![
-            ScannedPage {
-                id: "wiki/concepts/kubernetes".to_owned(),
-                path: PathBuf::from("wiki/concepts/kubernetes.md"),
-                title: "Kubernetes".to_owned(),
-                outgoing: vec![],
-                aliases: vec!["k8s".to_owned()],
-            },
-            build_page("wiki/linker", &["k8s"]),
-        ];
-        let g = WikiGraph::build(&pages, &VaultDirs::default());
-        assert_eq!(
-            g.edge_count(),
-            1,
-            "[[k8s]] must resolve to the kubernetes concept via its alias"
+            vec![("wiki/linker".to_owned(), "docs/alpha".to_owned())]
         );
         assert!(g.broken_links().is_empty());
     }
@@ -548,7 +404,7 @@ mod tests {
         let scope = vec![build_page("wiki/concepts/bar", &[])];
         let full = vec![
             build_page("wiki/concepts/bar", &[]),
-            build_page("daily/team-slack/2026-05-22", &["bar"]),
+            build_page("daily/team-slack/2026-05-22", &["wiki/concepts/bar"]),
         ];
 
         let legacy = WikiGraph::build(&scope, &VaultDirs::default());
@@ -583,10 +439,10 @@ mod tests {
 
     #[test]
     fn self_only_link_is_orphan() {
-        // A page whose only wikilink points at itself is disconnected; the
+        // A page whose only link points at itself is disconnected; the
         // self-reference must not exempt it from orphan status.
         let config = GraphConfig::default();
-        let pages = vec![build_page("wiki/lonely", &["lonely"])];
+        let pages = vec![build_page("wiki/lonely", &["wiki/lonely"])];
         let g = WikiGraph::build(&pages, &VaultDirs::default());
 
         assert_eq!(
@@ -596,31 +452,12 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_slug_does_not_over_exempt_orphan() {
-        // Two pages share the filename `dup`; `[[dup]]` resolves to the first.
-        // The second, unreferenced, is still an orphan — a flat slug set would
-        // have exempted both.
-        let config = GraphConfig::default();
-        let pages = vec![
-            build_page("wiki/a/dup", &[]),
-            build_page("wiki/b/dup", &[]),
-            build_page("wiki/linker", &["dup"]),
-        ];
-        let g = WikiGraph::build(&pages, &VaultDirs::default());
-
-        assert_eq!(
-            g.orphans(&config.metrics.orphan_exclude),
-            vec!["wiki/b/dup"]
-        );
-    }
-
-    #[test]
     fn truly_disconnected_page_still_orphan_with_existence() {
         // Existence awareness must not hide a genuinely disconnected page:
         // nothing links it and it links nothing that exists.
         let config = GraphConfig::default();
         let scope = vec![
-            build_page("wiki/connected", &["other"]),
+            build_page("wiki/connected", &["wiki/other"]),
             build_page("wiki/other", &[]),
             build_page("wiki/lonely", &[]),
         ];

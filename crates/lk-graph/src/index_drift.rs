@@ -2,11 +2,11 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::path::Path;
 
-use lk_core::wikilink;
+use lk_core::link;
 
 use crate::GraphError;
 use crate::graph::WikiGraph;
-use crate::scan::{self, VaultExistence, resolve_wikilink_target};
+use crate::scan::{self, ScannedPage, VaultExistence};
 
 #[derive(Debug)]
 pub struct IndexDrift {
@@ -43,17 +43,20 @@ pub fn diff(
         }
     };
 
-    // `build_index` catalogs pages by `[[slug|title]]` (concepts) or path
-    // (`[[daily/email-digest/2026-05-19]]`); resolve both via `resolve_wikilink_target`.
-    // Summaries are plain text (`index::strip_wikilinks`), so every `[[…]]` here is a real
+    // `build_index` catalogs pages as `- [title](relative-path)` entries; resolve each
+    // destination against the index's own location to the page id it addresses.
+    // Summaries are plain text (`link::strip_links`), so every link here is a real
     // catalog entry, never a link embedded in summary prose. Drift is checked against the
     // graph's `node_ids()` (the analysis scope, i.e. `<wiki>/`); daily/synthesis pages are
     // catalogued too but live outside that scope, so they are not drift-tracked here.
+    let index_rel = wiki_dir.join("index.md");
     let mut index_links = HashSet::new();
-    for page in wikilink::extract_wikilinks(&content) {
-        let slug = resolve_wikilink_target(&page);
-        if !slug.is_empty() {
-            index_links.insert(slug);
+    for dest in link::extract_dests(&content) {
+        if let Some(resolved) = link::resolve_dest(&index_rel, &dest) {
+            let id = scan::path_slug(&resolved);
+            if !id.is_empty() {
+                index_links.insert(id);
+            }
         }
     }
 
@@ -77,10 +80,7 @@ pub fn diff(
             if exclude.contains(id) {
                 return false;
             }
-            // The index links concepts by slug (`[[slug|title]]`) and other
-            // wiki pages by path (`[[wiki/documents/x]]`). Accept either form.
-            let filename = id.rsplit('/').next().unwrap_or(id);
-            !index_links.contains(filename) && !index_links.contains(id)
+            !index_links.contains(id)
         })
         .map(ToString::to_string)
         .collect();
@@ -103,7 +103,12 @@ pub fn diff(
     })
 }
 
-pub fn fix(drift: &IndexDrift, root: &Path, wiki_dir: &Path) -> Result<usize, GraphError> {
+pub fn fix(
+    drift: &IndexDrift,
+    pages: &[ScannedPage],
+    root: &Path,
+    wiki_dir: &Path,
+) -> Result<usize, GraphError> {
     if drift.missing_from_index.is_empty() {
         return Ok(0);
     }
@@ -123,11 +128,18 @@ pub fn fix(drift: &IndexDrift, root: &Path, wiki_dir: &Path) -> Result<usize, Gr
         }
     };
 
+    // Each appended entry needs the drifted page's real path (for the relative
+    // destination) and title (for the display text) — looked up from the scan.
+    let index_rel = wiki_dir.join("index.md");
     let mut added = 0;
     for page_id in &drift.missing_from_index {
-        // Link by full page id, not the bare stem: two nested pages can share a
-        // filename, and a bare `[[stem]]` would resolve ambiguously (first match).
-        let _ = write!(content, "\n- [[{page_id}]]");
+        let Some(page) = pages.iter().find(|p| &p.id == page_id) else {
+            return Err(GraphError::Io(format!(
+                "drifted page id not in scan: {page_id}"
+            )));
+        };
+        let dest = link::relative_dest(&index_rel, &page.path);
+        let _ = write!(content, "\n- {}", link::md_link(&page.title, &dest));
         added += 1;
     }
 
@@ -159,7 +171,6 @@ mod tests {
             path: PathBuf::from(format!("{id}.md")),
             title: id.rsplit('/').next().unwrap_or(id).to_owned(),
             outgoing: outgoing.iter().map(|s| (*s).to_string()).collect(),
-            aliases: Vec::new(),
         }
     }
 
@@ -168,7 +179,7 @@ mod tests {
         std::fs::create_dir_all(&wiki).unwrap();
         std::fs::write(
             wiki.join("index.md"),
-            "# Index\n\n- [[alpha]]\n- [[beta]]\n",
+            "# Index\n\n- [alpha](alpha.md)\n- [beta](beta.md)\n",
         )
         .unwrap();
     }
@@ -179,7 +190,7 @@ mod tests {
         setup_wiki(tmp.path());
 
         let pages = vec![
-            build_page("wiki/index", &["alpha", "beta"]),
+            build_page("wiki/index", &["wiki/alpha", "wiki/beta"]),
             build_page("wiki/alpha", &[]),
             build_page("wiki/beta", &[]),
             build_page("wiki/gamma", &[]),
@@ -200,12 +211,12 @@ mod tests {
         std::fs::create_dir_all(&wiki).unwrap();
         std::fs::write(
             wiki.join("index.md"),
-            "# Index\n\n- [[alpha]]\n- [[nonexistent]]\n",
+            "# Index\n\n- [alpha](alpha.md)\n- [nonexistent](nonexistent.md)\n",
         )
         .unwrap();
 
         let pages = vec![
-            build_page("wiki/index", &["alpha", "nonexistent"]),
+            build_page("wiki/index", &["wiki/alpha", "wiki/nonexistent"]),
             build_page("wiki/alpha", &[]),
         ];
 
@@ -213,7 +224,11 @@ mod tests {
         let existence = VaultExistence::build(&pages, &VaultDirs::default());
         let drift = diff(&graph, &existence, tmp.path(), Path::new("wiki"), &[]).unwrap();
 
-        assert!(drift.missing_from_disk.contains(&"nonexistent".to_owned()));
+        assert!(
+            drift
+                .missing_from_disk
+                .contains(&"wiki/nonexistent".to_owned())
+        );
     }
 
     #[test]
@@ -225,13 +240,14 @@ mod tests {
             missing_from_index: vec!["wiki/gamma".to_owned()],
             missing_from_disk: vec![],
         };
+        let pages = vec![build_page("wiki/gamma", &[])];
 
-        let added = fix(&drift, tmp.path(), Path::new("wiki")).unwrap();
+        let added = fix(&drift, &pages, tmp.path(), Path::new("wiki")).unwrap();
         assert_eq!(added, 1);
 
-        // Full page id (not bare stem) so nested same-filename pages can't collide.
+        // The appended entry is a relative link titled by the page's title.
         let content = std::fs::read_to_string(tmp.path().join("wiki/index.md")).unwrap();
-        assert!(content.contains("[[wiki/gamma]]"));
+        assert!(content.contains("- [gamma](gamma.md)"));
     }
 
     #[test]
@@ -247,12 +263,13 @@ mod tests {
             missing_from_index: vec!["wiki/alpha".to_owned(), "wiki/beta".to_owned()],
             missing_from_disk: vec![],
         };
-        let added = fix(&drift, tmp.path(), Path::new("wiki")).unwrap();
+        let pages = vec![build_page("wiki/alpha", &[]), build_page("wiki/beta", &[])];
+        let added = fix(&drift, &pages, tmp.path(), Path::new("wiki")).unwrap();
         assert_eq!(added, 2);
 
         let content = std::fs::read_to_string(tmp.path().join("wiki/index.md")).unwrap();
-        assert!(content.contains("[[wiki/alpha]]"));
-        assert!(content.contains("[[wiki/beta]]"));
+        assert!(content.contains("- [alpha](alpha.md)"));
+        assert!(content.contains("- [beta](beta.md)"));
     }
 
     #[test]
@@ -285,7 +302,7 @@ mod tests {
             missing_from_disk: vec![],
         };
 
-        let added = fix(&drift, tmp.path(), Path::new("wiki")).unwrap();
+        let added = fix(&drift, &[], tmp.path(), Path::new("wiki")).unwrap();
         assert_eq!(added, 0);
     }
 }

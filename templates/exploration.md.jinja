@@ -1,5 +1,6 @@
 ---
 id: {{ slug }}
+type: exploration
 title: {{ title | tojson }}
 aliases: [{{ title | tojson }}]
 created: {{ created }}
@@ -21,9 +22,9 @@ grounded_documents: {{ grounded_documents | tojson }}
 
 ## {{ i18n.exploration_grounding }}
 
-{% for c in grounded_concepts -%}
-- [[{{ c }}]]
+{% for c in grounded_concept_links -%}
+- {{ c }}
 {% endfor -%}
-{% for d in grounded_documents -%}
-- [[{{ d }}]]
+{% for d in grounded_document_links -%}
+- {{ d }}
 {% endfor %}

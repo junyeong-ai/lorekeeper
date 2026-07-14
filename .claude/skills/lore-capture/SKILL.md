@@ -97,7 +97,7 @@ pipeline cache, not to directly-authored pages. An in-the-moment capture has
 no originating file or URL, so omit `source_file`/`source_url` too (set them
 only when the insight came from a concrete file or link you can cite).
 
-Link the relevant concepts as `[[wikilink]]`s in the document's
+Link the relevant concepts as relative markdown links (AGENTS.md § Links) in the document's
 related-concepts section (heading from AGENTS.md) — these forward links are
 what `backlinks-sync` reads to derive each concept's sources section in step 6.
 

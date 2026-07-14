@@ -114,6 +114,11 @@ pub struct TaskTarget {
     /// locate key instead of a hardcoded kind→heading table, so locale changes never
     /// break the semantic plane.
     pub anchor: String,
+    /// Relative path from the target page's directory to the concepts directory
+    /// (e.g. `"../../wiki/concepts"`), precomputed at queue time. A concept link the
+    /// skill writes into the page is `[{Name}]({concepts_dir}/{slug}.md)` — pure
+    /// concatenation, so the LLM never does relative-path arithmetic.
+    pub concepts_dir: String,
 }
 
 /// Structured theme extraction from combined multi-source text. Used by weekly

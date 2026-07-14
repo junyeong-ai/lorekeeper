@@ -1,7 +1,11 @@
+use std::path::Path;
+
+use lk_core::concept::slugify;
 use lk_core::config::{HighlightSection, SourceType, VaultDirs};
 use lk_core::event::Event;
 use lk_core::frontmatter::field;
 use lk_core::i18n::Locale;
+use lk_core::link;
 use lk_core::vault_path::VaultPath;
 use lk_queue::TargetKind;
 use lk_vault::{TemplateEngine, replace_section, section_body};
@@ -26,6 +30,33 @@ pub fn llm_inputs_map(
 pub struct RenderResult {
     pub path: VaultPath,
     pub content: String,
+}
+
+/// Relative path from a target page to the concepts directory — the value carried in
+/// `TaskTarget.concepts_dir` and the base of every concept link a page renders, so
+/// the pipeline and the skill build byte-identical destinations.
+pub fn concepts_dir_dest(vault_path: &str, dirs: &VaultDirs) -> String {
+    link::relative_dest(
+        Path::new(vault_path),
+        &lk_core::vault_path::concepts_dir(dirs),
+    )
+}
+
+/// Render a concept-name list into `[Name](<concepts_dir>/<slug>.md)` links for a page
+/// at `vault_path`. The slug is derived from the name by the same `slugify` rule that
+/// names concept page files, so a link and its page can never disagree.
+fn concept_links(names: &[String], vault_path: &str, dirs: &VaultDirs) -> Vec<String> {
+    let base = concepts_dir_dest(vault_path, dirs);
+    names
+        .iter()
+        .filter_map(|name| {
+            let slug = slugify(name)?;
+            Some(link::md_link(
+                name,
+                &format!("{base}/{}.md", link::encode_dest(&slug)),
+            ))
+        })
+        .collect()
 }
 
 /// Per-page LLM input hashes stamped into the rendered frontmatter. Subsequent
@@ -134,7 +165,7 @@ pub fn render_daily_page(
         "labels": labels,
         "events": events_json,
         "summary": summary,
-        "concepts": concepts,
+        "concepts": concept_links(concepts, &path.to_string(), dirs),
         "extract_concepts": extract_concepts,
         "i18n": strings,
         (field::LLM_INPUTS): llm_inputs_json,
@@ -257,7 +288,7 @@ pub fn render_document_page(
         "tags": tags,
         "summary": summary,
         "content": event.body,
-        "concepts": concepts,
+        "concepts": concept_links(concepts, &path.to_string(), dirs),
         "extract_concepts": extract_concepts,
         "i18n": strings,
         (field::LLM_INPUTS): llm_inputs_json,

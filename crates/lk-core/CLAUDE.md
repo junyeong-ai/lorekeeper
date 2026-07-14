@@ -47,9 +47,14 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   (including spaces, punctuation, and literal `-`) to a separator, collapses runs to a
   single `-`, and trims edges. Concept slugs are always re-normalized through it to
   prevent path injection from LLM output.
-- **`wikilink::extract_wikilinks`** skips fenced code blocks and inline code spans
-  to prevent false edges in the wiki graph. Closing fence detection requires no info
-  string after the marker (per CommonMark). Single source consumed by lk-graph.
+- **`link`** is the single implementation of the vault's link vocabulary: inline
+  markdown links `[Display](relative/path.md)`, destinations relative to the containing
+  page and always `.md`-suffixed. Construction (`md_link` + `relative_dest`, CommonMark
+  percent-encoding), extraction (`extract_dests` — fence/inline-code-aware, images and
+  external schemes excluded), rewriting (`rewrite_links_outside_code`), and lexical
+  resolution (`resolve_dest` — folds `.`/`..`, accepts the OKF `/`-absolute form,
+  refuses to escape the vault root). Consumed by lk-graph/lk-vault/lk-pipeline —
+  never re-derive link syntax elsewhere.
 - **`fs::write_atomic(path, contents, mode)`** is the single atomic file write:
   a per-writer-unique temp (pid + process-global sequence) in the same dir, fsync,
   optional `chmod`, rename, dir-fsync — then temp cleanup on failure. Every writer

@@ -55,7 +55,7 @@ you last read them.
    heading per `target.kind`.
 3. **Never hand-write a concept's sources-section body or `source_count`** —
    both are machine-owned; `lore graph backlinks-sync` re-derives them from
-   forward `[[wikilink]]`s on origin pages.
+   forward concept links on origin pages.
 4. **Move a queue file to `processed/` only when every task in it
    succeeded.** On any failure, leave the file in place and stop processing
    that file.
@@ -72,7 +72,7 @@ Daily pages are materialized views with two kinds of fields:
 
 - **Structural** (frontmatter, raw event list, headings) — owned by the Rust
   pipeline, re-rendered on every ingest. This skill never writes them.
-- **Semantic** (summary body, refined event bodies, concept wiki-links) —
+- **Semantic** (summary body, refined event bodies, concept links) —
   owned by this skill, preserved across re-renders.
 
 The pipeline decides what needs work before the queue file exists: a task is
@@ -194,7 +194,7 @@ The essentials: a visible `.jsonl` is fully written and every
 
 5. **Finalize (mandatory — do not skip).** Concept `## Sources` sections and
    `source_count` are deliberately left empty during processing; they are
-   machine-owned and reconciled here from the wikilink graph, then the catalog
+   machine-owned and reconciled here from the link graph, then the catalog
    is refreshed. Run both and confirm each exits 0:
    ```bash
    lore graph backlinks-sync   # re-derive every concept's ## Sources + source_count

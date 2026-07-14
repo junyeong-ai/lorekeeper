@@ -15,14 +15,14 @@ Gmail·Slack·Jira·캘린더·RSS·메모를 매일 모아 중복을 없애고,
 
 메모·위키가 실패하는 진짜 이유는 *읽기·생각하기*가 아니라 **부기(bookkeeping)** — 교차참조 갱신, 중복 정리, 분류, 모순 점검 — 의 부담입니다. 사람이 이걸 못 버텨서 위키를 방치하죠. Lorekeeper는 그 부기를 LLM에게 맡깁니다.
 
-> 📖 **처음 보는 용어들** — **vault**: 마크다운 파일이 모인 폴더(곧 당신의 지식 저장소) · **개념(concept)**: 한 주제당 한 페이지 · **wikilink**: 페이지를 잇는 `[[다른 페이지]]` 링크 · **부기**: 링크·중복·분류를 손으로 갱신하는 그 잡일.
+> 📖 **처음 보는 용어들** — **vault**: 마크다운 파일이 모인 폴더(곧 당신의 지식 저장소) · **개념(concept)**: 한 주제당 한 페이지 · **링크**: 페이지를 잇는 `[표시 이름](상대/경로.md)` 마크다운 링크(Obsidian·GitHub·OKF 어디서든 해석) · **부기**: 링크·중복·분류를 손으로 갱신하는 그 잡일.
 
 | | |
 |---|---|
 | 📥 **설정 한 번 → 매일 자동** | 메일·메신저·이슈·일정·피드·메모에서 어제의 활동·지식을 수집 |
 | 🧹 **노이즈 제거** | 중복 차단, 관련 없는 항목 필터, 내 일은 work-log로 자동 분리 |
 | 🧩 **개념 자산화** | 같은 개념은 한 페이지로 수렴(`Vector DB` = `vector-database`), 카테고리·연관관계 정리 |
-| 🔗 **연결되는 지식 그래프** | wikilink·역링크·클러스터로 개념이 서로 이어짐 |
+| 🔗 **연결되는 지식 그래프** | 마크다운 링크·역링크·클러스터로 개념이 서로 이어짐 |
 | 📈 **복리** | 주간·월간·분기·연간 합성으로 시간이 갈수록 가치↑ |
 | 🔑 **API 키 불필요** | Claude Code 세션이 직접 LLM 작업 수행 (별도 과금 없음) |
 
@@ -150,10 +150,10 @@ tags: ["document"]
 … (원본을 정규화해 보존) …
 
 ## 관련 개념
-- [[Retrieval-Augmented Generation]]
-- [[벡터 데이터베이스]]
-- [[청킹]]
-- [[질의 재작성]]
+- [Retrieval-Augmented Generation](../../wiki/concepts/retrieval-augmented-generation.md)
+- [벡터 데이터베이스](../../wiki/concepts/벡터-데이터베이스.md)
+- [청킹](../../wiki/concepts/청킹.md)
+- [질의 재작성](../../wiki/concepts/질의-재작성.md)
 ```
 
 ### ✅ 결과 ② — 개념 페이지가 **수렴**합니다 (핵심 가치)
@@ -175,8 +175,8 @@ source_count: 2          # ← 두 문서가 이 한 개념을 인용
 옆에 벡터를 두면(pgvector) 별도 stateful 시스템을 피할 수 있다.
 
 ## 출처
-- [[프로덕션-벡터-db-선택]]
-- [[rag-파이프라인-낮은-recall-검색-고치기]]
+- [프로덕션 벡터 DB 선택](../../wiki/documents/프로덕션-벡터-db-선택.md)
+- [RAG 파이프라인 낮은 recall 검색 고치기](../../wiki/documents/rag-파이프라인-낮은-recall-검색-고치기.md)
 ```
 
 > `Vector DB`라고 쓰든 `벡터 데이터베이스`라고 쓰든 **한 페이지**로 모입니다(alias로 등록). 같은 지식이 흩어지지 않는 것 — 이게 "복리로 쌓인다"의 핵심입니다.
@@ -189,12 +189,12 @@ source_count: 2          # ← 두 문서가 이 한 개념을 인용
 ## 개념 (16)
 
 ### ai-ml (6)
-- [[vector-database|벡터 데이터베이스]] — 고차원 임베딩을 저장하고 ANN 탐색을 제공. 선택은 쿼리 지연보다 운영 단순성에 좌우…
-- [[retrieval-augmented-generation|RAG]] — 외부 코퍼스 검색 문맥에 LM 출력을 grounding. 답 품질은 임베딩 모델보다 검색 단계가 지배…
-- [[chunking|청킹]] — 문서를 임베딩·검색 단위로 쪼개는 것. 입도가 검색 품질을 크게 좌우…
+- [벡터 데이터베이스](concepts/vector-database.md) — 고차원 임베딩을 저장하고 ANN 탐색을 제공. 선택은 쿼리 지연보다 운영 단순성에 좌우…
+- [RAG](concepts/retrieval-augmented-generation.md) — 외부 코퍼스 검색 문맥에 LM 출력을 grounding. 답 품질은 임베딩 모델보다 검색 단계가 지배…
+- [청킹](concepts/chunking.md) — 문서를 임베딩·검색 단위로 쪼개는 것. 입도가 검색 품질을 크게 좌우…
 
 ### infrastructure (10)
-- [[kubernetes|Kubernetes]] — 컨테이너 오케스트레이션. 안정 운영은 pod 메모리·재시작 지표 관찰에 달림…
+- [Kubernetes](concepts/kubernetes.md) — 컨테이너 오케스트레이션. 안정 운영은 pod 메모리·재시작 지표 관찰에 달림…
 ```
 
 ### ✅ 결과 ④ — 지식 그래프가 형성됩니다
@@ -374,4 +374,4 @@ lore schedule | crontab -
 
 ## 기술 스택
 
-Rust 1.97 · 2024 edition. `tokio`/`reqwest`(비동기 소스), `jiff`(타임존 정확 날짜), `minijinja`(템플릿), `petgraph`(wikilink 그래프), `blake3`(이벤트·캐시 해시). 라이선스: MIT.
+Rust 1.97 · 2024 edition. `tokio`/`reqwest`(비동기 소스), `jiff`(타임존 정확 날짜), `minijinja`(템플릿), `petgraph`(링크 그래프), `blake3`(이벤트·캐시 해시). 라이선스: MIT.

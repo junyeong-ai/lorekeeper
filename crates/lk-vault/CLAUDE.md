@@ -38,7 +38,7 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   never inferred from whether a section is empty.)
 - **`index::build_index`** generates `{wiki}/index.md` — a single hierarchical page catalog
   grouped by category (concepts, documents, daily sources, work-log, synthesis), NEVER split
-  into sub-pages (like `log.md`/`map.md`). Each entry is `[[link]] — first-sentence summary`,
+  into sub-pages (like `log.md`/`map.md`). Each entry is `[title](relative-path) — first-sentence summary`,
   the summary extracted from the page's type-specific `## ` section body (concept synthesis,
   daily/document summary — heading resolved from the i18n bundle) and bounded by
   `truncate_summary` (first sentence, `MAX_SUMMARY_BYTES` cap) so a line stays scannable and

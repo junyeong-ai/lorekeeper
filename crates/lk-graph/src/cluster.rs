@@ -31,7 +31,7 @@ pub fn detect_communities(graph: &WikiGraph, config: &GraphConfig) -> ClusterRes
         };
     }
 
-    // Symmetrize the directed wikilink graph into an undirected weighted graph for
+    // Symmetrize the directed link graph into an undirected weighted graph for
     // Louvain. Each directed edge contributes weight 1.0 in both directions, so a
     // RECIPROCAL pair (A→B and B→A) accumulates weight 2.0 on that bond while a one-way
     // link stays at 1.0. This is deliberate: a mutual citation is a stronger topical tie
@@ -336,7 +336,7 @@ pub struct SuggestResult {
     pub pairs: Vec<LinkSuggestion>,
 }
 
-/// Suggest wikilinks to add: pairs of pages in the SAME Louvain community that have NO
+/// Suggest links to add: pairs of pages in the SAME Louvain community that have NO
 /// edge between them and share at least `min_shared_neighbors` neighbours, ranked by their
 /// Adamic–Adar index (descending). The count floor rejects the single-shared-neighbour case
 /// outright; the Adamic–Adar weighting then discounts shared neighbours that are high-degree
@@ -445,7 +445,6 @@ mod tests {
             path: PathBuf::from(format!("{id}.md")),
             title: name.to_owned(),
             outgoing: outgoing.iter().map(|s| s.to_string()).collect(),
-            aliases: Vec::new(),
         }
     }
 

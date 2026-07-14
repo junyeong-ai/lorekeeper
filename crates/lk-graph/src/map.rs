@@ -5,15 +5,17 @@
 //! without any embedding or retrieval layer. "Navigate, don't retrieve."
 //!
 //! This is a read-only materialized view, regenerated wholesale each run like `index.md`
-//! and `log.md` — it never writes `[[related]]` edges into concept pages. Communities
+//! and `log.md` — it never writes Related-section edges into concept pages. Communities
 //! encode *co-citation*, not curated topical relatedness, so the page is labelled as a
 //! citation map, never presented as authored relationships.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 
 use lk_core::config::{GraphConfig, VaultDirs};
 use lk_core::i18n::Locale;
+use lk_core::link;
 use lk_core::vault_path::concepts_dir;
 
 use crate::cluster::detect_communities;
@@ -45,7 +47,14 @@ pub fn build_map(
     // A concept page id is `{wiki}/concepts/{slug}` (per-segment slugified).
     let concept_prefix = format!("{}/", crate::scan::path_slug(&concepts_dir(dirs)));
 
+    // Destinations are relative to the map's own location (`{wiki}/map.md`). A concept
+    // page's path is its id plus `.md` — machine-created pages are slug-addressed by
+    // construction (`graph normalize` repairs any hand-made exception).
+    let map_rel = Path::new(&dirs.wiki).join("map.md");
+    let dest_of = |id: &str| link::relative_dest(&map_rel, &PathBuf::from(format!("{id}.md")));
+
     let mut out = String::new();
+    writeln!(out, "---\ntype: map\n---\n").unwrap();
     writeln!(out, "# {}", strings.map_title).unwrap();
     writeln!(out).unwrap();
     writeln!(out, "{}", strings.map_intro).unwrap();
@@ -65,15 +74,20 @@ pub fn build_map(
         concepts.sort_by(|a, b| degree.get(*b).cmp(&degree.get(*a)).then_with(|| a.cmp(b)));
         // The highest-degree concept is the cluster's representative (its hub).
         let hub = concepts[0];
-        writeln!(out, "## [[{}|{}]] ({})", hub, leaf(hub), concepts.len()).unwrap();
+        writeln!(
+            out,
+            "## {} ({})",
+            link::md_link(leaf(hub), &dest_of(hub)),
+            concepts.len()
+        )
+        .unwrap();
         writeln!(out).unwrap();
         for id in &concepts {
             let links = degree.get(*id).copied().unwrap_or(0);
             writeln!(
                 out,
-                "- [[{}|{}]] · {} {}",
-                id,
-                leaf(id),
+                "- {} · {} {}",
+                link::md_link(leaf(id), &dest_of(id)),
                 links,
                 strings.map_links
             )
@@ -91,7 +105,7 @@ pub fn build_map(
 }
 
 /// The last path segment of a node id (`wiki/concepts/foo` → `foo`) — the readable
-/// display label for an unambiguous path-form wikilink target.
+/// display label for a path-addressed link.
 fn leaf(id: &str) -> &str {
     id.rsplit('/').next().unwrap_or(id)
 }
@@ -109,7 +123,6 @@ mod tests {
             path: PathBuf::from(format!("{id}.md")),
             title: leaf(id).to_string(),
             outgoing: outgoing.iter().map(|s| s.to_string()).collect(),
-            aliases: vec![],
         }
     }
 
@@ -151,12 +164,16 @@ mod tests {
             Locale::En,
         );
         assert!(
-            md.contains("[[wiki/concepts/rag|rag]]"),
-            "concepts are listed by path id with leaf display:\n{md}"
+            md.contains("[rag](concepts/rag.md)"),
+            "concepts are linked relative to the map with leaf display:\n{md}"
         );
         assert!(
-            md.contains("[[wiki/concepts/embeddings|embeddings]]"),
+            md.contains("[embeddings](concepts/embeddings.md)"),
             "both concepts listed:\n{md}"
+        );
+        assert!(
+            md.starts_with("---\ntype: map\n---\n"),
+            "the map declares its page type:\n{md}"
         );
         assert!(
             !md.contains("survey"),

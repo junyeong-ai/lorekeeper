@@ -43,7 +43,7 @@ personal:                            # OPTIONAL personal-productivity module (wo
 synthesis: {weekly: {...}}           # cross-source weekly themes (domain-neutral)
 concepts:                            # LLM concept-page taxonomy
   categories: [{id: ..., label: ...}] # also orders/labels the `### category` index groups
-graph:                               # wikilink graph analysis (lore graph *)
+graph:                               # link graph analysis (lore graph *)
   scope: {dirs: [...]}               # defaults to vault.dirs.wiki
   metrics: {min_hub_degree: 5, orphan_exclude: [], concept_near_duplicate_threshold: 0.6}
   cluster: {resolution: 1.0, min_community_size: 1, suggest_min_shared_neighbors: 2}

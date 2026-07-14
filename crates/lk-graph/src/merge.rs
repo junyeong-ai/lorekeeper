@@ -2,12 +2,12 @@
 //!
 //! `find_near_duplicate_concepts` (in `concepts`) only *reports* variant-spelling
 //! duplicates (`vector-db` ~ `vector-database`); this module is the execution
-//! counterpart that resolves one. It rewrites every wikilink that targets the
-//! `from` concept so it points at `into`, folds `from`'s names (title + aliases) into
-//! `into`'s `aliases` so a synonym keeps resolving, then deletes the now-orphaned `from`
-//! page. The `## Sources` body and `source_count` are deliberately NOT touched
-//! here — they are owned by `backlinks-sync`, which re-derives them exactly from
-//! the post-merge link graph on its next run.
+//! counterpart that resolves one. It repoints every link that targets the `from`
+//! concept at `into`, folds `from`'s names (title + aliases) into `into`'s `aliases`
+//! so the synonym stays in the concept registry the LLM dedups against, then deletes
+//! the now-orphaned `from` page. The `## Sources` body and `source_count` are
+//! deliberately NOT touched here — they are owned by `backlinks-sync`, which
+//! re-derives them exactly from the post-merge link graph on its next run.
 //!
 //! The merge is link-rewiring only: it never fabricates or copies prose. If the
 //! `from` page carries body content a human authored (a synthesis paragraph,
@@ -19,19 +19,18 @@ use std::path::{Path, PathBuf};
 
 use lk_core::concept::slugify;
 use lk_core::i18n::Locale;
-use lk_core::wikilink;
-use regex::Captures;
+use lk_core::link;
 use serde::Serialize;
 
 use crate::GraphError;
-use crate::scan::{ScannedPage, path_slug};
+use crate::scan::ScannedPage;
 
-/// One page whose wikilinks were (or would be) rewritten by a merge.
+/// One page whose links were (or would be) rewritten by a merge.
 #[derive(Debug, Clone, Serialize)]
 pub struct RewrittenPage {
     /// Vault-relative path of the page.
     pub path: PathBuf,
-    /// Number of `[[from]]` links rewritten to `[[into]]` on it.
+    /// Number of links repointed from `from` to `into` on it.
     pub links: usize,
 }
 
@@ -50,7 +49,7 @@ pub struct MergeResult {
     pub dry_run: bool,
 }
 
-/// Fold the `from` concept into `into`: rewrite every wikilink targeting `from` to
+/// Fold the `from` concept into `into`: repoint every link targeting `from` at
 /// `into` across the whole vault, then delete `from`'s page.
 ///
 /// Errors when `from` and `into` are the same slug, when either concept page does
@@ -108,11 +107,6 @@ pub fn merge_concepts(
         )));
     }
 
-    // The two link forms that can target the from concept: a bare `[[from]]`
-    // (resolved by filename) and a path link to the page id `[[<wiki>/concepts/from]]`.
-    let from_path_id = path_slug(&from_rel);
-    let into_path_id = path_slug(&into_rel);
-
     // Compute the merged alias list BEFORE mutating any page, so a malformed `from`/`into`
     // aborts the merge before a single link is repointed (validate-before-mutate). The list
     // is derived from names only, so it stays valid even though the rewrite loop below may
@@ -132,7 +126,7 @@ pub fn merge_concepts(
         let abs = vault_root.join(&page.path);
         let content = std::fs::read_to_string(&abs)
             .map_err(|e| GraphError::Io(format!("read {}: {e}", abs.display())))?;
-        let (updated, count) = rewrite_links(&content, &from, &from_path_id, &into, &into_path_id);
+        let (updated, count) = rewrite_links(&content, &page.path, &from_rel, &into_rel);
         if count > 0 {
             if !dry_run && updated != content {
                 lk_core::fs::write_atomic(&abs, updated.as_bytes(), None)
@@ -148,9 +142,9 @@ pub fn merge_concepts(
 
     if !dry_run {
         // Apply the pre-computed aliases (reading `into` fresh so the rewrite loop's body
-        // changes are kept), then delete `from`. A synonym that resolved to `from` keeps
-        // resolving — now to `into`; without this the merged name would silently stop
-        // resolving once the page is gone.
+        // changes are kept), then delete `from`. The merged names stay in the concept
+        // registry, so a later extraction of the old name converges on `into` instead of
+        // re-minting a page.
         if let Some(aliases) = &absorbed_aliases {
             apply_aliases(vault_root, &into_rel, aliases)?;
         }
@@ -169,11 +163,12 @@ pub fn merge_concepts(
 }
 
 /// Compute the `into` page's alias list after absorbing `from`'s identity (its title and
-/// any declared aliases), so a synonym that resolved to `from` keeps resolving — to `into` —
-/// once `from` is deleted. The `into` title stays first (Obsidian convention) and duplicates
-/// are dropped. This is the fallible half (it reads and parses both pages), kept separate so
-/// the caller runs it BEFORE any mutation — a malformed page aborts the merge before a single
-/// link is repointed.
+/// any declared aliases), so the merged names stay in the concept registry
+/// (`lore wiki concepts`) the LLM dedups against — a later extraction of the old name
+/// converges on `into` instead of re-minting a page. The `into` title stays first
+/// (Obsidian convention) and duplicates are dropped. This is the fallible half (it reads
+/// and parses both pages), kept separate so the caller runs it BEFORE any mutation — a
+/// malformed page aborts the merge before a single link is repointed.
 fn compute_absorbed_aliases(
     vault_root: &Path,
     from_rel: &Path,
@@ -208,7 +203,7 @@ fn compute_absorbed_aliases(
     let into = lk_core::frontmatter::parse_page(&into_raw)
         .map_err(|e| GraphError::Io(format!("parse {}: {e}", into_rel.display())))?;
 
-    // Names to absorb: `from`'s title (covers a bare `[[from-name]]`/`[[from-slug]]`, which
+    // Names to absorb: `from`'s title (a surface form of the same concept — title and slug
     // slugify identically) plus every alias `from` itself carried.
     let mut absorb = Vec::new();
     absorb.extend(title_of(&from));
@@ -245,44 +240,35 @@ fn apply_aliases(vault_root: &Path, into_rel: &Path, aliases: &[String]) -> Resu
     Ok(())
 }
 
-/// Rewrite every wikilink targeting the from concept (bare slug or path id) to the
-/// into concept, preserving anchors and aliases. Returns the new content and the
-/// number of links rewritten.
+/// Repoint every link targeting the from concept at the into concept, preserving the
+/// display text and any heading anchor. Returns the new content and the number of
+/// links rewritten.
 fn rewrite_links(
     content: &str,
-    from_slug: &str,
-    from_path_id: &str,
-    into_slug: &str,
-    into_path_id: &str,
+    page_path: &Path,
+    from_rel: &Path,
+    into_rel: &Path,
 ) -> (String, usize) {
     let mut count = 0;
-    // Rewrite OUTSIDE code only (shared helper): a `[[from]]` shown inside a code fence/span
-    // is a code example, not a graph edge — `extract_wikilinks`/`broken` ignore it, so it
-    // never dangles after the from page is deleted, and rewriting it would corrupt the doc.
-    let out = wikilink::rewrite_wikilinks_outside_code(content, |caps: &Captures| {
-        let full = caps.get(0).unwrap().as_str();
-        // Decompose the FULL inner text (between `[[` and `]]`) into
-        // page / anchor / alias so each is preserved exactly once when the page is
-        // rewritten. `caps[1]` excludes the alias by regex design, so the full match
-        // is sliced instead — `[[` and `]]` are ASCII, so byte slicing is safe.
-        let (page_raw, anchor, alias) = wikilink::split_wikilink_parts(&full[2..full.len() - 2]);
-        let trimmed = page_raw.trim();
-
-        // Does this link target the from concept? Resolve the target the SAME way the
-        // graph does (`resolve_wikilink_target`: per-segment slugify) so a non-normalized
-        // path link like `[[wiki/concepts/Vector DB]]` — which resolves to the from page
-        // and would dangle after deletion — is rewritten too, not just exact-id matches.
-        let resolved = crate::scan::resolve_wikilink_target(trimmed);
-        let is_bare = resolved == from_slug && !trimmed.contains('/');
-        let is_path = resolved == from_path_id;
-        if !is_bare && !is_path {
-            return full.to_owned();
+    // Rewrite OUTSIDE code only (shared helper): a from-link shown inside a code
+    // fence/span is a code example, not a graph edge — `extract_dests`/`broken` ignore
+    // it, so it never dangles after the from page is deleted, and rewriting it would
+    // corrupt the doc.
+    let out = link::rewrite_links_outside_code(content, |text, raw_dest| {
+        // Does this link target the from concept? Resolve the destination the SAME way
+        // the graph does (against this page's location), so any spelling that lands on
+        // the from page — `../concepts/from.md`, `./from.md`, the OKF absolute form —
+        // is rewritten, not just one canonical string.
+        let (dest, anchor) = link::split_dest_anchor(raw_dest);
+        let resolved = link::resolve_dest(page_path, &link::decode_dest(dest));
+        if resolved.as_deref() != Some(from_rel) {
+            return None;
         }
         count += 1;
-        // Bare links rewrite to the bare into slug; path links to the into path id,
-        // so each citation keeps its original form.
-        let new_target = if is_path { into_path_id } else { into_slug };
-        format!("[[{new_target}{anchor}{alias}]]")
+        // `text` arrives exactly as written (escapes included) — reassemble verbatim
+        // rather than through `md_link`, which would escape it a second time.
+        let new_dest = format!("{}{anchor}", link::relative_dest(page_path, into_rel));
+        Some(format!("[{text}]({new_dest})"))
     });
     (out, count)
 }
@@ -291,10 +277,10 @@ fn rewrite_links(
 /// line outside the frontmatter that is neither a heading (`#…`) nor a machine-owned
 /// `## Sources` list item. Decides whether deletion needs `--force`.
 ///
-/// Section-aware: a `- [[…]]` bullet is machine-owned ONLY under the Sources heading,
-/// which `backlinks-sync` re-derives. The identical bullet under any other section —
-/// notably `## Related`, whose links are human-curated via `lore-wiki audit` — is
-/// authored knowledge the merge must never silently drop.
+/// Section-aware: a `- [title](dest)` bullet is machine-owned ONLY under the Sources
+/// heading, which `backlinks-sync` re-derives. The identical bullet under any other
+/// section — notably `## Related`, whose links are human-curated via `lore-wiki
+/// audit` — is authored knowledge the merge must never silently drop.
 fn concept_has_authored_body(abs: &Path) -> Result<bool, GraphError> {
     let raw = std::fs::read_to_string(abs)
         .map_err(|e| GraphError::Io(format!("read {}: {e}", abs.display())))?;
@@ -324,7 +310,7 @@ fn concept_has_authored_body(abs: &Path) -> Result<bool, GraphError> {
         if t.is_empty() || t.starts_with('#') {
             continue;
         }
-        if in_sources && t.starts_with("- [[") && t.ends_with("]]") {
+        if in_sources && t.starts_with("- [") && t.ends_with(')') && t.contains("](") {
             continue; // a Sources list item — machine-owned, re-derived by backlinks-sync
         }
         return Ok(true);
@@ -349,12 +335,11 @@ mod tests {
             path: PathBuf::from(rel),
             title: id.to_owned(),
             outgoing: outgoing.iter().map(|s| (*s).to_string()).collect(),
-            aliases: Vec::new(),
         }
     }
 
     #[test]
-    fn rewrite_preserves_anchor_and_alias_without_duplication() {
+    fn rewrite_preserves_text_and_anchor_without_duplication() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
         write(
@@ -370,26 +355,25 @@ mod tests {
         write(
             root,
             "daily/x/d.md",
-            "- [[old]]\n- [[old#sec]]\n- [[old|Alias]]\n- [[old#sec|Alias]]\n",
+            "- [Old](../../wiki/concepts/old.md)\n- [Old](../../wiki/concepts/old.md#sec)\n- [Alias](../../wiki/concepts/old.md)\n",
         );
         let pages = vec![
             page("wiki/concepts/old", "wiki/concepts/old.md", &[]),
             page("wiki/concepts/new", "wiki/concepts/new.md", &[]),
-            page("daily/x/d", "daily/x/d.md", &["old"]),
+            page("daily/x/d", "daily/x/d.md", &["wiki/concepts/old"]),
         ];
         merge_concepts(&pages, root, "wiki", "old", "new", false, false).unwrap();
         let daily = std::fs::read_to_string(root.join("daily/x/d.md")).unwrap();
-        // Every form rewritten to `new`, with anchor and alias each kept exactly once
-        // (the regression the `split_wikilink_parts` decomposition fixes).
+        // Every citation repointed to `new`, display text and anchor kept verbatim.
         assert_eq!(
             daily.as_str(),
-            "- [[new]]\n- [[new#sec]]\n- [[new|Alias]]\n- [[new#sec|Alias]]\n"
+            "- [Old](../../wiki/concepts/new.md)\n- [Old](../../wiki/concepts/new.md#sec)\n- [Alias](../../wiki/concepts/new.md)\n"
         );
     }
 
     #[test]
-    fn wikilinks_inside_code_are_not_rewritten() {
-        // A `[[old]]` shown inside a code fence or inline span is a code example, not a
+    fn links_inside_code_are_not_rewritten() {
+        // A from-link shown inside a code fence or inline span is a code example, not a
         // citation edge (`broken` ignores it too, so it never dangles after deletion). Merge
         // rewires only the real citation, leaving the code verbatim.
         let tmp = TempDir::new().unwrap();
@@ -407,31 +391,35 @@ mod tests {
         write(
             root,
             "wiki/documents/doc.md",
-            "Cites [[old]].\n```\nexample [[old]]\n```\nInline `[[old]]`.\n",
+            "Cites [Old](../concepts/old.md).\n```\nexample [Old](../concepts/old.md)\n```\nInline `[Old](../concepts/old.md)`.\n",
         );
         let pages = vec![
             page("wiki/concepts/old", "wiki/concepts/old.md", &[]),
             page("wiki/concepts/new", "wiki/concepts/new.md", &[]),
-            page("wiki/documents/doc", "wiki/documents/doc.md", &["old"]),
+            page(
+                "wiki/documents/doc",
+                "wiki/documents/doc.md",
+                &["wiki/concepts/old"],
+            ),
         ];
         merge_concepts(&pages, root, "wiki", "old", "new", false, false).unwrap();
         let doc = std::fs::read_to_string(root.join("wiki/documents/doc.md")).unwrap();
         assert!(
-            doc.contains("Cites [[new]]."),
+            doc.contains("Cites [Old](../concepts/new.md)."),
             "real citation rewired:\n{doc}"
         );
         assert!(
-            doc.contains("example [[old]]"),
+            doc.contains("example [Old](../concepts/old.md)"),
             "fenced code untouched:\n{doc}"
         );
         assert!(
-            doc.contains("Inline `[[old]]`."),
+            doc.contains("Inline `[Old](../concepts/old.md)`."),
             "inline code untouched:\n{doc}"
         );
     }
 
     #[test]
-    fn rewrites_bare_links_and_deletes_from() {
+    fn rewrites_any_spelling_that_resolves_to_from_and_deletes_from() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
         write(
@@ -444,10 +432,12 @@ mod tests {
             "wiki/concepts/vector-database.md",
             "---\nid: vector-database\n---\n\n# vector-database\n",
         );
+        // Three spellings of the same address: canonical relative, dot-relative, and
+        // the OKF absolute form — all resolve to the from page and must be rewritten.
         write(
             root,
             "daily/x/2026-05-20.md",
-            "See [[vector-db]] and [[vector-db#use|the db]].\n",
+            "See [V](../../wiki/concepts/vector-db.md) and [V](../../wiki/./concepts/vector-db.md) and [V](/wiki/concepts/vector-db.md).\n",
         );
 
         let pages = vec![
@@ -460,7 +450,7 @@ mod tests {
             page(
                 "daily/x/2026-05-20",
                 "daily/x/2026-05-20.md",
-                &["vector-db"],
+                &["wiki/concepts/vector-db"],
             ),
         ];
 
@@ -475,14 +465,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r.rewritten.len(), 1);
-        assert_eq!(r.rewritten[0].links, 2);
+        assert_eq!(r.rewritten[0].links, 3);
         assert!(r.deleted);
         assert!(!root.join("wiki/concepts/vector-db.md").exists());
 
         let daily = std::fs::read_to_string(root.join("daily/x/2026-05-20.md")).unwrap();
         assert_eq!(
             daily,
-            "See [[vector-database]] and [[vector-database#use|the db]].\n"
+            "See [V](../../wiki/concepts/vector-database.md) and [V](../../wiki/concepts/vector-database.md) and [V](../../wiki/concepts/vector-database.md).\n"
         );
     }
 
@@ -492,11 +482,11 @@ mod tests {
         let root = tmp.path();
         write(root, "wiki/concepts/a.md", "---\nid: a\n---\n\n# a\n");
         write(root, "wiki/concepts/b.md", "---\nid: b\n---\n\n# b\n");
-        write(root, "daily/x/d.md", "[[a]]\n");
+        write(root, "daily/x/d.md", "[a](../../wiki/concepts/a.md)\n");
         let pages = vec![
             page("wiki/concepts/a", "wiki/concepts/a.md", &[]),
             page("wiki/concepts/b", "wiki/concepts/b.md", &[]),
-            page("daily/x/d", "daily/x/d.md", &["a"]),
+            page("daily/x/d", "daily/x/d.md", &["wiki/concepts/a"]),
         ];
         let before = std::fs::read_to_string(root.join("daily/x/d.md")).unwrap();
         let r = merge_concepts(&pages, root, "wiki", "a", "b", true, false).unwrap();
@@ -532,7 +522,7 @@ mod tests {
         write(
             root,
             "wiki/concepts/a.md",
-            "---\nid: a\n---\n\n# a\n\n## 핵심\n\nA hand-written synthesis paragraph.\n\n## 출처\n\n- [[daily/x/d]]\n",
+            "---\nid: a\n---\n\n# a\n\n## 핵심\n\nA hand-written synthesis paragraph.\n\n## 출처\n\n- [d](../../daily/x/d.md)\n",
         );
         write(root, "wiki/concepts/b.md", "---\nid: b\n---\n\n# b\n");
         let pages = vec![
@@ -549,7 +539,7 @@ mod tests {
         write(
             root,
             "wiki/concepts/c.md",
-            "---\nid: c\n---\n\n# c\n\n## 출처\n\n- [[daily/x/d]]\n",
+            "---\nid: c\n---\n\n# c\n\n## 출처\n\n- [d](../../daily/x/d.md)\n",
         );
         let pages2 = vec![
             page("wiki/concepts/c", "wiki/concepts/c.md", &[]),
@@ -600,14 +590,14 @@ mod tests {
     fn related_only_body_is_authored_and_needs_force() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-        // `from`'s only body is human-curated `## 관련` (Related) wikilinks, no synthesis
+        // `from`'s only body is human-curated `## 관련` (Related) links, no synthesis
         // prose. Those links are confirmed via `lore-wiki audit` — authored knowledge,
         // NOT machine-derived like `## 출처` (Sources). The merge must refuse to silently
         // drop them without --force.
         write(
             root,
             "wiki/concepts/a.md",
-            "---\nid: a\n---\n\n# a\n\n## 관련\n\n- [[other]]\n",
+            "---\nid: a\n---\n\n# a\n\n## 관련\n\n- [other](other.md)\n",
         );
         write(root, "wiki/concepts/b.md", "---\nid: b\n---\n\n# b\n");
         let pages = vec![
@@ -637,7 +627,7 @@ mod tests {
         write(
             root,
             "wiki/concepts/a.md",
-            "---\nid: a\n---\n\n# a\n\n  ## 출처\n\n- [[daily/x/d]]\n",
+            "---\nid: a\n---\n\n# a\n\n  ## 출처\n\n- [d](../../daily/x/d.md)\n",
         );
         write(root, "wiki/concepts/b.md", "---\nid: b\n---\n\n# b\n");
         let pages = vec![
@@ -649,60 +639,6 @@ mod tests {
                 .unwrap()
                 .from_authored,
             "indented Sources heading must not be mistaken for the machine-owned section"
-        );
-    }
-
-    #[test]
-    fn merge_rewrites_non_normalized_path_links() {
-        // A path-style link whose segments aren't slugified (`[[wiki/concepts/Vector DB]]`)
-        // still resolves to the `from` page, so the merge MUST rewrite it before deleting
-        // `from` — otherwise it would dangle. Resolution goes through the same normalizer the
-        // graph uses, not a raw string compare.
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path();
-        write(
-            root,
-            "wiki/concepts/vector-db.md",
-            "---\nid: vector-db\n---\n\n# vector-db\n",
-        );
-        write(
-            root,
-            "wiki/concepts/vector-database.md",
-            "---\nid: vector-database\n---\n\n# vector-database\n",
-        );
-        write(
-            root,
-            "daily/x/d.md",
-            "See [[wiki/concepts/Vector DB]] for details.\n",
-        );
-        let pages = vec![
-            page("wiki/concepts/vector-db", "wiki/concepts/vector-db.md", &[]),
-            page(
-                "wiki/concepts/vector-database",
-                "wiki/concepts/vector-database.md",
-                &[],
-            ),
-            page("daily/x/d", "daily/x/d.md", &["wiki/concepts/vector-db"]),
-        ];
-        let r = merge_concepts(
-            &pages,
-            root,
-            "wiki",
-            "vector-db",
-            "vector-database",
-            false,
-            false,
-        )
-        .unwrap();
-        assert_eq!(
-            r.rewritten.len(),
-            1,
-            "the non-normalized path link is rewritten"
-        );
-        let daily = std::fs::read_to_string(root.join("daily/x/d.md")).unwrap();
-        assert_eq!(
-            daily, "See [[wiki/concepts/vector-database]] for details.\n",
-            "path link must repoint to the canonical page, not dangle"
         );
     }
 
@@ -738,9 +674,9 @@ mod tests {
             false,
         )
         .unwrap();
-        // `from`'s title and aliases are folded into `into`'s aliases (into-title stays first,
-        // duplicates dropped), so a bare `[[Vector DB]]`/`[[vecdb]]` keeps resolving — to the
-        // surviving `vector-database` page.
+        // `from`'s title and aliases are folded into `into`'s aliases (into-title stays
+        // first, duplicates dropped), so the merged names stay in the concept registry
+        // the LLM dedups against.
         let into = std::fs::read_to_string(root.join("wiki/concepts/vector-database.md")).unwrap();
         assert!(
             into.contains(r#"aliases: ["Vector Database","Vector DB","vecdb"]"#),

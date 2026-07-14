@@ -74,7 +74,7 @@ enum Command {
     },
     /// Prune the ingest log and drained queue files past the configured retention (default 90 days); streaming event logs are permanent
     Maintenance,
-    /// Wikilink graph analysis for the vault
+    /// Link graph analysis for the vault
     Graph {
         /// Root directory of the vault (overrides config.yaml vault.root)
         #[arg(long)]

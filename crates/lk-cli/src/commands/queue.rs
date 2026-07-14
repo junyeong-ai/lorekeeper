@@ -337,6 +337,7 @@ mod tests {
                 vault_path: vault_path.into(),
                 kind: TargetKind::DailySummary,
                 anchor: "## 요약".into(),
+                concepts_dir: "../../wiki/concepts".into(),
             },
         }
     }

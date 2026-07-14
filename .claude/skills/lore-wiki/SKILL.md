@@ -44,14 +44,15 @@ each as an independent source, and report the aggregate results.
 3. For EACH source, create a **document page** (per AGENTS.md): preserve the
    original content, set `document_type` from the format vocabulary
    (`note`|`report`|`data`; the source's nature goes in `tags`), and link the
-   extracted concepts as `[[wikilinks]]` in the related-concepts section.
+   extracted concepts as relative markdown links (`[Name](<concepts-dir>/<slug>.md)`,
+   per AGENTS.md § Links) in the related-concepts section.
 4. Extract every named entity, technology, and topic as concepts (typically
    several per source). Converge each one through the **Concept convergence**
    section of the vault's `AGENTS.md` — which covers loading the
    registry (`lore wiki concepts`), tracking concepts created earlier in this
    add, alias registration, and the machine-owned sources section/`source_count`
    fields. Fill the Synthesis section with a 1-2 sentence definition for a new
-   concept; the document's forward `[[wikilink]]` from step 3 is what
+   concept; the document's forward concept link from step 3 is what
    `backlinks-sync` counts as the citation.
 5. **Finalize**: `lore graph backlinks-sync`, then `lore wiki index`, then
    `lore wiki map` (refresh the citation-cluster navigation map), then
@@ -68,18 +69,18 @@ Answer a question grounded in vault content, with compounding.
    Search the vault (concepts, daily pages, explorations) for relevant pages.
    Read the most relevant pages to ground the answer.
 2. Synthesize an answer grounded in vault content. Cite sources using
-   `[[wikilink]]` format.
+   link format (AGENTS.md § Links).
 3. **Concept enrichment.** If the answer reveals connections between concepts
-   that aren't currently wikilinked in their Related sections (heading from
+   that aren't currently linked in their Related sections (heading from
    AGENTS.md), note these as suggested edits (but do NOT auto-apply).
 4. **Compounding judgment** — after answering, judge reusability:
    - **Reusable** (synthesis, comparison, multi-source analysis) → write an
      **exploration** page (path from AGENTS.md). Read AGENTS.md
      for the exploration page format (frontmatter keys, section headings, ownership).
-     Use slug-only values (no `[[…]]` wikilinks) in the `grounded_concepts` and
-     `grounded_documents` frontmatter arrays; wikilinks belong in the body's
+     Use slug-only values (no link syntax) in the `grounded_concepts` and
+     `grounded_documents` frontmatter arrays; links belong in the body's
      Grounding section. Then **finalize** so the new page leaves the graph clean:
-     `lore graph backlinks-sync` (its Grounding wikilinks are real citations that
+     `lore graph backlinks-sync` (its Grounding links are real citations that
      raise each grounded concept's `source_count`), then `lore wiki index` (so the
      exploration is catalogued and the next audit shows no index drift), then
      `lore wiki map` (so the new exploration joins the navigation map and its links

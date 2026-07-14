@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use lk_core::config::{ConceptCategory, GraphConfig, VaultDirs};
 use lk_core::i18n::Locale;
 use lk_graph::{
-    alias, audit, backlinks, cluster, concept_lint, export, graph, index_drift, merge, normalize,
-    output, scan,
+    audit, backlinks, cluster, concept_lint, export, graph, index_drift, merge, normalize, output,
+    scan,
 };
 
 use super::GlobalOptions;
@@ -21,7 +21,7 @@ struct ResolvedConfig {
 pub enum GraphCommand {
     /// Run all graph checks in one pass
     Lint,
-    /// Show top hub pages by wikilink degree
+    /// Show top hub pages by link degree
     Hubs {
         /// Number of top hubs to display
         #[arg(long, default_value_t = 10)]
@@ -29,7 +29,7 @@ pub enum GraphCommand {
     },
     /// Find orphan pages with zero links
     Orphans,
-    /// Find broken wikilinks pointing to non-existent pages
+    /// Find broken links pointing to non-existent pages
     Broken,
     /// Detect topic communities via Louvain modularity optimization
     Cluster {
@@ -54,11 +54,11 @@ pub enum GraphCommand {
     },
     /// Check slug normalization and optionally rename
     Normalize {
-        /// Apply renames and update wikilinks
+        /// Apply renames and repoint links
         #[arg(long)]
         fix: bool,
     },
-    /// Suggest wikilinks between co-clustered pages that are not yet linked
+    /// Suggest links between co-clustered pages that are not yet linked
     SuggestLinks {
         /// Minimum community size for suggestions (overrides config)
         #[arg(long)]
@@ -80,7 +80,7 @@ pub enum GraphCommand {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Merge a duplicate concept into a canonical one: rewrite every wikilink from
+    /// Merge a duplicate concept into a canonical one: repoint every link from
     /// `<from>` to `<into>`, then delete the `<from>` page. Run `backlinks-sync`
     /// afterward to re-derive the merged `## Sources` + `source_count`.
     Merge {
@@ -208,10 +208,6 @@ fn run_inner(
                 rc.graph.metrics.concept_near_duplicate_threshold,
             );
             let unresolved_conflicts = concept_lint::find_unresolved_conflicts(&concept_pages);
-            // Alias conflicts read the scanned pages (which carry `aliases`), not the
-            // concept-lint page set — the two declaration failures a silent first-wins
-            // alias resolution would otherwise hide.
-            let alias_conflicts = alias::find_alias_conflicts(&pages, &existence, &rc.vault_dirs);
 
             let findings = orphans.len()
                 + broken.len()
@@ -219,12 +215,11 @@ fn run_inner(
                 + drift.missing_from_disk.len()
                 + invalid_categories.len()
                 + near_duplicate_concepts.len()
-                + unresolved_conflicts.len()
-                + alias_conflicts.len();
+                + unresolved_conflicts.len();
 
             let report = output::LintReport {
                 pages: g.node_count(),
-                wikilinks: g.edge_count(),
+                links: g.edge_count(),
                 components: g.component_count(),
                 hubs,
                 orphans,
@@ -237,7 +232,6 @@ fn run_inner(
                 invalid_categories,
                 near_duplicate_concepts,
                 unresolved_conflicts,
-                alias_conflicts,
                 findings,
             };
             if json {
@@ -324,7 +318,7 @@ fn run_inner(
             let has_unfixable = !drift.missing_from_disk.is_empty();
             let fixed = if fix && !drift.missing_from_index.is_empty() {
                 Some(
-                    index_drift::fix(&drift, &rc.root, Path::new(&rc.vault_dirs.wiki))
+                    index_drift::fix(&drift, &pages, &rc.root, Path::new(&rc.vault_dirs.wiki))
                         .map_err(|e| format!("{e}"))?,
                 )
             } else {
@@ -523,7 +517,7 @@ fn command_scan_dirs(
 }
 
 /// Every vault-relative page directory that exists on disk — anything that can
-/// wikilink another page. Used by commands that need a full-vault view
+/// link another page. Used by commands that need a full-vault view
 /// (`backlinks-sync`, and the existence universe behind `lint`'s integrity
 /// checks) rather than the user-configured `graph.scope.dirs`, which stays
 /// narrowed for structural analysis (`hubs`/`cluster`/`suggest-links`). Missing

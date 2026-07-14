@@ -1,26 +1,27 @@
 //! Re-derive each concept page's `## <Sources>` body AND its frontmatter
-//! `source_count` from the actual wikilink graph — this module is the single
+//! `source_count` from the actual link graph — this module is the single
 //! source-of-truth for both. Ingest writes neither: it renders the Sources heading
 //! empty and preserves the on-disk `source_count` verbatim (0 for a new page), so this
-//! sync is what makes them correct: every daily/work-log/etc. page that wikilinks the concept
-//! becomes a `- [[…]]` entry, and the count is that entry total. Manual edits (a daily
-//! page gains/loses a `[[concept]]` link) and source-page deletions are reflected on
-//! the next run.
+//! sync is what makes them correct: every daily/work-log/etc. page that links the concept
+//! becomes a `- [title](relative-path)` entry, and the count is that entry total. Manual
+//! edits (a daily page gains/loses a concept link) and source-page deletions are
+//! reflected on the next run.
 //!
 //! Pure set comparison: no heuristics, no LLM, no per-source rules. A page is in
-//! the sources list iff it has an outgoing wikilink that resolves to the concept.
+//! the sources list iff it has an outgoing link that resolves to the concept.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use lk_core::config::VaultDirs;
 use lk_core::frontmatter;
 use lk_core::i18n::Locale;
+use lk_core::link;
 use lk_vault::{VaultWriter, replace_section, section_body, set_frontmatter_field};
 use serde::Serialize;
 
 use crate::GraphError;
-use crate::scan::{ScannedPage, VaultExistence, is_concept_page, is_valid_source};
+use crate::scan::{ScannedPage, VaultExistence, is_concept_page, is_valid_source, path_slug};
 
 /// Outcome of one concept page's reconciliation.
 #[derive(Debug, Clone, Serialize)]
@@ -29,7 +30,7 @@ pub struct ConceptUpdate {
     pub path: PathBuf,
     /// Sources that were missing from the page and would be added.
     pub added: Vec<String>,
-    /// Sources that were on the page but no longer have an incoming wikilink.
+    /// Sources that were on the page but no longer have an incoming link.
     pub removed: Vec<String>,
 }
 
@@ -48,7 +49,7 @@ pub struct BacklinksSyncResult {
 }
 
 /// Recompute the `## <Sources>` section on every `{wiki}/concepts/{slug}.md` page from
-/// the incoming wikilinks observed in `pages`, and rewrite any page whose section
+/// the incoming links observed in `pages`, and rewrite any page whose section
 /// differs. Returns the diff per page plus a count of pages that needed no change.
 ///
 /// `dry_run = true` skips all writes but still reports what would change. Re-running
@@ -62,13 +63,14 @@ pub fn sync_concept_backlinks(
     dirs: &VaultDirs,
 ) -> Result<BacklinksSyncResult, GraphError> {
     // Reverse index: concept page id → sorted set of source page ids that cite it.
-    // Resolution goes through the same `VaultExistence` the graph uses, so a citation
-    // by bare slug, path id, or declared alias all credit the one page the graph
-    // resolves them to — `## Sources` and `source_count` can never diverge from the
-    // wikilink graph. Only non-concept content pages count as sources (`is_valid_source`);
-    // a concept→concept link belongs in `## Related`, and navigation pages aren't sources.
-    // BTreeMap/BTreeSet keep the rendered body deterministic.
+    // `outgoing` targets are already resolved page ids (scan resolves each destination
+    // against its page's location), so crediting is a set-membership check — `## Sources`
+    // and `source_count` can never diverge from the link graph. Only non-concept content
+    // pages count as sources (`is_valid_source`); a concept→concept link belongs in
+    // `## Related`, and navigation pages aren't sources. BTreeMap/BTreeSet keep the
+    // rendered body deterministic.
     let existence = VaultExistence::build(pages, dirs);
+    let by_id: HashMap<&str, &ScannedPage> = pages.iter().map(|p| (p.id.as_str(), p)).collect();
     let mut incoming: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for page in pages {
         if !is_valid_source(&page.path, dirs) {
@@ -77,11 +79,9 @@ pub fn sync_concept_backlinks(
         for target in &page.outgoing {
             // Self-references are excluded for the same reason the graph excludes
             // self-edges.
-            if let Some(target_id) = existence.resolve(target).map(str::to_owned)
-                && target_id != page.id
-            {
+            if *target != page.id && existence.is_resolvable(target) {
                 incoming
-                    .entry(target_id)
+                    .entry(target.clone())
                     .or_default()
                     .insert(page.id.clone());
             }
@@ -103,7 +103,7 @@ pub fn sync_concept_backlinks(
             continue;
         }
 
-        // Sources for this concept = every page that resolves a wikilink to it.
+        // Sources for this concept = every page that links it.
         let mut sources: Vec<String> = incoming
             .get(&page.id)
             .map(|set| set.iter().cloned().collect())
@@ -124,7 +124,7 @@ pub fn sync_concept_backlinks(
             .find(|h| section_body(&raw, h).is_some())
             .unwrap_or_else(|| locale.strings().concept_sources);
 
-        let existing = parse_existing_sources(&raw, heading);
+        let existing = parse_existing_sources(&raw, heading, &page.path);
         let existing_set: BTreeSet<&str> = existing.iter().map(String::as_str).collect();
         let desired_set: BTreeSet<&str> = sources.iter().map(String::as_str).collect();
 
@@ -161,7 +161,7 @@ pub fn sync_concept_backlinks(
             .map(|s| (*s).to_owned())
             .collect();
 
-        let new_body = render_sources_body(&sources);
+        let new_body = render_sources_body(&sources, &page.path, &by_id);
         let updated_content =
             set_source_count(&replace_section(&raw, heading, &new_body), desired_count);
 
@@ -183,10 +183,14 @@ pub fn sync_concept_backlinks(
     Ok(report)
 }
 
-/// Extract `[[…]]` targets from the existing `## <heading>` section, in their
-/// on-disk order. Used only to compute the diff (added/removed) — the rewritten
-/// body is canonicalised through [`render_sources_body`].
-pub(crate) fn parse_existing_sources(content: &str, heading: &str) -> Vec<String> {
+/// Extract the resolved page ids of the links in the existing `## <heading>` section,
+/// in their on-disk order. Used only to compute the diff (added/removed) — the
+/// rewritten body is canonicalised through [`render_sources_body`].
+pub(crate) fn parse_existing_sources(
+    content: &str,
+    heading: &str,
+    concept_path: &Path,
+) -> Vec<String> {
     // Read the section body through the same fence-aware boundary `replace_section`
     // rewrites against, so the diff and the rewrite never disagree about where the
     // section ends (a fenced `## ` inside the body is content, not a boundary).
@@ -194,25 +198,12 @@ pub(crate) fn parse_existing_sources(content: &str, heading: &str) -> Vec<String
         return Vec::new();
     };
 
-    let mut out = Vec::new();
-    for line in body.lines() {
-        let line = line.trim();
-        // Match `- [[target]]` (Obsidian wikilink list item). Anchors / aliases
-        // are stripped so `- [[foo#bar|label]]` and `- [[foo]]` both report `foo`.
-        let Some(rest) = line.strip_prefix("- [[") else {
-            continue;
-        };
-        let Some(inner) = rest.strip_suffix("]]") else {
-            continue;
-        };
-        // Page part only (drop anchor/alias) via the single-sourced wikilink parser.
-        let (page, _anchor, _alias) = lk_core::wikilink::split_wikilink_parts(inner);
-        let target = page.trim();
-        if !target.is_empty() {
-            out.push(target.to_owned());
-        }
-    }
-    out
+    link::extract_dests(body)
+        .into_iter()
+        .filter_map(|dest| link::resolve_dest(concept_path, &dest))
+        .map(|resolved| path_slug(&resolved))
+        .filter(|id| !id.is_empty())
+        .collect()
 }
 
 /// Set the frontmatter `source_count` — a thin wrapper over the single-sourced
@@ -225,13 +216,30 @@ fn set_source_count(content: &str, count: u64) -> String {
     )
 }
 
-/// Render the sources list to the same shape `concept.md.jinja` produces:
-/// `- [[id]]` per line, newline-separated, no trailing newline (the section
-/// helper owns separators).
-pub(crate) fn render_sources_body(sources: &[String]) -> String {
+/// Render the sources list: `- [title](relative-path)` per line, newline-separated,
+/// no trailing newline (the section helper owns separators). Each destination is
+/// relative to the concept page's own directory, the address form every emitter
+/// writes; the display text is the source page's title.
+pub(crate) fn render_sources_body(
+    sources: &[String],
+    concept_path: &Path,
+    by_id: &HashMap<&str, &ScannedPage>,
+) -> String {
     sources
         .iter()
-        .map(|s| format!("- [[{s}]]"))
+        .map(|id| {
+            let (title, dest) = match by_id.get(id.as_str()) {
+                Some(source) => (
+                    source.title.as_str(),
+                    link::relative_dest(concept_path, &source.path),
+                ),
+                // A source id always comes from the same scan `by_id` was built from,
+                // so this arm is unreachable in practice; addressing by id keeps the
+                // entry meaningful if it ever isn't.
+                None => (id.as_str(), link::encode_dest(&format!("/{id}.md"))),
+            };
+            format!("- {}", link::md_link(title, &dest))
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -247,23 +255,21 @@ mod tests {
             path: PathBuf::from(rel),
             title: id.to_owned(),
             outgoing: outgoing.iter().map(|s| (*s).to_string()).collect(),
-            aliases: Vec::new(),
         }
     }
 
-    fn write_concept(dir: &TempDir, stem: &str, sources: &[&str]) {
+    fn write_concept(dir: &TempDir, stem: &str, source_lines: &[&str]) {
         let path = dir.path().join("wiki/concepts").join(format!("{stem}.md"));
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let count = sources.len();
-        let body = if sources.is_empty() {
+        let count = source_lines.len();
+        let body = if source_lines.is_empty() {
             format!(
                 "---\nid: {stem}\nsource_count: {count}\n---\n\n# {stem}\n\n## 출처\n\n\n## 메타\n\n- key: value\n"
             )
         } else {
-            let lines: Vec<String> = sources.iter().map(|s| format!("- [[{s}]]")).collect();
             format!(
                 "---\nid: {stem}\nsource_count: {count}\n---\n\n# {stem}\n\n## 출처\n\n{}\n\n## 메타\n\n- key: value\n",
-                lines.join("\n")
+                source_lines.join("\n")
             )
         };
         std::fs::write(&path, body).unwrap();
@@ -276,11 +282,11 @@ mod tests {
 
         let pages = vec![
             build_page("wiki/concepts/oy365", "wiki/concepts/oy365.md", &[]),
-            // A daily page that wikilinks the concept.
+            // A daily page that links the concept.
             build_page(
                 "daily/slack/2026-05-20",
                 "daily/slack/2026-05-20.md",
-                &["oy365"],
+                &["wiki/concepts/oy365"],
             ),
         ];
 
@@ -292,133 +298,13 @@ mod tests {
         assert_eq!(report.updated[0].added, vec!["daily/slack/2026-05-20"]);
         assert!(report.updated[0].removed.is_empty());
 
+        // The entry links the source page relative to the concept's own directory,
+        // titled by the source page's title.
         let content = std::fs::read_to_string(dir.path().join("wiki/concepts/oy365.md")).unwrap();
-        assert!(content.contains("## 출처\n\n- [[daily/slack/2026-05-20]]\n\n## 메타"));
-    }
-
-    #[test]
-    fn path_form_citation_is_credited() {
-        // A page citing the concept by its full path id (`[[wiki/concepts/oy365]]`)
-        // must be credited identically to a bare `[[oy365]]` — both resolve to the
-        // same concept in the graph, so `source_count` can't diverge by citation form.
-        let dir = TempDir::new().unwrap();
-        write_concept(&dir, "oy365", &[]);
-        let pages = vec![
-            build_page("wiki/concepts/oy365", "wiki/concepts/oy365.md", &[]),
-            build_page(
-                "daily/slack/2026-05-20",
-                "daily/slack/2026-05-20.md",
-                &["wiki/concepts/oy365"],
-            ),
-        ];
-        let report =
-            sync_concept_backlinks(&pages, dir.path(), Locale::Ko, false, &VaultDirs::default())
-                .unwrap();
-        assert_eq!(report.updated.len(), 1);
-        assert_eq!(report.updated[0].added, vec!["daily/slack/2026-05-20"]);
-        let content = std::fs::read_to_string(dir.path().join("wiki/concepts/oy365.md")).unwrap();
-        assert!(content.contains("- [[daily/slack/2026-05-20]]"));
+        assert!(content.contains(
+            "## 출처\n\n- [daily/slack/2026-05-20](../../daily/slack/2026-05-20.md)\n\n## 메타"
+        ));
         assert!(content.contains("source_count: 1"));
-    }
-
-    #[test]
-    fn alias_citation_is_credited_to_the_concept() {
-        // A daily page citing `[[k8s]]` (an alias of the kubernetes concept) must be
-        // listed under that concept's `## Sources` and counted, exactly as a citation
-        // by its canonical slug would — keeping source_count consistent with the graph.
-        let dir = TempDir::new().unwrap();
-        write_concept(&dir, "kubernetes", &[]);
-        let pages = vec![
-            ScannedPage {
-                id: "wiki/concepts/kubernetes".to_owned(),
-                path: PathBuf::from("wiki/concepts/kubernetes.md"),
-                title: "kubernetes".to_owned(),
-                outgoing: vec![],
-                aliases: vec!["k8s".to_owned()],
-            },
-            build_page("daily/x/2026-05-20", "daily/x/2026-05-20.md", &["k8s"]),
-        ];
-        let report =
-            sync_concept_backlinks(&pages, dir.path(), Locale::Ko, false, &VaultDirs::default())
-                .unwrap();
-        assert_eq!(report.updated.len(), 1);
-        assert_eq!(report.updated[0].added, vec!["daily/x/2026-05-20"]);
-        let content =
-            std::fs::read_to_string(dir.path().join("wiki/concepts/kubernetes.md")).unwrap();
-        assert!(content.contains("## 출처\n\n- [[daily/x/2026-05-20]]"));
-        assert!(content.contains("source_count: 1"));
-    }
-
-    #[test]
-    fn duplicate_alias_credits_smallest_id_concept_not_smallest_stem() {
-        // Two concepts in different subdirectories claim the same alias. The winner must
-        // be the smallest *id* (matching VaultExistence's resolver), NOT the smallest stem.
-        // Here id order and stem order disagree, so this distinguishes the two tiebreaks
-        // and locks the resolvers to a single shared key.
-        let dir = TempDir::new().unwrap();
-        write_concept(&dir, "aaa/banana", &[]); // smaller id, larger stem
-        write_concept(&dir, "zzz/apple", &[]); // larger id, smaller stem
-        let pages = vec![
-            ScannedPage {
-                id: "wiki/concepts/zzz/apple".to_owned(),
-                path: PathBuf::from("wiki/concepts/zzz/apple.md"),
-                title: "apple".to_owned(),
-                outgoing: vec![],
-                aliases: vec!["fruit".to_owned()],
-            },
-            ScannedPage {
-                id: "wiki/concepts/aaa/banana".to_owned(),
-                path: PathBuf::from("wiki/concepts/aaa/banana.md"),
-                title: "banana".to_owned(),
-                outgoing: vec![],
-                aliases: vec!["fruit".to_owned()],
-            },
-            build_page("daily/x/2026-05-20", "daily/x/2026-05-20.md", &["fruit"]),
-        ];
-        sync_concept_backlinks(&pages, dir.path(), Locale::Ko, false, &VaultDirs::default())
-            .unwrap();
-        let banana =
-            std::fs::read_to_string(dir.path().join("wiki/concepts/aaa/banana.md")).unwrap();
-        assert!(
-            banana.contains("- [[daily/x/2026-05-20]]"),
-            "the smallest-id concept must be credited the alias citation"
-        );
-        let apple = std::fs::read_to_string(dir.path().join("wiki/concepts/zzz/apple.md")).unwrap();
-        assert!(
-            !apple.contains("- [[daily/x/2026-05-20]]"),
-            "the smaller-stem (larger-id) concept must NOT be credited"
-        );
-    }
-
-    #[test]
-    fn alias_colliding_with_a_real_page_slug_is_not_credited() {
-        // `kubernetes` declares the alias `helm`, but a real `helm` document exists.
-        // A bare `[[helm]]` resolves to the document in the graph (a real page beats an
-        // alias), so backlinks must NOT credit it to kubernetes — otherwise source_count
-        // would diverge from the wikilink graph.
-        let dir = TempDir::new().unwrap();
-        write_concept(&dir, "kubernetes", &[]);
-        let pages = vec![
-            ScannedPage {
-                id: "wiki/concepts/kubernetes".to_owned(),
-                path: PathBuf::from("wiki/concepts/kubernetes.md"),
-                title: "kubernetes".to_owned(),
-                outgoing: vec![],
-                aliases: vec!["helm".to_owned()],
-            },
-            build_page("wiki/documents/helm", "wiki/documents/helm.md", &[]),
-            build_page("daily/x/2026-05-20", "daily/x/2026-05-20.md", &["helm"]),
-        ];
-        let report =
-            sync_concept_backlinks(&pages, dir.path(), Locale::Ko, false, &VaultDirs::default())
-                .unwrap();
-        // kubernetes is already in sync with zero sources — the `[[helm]]` citation is
-        // not credited to it.
-        assert!(
-            report.updated.is_empty(),
-            "alias colliding with a real page slug must not be credited: {report:?}"
-        );
-        assert_eq!(report.unchanged, 1);
     }
 
     #[test]
@@ -426,7 +312,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         // Disk says the concept is referenced by an old daily page that no longer
         // links to it.
-        write_concept(&dir, "oy365", &["daily/slack/2026-01-01"]);
+        write_concept(&dir, "oy365", &["- [old](../../daily/slack/2026-01-01.md)"]);
 
         let pages = vec![build_page(
             "wiki/concepts/oy365",
@@ -442,7 +328,7 @@ mod tests {
         assert_eq!(report.updated[0].removed, vec!["daily/slack/2026-01-01"]);
 
         let content = std::fs::read_to_string(dir.path().join("wiki/concepts/oy365.md")).unwrap();
-        // Body collapsed to empty — section heading remains, no `- [[…]]` lines.
+        // Body collapsed to empty — section heading remains, no list items.
         assert!(content.contains("## 출처\n\n\n## 메타"));
     }
 
@@ -453,13 +339,17 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "---\nid: oy365\n---\n\n# oy365\n\n## 핵심\n\nThis is the synthesis paragraph.\n\n## 출처\n\n- [[old]]\n\n## 메타\n\n- references: 1\n",
+            "---\nid: oy365\n---\n\n# oy365\n\n## 핵심\n\nThis is the synthesis paragraph.\n\n## 출처\n\n- [old](../../daily/x/old.md)\n\n## 메타\n\n- references: 1\n",
         )
         .unwrap();
 
         let pages = vec![
             build_page("wiki/concepts/oy365", "wiki/concepts/oy365.md", &[]),
-            build_page("daily/x/2026-05-20", "daily/x/2026-05-20.md", &["oy365"]),
+            build_page(
+                "daily/x/2026-05-20",
+                "daily/x/2026-05-20.md",
+                &["wiki/concepts/oy365"],
+            ),
         ];
 
         sync_concept_backlinks(&pages, dir.path(), Locale::Ko, false, &VaultDirs::default())
@@ -468,8 +358,8 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("## 핵심\n\nThis is the synthesis paragraph."));
         assert!(content.contains("## 메타\n\n- references: 1"));
-        assert!(content.contains("## 출처\n\n- [[daily/x/2026-05-20]]"));
-        assert!(!content.contains("- [[old]]"));
+        assert!(content.contains("## 출처\n\n- [daily/x/2026-05-20](../../daily/x/2026-05-20.md)"));
+        assert!(!content.contains("(../../daily/x/old.md)"));
     }
 
     #[test]
@@ -480,7 +370,11 @@ mod tests {
 
         let pages = vec![
             build_page("wiki/concepts/oy365", "wiki/concepts/oy365.md", &[]),
-            build_page("daily/x/2026-05-20", "daily/x/2026-05-20.md", &["oy365"]),
+            build_page(
+                "daily/x/2026-05-20",
+                "daily/x/2026-05-20.md",
+                &["wiki/concepts/oy365"],
+            ),
         ];
 
         let report =
@@ -500,7 +394,11 @@ mod tests {
 
         let pages = vec![
             build_page("wiki/concepts/oy365", "wiki/concepts/oy365.md", &[]),
-            build_page("daily/x/2026-05-20", "daily/x/2026-05-20.md", &["oy365"]),
+            build_page(
+                "daily/x/2026-05-20",
+                "daily/x/2026-05-20.md",
+                &["wiki/concepts/oy365"],
+            ),
         ];
 
         // First run rewrites the page.
@@ -530,25 +428,31 @@ mod tests {
 
         let pages = vec![
             build_page("wiki/concepts/oy365", "wiki/concepts/oy365.md", &[]),
-            build_page("daily/x/2026-05-20", "daily/x/2026-05-20.md", &["oy365"]),
+            build_page(
+                "daily/x/2026-05-20",
+                "daily/x/2026-05-20.md",
+                &["wiki/concepts/oy365"],
+            ),
         ];
 
         sync_concept_backlinks(&pages, dir.path(), Locale::En, false, &VaultDirs::default())
             .unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("## Sources\n\n- [[daily/x/2026-05-20]]\n\n## Metadata"));
+        assert!(content.contains(
+            "## Sources\n\n- [daily/x/2026-05-20](../../daily/x/2026-05-20.md)\n\n## Metadata"
+        ));
     }
 
     #[test]
     fn self_link_to_concept_is_ignored() {
-        // A concept page that wikilinks itself should not list itself as a source.
+        // A concept page that links itself should not list itself as a source.
         let dir = TempDir::new().unwrap();
         write_concept(&dir, "oy365", &[]);
 
         let pages = vec![build_page(
             "wiki/concepts/oy365",
             "wiki/concepts/oy365.md",
-            &["oy365"],
+            &["wiki/concepts/oy365"],
         )];
 
         let report =
@@ -556,5 +460,28 @@ mod tests {
                 .unwrap();
         assert_eq!(report.updated.len(), 0);
         assert_eq!(report.unchanged, 1);
+    }
+
+    #[test]
+    fn concept_to_concept_link_is_not_a_source() {
+        // Only content pages qualify as sources; a citation from another concept
+        // belongs in `## Related` and must not be credited here.
+        let dir = TempDir::new().unwrap();
+        write_concept(&dir, "target", &[]);
+        write_concept(&dir, "citer", &[]);
+
+        let pages = vec![
+            build_page("wiki/concepts/target", "wiki/concepts/target.md", &[]),
+            build_page(
+                "wiki/concepts/citer",
+                "wiki/concepts/citer.md",
+                &["wiki/concepts/target"],
+            ),
+        ];
+
+        let report =
+            sync_concept_backlinks(&pages, dir.path(), Locale::Ko, false, &VaultDirs::default())
+                .unwrap();
+        assert!(report.updated.is_empty());
     }
 }

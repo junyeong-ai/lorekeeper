@@ -1,5 +1,5 @@
 //! End-to-end test of `lore wiki map` through the real binary: the navigation map is
-//! written, lists concepts by citation cluster with valid path-form wikilinks, is
+//! written, lists concepts by citation cluster with valid relative links, is
 //! byte-identical on re-run (a materialized view), and — because reserved meta-files are
 //! excluded from the analysis graph — never lists itself even after it exists on disk.
 
@@ -35,12 +35,12 @@ fn wiki_map_writes_navigation_map_and_excludes_reserved_files() {
     .expect("config");
     std::fs::write(
         concepts.join("alpha.md"),
-        "---\nid: wiki/concepts/alpha\ntitle: Alpha\n---\n## Synthesis\nSee [[beta]].\n",
+        "---\nid: wiki/concepts/alpha\ntitle: Alpha\n---\n## Synthesis\nSee [Beta](beta.md).\n",
     )
     .expect("alpha");
     std::fs::write(
         concepts.join("beta.md"),
-        "---\nid: wiki/concepts/beta\ntitle: Beta\n---\n## Synthesis\nSee [[alpha]].\n",
+        "---\nid: wiki/concepts/beta\ntitle: Beta\n---\n## Synthesis\nSee [Alpha](alpha.md).\n",
     )
     .expect("beta");
 
@@ -54,11 +54,11 @@ fn wiki_map_writes_navigation_map_and_excludes_reserved_files() {
     let map_path = root.join("vault/wiki/map.md");
     let content = std::fs::read_to_string(&map_path).expect("map.md written");
     assert!(
-        content.contains("[[wiki/concepts/alpha|alpha]]"),
-        "map lists concepts by unambiguous path link with leaf display:\n{content}"
+        content.contains("[alpha](concepts/alpha.md)"),
+        "map lists concepts by relative link with leaf display:\n{content}"
     );
     assert!(
-        content.contains("[[wiki/concepts/beta|beta]]"),
+        content.contains("[beta](concepts/beta.md)"),
         "map lists both concepts:\n{content}"
     );
 
@@ -73,7 +73,7 @@ fn wiki_map_writes_navigation_map_and_excludes_reserved_files() {
         "map.md must be byte-identical on re-run (materialized view, no self-feedback)"
     );
     assert!(
-        !content.contains("[[wiki/map"),
+        !content.contains("(map.md)"),
         "map.md must never list itself:\n{content}"
     );
 }

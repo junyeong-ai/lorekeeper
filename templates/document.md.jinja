@@ -1,5 +1,6 @@
 ---
 id: {{ slug }}
+type: document
 title: {{ title | tojson }}
 created: {{ created }}
 updated: {{ updated }}
@@ -38,6 +39,6 @@ llm_inputs:
 ## {{ i18n.related_concepts }}
 
 {% for c in concepts -%}
-- [[{{ c }}]]
+- {{ c }}
 {% endfor %}
 {% endif %}

@@ -1,5 +1,6 @@
 ---
 title: Concept C
+type: concept
 ---
 
 # Concept C

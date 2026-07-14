@@ -155,7 +155,7 @@ async fn concept_pages_written_with_merge() {
     assert!(
         concept_output2.content.contains("source_count: 0"),
         "ingest never counts citations — backlinks-sync is the sole owner of \
-         source_count and re-derives it from the wikilink graph:\n{}",
+         source_count and re-derives it from the link graph:\n{}",
         concept_output2.content
     );
     assert!(
@@ -171,7 +171,7 @@ async fn concept_pages_written_with_merge() {
         concept_output2
             .content
             .contains(r#"aliases: ["Claude Code"]"#),
-        "concept page must carry an alias so [[Claude Code]] resolves:\n{}",
+        "concept page must carry its name as an alias for the dedup registry:\n{}",
         concept_output2.content
     );
     let _ = concept_output;
@@ -350,7 +350,7 @@ async fn concept_accumulates_across_sources_in_one_run() {
         "concept must be a single merged page, not one per source"
     );
     // Citation counting belongs to `backlinks-sync` (covered in lk-graph), which
-    // re-derives both `source_count` and the `## 출처` ref list from the wikilink
+    // re-derives both `source_count` and the `## 출처` ref list from the link
     // graph. Ingest writes neither — the merged page leaves the count at 0.
     assert!(
         shared.content.contains("source_count: 0"),
@@ -1601,7 +1601,10 @@ mod materialized_view {
             page.contains("REAL-REFINED-EVENT-BODY"),
             "refined events preserved"
         );
-        assert!(page.contains("REAL-CONCEPT-WIKILINK"), "concepts preserved");
+        assert!(
+            page.contains("- [Real Concept](../../wiki/concepts/real-concept.md)"),
+            "concepts preserved"
+        );
     }
 
     #[tokio::test]
@@ -2097,7 +2100,7 @@ mod materialized_view {
             content = lk_vault::replace_section(
                 &content,
                 strings.related_concepts,
-                "- [[REAL-CONCEPT-WIKILINK]]",
+                "- [Real Concept](../../wiki/concepts/real-concept.md)",
             );
             // The pipeline pre-stamped the input keys; the skill owns the completion
             // markers. Stamp each equal to its input hash so the next ingest is a cache
@@ -2778,8 +2781,11 @@ mod materialized_view {
         let doc_path = vault.join(result1.document_pages[0].path.as_ref());
         let mut content = tokio::fs::read_to_string(&doc_path).await.unwrap();
         content = lk_vault::replace_section(&content, strings.summary, "REAL-DOC-SUMMARY");
-        content =
-            lk_vault::replace_section(&content, strings.related_concepts, "- [[REAL-DOC-CONCEPT]]");
+        content = lk_vault::replace_section(
+            &content,
+            strings.related_concepts,
+            "- [Doc Concept](../concepts/doc-concept.md)",
+        );
         // Completion is uniformly marker-signalled; stamp each marker like the skill does.
         let doc_page_path = result1.document_pages[0].path.to_string();
         if let Some(hash) = task_hash_for_page(&queue_dir, &doc_page_path, "summarize") {
@@ -2819,7 +2825,7 @@ mod materialized_view {
             "document summary preserved across re-render"
         );
         assert!(
-            page.contains("REAL-DOC-CONCEPT"),
+            page.contains("- [Doc Concept](../concepts/doc-concept.md)"),
             "document concepts preserved across re-render"
         );
     }

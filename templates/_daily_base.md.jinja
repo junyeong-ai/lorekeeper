@@ -1,5 +1,6 @@
 ---
 id: {{ source_id }}-{{ date }}
+type: daily
 title: "{% block title %}{{ i18n.summary }}{% endblock %} {{ date }}"
 created: {{ date }}
 labels: {{ labels | tojson }}
@@ -53,6 +54,6 @@ llm_inputs:
 ## {{ i18n.related_concepts }}
 
 {% for concept in concepts -%}
-- [[{{ concept }}]]
+- {{ concept }}
 {% endfor %}
 {% endif %}

@@ -49,7 +49,7 @@ pub struct Config {
     /// Concept extraction and categorization settings.
     #[serde(default)]
     pub concepts: ConceptConfig,
-    /// Wikilink graph analysis settings (consumed by `lore graph` / `lk-graph`).
+    /// Link graph analysis settings (consumed by `lore graph` / `lk-graph`).
     /// Optional and fully defaulted; absent in config.yaml means "use defaults".
     #[serde(default)]
     pub graph: GraphConfig,
@@ -1053,7 +1053,7 @@ pub struct IngestConfig {
     pub schedule: Option<String>,
 }
 
-/// Wikilink graph analysis configuration, consumed by `lore graph` / `lk-graph`.
+/// Link graph analysis configuration, consumed by `lore graph` / `lk-graph`.
 /// Splits into analysis `scope`, structural `metrics`, and `cluster` settings.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]

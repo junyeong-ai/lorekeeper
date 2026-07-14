@@ -117,7 +117,7 @@ lore graph lint             # read-only health report
   is a no-op. Daily cadence keeps the catalog current with the
   concepts created on every ingest.
 - `graph lint` is pure read — no vault writes. Surfaces orphans, broken
-  wikilinks, near-duplicate concepts, unresolved contradictions, invalid
+  links, near-duplicate concepts, unresolved contradictions, invalid
   concept categories, and index drift. The contradiction worklist
   (`graph audit-candidates`) belongs to the weekly task, not here. Exit code 1 means
   findings exist (NOT an error); capture the counts for the report and

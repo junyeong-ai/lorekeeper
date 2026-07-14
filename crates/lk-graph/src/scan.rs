@@ -1,37 +1,37 @@
 //! Vault scan: walk markdown files and build [`ScannedPage`] records.
 //!
-//! The pure domain logic — slug normalization, frontmatter parsing, and wikilink
-//! extraction — lives in `lk-core` (`slugify`, `frontmatter::parse_page`, `wikilink`).
-//! This module keeps only the I/O concerns: filesystem walking (walkdir + rayon) and
-//! assembling [`ScannedPage`]s.
+//! The pure domain logic — slug normalization, frontmatter parsing, and markdown-link
+//! extraction/resolution — lives in `lk-core` (`slugify`, `frontmatter::parse_page`,
+//! `link`). This module keeps only the I/O concerns: filesystem walking (walkdir +
+//! rayon) and assembling [`ScannedPage`]s.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use lk_core::concept::slugify;
 use lk_core::config::{GraphConfig, VaultDirs};
 use lk_core::frontmatter::{self, Frontmatter};
+use lk_core::link;
 use lk_core::vault_path::{CONCEPTS_SUBDIR, DOCUMENTS_SUBDIR, EXPLORATIONS_SUBDIR};
-use lk_core::wikilink;
 use rayon::prelude::*;
 use walkdir::WalkDir;
 
 use crate::GraphError;
 
-/// A scanned vault page: its slug id, vault-relative path, display title, the
-/// slugified targets of its outgoing wikilinks (deduped, first-appearance order),
-/// and any declared alias slugs.
+/// A scanned vault page: its slug id, vault-relative path, display title, and the
+/// resolved page ids of its outgoing links (deduped, first-appearance order).
+///
+/// Resolution happens at scan time: each internal markdown-link destination is
+/// resolved against the page's own location ([`link::resolve_dest`]) and normalized
+/// to a page id ([`path_slug`]). A destination that escapes the vault root keeps its
+/// decoded text — it matches no page, so the graph reports it broken as written.
 #[derive(Debug, Clone, Default)]
 pub struct ScannedPage {
     pub id: String,
     pub path: PathBuf,
     pub title: String,
     pub outgoing: Vec<String>,
-    /// Slugified `aliases` frontmatter — alternate names a bare `[[alias]]` link
-    /// resolves to (concept pages only, in practice). The page's own stem slug is
-    /// excluded (a self-alias is a no-op), so this holds only genuine synonyms.
-    pub aliases: Vec<String>,
 }
 
 /// Walk the configured scope directories under `root` and parse every `.md` file.
@@ -106,38 +106,28 @@ fn parse_file(path: &Path, root: &Path) -> Result<ScannedPage, String> {
 
     let mut outgoing = Vec::new();
     let mut seen = HashSet::new();
-    for raw_target in wikilink::extract_wikilinks(&parsed.body) {
-        let target = resolve_wikilink_target(&raw_target);
+    for dest in link::extract_dests(&parsed.body) {
+        // Only `.md` destinations address knowledge pages; a link to any other file
+        // (an attachment) is not a graph edge.
+        if !Path::new(&dest).extension().is_some_and(|ext| ext == "md") {
+            continue;
+        }
+        let target = match link::resolve_dest(rel, &dest) {
+            Some(resolved) => path_slug(&resolved),
+            // Escapes the vault root: keep the destination as written — it matches
+            // no page id, so the graph reports it broken rather than dropping it.
+            None => dest,
+        };
         if !target.is_empty() && seen.insert(target.clone()) {
             outgoing.push(target);
         }
     }
-
-    // Declared aliases (slugified). The page's own stem slug is dropped — the concept
-    // template seeds `aliases: [name]`, which slugifies back to the page slug and is a
-    // no-op resolution target. Only genuine synonyms remain.
-    let self_slug = rel.file_stem().and_then(|s| s.to_str()).and_then(slugify);
-    let mut alias_seen = HashSet::new();
-    let aliases = parsed
-        .frontmatter
-        .get("aliases")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|a| a.as_str())
-                .filter_map(slugify)
-                .filter(|a| Some(a) != self_slug.as_ref())
-                .filter(|a| alias_seen.insert(a.clone()))
-                .collect()
-        })
-        .unwrap_or_default();
 
     Ok(ScannedPage {
         id,
         path: rel.to_path_buf(),
         title,
         outgoing,
-        aliases,
     })
 }
 
@@ -168,35 +158,21 @@ fn extract_first_heading(body: &str) -> Option<String> {
 /// scope. Built from a full-vault scan ([`scan_vault`] with all page dirs).
 #[derive(Debug, Clone, Default)]
 pub struct VaultExistence {
-    /// Filename slug → page id. A bare `[[name]]` targets the knowledge node, so a
-    /// concept page claims its slug ahead of a same-named non-concept (documents are
-    /// referenced by their path form); within a class, first insertion wins. Mirrors
-    /// the precedence in [`crate::graph::WikiGraph`] so the two resolve a bare
-    /// `[[name]]` to the same page, deterministically regardless of scan order.
-    by_filename: HashMap<String, String>,
-    /// Alias slug → concept page id, the LOWEST-precedence resolution layer. A
-    /// concept's declared `aliases` let a bare `[[synonym]]` resolve to it, but only
-    /// when the synonym isn't already a real id or filename slug (those always win).
-    by_alias: HashMap<String, String>,
-    /// Every page id — the form a path-style `[[dir/sub/name]]` link resolves to.
+    /// Every page id — the form a resolved link destination addresses.
     ids: HashSet<String>,
-    /// Page ids that are the resolved target of a wikilink from *another* page
-    /// (self-links excluded). Drives orphan inbound exemption, so it must carry
-    /// page identity — a flat slug set would credit every same-named page and
-    /// count self-links, both of which mask real orphans.
+    /// Page ids that are the resolved target of a link from *another* page
+    /// (self-links excluded). Drives orphan inbound exemption.
     linked: HashSet<String>,
 }
 
 impl VaultExistence {
-    /// Derive the universe from a full-vault page scan. Resolution is done up
-    /// front so `linked` holds resolved page ids, not raw target slugs.
+    /// Derive the universe from a full-vault page scan.
     pub fn build(pages: &[ScannedPage], dirs: &VaultDirs) -> Self {
         // Navigation/catalog meta-files (index.md, log.md, map.md, AGENTS.md) are generated
         // artifacts, not knowledge nodes: exclude them from the existence universe so their
         // catalog links (index.md links every page) never mark a concept "linked" — which
         // would otherwise defeat orphan detection — and so they never resolve as a target.
         let is_reserved = reserved_page_predicate(Path::new(&dirs.wiki));
-        let mut by_filename: HashMap<String, String> = HashMap::with_capacity(pages.len());
         let mut ids = HashSet::with_capacity(pages.len());
         for page in pages {
             if is_reserved(page.id.as_str()) {
@@ -204,108 +180,36 @@ impl VaultExistence {
             }
             ids.insert(page.id.clone());
         }
-        // Concept pages claim their filename slug first (a bare `[[name]]` is a
-        // knowledge-node reference), then non-concepts fill any still-vacant slug —
-        // so a concept deterministically owns the bare slug over a same-named
-        // document, independent of scan order.
-        for concept_pass in [true, false] {
-            for page in pages {
-                if is_reserved(page.id.as_str())
-                    || is_concept_page(&page.path, dirs) != concept_pass
-                {
-                    continue;
-                }
-                let slug = stem_slug(&page.path);
-                if !slug.is_empty() {
-                    by_filename.entry(slug).or_insert_with(|| page.id.clone());
-                }
-            }
-        }
 
-        // Aliases are the lowest-precedence layer: a concept's declared `aliases` let a
-        // bare `[[synonym]]` resolve to it, but never override a real id/filename slug,
-        // and the first concept to claim an alias wins (deterministic; a collision is
-        // surfaced separately by `concept_lint::alias_conflicts`).
-        let mut by_alias: HashMap<String, String> = HashMap::new();
-        for page in pages {
-            if !is_concept_page(&page.path, dirs) {
-                continue;
-            }
-            for alias in &page.aliases {
-                if ids.contains(alias) || by_filename.contains_key(alias) {
-                    continue;
-                }
-                // Winner is the lexicographically-smallest claimant id, pinned here so it
-                // never depends on the caller's page ordering. The backlinks resolver
-                // tiebreaks on the same key, so a duplicate alias resolves to one concept
-                // and `source_count` can never diverge from the resolved graph.
-                by_alias
-                    .entry(alias.clone())
-                    .and_modify(|cur| {
-                        if page.id < *cur {
-                            *cur = page.id.clone();
-                        }
-                    })
-                    .or_insert_with(|| page.id.clone());
-            }
-        }
-
-        let mut existence = Self {
-            by_filename,
-            by_alias,
-            ids,
-            linked: HashSet::new(),
-        };
+        let mut linked = HashSet::new();
         for page in pages {
             if is_reserved(page.id.as_str()) {
                 continue;
             }
             for target in &page.outgoing {
-                if let Some(target_id) = existence.resolve(target).map(str::to_owned)
-                    && target_id != page.id
-                {
-                    existence.linked.insert(target_id);
+                if *target != page.id && ids.contains(target) {
+                    linked.insert(target.clone());
                 }
             }
         }
-        existence
+
+        Self { ids, linked }
     }
 
-    /// Resolve a wikilink target to the page id it points at: a path target
-    /// (`dir/sub/name`) is its own id; a bare target (`name`) matches a filename.
-    pub fn resolve(&self, target: &str) -> Option<&str> {
-        self.ids
-            .get(target)
-            .map(String::as_str)
-            .or_else(|| self.by_filename.get(target).map(String::as_str))
-            .or_else(|| self.by_alias.get(target).map(String::as_str))
-    }
-
-    /// Whether `target` is a REAL page — a page id or a filename slug — independent of
-    /// the alias layer. The single source of truth for "an alias must not shadow a real
-    /// page", consulted by `WikiGraph` and the alias-conflict lint so every consumer
-    /// applies the same full-vault precedence rather than its own local subset.
-    pub(crate) fn is_real_page(&self, target: &str) -> bool {
-        self.ids.contains(target) || self.by_filename.contains_key(target)
-    }
-
-    /// Whether a wikilink target resolves to any page in the vault.
+    /// Whether a resolved link target addresses a page in the vault.
     pub fn is_resolvable(&self, target: &str) -> bool {
-        self.resolve(target).is_some()
+        self.ids.contains(target)
     }
 
-    /// Whether `page_id` is the resolved target of a wikilink from another page.
+    /// Whether `page_id` is the resolved target of a link from another page.
     pub fn is_linked(&self, page_id: &str) -> bool {
         self.linked.contains(page_id)
     }
 }
 
-/// Whether a page is a concept page (`{dirs.wiki}/concepts/{slug}.md`). A bare
-/// `[[name]]` wikilink targets the knowledge node, so a concept owns its filename
-/// slug over a same-named document or other page (which is always cited by its path
-/// form). Anchored to the configured `dirs.wiki` — never a hardcoded path segment —
-/// and is the single definition shared by the resolver (`build`, `WikiGraph`)
-/// and `backlinks`.
+/// Whether a page is a concept page (`{dirs.wiki}/concepts/{slug}.md`). Anchored to
+/// the configured `dirs.wiki` — never a hardcoded path segment — and shared by
+/// `backlinks` and the concept lints.
 pub(crate) fn is_concept_page(path: &Path, dirs: &VaultDirs) -> bool {
     let s = path.to_string_lossy().replace('\\', "/");
     s.starts_with(&format!("{}/{CONCEPTS_SUBDIR}/", dirs.wiki))
@@ -325,35 +229,6 @@ pub(crate) fn is_valid_source(path: &Path, dirs: &VaultDirs) -> bool {
         || s.starts_with(&format!("{}/", dirs.synthesis))
         || s.starts_with(&format!("{}/{DOCUMENTS_SUBDIR}/", dirs.wiki))
         || s.starts_with(&format!("{}/{EXPLORATIONS_SUBDIR}/", dirs.wiki))
-}
-
-/// Stem-slug of a page path: slugify the file stem (the resolution key used
-/// by [`crate::graph`] for filename-based wikilink matching).
-pub fn stem_slug(path: &Path) -> String {
-    path.file_stem()
-        .and_then(|s| s.to_str())
-        .and_then(slugify)
-        .unwrap_or_default()
-}
-
-/// Resolve a raw wikilink target to its graph resolution key.
-///
-/// A **path-style** target (containing a separator, e.g.
-/// `daily/team-slack/2026-05-22`) is slugified per segment and rejoined with
-/// `/`, so it matches a page id ([`path_slug`], which likewise normalizes
-/// `\` → `/`). A **bare** target (e.g. `Confluence Cloud`) is slugified whole,
-/// matching a filename slug. Without the path branch, `[[daily/x/y]]` would
-/// collapse to `daily-x-y` and resolve to neither form — every cross-folder link
-/// (e.g. a concept's `## Sources` backlinks) would read as broken.
-pub fn resolve_wikilink_target(raw: &str) -> String {
-    if raw.contains(['/', '\\']) {
-        raw.split(['/', '\\'])
-            .filter_map(slugify)
-            .collect::<Vec<_>>()
-            .join("/")
-    } else {
-        slugify(raw).unwrap_or_default()
-    }
 }
 
 /// Page ids of Lorekeeper's reserved wiki meta files (the index catalog, the time log,
@@ -425,145 +300,29 @@ mod tests {
     }
 
     #[test]
-    fn resolve_wikilink_target_bare_vs_path() {
-        // Bare target → filename slug.
-        assert_eq!(
-            resolve_wikilink_target("Confluence Cloud"),
-            "confluence-cloud"
-        );
-        // Path-style target → per-segment slug rejoined, matching a page id
-        // (not collapsed to `daily-team-slack-2026-05-22`).
-        assert_eq!(
-            resolve_wikilink_target("daily/team-slack/2026-05-22"),
-            "daily/team-slack/2026-05-22"
-        );
-        assert_eq!(
-            resolve_wikilink_target("wiki/concepts/Agentic AI"),
-            "wiki/concepts/agentic-ai"
-        );
-        // Empty segments collapse away.
-        assert_eq!(resolve_wikilink_target("daily//x/"), "daily/x");
-        // Backslash separators are normalized to `/`, matching `path_slug`.
-        assert_eq!(
-            resolve_wikilink_target("daily\\team-slack\\2026-05-22"),
-            "daily/team-slack/2026-05-22"
-        );
-    }
-
-    #[test]
-    fn vault_existence_indexes_both_forms() {
+    fn vault_existence_tracks_ids_and_linked() {
         let pages = vec![
             ScannedPage {
                 id: "daily/team-slack/2026-05-22".to_owned(),
                 path: PathBuf::from("daily/team-slack/2026-05-22.md"),
                 title: "t".to_owned(),
-                outgoing: vec!["confluence-cloud".to_owned()],
-                aliases: Vec::new(),
+                outgoing: vec!["wiki/concepts/confluence-cloud".to_owned()],
             },
             ScannedPage {
                 id: "wiki/concepts/confluence-cloud".to_owned(),
                 path: PathBuf::from("wiki/concepts/confluence-cloud.md"),
                 title: "Confluence Cloud".to_owned(),
                 outgoing: vec![],
-                aliases: Vec::new(),
             },
         ];
         let ex = VaultExistence::build(&pages, &VaultDirs::default());
-        // Both forms resolve: path id and bare filename.
         assert!(ex.is_resolvable("daily/team-slack/2026-05-22"));
-        assert!(ex.is_resolvable("2026-05-22"));
-        assert!(ex.is_resolvable("confluence-cloud"));
+        assert!(ex.is_resolvable("wiki/concepts/confluence-cloud"));
         assert!(!ex.is_resolvable("nope"));
-        // A bare filename resolves to the concept's page id.
-        assert_eq!(
-            ex.resolve("confluence-cloud"),
-            Some("wiki/concepts/confluence-cloud")
-        );
         // The daily page links the concept → its page id is a link target.
         assert!(ex.is_linked("wiki/concepts/confluence-cloud"));
         // The daily page itself is linked by nobody.
         assert!(!ex.is_linked("daily/team-slack/2026-05-22"));
-    }
-
-    #[test]
-    fn vault_existence_resolves_concept_alias() {
-        // A bare `[[k8s]]` (a declared alias of the kubernetes concept) resolves to
-        // the concept page and credits it as linked — so a synonym citation neither
-        // breaks nor orphans.
-        let pages = vec![
-            ScannedPage {
-                id: "wiki/concepts/kubernetes".to_owned(),
-                path: PathBuf::from("wiki/concepts/kubernetes.md"),
-                title: "Kubernetes".to_owned(),
-                outgoing: vec![],
-                aliases: vec!["k8s".to_owned()],
-            },
-            ScannedPage {
-                id: "daily/x/2026-05-22".to_owned(),
-                path: PathBuf::from("daily/x/2026-05-22.md"),
-                title: "d".to_owned(),
-                outgoing: vec!["k8s".to_owned()],
-                aliases: vec![],
-            },
-        ];
-        let ex = VaultExistence::build(&pages, &VaultDirs::default());
-        assert_eq!(ex.resolve("k8s"), Some("wiki/concepts/kubernetes"));
-        assert!(ex.is_linked("wiki/concepts/kubernetes"));
-    }
-
-    #[test]
-    fn alias_never_overrides_a_real_page() {
-        // A real page literally named `k8s` must win over another concept's `k8s`
-        // alias — aliases are the lowest-precedence resolution layer.
-        let pages = vec![
-            ScannedPage {
-                id: "wiki/concepts/kubernetes".to_owned(),
-                path: PathBuf::from("wiki/concepts/kubernetes.md"),
-                title: "Kubernetes".to_owned(),
-                outgoing: vec![],
-                aliases: vec!["k8s".to_owned()],
-            },
-            ScannedPage {
-                id: "wiki/concepts/k8s".to_owned(),
-                path: PathBuf::from("wiki/concepts/k8s.md"),
-                title: "k8s".to_owned(),
-                outgoing: vec![],
-                aliases: vec![],
-            },
-        ];
-        let ex = VaultExistence::build(&pages, &VaultDirs::default());
-        assert_eq!(ex.resolve("k8s"), Some("wiki/concepts/k8s"));
-    }
-
-    #[test]
-    fn duplicate_alias_resolves_to_smallest_id_regardless_of_order() {
-        // Two concepts claim the same alias. The winner must be the lexicographically
-        // smallest id and must NOT depend on the order pages are passed in — otherwise a
-        // differently-ordered caller (e.g. backlinks) could credit a different concept and
-        // make `source_count` disagree with the resolved graph.
-        let apple = ScannedPage {
-            id: "wiki/concepts/apple".to_owned(),
-            path: PathBuf::from("wiki/concepts/apple.md"),
-            title: "Apple".to_owned(),
-            outgoing: vec![],
-            aliases: vec!["fruit".to_owned()],
-        };
-        let banana = ScannedPage {
-            id: "wiki/concepts/banana".to_owned(),
-            path: PathBuf::from("wiki/concepts/banana.md"),
-            title: "Banana".to_owned(),
-            outgoing: vec![],
-            aliases: vec!["fruit".to_owned()],
-        };
-        let forward =
-            VaultExistence::build(&[apple.clone(), banana.clone()], &VaultDirs::default());
-        let reversed = VaultExistence::build(&[banana, apple], &VaultDirs::default());
-        assert_eq!(forward.resolve("fruit"), Some("wiki/concepts/apple"));
-        assert_eq!(
-            reversed.resolve("fruit"),
-            Some("wiki/concepts/apple"),
-            "duplicate-alias winner must be order-independent"
-        );
     }
 
     #[test]
@@ -581,20 +340,47 @@ mod tests {
     }
 
     #[test]
-    fn parse_file_extracts_title_and_links() {
+    fn parse_file_resolves_links_against_page_location() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daily = tmp.path().join("daily/x");
+        std::fs::create_dir_all(&daily).unwrap();
+        std::fs::write(
+            daily.join("2026-05-22.md"),
+            "---\ntitle: Day\n---\n\n# Day\n\n\
+             [K](../../wiki/concepts/kubernetes.md) and again \
+             [K](../../wiki/concepts/kubernetes.md), plus [ext](https://x.y/z.md).\n",
+        )
+        .unwrap();
+        let page = parse_file(&daily.join("2026-05-22.md"), tmp.path()).unwrap();
+        assert_eq!(page.id, "daily/x/2026-05-22");
+        assert_eq!(page.title, "Day");
+        // Both links resolve to the same page id and dedupe; the external is skipped.
+        assert_eq!(page.outgoing, vec!["wiki/concepts/kubernetes"]);
+    }
+
+    #[test]
+    fn parse_file_skips_non_md_destinations() {
         let tmp = tempfile::tempdir().unwrap();
         let wiki = tmp.path().join("wiki");
         std::fs::create_dir_all(&wiki).unwrap();
         std::fs::write(
             wiki.join("a.md"),
-            "---\ntitle: Concept A\n---\n\n# Heading\n\nLinks to [[Concept B]] and [[concept-b]].\n",
+            "[pdf](../files/report.pdf) and [page](concepts/b.md)\n",
         )
         .unwrap();
         let page = parse_file(&wiki.join("a.md"), tmp.path()).unwrap();
-        assert_eq!(page.id, "wiki/a");
-        assert_eq!(page.title, "Concept A");
-        // Both wikilinks slugify to the same target and dedupe.
-        assert_eq!(page.outgoing, vec!["concept-b"]);
+        assert_eq!(page.outgoing, vec!["wiki/concepts/b"]);
+    }
+
+    #[test]
+    fn parse_file_keeps_escaping_dest_as_broken_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wiki = tmp.path().join("wiki");
+        std::fs::create_dir_all(&wiki).unwrap();
+        std::fs::write(wiki.join("a.md"), "[out](../../outside/x.md)\n").unwrap();
+        let page = parse_file(&wiki.join("a.md"), tmp.path()).unwrap();
+        // The destination escapes the vault root: kept as written, never resolvable.
+        assert_eq!(page.outgoing, vec!["../../outside/x.md"]);
     }
 
     #[test]

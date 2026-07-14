@@ -1,5 +1,6 @@
 ---
 id: work-log-{{ date }}
+type: work-log
 title: "{{ i18n.work_log_title }} {{ date }}"
 created: {{ date }}
 labels: ["personal"]
@@ -18,6 +19,6 @@ llm_inputs:
 
 ## {{ i18n.concept_sources }}
 
-{% for source in sources %}
-- [[{{ daily_dir }}/{{ source }}/{{ date }}]]
+{% for link in source_links %}
+- {{ link }}
 {% endfor %}

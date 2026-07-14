@@ -58,6 +58,7 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs, personal: bool) -> Vec<PageSc
             path_pattern: format!("{}/{CONCEPTS_SUBDIR}/{{slug}}.md", dirs.wiki),
             frontmatter: &[
                 "id",
+                "type",
                 "title",
                 "aliases",
                 "created",
@@ -76,7 +77,15 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs, personal: bool) -> Vec<PageSc
         PageSchema {
             type_name: "daily",
             path_pattern: format!("{}/{{source-id}}/YYYY-MM-DD.md", dirs.daily),
-            frontmatter: &["id", "title", "created", "labels", "source", "event_count"],
+            frontmatter: &[
+                "id",
+                "type",
+                "title",
+                "created",
+                "labels",
+                "source",
+                "event_count",
+            ],
             sections: vec![
                 s("Summary", |i| i.summary.to_string(), Owner::Llm),
                 s(
@@ -96,6 +105,7 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs, personal: bool) -> Vec<PageSc
             path_pattern: format!("{}/{DOCUMENTS_SUBDIR}/{{slug}}.md", dirs.wiki),
             frontmatter: &[
                 "id",
+                "type",
                 "title",
                 "created",
                 "updated",
@@ -125,6 +135,7 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs, personal: bool) -> Vec<PageSc
             path_pattern: format!("{}/{EXPLORATIONS_SUBDIR}/{{slug}}.md", dirs.wiki),
             frontmatter: &[
                 "id",
+                "type",
                 "title",
                 "aliases",
                 "created",
@@ -156,6 +167,7 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs, personal: bool) -> Vec<PageSc
             path_pattern: format!("{}/{}/YYYY-Www.md", dirs.synthesis, dirs.weekly),
             frontmatter: &[
                 "id",
+                "type",
                 "title",
                 "created",
                 "labels",
@@ -178,7 +190,15 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs, personal: bool) -> Vec<PageSc
             PageSchema {
                 type_name: "work-log",
                 path_pattern: format!("{}/{WORK_LOG_SUBDIR}/YYYY-MM-DD.md", dirs.personal),
-                frontmatter: &["id", "title", "created", "labels", "categories", "sources"],
+                frontmatter: &[
+                    "id",
+                    "type",
+                    "title",
+                    "created",
+                    "labels",
+                    "categories",
+                    "sources",
+                ],
                 sections: vec![
                     s("Topic Summary", |i| i.topic_summary.to_string(), Owner::Llm),
                     s("Sources", |i| i.concept_sources.to_string(), Owner::Machine),
@@ -187,7 +207,15 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs, personal: bool) -> Vec<PageSc
             PageSchema {
                 type_name: "weekly-review",
                 path_pattern: format!("{}/{}/YYYY-Www.md", dirs.personal, dirs.weekly),
-                frontmatter: &["id", "title", "created", "labels", "period", "days_logged"],
+                frontmatter: &[
+                    "id",
+                    "type",
+                    "title",
+                    "created",
+                    "labels",
+                    "period",
+                    "days_logged",
+                ],
                 sections: vec![
                     s("Period", |i| i.period.to_string(), Owner::Machine),
                     s("Summary", |i| i.key_summary.to_string(), Owner::Llm),
@@ -201,7 +229,15 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs, personal: bool) -> Vec<PageSc
             PageSchema {
                 type_name: "monthly-review",
                 path_pattern: format!("{}/{}/YYYY-MM.md", dirs.personal, dirs.monthly),
-                frontmatter: &["id", "title", "created", "labels", "period", "days_logged"],
+                frontmatter: &[
+                    "id",
+                    "type",
+                    "title",
+                    "created",
+                    "labels",
+                    "period",
+                    "days_logged",
+                ],
                 sections: vec![
                     s("Period", |i| i.period.to_string(), Owner::Machine),
                     s("Summary", |i| i.key_summary.to_string(), Owner::Llm),
@@ -215,7 +251,7 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs, personal: bool) -> Vec<PageSc
             PageSchema {
                 type_name: "quarterly-review",
                 path_pattern: format!("{}/{}/YYYY-Qq.md", dirs.personal, dirs.quarterly),
-                frontmatter: &["id", "title", "created", "labels", "period"],
+                frontmatter: &["id", "type", "title", "created", "labels", "period"],
                 sections: vec![
                     s("Period", |i| i.period.to_string(), Owner::Machine),
                     s(
@@ -234,7 +270,7 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs, personal: bool) -> Vec<PageSc
             PageSchema {
                 type_name: "annual-review",
                 path_pattern: format!("{}/{}/YYYY.md", dirs.personal, dirs.annual),
-                frontmatter: &["id", "title", "created", "labels", "period"],
+                frontmatter: &["id", "type", "title", "created", "labels", "period"],
                 sections: vec![
                     s("Overview", |i| i.overall_summary.to_string(), Owner::Llm),
                     s(
@@ -265,6 +301,7 @@ pub fn render_agents_md(
     let locale_tag = locale.tag();
 
     let mut out = String::new();
+    writeln!(out, "---\ntype: schema\n---\n").unwrap();
     writeln!(out, "# Lorekeeper Page Formats").unwrap();
     writeln!(out).unwrap();
     writeln!(out, "> Generated by `lore schema` — locale: {locale_tag}").unwrap();
@@ -289,6 +326,32 @@ pub fn render_agents_md(
          concept's `audited_sources_hash` is stamped only by `lore graph audit-mark` after \
          the first contradiction audit, and `aliases` appears only when the page actually \
          has synonyms. Omit both when first authoring a page."
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "Every page's `type` frontmatter is its page-format id — exactly the `## \
+         {{type}}` names below (`concept`, `daily`, `document`, …). It is the one \
+         REQUIRED key of the Open Knowledge Format, so any OKF consumer can classify \
+         the vault's pages without Lorekeeper-specific knowledge."
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "## Links").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "Every internal reference is an inline markdown link `[Display](relative/path.md)` \
+         whose destination is RELATIVE TO THE CONTAINING PAGE'S DIRECTORY and always \
+         carries the `.md` extension — the one form Obsidian, GitHub, and OKF consumers \
+         all resolve. Never write `[[wikilinks]]`. A concept link from a page is \
+         `[{{Name}}]({{concepts-dir}}/{{slug}}.md)`, where `{{concepts-dir}}` is the \
+         relative path to `{}/{}` from that page (queue tasks carry it precomputed as \
+         `target.concepts_dir`) and `{{slug}}` is the slug of the concept name (rule \
+         below). Destinations with spaces or parens are percent-encoded (`%20`, `%28`, \
+         `%29`); non-ASCII slugs stay verbatim.",
+        dirs.wiki, CONCEPTS_SUBDIR
     )
     .unwrap();
 
@@ -324,7 +387,7 @@ pub fn render_agents_md(
     .unwrap();
     writeln!(
         out,
-        "From an entry point, open the pages it links and follow their `[[wikilinks]]`. \
+        "From an entry point, open the pages it links and follow their links. \
          Regenerate the entry points with `lore wiki map` / `lore wiki index` / `lore wiki log`."
     )
     .unwrap();
@@ -414,14 +477,13 @@ pub fn render_agents_md(
     writeln!(
         out,
         "4. **Register surface forms as aliases.** When a source's surface form differs \
-         from the canonical name, append it to the concept's `aliases` frontmatter so a \
-         bare `[[surface]]` resolves to the one page. A surface form containing `/` \
-         cannot be linked bare (`[[async/await]]` resolves as a vault path) — link it \
-         piped: `[[async-await|async/await]]`. An alias edit is metadata-only: it never \
-         renames the page and is not, by itself, a reason to rewrite the body (whether a \
-         merge also enriches the synthesis body is the consuming workflow's own \
-         judgment). `lore graph lint` surfaces any alias that collides with another \
-         concept or shadows a real page."
+         from the canonical name, append it to the concept's `aliases` frontmatter — the \
+         registry (`lore wiki concepts`) returns aliases, so the next run's dedup match \
+         recognizes the synonym instead of minting a variant page. Links are unaffected \
+         (they address the slug path; the display text is free-form). An alias edit is \
+         metadata-only: it never renames the page and is not, by itself, a reason to \
+         rewrite the body (whether a merge also enriches the synthesis body is the \
+         consuming workflow's own judgment)."
     )
     .unwrap();
     writeln!(
@@ -436,8 +498,9 @@ pub fn render_agents_md(
         "Machine-owned citation fields — never hand-write them: a NEW concept page \
          starts with an empty `## {sources_heading}` body and `source_count: 0`; on an \
          EXISTING page leave both exactly as found. Record citations as forward \
-         `[[wikilink]]`s on the ORIGIN page (its `## {related_concepts_heading}` \
-         section); `lore graph backlinks-sync` re-derives every concept's \
+         markdown links to the concept page on the ORIGIN page (its \
+         `## {related_concepts_heading}` section, link form per `## Links` above); \
+         `lore graph backlinks-sync` re-derives every concept's \
          `## {sources_heading}` + `source_count` from those forward links wholesale — \
          an entry not backed by a forward link is wiped, and a concept cited by several \
          pages in one batch is counted correctly where hand-written one-ref-per-item \

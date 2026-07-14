@@ -22,7 +22,7 @@ domain-neutral engine — then no work-log, reviews, or `is_personal` are produc
 - **Materialized-view render**: a daily page is two layers. The **structural** layer
   (frontmatter, raw event list, all `## ` headings) is re-rendered every ingest from
   the template. The **semantic** layer (summary body, refined event bodies, concept
-  wiki-links) is owned by the LLM via the queue and **preserved across re-renders**.
+  links) is owned by the LLM via the queue and **preserved across re-renders**.
   `Pipeline::plan`, `work_log`, and `synthesis` all implement this with:
   1. Compute `Request::cache_hash()` for every LLM task that would fire.
   2. Look up the previous render via the `VaultStore` seam (`FsVault`; `InMemoryVault` for
@@ -120,7 +120,7 @@ domain-neutral engine — then no work-log, reviews, or `is_personal` are produc
   assignment doesn't silently calcify. `merge` only widens the `first_seen`/`last_seen`
   window (`observe`); it does NOT count citations. `source_count` is written as `0` by
   the template and owned solely by `lore graph backlinks-sync`, which re-derives it
-  exactly from the wikilink graph — so a crash or an idempotent re-ingest can never inflate
+  exactly from the link graph — so a crash or an idempotent re-ingest can never inflate
   it. Duplicate concept creation is prevented skill-side: `/lore-process` loads the
   on-disk concept registry (`lore wiki concepts`) and reuses an established name instead
   of forking a variant — the pipeline embeds no registry in the task.

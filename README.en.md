@@ -15,7 +15,7 @@ Lorekeeper collects from Gmail, Slack, Jira, Calendar, RSS, and dropped notes ev
 
 Notes and wikis fail not because reading or thinking is hard, but because of the **bookkeeping** — updating cross-references, deduping, classifying, flagging contradictions. People can't keep up, so the wiki gets abandoned. Lorekeeper hands that bookkeeping to an LLM.
 
-> 📖 **New to the terms?** — **vault**: a folder of markdown files (i.e. your knowledge store) · **concept**: one page per topic · **wikilink**: a `[[another page]]` link between pages · **bookkeeping**: the chore of updating links, dedup, and categories by hand.
+> 📖 **New to the terms?** — **vault**: a folder of markdown files (i.e. your knowledge store) · **concept**: one page per topic · **link**: a `[Display](relative/path.md)` markdown link between pages (resolves in Obsidian, GitHub, and any OKF consumer) · **bookkeeping**: the chore of updating links, dedup, and categories by hand.
 
 | | |
 |---|---|
@@ -152,10 +152,10 @@ query formulation**, not by the choice of embedding model.
 … (normalized, preserved from the original) …
 
 ## Related Concepts
-- [[Retrieval-Augmented Generation]]
-- [[Vector Database]]
-- [[Chunking]]
-- [[Query Rewriting]]
+- [Retrieval-Augmented Generation](../../wiki/concepts/retrieval-augmented-generation.md)
+- [Vector Database](../../wiki/concepts/vector-database.md)
+- [Chunking](../../wiki/concepts/chunking.md)
+- [Query Rewriting](../../wiki/concepts/query-rewriting.md)
 ```
 
 ### ✅ Result ② — concept pages **converge** (the key payoff)
@@ -178,8 +178,8 @@ latency than by **operational simplicity** — co-locating vectors with relation
 (e.g. pgvector on Postgres) avoids running a separate stateful system.
 
 ## Sources
-- [[choosing-a-vector-database-for-production]]
-- [[rag-pipeline-fixing-low-recall-retrieval]]
+- [Choosing a Vector Database for Production](../../wiki/documents/choosing-a-vector-database-for-production.md)
+- [RAG Pipeline: Fixing Low-Recall Retrieval](../../wiki/documents/rag-pipeline-fixing-low-recall-retrieval.md)
 ```
 
 > Whether you write `Vector DB` or `Vector Database`, it lands on **one page** (registered as an alias). Knowledge not fragmenting — that *is* the "compounds over time" promise.
@@ -192,12 +192,12 @@ latency than by **operational simplicity** — co-locating vectors with relation
 ## Concepts (16)
 
 ### ai-ml (6)
-- [[vector-database|Vector Database]] — stores high-dimensional embeddings and serves ANN search; selection is driven by operational simplicity more than query latency…
-- [[retrieval-augmented-generation|RAG]] — grounds an LM's output in retrieved passages; answer quality is dominated by the retrieval stage, not the embedding model…
-- [[chunking|Chunking]] — splitting documents into embed/retrieve units; granularity strongly governs retrieval quality…
+- [Vector Database](concepts/vector-database.md) — stores high-dimensional embeddings and serves ANN search; selection is driven by operational simplicity more than query latency…
+- [RAG](concepts/retrieval-augmented-generation.md) — grounds an LM's output in retrieved passages; answer quality is dominated by the retrieval stage, not the embedding model…
+- [Chunking](concepts/chunking.md) — splitting documents into embed/retrieve units; granularity strongly governs retrieval quality…
 
 ### infrastructure (10)
-- [[kubernetes|Kubernetes]] — container orchestration; reliable operation depends on observing pod memory and restart signals…
+- [Kubernetes](concepts/kubernetes.md) — container orchestration; reliable operation depends on observing pod memory and restart signals…
 ```
 
 ### ✅ Result ④ — a knowledge graph forms
@@ -377,4 +377,4 @@ For unattended operation the installer also ships two Claude scheduled-task defi
 
 ## Built with
 
-Rust 1.97 · 2024 edition. `tokio`/`reqwest` (async sources), `jiff` (timezone-correct dates), `minijinja` (templates), `petgraph` (wikilink graph), `blake3` (event/cache hashing). License: MIT.
+Rust 1.97 · 2024 edition. `tokio`/`reqwest` (async sources), `jiff` (timezone-correct dates), `minijinja` (templates), `petgraph` (link graph), `blake3` (event/cache hashing). License: MIT.

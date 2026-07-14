@@ -290,34 +290,34 @@ mod tests {
 
     #[test]
     fn replaces_body_between_headings() {
-        let doc = "# Title\n\n## Sources\n\n- [[old]]\n\n## Meta\n\n- key: value\n";
-        let out = replace_section(doc, "Sources", "- [[new1]]\n- [[new2]]");
+        let doc = "# Title\n\n## Sources\n\n- [old](old.md)\n\n## Meta\n\n- key: value\n";
+        let out = replace_section(doc, "Sources", "- [new1](new1.md)\n- [new2](new2.md)");
         assert_eq!(
             out,
-            "# Title\n\n## Sources\n\n- [[new1]]\n- [[new2]]\n\n## Meta\n\n- key: value\n"
+            "# Title\n\n## Sources\n\n- [new1](new1.md)\n- [new2](new2.md)\n\n## Meta\n\n- key: value\n"
         );
     }
 
     #[test]
     fn matches_headings_with_trailing_spaces() {
-        let doc = "# Title\n\n## Sources  \n\n- [[old]]\n\n## Meta   \n\n- key: value\n";
-        let out = replace_section(doc, "Sources", "- [[new]]");
+        let doc = "# Title\n\n## Sources  \n\n- [old](old.md)\n\n## Meta   \n\n- key: value\n";
+        let out = replace_section(doc, "Sources", "- [new](new.md)");
         assert_eq!(
             out,
-            "# Title\n\n## Sources  \n\n- [[new]]\n\n## Meta   \n\n- key: value\n"
+            "# Title\n\n## Sources  \n\n- [new](new.md)\n\n## Meta   \n\n- key: value\n"
         );
     }
 
     #[test]
     fn replaces_body_at_end_of_file() {
-        let doc = "# Title\n\n## Sources\n\n- [[old]]\n";
-        let out = replace_section(doc, "Sources", "- [[new]]");
-        assert_eq!(out, "# Title\n\n## Sources\n\n- [[new]]\n");
+        let doc = "# Title\n\n## Sources\n\n- [old](old.md)\n";
+        let out = replace_section(doc, "Sources", "- [new](new.md)");
+        assert_eq!(out, "# Title\n\n## Sources\n\n- [new](new.md)\n");
     }
 
     #[test]
     fn empty_body_produces_blank_section() {
-        let doc = "## Sources\n\n- [[old]]\n\n## Meta\n";
+        let doc = "## Sources\n\n- [old](old.md)\n\n## Meta\n";
         let out = replace_section(doc, "Sources", "");
         assert_eq!(out, "## Sources\n\n\n## Meta\n");
     }
@@ -325,35 +325,35 @@ mod tests {
     #[test]
     fn missing_heading_returns_unchanged() {
         let doc = "# Title\n\n## Other\n\n- a\n";
-        let out = replace_section(doc, "Sources", "- [[new]]");
+        let out = replace_section(doc, "Sources", "- [new](new.md)");
         assert_eq!(out, doc);
     }
 
     #[test]
     fn does_not_match_partial_heading_prefix() {
         // `## Sourcesy` must not be treated as `## Sources`.
-        let doc = "## Sourcesy\n\nbody\n\n## Sources\n\n- [[old]]\n";
-        let out = replace_section(doc, "Sources", "- [[new]]");
+        let doc = "## Sourcesy\n\nbody\n\n## Sources\n\n- [old](old.md)\n";
+        let out = replace_section(doc, "Sources", "- [new](new.md)");
         assert!(out.contains("## Sourcesy\n\nbody\n"));
-        assert!(out.contains("- [[new]]"));
-        assert!(!out.contains("- [[old]]"));
+        assert!(out.contains("- [new](new.md)"));
+        assert!(!out.contains("- [old](old.md)"));
     }
 
     #[test]
     fn does_not_match_h3() {
         // `### Sources` is a different heading level and must be ignored.
-        let doc = "### Sources\n\n- [[keep]]\n";
-        let out = replace_section(doc, "Sources", "- [[new]]");
+        let doc = "### Sources\n\n- [keep](keep.md)\n";
+        let out = replace_section(doc, "Sources", "- [new](new.md)");
         assert_eq!(out, doc);
     }
 
     #[test]
     fn preserves_frontmatter_and_other_sections() {
-        let doc = "---\nid: x\n---\n\n# Title\n\n## Summary\n\nsumtext\n\n## Sources\n\n- [[a]]\n\n## Meta\n\nmeta\n";
-        let out = replace_section(doc, "Sources", "- [[b]]\n- [[c]]");
+        let doc = "---\nid: x\n---\n\n# Title\n\n## Summary\n\nsumtext\n\n## Sources\n\n- [a](a.md)\n\n## Meta\n\nmeta\n";
+        let out = replace_section(doc, "Sources", "- [b](b.md)\n- [c](c.md)");
         assert!(out.starts_with("---\nid: x\n---\n"));
         assert!(out.contains("## Summary\n\nsumtext\n"));
-        assert!(out.contains("## Sources\n\n- [[b]]\n- [[c]]\n\n## Meta\n"));
+        assert!(out.contains("## Sources\n\n- [b](b.md)\n- [c](c.md)\n\n## Meta\n"));
     }
 
     #[test]
@@ -361,20 +361,20 @@ mod tests {
         // A `## Sources` line inside a code fence must NOT terminate the section —
         // the real boundary is `## Meta` after the fence closes. The entire old
         // body (including the code fence) is replaced.
-        let doc = "## Sources\n\n- [[old]]\n\n```\n## Sources (quoted)\n```\n\n## Meta\n";
-        let out = replace_section(doc, "Sources", "- [[new]]");
-        assert_eq!(out, "## Sources\n\n- [[new]]\n\n## Meta\n");
+        let doc = "## Sources\n\n- [old](old.md)\n\n```\n## Sources (quoted)\n```\n\n## Meta\n";
+        let out = replace_section(doc, "Sources", "- [new](new.md)");
+        assert_eq!(out, "## Sources\n\n- [new](new.md)\n\n## Meta\n");
     }
 
     #[test]
     fn skips_target_heading_inside_fenced_code_block() {
         // The FIRST `## Sources` appears inside a fence — it must be skipped and
         // the second (real) one used.
-        let doc = "```\n## Sources\nquoted\n```\n\n## Sources\n\n- [[old]]\n";
-        let out = replace_section(doc, "Sources", "- [[new]]");
+        let doc = "```\n## Sources\nquoted\n```\n\n## Sources\n\n- [old](old.md)\n";
+        let out = replace_section(doc, "Sources", "- [new](new.md)");
         assert_eq!(
             out,
-            "```\n## Sources\nquoted\n```\n\n## Sources\n\n- [[new]]\n"
+            "```\n## Sources\nquoted\n```\n\n## Sources\n\n- [new](new.md)\n"
         );
     }
 
@@ -390,8 +390,8 @@ mod tests {
 
     #[test]
     fn idempotent_when_body_is_already_correct() {
-        let doc = "## Sources\n\n- [[a]]\n- [[b]]\n\n## Meta\n";
-        let out = replace_section(doc, "Sources", "- [[a]]\n- [[b]]");
+        let doc = "## Sources\n\n- [a](a.md)\n- [b](b.md)\n\n## Meta\n";
+        let out = replace_section(doc, "Sources", "- [a](a.md)\n- [b](b.md)");
         assert_eq!(out, doc);
     }
 
@@ -455,9 +455,9 @@ mod tests {
         // recognized as the section start.
         let doc =
             "## Sources\n\n````\n## Inner\n```\nnested\n```\n````\n\n## Meta\n\n- key: value\n";
-        let out = replace_section(doc, "Sources", "- [[new]]");
+        let out = replace_section(doc, "Sources", "- [new](new.md)");
         assert_eq!(
-            out, "## Sources\n\n- [[new]]\n\n## Meta\n\n- key: value\n",
+            out, "## Sources\n\n- [new](new.md)\n\n## Meta\n\n- key: value\n",
             "outer quad fence content must be replaced wholesale, not split by inner triple"
         );
         // And `## Inner` must not be findable as a real section.
@@ -468,8 +468,8 @@ mod tests {
     fn tilde_fence_inside_backtick_fence_does_not_toggle() {
         // Mismatched marker characters must not close the open fence.
         let doc = "## Sources\n\n```\n~~~\n## Trap\n~~~\n```\n\n## Meta\n\n- v\n";
-        let out = replace_section(doc, "Sources", "- [[new]]");
-        assert!(out.contains("## Sources\n\n- [[new]]\n\n## Meta\n"));
+        let out = replace_section(doc, "Sources", "- [new](new.md)");
+        assert!(out.contains("## Sources\n\n- [new](new.md)\n\n## Meta\n"));
         assert!(!is_section_filled(doc, "Trap"));
     }
 
@@ -494,8 +494,8 @@ mod tests {
         // looks like a fence but carries text after the markers is content, not a
         // close — so a `## Heading` further down should still be inside the fence.
         let doc = "## Sources\n\n```\nopen\n``` info string\n## Not a heading\n```\n\n## Meta\n";
-        let out = replace_section(doc, "Sources", "- [[new]]");
-        assert!(out.contains("## Sources\n\n- [[new]]\n\n## Meta\n"));
+        let out = replace_section(doc, "Sources", "- [new](new.md)");
+        assert!(out.contains("## Sources\n\n- [new](new.md)\n\n## Meta\n"));
         assert!(!is_section_filled(doc, "Not a heading"));
     }
 

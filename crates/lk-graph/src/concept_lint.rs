@@ -48,7 +48,7 @@ pub struct InvalidCategoryConcept {
 /// walked a single time per `graph lint` rather than once per check.
 #[derive(Debug, Clone)]
 pub struct ConceptPage {
-    /// Canonical identity = the file stem, matching how the wikilink graph identifies
+    /// Canonical identity = the file stem, matching how the link graph identifies
     /// every page (`scan::ScannedPage.id` is path-derived). Concepts are written as
     /// `{slug}.md`, so the stem IS the slug — independent of frontmatter, so it holds
     /// even when frontmatter is absent or malformed.

@@ -1,12 +1,12 @@
 # lk-graph
 
-Wikilink graph analysis. Pure deterministic — no HTTP, no LLM. The only vault
+Link graph analysis. Pure deterministic — no HTTP, no LLM. The only vault
 writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
 `backlinks-sync` without `--dry-run`). Every check re-scans the vault — markdown
 parsing is rayon-parallel and cheap, so analysis is always computed from current
 on-disk state, never from a cached snapshot.
 
-- **deps**: `lk-core` (slugify, frontmatter, wikilink) + `lk-vault` (the writer for the
+- **deps**: `lk-core` (slugify, frontmatter, link) + `lk-vault` (the writer for the
   gated mutations) + `petgraph` + `rayon` + `walkdir`. No reqwest/tokio — independent of
   the ingestion stack.
 - **Output type naming**: CLI-facing presentation structs in `output.rs` are `*Report`
@@ -18,25 +18,16 @@ on-disk state, never from a cached snapshot.
   `scope.dirs` (derived from `vault.dirs.wiki` when absent), `metrics.*`
   (`min_hub_degree`, `orphan_exclude`, `concept_near_duplicate_threshold`), `cluster.*`.
   All `deny_unknown_fields`. Validated: relative, no `..`.
-- **Wikilink resolution** (`scan::resolve_wikilink_target`): a bare target
-  (`[[concept-a]]`) matches any `concept-a.md` by filename, regardless of depth;
-  a path target (`[[<daily>/team-slack/2026-05-22]]`) matches that page id
-  (per-segment slugified, `/` preserved — *not* collapsed to `daily-…`). Anchors
-  (`#heading`, `^block`) stripped before resolution.
-- **Alias resolution** (lowest precedence: id → filename → alias). A concept's
-  `aliases` frontmatter (slugified into `ScannedPage::aliases`, self-slug dropped)
-  lets a bare `[[synonym]]` resolve to it. The same precedence is applied by every
-  resolver: `VaultExistence` (`by_alias`) and `WikiGraph` (`alias_to_node`, which consults
-  `VaultExistence::is_real_page` so a real id/filename always shadows an alias) each build
-  the map, and `backlinks` resolves citations through `VaultExistence::resolve` so
-  `source_count` matches the graph rather than re-deriving aliases. An alias never overrides
-  a real id/filename, and when two concepts claim the same alias the smallest-id concept
-  wins — order-independent, so every resolver picks the same concept regardless of scan
-  order or concept-file nesting. `alias::find_alias_conflicts`
-  surfaces the two ways this goes wrong (a `Duplicate` alias claimed by two concepts;
-  one that `ShadowsRealPage`) as a `graph lint` finding — so the deterministic winner
-  never calcifies silently. This is the deterministic, audit-friendly answer to synonyms
-  (no embeddings): the LLM/human registers the alias, the graph resolves it.
+- **Link resolution happens at scan time** (`scan::parse_file`): every internal inline
+  markdown-link destination is resolved against its page's own location
+  (`lk_core::link::resolve_dest`, `.md` destinations only — anchors stripped, images/
+  external schemes skipped) and normalized to a page id (`path_slug`), so
+  `ScannedPage::outgoing` already holds resolved ids. Every downstream consumer (graph
+  edges, `VaultExistence`, `backlinks`) is then a plain id lookup — there is no
+  name/alias resolution layer to disagree about. A destination that escapes the vault
+  root is kept as written; it matches no id, so `broken` reports it. Concept `aliases`
+  frontmatter is registry metadata for the LLM's dedup (and Obsidian display), never
+  link resolution — links address the slug path, and the display text is free-form.
 - **Integrity checks vs analysis scope**: `hubs`/`cluster`/`suggest-links`
   operate on the `graph.scope.dirs` subgraph. But
   `broken`/`orphans`/`index-sync` resolve against a full-vault *existence
@@ -57,11 +48,12 @@ on-disk state, never from a cached snapshot.
   deterministic.
 - **`map::build_map`** (`lore wiki map` → `<wiki>/map.md`): MATERIALIZES the Louvain
   communities (which `cluster` otherwise computes and discards) into a navigable page —
-  concepts grouped by citation cluster, hub-first, each linked by unambiguous path id with a
-  leaf display (`[[wiki/concepts/x|x]]`). A read-only materialized view (regenerated whole,
-  byte-deterministic) like `index.md`/`log.md` — pure markdown builder, the CLI writes it.
-  It NEVER writes `[[related]]` edges into concept pages: communities are co-citation, not
-  curated relatedness, so the page is labelled a citation map. `map.md` is in
+  concepts grouped by citation cluster, hub-first, each linked relative to the map with a
+  leaf display (`[x](concepts/x.md)`), under a `type: map` frontmatter. A read-only
+  materialized view (regenerated whole, byte-deterministic) like `index.md`/`log.md` —
+  pure markdown builder, the CLI writes it. It NEVER writes Related-section edges into
+  concept pages: communities are co-citation, not curated relatedness, so the page is
+  labelled a citation map. `map.md` is in
   `RESERVED_WIKI_FILES` (never an orphan/drift finding). This is the deterministic,
   embedding-free "navigate, don't retrieve" entry point AGENTS.md points agents to.
 - **Mutations gated**: `index_drift::fix()`, `normalize::apply()`, and
@@ -84,7 +76,8 @@ on-disk state, never from a cached snapshot.
   reviewing. Deterministic selection in Rust; the contradiction *judgment* stays with
   the LLM/human. Sorted by `source_count` desc, then slug.
 - **`backlinks::sync_concept_backlinks`**: rewrites the `## Sources` section on
-  each concept page to match the wikilink graph. Uses full-vault scope (not
+  each concept page to match the link graph (`- [title](relative-path)` entries,
+  destinations relative to the concept page). Uses full-vault scope (not
   `graph.scope.dirs`) so `<daily>`/`<personal>`/`<synthesis>` pages are included. Only
   non-concept content pages qualify as sources — `<daily>`, `<personal>`, `<synthesis>`,
   `<wiki>/documents`, and `<wiki>/explorations` (a concept-to-concept link belongs in
@@ -93,27 +86,27 @@ on-disk state, never from a cached snapshot.
   `Sources`/`Related` under `locale: en`, localized otherwise) — never a hardcoded
   literal. It is ALSO the SOLE owner of the frontmatter `source_count` (= number of
   incoming citations): ingest preserves the on-disk value across re-render (0 for a new
-  page) and `backlinks-sync` re-derives the real count from the wikilink graph, so it
+  page) and `backlinks-sync` re-derives the real count from the link graph, so it
   reflects source deletions and can never be inflated by a crash or an idempotent re-ingest.
   The `## Sources` body is the single source-of-truth for citations — concept
   frontmatter carries no `sources` array.
 - **`merge::merge_concepts`** (`lore graph merge <from> <into>`) folds a duplicate
-  concept into a canonical one: it rewires every wikilink targeting `from` (bare slug AND
-  path id — resolved through `scan::resolve_wikilink_target` so a non-normalized path link
-  is rewritten too, anchors/aliases preserved) to `into` across the FULL vault, folds
-  `from`'s title + aliases into `into`'s `aliases` (so a synonym keeps resolving — durable
-  because ingest preserves concept `aliases` across re-render), then deletes the `from`
-  page. It never copies/fabricates prose. **Authored-body guard**:
-  `concept_has_authored_body` is section-aware — a `- [[…]]` bullet is machine-owned ONLY
-  under the `## Sources` heading (matched across all locales, column-0 exact like
-  `backlinks-sync`); bullets under `## Related` (human-curated) or any synthesis prose
-  count as authored, so the merge ABORTS before mutating unless `--force`. `--dry-run`
-  previews without the gate firing. Run `backlinks-sync` afterward to re-derive the merged
-  concept's `## Sources` + `source_count`. Near-dup *detection* (below) only reports
-  candidates; this is the execution counterpart a human triggers.
+  concept into a canonical one: it repoints every link that RESOLVES to `from`'s page —
+  any spelling: canonical relative, dot-relative, the OKF `/`-absolute form — at `into`
+  across the FULL vault (display text and heading anchors preserved verbatim), folds
+  `from`'s title + aliases into `into`'s `aliases` (so the synonym stays in the dedup
+  registry — durable because ingest preserves concept `aliases` across re-render), then
+  deletes the `from` page. It never copies/fabricates prose. **Authored-body guard**:
+  `concept_has_authored_body` is section-aware — a `- [title](dest)` bullet is
+  machine-owned ONLY under the `## Sources` heading (matched across all locales, column-0
+  exact like `backlinks-sync`); bullets under `## Related` (human-curated) or any
+  synthesis prose count as authored, so the merge ABORTS before mutating unless
+  `--force`. `--dry-run` previews without the gate firing. Run `backlinks-sync` afterward
+  to re-derive the merged concept's `## Sources` + `source_count`. Near-dup *detection*
+  (below) only reports candidates; this is the execution counterpart a human triggers.
 - **`## Related` is NOT machine-written.** Louvain communities encode
   "co-cited together" (the in-scope graph is dominated by document/exploration→concept edges), not
-  topical relatedness, so auto-writing community co-membership as `[[related]]` edges
+  topical relatedness, so auto-writing community co-membership as Related edges
   manufactures co-occurrence noise and self-reinforcing cliques. Related links are
   instead curated via `lore-wiki audit`: `suggest_links` proposes candidates and an
   LLM confirms genuine relationships before any edge is written. `## Sources`
