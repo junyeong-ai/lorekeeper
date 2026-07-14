@@ -137,6 +137,7 @@ Now, in a Claude Code session, run **`/lore-process`**. The skill drains that qu
 ```markdown
 ---
 id: rag-pipeline-fixing-low-recall-retrieval
+type: document
 title: "RAG pipeline: fixing low-recall retrieval"
 created: 2026-06-13
 tags: ["document"]
@@ -165,6 +166,7 @@ Days later Sumin drops another note, *"Choosing a vector database for production
 ```markdown
 ---
 id: vector-database
+type: concept
 title: "Vector Database"
 aliases: ["Vector Database", "Vector DB"]
 category: ai-ml

@@ -5,7 +5,7 @@ resolve section headings before inspecting pages.
 
 1. **Structural** — run `lore graph --json lint`. ONE pass returns ALL of:
    `orphans`, `broken`, `hubs`, `invalid_categories`, `near_duplicate_concepts`,
-   `unresolved_conflicts`, `alias_conflicts`, and index drift
+   `unresolved_conflicts`, and index drift
    (`missing_from_index`/`_from_disk`).
    Surface every non-empty list. NOTE: a clean lint (`findings: 0`) means no
    structural FAULTS — it does NOT mean the wiki is well-connected. Empty
@@ -55,7 +55,8 @@ resolve section headings before inspecting pages.
      `k8s` ↔ `kubernetes`) — they share almost no characters. From the `lore wiki concepts`
      registry you already loaded, read down the list ONCE and spot equivalent pairs by
      meaning. Recommend declaring the non-canonical form as an `aliases` entry on the
-     canonical concept (`backlinks-sync` then resolves both spellings to one page), or a
+     canonical concept (the `lore wiki concepts` registry returns aliases, so future
+     extractions converge on the one page instead of minting a variant), or a
      `merge` when one side has no distinct content. Read-only suggestion — a human edits
      frontmatter. This is a registry scan WITHOUT the source text, so an acronym can be
      genuinely ambiguous here (`rag` could be red-amber-green) — surface the candidate for

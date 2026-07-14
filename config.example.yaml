@@ -326,7 +326,7 @@ concepts:
       label: "조직/이벤트"
 
 # ─── Graph analysis ───────────────────────────────────────
-# Wikilink graph analysis (lore graph lint/cluster/suggest-links).
+# Link graph analysis (lore graph lint/cluster/suggest-links).
 # Fully optional — omit the entire block to use defaults.
 # graph:
 #   scope:

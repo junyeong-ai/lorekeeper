@@ -1,6 +1,6 @@
 ---
 name: lore-extract
-version: 0.9.0
+version: 0.10.0
 description: Batch-extract transferable knowledge from a project repository into the Lorekeeper vault. Three-phase workflow — scan (discover + persist manifest), run (extract using manifest), audit (verify coverage). Manifest-driven for consistency across runs.
 when_to_use: |
   lore extract, batch extract, extract project knowledge,
@@ -214,6 +214,7 @@ Extract knowledge using the manifest. Requires a prior scan.
       ```yaml
       # Example (illustrative — see AGENTS.md for canonical format)
       id: {project}-{slug}
+      type: document
       title: "{Generalised Title}"
       created: {today}
       updated: {today}

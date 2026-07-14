@@ -136,6 +136,7 @@ queue: 2 current, 0 stale, 0 missing-target across 2 task(s)
 ```markdown
 ---
 id: rag-파이프라인-낮은-recall-검색-고치기
+type: document
 title: "RAG 파이프라인: 낮은 recall 검색 고치기"
 created: 2026-06-13
 tags: ["document"]
@@ -163,6 +164,7 @@ tags: ["document"]
 ```markdown
 ---
 id: vector-database
+type: concept
 title: "벡터 데이터베이스"
 aliases: ["벡터 데이터베이스", "Vector DB"]
 category: ai-ml

@@ -44,6 +44,7 @@ path patterns from AGENTS.md.
   "input": {
     "text": "<events concatenated for summarization>",
     "max_sentences": 5,
+    "locale": "ko",
     "source_type": "rss"
   },
   "target": {
