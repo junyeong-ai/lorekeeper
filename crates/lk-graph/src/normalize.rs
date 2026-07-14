@@ -133,7 +133,7 @@ fn repoint_renamed_links(
     path_map: &HashMap<&Path, &Path>,
 ) -> String {
     link::rewrite_links_outside_code(content, |text, raw_dest| {
-        let (dest, anchor) = link::split_dest_anchor(raw_dest);
+        let (dest, anchor) = link::split_raw_dest(raw_dest);
         let resolved = link::resolve_dest(page_path, &link::decode_dest(dest))?;
         let new_path = path_map.get(resolved.as_path())?;
         // `text` arrives exactly as written (escapes included) — reassemble verbatim
@@ -189,6 +189,19 @@ mod tests {
             updated,
             "See [A](concept-a.md) and [A](concept-a.md#part) and [B](other.md) here."
         );
+    }
+
+    #[test]
+    fn titled_destination_is_still_repointed() {
+        // Same rule as merge: a CommonMark title must not hide a link from the
+        // rename repoint — extraction resolves it to the renamed page, so the
+        // rewrite must follow.
+        let old_p = PathBuf::from("wiki/Concept_A.md");
+        let new_p = PathBuf::from("wiki/concept-a.md");
+        let path_map: HashMap<&Path, &Path> = [(old_p.as_path(), new_p.as_path())].into();
+        let content = "See [A](Concept_A.md \"tip\") here.";
+        let updated = repoint_renamed_links(content, Path::new("wiki/linker.md"), &path_map);
+        assert_eq!(updated, "See [A](concept-a.md) here.");
     }
 
     #[test]

@@ -259,7 +259,7 @@ fn rewrite_links(
         // the graph does (against this page's location), so any spelling that lands on
         // the from page — `../concepts/from.md`, `./from.md`, the OKF absolute form —
         // is rewritten, not just one canonical string.
-        let (dest, anchor) = link::split_dest_anchor(raw_dest);
+        let (dest, anchor) = link::split_raw_dest(raw_dest);
         let resolved = link::resolve_dest(page_path, &link::decode_dest(dest));
         if resolved.as_deref() != Some(from_rel) {
             return None;
@@ -474,6 +474,32 @@ mod tests {
             daily,
             "See [V](../../wiki/concepts/vector-database.md) and [V](../../wiki/concepts/vector-database.md) and [V](../../wiki/concepts/vector-database.md).\n"
         );
+    }
+
+    #[test]
+    fn titled_destination_is_still_repointed() {
+        // A CommonMark title after the destination (`[T](x.md "tip")`) must not hide
+        // the link from the rewrite: extraction counts it as a citation of `from`
+        // (`split_raw_dest` drops the title), so the merge must repoint it too —
+        // otherwise it dangles once `from` is deleted.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        write(root, "wiki/concepts/a.md", "---\nid: a\n---\n\n# a\n");
+        write(root, "wiki/concepts/b.md", "---\nid: b\n---\n\n# b\n");
+        write(
+            root,
+            "daily/x/d.md",
+            "See [A](../../wiki/concepts/a.md \"tooltip\").\n",
+        );
+        let pages = vec![
+            page("wiki/concepts/a", "wiki/concepts/a.md", &[]),
+            page("wiki/concepts/b", "wiki/concepts/b.md", &[]),
+            page("daily/x/d", "daily/x/d.md", &["wiki/concepts/a"]),
+        ];
+        let r = merge_concepts(&pages, root, "wiki", "a", "b", false, false).unwrap();
+        assert_eq!(r.rewritten.len(), 1, "titled citation must be repointed");
+        let daily = std::fs::read_to_string(root.join("daily/x/d.md")).unwrap();
+        assert_eq!(daily, "See [A](../../wiki/concepts/b.md).\n");
     }
 
     #[test]

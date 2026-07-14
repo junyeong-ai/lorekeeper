@@ -42,6 +42,16 @@ pub fn split_dest_anchor(dest: &str) -> (&str, &str) {
     }
 }
 
+/// Split a link's RAW `(dest)` capture into its page path and anchor. CommonMark
+/// permits a quoted title after the destination, so the destination proper ends at
+/// the first whitespace. The one normalization every consumer of a raw destination
+/// goes through — extraction and the merge/normalize rewriters — so they can never
+/// disagree about which page a link addresses.
+pub fn split_raw_dest(raw: &str) -> (&str, &str) {
+    let dest = raw.split_whitespace().next().unwrap_or("");
+    split_dest_anchor(dest)
+}
+
 /// Whether a destination is external — it carries an RFC 3986 scheme
 /// (`https:`, `mailto:`, …). External destinations are never vault pages, so they are
 /// invisible to extraction and rewriting.
@@ -196,10 +206,7 @@ fn internal_page_dest(cap: &Captures) -> Option<String> {
     if !cap[1].is_empty() {
         return None; // image embed
     }
-    // CommonMark permits a quoted title after the destination; the page part ends at
-    // the first whitespace.
-    let raw = cap[3].split_whitespace().next().unwrap_or("");
-    let (page, _anchor) = split_dest_anchor(raw);
+    let (page, _anchor) = split_raw_dest(&cap[3]);
     if page.is_empty() || is_external(page) {
         return None;
     }
@@ -480,6 +487,16 @@ Inline `[Old](../concepts/old.md)` and ![img](old.png).
         let body = "A [x](x.md).\n```\n[y](y.md)\n```\nB `[z](z.md)` C [w](w.md).\n";
         let out = rewrite_links_outside_code(body, |_, _| None);
         assert_eq!(out, body);
+    }
+
+    #[test]
+    fn split_raw_dest_drops_commonmark_title_before_anchor_split() {
+        // The title must be dropped BEFORE the anchor split, or the anchor would
+        // swallow the title text.
+        assert_eq!(split_raw_dest("a.md \"tip\""), ("a.md", ""));
+        assert_eq!(split_raw_dest("a.md#sec \"tip\""), ("a.md", "#sec"));
+        assert_eq!(split_raw_dest("a.md"), ("a.md", ""));
+        assert_eq!(split_raw_dest(""), ("", ""));
     }
 
     #[test]
