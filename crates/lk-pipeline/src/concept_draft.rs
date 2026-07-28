@@ -78,12 +78,23 @@ struct ConceptDraft {
 
 impl ConceptDrafts {
     /// Resolve a concept name to the page identity that owns it, building the alias index
-    /// from disk on first use. Pure lookup — nothing is staged, so callers may resolve
-    /// before deciding to commit.
+    /// from disk on first use. Nothing is staged — the run's accumulator is untouched, so
+    /// callers may resolve before deciding to commit.
     ///
     /// Lookup is by `identity_key`, so a name reaches its page however its separators fall
     /// (`VectorDB` finds `vector-db.md`); only when NO page owns the name does it become a
-    /// new concept, addressed at its own `slugify` slug.
+    /// new concept, addressed at its own `slugify` slug — and that decision is recorded in
+    /// the index, so it is the answer every later resolve of the name gets.
+    ///
+    /// Recording it here rather than at commit is what makes resolution self-consistent
+    /// within a run, and both callers need that. `Pipeline::plan` renders a page's concept
+    /// links from resolutions taken BEFORE any merge, so a decision made only at commit
+    /// would leave the link pointing at a page the merge then folded away. And
+    /// `apply_concept_result` stages a whole extraction before folding any of it, so two
+    /// spellings of one name in a single result would each resolve against the pre-batch
+    /// index and mint rival pages. The index is a lookup cache, not the accumulator, so a
+    /// caller that abandons a resolution leaves nothing half-folded behind — only the slug
+    /// that name would have resolved to anyway.
     pub async fn resolve_identity(
         &mut self,
         name: &str,
@@ -96,15 +107,17 @@ impl ConceptDrafts {
             self.alias_index = Some(build_alias_index(reader, dirs).await?);
         }
         let key = identity_key(name).expect("a name with a slug always has an identity");
-        Ok(self
+        let index = self
             .alias_index
-            .as_ref()
-            .and_then(|index| index.get(&key))
-            .cloned()
-            .unwrap_or_else(|| ConceptIdentity {
+            .as_mut()
+            .expect("the index was just built if it was absent");
+        Ok(index
+            .entry(key)
+            .or_insert(ConceptIdentity {
                 name: name.to_string(),
                 slug,
-            }))
+            })
+            .clone())
     }
 
     pub fn new() -> Self {
@@ -161,18 +174,6 @@ impl ConceptDrafts {
         dirs: &VaultDirs,
     ) -> Result<StagedConcept, PipelineError> {
         let identity = self.resolve_identity(&concept.name, reader, dirs).await?;
-        // A concept this run has resolved is as established as one on disk, and it has to
-        // be recorded HERE rather than at commit: a caller stages a whole extraction before
-        // folding any of it, so two spellings of one name inside a single result would both
-        // resolve against the pre-batch index and mint rival pages. The index is a lookup
-        // cache, not the run accumulator — writing back a resolution it just made leaves
-        // nothing half-folded if a later stage fails, and the slug is what that name would
-        // resolve to on any later attempt anyway.
-        if let Some(index) = self.alias_index.as_mut()
-            && let Some(key) = identity_key(&identity.slug)
-        {
-            index.entry(key).or_insert_with(|| identity.clone());
-        }
         // A slug already staged this run needs no read: the draft in hand is newer than the
         // page on disk, and `commit` folds into it.
         let existing = if self.drafts.contains_key(&identity.slug) {
@@ -515,8 +516,12 @@ async fn build_alias_index(
             // duplicate lint reports, and the router has to pick one. It does so
             // deterministically (last read wins) but arbitrarily, so say which — silence
             // here is what would make a mis-addressed citation impossible to explain.
+            // Only when the holder claims the key as its own ADDRESS: a page displaced
+            // because it merely aliased this name is the seed guarantee working, and the
+            // mirror of that case is deliberately silent a few lines below.
             if let Some(held) = index.get(&own_key)
                 && held.slug != slug
+                && identity_key(&held.slug).as_deref() == Some(own_key.as_str())
             {
                 tracing::warn!(
                     identity = %own_key,

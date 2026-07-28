@@ -182,15 +182,17 @@ jobs:
           # Each release is tagged with a message explaining what changed and why.
           # Publishing only `--generate-notes` left that unread on GitHub and every body a
           # bare commit list, so the tag's message becomes the body and the generated list
-          # is appended under it. `%(contents)` reads the annotated tag's message, falling
-          # back to the tagged commit's for a lightweight tag — either way the text a human
-          # wrote for this release. `--notes-from-tag` would say this in one flag but
-          # refuses to combine with `--generate-notes`, which would cost the compare link.
+          # is appended under it. `--notes-from-tag` would say this in one flag but refuses
+          # to combine with `--generate-notes`, which would cost the compare link.
           # Checkout leaves a shallow clone with no tag object, so fetch just this one —
           # by name rather than as a refspec, which keeps a `$TAG:` adjacency out of the
           # string (harmless in bash, a modifier that silently truncates it in zsh).
+          # `subject` + `body` rather than `contents`, which would also emit the signature
+          # block once these tags are signed; both fall back to the tagged commit's message
+          # for a lightweight tag, so the body is the text a human wrote either way.
           git fetch --force --depth=1 origin tag "$TAG"
-          git tag -l --format='%(contents)' "$TAG" > release-notes.md
+          git tag -l --format='%(contents:subject)%0a%0a%(contents:body)' "$TAG" \
+            > release-notes.md
           gh release create "$TAG" \
             --title "$TAG" \
             --notes-file release-notes.md \

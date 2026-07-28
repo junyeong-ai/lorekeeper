@@ -204,7 +204,8 @@ pub struct DuplicateConcept {
 ///
 /// Deliberately EXACT: no score, no threshold, and no morphology. Two names collide only
 /// when `lk_core::concept::identity_key` reduces them to one identity, and that fold covers
-/// typography alone — case, punctuation, and a break between letters. So a finding is never
+/// typography alone — case, punctuation, and every break except one between two numerals.
+/// So a finding is never
 /// a similarity guess; it is a name the vault spells two ways.
 ///
 /// A scored variant (Sørensen-Dice over slug character bigrams) preceded this and was
@@ -467,8 +468,21 @@ mod tests {
         assert_eq!(
             pairs,
             vec![("vector-db", "vectordb")],
-            "a break between letters is typography; nothing else may be flagged: {result:?}"
+            "only a break between numerals survives; nothing else may be flagged: {result:?}"
         );
+    }
+
+    #[test]
+    fn a_break_beside_a_single_digit_is_still_one_name() {
+        // The companion of `claude-3-5` ~ `claude-35` staying distinct: only a break
+        // BETWEEN numerals is identity, so a one-sided one folds and the pair IS a finding.
+        // The pipeline relies on the same rule to route `Claude 35` at one page.
+        let tmp = TempDir::new().unwrap();
+        write_concept(tmp.path(), "claude-35", "id: claude-35");
+        write_concept(tmp.path(), "claude35", "id: claude35");
+        let result = find_duplicate_concepts(&scan(tmp.path()));
+        let pairs: Vec<(&str, &str)> = result.iter().map(|d| (&*d.a, &*d.b)).collect();
+        assert_eq!(pairs, vec![("claude-35", "claude35")], "{result:?}");
     }
 
     #[test]

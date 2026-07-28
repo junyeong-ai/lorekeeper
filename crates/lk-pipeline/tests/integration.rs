@@ -3428,7 +3428,7 @@ async fn a_break_between_digits_does_not_fold_one_version_onto_another() {
     );
 }
 
-/// A break between letters is typography, so an extraction that spells an
+/// A break that is not between two numerals is typography, so an extraction that spells an
 /// established name without them must land on that page rather than mint a second one at
 /// its own spelling. The alias index and `graph lint` share `identity_key` precisely so
 /// the page pair the lint calls a duplicate is the one the index refuses to create.

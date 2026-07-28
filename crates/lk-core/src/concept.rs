@@ -42,13 +42,13 @@ pub fn slugify(name: &str) -> Option<String> {
 /// The identity a name claims, as opposed to the ADDRESS [`slugify`] writes it at.
 ///
 /// The two answer different questions. A slug has to stay readable as a filename, so it
-/// keeps every separator; identity keeps only the separators that mean something. Between
-/// letters a break is typography — `Vector DB`, `vector-db` and `vectordb` are one name
-/// written three ways, and every defect they cause comes from treating them as three.
-/// Between DIGITS a break is the name itself: positional notation makes `3-5` two numerals
-/// and `35` one, so `Claude 3.5` and `Claude 35` are different names, as are `GPT-4.1`/
-/// `GPT-41` and `Web 2.0`/`web20`. Dropping every separator would fold those together —
-/// and version-numbered names are the single most common shape in a technology vault.
+/// keeps every separator; identity keeps only the separators that mean something. Every
+/// break is typography — `Vector DB`, `vector-db` and `vectordb` are one name written three
+/// ways, and so are `claude-35` and `claude35` — EXCEPT one between two numerals, which is
+/// the name itself: positional notation makes `3-5` two numerals and `35` one, so
+/// `Claude 3.5` and `Claude 35` are different names, as are `GPT-4.1`/`GPT-41` and
+/// `Web 2.0`/`web20`. Dropping every separator would fold those together, and
+/// version-numbered names are the single most common shape in a technology vault.
 ///
 /// Nothing else is folded. Word order and every character are identity, so `agent-harness`
 /// and `harness-agent`, `http` and `https`, `doc-hub` and `docs-hub` are all DIFFERENT
@@ -109,8 +109,8 @@ mod tests {
     }
 
     #[test]
-    fn identity_key_folds_a_break_between_letters() {
-        // Everything slugify folds, plus where a break between letters falls.
+    fn identity_key_folds_every_break_but_one_between_numerals() {
+        // Everything slugify folds, plus every break that is not between two numerals.
         let vector_db = identity_key("Vector DB");
         assert_eq!(identity_key("vector-db"), vector_db);
         assert_eq!(identity_key("vectordb"), vector_db);
@@ -127,6 +127,26 @@ mod tests {
         assert_eq!(identity_key("ISO-8601"), identity_key("iso8601"));
         assert_eq!(identity_key("S3 bucket"), identity_key("s3bucket"));
         assert_eq!(identity_key("---"), None);
+    }
+
+    #[test]
+    fn slugify_and_identity_key_are_idempotent() {
+        // `lk_pipeline` keys the alias index on `identity_key(name)` and looks a resolved
+        // page up by `identity_key(slug)`. Those two agree only because re-normalizing a
+        // slug is a no-op, so an accidental non-idempotent rule would silently split the
+        // index into a write key and a read key that never meet.
+        for name in [
+            "Claude 3.5",
+            "Vector DB",
+            "GPT-4o",
+            "RAG (Retrieval)",
+            "ＲＡＧ",
+            "8비트 색상 정규화",
+        ] {
+            let slug = slugify(name).unwrap();
+            assert_eq!(slugify(&slug).as_deref(), Some(slug.as_str()), "{name}");
+            assert_eq!(identity_key(&slug), identity_key(name), "{name}");
+        }
     }
 
     #[test]

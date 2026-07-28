@@ -359,8 +359,9 @@ impl Pipeline {
                 (None, vec![])
             };
 
-            // Resolve before rendering so the link carries the slug the merge will use.
-            // Resolution is a pure lookup; staging still happens after every page renders.
+            // Resolve before rendering so the link carries the slug the merge will use —
+            // resolution records its decision, so the merge below cannot pick another.
+            // Nothing is staged here; that still happens after every page renders.
             let mut concept_names = Vec::with_capacity(day_concepts.len());
             for c in &day_concepts {
                 concept_names.push(

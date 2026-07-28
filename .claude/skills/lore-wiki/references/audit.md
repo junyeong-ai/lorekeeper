@@ -45,8 +45,9 @@ resolve section headings before inspecting pages.
    The two halves split on what is DECIDABLE. Layer 1 owns spelling; you own meaning.
    - **Duplicates** from layer 1's `duplicate_concepts`: two pages answering to one
      name (`vector-db` ~ `vectordb`, or an alias on one page that is another page's
-     title). Layer 1 folds only typography — case, punctuation, and a break
-     between letters — so this is a fact, not a candidate: one name reaches two pages, so
+     title). Layer 1 folds only typography — case, punctuation, and every break except
+     one between two numerals (so `claude-35` ~ `claude35` IS a finding, `claude-3-5` ~
+     `claude-35` is not) — so this is a fact, not a candidate: one name reaches two pages, so
      citations fragment by spelling, and every entry needs resolving. Recommend
      `lore graph merge <from> <into>`
      followed by `lore graph backlinks-sync` (the merge rewires every link and deletes
