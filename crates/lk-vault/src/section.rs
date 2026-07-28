@@ -157,17 +157,16 @@ fn frontmatter_block(lines: &[&str]) -> Option<std::ops::Range<usize>> {
     Some(1..closing)
 }
 
-/// Rebuild the document with `line` written at index `at` — replacing the line already
-/// there when `replace`, otherwise inserting before it. Every other line is copied byte
-/// for byte.
-fn splice_line(bom: &str, lines: &[&str], at: usize, line: &str, replace: bool) -> String {
+/// Rebuild the document with `line` written in place of `replaced`. An empty range inserts
+/// before its start instead. Every other line is copied byte for byte.
+fn splice_lines(bom: &str, lines: &[&str], replaced: std::ops::Range<usize>, line: &str) -> String {
     let mut out = String::with_capacity(bom.len() + line.len() + content_len(lines));
     out.push_str(bom);
-    for existing in &lines[..at] {
+    for existing in &lines[..replaced.start] {
         out.push_str(existing);
     }
     out.push_str(line);
-    for existing in &lines[at + usize::from(replace)..] {
+    for existing in &lines[replaced.end..] {
         out.push_str(existing);
     }
     out
@@ -175,6 +174,33 @@ fn splice_line(bom: &str, lines: &[&str], at: usize, line: &str, replace: bool) 
 
 fn content_len(lines: &[&str]) -> usize {
     lines.iter().map(|l| l.len()).sum()
+}
+
+/// The indented lines that belong to the entry starting at `start`, bounded by `end`: a
+/// block list's items (`  - RAG`), a nested mapping's children, a folded scalar's text.
+/// `None` when the entry is a single line.
+///
+/// Blank lines and comments do NOT end an entry — YAML permits both at any column, so
+/// treating one as the end would take a later continuation for a separate entry. Writing
+/// there leaves two copies of the same key in one block, and the stale one wins on the next
+/// parse: the write silently undone. Only a non-blank, non-comment line at column 0 starts
+/// the next entry. The span stops at the LAST real continuation, so trailing blanks and
+/// comments stay with whatever follows them rather than being swallowed by a rewrite.
+fn continuation_span(lines: &[&str], start: usize, end: usize) -> Option<std::ops::Range<usize>> {
+    let (mut first, mut last) = (None, None);
+    for (i, line) in lines.iter().enumerate().take(end).skip(start + 1) {
+        let line = unterminated(line);
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if indent_of(line).is_empty() {
+            break;
+        }
+        first.get_or_insert(i);
+        last = Some(i);
+    }
+    Some(first?..last? + 1)
 }
 
 /// Set a scalar `key: value` inside the frontmatter block ONLY. Matches a TOP-LEVEL
@@ -187,6 +213,10 @@ fn content_len(lines: &[&str]) -> usize {
 ///
 /// `value` is written verbatim, so the caller owns serialization (`serde_json::to_string`
 /// for anything that could need quoting).
+///
+/// Replacing a key takes its whole value with it, including a BLOCK-style one spread over
+/// the lines below (`aliases:` then `  - RAG`). Rewriting only the `key:` line would leave
+/// those items orphaned under the new inline value and the page would no longer parse.
 ///
 /// `None` when the page has no frontmatter block — there is nowhere to put the field, and
 /// a caller that dropped it silently would report a write it never made.
@@ -201,14 +231,16 @@ pub fn set_frontmatter_field(content: &str, key: &str, value: &str) -> Option<St
         .position(|line| line.starts_with(&prefix))
         .map(|i| i + block.start);
 
-    let at = existing.unwrap_or(block.end);
-    let eol = terminator(lines[at]);
-    Some(splice_line(
+    let replaced = match existing {
+        Some(at) => at..continuation_span(&lines, at, block.end).map_or(at + 1, |s| s.end),
+        None => block.end..block.end,
+    };
+    let eol = terminator(lines[replaced.start]);
+    Some(splice_lines(
         bom,
         &lines,
-        at,
+        replaced,
         &format!("{key}: {value}{eol}"),
-        existing.is_some(),
     ))
 }
 
@@ -231,56 +263,40 @@ pub fn set_llm_input(content: &str, key: &str, value: &str) -> Option<String> {
     let lines: Vec<&str> = body.split_inclusive('\n').collect();
     let block = frontmatter_block(&lines)?;
 
+    // Trailing whitespace after the key is invisible and legal, so it must not decide
+    // whether the mapping is found at all.
     let parent = format!("{}:", lk_core::frontmatter::field::LLM_INPUTS);
     let parent_idx = lines[block.clone()]
         .iter()
-        .position(|line| unterminated(line) == parent)
+        .position(|line| unterminated(line).trim_end() == parent)
         .map(|i| i + block.start)?;
 
-    // The mapping runs to the first non-blank line at column 0 — a new top-level key — or to
-    // the end of the block. A BLANK line does NOT end a YAML block mapping: stopping at one
-    // would insert the key above a child that lives below it, leaving two copies of the same
-    // key in one mapping, and on the next parse the stale one wins — the write silently
-    // undone.
-    let mut first_child = None;
-    let mut last_child = None;
-    for (i, line) in lines
-        .iter()
-        .enumerate()
-        .take(block.end)
-        .skip(parent_idx + 1)
-    {
-        let line = unterminated(line);
-        if line.trim().is_empty() {
-            continue;
-        }
-        if indent_of(line).is_empty() {
-            break;
-        }
-        first_child.get_or_insert(i);
-        last_child = Some(i);
-    }
-
+    let children = continuation_span(&lines, parent_idx, block.end);
     let prefix = format!("{key}:");
-    let after_last = last_child.map_or(parent_idx + 1, |i| i + 1);
-    let existing = (parent_idx + 1..after_last)
-        .find(|&i| unterminated(lines[i]).trim_start().starts_with(&prefix));
+    let existing = children.clone().and_then(|span| {
+        span.into_iter()
+            .find(|&i| unterminated(lines[i]).trim_start().starts_with(&prefix))
+    });
 
     // A replacement keeps its own line's indentation; a new key joins the mapping directly
     // after its last child, at the indentation the first one already uses.
-    let at = existing.unwrap_or(after_last);
+    let at = existing.unwrap_or_else(|| children.clone().map_or(parent_idx + 1, |s| s.end));
     let indent = existing
-        .or(first_child)
+        .or_else(|| children.map(|s| s.start))
         .map(|i| indent_of(unterminated(lines[i])))
         .unwrap_or("  ");
     let eol = terminator(lines[at]);
+    let replaced = if existing.is_some() {
+        at..at + 1
+    } else {
+        at..at
+    };
 
-    Some(splice_line(
+    Some(splice_lines(
         bom,
         &lines,
-        at,
+        replaced,
         &format!("{indent}{key}: {value}{eol}"),
-        existing.is_some(),
     ))
 }
 
@@ -375,6 +391,39 @@ mod tests {
         assert_eq!(
             out,
             "---\nllm_inputs:\n  source_count: 5\nsource_count: 2\n---\n"
+        );
+    }
+
+    #[test]
+    fn set_frontmatter_field_replaces_a_block_style_value_whole() {
+        // Obsidian's property editor writes lists block-style. Rewriting only the `aliases:`
+        // line would strand the items under the new inline value and the page would stop
+        // parsing — on `graph merge`, that is the canonical concept page.
+        let doc = "---\nid: x\naliases:\n  - RAG\n  - IR\nsource_count: 2\n---\n\n# X\n";
+        let out = set_frontmatter_field(doc, "aliases", r#"["RAG","IR","Retrieval"]"#).unwrap();
+        assert_eq!(
+            out,
+            "---\nid: x\naliases: [\"RAG\",\"IR\",\"Retrieval\"]\nsource_count: 2\n---\n\n# X\n"
+        );
+        let page = lk_core::frontmatter::parse_page(&out).expect("page must still parse");
+        assert_eq!(
+            page.frontmatter
+                .get("aliases")
+                .and_then(|v| v.as_array())
+                .map(Vec::len),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn set_frontmatter_field_leaves_a_trailing_comment_with_what_follows_it() {
+        // The span ends at the last real continuation, so a comment sitting between two
+        // keys belongs to the one below it and survives the rewrite.
+        let doc = "---\naliases:\n  - RAG\n# about the count\nsource_count: 2\n---\n";
+        let out = set_frontmatter_field(doc, "aliases", "[]").unwrap();
+        assert_eq!(
+            out,
+            "---\naliases: []\n# about the count\nsource_count: 2\n---\n"
         );
     }
 
@@ -759,6 +808,39 @@ mod llm_input_tests {
             Some("NEW"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn a_comment_does_not_end_the_mapping() {
+        // A `#` comment is legal at any column. Treating a column-0 one as the next
+        // top-level key hides the child below it, and the duplicate that gets written
+        // above loses to the stale value on the next parse.
+        let doc =
+            "---\nid: d\nllm_inputs:\n  summary: \"a\"\n# note\n  concepts: \"b\"\n---\n\nbody\n";
+        let out = stamp(doc, "concepts", "NEW").unwrap();
+        assert_eq!(
+            out.matches("concepts:").count(),
+            1,
+            "the key must be replaced, not duplicated: {out}"
+        );
+        let page = lk_core::frontmatter::parse_page(&out).unwrap();
+        assert_eq!(
+            page.frontmatter
+                .get("llm_inputs")
+                .and_then(|v| v.get("concepts"))
+                .and_then(|v| v.as_str()),
+            Some("NEW"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn trailing_whitespace_after_the_parent_key_still_finds_the_mapping() {
+        // Invisible and legal. Refusing here fails `queue apply` on every run until a
+        // human notices a space.
+        let doc = "---\nid: d\nllm_inputs: \n  summary: \"a\"\n---\n\nbody\n";
+        let out = stamp(doc, "concepts_done", "z").expect("mapping must still be found");
+        assert!(out.contains("  concepts_done: \"z\""), "{out}");
     }
 
     #[test]
