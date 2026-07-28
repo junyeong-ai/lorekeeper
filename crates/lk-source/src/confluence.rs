@@ -350,17 +350,19 @@ impl Source for ConfluenceSource {
                     break;
                 }
                 // Exhausting the budget with NOTHING kept is a different failure from a
-                // partial one, and worth saying so: the query matched more than the budget
-                // in padding alone, so the target window was never reached and the day
-                // comes back empty. It is a query-scope problem, not a transient one, so
-                // the message names the fix rather than leaving "may be incomplete".
+                // partial one, and worth saying so: the day comes back empty, and the cause
+                // is the query's scope rather than anything transient. The two ways to get
+                // here are not distinguishable from the counters — every result may have
+                // fallen outside the window, or inside it and been dropped as someone
+                // else's edit — so the message names both rather than asserting one.
                 crate::paging::PageStep::Exhausted if items.is_empty() => {
                     tracing::warn!(
                         pages = crate::paging::MAX_PAGES,
-                        "confluence: page budget exhausted before any page inside the target \
-                         window was reached — this cql matches far more than the window, so \
-                         the day will be empty. Scope it (e.g. `contributor = currentUser()`) \
-                         rather than relying on `only_my_edits` to filter afterwards."
+                        "confluence: page budget exhausted with nothing inside the target \
+                         window kept, so the day will be empty — this cql matches far more \
+                         than the window, or than this account's own edits. Narrow it \
+                         server-side (a space filter, or `contributor = currentUser()`) so \
+                         the budget is spent on candidates instead of on discards."
                     );
                     break;
                 }
