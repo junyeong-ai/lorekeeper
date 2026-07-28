@@ -67,36 +67,45 @@ pub struct ExtractContext {
 }
 
 impl ExtractContext {
-    /// Time window an adapter should query so that everything landing on
-    /// `target_date` (the civil day the pipeline keeps) is covered, with optional
-    /// padding. Anchored to the target day's bounds in `timezone` — NOT to "now" —
-    /// so historical backfill (`lore ingest --date YYYY-MM-DD`) fetches the right day
-    /// instead of the last N hours from the wall clock.
+    /// Time window an adapter should query so that everything landing on `target_date`
+    /// (the civil day the pipeline keeps) is covered, with optional padding.
     ///
-    /// Returns `[day_start - lookback, day_end + lookahead]`.
+    /// Anchored to the target day in `timezone`, never to "now", so historical backfill
+    /// (`lore ingest --date YYYY-MM-DD`) fetches the right day.
+    ///
+    /// Both bounds land on CIVIL MIDNIGHT, with the padding rounded outward to whole days.
+    /// That is not tidiness: the pipeline renders a daily page for every date a batch
+    /// touches, and a complete-refetch source renders that page from the fetch alone — so a
+    /// window ending mid-day would hand the pipeline a PARTIAL day and overwrite that date's
+    /// existing page with the fragment. Subtracting absolute hours cannot guarantee this: on
+    /// a DST fall-back day the local day is 25 hours long, so `day_start - 24h` lands an hour
+    /// AFTER the previous midnight. Rounding outward keeps the window a superset while making
+    /// whole days true by construction, for every adapter and every `lookback_hours` value.
     pub fn day_window(
         &self,
         lookback_hours: u32,
         lookahead_hours: u32,
     ) -> Result<(jiff::Timestamp, jiff::Timestamp), SourceError> {
-        let day_start = self
+        let days_back = lookback_hours.div_ceil(24) as i32;
+        let days_forward = lookahead_hours.div_ceil(24) as i32;
+
+        let midnight = |date: jiff::civil::Date| -> Result<jiff::Timestamp, SourceError> {
+            date.to_zoned(self.timezone.clone())
+                .map(|z| z.timestamp())
+                .map_err(|e| SourceError::Parse(format!("day boundary {date}: {e}")))
+        };
+
+        let first = self
             .target_date
-            .to_zoned(self.timezone.clone())
-            .map_err(|e| SourceError::Parse(format!("day start: {e}")))?;
-        let day_end = self
+            .checked_sub(jiff::Span::new().days(days_back))
+            .map_err(|e| SourceError::Parse(format!("window start: {e}")))?;
+        // `+1` because the target day itself must be fully inside the window.
+        let last = self
             .target_date
-            .tomorrow()
-            .and_then(|d| d.to_zoned(self.timezone.clone()))
-            .map_err(|e| SourceError::Parse(format!("day end: {e}")))?;
-        let min = day_start
-            .timestamp()
-            .checked_sub(jiff::SignedDuration::from_hours(lookback_hours.into()))
-            .map_err(|e| SourceError::Parse(format!("window min: {e}")))?;
-        let max = day_end
-            .timestamp()
-            .checked_add(jiff::SignedDuration::from_hours(lookahead_hours.into()))
-            .map_err(|e| SourceError::Parse(format!("window max: {e}")))?;
-        Ok((min, max))
+            .checked_add(jiff::Span::new().days(days_forward + 1))
+            .map_err(|e| SourceError::Parse(format!("window end: {e}")))?;
+
+        Ok((midnight(first)?, midnight(last)?))
     }
 }
 
@@ -333,10 +342,35 @@ mod tests {
     }
 
     #[test]
-    fn day_window_applies_padding() {
+    fn day_window_applies_padding_rounded_out_to_whole_days() {
+        // Padding is rounded outward: a partial day in the batch would make the pipeline
+        // re-render that date's page from a fragment.
         let (min, max) = ctx("2026-05-01", "UTC").day_window(24, 12).unwrap();
         assert_eq!(min.to_string(), "2026-04-30T00:00:00Z");
-        assert_eq!(max.to_string(), "2026-05-02T12:00:00Z");
+        assert_eq!(max.to_string(), "2026-05-03T00:00:00Z");
+
+        // A lookback that is not a multiple of 24 still yields whole days, as a superset.
+        let (min, max) = ctx("2026-05-01", "UTC").day_window(30, 0).unwrap();
+        assert_eq!(min.to_string(), "2026-04-29T00:00:00Z");
+        assert_eq!(max.to_string(), "2026-05-02T00:00:00Z");
+    }
+
+    #[test]
+    fn day_window_bounds_are_true_midnights_across_a_dst_transition() {
+        // 2026-11-01 is a 25-hour local day in America/New_York. Subtracting 24 absolute
+        // hours from 11-02's midnight lands an hour INSIDE 11-01, which would hand the
+        // pipeline a partial day and overwrite that date's page with the fragment.
+        let tz = jiff::tz::TimeZone::get("America/New_York").unwrap();
+        let (min, max) = ctx("2026-11-02", "America/New_York")
+            .day_window(24, 0)
+            .unwrap();
+
+        let expect_midnight =
+            |date: jiff::civil::Date| date.to_zoned(tz.clone()).unwrap().timestamp();
+        assert_eq!(min, expect_midnight(jiff::civil::date(2026, 11, 1)));
+        assert_eq!(max, expect_midnight(jiff::civil::date(2026, 11, 3)));
+        // The hour-arithmetic result this replaces would have been 05:00Z, an hour late.
+        assert_eq!(min.to_string(), "2026-11-01T04:00:00Z");
     }
 
     #[test]
