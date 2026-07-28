@@ -114,6 +114,15 @@ pub async fn run(
         Some(_) => pipeline_env(bin, &config_path),
         None => Vec::new(),
     };
+    // A crontab environment line ends at the newline, so a value carrying one would silently
+    // truncate and leave the remainder parsed as a schedule entry. Refuse rather than emit a
+    // file that reads as valid and is not.
+    if let Some((key, _)) = env.iter().find(|(_, v)| v.contains(['\n', '\r'])) {
+        return Err(miette::miette!(
+            "`{key}` contains a line break, which no scheduler format can carry. \
+             Fix it in the environment this command runs in, then re-run."
+        ));
+    }
 
     match format {
         Format::Cron => print_cron(bin, &cwd, &jobs, &env),
