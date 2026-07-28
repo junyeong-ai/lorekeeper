@@ -263,7 +263,17 @@ impl Source for ConfluenceSource {
         // loop follows that; termination is still `paging::page_step`, the rule every
         // listing adapter shares.
         const PAGE_SIZE: usize = 50;
-        let mut pages: Vec<Page> = Vec::new();
+        let site = self
+            .auth
+            .browse_base(Product::Confluence)
+            .unwrap_or_default();
+        // The cap counts items the batch will actually KEEP, so each response is cut to the
+        // exact window as it arrives. Counting raw results instead made the cap depend on
+        // result order, and no order protects both ends: the query is padded on both sides
+        // against timezone resolution, and on a scheduled run the upper padding is empty by
+        // construction (nothing is edited after now) while on a backfill it is the larger of
+        // the two. Capping what survives the cut removes the question.
+        let mut items: Vec<RawItem> = Vec::new();
         let mut next_path: Option<String> = None;
         let mut pages_fetched = 0usize;
 
@@ -310,10 +320,18 @@ impl Source for ConfluenceSource {
             let page: SearchResponse = resp.json().await?;
             let has_next = page.links.next.is_some();
             next_path = page.links.next.clone();
-            pages.extend(page.results);
             pages_fetched += 1;
+            // The authoritative window. The CQL bound is a coarse superset; this cuts it to
+            // the exact instants `day_window` asked for, so the batch holds only the whole
+            // days the pipeline is entitled to re-render.
+            items.extend(
+                page.results
+                    .into_iter()
+                    .filter_map(|page| map_page(page, &my_account_id, &site, p.only_my_edits))
+                    .filter(|item| item.timestamp >= min && item.timestamp < max),
+            );
 
-            match crate::paging::page_step(pages.len(), p.max_pages, has_next, pages_fetched) {
+            match crate::paging::page_step(items.len(), p.max_pages, has_next, pages_fetched) {
                 crate::paging::PageStep::Continue => continue,
                 crate::paging::PageStep::Stop { dropped } => {
                     if dropped {
@@ -322,7 +340,7 @@ impl Source for ConfluenceSource {
                             "confluence: max_pages reached; some pages may have been dropped"
                         );
                     }
-                    pages.truncate(p.max_pages);
+                    items.truncate(p.max_pages);
                     break;
                 }
                 crate::paging::PageStep::Exhausted => {
@@ -336,20 +354,7 @@ impl Source for ConfluenceSource {
             }
         }
 
-        tracing::info!(count = pages.len(), "confluence: pages found");
-
-        let site = self
-            .auth
-            .browse_base(Product::Confluence)
-            .unwrap_or_default();
-        let items = pages
-            .into_iter()
-            .filter_map(|page| map_page(page, &my_account_id, &site, p.only_my_edits))
-            // The authoritative window. The CQL bound is a coarse superset; this cuts it
-            // to the exact instants `day_window` asked for, so the batch holds only the
-            // whole days the pipeline is entitled to re-render.
-            .filter(|item| item.timestamp >= min && item.timestamp < max)
-            .collect();
+        tracing::info!(count = items.len(), "confluence: pages found");
         Ok(items)
     }
 }
@@ -369,10 +374,10 @@ impl Source for ConfluenceSource {
 /// resolution, which is what Atlassian documents; the UPPER one additionally holds under any
 /// later resolution, since a later cutoff only widens it.
 ///
-/// Ordered ASCENDING so the `max_pages` cap, which keeps the first results, spends its budget
-/// on the target window and discards the padding after it. Descending would fill the budget
-/// with the two padding days that sort newest and truncate the very day being ingested. The
-/// pipeline sorts events canonically before rendering, so this order is not otherwise visible.
+/// Ordered newest-first. The cap counts items that survive the exact cut, not raw results, so
+/// order no longer decides what is dropped — it only decides which edits win if a single day
+/// genuinely overflows the cap, and the most recent ones are the better keep. The pipeline
+/// sorts events canonically before rendering, so this order is not otherwise visible.
 ///
 /// Exactness matters beyond accuracy here. `day_window` returns bounds on day boundaries, so
 /// a correctly-cut batch holds only WHOLE days; Confluence is non-streaming, and the pipeline
@@ -386,7 +391,7 @@ fn build_windowed_cql(base: &str, min: jiff::Timestamp, max: jiff::Timestamp) ->
     let forward = jiff::SignedDuration::from_hours(48);
     format!(
         "({base}) AND lastModified >= \"{}\" AND lastModified <= \"{}\" \
-         ORDER BY lastModified ASC",
+         ORDER BY lastModified DESC",
         format_cql_date(min.checked_sub(back).unwrap_or(min)),
         format_cql_date(max.checked_add(forward).unwrap_or(max)),
     )
@@ -581,7 +586,7 @@ mod tests {
         assert!(cql.starts_with("(type = page AND contributor = currentUser())"));
         assert!(cql.contains(r#"lastModified >= "2026/07/25""#), "{cql}");
         assert!(cql.contains(r#"lastModified <= "2026/07/29""#), "{cql}");
-        assert!(cql.ends_with("ORDER BY lastModified ASC"));
+        assert!(cql.ends_with("ORDER BY lastModified DESC"));
         // A wall clock in the literal would re-introduce the timezone assumption.
         assert!(!cql.contains(':'), "date-only literal expected: {cql}");
     }
