@@ -350,11 +350,12 @@ impl Source for ConfluenceSource {
                     break;
                 }
                 // Exhausting the budget with NOTHING kept is a different failure from a
-                // partial one, and worth saying so: the day comes back empty, and the cause
-                // is the query's scope rather than anything transient. The two ways to get
-                // here are not distinguishable from the counters — every result may have
-                // fallen outside the window, or inside it and been dropped as someone
-                // else's edit — so the message names both rather than asserting one.
+                // partial one, and worth saying so: the day comes back empty. The ways to
+                // get here are not distinguishable from the counters — every result may
+                // have fallen outside the window, or inside it and been dropped as someone
+                // else's edit, or the server may have kept handing back continuation tokens
+                // without progress (the case `MAX_PAGES` exists for) — so the message names
+                // the ones an operator can act on and asserts none of them.
                 crate::paging::PageStep::Exhausted if items.is_empty() => {
                     tracing::warn!(
                         pages = crate::paging::MAX_PAGES,

@@ -682,6 +682,31 @@ mod tests {
     }
 
     #[test]
+    fn a_partly_successful_quarantine_says_how_many_moved() {
+        // A rename can fail for one file and not another; the summary must not round that
+        // to all-or-nothing in either direction.
+        let dir = TempDir::new().unwrap();
+        let corrupt = dir.path().join("corrupt");
+        let real = dir.path().join("ext-1.json");
+        std::fs::write(&real, "{trunc").unwrap();
+        let vanished = dir.path().join("ext-2.json"); // never created — its rename fails
+
+        let moved = quarantine(
+            &corrupt,
+            &[
+                (real.clone(), "parse error".into()),
+                (vanished, "parse error".into()),
+            ],
+            false,
+        );
+        assert_eq!(moved, 1);
+        assert!(!real.exists(), "the one that could move did");
+
+        let err = finish_apply(0, 2, moved, false).unwrap_err().to_string();
+        assert!(err.contains("1 of 2 moved"), "{err}");
+    }
+
+    #[test]
     fn a_dry_run_quarantine_moves_nothing_and_says_so() {
         let dir = TempDir::new().unwrap();
         let corrupt = dir.path().join("corrupt");
