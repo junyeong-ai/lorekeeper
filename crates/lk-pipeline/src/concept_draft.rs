@@ -443,10 +443,8 @@ fn warn_category_conflict(slug: &str, established: Option<&str>, incoming: Optio
     }
 }
 
-/// Filter that callers use to drop concepts whose slug would be empty before threading
-/// them into rendered output. Keeps daily-page wiki links honest.
-/// Map every name a concept page answers to — its title and each alias — to that page's
-/// slug, so an extraction naming any of them lands on the established page.
+/// Map every name a concept page answers to — its own slug, its title, and each alias —
+/// to that page's slug, so an extraction naming any of them lands on the established page.
 async fn build_alias_index(
     reader: &dyn VaultStore,
     dirs: &VaultDirs,
@@ -479,21 +477,23 @@ async fn build_alias_index(
                     .flatten()
                     .filter_map(|v| v.as_str()),
             );
+        let identity = ConceptIdentity {
+            name: title.clone(),
+            slug: slug.to_string(),
+        };
+        // A page owns its own address unconditionally, whatever order the pages are read
+        // in — so a stale alias elsewhere can never redirect a concept away from its own
+        // page. Seeding the stem is what makes that hold for EVERY page: deriving the
+        // claim from the names alone protects only pages whose title or an alias happens
+        // to reproduce the stem, and a page titled more descriptively than its file
+        // (`access-ingress-2axis-model` ← "Access × Ingress 2-Axis Deployment Model") has
+        // no name that does — leaving its address free for another page's alias to take.
+        index.insert(slug.to_string(), identity.clone());
         for name in names {
             let Some(key) = slugify(name) else { continue };
-            let identity = ConceptIdentity {
-                name: title.clone(),
-                slug: slug.to_string(),
-            };
-            // The page's own slug wins over any alias claiming the same key, so a stale
-            // alias on another page can never redirect a concept away from its own page.
-            if key == slug {
-                index.insert(key, identity);
-                continue;
-            }
             match index.entry(key) {
                 std::collections::btree_map::Entry::Vacant(slot) => {
-                    slot.insert(identity);
+                    slot.insert(identity.clone());
                 }
                 std::collections::btree_map::Entry::Occupied(held) => {
                     // Two pages registering the same alias is a vault defect, not something
@@ -517,6 +517,8 @@ async fn build_alias_index(
     Ok(index)
 }
 
+/// Filter that callers use to drop concepts whose slug would be empty before threading
+/// them into rendered output. Keeps daily-page wiki links honest.
 pub fn has_valid_slug(concept: &ExtractedConcept) -> bool {
     slugify(&concept.name).is_some()
 }

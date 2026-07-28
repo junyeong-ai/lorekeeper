@@ -124,6 +124,17 @@ domain-neutral engine — then no work-log, reviews, or `is_personal` are produc
   it. Duplicate concept creation is prevented skill-side: `/lore-process` loads the
   on-disk concept registry (`lore wiki concepts`) and reuses an established name instead
   of forking a variant — the pipeline embeds no registry in the task.
+- **`build_alias_index` seeds every page's own slug before any name.** The index maps
+  `slugify(name) → ConceptIdentity` so an extraction naming a synonym lands on the
+  established page; a page owning its OWN address is what stops a stale alias elsewhere
+  from redirecting a concept away from its page. Deriving that claim from title/aliases
+  alone would only protect pages whose names happen to reproduce the stem — and a page
+  titled more descriptively than its file (`access-ingress-2axis-model` ←
+  "Access × Ingress 2-Axis Deployment Model") has NO such name, leaving its address free
+  for another page's alias to take and sending every citation of its own name elsewhere.
+  Seeding is unconditional, so the guarantee does not depend on directory read order.
+  Two pages claiming the same non-address name stays a `tracing::warn` (first wins,
+  deterministic) and is reported deterministically by `lore graph lint`.
 - **`theme` vs `topic` are deliberately distinct, not drift.** A weekly-synthesis
   `Theme` (`identify_themes`) is a cross-source cluster spanning a whole week; a work-log
   `topic_summary`/`topic_heading` is a single day's per-source activity grouping. They sit

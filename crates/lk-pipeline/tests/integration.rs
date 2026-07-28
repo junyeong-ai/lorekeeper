@@ -3161,6 +3161,86 @@ async fn a_grounding_from_a_later_result_still_seeds_a_new_concept_page() {
     );
 }
 
+/// A page owns its own address even when NONE of its names reproduces it — a long
+/// descriptive title over a short slug is the common case, and such a page has no name
+/// that slugifies to its own stem. A stale alias elsewhere must not be able to take that
+/// address, whatever order the concepts dir is read in (here the claimant sorts first).
+#[tokio::test]
+async fn a_stale_alias_cannot_capture_another_pages_address() {
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let config = base_config(vault);
+
+    let concepts = vault.join("wiki").join("concepts");
+    std::fs::create_dir_all(&concepts).unwrap();
+    // Sorts before the real page, and claims its address as an alias.
+    std::fs::write(
+        concepts.join("aaa-stale-notes.md"),
+        "---\nid: aaa-stale-notes\ntype: concept\ntitle: \"Stale Notes\"\n\
+         aliases: [\"Stale Notes\", \"access-ingress-2axis-model\"]\n\
+         created: 2026-06-06\nupdated: 2026-06-06\nsource_count: 1\n---\n\n\
+         ## Synthesis\n\nUnrelated.\n\n## Sources\n\n- x\n",
+    )
+    .unwrap();
+    // No name here slugifies to the stem: the title yields `access-ingress-2-axis-...`.
+    std::fs::write(
+        concepts.join("access-ingress-2axis-model.md"),
+        "---\nid: access-ingress-2axis-model\ntype: concept\n\
+         title: \"Access x Ingress 2-Axis Deployment Model\"\n\
+         aliases: [\"Access x Ingress 2-Axis Deployment Model\"]\n\
+         created: 2026-06-06\nupdated: 2026-06-06\nsource_count: 4\n---\n\n\
+         ## Synthesis\n\nEstablished body.\n\n## Sources\n\n- x\n",
+    )
+    .unwrap();
+
+    let ctx = build_ctx(&config, Arc::new(NoopLlmClient));
+    let mut pipeline = Pipeline::new(vault, ctx);
+
+    let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
+    let result = lk_queue::TaskResult {
+        task_id: "ext-1".into(),
+        cache_hash: "h".into(),
+        target: lk_queue::TaskTarget {
+            vault_path: "daily/test-source/2026-05-23.md".into(),
+            kind: lk_queue::TargetKind::DailyConcepts,
+            anchor: "## Related Concepts".into(),
+            concepts_dir: "../../wiki/concepts".into(),
+        },
+        date: jiff::civil::date(2026, 5, 23),
+        concepts: vec![lk_queue::ReportedConcept {
+            concept: ExtractedConcept {
+                name: "access-ingress-2axis-model".into(),
+                category: None,
+            },
+            synthesis: Some("A later mention must not overwrite the established body.".into()),
+        }],
+    };
+
+    let rewritten = pipeline.apply_concept_result(&result, page).await.unwrap();
+    assert!(
+        rewritten.contains("../../wiki/concepts/access-ingress-2axis-model.md"),
+        "a name must resolve to the page that lives at it, not to a stale claimant: {rewritten}"
+    );
+    assert!(
+        !rewritten.contains("aaa-stale-notes.md"),
+        "the stale alias must not capture the address: {rewritten}"
+    );
+
+    let pages = pipeline.render_concept_pages().await.unwrap();
+    assert_eq!(pages.len(), 1);
+    assert!(
+        pages[0]
+            .path
+            .to_string()
+            .ends_with("access-ingress-2axis-model.md")
+    );
+    assert!(
+        pages[0].content.contains("Established body."),
+        "the established synthesis must survive: {}",
+        pages[0].content
+    );
+}
+
 /// A concept page's id is not always `slugify(title)` — a renamed or merged page keeps its
 /// original id and records the other names as aliases, which is what keeps existing
 /// citations resolving. An extraction naming an alias must land on that page, not mint a
