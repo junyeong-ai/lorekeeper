@@ -1,6 +1,6 @@
 ---
 name: lore-setup
-version: 0.12.0
+version: 0.12.1
 description: Build or edit a Lorekeeper config.yaml by inspecting the user's real workspace — discovers Slack channel IDs, Jira projects and custom-field IDs, Google calendars, and Gmail query categories via their CLIs, then writes a validated config. Use when the user wants help setting up Lorekeeper, adding a source, or finding the concrete IDs a source needs. Read-only against the user's accounts; only writes config.yaml after confirmation.
 when_to_use: |
   setup Lorekeeper, configure sources, build config,
