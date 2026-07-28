@@ -454,8 +454,8 @@ impl Pipeline {
 
         // Commit staged concepts into the run-level accumulator (shared across all sources,
         // so a concept mentioned by several sources aggregates into one page) now that every
-        // page rendered. Every read first, then every fold: `merge` would do both per
-        // concept, so a read failing on the third would leave the first two in the
+        // page rendered. Every read first, then every fold: reading and folding one
+        // concept at a time would let a read failing on the third leave the first two in the
         // accumulator that `render_concept_pages` emits unconditionally — concept pages
         // written for an origin page this failed plan never wrote, landing as orphans.
         let mut reads = Vec::with_capacity(staged_concepts.len());

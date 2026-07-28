@@ -89,8 +89,8 @@ impl ConceptDrafts {
     ///
     /// Recording it here rather than at commit is what makes resolution self-consistent
     /// within a run, and both callers need that. `Pipeline::plan` renders a page's concept
-    /// links from resolutions taken BEFORE any merge, so a decision made only at commit
-    /// would leave the link pointing at a page the merge then folded away. And
+    /// links from resolutions taken BEFORE anything is folded, so a decision made only at
+    /// commit would leave the link pointing at a page the fold then absorbed. And
     /// `apply_concept_result` stages a whole extraction before folding any of it, so two
     /// spellings of one name in a single result would each resolve against the pre-batch
     /// index and mint rival pages. The index is a lookup cache, not the accumulator, so a
@@ -135,12 +135,14 @@ impl ConceptDrafts {
     ///
     /// The drafts are what that protects. Resolving a name does record it in the alias index
     /// (see [`Self::resolve_identity`]), so a `stage` that fails afterwards leaves that entry
-    /// behind. Deliberately, but it is not a no-op: the entry carries the FIRST spelling's
-    /// slug and display name, so a later spelling of the same identity inherits both, and a
-    /// run whose first mention was `VectorDB` writes `vectordb.md` where a run that saw
-    /// `Vector DB` first would write `vector-db.md`. Both are correct pages holding one
-    /// concept, whichever wins is deterministic for a given input, and the next run rebuilds
-    /// the index from disk — where the page's own address and title key alike.
+    /// behind. Deliberately, but it is not a no-op: the entry fixes the SLUG for the rest of
+    /// the run, so a run whose first mention was `VectorDB` writes `vectordb.md` where one
+    /// that saw `Vector DB` first would write `vector-db.md`. Only the address is inherited
+    /// — the page's title is whichever spelling created the draft, and the display name in a
+    /// link is the resolved one only where a caller renders from [`Self::resolve_identity`]
+    /// rather than from [`Self::commit`]. So a link may read `[VectorDB]` beside a page
+    /// titled `Vector DB`: one concept, one address, deterministic for a given input, and
+    /// the next run rebuilds the index from disk where address and title key alike.
     pub async fn stage(
         &mut self,
         concept: &ExtractedConcept,
@@ -327,7 +329,7 @@ impl ConceptDraft {
     ///
     /// Applied on every fold, not just the one that creates the draft: two results in a run
     /// can name the same new concept and only one of them carry a grounding. Seeding solely
-    /// on the staging merge would leave the created page's synthesis empty or filled
+    /// on the fold that creates it would leave the page's synthesis empty or filled
     /// depending on which result the run happened to read first.
     fn seed_synthesis(&mut self, synthesis: Option<&str>) {
         if self.preserved_synthesis.is_none()
