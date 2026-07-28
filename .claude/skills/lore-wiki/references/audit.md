@@ -44,9 +44,10 @@ resolve section headings before inspecting pages.
 5. **Concept convergence** — two parts:
    The two halves split on what is DECIDABLE. Layer 1 owns spelling; you own meaning.
    - **Duplicates** from layer 1's `duplicate_concepts`: two pages answering to one
-     name (`doc-hub` ~ `docs-hub`, or an alias on one page that is another page's
-     title). This is a fact, not a candidate — that name cannot route deterministically
-     — so every entry needs resolving. Recommend `lore graph merge <from> <into>`
+     name (`vector-db` ~ `vectordb`, or an alias on one page that is another page's
+     title). Layer 1 folds only what carries no identity — case, punctuation, and where
+     the separators fall — so this is a fact, not a candidate: that name cannot route
+     deterministically, and every entry needs resolving. Recommend `lore graph merge <from> <into>`
      followed by `lore graph backlinks-sync` (the merge rewires every link and deletes
      the `from` page; it refuses if `from` has authored prose unless `--force`, so
      salvage that prose into the survivor first). Like every audit finding the merge is
@@ -54,10 +55,11 @@ resolve section headings before inspecting pages.
      pages turn out to be genuinely different things that merely share a name, the fix
      is the opposite one: rename the mistaken side, or drop the alias that reaches
      across.
-   - **Synonyms, abbreviations, and short forms**: layer 1 compares names, so by
+   - **Synonyms, abbreviations, plurals, and short forms**: layer 1 compares names, so by
      construction it cannot see two DIFFERENT names for one thing — an acronym and its
-     expansion (`rag` ↔ `retrieval-augmented-generation`, `k8s` ↔ `kubernetes`), or a
-     team's shorthand and the full id (`enterprise-prd` ↔ `oy-gemini-enterprise-prd`).
+     expansion (`rag` ↔ `retrieval-augmented-generation`, `k8s` ↔ `kubernetes`), a plural
+     (`doc-hub` ↔ `docs-hub`), or a team's shorthand and the full id (`enterprise-prd` ↔
+     `oy-gemini-enterprise-prd`).
      That judgment is yours and it is where this layer earns its keep. From the
      `lore wiki concepts` registry you already loaded, read down the list ONCE and spot
      equivalent pairs by meaning; check the cited daily pages when a short form might

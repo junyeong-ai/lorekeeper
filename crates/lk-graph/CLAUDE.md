@@ -128,25 +128,30 @@ on-disk state, never from a cached snapshot.
   state.
 - **`concept_lint::find_duplicate_concepts` reports NAME COLLISIONS, not similarity.**
   Each page claims a set of names — its slug, `title`, and every `aliases` entry — and a
-  finding is two pages claiming one name. `identity_keys` reduces a name through
-  `lk_core::concept::slugify` (the same normalization that mints page ids and the
-  pipeline's alias index, so a collision here is exactly a name that routes ambiguously
-  there) to two exact keys: the singularized token MULTISET (`doc-hub` ~ `docs-hub`,
-  order/case/separator/plural) and the tokens CONCATENATED (`vector-db` ~ `vectordb`,
-  separator placement). Both keys are hash-grouped, so the scan is linear.
-  **There is deliberately no score and no threshold.** The predecessor scored slug
-  character bigrams (Sørensen-Dice ≥ `concept_near_duplicate_threshold`, since removed
-  from config); measured on a 1,599-concept vault it returned 298 findings containing one
-  real duplicate. Character overlap is morphology, so it fires on shared namespace
-  prefixes (`amazon-sagemaker-ai` ~ `amazon-sagemaker-hyperpod`), shared head nouns
-  (`robot-foundation-model` ~ `tabular-foundation-model`) and coincidence (`agentops` ~
-  `gentoo`), while missing acronym pairs outright — and no cutoff separates those from
-  duplicates, because the difference is meaning. A permanently-red lint is worse than a
-  silent one. The exact rule also needs no `is_version_variant` escape hatch: `gpt-4`/
-  `gpt-5` and `gemini-3-1-flash-lite`/`gemini-3-5-flash-lite` simply claim different
-  names. Semantic equivalence (`k8s` ↔ `kubernetes`) is out of scope BY CONSTRUCTION and
-  belongs to `/lore-wiki audit` layer 5, which reads meaning. Read-only; `graph merge` is
-  the remedy a human triggers.
+  finding is two pages claiming one name. `identity_key` is `lk_core::concept::slugify`
+  with the separators dropped: slugify is the normalization that mints page ids and keys
+  the pipeline's alias index (so a collision here is exactly a name that routes ambiguously
+  there), and dropping separators folds the only thing it preserves that carries no
+  identity — WHERE the breaks fall (`vector-db` ~ `vectordb` ~ `Vector DB`). Keys are
+  hash-grouped, so the scan is linear. **A finding therefore cannot be a false positive**:
+  the two names are the same characters in the same order.
+  **There is deliberately no score, no threshold, and no morphology.** The predecessor
+  scored slug character bigrams (Sørensen-Dice ≥ `concept_near_duplicate_threshold`, since
+  removed from config); measured on a 1,599-concept vault it returned 298 findings
+  containing one real duplicate, because character overlap is morphology — it fires on
+  shared namespace prefixes (`amazon-sagemaker-ai` ~ `amazon-sagemaker-hyperpod`), shared
+  head nouns (`robot-foundation-model` ~ `tabular-foundation-model`) and coincidence
+  (`agentops` ~ `gentoo`) while missing acronym pairs outright. Two softer keys were
+  measured on the same vault and cut for the same reason: an order-insensitive token
+  multiset found NOTHING the exact key did not (no two slugs are permutations) while
+  assuming word order carries no meaning, and per-token plural stripping bought exactly one
+  finding at the cost of collapsing `http` onto `https`. A permanently-red lint is worse
+  than a silent one, so precision wins and recall goes where it can be judged. The exact
+  rule also needs no `is_version_variant` escape hatch: `gpt-4`/`gpt-5` and
+  `gemini-3-1-flash-lite`/`gemini-3-5-flash-lite` simply claim different names. Everything
+  about MEANING — plurals, acronyms (`k8s` ↔ `kubernetes`), a team's shorthand — is out of
+  scope BY CONSTRUCTION and belongs to `/lore-wiki audit` layer 5. Read-only; `graph merge`
+  is the remedy a human triggers.
 - **`concept_lint::find_unresolved_conflicts`**: reports concept pages whose body carries an
   unresolved `> [!conflict]` callout — a contradiction `/lore-wiki audit` flagged
   between cited sources. The marker lives in the LLM-owned synthesis body (NOT

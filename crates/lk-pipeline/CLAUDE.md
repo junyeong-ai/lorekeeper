@@ -125,8 +125,11 @@ domain-neutral engine — then no work-log, reviews, or `is_personal` are produc
   on-disk concept registry (`lore wiki concepts`) and reuses an established name instead
   of forking a variant — the pipeline embeds no registry in the task.
 - **`build_alias_index` seeds every page's own slug before any name.** The index maps
-  `slugify(name) → ConceptIdentity` so an extraction naming a synonym lands on the
-  established page; a page owning its OWN address is what stops a stale alias elsewhere
+  `lk_core::concept::identity_key(name) → ConceptIdentity` — the SAME key `lore graph lint`
+  uses to report two pages owning one name, so what routes here and what the lint calls a
+  duplicate cannot drift apart. Keying on identity rather than the slug is also what makes
+  `VectorDB` land on `vector-db.md` instead of minting a second page. A page owning its OWN
+  address is what stops a stale alias elsewhere
   from redirecting a concept away from its page. Deriving that claim from title/aliases
   alone would only protect pages whose names happen to reproduce the stem — and a page
   titled more descriptively than its file (`access-ingress-2axis-model` ←

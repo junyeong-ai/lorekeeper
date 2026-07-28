@@ -3161,6 +3161,69 @@ async fn a_grounding_from_a_later_result_still_seeds_a_new_concept_page() {
     );
 }
 
+/// Where the separators fall carries no identity, so an extraction that spells an
+/// established name without them must land on that page rather than mint a second one at
+/// its own spelling. The alias index and `graph lint` share `identity_key` precisely so
+/// the page pair the lint calls a duplicate is the one the index refuses to create.
+#[tokio::test]
+async fn a_name_spelled_without_separators_lands_on_the_established_page() {
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let config = base_config(vault);
+
+    let concepts = vault.join("wiki").join("concepts");
+    std::fs::create_dir_all(&concepts).unwrap();
+    std::fs::write(
+        concepts.join("vector-db.md"),
+        "---\nid: vector-db\ntype: concept\ntitle: \"Vector DB\"\naliases: [\"Vector DB\"]\n\
+         created: 2026-06-06\nupdated: 2026-06-06\nsource_count: 3\n---\n\n\
+         ## Synthesis\n\nEstablished body.\n\n## Sources\n\n- x\n",
+    )
+    .unwrap();
+
+    let ctx = build_ctx(&config, Arc::new(NoopLlmClient));
+    let mut pipeline = Pipeline::new(vault, ctx);
+
+    let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
+    let result = lk_queue::TaskResult {
+        task_id: "ext-1".into(),
+        cache_hash: "h".into(),
+        target: lk_queue::TaskTarget {
+            vault_path: "daily/test-source/2026-05-23.md".into(),
+            kind: lk_queue::TargetKind::DailyConcepts,
+            anchor: "## Related Concepts".into(),
+            concepts_dir: "../../wiki/concepts".into(),
+        },
+        date: jiff::civil::date(2026, 5, 23),
+        concepts: vec![lk_queue::ReportedConcept {
+            concept: ExtractedConcept {
+                name: "VectorDB".into(),
+                category: None,
+            },
+            synthesis: Some("A later mention must not overwrite the established body.".into()),
+        }],
+    };
+
+    let rewritten = pipeline.apply_concept_result(&result, page).await.unwrap();
+    assert!(
+        rewritten.contains("../../wiki/concepts/vector-db.md"),
+        "citation must point at the established page: {rewritten}"
+    );
+    assert!(
+        !rewritten.contains("vectordb.md"),
+        "a separator-free spelling must not mint a second page: {rewritten}"
+    );
+
+    let pages = pipeline.render_concept_pages().await.unwrap();
+    assert_eq!(pages.len(), 1);
+    assert!(pages[0].path.to_string().ends_with("vector-db.md"));
+    assert!(
+        pages[0].content.contains("Established body."),
+        "the established synthesis must survive: {}",
+        pages[0].content
+    );
+}
+
 /// A page owns its own address even when NONE of its names reproduces it — a long
 /// descriptive title over a short slug is the common case, and such a page has no name
 /// that slugifies to its own stem. A stale alias elsewhere must not be able to take that

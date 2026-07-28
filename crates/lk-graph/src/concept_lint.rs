@@ -16,6 +16,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use lk_core::concept::identity_key;
 use lk_core::config::ConceptCategory;
 use lk_core::frontmatter;
 use lk_core::markdown::FenceState;
@@ -200,17 +201,27 @@ pub struct DuplicateConcept {
 /// pipeline's alias index picks one and the other's citations fragment away from it.
 /// Read-only; `lore graph merge` is the remedy a human triggers.
 ///
-/// Deliberately EXACT, with no similarity score and no threshold. A scored variant
-/// (Sørensen-Dice over slug character bigrams) preceded this and was measured on a
-/// 1,599-concept vault: 298 findings, of which one was a real duplicate — the signal is
-/// morphology, so it fires on every shared namespace prefix (`amazon-sagemaker-ai` ~
-/// `amazon-sagemaker-hyperpod`), every shared head noun (`robot-foundation-model` ~
+/// Deliberately EXACT: no score, no threshold, and no morphology. Two names collide when
+/// they are the SAME SEQUENCE OF CHARACTERS under the vault's own normalization, and
+/// nothing else — so a finding can never be a false positive, only a page pair a human
+/// resolves by merging or renaming.
+///
+/// A scored variant (Sørensen-Dice over slug character bigrams) preceded this and was
+/// measured on a 1,599-concept vault: 298 findings, of which one was a real duplicate. The
+/// signal is morphology, so it fires on every shared namespace prefix (`amazon-sagemaker-ai`
+/// ~ `amazon-sagemaker-hyperpod`), every shared head noun (`robot-foundation-model` ~
 /// `tabular-foundation-model`) and on plain character coincidence (`agentops` ~ `gentoo`),
 /// while missing acronym pairs entirely. No cutoff separates those from real duplicates,
-/// because the difference is meaning, not spelling distance. A permanently-red lint is
-/// worse than a silent one, so the check now reports only what it can decide — and it
-/// needs no version-variant escape hatch, since `gpt-4`/`gpt-5` and `gemini-3-1-flash`/
-/// `gemini-3-5-flash` simply claim different names.
+/// because the difference is meaning, not spelling distance — and a permanently-red lint is
+/// worse than a silent one. Two softer keys were measured on the same vault and dropped for
+/// the same reason: an order-insensitive token multiset found nothing the exact key did not
+/// (no two slugs are permutations of each other) while assuming word order carries no
+/// meaning, and per-token plural stripping bought exactly one finding at the cost of
+/// collapsing `http` onto `https`. Everything they reached for — plurals, acronyms,
+/// shorthand — is a question about meaning, and belongs to `/lore-wiki audit` layer 5.
+///
+/// Being exact is also why no version-variant escape hatch is needed: `gpt-4`/`gpt-5` and
+/// `gemini-3-1-flash-lite`/`gemini-3-5-flash-lite` simply claim different names.
 pub fn find_duplicate_concepts(pages: &[ConceptPage]) -> Vec<DuplicateConcept> {
     // key → the pages claiming it, each with the first name on that page that produced it.
     // BTreeMaps throughout: iteration order is the key order and then page order, so the
@@ -218,13 +229,13 @@ pub fn find_duplicate_concepts(pages: &[ConceptPage]) -> Vec<DuplicateConcept> {
     let mut claims: BTreeMap<String, BTreeMap<usize, &str>> = BTreeMap::new();
     for (i, page) in pages.iter().enumerate() {
         for name in &page.names {
-            for key in identity_keys(name) {
+            if let Some(key) = identity_key(name) {
                 claims.entry(key).or_default().entry(i).or_insert(name);
             }
         }
     }
 
-    // A pair can collide under both keys; report it once, keyed on the page pair.
+    // Two pages can claim one another through several names; report the PAIR once.
     // `pages` is slug-sorted, so `i < j` already yields lexicographically-ordered `(a, b)`.
     let mut pairs: BTreeMap<(usize, usize), (&str, &str)> = BTreeMap::new();
     for holders in claims.values() {
@@ -247,44 +258,6 @@ pub fn find_duplicate_concepts(pages: &[ConceptPage]) -> Vec<DuplicateConcept> {
             b_name: b_name.to_owned(),
         })
         .collect()
-}
-
-/// The identity keys a name claims — the forms under which two spellings are the same
-/// name. Both are derived from `lk_core::concept::slugify`, so a claim is compared under
-/// the very normalization (NFKC, case, punctuation) that mints page ids and the
-/// pipeline's alias index: a name that collides here is a name that routes ambiguously
-/// there. Empty for a name that slugifies to nothing (pure punctuation).
-///
-/// * `words:` — the token multiset, singularized. Absorbs separator, case, order and
-///   plural variance (`doc-hub` ~ `docs-hub`, `Chain of Thought` ~ `chain-of-thought`).
-/// * `chars:` — the tokens concatenated. Absorbs separator PLACEMENT, which a multiset
-///   cannot see (`vector-db` ~ `vectordb`).
-fn identity_keys(name: &str) -> Vec<String> {
-    let Some(slug) = lk_core::concept::slugify(name) else {
-        return Vec::new();
-    };
-    // slugify collapses separator runs and trims the edges, so no segment is empty.
-    let mut words: Vec<&str> = slug.split('-').map(singular).collect();
-    words.sort_unstable();
-    vec![
-        format!("words:{}", words.join("-")),
-        format!("chars:{}", slug.replace('-', "")),
-    ]
-}
-
-/// A token with an English plural `s` removed, so `docs-hub` and `doc-hub` claim one
-/// name. Three exclusions keep it from mangling words that merely end in `s`: a stem
-/// under three characters (`ops`, `aws`, `k8s` — the `s` belongs to the word), and a
-/// stem already ending in `s`, `u` or `i` (`css`, `status`, `analysis`). A CJK token
-/// never ends in `s`, so it is returned untouched.
-fn singular(token: &str) -> &str {
-    let Some(stem) = token.strip_suffix('s') else {
-        return token;
-    };
-    if stem.chars().count() < 3 || stem.ends_with(['s', 'u', 'i']) {
-        return token;
-    }
-    stem
 }
 
 /// A concept page carrying an unresolved `> [!conflict]` callout — a contradiction
@@ -483,12 +456,8 @@ mod tests {
     }
 
     #[test]
-    fn spelling_variants_of_one_name_are_flagged() {
+    fn one_name_spelled_two_ways_is_flagged() {
         let tmp = TempDir::new().unwrap();
-        // Plural (`words:` key) and separator placement (`chars:` key) — the two forms
-        // in which one name is written two ways.
-        write_concept(tmp.path(), "doc-hub", "id: doc-hub");
-        write_concept(tmp.path(), "docs-hub", "id: docs-hub");
         write_concept(tmp.path(), "vector-db", "id: vector-db");
         write_concept(tmp.path(), "vectordb", "id: vectordb");
         write_concept(tmp.path(), "kubernetes", "id: kubernetes");
@@ -496,8 +465,8 @@ mod tests {
         let pairs: Vec<(&str, &str)> = result.iter().map(|d| (&*d.a, &*d.b)).collect();
         assert_eq!(
             pairs,
-            vec![("doc-hub", "docs-hub"), ("vector-db", "vectordb")],
-            "one name spelled two ways must be flagged, sorted, and nothing else: {result:?}"
+            vec![("vector-db", "vectordb")],
+            "separator placement carries no identity; nothing else may be flagged: {result:?}"
         );
     }
 
@@ -526,8 +495,8 @@ mod tests {
 
     #[test]
     fn a_page_pair_is_reported_once_however_many_names_collide() {
-        // Two pages can collide under both keys and via several names each. The finding
-        // is about the PAIR, so it is emitted once.
+        // Two pages can reach each other through several names each. The finding is about
+        // the PAIR, so it is emitted once.
         let tmp = TempDir::new().unwrap();
         write_concept(
             tmp.path(),
@@ -558,9 +527,9 @@ mod tests {
 
     #[test]
     fn distinct_names_are_not_flagged() {
-        // The four classes the previous similarity scorer false-fired on, measured on a
-        // real 1,599-concept vault. None of them claims another page's name, so none is
-        // a finding — and no version-variant escape hatch is needed to keep them off.
+        // Every class the softer rules false-fired on. The first four sank the similarity
+        // scorer (measured on a real 1,599-concept vault); the last two are why neither an
+        // order-insensitive multiset nor plural stripping survived review.
         let tmp = TempDir::new().unwrap();
         for slug in [
             // shared namespace prefix
@@ -586,6 +555,12 @@ mod tests {
             // short partial overlap
             "rag",
             "raga",
+            // word order carries meaning
+            "agent-harness",
+            "harness-agent",
+            // a trailing `s` that belongs to the word, not to a plural
+            "http",
+            "https",
         ] {
             write_concept(tmp.path(), slug, &format!("id: {slug}"));
         }
@@ -594,39 +569,22 @@ mod tests {
     }
 
     #[test]
-    fn case_punctuation_order_and_script_folding_cannot_hide_a_collision() {
-        // Names are compared through `slugify`, the same normalization that mints page
-        // ids — so display styling never lets one name address two pages unnoticed.
+    fn only_what_carries_no_identity_is_folded() {
+        // Names are compared through `slugify`, the same normalization that mints page ids,
+        // so display styling never lets one name address two pages unnoticed…
         assert_eq!(
-            identity_keys("Chain of Thought"),
-            identity_keys("chain-of-thought")
+            identity_key("Chain of Thought"),
+            identity_key("chain-of-thought")
         );
-        assert_eq!(identity_keys("A/I"), identity_keys("a i"));
-        assert_eq!(identity_keys("ＲＡＧ"), identity_keys("rag")); // NFKC full-width
-        assert_eq!(
-            identity_keys("agent harness")[0],
-            identity_keys("harness agent")[0],
-            "the `words:` key is a multiset, so token order does not matter"
-        );
-        assert!(identity_keys("!!!").is_empty());
-    }
-
-    #[test]
-    fn singular_only_strips_a_real_plural() {
-        assert_eq!(singular("docs"), "doc");
-        assert_eq!(singular("agents"), "agent");
-        // The `s` belongs to the word: too short to be a plural stem…
-        assert_eq!(singular("ops"), "ops");
-        assert_eq!(singular("aws"), "aws");
-        assert_eq!(singular("k8s"), "k8s");
-        // …or the stem already ends in a letter that makes the `s` part of the word.
-        assert_eq!(singular("css"), "css");
-        assert_eq!(singular("status"), "status");
-        assert_eq!(singular("analysis"), "analysis");
-        assert_eq!(singular("harness"), "harness");
-        // No trailing `s` at all, including CJK.
-        assert_eq!(singular("agent"), "agent");
-        assert_eq!(singular("에이전트"), "에이전트");
+        assert_eq!(identity_key("A/I"), identity_key("a i"));
+        assert_eq!(identity_key("ＲＡＧ"), identity_key("rag")); // NFKC full-width
+        assert_eq!(identity_key("Vite+"), identity_key("vite"));
+        assert_eq!(identity_key("vector-db"), identity_key("vectordb"));
+        // …and nothing beyond that is folded: order and every letter are identity.
+        assert_ne!(identity_key("agent harness"), identity_key("harness agent"));
+        assert_ne!(identity_key("http"), identity_key("https"));
+        assert_ne!(identity_key("doc-hub"), identity_key("docs-hub"));
+        assert_eq!(identity_key("!!!"), None);
     }
 
     #[test]

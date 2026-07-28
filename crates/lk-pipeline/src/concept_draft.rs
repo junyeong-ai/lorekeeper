@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use lk_core::concept::{ExtractedConcept, slugify};
+use lk_core::concept::{ExtractedConcept, identity_key, slugify};
 use lk_core::config::VaultDirs;
 use lk_core::i18n::Locale;
 use lk_core::vault_path::VaultPath;
@@ -20,16 +20,16 @@ pub struct ConceptIdentity {
 
 pub struct ConceptDrafts {
     drafts: BTreeMap<String, ConceptDraft>,
-    /// `slugify(alias)` → the canonical page slug that alias belongs to, built once from
-    /// the concept pages already in the vault.
+    /// `identity_key(name)` → the page that owns that name, built once from the concept
+    /// pages already in the vault.
     ///
     /// A concept page's id is NOT always `slugify(title)`: a page renamed or merged keeps
     /// its original id and records the other names as aliases, which is what makes every
     /// existing citation to it keep resolving. Extractions arrive under any of those names,
     /// so resolving by slug alone would mint a second page beside the canonical one
     /// — splitting a concept's citations in two and leaving the synthesis on the old page.
-    /// The lookup is exact (both sides through `slugify`), never fuzzy: a name either IS a
-    /// recorded alias or it is a new concept.
+    /// The lookup is EXACT (both sides through `identity_key`), never fuzzy: a name either
+    /// IS one this vault already answers to, or it is a new concept.
     alias_index: Option<BTreeMap<String, ConceptIdentity>>,
 }
 
@@ -80,6 +80,10 @@ impl ConceptDrafts {
     /// Resolve a concept name to the page identity that owns it, building the alias index
     /// from disk on first use. Pure lookup — nothing is staged, so callers may resolve
     /// before deciding to commit.
+    ///
+    /// Lookup is by `identity_key`, so a name reaches its page however its separators fall
+    /// (`VectorDB` finds `vector-db.md`); only when NO page owns the name does it become a
+    /// new concept, addressed at its own `slugify` slug.
     pub async fn resolve_identity(
         &mut self,
         name: &str,
@@ -91,10 +95,11 @@ impl ConceptDrafts {
         if self.alias_index.is_none() {
             self.alias_index = Some(build_alias_index(reader, dirs).await?);
         }
+        let key = slug.replace('-', "");
         Ok(self
             .alias_index
             .as_ref()
-            .and_then(|index| index.get(&slug))
+            .and_then(|index| index.get(&key))
             .cloned()
             .unwrap_or_else(|| ConceptIdentity {
                 name: name.to_string(),
@@ -444,7 +449,10 @@ fn warn_category_conflict(slug: &str, established: Option<&str>, incoming: Optio
 }
 
 /// Map every name a concept page answers to — its own slug, its title, and each alias —
-/// to that page's slug, so an extraction naming any of them lands on the established page.
+/// to that page's identity, so an extraction naming any of them lands on the established
+/// page. Keyed by `lk_core::concept::identity_key`, the same rule `lore graph lint` uses to
+/// report two pages owning one name: what routes here and what the lint calls a duplicate
+/// cannot drift apart.
 async fn build_alias_index(
     reader: &dyn VaultStore,
     dirs: &VaultDirs,
@@ -477,6 +485,9 @@ async fn build_alias_index(
                     .flatten()
                     .filter_map(|v| v.as_str()),
             );
+        let Some(own_key) = identity_key(slug) else {
+            continue;
+        };
         let identity = ConceptIdentity {
             name: title.clone(),
             slug: slug.to_string(),
@@ -488,9 +499,11 @@ async fn build_alias_index(
         // to reproduce the stem, and a page titled more descriptively than its file
         // (`access-ingress-2axis-model` ← "Access × Ingress 2-Axis Deployment Model") has
         // no name that does — leaving its address free for another page's alias to take.
-        index.insert(slug.to_string(), identity.clone());
+        index.insert(own_key, identity.clone());
         for name in names {
-            let Some(key) = slugify(name) else { continue };
+            let Some(key) = identity_key(name) else {
+                continue;
+            };
             match index.entry(key) {
                 std::collections::btree_map::Entry::Vacant(slot) => {
                     slot.insert(identity.clone());
@@ -501,13 +514,16 @@ async fn build_alias_index(
                     // sorted path order) but arbitrary, and every citation naming the alias
                     // lands on one page while the other's meaning stays uncited — so it is
                     // reported like a category conflict and left for a human to merge.
-                    // Losing to a page's OWN slug is the rule above working, not a conflict.
-                    if held.get().slug != slug && held.key() != &held.get().slug {
+                    // Losing to a page that holds the key as its own ADDRESS is the seed
+                    // above working, not a conflict.
+                    let held_claims_it_by_name =
+                        identity_key(&held.get().slug).as_deref() != Some(held.key());
+                    if held.get().slug != slug && held_claims_it_by_name {
                         tracing::warn!(
-                            alias = %held.key(),
+                            name = %held.key(),
                             resolves_to = %held.get().slug,
                             also_claimed_by = %slug,
-                            "two concept pages register the same alias"
+                            "two concept pages claim the same name"
                         );
                     }
                 }

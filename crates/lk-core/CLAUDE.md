@@ -47,6 +47,16 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   (including spaces, punctuation, and literal `-`) to a separator, collapses runs to a
   single `-`, and trims edges. Concept slugs are always re-normalized through it to
   prevent path injection from LLM output.
+- **`identity_key()` is `slugify` with the separators dropped** — the ADDRESS a name is
+  written at vs the IDENTITY it claims. A slug must stay readable as a filename so it keeps
+  the breaks; identity does not care where they fall, so `Vector DB` / `vector-db` /
+  `vectordb` are one name. Nothing further is folded: word order and every letter are
+  identity (`agent-harness` ≠ `harness-agent`, `http` ≠ `https`, `doc-hub` ≠ `docs-hub`) —
+  whether two names mean one concept is a judgment, and lives in `/lore-wiki audit`, never
+  here. Single-sourced because two consumers must agree EXACTLY: `lk_pipeline`'s alias index
+  routes an extracted name to the page owning it, and `lk_graph`'s duplicate lint reports
+  two pages owning one name. Were they to disagree, the lint would flag pairs the index
+  routes fine, or stay silent while the index mints a second page for a name already taken.
 - **`link`** is the single implementation of the vault's link vocabulary: inline
   markdown links `[Display](relative/path.md)`, destinations relative to the containing
   page and always `.md`-suffixed. Construction (`md_link` + `relative_dest`, CommonMark

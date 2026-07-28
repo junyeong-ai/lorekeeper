@@ -39,6 +39,29 @@ pub fn slugify(name: &str) -> Option<String> {
     if out.is_empty() { None } else { Some(out) }
 }
 
+/// The identity a name claims, as opposed to the ADDRESS [`slugify`] writes it at.
+///
+/// The two answer different questions. A slug has to stay readable as a filename, so it
+/// keeps the separators; identity does not care where the breaks fall, only what the name
+/// is — `Vector DB`, `vector-db` and `vectordb` are one name written three ways, and every
+/// vault defect they cause comes from treating them as three. So identity is the slug with
+/// its separators dropped: everything [`slugify`] folds (NFKC, case, punctuation) plus the
+/// one thing it must preserve but that carries no identity.
+///
+/// Nothing further is folded. Word order and every letter are identity, so `agent-harness`
+/// and `harness-agent`, `http` and `https`, `doc-hub` and `docs-hub` are all DIFFERENT
+/// names — whether they name the same concept is a question about meaning, which this
+/// cannot and must not answer.
+///
+/// Single-sourced because two consumers must agree exactly: `lk_pipeline`'s alias index
+/// resolves an extracted name to the page that owns it, and `lk_graph`'s duplicate lint
+/// reports two pages owning one name. If they disagreed, the lint would report pairs the
+/// index routes fine, or stay silent while the index mints a second page for a name that
+/// already has one.
+pub fn identity_key(name: &str) -> Option<String> {
+    Some(slugify(name)?.replace('-', ""))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -59,6 +82,27 @@ mod tests {
             Some("leading-and-trailing".into())
         );
         assert_eq!(slugify("under_score"), Some("under-score".into()));
+    }
+
+    #[test]
+    fn identity_key_folds_only_what_carries_no_identity() {
+        // Everything slugify folds, plus where the separators fall.
+        let vector_db = identity_key("Vector DB");
+        assert_eq!(identity_key("vector-db"), vector_db);
+        assert_eq!(identity_key("vectordb"), vector_db);
+        assert_eq!(identity_key("VectorDB"), vector_db);
+        assert_eq!(
+            identity_key("Chain of Thought"),
+            identity_key("chain-of-thought")
+        );
+        assert_eq!(identity_key("ＲＡＧ"), identity_key("rag")); // NFKC full-width
+        assert_eq!(identity_key("Vite+"), identity_key("vite"));
+        // And nothing else. Order and every letter are identity; whether two of these
+        // name one concept is a question about meaning, which this must not answer.
+        assert_ne!(identity_key("agent harness"), identity_key("harness agent"));
+        assert_ne!(identity_key("http"), identity_key("https"));
+        assert_ne!(identity_key("doc-hub"), identity_key("docs-hub"));
+        assert_eq!(identity_key("---"), None);
     }
 
     #[test]
