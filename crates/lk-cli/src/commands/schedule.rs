@@ -114,30 +114,28 @@ pub async fn run(
         Some(_) => pipeline_env(bin, &config_path),
         None => Vec::new(),
     };
-    // A crontab line ends at the newline, so any value carrying one truncates the entry and
-    // leaves its remainder parsed as a schedule of its own. Every value that reaches a line —
-    // the environment, the working directory, the config path — is checked, and refused
-    // rather than emitted as a file that reads as valid and is not.
-    let cwd_str = cwd.display().to_string();
-    let on_a_line = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).chain([
-        ("the working directory", cwd_str.as_str()),
-        ("the config path", config_path.to_str().unwrap_or_default()),
-    ]);
-    if let Some((what, _)) = on_a_line
-        .into_iter()
-        .find(|(_, v)| v.contains(['\n', '\r']))
-    {
-        return Err(miette::miette!(
-            "{what} contains a line break, which a crontab entry cannot carry. \
-             Fix it, then re-run."
-        ));
-    }
-
     match format {
-        Format::Cron => print_cron(bin, &cwd, &jobs, &env),
+        Format::Cron => print_cron(bin, &cwd, &jobs, &env)?,
         Format::Launchd => print_launchd(bin, &cwd, &jobs, &env)?,
     }
     Ok(())
+}
+
+/// Refuse a crontab line carrying a line break.
+///
+/// A crontab entry ends at the newline, so one inside any value — an environment value, the
+/// working directory, a binary or script path, even a schedule expression, since
+/// `validate_cron` splits on whitespace — truncates the entry and leaves its remainder
+/// parsed as a line of its own. The check is on the ASSEMBLED line rather than on each
+/// source, so it cannot fall behind as new values start reaching one.
+fn checked_line(line: String) -> miette::Result<String> {
+    if line.contains(['\n', '\r']) {
+        return Err(miette::miette!(
+            "a scheduled entry contains a line break, which a crontab line cannot carry:\n  \
+             {line:?}\nFix the offending value, then re-run."
+        ));
+    }
+    Ok(line)
 }
 
 /// The scheduled job list implied by `config`'s cron keys.
@@ -211,7 +209,12 @@ fn build_jobs(
     jobs
 }
 
-fn print_cron(bin: &str, cwd: &std::path::Path, jobs: &[Job], env: &[(String, String)]) {
+fn print_cron(
+    bin: &str,
+    cwd: &std::path::Path,
+    jobs: &[Job],
+    env: &[(String, String)],
+) -> miette::Result<()> {
     let cwd_str = shell_escape(&cwd.display().to_string());
     let bin_escaped = shell_escape(bin);
 
@@ -230,7 +233,7 @@ fn print_cron(bin: &str, cwd: &std::path::Path, jobs: &[Job], env: &[(String, St
     if !env.is_empty() {
         println!("# Environment the pipelines need to find their own tools:");
         for (key, value) in env {
-            println!("{key}={value}");
+            println!("{}", checked_line(format!("{key}={value}"))?);
         }
         println!();
     }
@@ -241,8 +244,12 @@ fn print_cron(bin: &str, cwd: &std::path::Path, jobs: &[Job], env: &[(String, St
             command.push(' ');
             command.push_str(&shell_escape(arg));
         }
-        println!("{} cd {cwd_str} && {command}", job.schedule);
+        println!(
+            "{}",
+            checked_line(format!("{} cd {cwd_str} && {command}", job.schedule))?
+        );
     }
+    Ok(())
 }
 
 /// Emit one plist per job, separated by a header naming the file it belongs in.
