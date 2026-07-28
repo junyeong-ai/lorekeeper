@@ -170,13 +170,17 @@ mod tests {
     fn a_numeral_is_a_numeral_in_any_script() {
         // The break test asks `is_numeric`, not `is_ascii_digit`: NFKC folds full-width,
         // superscript and enclosed forms to ASCII, but Arabic-Indic and Devanagari digits
-        // survive it and are still numerals. A Roman numeral folds to LETTERS under NFKC
-        // (`Ⅴ` → `v`), and Korean number words are letters, so both are typography.
+        // survive it and are still numerals. `is_numeric` is Nd ∪ Nl ∪ No, so a numeral
+        // that NFKC leaves alone stays one — `Ⅴ` decomposes to the letter `v`, while `ↀ`
+        // (U+2180, no decomposition) does not and keeps its break. Korean number words are
+        // letters. None of this is reachable from a real concept name; it is pinned so the
+        // predicate is a decision rather than an accident.
         assert_ne!(identity_key("x ٥ ٦"), identity_key("x ٥٦")); // Arabic-Indic
         assert_ne!(identity_key("x ५ ६"), identity_key("x ५६")); // Devanagari
         assert_ne!(identity_key("x ５ ６"), identity_key("x ５６")); // full-width
         assert_ne!(identity_key("x²·³"), identity_key("x²³")); // superscript
-        assert_eq!(identity_key("x Ⅴ Ⅵ"), identity_key("xⅤⅥ")); // Roman → letters
+        assert_eq!(identity_key("x Ⅴ Ⅵ"), identity_key("xⅤⅥ")); // U+2160 → letters
+        assert_ne!(identity_key("x ↀ ↀ"), identity_key("xↀↀ")); // U+2180 stays a numeral
         assert_eq!(identity_key("x 오 육"), identity_key("x오육")); // Hangul → letters
     }
 

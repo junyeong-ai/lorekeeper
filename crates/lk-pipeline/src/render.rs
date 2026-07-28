@@ -31,9 +31,8 @@ pub struct RenderResult {
     pub content: String,
 }
 
-/// Relative path from a target page to the concepts directory — the value carried in
-/// `TaskTarget.concepts_dir` and the base of every concept link a page renders, so
-/// the pipeline and the skill build byte-identical destinations.
+/// Relative path from a target page to the concepts directory — the base of every concept
+/// link that page renders, computed here so no caller does relative-path arithmetic.
 pub fn concepts_dir_dest(vault_path: &str, dirs: &VaultDirs) -> String {
     link::relative_dest(
         Path::new(vault_path),

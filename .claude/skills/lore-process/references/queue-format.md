@@ -50,8 +50,7 @@ path patterns from AGENTS.md.
   "target": {
     "vault_path": "<daily>/ai-news/2026-05-23.md",
     "kind": "daily-summary",
-    "anchor": "## Summary",
-    "concepts_dir": "../../wiki/concepts"
+    "anchor": "## Summary"
   }
 }
 ```
@@ -66,11 +65,6 @@ path patterns from AGENTS.md.
 `target.anchor`: the exact section heading (e.g. `"## Summary"`, or its localized form per
 AGENTS.md) the pipeline wrote, resolved from i18n at queue time. Always use this as the
 locate key — never hardcode headings per `target.kind`.
-
-`target.concepts_dir`: the relative path from the target page's directory to the
-concepts directory, precomputed by the pipeline. A concept link written into the page
-is `[{Name}]({target.concepts_dir}/{slug}.md)` — pure concatenation; never derive the
-relative path yourself.
 
 `cache_hash` is BLAKE3-128 (32 hex chars) of the cache-identity subset of `input`
 (it excludes `source_type`, which scopes extraction but doesn't shape output). It equals the value the pipeline wrote

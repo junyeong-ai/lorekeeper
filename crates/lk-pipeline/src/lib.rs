@@ -251,7 +251,6 @@ impl Pipeline {
                     vault_path: daily_path.clone(),
                     kind: lk_queue::TargetKind::DailySummary,
                     anchor: format!("## {summary_heading}"),
-                    concepts_dir: render::concepts_dir_dest(&daily_path, &self.ctx.dirs),
                 },
             };
             let summary_decision = llm_cache::lookup(
@@ -275,7 +274,6 @@ impl Pipeline {
                     vault_path: daily_path.clone(),
                     kind: lk_queue::TargetKind::DailyRefineEvents,
                     anchor: format!("## {events_heading}"),
-                    concepts_dir: render::concepts_dir_dest(&daily_path, &self.ctx.dirs),
                 },
             };
             let refine_decision = llm_cache::lookup(
@@ -326,7 +324,6 @@ impl Pipeline {
                         vault_path: daily_path.clone(),
                         kind: lk_queue::TargetKind::DailyConcepts,
                         anchor: format!("## {concepts_heading}"),
-                        concepts_dir: render::concepts_dir_dest(&daily_path, &self.ctx.dirs),
                     },
                     categories: self.ctx.concept_categories.clone(),
                 };
@@ -757,7 +754,6 @@ impl Pipeline {
                     vault_path: vault_path.clone(),
                     kind: lk_queue::TargetKind::DocumentSummary,
                     anchor: format!("## {summary_heading}"),
-                    concepts_dir: render::concepts_dir_dest(&vault_path, &self.ctx.dirs),
                 },
             };
             let summary_decision = llm_cache::lookup(
@@ -797,7 +793,6 @@ impl Pipeline {
                         vault_path: vault_path.clone(),
                         kind: lk_queue::TargetKind::DocumentConcepts,
                         anchor: format!("## {concepts_heading}"),
-                        concepts_dir: render::concepts_dir_dest(&vault_path, &self.ctx.dirs),
                     },
                     categories: self.ctx.concept_categories.clone(),
                 };

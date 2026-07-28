@@ -2852,7 +2852,6 @@ async fn queue_results_materialize_through_the_same_merge_path() {
             vault_path: "daily/test-source/2026-05-23.md".into(),
             kind: lk_queue::TargetKind::DailyConcepts,
             anchor: "## Related Concepts".into(),
-            concepts_dir: "../../wiki/concepts".into(),
         },
         date: jiff::civil::date(2026, 5, 23),
         concepts: vec![
@@ -2950,7 +2949,6 @@ async fn a_page_without_the_concepts_section_is_an_error_not_a_silent_no_op() {
             vault_path: "daily/test-source/2026-05-23.md".into(),
             kind: lk_queue::TargetKind::DailyConcepts,
             anchor: "## Related Concepts".into(),
-            concepts_dir: "../../wiki/concepts".into(),
         },
         date: jiff::civil::date(2026, 5, 23),
         concepts: vec![lk_queue::ReportedConcept {
@@ -2993,7 +2991,6 @@ async fn a_page_that_cannot_record_completion_is_an_error() {
             vault_path: "daily/test-source/2026-05-23.md".into(),
             kind: lk_queue::TargetKind::DailyConcepts,
             anchor: "## Related Concepts".into(),
-            concepts_dir: "../../wiki/concepts".into(),
         },
         date: jiff::civil::date(2026, 5, 23),
         concepts: vec![lk_queue::ReportedConcept {
@@ -3052,7 +3049,6 @@ async fn a_concept_that_fails_to_stage_takes_its_whole_result_with_it() {
             vault_path: "daily/test-source/2026-05-23.md".into(),
             kind: lk_queue::TargetKind::DailyConcepts,
             anchor: "## Related Concepts".into(),
-            concepts_dir: "../../wiki/concepts".into(),
         },
         date: jiff::civil::date(2026, 5, 23),
         concepts: names.iter().map(|n| named(n)).collect(),
@@ -3124,7 +3120,6 @@ async fn a_grounding_from_a_later_result_still_seeds_a_new_concept_page() {
             vault_path: vault_path.into(),
             kind: lk_queue::TargetKind::DailyConcepts,
             anchor: "## Related Concepts".into(),
-            concepts_dir: "../../wiki/concepts".into(),
         },
         date: jiff::civil::date(2026, 5, 23),
         concepts: vec![lk_queue::ReportedConcept {
@@ -3219,7 +3214,6 @@ async fn two_pages_claiming_one_address_resolve_deterministically() {
             vault_path: "daily/test-source/2026-05-23.md".into(),
             kind: lk_queue::TargetKind::DailyConcepts,
             anchor: "## Related Concepts".into(),
-            concepts_dir: "../../wiki/concepts".into(),
         },
         date: jiff::civil::date(2026, 5, 23),
         concepts: vec![lk_queue::ReportedConcept {
@@ -3294,7 +3288,6 @@ async fn two_spellings_in_one_extraction_resolve_to_one_page() {
             vault_path: "daily/test-source/2026-05-23.md".into(),
             kind: lk_queue::TargetKind::DailyConcepts,
             anchor: "## Related Concepts".into(),
-            concepts_dir: "../../wiki/concepts".into(),
         },
         date: jiff::civil::date(2026, 5, 23),
         concepts: vec![reported("Vector DB"), reported("VectorDB")],
@@ -3333,7 +3326,6 @@ async fn a_page_created_earlier_in_the_run_is_found_by_a_later_spelling() {
             vault_path: "daily/test-source/2026-05-23.md".into(),
             kind: lk_queue::TargetKind::DailyConcepts,
             anchor: "## Related Concepts".into(),
-            concepts_dir: "../../wiki/concepts".into(),
         },
         date: jiff::civil::date(2026, 5, 23),
         concepts: vec![lk_queue::ReportedConcept {
@@ -3396,7 +3388,6 @@ async fn a_break_between_digits_does_not_fold_one_version_onto_another() {
             vault_path: "daily/test-source/2026-05-23.md".into(),
             kind: lk_queue::TargetKind::DailyConcepts,
             anchor: "## Related Concepts".into(),
-            concepts_dir: "../../wiki/concepts".into(),
         },
         date: jiff::civil::date(2026, 5, 23),
         concepts: vec![lk_queue::ReportedConcept {
@@ -3459,7 +3450,6 @@ async fn a_name_spelled_without_separators_lands_on_the_established_page() {
             vault_path: "daily/test-source/2026-05-23.md".into(),
             kind: lk_queue::TargetKind::DailyConcepts,
             anchor: "## Related Concepts".into(),
-            concepts_dir: "../../wiki/concepts".into(),
         },
         date: jiff::civil::date(2026, 5, 23),
         concepts: vec![lk_queue::ReportedConcept {
@@ -3543,7 +3533,6 @@ async fn stale_alias_loses_to_the_address_owner(claimant: &str) {
             vault_path: "daily/test-source/2026-05-23.md".into(),
             kind: lk_queue::TargetKind::DailyConcepts,
             anchor: "## Related Concepts".into(),
-            concepts_dir: "../../wiki/concepts".into(),
         },
         date: jiff::civil::date(2026, 5, 23),
         concepts: vec![lk_queue::ReportedConcept {
@@ -3615,7 +3604,6 @@ async fn an_extraction_naming_an_alias_lands_on_the_established_page() {
             vault_path: "daily/test-source/2026-05-23.md".into(),
             kind: lk_queue::TargetKind::DailyConcepts,
             anchor: "## Related Concepts".into(),
-            concepts_dir: "../../wiki/concepts".into(),
         },
         date: jiff::civil::date(2026, 5, 23),
         concepts: vec![lk_queue::ReportedConcept {

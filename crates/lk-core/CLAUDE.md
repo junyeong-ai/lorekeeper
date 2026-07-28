@@ -50,12 +50,14 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
 - **`identity_key()` is `slugify` keeping only the separators that MEAN something** — the
   ADDRESS a name is written at vs the IDENTITY it claims. A slug must stay readable as a
   filename so it keeps every break; identity keeps a break only where it changes the name.
-  Between letters a break is typography, so `Vector DB` / `vector-db` / `vectordb` are one
-  name. Between DIGITS it is the name itself — positional notation makes `3-5` two numerals
-  and `35` one — so `Claude 3.5` ≠ `Claude 35`, `GPT-4.1` ≠ `GPT-41`, `Web 2.0` ≠ `web20`.
-  Dropping every separator folded exactly those together, and version-numbered names are the
-  most common shape in a technology vault. A break on only ONE side of a digit is still
-  typography (`GPT-4o` = `gpt4o`, `ISO-8601` = `iso8601`).
+  Every break is typography — `Vector DB` / `vector-db` / `vectordb` are one name, as are
+  `claude-35` / `claude35` — EXCEPT one between two NUMERALS, which is the name itself:
+  positional notation makes `3-5` two numerals and `35` one, so `Claude 3.5` ≠ `Claude 35`,
+  `GPT-4.1` ≠ `GPT-41`, `Web 2.0` ≠ `web20`. Dropping every separator folded exactly those
+  together, and version-numbered names are the most common shape in a technology vault. A
+  break on only ONE side of a numeral is still typography (`GPT-4o` = `gpt4o`,
+  `ISO-8601` = `iso8601`). "Numeral" is `char::is_numeric` (Nd ∪ Nl ∪ No), so a digit NFKC
+  leaves alone — Arabic-Indic, Devanagari — counts, while `Ⅴ` decomposes to a letter.
   Nothing else is folded: word order and every character are identity (`agent-harness` ≠
   `harness-agent`, `http` ≠ `https`, `doc-hub` ≠ `docs-hub`) — whether two names mean one
   concept is a judgment, and lives in `/lore-wiki audit`, never here.

@@ -338,7 +338,6 @@ mod tests {
                 vault_path: "daily/src/2026-05-23.md".into(),
                 kind: TargetKind::DailyConcepts,
                 anchor: "## Related Concepts".into(),
-                concepts_dir: "../../wiki/concepts".into(),
             },
             date: jiff::civil::date(2026, 5, 23),
             concepts: Vec::new(),
@@ -405,7 +404,6 @@ mod tests {
                 vault_path: "daily/test/2026-05-23.md".into(),
                 kind: TargetKind::DailySummary,
                 anchor: "## Summary".into(),
-                concepts_dir: "../../wiki/concepts".into(),
             },
         };
         let result = client.summarize(req).await.unwrap();
@@ -444,7 +442,6 @@ mod tests {
                     vault_path: "p".into(),
                     kind: TargetKind::DailySummary,
                     anchor: String::new(),
-                    concepts_dir: "../../wiki/concepts".into(),
                 },
             };
             client.summarize(req).await.unwrap();
@@ -473,7 +470,6 @@ mod tests {
                     vault_path: path.into(),
                     kind: TargetKind::DailySummary,
                     anchor: String::new(),
-                    concepts_dir: "../../wiki/concepts".into(),
                 },
             }
         }
@@ -525,7 +521,6 @@ mod tests {
                 vault_path: "daily/ai-news/2026-05-23.md".into(),
                 kind: TargetKind::DailyConcepts,
                 anchor: "## Related Concepts".into(),
-                concepts_dir: "../../wiki/concepts".into(),
             },
             categories: vec![],
         };
@@ -557,7 +552,6 @@ mod tests {
                     vault_path: "daily/tech-news/2026-05-23.md".into(),
                     kind: TargetKind::DailyConcepts,
                     anchor: "## Related Concepts".into(),
-                    concepts_dir: "../../wiki/concepts".into(),
                 },
                 categories: vec![],
             })
@@ -606,7 +600,6 @@ mod tests {
                 vault_path: "p".into(),
                 kind: TargetKind::DailySummary,
                 anchor: String::new(),
-                concepts_dir: "../../wiki/concepts".into(),
             },
         };
         client.summarize(req).await.unwrap();
@@ -636,7 +629,6 @@ mod tests {
                 vault_path: "p".into(),
                 kind: TargetKind::DailyConcepts,
                 anchor: "## c".into(),
-                concepts_dir: "../../wiki/concepts".into(),
             },
             categories: vec![
                 CategoryReference {
@@ -660,7 +652,6 @@ mod tests {
             vault_path: "p".into(),
             kind: TargetKind::DailySummary,
             anchor: "## s".into(),
-            concepts_dir: "../../wiki/concepts".into(),
         };
         let a = SummarizeRequest {
             text: "v1".into(),
@@ -691,7 +682,6 @@ mod tests {
                 vault_path: "daily/a.md".into(),
                 kind: TargetKind::DailySummary,
                 anchor: "## s".into(),
-                concepts_dir: "../../wiki/concepts".into(),
             },
         };
         let b = SummarizeRequest {
@@ -699,7 +689,6 @@ mod tests {
                 vault_path: "daily/b.md".into(),
                 kind: TargetKind::DailySummary,
                 anchor: "## s".into(),
-                concepts_dir: "../../wiki/concepts".into(),
             },
             ..a.clone()
         };
@@ -715,7 +704,6 @@ mod tests {
             vault_path: "synthesis/weekly/2026-W01.md".into(),
             kind: TargetKind::WeeklySynthesisThemes,
             anchor: "## Themes".into(),
-            concepts_dir: "../../wiki/concepts".into(),
         };
         let ko = ThemeRequest {
             text: "combined source text".into(),
@@ -789,7 +777,6 @@ mod tests {
                     vault_path: "p".into(),
                     kind: TargetKind::DailySummary,
                     anchor: String::new(),
-                    concepts_dir: "../../wiki/concepts".into(),
                 },
             })
             .await

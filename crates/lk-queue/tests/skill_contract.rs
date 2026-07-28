@@ -113,7 +113,6 @@ fn skill_documents_the_result_protocol_it_must_produce() {
             vault_path: "p".into(),
             kind: TargetKind::DailyConcepts,
             anchor: "## a".into(),
-            concepts_dir: "c".into(),
         },
         date: jiff::civil::date(2026, 1, 1),
         concepts: vec![],

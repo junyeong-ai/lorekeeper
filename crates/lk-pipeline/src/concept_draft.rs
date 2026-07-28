@@ -94,8 +94,8 @@ impl ConceptDrafts {
     /// `apply_concept_result` stages a whole extraction before folding any of it, so two
     /// spellings of one name in a single result would each resolve against the pre-batch
     /// index and mint rival pages. The index is a lookup cache, not the accumulator, so a
-    /// caller that abandons a resolution leaves nothing half-folded behind — only the slug
-    /// that name would have resolved to anyway.
+    /// caller that abandons a resolution leaves nothing half-folded behind — only the
+    /// decision that the FIRST spelling seen is the one this run answers with.
     pub async fn resolve_identity(
         &mut self,
         name: &str,
@@ -135,8 +135,12 @@ impl ConceptDrafts {
     ///
     /// The drafts are what that protects. Resolving a name does record it in the alias index
     /// (see [`Self::resolve_identity`]), so a `stage` that fails afterwards leaves that entry
-    /// behind — deliberately: it holds the slug the name would resolve to on any later
-    /// attempt, so the record cannot make a subsequent resolution differ from a fresh one.
+    /// behind. Deliberately, but it is not a no-op: the entry carries the FIRST spelling's
+    /// slug and display name, so a later spelling of the same identity inherits both, and a
+    /// run whose first mention was `VectorDB` writes `vectordb.md` where a run that saw
+    /// `Vector DB` first would write `vector-db.md`. Both are correct pages holding one
+    /// concept, whichever wins is deterministic for a given input, and the next run rebuilds
+    /// the index from disk — where the page's own address and title key alike.
     pub async fn stage(
         &mut self,
         concept: &ExtractedConcept,
@@ -550,6 +554,62 @@ pub fn has_valid_slug(concept: &ExtractedConcept) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A vault whose every page is missing, except one path whose read fails outright.
+    struct FailsOn(&'static str);
+
+    #[async_trait::async_trait]
+    impl VaultStore for FailsOn {
+        async fn read_page(
+            &self,
+            rel_path: &std::path::Path,
+        ) -> Result<Option<lk_core::frontmatter::VaultPage>, lk_vault::VaultError> {
+            if rel_path.to_string_lossy().contains(self.0) {
+                return Err(lk_vault::VaultError::Io(std::io::Error::other(
+                    "read failed",
+                )));
+            }
+            Ok(None)
+        }
+
+        async fn list_markdown(
+            &self,
+            _rel_dir: &std::path::Path,
+        ) -> Result<Vec<std::path::PathBuf>, lk_vault::VaultError> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// The property every caller that stages a batch before folding it relies on — and the
+    /// reason `Pipeline::plan`, `plan_documents` and `apply_concept_result` all read every
+    /// concept before committing any. `render_pages` emits the accumulator unconditionally,
+    /// so a fold that survived a failed batch would write concept pages for an origin page
+    /// the failed run never wrote.
+    #[tokio::test]
+    async fn a_failed_stage_leaves_the_drafts_untouched() {
+        let dirs = VaultDirs::default();
+        let reader = FailsOn("second");
+        let mut drafts = ConceptDrafts::new();
+
+        let first = ExtractedConcept {
+            name: "First".into(),
+            category: None,
+        };
+        let second = ExtractedConcept {
+            name: "Second".into(),
+            category: None,
+        };
+        let staged = drafts.stage(&first, None, &reader, &dirs).await.unwrap();
+        assert!(drafts.stage(&second, None, &reader, &dirs).await.is_err());
+        assert!(
+            drafts.drafts.is_empty(),
+            "staging alone must fold nothing, so the batch can be abandoned whole"
+        );
+
+        let date = jiff::civil::date(2026, 5, 23);
+        drafts.commit(staged, date);
+        assert_eq!(drafts.drafts.len(), 1, "only what the caller commits lands");
+    }
 
     #[test]
     fn capture_section_finds_body_under_any_locale_heading() {

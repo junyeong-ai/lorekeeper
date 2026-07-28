@@ -347,8 +347,8 @@ pub fn render_agents_md(
          carries the `.md` extension — the one form Obsidian, GitHub, and OKF consumers \
          all resolve. Never write `[[wikilinks]]`. A concept link from a page is \
          `[{{Name}}]({{concepts-dir}}/{{slug}}.md)`, where `{{concepts-dir}}` is the \
-         relative path to `{}/{}` from that page (queue tasks carry it precomputed as \
-         `target.concepts_dir`) and `{{slug}}` is the slug of the concept name (rule \
+         relative path to `{}/{}` from that page and `{{slug}}` is the slug of the \
+         concept name (rule \
          below). Destinations with spaces or parens are percent-encoded (`%20`, `%28`, \
          `%29`); non-ASCII slugs stay verbatim.",
         dirs.wiki, CONCEPTS_SUBDIR

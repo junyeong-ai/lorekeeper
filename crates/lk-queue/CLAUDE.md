@@ -27,15 +27,13 @@ knows about; provider choice is config-driven (`build_llm_client` in lk-cli).
   runs at LLM summarization/concept-extraction time in the skill.
 - **`QueueError::is_fatal()`** is true for `QueueIo` (a persistence failure that must
   abort the run).
-- **`TaskTarget { vault_path, kind, anchor, concepts_dir }`** rides through the trait so
-  queue mode records where each result should land. `anchor` is the exact `## …` heading
-  the pipeline wrote, resolved from i18n at construction time — the skill locates by
-  `target.anchor` instead of a hardcoded kind→heading table. `concepts_dir` is the
-  precomputed relative path from the target page's directory to `{wiki}/concepts`
-  (`render::concepts_dir_dest`), so a concept link the skill writes is pure
-  concatenation `[{Name}]({concepts_dir}/{slug}.md)` — the LLM never does relative-path
-  arithmetic. Populated uniformly for every kind (same lesson as the uniform `*_done`
-  markers: per-kind "does this kind link concepts?" judgments drift).
+- **`TaskTarget { vault_path, kind, anchor }`** rides through the trait so queue mode
+  records where each result should land. `anchor` is the exact `## …` heading the pipeline
+  wrote, resolved from i18n at construction time — the skill locates by `target.anchor`
+  instead of a hardcoded kind→heading table. It once also carried a precomputed
+  `concepts_dir` for the skill to concatenate concept links from; concept extraction now
+  returns VALUES and `lore queue apply` renders the links itself, so the field had no
+  reader and is gone. A target says where a result lands, not how to write one.
 - **Each request type exposes two JSON projections.**
   - `task_input()` — payload serialized into the queue file. Carries every field
     `/lore-process` needs to do its work (`source_type` plus the cache-identity fields).

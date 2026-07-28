@@ -191,8 +191,15 @@ jobs:
           # block once these tags are signed; both fall back to the tagged commit's message
           # for a lightweight tag, so the body is the text a human wrote either way.
           git fetch --force --depth=1 origin tag "$TAG"
+          # `git tag -l` takes a GLOB and exits 0 on no match, so a typo'd or wildcarded
+          # tag would silently publish generated notes only — or concatenate several tags'
+          # messages. Refuse instead: a release whose notes went missing is worth a red job.
+          case "$TAG" in
+            *[\*\?\[]*) echo "tag name must not contain glob characters: $TAG" >&2; exit 1 ;;
+          esac
           git tag -l --format='%(contents:subject)%0a%0a%(contents:body)' "$TAG" \
             > release-notes.md
+          [ -s release-notes.md ] || { echo "no tag message for $TAG" >&2; exit 1; }
           gh release create "$TAG" \
             --title "$TAG" \
             --notes-file release-notes.md \

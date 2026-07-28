@@ -88,7 +88,6 @@ pub async fn render_work_log(
                 vault_path: vault_path.clone(),
                 kind: TargetKind::WorkLogSynthesis,
                 anchor: format!("## {topic_heading}"),
-                concepts_dir: crate::render::concepts_dir_dest(&vault_path, &ctx.dirs),
             },
         };
         let hash = req.cache_hash();
