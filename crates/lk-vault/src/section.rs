@@ -176,17 +176,22 @@ fn content_len(lines: &[&str]) -> usize {
     lines.iter().map(|l| l.len()).sum()
 }
 
-/// The indented lines that belong to the entry starting at `start`, bounded by `end`: a
-/// block list's items (`  - RAG`), a nested mapping's children, a folded scalar's text.
-/// `None` when the entry is a single line.
+/// The lines that belong to the entry starting at `start`, bounded by `end`: a block list's
+/// items (`  - RAG`), a nested mapping's children, a folded scalar's text. `None` when the
+/// entry is a single line.
+///
+/// A continuation is a line indented MORE than the entry's own line, which is what makes
+/// this work at any depth: for a top-level key the next column-0 key ends it, for a child
+/// the next sibling at the same indent does.
 ///
 /// Blank lines and comments do NOT end an entry — YAML permits both at any column, so
 /// treating one as the end would take a later continuation for a separate entry. Writing
 /// there leaves two copies of the same key in one block, and the stale one wins on the next
-/// parse: the write silently undone. Only a non-blank, non-comment line at column 0 starts
-/// the next entry. The span stops at the LAST real continuation, so trailing blanks and
-/// comments stay with whatever follows them rather than being swallowed by a rewrite.
+/// parse: the write silently undone. The span stops at the LAST real continuation, so
+/// trailing blanks and comments stay with whatever follows them rather than being swallowed
+/// by a rewrite.
 fn continuation_span(lines: &[&str], start: usize, end: usize) -> Option<std::ops::Range<usize>> {
+    let base = indent_of(unterminated(lines[start])).len();
     let (mut first, mut last) = (None, None);
     for (i, line) in lines.iter().enumerate().take(end).skip(start + 1) {
         let line = unterminated(line);
@@ -194,7 +199,7 @@ fn continuation_span(lines: &[&str], start: usize, end: usize) -> Option<std::op
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        if indent_of(line).is_empty() {
+        if indent_of(line).len() <= base {
             break;
         }
         first.get_or_insert(i);
@@ -280,16 +285,18 @@ pub fn set_llm_input(content: &str, key: &str, value: &str) -> Option<String> {
 
     // A replacement keeps its own line's indentation; a new key joins the mapping directly
     // after its last child, at the indentation the first one already uses.
-    let at = existing.unwrap_or_else(|| children.clone().map_or(parent_idx + 1, |s| s.end));
+    let children_end = children.clone().map_or(parent_idx + 1, |s| s.end);
+    let at = existing.unwrap_or(children_end);
     let indent = existing
         .or_else(|| children.map(|s| s.start))
         .map(|i| indent_of(unterminated(lines[i])))
         .unwrap_or("  ");
     let eol = terminator(lines[at]);
-    let replaced = if existing.is_some() {
-        at..at + 1
-    } else {
-        at..at
+    // A child takes its own continuation with it, so replacing one whose value is a block
+    // scalar does not orphan the value's lines under the new inline one.
+    let replaced = match existing {
+        Some(at) => at..continuation_span(&lines, at, children_end).map_or(at + 1, |s| s.end),
+        None => at..at,
     };
 
     Some(splice_lines(
@@ -860,6 +867,28 @@ mod llm_input_tests {
         let doc = "---\nid: d\nllm_inputs: \n  summary: \"a\"\n---\n\nbody\n";
         let out = stamp(doc, "concepts_done", "z").expect("mapping must still be found");
         assert!(out.contains("  concepts_done: \"z\""), "{out}");
+    }
+
+    #[test]
+    fn replacing_a_child_takes_its_block_value_with_it() {
+        // A child whose value spans lines is orphaned under the new inline one if only its
+        // key line is replaced — the same corruption as the top-level block-list case, one
+        // level down. A sibling at the same indent must still bound the span.
+        let doc = "---\nllm_inputs:\n  summary: |\n    line one\n    line two\n  concepts: \"b\"\n---\n\nbody\n";
+        let out = stamp(doc, "summary", "z").unwrap();
+        assert_eq!(
+            out,
+            "---\nllm_inputs:\n  summary: \"z\"\n  concepts: \"b\"\n---\n\nbody\n"
+        );
+        let page = lk_core::frontmatter::parse_page(&out).expect("page must still parse");
+        assert_eq!(
+            page.frontmatter
+                .get("llm_inputs")
+                .and_then(|v| v.get("concepts"))
+                .and_then(|v| v.as_str()),
+            Some("b"),
+            "the sibling must survive: {out}"
+        );
     }
 
     #[test]
