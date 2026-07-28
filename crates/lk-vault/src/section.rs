@@ -120,6 +120,78 @@ pub fn section_body<'a>(content: &'a str, heading: &str) -> Option<&'a str> {
 /// returned unchanged. A leading BOM is recognized (mirroring `parse_page`) and preserved.
 /// The single source of truth for setting a frontmatter scalar — used by `backlinks-sync`
 /// (`source_count`) and the audit marker (`audited_sources_hash`).
+/// Set `llm_inputs.<key>` in a page's frontmatter, leaving every other line byte-identical.
+///
+/// The completion markers live one level down, so [`set_frontmatter_field`] — which owns
+/// top-level keys — cannot reach them. Whoever fills a section must stamp its marker in the
+/// same edit: `llm_cache::lookup` decides purely on the marker, never on whether the body
+/// looks filled, so a section written without one is erased by the next re-render and its
+/// task re-enqueued forever.
+///
+/// Returns the content unchanged when there is no `llm_inputs` block — the page was not
+/// rendered by this pipeline, and inventing the block would misrepresent it as cached.
+pub fn set_llm_input(content: &str, key: &str, value: &str) -> String {
+    let Some(page) = lk_core::frontmatter::parse_page(content).ok() else {
+        return content.to_string();
+    };
+    if page
+        .frontmatter
+        .get(lk_core::frontmatter::field::LLM_INPUTS)
+        .is_none()
+    {
+        return content.to_string();
+    }
+
+    let mut out = String::with_capacity(content.len() + key.len() + value.len() + 8);
+    let mut state = LlmInputScan::Before;
+    let mut written = false;
+    let mut indent = String::from("  ");
+
+    for line in content.split_inclusive('\n') {
+        match state {
+            LlmInputScan::Before => {
+                out.push_str(line);
+                if line.trim_end() == format!("{}:", lk_core::frontmatter::field::LLM_INPUTS) {
+                    state = LlmInputScan::Inside;
+                }
+            }
+            LlmInputScan::Inside => {
+                let body = line.trim_end_matches(['\n', '\r']);
+                let child_indent: String = body.chars().take_while(|c| *c == ' ').collect();
+                let is_child = !child_indent.is_empty() && !body.trim().is_empty();
+                if is_child {
+                    indent = child_indent;
+                    if body.trim_start().starts_with(&format!("{key}:")) {
+                        out.push_str(&format!("{indent}{key}: \"{value}\"\n"));
+                        written = true;
+                    } else {
+                        out.push_str(line);
+                    }
+                } else {
+                    if !written {
+                        out.push_str(&format!("{indent}{key}: \"{value}\"\n"));
+                        written = true;
+                    }
+                    out.push_str(line);
+                    state = LlmInputScan::Past;
+                }
+            }
+            LlmInputScan::Past => out.push_str(line),
+        }
+    }
+    if !written {
+        out.push_str(&format!("{indent}{key}: \"{value}\"\n"));
+    }
+    out
+}
+
+/// Where the line-by-line rewrite currently sits relative to the `llm_inputs` block.
+enum LlmInputScan {
+    Before,
+    Inside,
+    Past,
+}
+
 pub fn set_frontmatter_field(content: &str, key: &str, value: &str) -> String {
     // Recognize a leading BOM the way `parse_page` does, then restore it so the page
     // round-trips byte-faithfully.
@@ -503,5 +575,50 @@ mod tests {
     fn body_returns_none_for_missing_heading() {
         let doc = "## Other\n\nbody\n";
         assert!(section_body(doc, "Summary").is_none());
+    }
+}
+
+#[cfg(test)]
+mod llm_input_tests {
+    use super::set_llm_input;
+
+    const PAGE: &str = "---\nid: d\ntype: daily\nllm_inputs:\n  summary: \"a\"\n  concepts: \"b\"\n---\n\n## Summary\n\nx\n";
+
+    #[test]
+    fn replaces_an_existing_marker_in_place() {
+        let out = set_llm_input(PAGE, "concepts", "z");
+        assert!(out.contains("  concepts: \"z\""));
+        assert!(
+            out.contains("  summary: \"a\""),
+            "siblings untouched: {out}"
+        );
+        assert!(out.contains("## Summary\n\nx\n"), "body untouched: {out}");
+    }
+
+    #[test]
+    fn appends_a_marker_the_block_does_not_have_yet() {
+        let out = set_llm_input(PAGE, "concepts_done", "z");
+        assert!(out.contains("  concepts_done: \"z\""));
+        assert!(out.contains("  concepts: \"b\""));
+        // The new key belongs inside the block, above the closing fence.
+        let block = out.split("---").nth(1).unwrap();
+        assert!(
+            block.contains("concepts_done"),
+            "must land inside frontmatter: {out}"
+        );
+    }
+
+    #[test]
+    fn a_page_with_no_llm_inputs_block_is_left_alone() {
+        // Inventing the block would claim the page is cached when nothing rendered it.
+        let plain = "---\nid: d\n---\n\n## Summary\n\nx\n";
+        assert_eq!(set_llm_input(plain, "concepts_done", "z"), plain);
+    }
+
+    #[test]
+    fn indentation_follows_the_block_it_joins() {
+        let four = "---\nid: d\nllm_inputs:\n    summary: \"a\"\n---\n\nbody\n";
+        let out = set_llm_input(four, "concepts_done", "z");
+        assert!(out.contains("    concepts_done: \"z\""), "{out}");
     }
 }
