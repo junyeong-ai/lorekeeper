@@ -98,5 +98,16 @@ knows about; provider choice is config-driven (`build_llm_client` in lk-cli).
   it through `lk-pipeline`'s `ConceptDrafts` — the same code the synchronous LLM route uses.
   The result carries `target` and `cache_hash` verbatim so the applier can re-run the queue's
   one staleness check: the page may have been re-rendered while the drain was working.
-  `read_results` treats a malformed file as an ERROR, never a skip — dropping it would lose
-  an extraction that cannot be reproduced without another LLM session.
+  `read_results` splits the directory into `ready` and `unreadable` rather than failing on a
+  malformed file, and `queue apply` moves the unreadable ones to `results/corrupt/`. Failing
+  the read stranded every other pending result behind one truncated write on every run
+  forever — nothing prunes results, so only a human noticing a red pipeline would clear it.
+  The extraction is not lost with the file: the drain writes results only, `queue apply` is
+  what stamps the completion marker, so an unapplied result leaves its page unmarked and the
+  next ingest that RE-RENDERS that page re-enqueues the task off the unchanged input hash
+  (a page whose date has scrolled out of the lookback window needs `--date` backfill). The
+  file is moved rather than deleted because, unlike a structurally valid result, a truncated
+  one may still be readable by a human — and nothing prunes `corrupt/`, by design.
+  (`lk-pipeline`'s `event_log` stays strict about a corrupt line for a reason that does NOT
+  transfer: its caller rewrites the log from what it parsed, so a skip would destroy the
+  record.)
