@@ -196,12 +196,21 @@ fn continuation_span(lines: &[&str], start: usize, end: usize) -> Option<std::op
     for (i, line) in lines.iter().enumerate().take(end).skip(start + 1) {
         let line = unterminated(line);
         let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
+        // A blank line neither ends the entry nor belongs to it.
+        if trimmed.is_empty() {
             continue;
         }
         if indent_of(line).len() <= base {
+            // At or outside the entry's own indentation, a comment belongs to whatever
+            // follows it and anything else starts the next entry.
+            if trimmed.starts_with('#') {
+                continue;
+            }
             break;
         }
+        // Indented deeper, so it is part of this entry's value — a `#` line included, which
+        // inside a block scalar is content rather than a comment. Leaving it behind would
+        // turn value text into a comment, or split the scalar around an inserted key.
         first.get_or_insert(i);
         last = Some(i);
     }
@@ -875,6 +884,29 @@ mod llm_input_tests {
         let doc = "---\nid: d\nllm_inputs: \n  summary: \"a\"\n---\n\nbody\n";
         let out = stamp(doc, "concepts_done", "z").expect("mapping must still be found");
         assert!(out.contains("  concepts_done: \"z\""), "{out}");
+    }
+
+    #[test]
+    fn a_hash_line_inside_a_block_scalar_is_value_not_comment() {
+        // Indentation is what separates the two: a `#` line indented into the value is
+        // content. Leaving it behind turns value text into a comment, or — on an insert —
+        // splits the scalar around the new key.
+        let doc =
+            "---\nllm_inputs:\n  summary: |\n    real\n    # hashline\n  concepts: \"b\"\n---\n";
+        let out = stamp(doc, "summary", "z").unwrap();
+        assert_eq!(
+            out,
+            "---\nllm_inputs:\n  summary: \"z\"\n  concepts: \"b\"\n---\n"
+        );
+        let page = lk_core::frontmatter::parse_page(&out).unwrap();
+        assert_eq!(
+            page.frontmatter
+                .get("llm_inputs")
+                .and_then(|v| v.get("summary"))
+                .and_then(|v| v.as_str()),
+            Some("z"),
+            "{out}"
+        );
     }
 
     #[test]
