@@ -73,9 +73,11 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   a column-0 key the former); a BLANK line neither ends an entry nor belongs to it; a COMMENT
   belongs to whatever FOLLOWS it, at ANY indentation — except inside a BLOCK SCALAR
   (`key: |`, `key: >`), the one place a `#` line is value text. Which lines those are is
-  tracked PER LINE, from the nearest preceding shallower key: the entry a span belongs to
-  cannot answer for the lines under it (a span over `llm_inputs:` walks its children, and
-  `llm_inputs:` is not a block scalar even when a child is). Replacing a key takes its whole
+  tracked PER LINE, from the nearest preceding shallower line that OPENED one — key-bearing
+  (`key: |`) or not (`- |`, a list item having no colon to look behind). The entry a span
+  belongs to cannot answer for the lines under it: a span over `llm_inputs:` walks its
+  children, and `llm_inputs:` is not a block scalar even when a child is. Replacing a key
+  takes its whole
   span, so a block-style value never outlives the key it belonged to. And `set_llm_input`
   reads the child indentation from the first REAL child, never from the span's first line,
   which may be a comment indented past them.

@@ -130,14 +130,25 @@ fn unterminated(line: &str) -> &str {
     line.trim_end_matches(['\n', '\r'])
 }
 
-/// True when this key line opens a BLOCK SCALAR (`key: |`, `key: >-`, `key: |2`, …) — the
-/// one construct whose following `#` lines are value text rather than comments. Decided from
-/// the indicator after the key's colon, since indentation cannot tell a comment sitting
-/// inside a value apart from one merely indented past it.
+/// True when this line opens a BLOCK SCALAR (`key: |`, `key: >-`, `- |`, `- key: |2`, …) —
+/// the one construct whose following `#` lines are value text rather than comments. Decided
+/// from the indicator, since indentation cannot tell a comment sitting inside a value apart
+/// from one merely indented past it.
+///
+/// Sequence markers are stripped first so a list ITEM is read like the entry it holds: a
+/// keyless `- |` has no colon to look behind, and skipping it leaves its content lines to be
+/// mistaken for comments.
 fn opens_block_scalar(line: &str) -> bool {
-    line.split_once(':')
-        .map(|(_, value)| value.trim_start())
-        .is_some_and(|value| value.starts_with('|') || value.starts_with('>'))
+    let mut rest = line.trim_start();
+    while let Some(item) = rest.strip_prefix('-') {
+        // `-foo` is a plain scalar, not a marker; `-` alone is an empty item.
+        if !item.is_empty() && !item.starts_with([' ', '\t']) {
+            break;
+        }
+        rest = item.trim_start();
+    }
+    let value = rest.split_once(':').map_or(rest, |(_, v)| v.trim_start());
+    value.starts_with('|') || value.starts_with('>')
 }
 
 /// The terminator a written line takes, copied from the line it replaces or joins, so a
@@ -460,6 +471,22 @@ mod tests {
                 .map(Vec::len),
             Some(3)
         );
+    }
+
+    #[test]
+    fn a_keyless_block_scalar_in_a_list_is_replaced_whole() {
+        let doc = "---\naliases:\n  - |\n    multi\n    # y\nid: x\n---\n";
+        let out = set_frontmatter_field(doc, "aliases", "[]").unwrap();
+        assert_eq!(out, "---\naliases: []\nid: x\n---\n");
+    }
+
+    #[test]
+    fn a_plain_scalar_starting_with_a_dash_is_not_a_sequence_marker() {
+        // `-foo` is a value, not a list item, so nothing may be stripped off it looking for
+        // an indicator behind.
+        let doc = "---\nnote: -foo\nid: x\n---\n";
+        let out = set_frontmatter_field(doc, "id", "y").unwrap();
+        assert_eq!(out, "---\nnote: -foo\nid: y\n---\n");
     }
 
     #[test]
@@ -942,6 +969,20 @@ mod llm_input_tests {
         assert_eq!(
             out,
             "---\naliases: []\n  # human note: keep RAG spelled out\nsource_count: 2\n---\n"
+        );
+    }
+
+    #[test]
+    fn a_keyless_block_scalar_owns_its_hash_lines_too() {
+        // `- |` has no colon to look behind, so a rule that reads the indicator after a key
+        // skips it and its content lines fall back to being read as comments — the same
+        // corruption, one construct over.
+        let doc = "---\nllm_inputs:\n  summary:\n    - |\n      x\n      # y\nid: d\n---\n";
+        let out = stamp(doc, "concepts_done", "z").unwrap();
+        assert_eq!(
+            out,
+            "---\nllm_inputs:\n  summary:\n    - |\n      x\n      # y\n  concepts_done: \"z\"\nid: d\n---\n",
+            "the new key joins after the list item's scalar, not inside it"
         );
     }
 
