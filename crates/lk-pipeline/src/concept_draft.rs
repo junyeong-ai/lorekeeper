@@ -79,8 +79,8 @@ struct ConceptDraft {
 
 impl ConceptDrafts {
     /// Resolve a concept name to the page identity that owns it, building the alias index
-    /// from disk on first use. Nothing is staged — the run's accumulator is untouched, so
-    /// callers may resolve before deciding to commit.
+    /// from disk on first use. The run's accumulator is untouched, so a caller may resolve
+    /// before deciding whether to fold anything.
     ///
     /// Lookup is by `identity_key`, so a name reaches its page however its separators fall
     /// (`VectorDB` finds `vector-db.md`); only when NO page owns the name does it become a
@@ -103,7 +103,7 @@ impl ConceptDrafts {
         dirs: &VaultDirs,
     ) -> Result<ConceptIdentity, PipelineError> {
         let slug =
-            slugify(name).expect("concepts are slug-filtered via has_valid_slug before merge");
+            slugify(name).expect("concepts are slug-filtered via has_valid_slug before staging");
         let index = match &mut self.alias_index {
             Some(index) => index,
             slot => slot.insert(build_alias_index(reader, dirs).await?),
@@ -317,7 +317,7 @@ impl ConceptDraft {
     /// yet — an established synthesis is accumulated meaning across every source that cited
     /// the concept, so one new mention never overwrites it.
     ///
-    /// Applied on every merge, not just the one that stages the draft: two results in a run
+    /// Applied on every fold, not just the one that creates the draft: two results in a run
     /// can name the same new concept and only one of them carry a grounding. Seeding solely
     /// on the staging merge would leave the created page's synthesis empty or filled
     /// depending on which result the run happened to read first.
