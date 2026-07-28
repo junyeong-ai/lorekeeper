@@ -273,6 +273,12 @@ impl Source for ConfluenceSource {
         // against timezone resolution, and on a scheduled run the upper padding is empty by
         // construction (nothing is edited after now) while on a backfill it is the larger of
         // the two. Capping what survives the cut removes the question.
+        //
+        // The cost is that padding and `only_my_edits` rejects no longer count toward the
+        // cap, so a busy space can now be paginated much further — bounded by `MAX_PAGES`,
+        // which warns when it trips. That is the intended trade: the previous behaviour
+        // stopped early by counting results it was about to discard, which is precisely how
+        // it dropped the target day.
         let mut items: Vec<RawItem> = Vec::new();
         let mut next_path: Option<String> = None;
         let mut pages_fetched = 0usize;
