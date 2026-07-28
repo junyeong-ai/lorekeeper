@@ -3227,22 +3227,31 @@ async fn a_name_spelled_without_separators_lands_on_the_established_page() {
 /// A page owns its own address even when NONE of its names reproduces it — a long
 /// descriptive title over a short slug is the common case, and such a page has no name
 /// that slugifies to its own stem. A stale alias elsewhere must not be able to take that
-/// address, whatever order the concepts dir is read in (here the claimant sorts first).
+/// address. Run in BOTH read orders: the concepts dir is walked in sorted path order, so
+/// a guarantee that held only when the owner is read last would be an accident of naming.
 #[tokio::test]
-async fn a_stale_alias_cannot_capture_another_pages_address() {
+async fn a_stale_alias_cannot_capture_another_pages_address_in_either_read_order() {
+    for claimant in ["aaa-stale-notes", "zzz-stale-notes"] {
+        stale_alias_loses_to_the_address_owner(claimant).await;
+    }
+}
+
+async fn stale_alias_loses_to_the_address_owner(claimant: &str) {
     let dir = TempDir::new().unwrap();
     let vault = dir.path();
     let config = base_config(vault);
 
     let concepts = vault.join("wiki").join("concepts");
     std::fs::create_dir_all(&concepts).unwrap();
-    // Sorts before the real page, and claims its address as an alias.
+    // Claims the other page's address as an alias; sorts before or after it by name.
     std::fs::write(
-        concepts.join("aaa-stale-notes.md"),
-        "---\nid: aaa-stale-notes\ntype: concept\ntitle: \"Stale Notes\"\n\
-         aliases: [\"Stale Notes\", \"access-ingress-2axis-model\"]\n\
-         created: 2026-06-06\nupdated: 2026-06-06\nsource_count: 1\n---\n\n\
-         ## Synthesis\n\nUnrelated.\n\n## Sources\n\n- x\n",
+        concepts.join(format!("{claimant}.md")),
+        format!(
+            "---\nid: {claimant}\ntype: concept\ntitle: \"Stale Notes\"\n\
+             aliases: [\"Stale Notes\", \"access-ingress-2axis-model\"]\n\
+             created: 2026-06-06\nupdated: 2026-06-06\nsource_count: 1\n---\n\n\
+             ## Synthesis\n\nUnrelated.\n\n## Sources\n\n- x\n"
+        ),
     )
     .unwrap();
     // No name here slugifies to the stem: the title yields `access-ingress-2-axis-...`.
@@ -3282,10 +3291,11 @@ async fn a_stale_alias_cannot_capture_another_pages_address() {
     let rewritten = pipeline.apply_concept_result(&result, page).await.unwrap();
     assert!(
         rewritten.contains("../../wiki/concepts/access-ingress-2axis-model.md"),
-        "a name must resolve to the page that lives at it, not to a stale claimant: {rewritten}"
+        "a name must resolve to the page that lives at it, not to a stale claimant \
+         (claimant {claimant}): {rewritten}"
     );
     assert!(
-        !rewritten.contains("aaa-stale-notes.md"),
+        !rewritten.contains(&format!("{claimant}.md")),
         "the stale alias must not capture the address: {rewritten}"
     );
 

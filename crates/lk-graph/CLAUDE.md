@@ -102,8 +102,9 @@ on-disk state, never from a cached snapshot.
   exact like `backlinks-sync`); bullets under `## Related` (human-curated) or any
   synthesis prose count as authored, so the merge ABORTS before mutating unless
   `--force`. `--dry-run` previews without the gate firing. Run `backlinks-sync` afterward
-  to re-derive the merged concept's `## Sources` + `source_count`. Near-dup *detection*
-  (below) only reports candidates; this is the execution counterpart a human triggers.
+  to re-derive the merged concept's `## Sources` + `source_count`. Duplicate *detection*
+  (below) only reports the pages that answer to one name; this is the execution
+  counterpart a human triggers, because it deletes a page.
 - **`## Related` is NOT machine-written.** Louvain communities encode
   "co-cited together" (the in-scope graph is dominated by document/exploration→concept edges), not
   topical relatedness, so auto-writing community co-membership as Related edges

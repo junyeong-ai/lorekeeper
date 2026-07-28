@@ -20,8 +20,8 @@ drain_queue
 sync_graph
 
 # The semantic review the deterministic linter cannot do: contradiction worklist,
-# near-duplicate judgement, relationship gaps. Read-mostly — destructive consolidation
-# (`lore graph merge`) stays a human decision.
+# two different names for one concept, relationship gaps. Read-mostly — destructive
+# consolidation (`lore graph merge`) stays a human decision.
 run "knowledge audit" claude_skill "/lore-wiki audit" "$HOME/.claude/skills/lore-wiki"
 
 pipeline_finish
