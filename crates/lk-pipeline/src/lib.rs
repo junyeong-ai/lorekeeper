@@ -565,7 +565,12 @@ impl Pipeline {
             ))
         })?;
 
-        let mut identities = Vec::with_capacity(result.concepts.len());
+        // Stage every concept before folding any. Staging is the only fallible half (it
+        // reads the vault), so a failure on the third concept cannot leave the first two in
+        // the run's drafts — `render_concept_pages` emits that accumulator unconditionally,
+        // and a half-folded result would write concept pages this origin page was never
+        // updated to cite.
+        let mut staged = Vec::with_capacity(result.concepts.len());
         for reported in &result.concepts {
             // The same filter the synchronous path applies: an unslugifiable name is
             // dropped, an invented category stripped.
@@ -575,18 +580,21 @@ impl Pipeline {
             else {
                 continue;
             };
-            identities.push(
+            staged.push(
                 self.concept_drafts
-                    .merge_with_synthesis(
+                    .stage(
                         &concept,
                         reported.synthesis.as_deref(),
-                        result.date,
                         self.reader.as_ref(),
                         &self.ctx.dirs,
                     )
                     .await?,
             );
         }
+        let identities: Vec<_> = staged
+            .into_iter()
+            .map(|s| self.concept_drafts.commit(s, result.date))
+            .collect();
 
         let links = render::concept_links(&identities, &result.target.vault_path, &self.ctx.dirs);
         Ok(lk_vault::replace_section(

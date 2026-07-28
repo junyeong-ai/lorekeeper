@@ -3021,6 +3021,63 @@ async fn a_page_that_cannot_record_completion_is_an_error() {
     );
 }
 
+/// A result names several concepts, and reading the vault for one of them fails. The
+/// earlier concepts must not survive in the run's drafts: `render_concept_pages` emits that
+/// accumulator whatever this returns, so a half-folded result would write concept pages
+/// while the origin page — which was supposed to cite them — is discarded with the error.
+#[tokio::test]
+async fn a_concept_that_fails_to_stage_takes_its_whole_result_with_it() {
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let config = base_config(vault);
+
+    let concepts = vault.join("wiki").join("concepts");
+    std::fs::create_dir_all(&concepts).unwrap();
+    // The SECOND concept's page has an unclosed frontmatter block, so reading it errors.
+    std::fs::write(
+        concepts.join("vector-database.md"),
+        "---\nid: vector-database\ntype: concept\nno closing delimiter\n",
+    )
+    .unwrap();
+
+    let ctx = build_ctx(&config, Arc::new(NoopLlmClient));
+    let mut pipeline = Pipeline::new(vault, ctx);
+
+    let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
+    let named = |name: &str| lk_queue::ReportedConcept {
+        concept: ExtractedConcept {
+            name: name.into(),
+            category: None,
+        },
+        synthesis: None,
+    };
+    let result = lk_queue::TaskResult {
+        task_id: "ext-1".into(),
+        cache_hash: "h".into(),
+        target: lk_queue::TaskTarget {
+            vault_path: "daily/test-source/2026-05-23.md".into(),
+            kind: lk_queue::TargetKind::DailyConcepts,
+            anchor: "## Related Concepts".into(),
+            concepts_dir: "../../wiki/concepts".into(),
+        },
+        date: jiff::civil::date(2026, 5, 23),
+        // The first merges cleanly; the second cannot be read.
+        concepts: vec![
+            named("Retrieval Augmented Generation"),
+            named("Vector Database"),
+        ],
+    };
+
+    assert!(
+        pipeline.apply_concept_result(&result, page).await.is_err(),
+        "an unreadable concept page must fail the result"
+    );
+    assert!(
+        pipeline.render_concept_pages().await.unwrap().is_empty(),
+        "the concept that staged cleanly must not be written on its own"
+    );
+}
+
 /// Two results in one apply run can name the same new concept, and only one of them may
 /// carry a grounding sentence. Whichever arrives first stages the draft, so seeding the
 /// synthesis only on that merge would leave the created page's `## Synthesis` empty or

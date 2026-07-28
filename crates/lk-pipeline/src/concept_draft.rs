@@ -33,6 +33,17 @@ pub struct ConceptDrafts {
     alias_index: Option<BTreeMap<String, ConceptIdentity>>,
 }
 
+/// One extraction with everything the vault could tell us about it already read: the page
+/// identity its name resolves to, and the existing page at that slug if there is one.
+/// Produced by [`ConceptDrafts::stage`] (fallible, reads) and consumed by
+/// [`ConceptDrafts::commit`] (pure, mutates).
+pub struct StagedConcept {
+    concept: ExtractedConcept,
+    slug: String,
+    existing: Option<lk_core::frontmatter::VaultPage>,
+    synthesis: Option<String>,
+}
+
 struct ConceptDraft {
     slug: String,
     name: String,
@@ -126,10 +137,52 @@ impl ConceptDrafts {
         reader: &dyn VaultStore,
         dirs: &VaultDirs,
     ) -> Result<ConceptIdentity, PipelineError> {
-        let safe_slug = self
-            .resolve_identity(&concept.name, reader, dirs)
-            .await?
-            .slug;
+        let staged = self.stage(concept, synthesis, reader, dirs).await?;
+        Ok(self.commit(staged, date))
+    }
+
+    /// Read everything a merge needs from the vault WITHOUT staging anything.
+    ///
+    /// Splitting the read from the fold is what lets a caller with several concepts stage
+    /// them all before committing any: the reads are the only fallible part, so a failure on
+    /// the third concept cannot leave the first two in the run's drafts. That matters because
+    /// [`Self::render_pages`] emits the accumulator unconditionally — a half-folded result
+    /// would write concept pages whose origin page was never updated to cite them.
+    pub async fn stage(
+        &mut self,
+        concept: &ExtractedConcept,
+        synthesis: Option<&str>,
+        reader: &dyn VaultStore,
+        dirs: &VaultDirs,
+    ) -> Result<StagedConcept, PipelineError> {
+        let identity = self.resolve_identity(&concept.name, reader, dirs).await?;
+        // A slug already staged this run needs no read: the draft in hand is newer than the
+        // page on disk, and `commit` folds into it.
+        let existing = if self.drafts.contains_key(&identity.slug) {
+            None
+        } else {
+            reader
+                .read_page(VaultPath::concept(dirs, &identity.slug).as_ref())
+                .await?
+        };
+        Ok(StagedConcept {
+            concept: concept.clone(),
+            slug: identity.slug,
+            existing,
+            synthesis: synthesis.map(str::to_string),
+        })
+    }
+
+    /// Fold a staged concept into the run's drafts. Pure and infallible — every read it
+    /// could need already happened in [`Self::stage`].
+    pub fn commit(&mut self, staged: StagedConcept, date: jiff::civil::Date) -> ConceptIdentity {
+        let StagedConcept {
+            concept,
+            slug: safe_slug,
+            existing,
+            synthesis,
+        } = staged;
+        let synthesis = synthesis.as_deref();
 
         if let Some(draft) = self.drafts.get_mut(&safe_slug) {
             draft.observe(date);
@@ -142,14 +195,11 @@ impl ConceptDrafts {
             if draft.category.is_none() {
                 draft.category = concept.category.clone();
             }
-            return Ok(ConceptIdentity {
+            return ConceptIdentity {
                 name: draft.name.clone(),
                 slug: safe_slug,
-            });
+            };
         }
-
-        let path = VaultPath::concept(dirs, &safe_slug);
-        let existing = reader.read_page(path.as_ref()).await?;
 
         let mut draft = match existing.as_ref() {
             Some(page) => {
@@ -238,7 +288,7 @@ impl ConceptDrafts {
             slug: safe_slug.clone(),
         };
         self.drafts.insert(safe_slug, draft);
-        Ok(identity)
+        identity
     }
 
     pub fn render_pages(
