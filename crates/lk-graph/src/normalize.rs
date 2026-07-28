@@ -67,6 +67,25 @@ pub fn scan(pages: &[ScannedPage]) -> Vec<Rename> {
     renames
 }
 
+/// Whether two paths name the SAME file on disk, which is not the same question as whether
+/// they are the same string.
+///
+/// The rename this module performs is usually case-only (`Bad_Name` → `bad-name`,
+/// `allUsers-…` → `allusers-…`), and macOS and Windows default to case-INSENSITIVE
+/// filesystems. There the new path already "exists" — as the file being renamed — so an
+/// existence check alone refuses the very repair `--fix` exists to make, on the platform
+/// `lore schedule --format launchd` is written for. `canonicalize` resolves both to the
+/// name the filesystem actually holds, so a case-only rename compares equal while a genuine
+/// collision (two distinct files, as on a case-sensitive volume) still does not.
+fn is_same_file(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        // Unresolvable means we cannot claim they are the same; the caller then refuses,
+        // which is the safe direction for a destructive rename.
+        _ => false,
+    }
+}
+
 pub fn apply(renames: &[Rename], pages: &[ScannedPage], root: &Path) -> Result<usize, GraphError> {
     if renames.is_empty() {
         return Ok(0);
@@ -74,7 +93,7 @@ pub fn apply(renames: &[Rename], pages: &[ScannedPage], root: &Path) -> Result<u
 
     for rename in renames {
         let target = root.join(&rename.new_path);
-        if target.exists() {
+        if target.exists() && !is_same_file(&root.join(&rename.old_path), &target) {
             return Err(GraphError::Io(format!(
                 "rename target already exists: {}",
                 target.display()
@@ -120,7 +139,22 @@ pub fn apply(renames: &[Rename], pages: &[ScannedPage], root: &Path) -> Result<u
         let content = std::fs::read_to_string(&abs_path)
             .map_err(|e| GraphError::Io(format!("failed to read {}: {e}", abs_path.display())))?;
 
-        let updated = repoint_renamed_links(&content, rel_path, &renamed_ids);
+        let mut updated = repoint_renamed_links(&content, rel_path, &renamed_ids);
+
+        // A renamed page records its own address in `id`, so leaving that behind would
+        // publish a page whose frontmatter names a file that no longer exists. The stem is
+        // the identity every consumer resolves by, which is exactly why the stale copy is
+        // worth removing rather than tolerating.
+        if renamed_paths.contains_key(page.path.as_path())
+            && let Some(new_slug) = rel_path.file_stem().and_then(|s| s.to_str())
+            && let Some(with_id) = lk_vault::set_frontmatter_field(
+                &updated,
+                "id",
+                &serde_json::to_string(new_slug).expect("a str always serializes"),
+            )
+        {
+            updated = with_id;
+        }
 
         if updated != content {
             lk_core::fs::write_atomic(&abs_path, updated.as_bytes(), None).map_err(|e| {
@@ -253,6 +287,72 @@ mod tests {
         assert!(updated.contains("Prose [A](concept-a.md)."));
         assert!(updated.contains("example [A](Concept%20A.md)"));
         assert!(updated.contains("Inline `[A](Concept%20A.md)`."));
+    }
+
+    #[test]
+    fn a_case_only_rename_is_not_mistaken_for_a_collision() {
+        // The common real rename differs ONLY in case (`allUsers-…` → `allusers-…`), and on
+        // a case-insensitive filesystem — macOS and Windows by default — the target then
+        // already "exists" as the file being renamed. An existence check alone refuses the
+        // repair `--fix` exists to make. Every other test here renames a name that differs
+        // by punctuation too, so none of them ever reached this path.
+        let tmp = tempfile::tempdir().unwrap();
+        let wiki = tmp.path().join("wiki");
+        std::fs::create_dir_all(&wiki).unwrap();
+        std::fs::write(wiki.join("allUsers.md"), "# allUsers\n").unwrap();
+        std::fs::write(wiki.join("linker.md"), "See [x](allUsers.md).\n").unwrap();
+
+        let pages = vec![
+            build_page("wiki/allUsers.md", &[]),
+            build_page("wiki/linker.md", &["wiki/allusers"]),
+        ];
+        let renames = scan(&pages);
+        assert_eq!(renames.len(), 1, "{renames:?}");
+        assert_eq!(apply(&renames, &pages, tmp.path()).unwrap(), 1);
+
+        let linker = std::fs::read_to_string(wiki.join("linker.md")).unwrap();
+        assert!(linker.contains("[x](allusers.md)"), "{linker}");
+    }
+
+    #[test]
+    fn a_renamed_page_stops_recording_its_old_address() {
+        // `id` is the page's own record of where it lives. A rename that leaves it behind
+        // publishes frontmatter naming a file that no longer exists.
+        let tmp = tempfile::tempdir().unwrap();
+        let wiki = tmp.path().join("wiki");
+        std::fs::create_dir_all(&wiki).unwrap();
+        std::fs::write(
+            wiki.join("Bad_Name.md"),
+            "---\nid: Bad_Name\ntype: concept\n---\n\n# Bad\n",
+        )
+        .unwrap();
+
+        let pages = vec![build_page("wiki/Bad_Name.md", &[])];
+        let renames = scan(&pages);
+        assert_eq!(apply(&renames, &pages, tmp.path()).unwrap(), 1);
+
+        let moved = std::fs::read_to_string(wiki.join("bad-name.md")).unwrap();
+        assert!(moved.contains("id: \"bad-name\""), "{moved}");
+        assert!(!moved.contains("Bad_Name"), "{moved}");
+    }
+
+    #[test]
+    fn a_real_collision_is_still_refused() {
+        // Two DISTINCT files whose ids differ only in case can coexist on a case-sensitive
+        // volume; renaming one onto the other would destroy it, so the guard must still
+        // fire. Skipped where the filesystem cannot represent the situation.
+        let tmp = tempfile::tempdir().unwrap();
+        let wiki = tmp.path().join("wiki");
+        std::fs::create_dir_all(&wiki).unwrap();
+        std::fs::write(wiki.join("Dup.md"), "# upper\n").unwrap();
+        if std::fs::write(wiki.join("dup.md"), "# lower\n").is_err()
+            || std::fs::read_to_string(wiki.join("Dup.md")).unwrap() != "# upper\n"
+        {
+            return; // case-insensitive volume: the two names are one file
+        }
+        let pages = vec![build_page("wiki/Dup.md", &[])];
+        let renames = scan(&pages);
+        assert!(apply(&renames, &pages, tmp.path()).is_err());
     }
 
     #[test]
