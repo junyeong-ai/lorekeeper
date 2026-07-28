@@ -1,4 +1,5 @@
 mod atlassian;
+mod confluence;
 pub mod credentials;
 mod google;
 mod jira;
@@ -153,6 +154,7 @@ pub fn validate_params(
         SourceType::SlackChannel => slack::channel::validate_params(params),
         SourceType::SlackSearch => slack::search::validate_params(params),
         SourceType::Jira => jira::validate_params(params),
+        SourceType::Confluence => confluence::validate_params(params),
         SourceType::Rss => rss::validate_params(params),
         SourceType::Manual => manual::validate_params(params),
     }
@@ -297,6 +299,10 @@ pub fn build_source(
         SourceType::Jira => {
             let auth = resolve_atlassian(creds, registry, instance)?;
             Ok(Box::new(jira::JiraSource::new(http, auth)))
+        }
+        SourceType::Confluence => {
+            let auth = resolve_atlassian(creds, registry, instance)?;
+            Ok(Box::new(confluence::ConfluenceSource::new(http, auth)))
         }
         // RSS feeds are public HTTP — no credentials.
         SourceType::Rss => Ok(Box::new(rss::RssSource::new(http))),

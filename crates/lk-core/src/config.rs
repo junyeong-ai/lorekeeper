@@ -720,6 +720,10 @@ pub enum SourceType {
     SlackChannel,
     SlackSearch,
     Jira,
+    /// Confluence Cloud pages selected by CQL. Unlike every other source's immutable
+    /// items, a page is a living document: its version is folded into the event identity,
+    /// so an edit re-enters the pipeline while an unchanged page dedups away.
+    Confluence,
     GoogleCalendar,
     /// RSS/Atom feed reader for external knowledge sources (vendor blogs, news
     /// aggregators). Public HTTP, no credentials. One source can poll many feeds.
@@ -798,6 +802,13 @@ impl SourceType {
             SourceType::Jira => SourceDescriptor {
                 streaming: false,
                 default_template: "jira.md.jinja",
+                item_kind: ItemKind::Event,
+            },
+            // Not streaming: a CQL window re-queries any past day completely, so a daily
+            // page rebuilds from the fetch alone — no event-log projection needed.
+            SourceType::Confluence => SourceDescriptor {
+                streaming: false,
+                default_template: "confluence.md.jinja",
                 item_kind: ItemKind::Event,
             },
             SourceType::GoogleCalendar => SourceDescriptor {
