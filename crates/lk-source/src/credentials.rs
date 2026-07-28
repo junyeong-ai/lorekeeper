@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -10,8 +11,11 @@ pub struct Credentials {
     pub google: Option<GoogleCredentials>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slack: Option<SlackCredentials>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub jira: Option<JiraCredentials>,
+    /// Atlassian instances by name (`default`, `cloud`, `onprem`, …). One entry serves both
+    /// the Jira and Confluence adapters on that instance; a source selects one with its
+    /// `instance` field.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub atlassian: BTreeMap<String, AtlassianCredentials>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -71,20 +75,103 @@ impl SlackCredentials {
     }
 }
 
+/// One authenticated Atlassian instance. Jira and Confluence live on the same instance and
+/// share its credential, so one entry serves both adapters.
+///
+/// Instances are NAMED (`credentials.atlassian` is a map) because a single organization
+/// routinely runs more than one — a Cloud tenant plus an on-prem Data Center wiki, or
+/// separate production and sandbox sites. A source names the instance it reads.
 #[derive(Clone, Serialize, Deserialize)]
-pub struct JiraCredentials {
-    pub base_url: String,
-    pub email: String,
-    pub api_token: String,
+pub struct AtlassianCredentials {
+    /// Site root as a human would type it: `https://acme.atlassian.net` (Cloud) or
+    /// `https://wiki.corp.example/confluence` (Data Center, context path included).
+    /// Always the basis for browse links; also the API host for everything except OAuth,
+    /// which routes through Atlassian's gateway instead.
+    pub site_url: String,
+    #[serde(flatten)]
+    pub auth: AtlassianAuthMethod,
 }
 
-// `base_url`/`email` are not secrets; `api_token` is, so it redacts.
-impl std::fmt::Debug for JiraCredentials {
+/// How requests to an instance are authenticated.
+///
+/// Each variant carries exactly the fields its method needs and no others, so an
+/// unusable combination — a PAT with a `cloud_id`, an OAuth grant with an `email` —
+/// cannot be expressed. The variant also determines the deployment (and therefore the
+/// REST dialect): OAuth and API tokens exist only on Cloud, personal access tokens only
+/// on Data Center/Server.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "method", rename_all = "kebab-case")]
+pub enum AtlassianAuthMethod {
+    /// OAuth 2.0 (3LO) — Cloud. The only method that survives an IP allowlist, which
+    /// rejects API-token traffic from unlisted addresses while honoring an org-approved app.
+    ///
+    /// **Give Lorekeeper its own OAuth app.** Atlassian ROTATES refresh tokens: each
+    /// refresh mints a successor and invalidates the token just used, so two clients
+    /// sharing one grant invalidate each other on every run.
+    Oauth {
+        client_id: String,
+        client_secret: String,
+        /// Rotating — the successor is written back to this file after each refresh.
+        refresh_token: String,
+        /// Tenant id from `/oauth/token/accessible-resources`; selects the gateway path
+        /// `https://api.atlassian.com/ex/{product}/{cloud_id}`.
+        cloud_id: String,
+    },
+    /// Atlassian account API token over HTTP Basic — Cloud. Simple to set up, but an
+    /// instance with an IP allowlist blocks it outright from any unlisted address.
+    ApiToken { email: String, api_token: String },
+    /// Personal access token over HTTP Bearer — Data Center / Server. These instances have
+    /// no OAuth gateway and no account API tokens; a PAT issued from the user's profile is
+    /// the supported programmatic credential.
+    #[serde(rename = "pat")]
+    PersonalAccessToken { token: String },
+}
+
+impl AtlassianAuthMethod {
+    /// Stable name for diagnostics and config errors.
+    pub fn label(&self) -> &'static str {
+        match self {
+            AtlassianAuthMethod::Oauth { .. } => "oauth",
+            AtlassianAuthMethod::ApiToken { .. } => "api-token",
+            AtlassianAuthMethod::PersonalAccessToken { .. } => "pat",
+        }
+    }
+}
+
+// Identifiers (app id, tenant id, account email) stay visible because they name the
+// principal rather than authenticate it; every bearer secret redacts.
+impl std::fmt::Debug for AtlassianAuthMethod {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("JiraCredentials")
-            .field("base_url", &self.base_url)
-            .field("email", &self.email)
-            .field("api_token", &"<redacted>")
+        match self {
+            AtlassianAuthMethod::Oauth {
+                client_id,
+                cloud_id,
+                ..
+            } => f
+                .debug_struct("Oauth")
+                .field("client_id", client_id)
+                .field("client_secret", &"<redacted>")
+                .field("refresh_token", &"<redacted>")
+                .field("cloud_id", cloud_id)
+                .finish(),
+            AtlassianAuthMethod::ApiToken { email, .. } => f
+                .debug_struct("ApiToken")
+                .field("email", email)
+                .field("api_token", &"<redacted>")
+                .finish(),
+            AtlassianAuthMethod::PersonalAccessToken { .. } => f
+                .debug_struct("PersonalAccessToken")
+                .field("token", &"<redacted>")
+                .finish(),
+        }
+    }
+}
+
+impl std::fmt::Debug for AtlassianCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AtlassianCredentials")
+            .field("site_url", &self.site_url)
+            .field("auth", &self.auth)
             .finish()
     }
 }
@@ -137,6 +224,88 @@ impl Credentials {
         Ok(path)
     }
 
+    /// Resolve the Atlassian instance a source asked for.
+    ///
+    /// An explicit name wins. With no name, a lone configured instance is unambiguous and is
+    /// used regardless of its key; more than one is a genuine ambiguity, so the error names
+    /// the available instances rather than guessing.
+    pub fn atlassian_instance(
+        &self,
+        name: Option<&str>,
+    ) -> Result<(&str, &AtlassianCredentials), SourceError> {
+        if let Some(name) = name {
+            return self
+                .atlassian
+                .get_key_value(name)
+                .map(|(k, v)| (k.as_str(), v))
+                .ok_or_else(|| {
+                    SourceError::Auth(format!(
+                        "no Atlassian instance named `{name}` in credentials.json \
+                         (configured: {})",
+                        self.atlassian_instance_names()
+                    ))
+                });
+        }
+        let mut iter = self.atlassian.iter();
+        match (iter.next(), iter.next()) {
+            (Some((k, v)), None) => Ok((k.as_str(), v)),
+            (None, _) => Err(SourceError::Auth(
+                "no Atlassian instance configured. Run `lore init credentials` to authorize \
+                 one (OAuth for Cloud, or a personal access token for Data Center)."
+                    .into(),
+            )),
+            _ => Err(SourceError::Auth(format!(
+                "several Atlassian instances are configured ({}); set the source's \
+                 `instance` param to name one.",
+                self.atlassian_instance_names()
+            ))),
+        }
+    }
+
+    fn atlassian_instance_names(&self) -> String {
+        if self.atlassian.is_empty() {
+            return "none".into();
+        }
+        self.atlassian
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// Write a rotated Atlassian refresh token back for ONE instance, leaving every other
+    /// instance and provider untouched (read-modify-write against the file, not against the
+    /// env-overlaid values).
+    ///
+    /// Atlassian invalidates a refresh token the instant it is used, so persisting the
+    /// successor is part of completing a refresh — drop it and the next run is locked out.
+    /// Returns `false` when there is no file entry to update (credentials came from the
+    /// environment), which the caller surfaces as a warning: an env-supplied refresh token
+    /// cannot survive rotation, since only the environment's owner can update it.
+    pub fn persist_atlassian_refresh_token(
+        vault_root: &Path,
+        instance: &str,
+        refresh_token: &str,
+    ) -> Result<bool, SourceError> {
+        let mut on_disk = Self::load_file(vault_root)?;
+        let Some(entry) = on_disk.atlassian.get_mut(instance) else {
+            return Ok(false);
+        };
+        let AtlassianAuthMethod::Oauth {
+            refresh_token: stored,
+            ..
+        } = &mut entry.auth
+        else {
+            return Ok(false);
+        };
+        if stored == refresh_token {
+            return Ok(true);
+        }
+        *stored = refresh_token.to_string();
+        on_disk.save(vault_root)?;
+        Ok(true)
+    }
+
     fn override_from_env(&mut self) {
         if let (Ok(id), Ok(secret), Ok(refresh)) = (
             std::env::var("LORE_GOOGLE_CLIENT_ID"),
@@ -163,16 +332,28 @@ impl Credentials {
             self.slack = Some(slack);
         }
 
-        if let (Ok(url), Ok(email), Ok(token)) = (
-            std::env::var("LORE_JIRA_URL"),
-            std::env::var("LORE_JIRA_EMAIL"),
-            std::env::var("LORE_JIRA_TOKEN"),
-        ) {
-            self.jira = Some(JiraCredentials {
-                base_url: url,
-                email,
-                api_token: token,
-            });
+        // Env overlay targets the `default` instance, and covers the two methods whose
+        // credentials are stable strings: a Data Center PAT, and a Cloud email + API token.
+        // OAuth is deliberately absent — its refresh token ROTATES, and
+        // `persist_atlassian_refresh_token` has no file entry to write the successor to, so
+        // an env-supplied grant would work for exactly one run. Grants live in the file,
+        // where their rotation can be recorded.
+        if let Ok(site_url) = std::env::var("LORE_ATLASSIAN_SITE_URL") {
+            let auth = match (
+                std::env::var("LORE_ATLASSIAN_PAT"),
+                std::env::var("LORE_ATLASSIAN_EMAIL"),
+                std::env::var("LORE_ATLASSIAN_API_TOKEN"),
+            ) {
+                (Ok(token), _, _) => Some(AtlassianAuthMethod::PersonalAccessToken { token }),
+                (_, Ok(email), Ok(api_token)) => {
+                    Some(AtlassianAuthMethod::ApiToken { email, api_token })
+                }
+                _ => None,
+            };
+            if let Some(auth) = auth {
+                self.atlassian
+                    .insert("default".into(), AtlassianCredentials { site_url, auth });
+            }
         }
     }
 }
@@ -181,6 +362,150 @@ impl Credentials {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn instance(site: &str, auth: AtlassianAuthMethod) -> AtlassianCredentials {
+        AtlassianCredentials {
+            site_url: site.into(),
+            auth,
+        }
+    }
+
+    fn oauth_method() -> AtlassianAuthMethod {
+        AtlassianAuthMethod::Oauth {
+            client_id: "cid".into(),
+            client_secret: "sec".into(),
+            refresh_token: "rt-1".into(),
+            cloud_id: "cloud-1".into(),
+        }
+    }
+
+    #[test]
+    fn a_lone_instance_needs_no_name_whatever_its_key() {
+        let mut creds = Credentials::default();
+        creds
+            .atlassian
+            .insert("whatever".into(), instance("https://a.net", oauth_method()));
+        let (name, _) = creds.atlassian_instance(None).unwrap();
+        assert_eq!(name, "whatever");
+    }
+
+    #[test]
+    fn several_instances_require_naming_and_the_error_lists_them() {
+        let mut creds = Credentials::default();
+        creds
+            .atlassian
+            .insert("cloud".into(), instance("https://a.net", oauth_method()));
+        creds.atlassian.insert(
+            "onprem".into(),
+            instance(
+                "https://wiki.corp/confluence",
+                AtlassianAuthMethod::PersonalAccessToken { token: "p".into() },
+            ),
+        );
+
+        let err = creds.atlassian_instance(None).unwrap_err().to_string();
+        assert!(err.contains("cloud") && err.contains("onprem"), "{err}");
+
+        assert_eq!(
+            creds.atlassian_instance(Some("onprem")).unwrap().0,
+            "onprem"
+        );
+        let missing = creds
+            .atlassian_instance(Some("nope"))
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("cloud, onprem"), "{missing}");
+    }
+
+    #[test]
+    fn no_instance_configured_points_at_the_setup_command() {
+        let err = Credentials::default()
+            .atlassian_instance(None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("lore init credentials"), "{err}");
+    }
+
+    #[test]
+    fn rotated_refresh_token_is_persisted_for_the_named_instance_only() {
+        let dir = TempDir::new().unwrap();
+        let mut creds = Credentials::default();
+        creds
+            .atlassian
+            .insert("cloud".into(), instance("https://a.net", oauth_method()));
+        creds
+            .atlassian
+            .insert("other".into(), instance("https://b.net", oauth_method()));
+        creds.save(dir.path()).unwrap();
+
+        let updated =
+            Credentials::persist_atlassian_refresh_token(dir.path(), "cloud", "rt-2").unwrap();
+        assert!(updated);
+
+        let back = Credentials::load_file(dir.path()).unwrap();
+        let rt = |c: &Credentials, k: &str| match &c.atlassian[k].auth {
+            AtlassianAuthMethod::Oauth { refresh_token, .. } => refresh_token.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(rt(&back, "cloud"), "rt-2");
+        assert_eq!(rt(&back, "other"), "rt-1", "sibling instance untouched");
+    }
+
+    #[test]
+    fn persisting_reports_false_when_there_is_no_file_entry_to_update() {
+        // An env-supplied grant has nowhere to record rotation; the caller warns instead of
+        // silently losing the successor.
+        let dir = TempDir::new().unwrap();
+        Credentials::default().save(dir.path()).unwrap();
+        assert!(
+            !Credentials::persist_atlassian_refresh_token(dir.path(), "cloud", "rt-2").unwrap()
+        );
+    }
+
+    #[test]
+    fn a_pat_instance_has_no_refresh_token_to_rotate() {
+        let dir = TempDir::new().unwrap();
+        let mut creds = Credentials::default();
+        creds.atlassian.insert(
+            "onprem".into(),
+            instance(
+                "https://wiki.corp/confluence",
+                AtlassianAuthMethod::PersonalAccessToken {
+                    token: "pat".into(),
+                },
+            ),
+        );
+        creds.save(dir.path()).unwrap();
+        assert!(
+            !Credentials::persist_atlassian_refresh_token(dir.path(), "onprem", "rt").unwrap(),
+            "rotation is an OAuth concept; a PAT entry must be left alone"
+        );
+    }
+
+    #[test]
+    fn auth_method_round_trips_through_its_tag() {
+        let dir = TempDir::new().unwrap();
+        let mut creds = Credentials::default();
+        creds.atlassian.insert(
+            "onprem".into(),
+            instance(
+                "https://wiki.corp/confluence",
+                AtlassianAuthMethod::PersonalAccessToken {
+                    token: "pat".into(),
+                },
+            ),
+        );
+        creds.save(dir.path()).unwrap();
+
+        let raw = std::fs::read_to_string(Credentials::path(dir.path())).unwrap();
+        assert!(raw.contains(r#""method": "pat""#), "{raw}");
+
+        let back = Credentials::load_file(dir.path()).unwrap();
+        assert!(matches!(
+            back.atlassian["onprem"].auth,
+            AtlassianAuthMethod::PersonalAccessToken { .. }
+        ));
+    }
 
     #[test]
     fn save_round_trips_and_omits_unset_providers() {
@@ -232,14 +557,16 @@ mod tests {
         assert!(!g.contains("SHHH-secret"), "client_secret redacted: {g}");
         assert!(!g.contains("1//refresh-shh"), "refresh_token redacted: {g}");
 
-        let jira = JiraCredentials {
-            base_url: "https://x.atlassian.net".into(),
-            email: "me@x.com".into(),
-            api_token: "JIRA-shh".into(),
-        };
-        let j = format!("{jira:?}");
-        assert!(j.contains("https://x.atlassian.net") && j.contains("me@x.com"));
-        assert!(!j.contains("JIRA-shh"), "api_token redacted: {j}");
+        let atlassian = instance(
+            "https://x.atlassian.net",
+            AtlassianAuthMethod::ApiToken {
+                email: "me@x.com".into(),
+                api_token: "JIRA-shh".into(),
+            },
+        );
+        let a = format!("{atlassian:?}");
+        assert!(a.contains("https://x.atlassian.net") && a.contains("me@x.com"));
+        assert!(!a.contains("JIRA-shh"), "api_token redacted: {a}");
 
         let slack = SlackCredentials {
             bot_token: Some("xoxb-shh".into()),

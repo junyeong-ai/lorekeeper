@@ -21,6 +21,8 @@ feed-rs = { workspace = true }
 dom_smoothie = { workspace = true }
 url = { workspace = true }
 base64 = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
 regex = { workspace = true }
 blake3 = { workspace = true }
 emojis = "0.9"

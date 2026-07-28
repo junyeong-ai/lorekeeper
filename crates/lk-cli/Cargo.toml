@@ -26,6 +26,7 @@ miette = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 dialoguer = { workspace = true }
+blake3 = { workspace = true }
 walkdir = { workspace = true }
 
 [dev-dependencies]

@@ -632,6 +632,14 @@ pub struct SourceConfig {
     pub enabled: bool,
     #[serde(default = "empty_object")]
     pub params: serde_json::Value,
+    /// Which entry of `credentials.atlassian` this source authenticates with. Optional
+    /// when exactly one instance is configured; required to disambiguate when several are
+    /// (a Cloud tenant alongside an on-prem wiki, say).
+    ///
+    /// Credential routing is a source-level concern the FACTORY resolves, not adapter data,
+    /// so it lives here rather than in `params` — the same separation `classify` keeps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
     /// Ordered rules for deterministic keyword classification. A source-level
     /// concern (read by the pipeline), kept out of `params` so adapter params can
     /// reject unknown keys without colliding with this cross-cutting field.
@@ -1183,6 +1191,7 @@ mod tests {
     fn normalized_focus_treats_blank_as_none() {
         let mk = |f: Option<&str>| SourceConfig {
             source_type: SourceType::Rss,
+            instance: None,
             enabled: true,
             params: empty_object(),
             classify: vec![],

@@ -17,6 +17,7 @@ fn base_config(vault_root: &std::path::Path) -> Config {
         "test-source".to_string(),
         SourceConfig {
             source_type: SourceType::Gmail,
+            instance: None,
             enabled: true,
             params: serde_json::Value::Object(Default::default()),
             classify: Default::default(),
@@ -301,6 +302,7 @@ async fn concept_accumulates_across_sources_in_one_run() {
         "second-source".to_string(),
         SourceConfig {
             source_type: SourceType::Gmail,
+            instance: None,
             enabled: true,
             params: serde_json::Value::Object(Default::default()),
             classify: Default::default(),

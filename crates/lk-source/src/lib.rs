@@ -1,3 +1,4 @@
+mod atlassian;
 pub mod credentials;
 mod google;
 mod jira;
@@ -27,6 +28,13 @@ use google::GoogleAuth;
 /// Mint a Google refresh token via an interactive OAuth loopback flow (used by
 /// `lore init credentials`).
 pub use google::oauth::build_refresh_token as build_google_refresh_token;
+
+/// Mint an Atlassian OAuth 2.0 (3LO) grant — refresh token + tenant — covering Jira and
+/// Confluence (used by `lore init credentials`).
+pub use atlassian::oauth::{
+    AtlassianGrant, AtlassianSite, DEFAULT_REDIRECT_PORT as ATLASSIAN_REDIRECT_PORT, Products,
+    build_grant as build_atlassian_grant,
+};
 
 #[derive(Debug, Error)]
 pub enum SourceError {
@@ -193,10 +201,59 @@ pub fn build_http_client() -> Result<reqwest::Client, SourceError> {
         .build()?)
 }
 
+/// One shared auth provider per Atlassian instance, built once for a whole run.
+///
+/// Sharing is a correctness requirement, not an optimization. Atlassian rotates OAuth
+/// refresh tokens: the first refresh invalidates the token it used. Two providers over one
+/// instance would each hold the same starting token, so once one refreshed, the other's copy
+/// would be dead and its next refresh would fail with `invalid_grant` — the Jira source
+/// would silently break the Confluence source in the same run. One provider per instance
+/// means one rotation chain per instance.
+pub type AtlassianRegistry = std::collections::BTreeMap<String, Arc<atlassian::AtlassianAuth>>;
+
+pub fn build_atlassian_registry(
+    creds: &Credentials,
+    http: &reqwest::Client,
+    vault_root: &std::path::Path,
+) -> AtlassianRegistry {
+    creds
+        .atlassian
+        .iter()
+        .map(|(name, ac)| {
+            (
+                name.clone(),
+                Arc::new(atlassian::AtlassianAuth::new(
+                    http.clone(),
+                    name,
+                    ac,
+                    vault_root,
+                )),
+            )
+        })
+        .collect()
+}
+
+/// Resolve the shared provider for the instance a source asked for. Name resolution lives
+/// in `Credentials` so the "one instance is unambiguous, several need naming" rule — and
+/// its error text — is stated once.
+fn resolve_atlassian(
+    creds: &Credentials,
+    registry: &AtlassianRegistry,
+    instance: Option<&str>,
+) -> Result<Arc<atlassian::AtlassianAuth>, SourceError> {
+    let (name, _) = creds.atlassian_instance(instance)?;
+    registry
+        .get(name)
+        .cloned()
+        .ok_or_else(|| SourceError::Auth(format!("Atlassian instance `{name}` was not built")))
+}
+
 pub fn build_source(
     source_type: SourceType,
     http: reqwest::Client,
     creds: &Credentials,
+    registry: &AtlassianRegistry,
+    instance: Option<&str>,
 ) -> Result<Box<dyn Source>, SourceError> {
     match source_type {
         SourceType::Gmail => {
@@ -238,15 +295,8 @@ pub fn build_source(
             Ok(Box::new(slack::search::SlackSearchSource::new(http, token)))
         }
         SourceType::Jira => {
-            let jc = creds.jira.as_ref().ok_or_else(|| {
-                SourceError::Auth(
-                    "Jira credentials not configured. \
-                     Set LORE_JIRA_URL, LORE_JIRA_EMAIL, LORE_JIRA_TOKEN \
-                     or add to .lorekeeper/credentials.json"
-                        .into(),
-                )
-            })?;
-            Ok(Box::new(jira::JiraSource::new(http, jc.clone())))
+            let auth = resolve_atlassian(creds, registry, instance)?;
+            Ok(Box::new(jira::JiraSource::new(http, auth)))
         }
         // RSS feeds are public HTTP — no credentials.
         SourceType::Rss => Ok(Box::new(rss::RssSource::new(http))),
@@ -279,7 +329,6 @@ mod tests {
     #[test]
     fn day_window_applies_padding() {
         let (min, max) = ctx("2026-05-01", "UTC").day_window(24, 12).unwrap();
-        // day [05-01T00:00, 05-02T00:00) padded by -24h / +12h.
         assert_eq!(min.to_string(), "2026-04-30T00:00:00Z");
         assert_eq!(max.to_string(), "2026-05-02T12:00:00Z");
     }

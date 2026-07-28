@@ -123,6 +123,9 @@ pub async fn run(
     }
 
     let http = lk_source::build_http_client().map_err(|e| miette::miette!("{e}"))?;
+    // One auth provider per Atlassian instance for the whole run. OAuth refresh tokens
+    // rotate, so two providers over one instance would invalidate each other mid-run.
+    let atlassian = lk_source::build_atlassian_registry(&creds, &http, &vault_root);
     let extract_ctx = lk_source::ExtractContext {
         target_date: extract_target,
         timezone: tz,
@@ -146,7 +149,13 @@ pub async fn run(
         let started_at = std::time::Instant::now();
         eprintln!("▸ {id} ({})", sc.source_type);
 
-        let adapter = match lk_source::build_source(sc.source_type, http.clone(), &creds) {
+        let adapter = match lk_source::build_source(
+            sc.source_type,
+            http.clone(),
+            &creds,
+            &atlassian,
+            sc.instance.as_deref(),
+        ) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("  ✗ {e}");

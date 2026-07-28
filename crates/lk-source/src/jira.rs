@@ -1,17 +1,20 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use serde::Deserialize;
 use tokio::sync::OnceCell;
 
 use lk_core::event::RawItem;
 
-use crate::credentials::JiraCredentials;
+use crate::atlassian::{AtlassianAuth, JiraPaging, Product};
 use crate::{ExtractContext, Source, SourceError};
 
 pub struct JiraSource {
     http: reqwest::Client,
-    creds: JiraCredentials,
-    /// The authenticated user's `accountId`, fetched once and cached for the life
-    /// of the source (it is invariant for fixed credentials).
+    auth: Arc<AtlassianAuth>,
+    /// The authenticated user's ownership key (`accountId` on Cloud, `name` on Data
+    /// Center), fetched once and cached for the life of the source — it is invariant for
+    /// fixed credentials.
     account_id: OnceCell<String>,
 }
 
@@ -80,8 +83,13 @@ fn default_max() -> u32 {
 #[derive(Deserialize)]
 struct SearchResult {
     issues: Option<Vec<Issue>>,
+    /// Cloud continuation cursor. Absent on Data Center, which pages by offset.
     #[serde(rename = "nextPageToken")]
     next_page_token: Option<String>,
+    /// Data Center reports the full match count so the offset loop knows when it is done.
+    /// Absent on Cloud, which signals completion purely by dropping the cursor.
+    #[serde(default)]
+    total: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -117,17 +125,31 @@ struct NameField {
 struct UserField {
     #[serde(rename = "accountId")]
     account_id: Option<String>,
+    /// Data Center's identity field. `accountId` is Cloud-only, so without this every DC
+    /// issue would deserialize with no identity at all and silently compare not-self —
+    /// erasing a whole deployment's work from the personal log with no signal.
+    #[serde(default)]
+    name: Option<String>,
     #[serde(rename = "displayName")]
     display_name: Option<String>,
     #[serde(rename = "emailAddress")]
     email_address: Option<String>,
 }
 
+impl UserField {
+    /// The ownership key this deployment populates. Exactly one of the two is ever present
+    /// — Cloud sends `accountId`, Data Center sends `name` — so preferring whichever exists
+    /// is unambiguous, and mirrors how the Confluence adapter resolves the same split.
+    fn identity(&self) -> Option<&str> {
+        self.account_id.as_deref().or(self.name.as_deref())
+    }
+}
+
 impl JiraSource {
-    pub fn new(http: reqwest::Client, creds: JiraCredentials) -> Self {
+    pub fn new(http: reqwest::Client, auth: Arc<AtlassianAuth>) -> Self {
         Self {
             http,
-            creds,
+            auth,
             account_id: OnceCell::new(),
         }
     }
@@ -141,33 +163,38 @@ impl JiraSource {
     async fn account_id(&self) -> Result<&str, SourceError> {
         self.account_id
             .get_or_try_init(|| async {
+                let deployment = self.auth.deployment();
                 let url = format!(
-                    "{}/rest/api/3/myself",
-                    self.creds.base_url.trim_end_matches('/')
+                    "{}{}",
+                    self.auth.api_base(Product::Jira),
+                    deployment.jira_myself_path()
                 );
-                let resp = crate::retry::send_with_retry(|| {
-                    self.http
-                        .get(&url)
-                        .basic_auth(&self.creds.email, Some(&self.creds.api_token))
-                        .send()
-                })
-                .await?;
+                let header = self.auth.header().await?;
+                let resp =
+                    crate::retry::send_with_retry(|| header.apply(self.http.get(&url)).send())
+                        .await?;
                 if !resp.status().is_success() {
                     let status = resp.status().as_u16();
                     let body = resp.text().await.unwrap_or_default();
                     return Err(SourceError::Api {
                         status,
-                        message: format!("Jira /myself failed: {body}"),
+                        message: format!(
+                            "Jira /myself failed: {}",
+                            self.auth.explain_failure(status, &body)
+                        ),
                     });
                 }
+                // Cloud identifies users by `accountId`, Data Center by `name` — the
+                // dialect owns which, so this stays a single lookup.
+                let key = deployment.jira_user_key();
                 resp.json::<serde_json::Value>()
                     .await
                     .map_err(|e| SourceError::Parse(e.to_string()))?
-                    .get("accountId")
+                    .get(key)
                     .and_then(|v| v.as_str())
                     .map(String::from)
                     .ok_or_else(|| {
-                        SourceError::Parse("Jira /myself response missing accountId".into())
+                        SourceError::Parse(format!("Jira /myself response missing {key}"))
                     })
             })
             .await
@@ -184,9 +211,11 @@ impl Source for JiraSource {
     ) -> Result<Vec<RawItem>, SourceError> {
         let p: JiraParams = crate::parse_validated(params)?;
 
+        let deployment = self.auth.deployment();
         let url = format!(
-            "{}/rest/api/3/search/jql",
-            self.creds.base_url.trim_end_matches('/')
+            "{}{}",
+            self.auth.api_base(Product::Jira),
+            deployment.jira_search_path()
         );
         // Append the configured start-date field (if any) so the API returns it; it's
         // extracted by raw id afterward since the id is instance-specific.
@@ -197,12 +226,14 @@ impl Source for JiraSource {
         let fields_csv = fields.join(",");
 
         let my_account_id = self.account_id().await?;
+        let header = self.auth.header().await?;
 
         // Paginate to the end of the JQL result (complete-refetch contract: the daily page
         // is re-rendered from this fetch, so an issue beyond one page is silently lost
-        // knowledge). `/search/jql` paginates by `nextPageToken`, not the legacy `startAt`.
-        // Requested page size; the server may return fewer (or zero) per page.
-        // Termination is `paging::page_step` — the rule all listing adapters share.
+        // knowledge). The continuation mechanism is deployment-specific — Cloud's
+        // `/search/jql` hands back an opaque `nextPageToken`, Data Center's v2 `/search`
+        // uses a `startAt` offset — but termination is `paging::page_step` either way, the
+        // rule all listing adapters share.
         const PAGE_SIZE: usize = 100;
         let page_size = PAGE_SIZE.to_string();
         let cap = p.max_issues as usize;
@@ -212,19 +243,20 @@ impl Source for JiraSource {
         let mut pages_fetched = 0usize;
 
         loop {
+            let start_at = issues.len().to_string();
             let resp = crate::retry::send_with_retry(|| {
-                let mut req = self
-                    .http
-                    .get(&url)
-                    .basic_auth(&self.creds.email, Some(&self.creds.api_token))
-                    .query(&[
-                        ("jql", p.jql.as_str()),
-                        ("maxResults", page_size.as_str()),
-                        ("fields", fields_csv.as_str()),
-                    ]);
-                if let Some(ref pt) = page_token {
-                    req = req.query(&[("nextPageToken", pt.as_str())]);
-                }
+                let mut req = header.apply(self.http.get(&url)).query(&[
+                    ("jql", p.jql.as_str()),
+                    ("maxResults", page_size.as_str()),
+                    ("fields", fields_csv.as_str()),
+                ]);
+                req = match deployment.jira_paging() {
+                    JiraPaging::Token => match page_token {
+                        Some(ref pt) => req.query(&[("nextPageToken", pt.as_str())]),
+                        None => req,
+                    },
+                    JiraPaging::Offset => req.query(&[("startAt", start_at.as_str())]),
+                };
                 req.send()
             })
             .await?;
@@ -234,7 +266,10 @@ impl Source for JiraSource {
                 let body = resp.text().await.unwrap_or_default();
                 return Err(SourceError::Api {
                     status,
-                    message: format!("Jira search failed: {body}"),
+                    message: format!(
+                        "Jira search failed: {}",
+                        self.auth.explain_failure(status, &body)
+                    ),
                 });
             }
 
@@ -243,15 +278,36 @@ impl Source for JiraSource {
                 .await
                 .map_err(|e| SourceError::Parse(e.to_string()))?;
 
+            let page_len = result.issues.as_ref().map_or(0, Vec::len);
             issues.extend(result.issues.unwrap_or_default());
             pages_fetched += 1;
 
-            match crate::paging::page_step(
-                issues.len(),
-                cap,
-                result.next_page_token.is_some(),
-                pages_fetched,
-            ) {
+            // Each dialect states "more remain" differently: Cloud by handing back a cursor,
+            // Data Center by reporting a `total` the collected count hasn't reached. A DC
+            // response that returns nothing while claiming more would spin forever on an
+            // unadvancing offset, so an empty page also ends the offset loop.
+            let has_next = match deployment.jira_paging() {
+                JiraPaging::Token => result.next_page_token.is_some(),
+                JiraPaging::Offset => {
+                    let more_expected = result.total.is_some_and(|t| (issues.len() as u64) < t);
+                    // An empty page while `total` says more remain means the offset is not
+                    // advancing; continuing would spin. Stopping is right, but it IS a
+                    // truncation, and this crate's contract is that truncation is never
+                    // silent. (`total` absent entirely is the same story: nothing left to
+                    // page against.)
+                    if more_expected && page_len == 0 {
+                        tracing::warn!(
+                            collected = issues.len(),
+                            total = result.total,
+                            "jira: server returned an empty page before the result set was \
+                             exhausted; results may be incomplete"
+                        );
+                    }
+                    page_len > 0 && more_expected
+                }
+            };
+
+            match crate::paging::page_step(issues.len(), cap, has_next, pages_fetched) {
                 crate::paging::PageStep::Continue => page_token = result.next_page_token,
                 crate::paging::PageStep::Stop { dropped } => {
                     issues.truncate(cap);
@@ -275,15 +331,16 @@ impl Source for JiraSource {
 
         tracing::info!(count = issues.len(), "jira: issues found");
 
-        let base = self.creds.base_url.trim_end_matches('/');
+        // Links resolve against the site, never the OAuth gateway (which is not browsable).
+        let base = self.auth.browse_base(Product::Jira).unwrap_or_default();
         let items = issues
             .into_iter()
             .filter_map(|issue| {
                 map_issue(
                     issue,
                     my_account_id,
-                    base,
-                    &self.creds.email,
+                    &base,
+                    &ctx.identity.email,
                     p.start_date_field.as_deref(),
                     ctx.locale.strings(),
                 )
@@ -321,7 +378,7 @@ fn map_issue(
     };
 
     let assignee = issue.fields.assignee.as_ref();
-    let assignee_aid = assignee.and_then(|a| a.account_id.as_deref());
+    let assignee_aid = assignee.and_then(UserField::identity);
     let is_me = assignee_aid == Some(my_account_id);
     let author = if is_me {
         Some(my_email.to_string())
@@ -356,13 +413,13 @@ fn map_issue(
         .fields
         .assignee
         .as_ref()
-        .and_then(|a| a.account_id.clone());
+        .and_then(|a| a.identity().map(str::to_string));
 
     Some(RawItem {
         external_id: Some(issue.key.clone()),
         title: format!("[{}] {}", issue.key, summary),
         body,
-        url: Some(format!("{base}/browse/{}", issue.key)),
+        url: (!base.is_empty()).then(|| format!("{base}/browse/{}", issue.key)),
         author,
         timestamp: ts,
         is_self: is_me,
