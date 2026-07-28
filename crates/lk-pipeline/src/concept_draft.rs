@@ -170,9 +170,13 @@ impl ConceptDrafts {
     /// to — the established title and slug. Pure and infallible: every read it could need
     /// already happened in [`Self::stage`].
     ///
-    /// Callers render links from the RETURNED identity, never from the extraction's own
-    /// name: an alias resolves to a different slug than it would produce itself, so
-    /// re-deriving one would point the citation at a page that does not exist.
+    /// A link is rendered from a RESOLVED identity, never from the extraction's own name:
+    /// an alias resolves to a different slug than it would produce itself, so re-deriving
+    /// one would point the citation at a page that does not exist. `apply_concept_result`
+    /// takes that identity from here; `Pipeline::plan` and `plan_documents` render a page
+    /// before staging anything and so take it from [`Self::resolve_identity`], discarding
+    /// this return. The two agree because resolution records its decision — which is what
+    /// makes rendering-before-folding safe at all.
     pub fn commit(&mut self, staged: StagedConcept, date: jiff::civil::Date) -> ConceptIdentity {
         let StagedConcept {
             concept,

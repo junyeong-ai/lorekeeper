@@ -3419,6 +3419,189 @@ async fn a_break_between_digits_does_not_fold_one_version_onto_another() {
     );
 }
 
+/// An LLM whose extraction differs per call, so one `Pipeline` can plan twice with
+/// different concepts — which `MockLlmClient`'s fixed list cannot express.
+struct ConceptsPerCall(std::sync::Mutex<std::collections::VecDeque<Vec<ExtractedConcept>>>);
+
+impl ConceptsPerCall {
+    fn build(batches: Vec<Vec<&str>>) -> Arc<dyn LlmClient> {
+        Arc::new(Self(std::sync::Mutex::new(
+            batches
+                .into_iter()
+                .map(|names| {
+                    names
+                        .into_iter()
+                        .map(|name| ExtractedConcept {
+                            name: name.into(),
+                            category: None,
+                        })
+                        .collect()
+                })
+                .collect(),
+        )))
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmClient for ConceptsPerCall {
+    async fn summarize(
+        &self,
+        _req: lk_queue::SummarizeRequest,
+    ) -> Result<String, lk_queue::QueueError> {
+        Ok("summary".into())
+    }
+
+    async fn extract_concepts(
+        &self,
+        _req: lk_queue::ExtractConceptsRequest,
+    ) -> Result<Vec<ExtractedConcept>, lk_queue::QueueError> {
+        Ok(self.0.lock().unwrap().pop_front().unwrap_or_default())
+    }
+}
+
+/// A source plan that FAILS must leave nothing of its concepts behind.
+/// `render_concept_pages` emits the run-level accumulator unconditionally, so a plan that
+/// folded concepts one at a time would write pages for a daily page it never wrote —
+/// orphans produced by a run that reported failure. Both plan paths read every concept
+/// before folding any; this pins the daily one, `plan_documents` has its own.
+#[tokio::test]
+async fn a_failed_daily_plan_leaves_none_of_its_concepts_behind() {
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let config = base_config(vault);
+    let source = config.sources.get("test-source").unwrap();
+    let options = IngestOptions {
+        target_date: None,
+        today: far_future(),
+        dry_run: false,
+    };
+    let ts: jiff::Timestamp = "2026-05-23T10:00:00Z".parse().unwrap();
+
+    // The first plan builds the alias index while every page still parses; corrupting a
+    // page before that would fail the index build instead, never reaching `stage`.
+    let llm = ConceptsPerCall::build(vec![vec!["Kept Concept"], vec!["New A", "New B", "Broken"]]);
+    let mut pipeline = Pipeline::new(vault, build_ctx(&config, llm));
+    pipeline
+        .plan(
+            "test-source",
+            source,
+            vec![raw_item("first", "...", "MSG-1", ts)],
+            &options,
+        )
+        .await
+        .unwrap();
+
+    // Unparseable frontmatter: staging the concept addressed here fails, and it is the
+    // LAST of the three, so two are already staged when it does.
+    let concepts_dir = vault.join("wiki").join("concepts");
+    std::fs::create_dir_all(&concepts_dir).unwrap();
+    std::fs::write(
+        concepts_dir.join("broken.md"),
+        "---\nid: broken\nno close\n",
+    )
+    .unwrap();
+
+    let failed = pipeline
+        .plan(
+            "test-source",
+            source,
+            vec![raw_item("second", "...", "MSG-2", ts)],
+            &options,
+        )
+        .await;
+    assert!(
+        failed.is_err(),
+        "a concept whose page cannot be read fails the plan"
+    );
+
+    let slugs: Vec<String> = pipeline
+        .render_concept_pages()
+        .await
+        .unwrap()
+        .iter()
+        .map(|p| p.path.to_string())
+        .collect();
+    assert!(
+        slugs
+            .iter()
+            .all(|s| !s.contains("new-a") && !s.contains("new-b")),
+        "a failed plan must leave none of its concepts in the accumulator: {slugs:?}"
+    );
+    assert!(
+        slugs.iter().any(|s| s.contains("kept-concept")),
+        "the earlier successful plan's concept must survive: {slugs:?}"
+    );
+}
+
+/// The same guarantee on the document path. `plan_documents` is a separate function with
+/// its own concept loop, and it kept folding one at a time for a commit after the daily
+/// loop stopped — a sibling that has to be pinned separately, not assumed.
+#[tokio::test]
+async fn a_failed_document_plan_leaves_none_of_its_concepts_behind() {
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let mut config = base_config(vault);
+    config.sources.get_mut("test-source").unwrap().source_type = SourceType::Manual;
+    let source = config.sources.get("test-source").unwrap().clone();
+    let options = IngestOptions {
+        target_date: None,
+        today: far_future(),
+        dry_run: false,
+    };
+    let ts: jiff::Timestamp = "2026-05-23T10:00:00Z".parse().unwrap();
+
+    let llm = ConceptsPerCall::build(vec![vec!["Kept Concept"], vec!["New A", "New B", "Broken"]]);
+    let mut pipeline = Pipeline::new(vault, build_ctx(&config, llm));
+    pipeline
+        .plan(
+            "test-source",
+            &source,
+            vec![raw_item("First Note", "body", "DOC-A", ts)],
+            &options,
+        )
+        .await
+        .unwrap();
+
+    let concepts_dir = vault.join("wiki").join("concepts");
+    std::fs::create_dir_all(&concepts_dir).unwrap();
+    std::fs::write(
+        concepts_dir.join("broken.md"),
+        "---\nid: broken\nno close\n",
+    )
+    .unwrap();
+
+    let failed = pipeline
+        .plan(
+            "test-source",
+            &source,
+            vec![raw_item("Second Note", "body", "DOC-B", ts)],
+            &options,
+        )
+        .await;
+    assert!(
+        failed.is_err(),
+        "a concept whose page cannot be read fails the document plan"
+    );
+
+    let slugs: Vec<String> = pipeline
+        .render_concept_pages()
+        .await
+        .unwrap()
+        .iter()
+        .map(|p| p.path.to_string())
+        .collect();
+    assert!(
+        slugs
+            .iter()
+            .all(|s| !s.contains("new-a") && !s.contains("new-b")),
+        "a failed document plan must leave none of its concepts behind: {slugs:?}"
+    );
+    assert!(
+        slugs.iter().any(|s| s.contains("kept-concept")),
+        "the earlier successful plan's concept must survive: {slugs:?}"
+    );
+}
+
 /// A break that is not between two numerals is typography, so an extraction that spells an
 /// established name without them must land on that page rather than mint a second one at
 /// its own spelling. The alias index and `graph lint` share `identity_key` precisely so
