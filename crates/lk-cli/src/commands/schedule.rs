@@ -218,24 +218,30 @@ fn print_cron(
     let cwd_str = shell_escape(&cwd.display().to_string());
     let bin_escaped = shell_escape(bin);
 
-    println!("# lorekeeper scheduled tasks");
-    println!("# Paste into your crontab: crontab -e");
-    println!("# Requires: {bin_escaped} in PATH (cargo install --path crates/lk-cli)");
-    println!("# Working dir: {}", cwd.display());
-    println!("#");
-    println!("# On macOS prefer `lore schedule --format launchd`: cron SKIPS a job whose time");
-    println!("# passed while the machine was asleep, which silently drops a day's ingest.");
-    println!();
+    // Every line, COMMENTS INCLUDED, is collected and checked before a byte is printed. A
+    // comment is not exempt: a line break inside one ends the comment and leaves the rest of
+    // the value as a crontab entry in its own right — a directory named
+    // `dir\n* * * * * <command>` is enough. And the output is emitted only once the whole
+    // file has passed, so a refusal on a later line cannot leave an earlier one already
+    // piped into `crontab -`.
+    let mut out: Vec<String> = vec![
+        "# lorekeeper scheduled tasks".into(),
+        "# Paste into your crontab: crontab -e".into(),
+        format!("# Requires: {bin_escaped} in PATH (cargo install --path crates/lk-cli)"),
+        format!("# Working dir: {}", cwd.display()),
+        "#".into(),
+        "# On macOS prefer `lore schedule --format launchd`: cron SKIPS a job whose time".into(),
+        "# passed while the machine was asleep, which silently drops a day's ingest.".into(),
+        String::new(),
+    ];
 
     // cron gives a job almost no environment. Assignment lines apply to every entry below
     // them, which is crontab's own way of saying this — and keeps the job lines readable
     // instead of repeating a full PATH on each one.
     if !env.is_empty() {
-        println!("# Environment the pipelines need to find their own tools:");
-        for (key, value) in env {
-            println!("{}", checked_line(format!("{key}={value}"))?);
-        }
-        println!();
+        out.push("# Environment the pipelines need to find their own tools:".into());
+        out.extend(env.iter().map(|(key, value)| format!("{key}={value}")));
+        out.push(String::new());
     }
 
     for job in jobs {
@@ -244,11 +250,14 @@ fn print_cron(
             command.push(' ');
             command.push_str(&shell_escape(arg));
         }
-        println!(
-            "{}",
-            checked_line(format!("{} cd {cwd_str} && {command}", job.schedule))?
-        );
+        out.push(format!("{} cd {cwd_str} && {command}", job.schedule));
     }
+
+    let checked: Vec<String> = out
+        .into_iter()
+        .map(checked_line)
+        .collect::<Result<_, _>>()?;
+    println!("{}", checked.join("\n"));
     Ok(())
 }
 
@@ -493,6 +502,24 @@ fn shell_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_line_break_in_the_working_directory_is_refused_before_anything_prints() {
+        // A comment is not exempt: `# Working dir: <cwd>` ends at the break and leaves the
+        // rest as a crontab entry of its own, so a directory named `dir\n* * * * * <cmd>`
+        // installs a job. Nothing may be printed before the whole file has passed, or a
+        // refusal on a later line still leaves this one in `crontab -`.
+        let jobs = [Job {
+            name: "ingest".into(),
+            schedule: "0 9 * * *".into(),
+            program: None,
+            args: vec!["ingest".into()],
+        }];
+        let hostile = std::path::Path::new("/v/dir\n* * * * * echo pwned");
+        assert!(print_cron("/usr/bin/lore", hostile, &jobs, &[]).is_err());
+        // Also with no jobs at all, where no job line exists to catch it.
+        assert!(print_cron("/usr/bin/lore", hostile, &[], &[]).is_err());
+    }
 
     #[test]
     fn a_line_break_anywhere_in_an_assembled_line_is_refused() {
