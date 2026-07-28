@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+pub mod config;
 pub mod doctor;
 pub mod graph;
 pub mod health;

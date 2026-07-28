@@ -60,9 +60,14 @@ enum Command {
     Performance,
     /// Validate config file
     Validate,
+    /// Inspect resolved configuration values
+    Config {
+        #[command(subcommand)]
+        cmd: commands::config::ConfigCommand,
+    },
     /// Print crontab entries (ingest, synthesis, maintenance)
     Schedule {
-        /// Override the binary name in cron lines (default: "lore")
+        /// Override the binary path used in the generated entries (default: "lore")
         #[arg(long, default_value = "lore")]
         bin: String,
     },
@@ -143,6 +148,7 @@ async fn main() -> miette::Result<()> {
             InitTarget::Schema { root } => commands::schema::run(&opts, root).await,
         },
         Command::Validate => commands::validate::run(&opts).await,
+        Command::Config { cmd } => commands::config::run(&opts, cmd).await,
         Command::Schema { root } => commands::schema::run(&opts, root).await,
         Command::Status => commands::status::run(&opts).await,
         Command::Ingest {
