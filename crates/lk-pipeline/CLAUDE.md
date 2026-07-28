@@ -19,6 +19,12 @@ domain-neutral engine — then no work-log, reviews, or `is_personal` are produc
   accumulator. Concept pages are a cross-source aggregate, rendered ONCE via
   `render_concept_pages()` after all sources are planned — never per source (that would
   let a later source's write clobber an earlier one).
+  **Every concept is READ before any is folded** — `ConceptDrafts::stage` for all of them,
+  then `commit` — on all three paths that touch the accumulator (`plan`, `plan_documents`,
+  `apply_concept_result`). Folding one at a time would leave the earlier ones in an
+  accumulator `render_concept_pages()` emits unconditionally, so a read failing partway
+  writes concept pages for an origin page that plan never wrote — orphans on a run that
+  reported failure. Reading is the only fallible half, which is what makes the split work.
 - **Materialized-view render**: a daily page is two layers. The **structural** layer
   (frontmatter, raw event list, all `## ` headings) is re-rendered every ingest from
   the template. The **semantic** layer (summary body, refined event bodies, concept

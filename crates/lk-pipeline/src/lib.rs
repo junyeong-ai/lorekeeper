@@ -890,16 +890,24 @@ impl Pipeline {
             staged_concepts.extend(doc_concepts.into_iter().map(|c| (c, event.date)));
         }
 
-        // Commit staged run-level state now that every page rendered. Concept merges
-        // (fallible — they read existing pages) run before the infallible slug commit, so a
-        // merge error leaves neither half-committed.
-        let mut all_concepts = Vec::with_capacity(staged_concepts.len());
-        for (concept, date) in staged_concepts {
-            self.concept_drafts
-                .merge(&concept, date, self.reader.as_ref(), &self.ctx.dirs)
-                .await?;
-            all_concepts.push(concept);
+        // Commit staged run-level state now that every page rendered. Every concept read
+        // happens before any fold and before the infallible slug commit, so a read failure
+        // leaves nothing half-committed — folding one concept at a time would leave the
+        // earlier ones in the accumulator `render_concept_pages` emits unconditionally,
+        // writing concept pages for a document page this failed plan never wrote.
+        let mut reads = Vec::with_capacity(staged_concepts.len());
+        for (concept, date) in &staged_concepts {
+            reads.push((
+                self.concept_drafts
+                    .stage(concept, None, self.reader.as_ref(), &self.ctx.dirs)
+                    .await?,
+                *date,
+            ));
         }
+        for (staged, date) in reads {
+            self.concept_drafts.commit(staged, date);
+        }
+        let all_concepts: Vec<_> = staged_concepts.into_iter().map(|(c, _)| c).collect();
         self.document_slugs.extend(claimed_slugs);
 
         Ok(IngestResult {

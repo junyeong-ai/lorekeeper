@@ -125,39 +125,7 @@ impl ConceptDrafts {
         }
     }
 
-    /// Fold one extraction into the run's drafts and return the page identity it resolved
-    /// to — the established title and slug. Callers render links from THIS, never from the
-    /// extraction's own name: an alias resolves to a different slug than it would produce
-    /// itself, so re-deriving one would point the citation at a page that does not exist.
-    pub async fn merge(
-        &mut self,
-        concept: &ExtractedConcept,
-        date: jiff::civil::Date,
-        reader: &dyn VaultStore,
-        dirs: &VaultDirs,
-    ) -> Result<ConceptIdentity, PipelineError> {
-        self.merge_with_synthesis(concept, None, date, reader, dirs)
-            .await
-    }
-
-    /// As [`Self::merge`], but seeds `## Synthesis` when the page is being CREATED.
-    ///
-    /// An established page's synthesis is its accumulated meaning across every source that
-    /// cited it, so a single new mention never overwrites it. A brand-new page has none, and
-    /// creating it empty leaves a heading with nothing under it.
-    pub async fn merge_with_synthesis(
-        &mut self,
-        concept: &ExtractedConcept,
-        synthesis: Option<&str>,
-        date: jiff::civil::Date,
-        reader: &dyn VaultStore,
-        dirs: &VaultDirs,
-    ) -> Result<ConceptIdentity, PipelineError> {
-        let staged = self.stage(concept, synthesis, reader, dirs).await?;
-        Ok(self.commit(staged, date))
-    }
-
-    /// Read everything a merge needs from the vault, without folding it into the drafts.
+    /// Read everything a fold needs from the vault, without folding it into the drafts.
     ///
     /// Splitting the read from the fold is what lets a caller with several concepts stage
     /// them all before committing any: the reads are the only fallible part, so a failure on
@@ -194,8 +162,13 @@ impl ConceptDrafts {
         })
     }
 
-    /// Fold a staged concept into the run's drafts. Pure and infallible — every read it
-    /// could need already happened in [`Self::stage`].
+    /// Fold a staged concept into the run's drafts and return the page identity it resolved
+    /// to — the established title and slug. Pure and infallible: every read it could need
+    /// already happened in [`Self::stage`].
+    ///
+    /// Callers render links from the RETURNED identity, never from the extraction's own
+    /// name: an alias resolves to a different slug than it would produce itself, so
+    /// re-deriving one would point the citation at a page that does not exist.
     pub fn commit(&mut self, staged: StagedConcept, date: jiff::civil::Date) -> ConceptIdentity {
         let StagedConcept {
             concept,
