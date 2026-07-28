@@ -416,6 +416,25 @@ mod tests {
     }
 
     #[test]
+    fn a_block_scalar_containing_dashes_does_not_end_the_entry_or_the_block() {
+        // `---` indented inside a block scalar is content, not a delimiter. If the span or
+        // the block boundary took it for one, the rewrite would land outside the frontmatter
+        // — the class of bug `frontmatter_block` exists to make impossible.
+        let doc = "---\nnote: |\n  ---\n  still yaml\nid: x\n---\n\nbody\n";
+        let out = set_frontmatter_field(doc, "id", "y").unwrap();
+        assert_eq!(
+            out,
+            "---\nnote: |\n  ---\n  still yaml\nid: y\n---\n\nbody\n"
+        );
+        let page = lk_core::frontmatter::parse_page(&out).unwrap();
+        assert_eq!(
+            page.frontmatter.get("id").and_then(|v| v.as_str()),
+            Some("y")
+        );
+        assert!(page.body.contains("body"));
+    }
+
+    #[test]
     fn set_frontmatter_field_leaves_a_trailing_comment_with_what_follows_it() {
         // The span ends at the last real continuation, so a comment sitting between two
         // keys belongs to the one below it and survives the rewrite.
