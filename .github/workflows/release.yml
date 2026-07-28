@@ -168,9 +168,6 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
-          # The annotated tag's message IS the release note, and a shallow clone
-          # fetches the commit without the tag object that carries it.
-          fetch-depth: 0
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
@@ -182,23 +179,18 @@ jobs:
         run: |
           set -euo pipefail
           ls -la artifacts
-          # Each release is tagged with an annotated message explaining what changed and
-          # why. Publishing only `--generate-notes` left that unread on GitHub and the
-          # body a bare commit list, so the note is taken from the tag; the generated
-          # commit list is appended under it, never in place of it. A lightweight tag has
-          # no message, so fall back rather than publishing an empty body.
-          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
-          notes=$(git tag -l --format='%(contents)' "$TAG")
-          if [ -n "${notes//[[:space:]]/}" ]; then
-            printf '%s\n' "$notes" > release-notes.md
-            gh release create "$TAG" \
-              --title "$TAG" \
-              --notes-file release-notes.md \
-              --generate-notes \
-              artifacts/*
-          else
-            gh release create "$TAG" \
-              --title "$TAG" \
-              --generate-notes \
-              artifacts/*
-          fi
+          # Each release is tagged with a message explaining what changed and why.
+          # Publishing only `--generate-notes` left that unread on GitHub and every body a
+          # bare commit list, so the tag's message becomes the body and the generated list
+          # is appended under it. `%(contents)` reads the annotated tag's message, falling
+          # back to the tagged commit's for a lightweight tag — either way the text a human
+          # wrote for this release. `--notes-from-tag` would say this in one flag but
+          # refuses to combine with `--generate-notes`, which would cost the compare link.
+          # Checkout leaves a shallow clone with no tag object, so fetch just this one.
+          git fetch --force --depth=1 origin "refs/tags/$TAG:refs/tags/$TAG"
+          git tag -l --format='%(contents)' "$TAG" > release-notes.md
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes-file release-notes.md \
+            --generate-notes \
+            artifacts/*
