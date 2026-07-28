@@ -20,8 +20,9 @@ pub struct ConceptIdentity {
 
 pub struct ConceptDrafts {
     drafts: BTreeMap<String, ConceptDraft>,
-    /// `identity_key(name)` → the page that owns that name, built once from the concept
-    /// pages already in the vault.
+    /// `identity_key(name)` → the page that owns that name: seeded once from the concept
+    /// pages already in the vault, then extended by each new name this run resolves, so a
+    /// decision made for one spelling is the answer every other spelling of it gets.
     ///
     /// A concept page's id is NOT always `slugify(title)`: a page renamed or merged keeps
     /// its original id and records the other names as aliases, which is what makes every
@@ -156,13 +157,18 @@ impl ConceptDrafts {
         Ok(self.commit(staged, date))
     }
 
-    /// Read everything a merge needs from the vault WITHOUT staging anything.
+    /// Read everything a merge needs from the vault, without folding it into the drafts.
     ///
     /// Splitting the read from the fold is what lets a caller with several concepts stage
     /// them all before committing any: the reads are the only fallible part, so a failure on
     /// the third concept cannot leave the first two in the run's drafts. That matters because
     /// [`Self::render_pages`] emits the accumulator unconditionally — a half-folded result
     /// would write concept pages whose origin page was never updated to cite them.
+    ///
+    /// The drafts are what that protects. Resolving a name does record it in the alias index
+    /// (see [`Self::resolve_identity`]), so a `stage` that fails afterwards leaves that entry
+    /// behind — deliberately: it holds the slug the name would resolve to on any later
+    /// attempt, so the record cannot make a subsequent resolution differ from a fresh one.
     pub async fn stage(
         &mut self,
         concept: &ExtractedConcept,
