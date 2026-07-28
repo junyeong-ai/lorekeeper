@@ -1,6 +1,5 @@
 use std::path::Path;
 
-use lk_core::concept::slugify;
 use lk_core::config::{HighlightSection, SourceType, VaultDirs};
 use lk_core::event::Event;
 use lk_core::frontmatter::field;
@@ -42,19 +41,26 @@ pub fn concepts_dir_dest(vault_path: &str, dirs: &VaultDirs) -> String {
     )
 }
 
-/// Render a concept-name list into `[Name](<concepts_dir>/<slug>.md)` links for a page
-/// at `vault_path`. The slug is derived from the name by the same `slugify` rule that
-/// names concept page files, so a link and its page can never disagree.
-fn concept_links(names: &[String], vault_path: &str, dirs: &VaultDirs) -> Vec<String> {
+/// Render resolved concept identities into `[Name](<concepts_dir>/<slug>.md)` links for a
+/// page at `vault_path`.
+///
+/// The slug is the one `ConceptDrafts` resolved, never re-derived from the display name: a
+/// page's slug is not always `slugify(title)` — an alias or a renamed page resolves
+/// elsewhere — so deriving it here again would point the citation at a page that was never
+/// written.
+pub(crate) fn concept_links(
+    concepts: &[crate::concept_draft::ConceptIdentity],
+    vault_path: &str,
+    dirs: &VaultDirs,
+) -> Vec<String> {
     let base = concepts_dir_dest(vault_path, dirs);
-    names
+    concepts
         .iter()
-        .filter_map(|name| {
-            let slug = slugify(name)?;
-            Some(link::md_link(
-                name,
-                &format!("{base}/{}.md", link::encode_dest(&slug)),
-            ))
+        .map(|c| {
+            link::md_link(
+                &c.name,
+                &format!("{base}/{}.md", link::encode_dest(&c.slug)),
+            )
         })
         .collect()
 }
@@ -86,7 +92,7 @@ pub struct DailyRenderContext<'a> {
     pub events: &'a [&'a Event],
     pub labels: &'a [String],
     pub summary: &'a str,
-    pub concepts: &'a [String],
+    pub concepts: &'a [crate::concept_draft::ConceptIdentity],
     /// Whether this source extracts concepts. Templates render the `## Related Concepts`
     /// section only when true, so a source that opts out (`extract_concepts: false`,
     /// e.g. a personal work-log feed) doesn't carry a permanently-empty section.
@@ -225,7 +231,7 @@ pub struct DocumentRenderContext<'a> {
     pub slug: &'a str,
     pub event: &'a Event,
     pub summary: &'a str,
-    pub concepts: &'a [String],
+    pub concepts: &'a [crate::concept_draft::ConceptIdentity],
     pub extract_concepts: bool,
     pub locale: Locale,
     pub llm_inputs: DocumentLlmInputHashes<'a>,

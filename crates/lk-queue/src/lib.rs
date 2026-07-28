@@ -6,7 +6,10 @@ mod queue;
 #[cfg(feature = "test-util")]
 pub use mock::MockLlmClient;
 pub use noop::NoopLlmClient;
-pub use queue::{QueueLlmClient, QueueTask, TaskKind, write_tasks_atomic};
+pub use queue::{
+    QueueLlmClient, QueueTask, RESULTS_SUBDIR, ReportedConcept, TaskKind, TaskResult, read_results,
+    write_tasks_atomic,
+};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

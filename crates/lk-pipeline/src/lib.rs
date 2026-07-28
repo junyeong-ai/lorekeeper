@@ -359,7 +359,16 @@ impl Pipeline {
                 (None, vec![])
             };
 
-            let concept_names: Vec<String> = day_concepts.iter().map(|c| c.name.clone()).collect();
+            // Resolve before rendering so the link carries the slug the merge will use.
+            // Resolution is a pure lookup; staging still happens after every page renders.
+            let mut concept_names = Vec::with_capacity(day_concepts.len());
+            for c in &day_concepts {
+                concept_names.push(
+                    self.concept_drafts
+                        .resolve_identity(&c.name, self.reader.as_ref(), &self.ctx.dirs)
+                        .await?,
+                );
+            }
 
             let labels: Vec<String> = {
                 let mut set = std::collections::BTreeSet::new();
@@ -495,6 +504,84 @@ impl Pipeline {
             merged_all.extend(merged);
         }
         Ok(merged_all)
+    }
+
+    /// Materialize the concepts a drained queue task produced.
+    ///
+    /// Extraction is the LLM's half of the work; deciding where each concept lands is this
+    /// crate's, and it is the same decision `plan` makes when an LLM answers synchronously:
+    /// invalid categories dropped, slugs normalized, the origin page's related-concepts
+    /// section rendered from `concept_links`, and each concept page created-or-merged with
+    /// its `## Synthesis`, aliases and citation count preserved. Routing the queue's results
+    /// back through it is what keeps that logic in one place rather than restated as prose
+    /// the drain has to follow.
+    ///
+    /// Returns the rewritten origin page. Concept pages accumulate and are emitted together
+    /// by [`Self::render_concept_pages`], so a concept named by several pages produces one
+    /// page rather than a last-writer-wins race.
+    pub async fn apply_concept_result(
+        &mut self,
+        result: &lk_queue::TaskResult,
+        page: &str,
+    ) -> Result<String, PipelineError> {
+        let reported: Vec<&lk_queue::ReportedConcept> = result
+            .concepts
+            .iter()
+            .filter(|r| {
+                !filter_valid_concepts(vec![r.concept.clone()], &self.ctx.concept_categories)
+                    .is_empty()
+            })
+            .collect();
+        let mut identities = Vec::with_capacity(reported.len());
+        for reported in reported {
+            let concept =
+                filter_valid_concepts(vec![reported.concept.clone()], &self.ctx.concept_categories)
+                    .remove(0);
+            identities.push(
+                self.concept_drafts
+                    .merge_with_synthesis(
+                        &concept,
+                        reported.synthesis.as_deref(),
+                        result.date,
+                        self.reader.as_ref(),
+                        &self.ctx.dirs,
+                    )
+                    .await?,
+            );
+        }
+
+        // The heading comes from the task's own anchor, which is the value the queue
+        // contract carries for exactly this purpose. Deriving it from the CURRENT locale
+        // instead would break the moment `vault.locale` changed between the drain and the
+        // apply: the page still carries the old heading, the task still classifies current,
+        // and every later run would abort on a section it could not find.
+        let heading = result.target.anchor.strip_prefix("## ").ok_or_else(|| {
+            PipelineError::Render(format!(
+                "{}: task anchor `{}` is not an H2 heading",
+                result.target.vault_path, result.target.anchor
+            ))
+        })?;
+        // A missing section is an error, not a quiet pass: `replace_section` returns the page
+        // untouched when the heading is absent, so the links would vanish while the result
+        // was consumed and reported as applied.
+        if lk_vault::section_body(page, heading).is_none() {
+            return Err(PipelineError::Render(format!(
+                "{}: no `{}` section to receive concept links",
+                result.target.vault_path, result.target.anchor
+            )));
+        }
+
+        let links = render::concept_links(&identities, &result.target.vault_path, &self.ctx.dirs);
+        let filled = lk_vault::replace_section(page, heading, &links.join("\n"));
+        // Stamp the completion marker in the SAME edit that fills the section. `llm_cache`
+        // decides a section's fate purely on this marker, never on whether the body looks
+        // filled — so a section written without it is erased by the next render and its task
+        // re-enqueued, forever.
+        Ok(lk_vault::set_llm_input(
+            &filled,
+            &result.target.kind.completion_key(),
+            &result.cache_hash,
+        ))
     }
 
     /// Render the concept pages accumulated across every `plan` call in this run.
@@ -713,7 +800,15 @@ impl Pipeline {
                 (None, vec![])
             };
 
-            let concept_names: Vec<String> = doc_concepts.iter().map(|c| c.name.clone()).collect();
+            // Resolve before rendering so the link carries the slug the merge will use.
+            let mut concept_names = Vec::with_capacity(doc_concepts.len());
+            for c in &doc_concepts {
+                concept_names.push(
+                    self.concept_drafts
+                        .resolve_identity(&c.name, self.reader.as_ref(), &self.ctx.dirs)
+                        .await?,
+                );
+            }
 
             // Completion markers are valid only on a cache hit — see the daily path.
             let summary_done = summary_decision

@@ -11,8 +11,26 @@ use crate::render::RenderResult;
 
 /// In-memory aggregator for concept page state across multiple dates in a single run.
 /// Reads existing vault pages on first encounter, then merges further mentions.
+/// The page an extraction resolved to: its established title and slug.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConceptIdentity {
+    pub name: String,
+    pub slug: String,
+}
+
 pub struct ConceptDrafts {
     drafts: BTreeMap<String, ConceptDraft>,
+    /// `slugify(alias)` → the canonical page slug that alias belongs to, built once from
+    /// the concept pages already in the vault.
+    ///
+    /// A concept page's id is NOT always `slugify(title)`: a page renamed or merged keeps
+    /// its original id and records the other names as aliases, which is what makes every
+    /// existing citation to it keep resolving. Extractions arrive under any of those names,
+    /// so resolving by slug alone would mint a near-duplicate page beside the canonical one
+    /// — splitting a concept's citations in two and leaving the synthesis on the old page.
+    /// The lookup is exact (both sides through `slugify`), never fuzzy: a name either IS a
+    /// recorded alias or it is a new concept.
+    alias_index: Option<BTreeMap<String, ConceptIdentity>>,
 }
 
 struct ConceptDraft {
@@ -48,21 +66,70 @@ struct ConceptDraft {
 }
 
 impl ConceptDrafts {
+    /// Resolve a concept name to the page identity that owns it, building the alias index
+    /// from disk on first use. Pure lookup — nothing is staged, so callers may resolve
+    /// before deciding to commit.
+    pub async fn resolve_identity(
+        &mut self,
+        name: &str,
+        reader: &dyn VaultStore,
+        dirs: &VaultDirs,
+    ) -> Result<ConceptIdentity, PipelineError> {
+        let slug =
+            slugify(name).expect("concepts are slug-filtered via has_valid_slug before merge");
+        if self.alias_index.is_none() {
+            self.alias_index = Some(build_alias_index(reader, dirs).await?);
+        }
+        Ok(self
+            .alias_index
+            .as_ref()
+            .and_then(|index| index.get(&slug))
+            .cloned()
+            .unwrap_or_else(|| ConceptIdentity {
+                name: name.to_string(),
+                slug,
+            }))
+    }
+
     pub fn new() -> Self {
         Self {
             drafts: BTreeMap::new(),
+            alias_index: None,
         }
     }
 
+    /// Fold one extraction into the run's drafts and return the page identity it resolved
+    /// to — the established title and slug. Callers render links from THIS, never from the
+    /// extraction's own name: an alias resolves to a different slug than it would produce
+    /// itself, so re-deriving one would point the citation at a page that does not exist.
     pub async fn merge(
         &mut self,
         concept: &ExtractedConcept,
         date: jiff::civil::Date,
         reader: &dyn VaultStore,
         dirs: &VaultDirs,
-    ) -> Result<(), PipelineError> {
-        let safe_slug = slugify(&concept.name)
-            .expect("concepts are slug-filtered via has_valid_slug before merge");
+    ) -> Result<ConceptIdentity, PipelineError> {
+        self.merge_with_synthesis(concept, None, date, reader, dirs)
+            .await
+    }
+
+    /// As [`Self::merge`], but seeds `## Synthesis` when the page is being CREATED.
+    ///
+    /// An established page's synthesis is its accumulated meaning across every source that
+    /// cited it, so a single new mention never overwrites it. A brand-new page has none, and
+    /// creating it empty leaves a heading with nothing under it.
+    pub async fn merge_with_synthesis(
+        &mut self,
+        concept: &ExtractedConcept,
+        synthesis: Option<&str>,
+        date: jiff::civil::Date,
+        reader: &dyn VaultStore,
+        dirs: &VaultDirs,
+    ) -> Result<ConceptIdentity, PipelineError> {
+        let safe_slug = self
+            .resolve_identity(&concept.name, reader, dirs)
+            .await?
+            .slug;
 
         if let Some(draft) = self.drafts.get_mut(&safe_slug) {
             draft.observe(date);
@@ -74,7 +141,10 @@ impl ConceptDrafts {
             if draft.category.is_none() {
                 draft.category = concept.category.clone();
             }
-            return Ok(());
+            return Ok(ConceptIdentity {
+                name: draft.name.clone(),
+                slug: safe_slug,
+            });
         }
 
         let path = VaultPath::concept(dirs, &safe_slug);
@@ -161,8 +231,17 @@ impl ConceptDrafts {
         };
 
         draft.observe(date);
+        if draft.preserved_synthesis.is_none()
+            && let Some(text) = synthesis.map(str::trim).filter(|t| !t.is_empty())
+        {
+            draft.preserved_synthesis = Some(text.to_string());
+        }
+        let identity = ConceptIdentity {
+            name: draft.name.clone(),
+            slug: safe_slug.clone(),
+        };
         self.drafts.insert(safe_slug, draft);
-        Ok(())
+        Ok(identity)
     }
 
     pub fn render_pages(
@@ -303,6 +382,59 @@ fn warn_category_conflict(slug: &str, established: Option<&str>, incoming: Optio
 
 /// Filter that callers use to drop concepts whose slug would be empty before threading
 /// them into rendered output. Keeps daily-page wiki links honest.
+/// Map every name a concept page answers to — its title and each alias — to that page's
+/// slug, so an extraction naming any of them lands on the established page.
+async fn build_alias_index(
+    reader: &dyn VaultStore,
+    dirs: &VaultDirs,
+) -> Result<BTreeMap<String, ConceptIdentity>, PipelineError> {
+    let dir = lk_core::vault_path::concepts_dir(dirs);
+    let mut index = BTreeMap::new();
+    for path in reader.list_markdown(&dir).await? {
+        let Some(page) = reader.read_page(&path).await? else {
+            continue;
+        };
+        let Some(slug) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let title = page
+            .frontmatter
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or(slug)
+            .to_string();
+        let names = page
+            .frontmatter
+            .get("title")
+            .and_then(|v| v.as_str())
+            .into_iter()
+            .chain(
+                page.frontmatter
+                    .get("aliases")
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|v| v.as_str()),
+            );
+        for name in names {
+            if let Some(key) = slugify(name) {
+                let identity = ConceptIdentity {
+                    name: title.clone(),
+                    slug: slug.to_string(),
+                };
+                // The page's own slug wins over any alias claiming the same key, so a stale
+                // alias on another page can never redirect a concept away from its own page.
+                if key == slug {
+                    index.insert(key, identity);
+                } else {
+                    index.entry(key).or_insert(identity);
+                }
+            }
+        }
+    }
+    Ok(index)
+}
+
 pub fn has_valid_slug(concept: &ExtractedConcept) -> bool {
     slugify(&concept.name).is_some()
 }

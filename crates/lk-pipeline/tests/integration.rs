@@ -2832,3 +2832,220 @@ mod materialized_view {
         );
     }
 }
+
+/// The queue's half of concept handling: the drain reports names, this crate decides where
+/// they land. Exercises the same merge path the synchronous LLM route uses, so the two can
+/// never drift into separate behaviours.
+#[tokio::test]
+async fn queue_results_materialize_through_the_same_merge_path() {
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let config = base_config(vault);
+    let ctx = build_ctx(&config, Arc::new(NoopLlmClient));
+    let mut pipeline = Pipeline::new(vault, ctx);
+
+    let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Summary\n\nbody\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
+    let result = lk_queue::TaskResult {
+        task_id: "ext-1".into(),
+        cache_hash: "h".into(),
+        target: lk_queue::TaskTarget {
+            vault_path: "daily/test-source/2026-05-23.md".into(),
+            kind: lk_queue::TargetKind::DailyConcepts,
+            anchor: "## Related Concepts".into(),
+            concepts_dir: "../../wiki/concepts".into(),
+        },
+        date: jiff::civil::date(2026, 5, 23),
+        concepts: vec![
+            lk_queue::ReportedConcept {
+                concept: ExtractedConcept {
+                    name: "Retrieval Augmented Generation".into(),
+                    category: None,
+                },
+                synthesis: Some("Grounding a generation step in retrieved documents.".into()),
+            },
+            // An unknown category is dropped by the same filter the synchronous path uses,
+            // rather than reaching a page and surfacing later as a lint finding.
+            lk_queue::ReportedConcept {
+                concept: ExtractedConcept {
+                    name: "Vector Database".into(),
+                    category: Some("not-a-real-category".into()),
+                },
+                synthesis: None,
+            },
+        ],
+    };
+
+    let rewritten = pipeline.apply_concept_result(&result, page).await.unwrap();
+
+    // Links are built by the same helper the synchronous render uses, so the slug in the
+    // page and the concept page's filename cannot disagree.
+    assert!(rewritten.contains(
+        "[Retrieval Augmented Generation](../../wiki/concepts/retrieval-augmented-generation.md)"
+    ));
+    assert!(rewritten.contains("[Vector Database](../../wiki/concepts/vector-database.md)"));
+    // Sections other than the anchor are untouched.
+    assert!(rewritten.contains("## Summary\n\nbody"));
+    assert!(rewritten.contains("- a\n"));
+    // The completion marker rides the same edit — without it the next render erases these
+    // links and re-enqueues the task forever.
+    assert!(
+        rewritten.contains(r#"concepts_done: "h""#),
+        "completion marker must be stamped: {rewritten}"
+    );
+
+    let pages = pipeline.render_concept_pages().await.unwrap();
+    let mut slugs: Vec<String> = pages
+        .iter()
+        .map(|p| p.path.to_string().rsplit('/').next().unwrap().to_string())
+        .collect();
+    slugs.sort();
+    assert_eq!(
+        slugs,
+        vec![
+            "retrieval-augmented-generation.md".to_string(),
+            "vector-database.md".to_string()
+        ]
+    );
+    let rag_page = pages
+        .iter()
+        .find(|p| {
+            p.path
+                .to_string()
+                .ends_with("retrieval-augmented-generation.md")
+        })
+        .unwrap();
+    assert!(
+        rag_page.content.contains("Grounding a generation step"),
+        "a newly created concept page must carry its grounding, not an empty heading: {}",
+        rag_page.content
+    );
+
+    let vector_page = pages
+        .iter()
+        .find(|p| p.path.to_string().ends_with("vector-database.md"))
+        .unwrap();
+    assert!(
+        !vector_page.content.contains("not-a-real-category"),
+        "an unlisted category must not reach the page: {}",
+        vector_page.content
+    );
+}
+
+/// A missing anchor must fail loudly. `replace_section` returns the page unchanged when the
+/// heading is absent, so a silent pass here would write the page untouched, delete the
+/// queue result, and lose the extraction with a success report.
+#[tokio::test]
+async fn a_page_without_the_concepts_section_is_an_error_not_a_silent_no_op() {
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let config = base_config(vault);
+    let ctx = build_ctx(&config, Arc::new(NoopLlmClient));
+    let mut pipeline = Pipeline::new(vault, ctx);
+
+    let page = "---\nid: daily-1\ntype: daily\n---\n\n## Summary\n\nbody\n";
+    let result = lk_queue::TaskResult {
+        task_id: "ext-1".into(),
+        cache_hash: "h".into(),
+        target: lk_queue::TaskTarget {
+            vault_path: "daily/test-source/2026-05-23.md".into(),
+            kind: lk_queue::TargetKind::DailyConcepts,
+            anchor: "## Related Concepts".into(),
+            concepts_dir: "../../wiki/concepts".into(),
+        },
+        date: jiff::civil::date(2026, 5, 23),
+        concepts: vec![lk_queue::ReportedConcept {
+            concept: ExtractedConcept {
+                name: "Retrieval Augmented Generation".into(),
+                category: None,
+            },
+            synthesis: None,
+        }],
+    };
+
+    let err = pipeline
+        .apply_concept_result(&result, page)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("Related Concepts"),
+        "error must name the missing section: {err}"
+    );
+}
+
+/// A concept page's id is not always `slugify(title)` — a renamed or merged page keeps its
+/// original id and records the other names as aliases, which is what keeps existing
+/// citations resolving. An extraction naming an alias must land on that page, not mint a
+/// near-duplicate beside it (which would split the concept's citations and strand its
+/// synthesis on the old page).
+#[tokio::test]
+async fn an_extraction_naming_an_alias_lands_on_the_established_page() {
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let config = base_config(vault);
+
+    let concepts = vault.join("wiki").join("concepts");
+    std::fs::create_dir_all(&concepts).unwrap();
+    std::fs::write(
+        concepts.join("adversarial-design-review.md"),
+        "---\nid: adversarial-design-review\ntype: concept\n\
+         title: \"Adversarial Design Review (pre-build refutation)\"\n\
+         aliases: [\"Adversarial Design Review (pre-build refutation)\", \"Pre-Build Design Refutation\"]\n\
+         created: 2026-06-06\nupdated: 2026-06-06\nsource_count: 9\n---\n\n\
+         ## Synthesis\n\nEstablished body.\n\n## Sources\n\n- x\n",
+    )
+    .unwrap();
+
+    let ctx = build_ctx(&config, Arc::new(NoopLlmClient));
+    let mut pipeline = Pipeline::new(vault, ctx);
+
+    let page =
+        "---\nid: daily-1\ntype: daily\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
+    let result = lk_queue::TaskResult {
+        task_id: "ext-1".into(),
+        cache_hash: "h".into(),
+        target: lk_queue::TaskTarget {
+            vault_path: "daily/test-source/2026-05-23.md".into(),
+            kind: lk_queue::TargetKind::DailyConcepts,
+            anchor: "## Related Concepts".into(),
+            concepts_dir: "../../wiki/concepts".into(),
+        },
+        date: jiff::civil::date(2026, 5, 23),
+        concepts: vec![lk_queue::ReportedConcept {
+            concept: ExtractedConcept {
+                // An alias, not the title — its slugify differs from the page's id.
+                name: "Pre-Build Design Refutation".into(),
+                category: None,
+            },
+            synthesis: Some("A later mention must not overwrite the established body.".into()),
+        }],
+    };
+
+    let rewritten = pipeline.apply_concept_result(&result, page).await.unwrap();
+    assert!(
+        rewritten.contains("../../wiki/concepts/adversarial-design-review.md"),
+        "citation must point at the established page: {rewritten}"
+    );
+    assert!(
+        !rewritten.contains("pre-build-design-refutation.md"),
+        "an alias must not mint a second page: {rewritten}"
+    );
+
+    let pages = pipeline.render_concept_pages().await.unwrap();
+    assert_eq!(pages.len(), 1);
+    let page = &pages[0];
+    assert!(
+        page.path
+            .to_string()
+            .ends_with("adversarial-design-review.md")
+    );
+    assert!(
+        page.content.contains("Established body."),
+        "the established synthesis must survive the merge: {}",
+        page.content
+    );
+    assert!(
+        !page.content.contains("must not overwrite"),
+        "a single mention must not replace an established synthesis: {}",
+        page.content
+    );
+}

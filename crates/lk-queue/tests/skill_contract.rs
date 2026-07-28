@@ -90,3 +90,56 @@ fn skill_documents_every_completion_marker() {
         );
     }
 }
+
+/// The result protocol is the other half of the wire agreement, and the half a compiler
+/// cannot see at all: the drain writes JSON that only `lore queue apply` reads. Pinning the
+/// field names and the path here means a rename in `TaskResult` fails until the skill that
+/// produces it is updated — the drift that would otherwise surface as an apply step that
+/// silently finds nothing.
+#[test]
+fn skill_documents_the_result_protocol_it_must_produce() {
+    let processing = read_skill_file("references/processing-kinds.md");
+    let expected_path = format!("{}/{{task_id}}.json", lk_queue::RESULTS_SUBDIR);
+    assert!(
+        processing.contains(&expected_path),
+        "processing-kinds.md must name the result path `{expected_path}`"
+    );
+
+    // Field names as serde writes them, taken from a real value so the test cannot drift.
+    let sample = lk_queue::TaskResult {
+        task_id: "t".into(),
+        cache_hash: "h".into(),
+        target: lk_queue::TaskTarget {
+            vault_path: "p".into(),
+            kind: TargetKind::DailyConcepts,
+            anchor: "## a".into(),
+            concepts_dir: "c".into(),
+        },
+        date: jiff::civil::date(2026, 1, 1),
+        concepts: vec![],
+    };
+    let serde_json::Value::Object(fields) = serde_json::to_value(&sample).unwrap() else {
+        panic!("TaskResult must serialize as an object");
+    };
+    for field in fields.keys() {
+        assert!(
+            processing.contains(&format!("\"{field}\"")),
+            "processing-kinds.md must document the `{field}` result field"
+        );
+    }
+}
+
+/// The whole point of routing concepts through `queue apply` is that ONE implementation
+/// merges them. A skill that still writes concept pages would restore the second one.
+#[test]
+fn skill_forbids_writing_concept_pages_directly() {
+    let skill = read_skill_file("SKILL.md");
+    assert!(
+        skill.contains("Never write a concept page"),
+        "SKILL.md must forbid the drain from writing concept pages"
+    );
+    assert!(
+        skill.contains("queue apply"),
+        "SKILL.md must point at `lore queue apply` as the materializer"
+    );
+}

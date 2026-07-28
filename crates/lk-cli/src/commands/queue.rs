@@ -19,6 +19,33 @@ pub enum QueueCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Materialize the concept extractions a drain produced.
+    ///
+    /// The drain's job ends at judgement: which concepts a page names. Where each one lands
+    /// — created or merged, with its synthesis, aliases, category and citation count intact,
+    /// and the origin page's related-concepts section rebuilt from the same link builder the
+    /// synchronous path uses — is decided here, by the code that already owns those rules.
+    /// Results whose target page moved on since the drain read it are dropped, on the same
+    /// hash the queue uses everywhere else.
+    Apply {
+        /// Vault root override (default: vault.root from config)
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Report what would be written, and write nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Print the number of `current` tasks — the count a drain would actually process —
+    /// as a bare integer on stdout, and nothing else.
+    ///
+    /// `status` is written for a human and `--json` needs a JSON parser; a scheduled script
+    /// deciding whether to spend an LLM session on the queue should not have to grep prose
+    /// or take a dependency on `jq` to learn one number.
+    Count {
+        /// Vault root override (default: vault.root from config)
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
     /// Remove dead tasks from pending queue files using the same classification as
     /// `status`: `stale` and `missing-target` tasks are exactly what `/lore-process`
     /// would drop without editing anything, so pruning them is that drop performed
@@ -70,6 +97,8 @@ struct TaskReport {
 pub async fn run(opts: &super::GlobalOptions, cmd: QueueCommand) -> miette::Result<()> {
     match cmd {
         QueueCommand::Status { root, json } => status(opts, root, json).await,
+        QueueCommand::Count { root } => count(opts, root).await,
+        QueueCommand::Apply { root, dry_run } => apply(opts, root, dry_run).await,
         QueueCommand::Prune {
             root,
             json,
@@ -117,6 +146,138 @@ fn read_tasks(file: &Path) -> miette::Result<Vec<QueueTask>> {
                 .map_err(|e| miette::miette!("parse task in {}: {e}", file.display()))
         })
         .collect()
+}
+
+async fn apply(
+    opts: &super::GlobalOptions,
+    root: Option<PathBuf>,
+    dry_run: bool,
+) -> miette::Result<()> {
+    let config = load_config(&find_config(opts)?)?;
+    let vault_root = root.unwrap_or_else(|| config.vault.root_path());
+    let queue_dir = vault_root.join(".lorekeeper").join("queue");
+
+    let results = lk_queue::read_results(&queue_dir)
+        .map_err(|e| miette::miette!("read queue results: {e}"))?;
+    if results.is_empty() {
+        eprintln!("queue apply: no results pending");
+        return Ok(());
+    }
+
+    let ctx = std::sync::Arc::new(
+        lk_pipeline::PipelineContext::build(
+            opts.template_dir.as_deref(),
+            std::sync::Arc::new(lk_queue::NoopLlmClient),
+            &config,
+        )
+        .map_err(|e| miette::miette!("{e}"))?,
+    );
+    let mut pipeline = lk_pipeline::Pipeline::new(&vault_root, ctx);
+    let writer = lk_vault::VaultWriter::new(&vault_root);
+
+    let (mut applied, mut dropped, mut failed) = (0usize, 0usize, 0usize);
+    let mut origin_pages: Vec<(PathBuf, String)> = Vec::new();
+    let mut consumed: Vec<PathBuf> = Vec::new();
+
+    for (path, result) in &results {
+        match classify_against_page(
+            &vault_root,
+            &result.target.vault_path,
+            result.target.kind,
+            &result.cache_hash,
+        )? {
+            TaskStatus::Current => {}
+            status => {
+                eprintln!(
+                    "  dropped {} ({}): {}",
+                    result.task_id,
+                    result.target.vault_path,
+                    status.as_str()
+                );
+                dropped += 1;
+                consumed.push(path.clone());
+                continue;
+            }
+        }
+        let rel_path = PathBuf::from(&result.target.vault_path);
+        let content = std::fs::read_to_string(vault_root.join(&rel_path))
+            .map_err(|e| miette::miette!("read {}: {e}", rel_path.display()))?;
+        // A result whose page cannot receive links is that result's problem, not the
+        // batch's: aborting here would strand every other valid extraction in the run.
+        // The file is LEFT in place so a fixed page picks it up next time.
+        match pipeline.apply_concept_result(result, &content).await {
+            Ok(rewritten) => {
+                origin_pages.push((rel_path, rewritten));
+                consumed.push(path.clone());
+                applied += 1;
+            }
+            Err(e) => {
+                eprintln!("  ✗ {} ({}): {e}", result.task_id, result.target.vault_path);
+                failed += 1;
+            }
+        }
+    }
+
+    let concept_pages = pipeline
+        .render_concept_pages()
+        .await
+        .map_err(|e| miette::miette!("{e}"))?;
+
+    if dry_run {
+        eprintln!(
+            "[dry-run] queue apply: {applied} applied, {dropped} dropped, {failed} failed, \
+             {} concept page(s)",
+            concept_pages.len()
+        );
+        return Ok(());
+    }
+
+    // Concept pages before origin pages. A crash between the two then leaves concept pages
+    // nothing yet cites — harmless, and the retained result files replay the citation — where
+    // the reverse order would leave citations pointing at pages that do not exist.
+    for page in &concept_pages {
+        writer
+            .write_page(page.path.as_ref(), &page.content)
+            .await
+            .map_err(|e| miette::miette!("write {}: {e}", page.path))?;
+    }
+    for (rel_path, content) in &origin_pages {
+        writer
+            .write_page(rel_path, content)
+            .await
+            .map_err(|e| miette::miette!("write {}: {e}", rel_path.display()))?;
+    }
+    for path in &consumed {
+        std::fs::remove_file(path)
+            .map_err(|e| miette::miette!("remove {}: {e}", path.display()))?;
+    }
+
+    eprintln!(
+        "queue apply: {applied} applied, {dropped} dropped, {failed} failed, \
+         {} concept page(s)",
+        concept_pages.len()
+    );
+    if failed > 0 {
+        return Err(miette::miette!(
+            "{failed} result(s) could not be applied; their files were kept for retry"
+        ));
+    }
+    Ok(())
+}
+
+async fn count(opts: &super::GlobalOptions, root: Option<PathBuf>) -> miette::Result<()> {
+    let vault_root = resolve_vault_root(opts, root)?;
+    let queue_dir = vault_root.join(".lorekeeper").join("queue");
+    let mut current = 0usize;
+    for file in pending_queue_files(&queue_dir)? {
+        for task in read_tasks(&file)? {
+            if classify_task(&vault_root, &task)? == TaskStatus::Current {
+                current += 1;
+            }
+        }
+    }
+    println!("{current}");
+    Ok(())
 }
 
 async fn status(
@@ -297,7 +458,24 @@ async fn prune(
 /// pipeline stamped into the target page's `llm_inputs.<key>` frontmatter. This is
 /// the deterministic form of the stale-task guard `/lore-process` must honor.
 fn classify_task(vault_root: &Path, task: &QueueTask) -> miette::Result<TaskStatus> {
-    let page_path = vault_root.join(&task.target.vault_path);
+    classify_against_page(
+        vault_root,
+        &task.target.vault_path,
+        task.target.kind,
+        &task.cache_hash,
+    )
+}
+
+/// The queue's one staleness rule: a task or result is current exactly when the page still
+/// carries the `llm_inputs` hash it was created against. Pending tasks and drained results
+/// are classified by the same code so they can never disagree about what "stale" means.
+fn classify_against_page(
+    vault_root: &Path,
+    vault_path: &str,
+    kind: lk_queue::TargetKind,
+    cache_hash: &str,
+) -> miette::Result<TaskStatus> {
+    let page_path = vault_root.join(vault_path);
     let content = match std::fs::read_to_string(&page_path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -307,13 +485,12 @@ fn classify_task(vault_root: &Path, task: &QueueTask) -> miette::Result<TaskStat
     };
     let page = lk_core::frontmatter::parse_page(&content)
         .map_err(|e| miette::miette!("parse {}: {e}", page_path.display()))?;
-    let key = task.target.kind.llm_inputs_key();
     let stored = page
         .frontmatter
         .get(lk_core::frontmatter::field::LLM_INPUTS)
-        .and_then(|v| v.get(key))
+        .and_then(|v| v.get(kind.llm_inputs_key()))
         .and_then(|v| v.as_str());
-    Ok(if stored == Some(task.cache_hash.as_str()) {
+    Ok(if stored == Some(cache_hash) {
         TaskStatus::Current
     } else {
         TaskStatus::Stale

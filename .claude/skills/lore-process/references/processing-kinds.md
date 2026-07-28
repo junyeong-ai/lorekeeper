@@ -58,13 +58,34 @@ and descriptions in `input.locale` language; default to Korean if absent.
 
 ## `kind: extract-concepts`
 
-Identify the key named entities, topics, and concepts (whatever the source's
-domain — the focus, if present, names it). Output a list of concept names (in
-the source language). Each concept also produces a concept page (create if
-missing, merge if exists). Fill the origin page's related-concepts section
-(the task's `target.anchor` heading) with a forward markdown link per concept —
-the single source of truth `backlinks-sync` reads; leave the concept's sources
-section / `source_count` to it. Use the concept path pattern from AGENTS.md.
+Identify the key named entities, topics, and concepts (whatever the source's domain — the
+focus, if present, names it), and write them to a result file. Do NOT create or edit concept
+pages, and do NOT touch the origin page's related-concepts section: `lore queue apply`
+materializes both, so that the merge rules (preserved `## Synthesis`, aliases, category,
+citation count) and the link/slug format live in one tested place rather than being restated
+here. Your output is judgement — which concepts the page names — and nothing else.
+
+Write one file per task to `<vault>/.lorekeeper/queue/results/{task_id}.json`:
+
+```json
+{
+  "task_id": "<task.task_id>",
+  "cache_hash": "<task.cache_hash>",
+  "target": <task.target verbatim>,
+  "date": "<task.input.date>",
+  "concepts": [{ "name": "…", "category": "…", "synthesis": "…" }]
+}
+```
+
+`synthesis` is one or two sentences grounding the concept, and is used only when the page
+is being CREATED — an established page's synthesis is its accumulated meaning across every
+source that cited it, so a single mention never overwrites it. Omit it and a new page is an
+empty heading.
+
+`concepts` may be empty — that is a valid answer for a page with nothing durable in it, and
+it still records that the task was answered. Copy `target` and `cache_hash` through
+unchanged; the applier re-checks the hash against the page and drops the result if the page
+moved on while you were working.
 
 **What counts as a concept** (keep the graph high-signal, not noisy): extract
 durable, reusable knowledge nodes — technologies, named methods,
@@ -92,39 +113,6 @@ never abbreviate. If no listed category fits the concept, leave the
 findings, so an invented category is observable drift that breaks the index.
 When `input.categories` is absent or empty, omit the field unconditionally.
 
-Same rule for the `tags` array: when a category is assigned, include that
-category ID as the page's sole tag (`tags: ["{category-id}"]`). When no
-category is assigned, use `tags: ["concept"]`.
-
-**Concept page format.** Use exactly these frontmatter keys:
-
-```yaml
----
-id: {slug}
-type: concept
-title: "{Name}"
-aliases: ["{Name}"]
-created: {YYYY-MM-DD}
-updated: {YYYY-MM-DD}
-category: {category-id}
-source_count: 0
-tags: ["{category-id}"]
----
-```
-
-Do NOT add any keys beyond those listed above. Emit all three body sections with
-headings EXACTLY as AGENTS.md defines for the concept page type (they are
-locale-dependent — never assume English): the synthesis section (you fill — see
-below), the sources section (leave EMPTY), and the related section (leave EMPTY).
-The sources section and `source_count: 0` are machine-owned (AGENTS.md § Concept
-convergence); the related section is human/audit-curated and never
-machine-written, so emit its heading with no bullets.
-
-**When creating a new concept page**, fill the Synthesis section (heading
-from AGENTS.md) with a 1-2 sentence definition/context of the concept based
-on the source text. Don't leave it empty — even a first-appearance concept
-benefits from a brief grounding. On merge (concept already exists), update
-the synthesis if the new source adds meaningful context; otherwise leave it.
 
 ## Per-kind target formatting
 

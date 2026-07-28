@@ -61,6 +61,74 @@ pub struct QueueTask {
     pub target: TaskTarget,
 }
 
+/// What a drained task produced, for the kinds whose output Lorekeeper materializes itself.
+///
+/// Most tasks write one section of one page, and the drain writes it directly — there is
+/// nothing to decide. Concept extraction is different: its output lands on a SHARED page
+/// per concept, under merge rules (preserved `## Synthesis`, aliases, category, citation
+/// count) that already exist as tested Rust. Returning the extraction as data lets that
+/// code own the merge, which keeps one implementation of it and leaves the extraction
+/// itself a pure function of the page it read.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskResult {
+    pub task_id: String,
+    /// The task's `cache_hash`, carried back so the applier can re-check staleness against
+    /// the target page: the page may have been re-rendered while the drain was running.
+    pub cache_hash: String,
+    pub target: TaskTarget,
+    pub date: jiff::civil::Date,
+    pub concepts: Vec<ReportedConcept>,
+}
+
+/// One concept an extraction named, with the grounding sentence that makes its page worth
+/// having.
+///
+/// The synthesis travels with the extraction because only the reader of the source page can
+/// write it, and a concept page created without one is an empty heading nobody can act on.
+/// It applies on CREATION only — an established page's synthesis is its accumulated meaning
+/// and outranks any single mention.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportedConcept {
+    #[serde(flatten)]
+    pub concept: ExtractedConcept,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthesis: Option<String>,
+}
+
+/// Subdirectory of the queue holding results awaiting `lore queue apply`.
+pub const RESULTS_SUBDIR: &str = "results";
+
+/// Read every result file in `<queue_dir>/results/`, oldest first.
+///
+/// A malformed file is an error, not a skip: silently ignoring one would drop the concepts
+/// of a whole page while reporting success, and the extraction that produced them is not
+/// repeatable without another LLM session.
+pub fn read_results(queue_dir: &Path) -> std::io::Result<Vec<(PathBuf, TaskResult)>> {
+    let dir = queue_dir.join(RESULTS_SUBDIR);
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
+        .collect();
+    paths.sort();
+
+    let mut out = Vec::with_capacity(paths.len());
+    for path in paths {
+        let raw = std::fs::read_to_string(&path)?;
+        let result: TaskResult = serde_json::from_str(&raw).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{}: {e}", path.display()),
+            )
+        })?;
+        out.push((path, result));
+    }
+    Ok(out)
+}
+
 /// `EnumIter` exists for the skill-contract tests — see [`crate::TargetKind`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::EnumIter)]
 #[serde(rename_all = "kebab-case")]

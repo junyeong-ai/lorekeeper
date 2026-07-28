@@ -61,10 +61,12 @@ you last read them.
    that file.
 5. **The target page's frontmatter is read-only**, except for the one
    `llm_inputs.<key>_done` completion marker you own and MUST stamp when a task
-   finishes (the per-kind key is in the step 3c table). Concept pages the skill
-   creates or merges are not
-   the target page — their frontmatter follows the concept page format and the
-   Concept convergence contract (alias appends allowed).
+   finishes (the per-kind key is in the step 3c table).
+6. **Never write a concept page, and never write a related-concepts section.**
+   `extract-concepts` emits a result file; `lore queue apply` materializes both.
+   Concept pages are shared between origin pages and merge under rules that
+   already exist as tested Rust — restating them here would be a second
+   implementation, and a drain that wrote them could not run two pages at once.
 
 ## Materialized-view contract
 
@@ -72,8 +74,10 @@ Daily pages are materialized views with two kinds of fields:
 
 - **Structural** (frontmatter, raw event list, headings) — owned by the Rust
   pipeline, re-rendered on every ingest. This skill never writes them.
-- **Semantic** (summary body, refined event bodies, concept links) —
-  owned by this skill, preserved across re-renders.
+- **Semantic** (summary body, refined event bodies) — owned by this skill,
+  preserved across re-renders. Concept links are semantic too, but they are
+  written by `lore queue apply` from the concepts this skill reports, so that
+  their slug and link format match the pages it creates.
 
 The pipeline decides what needs work before the queue file exists: a task is
 enqueued only when its section is missing or its inputs changed. This skill's
@@ -197,6 +201,7 @@ The essentials: a visible `.jsonl` is fully written and every
    machine-owned and reconciled here from the link graph, then the catalog
    is refreshed. Run both and confirm each exits 0:
    ```bash
+   lore queue apply            # materialize reported concepts into pages + links
    lore graph backlinks-sync   # re-derive every concept's ## Sources + source_count
    lore wiki index             # refresh the catalog
    lore wiki map               # refresh the citation-cluster navigation map
@@ -206,11 +211,11 @@ The essentials: a visible `.jsonl` is fully written and every
    `source_count` until some later run happens to reconcile. If any command
    exits non-zero, treat the run as failed and surface the error in step 6
    instead of reporting success. `lore ingest` never runs these. (The
-   `lore-daily-ingest` scheduled task chains ingest → /lore-process → these.)
+   `lore-daily.sh` pipeline chains ingest → /lore-process → these.)
 
 6. **Report** to the user:
    - On full success: number of files processed and tasks completed, and confirm
-     the step-5 Finalize ran (`backlinks-sync` + `index` + `map`, all exited 0).
+     the step-5 Finalize ran (`queue apply` + `backlinks-sync` + `index` + `map`, all exited 0).
    - On any failure (including a non-zero Finalize command): which file was left
      in place and the failed `task_id`s (or the failed command) with their error
      messages, then stop — leave remaining files for the next run.
