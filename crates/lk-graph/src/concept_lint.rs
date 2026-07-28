@@ -561,6 +561,11 @@ mod tests {
             // a trailing `s` that belongs to the word, not to a plural
             "http",
             "https",
+            // a break between digits is the name: `3-5` is two numerals, `35` is one
+            "claude-3-5",
+            "claude-35",
+            "web-2-0",
+            "web20",
         ] {
             write_concept(tmp.path(), slug, &format!("id: {slug}"));
         }
@@ -580,10 +585,12 @@ mod tests {
         assert_eq!(identity_key("ＲＡＧ"), identity_key("rag")); // NFKC full-width
         assert_eq!(identity_key("Vite+"), identity_key("vite"));
         assert_eq!(identity_key("vector-db"), identity_key("vectordb"));
-        // …and nothing beyond that is folded: order and every letter are identity.
+        // …and nothing beyond that is folded: order, every character, and a break
+        // between digits are all identity.
         assert_ne!(identity_key("agent harness"), identity_key("harness agent"));
         assert_ne!(identity_key("http"), identity_key("https"));
         assert_ne!(identity_key("doc-hub"), identity_key("docs-hub"));
+        assert_ne!(identity_key("Claude 3.5"), identity_key("Claude 35"));
         assert_eq!(identity_key("!!!"), None);
     }
 

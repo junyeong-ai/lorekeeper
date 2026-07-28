@@ -47,16 +47,25 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   (including spaces, punctuation, and literal `-`) to a separator, collapses runs to a
   single `-`, and trims edges. Concept slugs are always re-normalized through it to
   prevent path injection from LLM output.
-- **`identity_key()` is `slugify` with the separators dropped** — the ADDRESS a name is
-  written at vs the IDENTITY it claims. A slug must stay readable as a filename so it keeps
-  the breaks; identity does not care where they fall, so `Vector DB` / `vector-db` /
-  `vectordb` are one name. Nothing further is folded: word order and every letter are
-  identity (`agent-harness` ≠ `harness-agent`, `http` ≠ `https`, `doc-hub` ≠ `docs-hub`) —
-  whether two names mean one concept is a judgment, and lives in `/lore-wiki audit`, never
-  here. Single-sourced because two consumers must agree EXACTLY: `lk_pipeline`'s alias index
-  routes an extracted name to the page owning it, and `lk_graph`'s duplicate lint reports
-  two pages owning one name. Were they to disagree, the lint would flag pairs the index
-  routes fine, or stay silent while the index mints a second page for a name already taken.
+- **`identity_key()` is `slugify` keeping only the separators that MEAN something** — the
+  ADDRESS a name is written at vs the IDENTITY it claims. A slug must stay readable as a
+  filename so it keeps every break; identity keeps a break only where it changes the name.
+  Between letters a break is typography, so `Vector DB` / `vector-db` / `vectordb` are one
+  name. Between DIGITS it is the name itself — positional notation makes `3-5` two numerals
+  and `35` one — so `Claude 3.5` ≠ `Claude 35`, `GPT-4.1` ≠ `GPT-41`, `Web 2.0` ≠ `web20`.
+  Dropping every separator folded exactly those together, and version-numbered names are the
+  most common shape in a technology vault. A break on only ONE side of a digit is still
+  typography (`GPT-4o` = `gpt4o`, `ISO-8601` = `iso8601`).
+  Nothing else is folded: word order and every character are identity (`agent-harness` ≠
+  `harness-agent`, `http` ≠ `https`, `doc-hub` ≠ `docs-hub`) — whether two names mean one
+  concept is a judgment, and lives in `/lore-wiki audit`, never here. Single-sourced because
+  two consumers must agree EXACTLY: `lk_pipeline`'s alias index routes an extracted name to
+  the page owning it, and `lk_graph`'s duplicate lint reports two pages owning one name.
+  **The lint only REPORTS; the index ACTS** — it can fold an extraction into an established
+  page, and that fold is not reviewable after the fact (only one page ever exists, so the
+  lint has no pair to compare and the extraction's synthesis is dropped as a later mention).
+  So the fold must be one no reviewer would overturn; that asymmetry, not tidiness, is why
+  it stays this narrow.
 - **`link`** is the single implementation of the vault's link vocabulary: inline
   markdown links `[Display](relative/path.md)`, destinations relative to the containing
   page and always `.md`-suffixed. Construction (`md_link` + `relative_dest`, CommonMark

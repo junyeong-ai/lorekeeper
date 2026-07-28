@@ -42,24 +42,40 @@ pub fn slugify(name: &str) -> Option<String> {
 /// The identity a name claims, as opposed to the ADDRESS [`slugify`] writes it at.
 ///
 /// The two answer different questions. A slug has to stay readable as a filename, so it
-/// keeps the separators; identity does not care where the breaks fall, only what the name
-/// is — `Vector DB`, `vector-db` and `vectordb` are one name written three ways, and every
-/// vault defect they cause comes from treating them as three. So identity is the slug with
-/// its separators dropped: everything [`slugify`] folds (NFKC, case, punctuation) plus the
-/// one thing it must preserve but that carries no identity.
+/// keeps every separator; identity keeps only the separators that mean something. Between
+/// letters a break is typography — `Vector DB`, `vector-db` and `vectordb` are one name
+/// written three ways, and every defect they cause comes from treating them as three.
+/// Between DIGITS a break is the name itself: positional notation makes `3-5` two numerals
+/// and `35` one, so `Claude 3.5` and `Claude 35` are different names, as are `GPT-4.1`/
+/// `GPT-41` and `Web 2.0`/`web20`. Dropping every separator would fold those together —
+/// and version-numbered names are the single most common shape in a technology vault.
 ///
-/// Nothing further is folded. Word order and every letter are identity, so `agent-harness`
+/// Nothing else is folded. Word order and every character are identity, so `agent-harness`
 /// and `harness-agent`, `http` and `https`, `doc-hub` and `docs-hub` are all DIFFERENT
 /// names — whether they name the same concept is a question about meaning, which this
 /// cannot and must not answer.
 ///
 /// Single-sourced because two consumers must agree exactly: `lk_pipeline`'s alias index
 /// resolves an extracted name to the page that owns it, and `lk_graph`'s duplicate lint
-/// reports two pages owning one name. If they disagreed, the lint would report pairs the
-/// index routes fine, or stay silent while the index mints a second page for a name that
-/// already has one.
+/// reports two pages owning one name. The lint only reports, but the index ACTS — it can
+/// fold an extraction into an established page — so the fold has to be one no reviewer
+/// would overturn.
 pub fn identity_key(name: &str) -> Option<String> {
-    Some(slugify(name)?.replace('-', ""))
+    let slug = slugify(name)?;
+    let mut key = String::with_capacity(slug.len());
+    let mut rest = slug.chars().peekable();
+    while let Some(c) = rest.next() {
+        // slugify leaves no leading, trailing or repeated separator, so a `-` always sits
+        // between two characters and both sides are readable here.
+        if c != '-' {
+            key.push(c);
+        } else if key.chars().next_back().is_some_and(char::is_numeric)
+            && rest.peek().copied().is_some_and(char::is_numeric)
+        {
+            key.push('-');
+        }
+    }
+    Some(key)
 }
 
 #[cfg(test)]
@@ -85,8 +101,8 @@ mod tests {
     }
 
     #[test]
-    fn identity_key_folds_only_what_carries_no_identity() {
-        // Everything slugify folds, plus where the separators fall.
+    fn identity_key_folds_a_break_between_letters() {
+        // Everything slugify folds, plus where a break between letters falls.
         let vector_db = identity_key("Vector DB");
         assert_eq!(identity_key("vector-db"), vector_db);
         assert_eq!(identity_key("vectordb"), vector_db);
@@ -97,12 +113,39 @@ mod tests {
         );
         assert_eq!(identity_key("ＲＡＧ"), identity_key("rag")); // NFKC full-width
         assert_eq!(identity_key("Vite+"), identity_key("vite"));
-        // And nothing else. Order and every letter are identity; whether two of these
-        // name one concept is a question about meaning, which this must not answer.
+        // A break on only ONE side of a digit is still typography.
+        assert_eq!(identity_key("GPT-4o"), identity_key("gpt4o"));
+        assert_eq!(identity_key("H-2"), identity_key("h2"));
+        assert_eq!(identity_key("ISO-8601"), identity_key("iso8601"));
+        assert_eq!(identity_key("S3 bucket"), identity_key("s3bucket"));
+        assert_eq!(identity_key("---"), None);
+    }
+
+    #[test]
+    fn identity_key_keeps_a_break_between_digits() {
+        // Positional notation: `3-5` is two numerals, `35` is one, so the break IS the
+        // name. Version-numbered names are the most common shape in a technology vault,
+        // and folding these together would silently route one concept onto the other.
+        assert_ne!(identity_key("Claude 3.5"), identity_key("Claude 35"));
+        assert_ne!(identity_key("GPT-4.1"), identity_key("GPT-41"));
+        assert_ne!(identity_key("Web 2.0"), identity_key("web20"));
+        assert_ne!(identity_key("v1-0"), identity_key("v10"));
+        // Spelling the same version differently still folds.
+        assert_eq!(identity_key("Claude 3.5"), identity_key("claude-3-5"));
+        assert_eq!(
+            identity_key("Gemini 3.1 Flash"),
+            identity_key("gemini-3-1-flash")
+        );
+    }
+
+    #[test]
+    fn identity_key_folds_nothing_about_meaning() {
+        // Order and every character are identity; whether two of these name one concept
+        // is a question about meaning, which this must not answer.
         assert_ne!(identity_key("agent harness"), identity_key("harness agent"));
         assert_ne!(identity_key("http"), identity_key("https"));
         assert_ne!(identity_key("doc-hub"), identity_key("docs-hub"));
-        assert_eq!(identity_key("---"), None);
+        assert_ne!(identity_key("k8s"), identity_key("kubernetes"));
     }
 
     #[test]

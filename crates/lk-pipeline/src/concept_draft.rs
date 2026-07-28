@@ -95,7 +95,7 @@ impl ConceptDrafts {
         if self.alias_index.is_none() {
             self.alias_index = Some(build_alias_index(reader, dirs).await?);
         }
-        let key = slug.replace('-', "");
+        let key = identity_key(name).expect("a name with a slug always has an identity");
         Ok(self
             .alias_index
             .as_ref()
@@ -458,7 +458,7 @@ async fn build_alias_index(
     dirs: &VaultDirs,
 ) -> Result<BTreeMap<String, ConceptIdentity>, PipelineError> {
     let dir = lk_core::vault_path::concepts_dir(dirs);
-    let mut index = BTreeMap::new();
+    let mut index: BTreeMap<String, ConceptIdentity> = BTreeMap::new();
     for path in reader.list_markdown(&dir).await? {
         let Some(page) = reader.read_page(&path).await? else {
             continue;
@@ -499,6 +499,20 @@ async fn build_alias_index(
         // A stem that carries no identity at all has no address to seed; its names still
         // register, so the page keeps answering to them.
         if let Some(own_key) = identity_key(slug) {
+            // Two pages whose ADDRESSES claim one identity is the same vault defect the
+            // duplicate lint reports, and the router has to pick one. It does so
+            // deterministically (last read wins) but arbitrarily, so say which — silence
+            // here is what would make a mis-addressed citation impossible to explain.
+            if let Some(held) = index.get(&own_key)
+                && held.slug != slug
+            {
+                tracing::warn!(
+                    identity = %own_key,
+                    now_resolves_to = %slug,
+                    displaced = %held.slug,
+                    "two concept pages are addressed by the same name"
+                );
+            }
             index.insert(own_key, identity.clone());
         }
         for name in names {

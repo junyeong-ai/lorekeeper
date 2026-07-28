@@ -128,16 +128,23 @@ domain-neutral engine — then no work-log, reviews, or `is_personal` are produc
   `lk_core::concept::identity_key(name) → ConceptIdentity` — the SAME key `lore graph lint`
   uses to report two pages owning one name, so what routes here and what the lint calls a
   duplicate cannot drift apart. Keying on identity rather than the slug is also what makes
-  `VectorDB` land on `vector-db.md` instead of minting a second page. A page owning its OWN
+  `VectorDB` land on `vector-db.md` instead of minting a second page.
+  **This index is the one place a fold ACTS rather than reports**, and the act is not
+  reviewable afterwards: a name folded onto an established page leaves only one page, so
+  the lint has no pair to compare and the extraction's synthesis is dropped as a later
+  mention. That is why `identity_key` keeps a break between digits — see lk-core — and why
+  nothing meaning-shaped may ever be added to it. A page owning its OWN
   address is what stops a stale alias elsewhere
   from redirecting a concept away from its page. Deriving that claim from title/aliases
   alone would only protect pages whose names happen to reproduce the stem — and a page
   titled more descriptively than its file (`access-ingress-2axis-model` ←
   "Access × Ingress 2-Axis Deployment Model") has NO such name, leaving its address free
   for another page's alias to take and sending every citation of its own name elsewhere.
-  Seeding is unconditional, so the guarantee does not depend on directory read order.
-  Two pages claiming the same non-address name stays a `tracing::warn` (first wins,
-  deterministic) and is reported deterministically by `lore graph lint`.
+  Seeding is unconditional, so the guarantee does not depend on directory read order; two
+  pages whose ADDRESSES claim one identity — the lint's own finding — resolve to whichever
+  is read last, which is deterministic but arbitrary, so it is `tracing::warn`ed rather
+  than settled in silence. Two pages claiming the same non-address name likewise warns
+  (first wins, deterministic) and is reported deterministically by `lore graph lint`.
 - **`theme` vs `topic` are deliberately distinct, not drift.** A weekly-synthesis
   `Theme` (`identify_themes`) is a cross-source cluster spanning a whole week; a work-log
   `topic_summary`/`topic_heading` is a single day's per-source activity grouping. They sit

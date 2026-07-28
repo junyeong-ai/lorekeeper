@@ -129,13 +129,15 @@ on-disk state, never from a cached snapshot.
   state.
 - **`concept_lint::find_duplicate_concepts` reports NAME COLLISIONS, not similarity.**
   Each page claims a set of names — its slug, `title`, and every `aliases` entry — and a
-  finding is two pages claiming one name. `identity_key` is `lk_core::concept::slugify`
-  with the separators dropped: slugify is the normalization that mints page ids and keys
-  the pipeline's alias index (so a collision here is exactly a name that routes ambiguously
-  there), and dropping separators folds the only thing it preserves that carries no
-  identity — WHERE the breaks fall (`vector-db` ~ `vectordb` ~ `Vector DB`). Keys are
-  hash-grouped, so the scan is linear. **A finding therefore cannot be a false positive**:
-  the two names are the same characters in the same order.
+  finding is two pages claiming one name. `lk_core::concept::identity_key` is that rule —
+  `slugify` (the normalization that mints page ids and keys the pipeline's alias index)
+  keeping only the breaks that mean something: a break between letters is typography
+  (`vector-db` ~ `vectordb` ~ `Vector DB`), a break between digits is the name
+  (`claude-3-5` ≠ `claude-35`). Keys are hash-grouped, so the scan is linear. **A finding
+  therefore cannot be a false positive**: the two names are the same characters in the same
+  order. What it CANNOT see is the defect that never becomes two pages — the router folding
+  an extraction into an established page leaves nothing to compare — which is why the fold
+  itself has to be narrow rather than the lint forgiving.
   **There is deliberately no score, no threshold, and no morphology.** The predecessor
   scored slug character bigrams (Sørensen-Dice ≥ `concept_near_duplicate_threshold`, since
   removed from config); measured on a 1,599-concept vault it returned 298 findings

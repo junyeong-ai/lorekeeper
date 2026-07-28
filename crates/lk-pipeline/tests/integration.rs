@@ -3161,6 +3161,70 @@ async fn a_grounding_from_a_later_result_still_seeds_a_new_concept_page() {
     );
 }
 
+/// A break BETWEEN DIGITS is the name, not typography: `3-5` is two numerals and `35` is
+/// one. The router acts on identity — it folds an extraction into an established page —
+/// so folding these together loses the second concept in a way nothing can report: only
+/// one page ever exists, so the duplicate lint has no pair to compare, and the extraction's
+/// synthesis is dropped because the established page already has one.
+#[tokio::test]
+async fn a_break_between_digits_does_not_fold_one_version_onto_another() {
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let config = base_config(vault);
+
+    let concepts = vault.join("wiki").join("concepts");
+    std::fs::create_dir_all(&concepts).unwrap();
+    std::fs::write(
+        concepts.join("claude-35.md"),
+        "---\nid: claude-35\ntype: concept\ntitle: \"Claude 35\"\naliases: [\"Claude 35\"]\n\
+         created: 2026-06-06\nupdated: 2026-06-06\nsource_count: 1\n---\n\n\
+         ## Synthesis\n\nAn unrelated internal codename.\n\n## Sources\n\n- x\n",
+    )
+    .unwrap();
+
+    let ctx = build_ctx(&config, Arc::new(NoopLlmClient));
+    let mut pipeline = Pipeline::new(vault, ctx);
+
+    let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
+    let result = lk_queue::TaskResult {
+        task_id: "ext-1".into(),
+        cache_hash: "h".into(),
+        target: lk_queue::TaskTarget {
+            vault_path: "daily/test-source/2026-05-23.md".into(),
+            kind: lk_queue::TargetKind::DailyConcepts,
+            anchor: "## Related Concepts".into(),
+            concepts_dir: "../../wiki/concepts".into(),
+        },
+        date: jiff::civil::date(2026, 5, 23),
+        concepts: vec![lk_queue::ReportedConcept {
+            concept: ExtractedConcept {
+                name: "Claude 3.5".into(),
+                category: None,
+            },
+            synthesis: Some("Anthropic's model release.".into()),
+        }],
+    };
+
+    let rewritten = pipeline.apply_concept_result(&result, page).await.unwrap();
+    assert!(
+        rewritten.contains("../../wiki/concepts/claude-3-5.md"),
+        "a version must get its own page, not be folded onto a different number: {rewritten}"
+    );
+    assert!(
+        !rewritten.contains("claude-35.md"),
+        "the unrelated page must not capture the citation: {rewritten}"
+    );
+
+    let pages = pipeline.render_concept_pages().await.unwrap();
+    assert_eq!(pages.len(), 1);
+    assert!(pages[0].path.to_string().ends_with("claude-3-5.md"));
+    assert!(
+        pages[0].content.contains("Anthropic's model release."),
+        "the extraction's synthesis must reach its own page: {}",
+        pages[0].content
+    );
+}
+
 /// Where the separators fall carries no identity, so an extraction that spells an
 /// established name without them must land on that page rather than mint a second one at
 /// its own spelling. The alias index and `graph lint` share `identity_key` precisely so
