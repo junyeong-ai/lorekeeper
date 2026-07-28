@@ -117,9 +117,17 @@ fn print_launchd(bin: &str, cwd: &std::path::Path, jobs: &[Job]) -> miette::Resu
     // cryptic status in `launchctl print`, so both are refused up front rather than emitted
     // as a plist that looks right and never runs.
     if !std::path::Path::new(bin).is_absolute() {
+        // A bare name is a PATH lookup; a relative path resolves against the same cwd the
+        // jobs run in. Suggesting `command -v` for both would echo a relative path straight
+        // back and fail again.
+        let absolute = if bin.contains(std::path::MAIN_SEPARATOR) {
+            cwd.join(bin).display().to_string()
+        } else {
+            format!("$(command -v {bin})")
+        };
         return Err(miette::miette!(
             "launchd needs an absolute path to the binary — it does not search PATH.\n\
-             Re-run with: lore schedule --format launchd --bin \"$(command -v {bin})\""
+             Re-run with: lore schedule --format launchd --bin \"{absolute}\""
         ));
     }
     let home = std::env::var("HOME").map_err(|_| {
