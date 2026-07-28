@@ -180,8 +180,8 @@ async fn apply(
     let mut consumed: Vec<PathBuf> = Vec::new();
 
     // Everything a result can get wrong is that result's problem, not the batch's: aborting
-    // would strand every other valid extraction in the run. Each failure leaves the file in
-    // place so a fixed page picks it up next time, and the run still exits non-zero.
+    // would strand every other valid extraction in the run. A RETRYABLE failure leaves the
+    // file in place so a fixed page picks it up next time, and the run exits non-zero.
     for (path, result) in &results {
         let fail = |reason: String| {
             eprintln!(
@@ -189,10 +189,22 @@ async fn apply(
                 result.task_id, result.target.vault_path
             );
         };
+        let drop_dead = |reason: &str| {
+            eprintln!(
+                "  dropped {} ({}): {reason}",
+                result.task_id, result.target.vault_path
+            );
+        };
 
+        // An address outside the vault is not a page that might be fixed — it is a result
+        // that can never be applied. Keeping it would fail `queue apply`, and so the whole
+        // scheduled pipeline, on every run forever: `queue prune` classifies TASKS, so no
+        // janitor would ever clear it. It is dead in the same sense a stale result is, and
+        // is consumed on the same terms.
         let Some(rel_path) = resolve_target_path(&result.target.vault_path) else {
-            fail("target path escapes the vault root".into());
-            failed += 1;
+            drop_dead("target path escapes the vault root");
+            dropped += 1;
+            consumed.push(path.clone());
             continue;
         };
         match classify_against_page(
@@ -203,12 +215,7 @@ async fn apply(
         ) {
             Ok(TaskStatus::Current) => {}
             Ok(status) => {
-                eprintln!(
-                    "  dropped {} ({}): {}",
-                    result.task_id,
-                    result.target.vault_path,
-                    status.as_str()
-                );
+                drop_dead(status.as_str());
                 dropped += 1;
                 consumed.push(path.clone());
                 continue;
