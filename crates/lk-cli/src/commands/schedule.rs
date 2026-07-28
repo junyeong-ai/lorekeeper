@@ -17,11 +17,62 @@ struct Job {
     name: String,
     /// 5-field cron expression from config.
     schedule: String,
-    /// Arguments after the binary.
+    /// Program to run. `None` = the `--bin` lore binary; `Some` = a pipeline script, which
+    /// also needs [`pipeline_env`] to find its own tools.
+    program: Option<String>,
+    /// Arguments after the program.
     args: Vec<String>,
 }
 
-pub async fn run(opts: &super::GlobalOptions, bin: &str, format: Format) -> miette::Result<()> {
+impl Job {
+    fn is_pipeline(&self) -> bool {
+        self.program.is_some()
+    }
+}
+
+/// The environment a pipeline script needs, taken from the session `lore schedule` runs in.
+///
+/// A scheduler starts a job with almost no environment: launchd provides a minimal `PATH`
+/// and cron little more. The scripts call `lore` and `claude` by name, so without this they
+/// fail to find their own tools — a job that looks installed and never works.
+///
+/// These values are INHERITED, never invented. `lore schedule` is run interactively by the
+/// operator, so its own `PATH` is the one that resolves their tools today; `claude` is looked
+/// up on that `PATH`, and `lore` and the config are the paths this command already resolved.
+/// Guessing any of them would produce exactly the silently-broken job this exists to prevent.
+fn pipeline_env(bin: &str, config_path: &std::path::Path) -> Vec<(String, String)> {
+    let mut env = vec![
+        ("LORE_BIN".to_string(), bin.to_string()),
+        ("LORE_CONFIG".to_string(), config_path.display().to_string()),
+    ];
+    if let Ok(path) = std::env::var("PATH") {
+        env.insert(0, ("PATH".to_string(), path));
+    }
+    match find_on_path("claude") {
+        Some(claude) => env.push(("CLAUDE_BIN".to_string(), claude.display().to_string())),
+        // The drain is the one stage that needs it. Say so now rather than let the job fail
+        // at 09:00 with `claude: command not found` in a log nobody is reading.
+        None => eprintln!(
+            "warning: `claude` was not found on PATH, so the pipelines have no drain step \
+             to enqueue against. Install Claude Code, then re-run this command."
+        ),
+    }
+    env
+}
+
+/// First executable named `name` on `PATH`.
+fn find_on_path(name: &str) -> Option<std::path::PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+pub async fn run(
+    opts: &super::GlobalOptions,
+    bin: &str,
+    format: Format,
+    pipeline_dir: Option<&std::path::Path>,
+) -> miette::Result<()> {
     let config_path = find_config(opts)?;
     let config = load_config(&config_path)?;
     let cwd = std::env::current_dir()
@@ -38,51 +89,92 @@ pub async fn run(opts: &super::GlobalOptions, bin: &str, format: Format) -> miet
         flags.push(p.display().to_string());
     }
 
-    let mut jobs: Vec<Job> = Vec::new();
-    let mut push = |name: &str, schedule: &str, tail: &[&str]| {
-        let mut args = flags.clone();
-        args.extend(tail.iter().map(|s| (*s).to_string()));
-        jobs.push(Job {
-            name: name.to_string(),
-            schedule: schedule.to_string(),
-            args,
-        });
+    let jobs = build_jobs(&config, &flags, pipeline_dir);
+
+    let env = match pipeline_dir {
+        Some(dir) if !dir.is_absolute() => {
+            return Err(miette::miette!(
+                "--pipeline-dir must be absolute: a scheduler starts the job with no useful \
+                 working directory to resolve a relative path against."
+            ));
+        }
+        Some(_) => pipeline_env(bin, &config_path),
+        None => Vec::new(),
     };
 
-    if let Some(ref sched) = config.ingest.schedule {
-        push("ingest", sched, &["ingest"]);
-    }
-    if config.synthesis.weekly.enabled
-        && let Some(sched) = &config.synthesis.weekly.schedule
-    {
-        push(
-            "synthesis-weekly",
-            sched,
-            &["synthesis", "weekly", "--previous"],
-        );
-    }
-    if let Some(personal) = &config.personal {
-        for (period, sched) in personal.review_schedules() {
-            push(
-                &format!("synthesis-{period}"),
-                sched,
-                &["synthesis", period, "--previous"],
-            );
-        }
-    }
-    if let Some(ref sched) = config.maintenance.schedule {
-        push("maintenance", sched, &["maintenance"]);
-        push("queue-prune", sched, &["queue", "prune"]);
-    }
-
     match format {
-        Format::Cron => print_cron(bin, &cwd, &jobs),
-        Format::Launchd => print_launchd(bin, &cwd, &jobs)?,
+        Format::Cron => print_cron(bin, &cwd, &jobs, &env),
+        Format::Launchd => print_launchd(bin, &cwd, &jobs, &env)?,
     }
     Ok(())
 }
 
-fn print_cron(bin: &str, cwd: &std::path::Path, jobs: &[Job]) {
+/// The scheduled job list implied by `config`'s cron keys.
+fn build_jobs(
+    config: &lk_core::config::Config,
+    flags: &[String],
+    pipeline_dir: Option<&std::path::Path>,
+) -> Vec<Job> {
+    let lore_job = |name: &str, schedule: &str, tail: &[&str]| {
+        let mut args = flags.to_vec();
+        args.extend(tail.iter().map(|s| (*s).to_string()));
+        Job {
+            name: name.to_string(),
+            schedule: schedule.to_string(),
+            program: None,
+            args,
+        }
+    };
+    // The daily ingest and the weekly synthesis are the FIRST stage of a pipeline, not the
+    // whole job: each later stage consumes what the previous produced, and the queue drain
+    // needs an LLM session `lore` deliberately does not invoke. Scheduling the bare
+    // subcommand ingests every morning and never drains or applies, so summaries and
+    // concepts stay empty while tasks pile up. With the scripts installed those two jobs run
+    // them; every other job is a plain `lore` invocation with no LLM stage, which is why the
+    // scripts themselves say those belong on their own schedules.
+    let pipeline_job = |dir: &std::path::Path, name: &str, schedule: &str, script: &str| Job {
+        name: name.to_string(),
+        schedule: schedule.to_string(),
+        program: Some(dir.join(script).display().to_string()),
+        args: Vec::new(),
+    };
+
+    let mut jobs: Vec<Job> = Vec::new();
+    if let Some(ref sched) = config.ingest.schedule {
+        jobs.push(match pipeline_dir {
+            Some(dir) => pipeline_job(dir, "daily", sched, "lore-daily.sh"),
+            None => lore_job("ingest", sched, &["ingest"]),
+        });
+    }
+    if config.synthesis.weekly.enabled
+        && let Some(sched) = &config.synthesis.weekly.schedule
+    {
+        jobs.push(match pipeline_dir {
+            Some(dir) => pipeline_job(dir, "weekly", sched, "lore-weekly.sh"),
+            None => lore_job(
+                "synthesis-weekly",
+                sched,
+                &["synthesis", "weekly", "--previous"],
+            ),
+        });
+    }
+    if let Some(personal) = &config.personal {
+        for (period, sched) in personal.review_schedules() {
+            jobs.push(lore_job(
+                &format!("synthesis-{period}"),
+                sched,
+                &["synthesis", period, "--previous"],
+            ));
+        }
+    }
+    if let Some(ref sched) = config.maintenance.schedule {
+        jobs.push(lore_job("maintenance", sched, &["maintenance"]));
+        jobs.push(lore_job("queue-prune", sched, &["queue", "prune"]));
+    }
+    jobs
+}
+
+fn print_cron(bin: &str, cwd: &std::path::Path, jobs: &[Job], env: &[(String, String)]) {
     let cwd_str = shell_escape(&cwd.display().to_string());
     let bin_escaped = shell_escape(bin);
 
@@ -95,14 +187,24 @@ fn print_cron(bin: &str, cwd: &std::path::Path, jobs: &[Job]) {
     println!("# passed while the machine was asleep, which silently drops a day's ingest.");
     println!();
 
+    // cron gives a job almost no environment. Assignment lines apply to every entry below
+    // them, which is crontab's own way of saying this — and keeps the job lines readable
+    // instead of repeating a full PATH on each one.
+    if !env.is_empty() {
+        println!("# Environment the pipelines need to find their own tools:");
+        for (key, value) in env {
+            println!("{key}={value}");
+        }
+        println!();
+    }
+
     for job in jobs {
-        let args = job
-            .args
-            .iter()
-            .map(|a| shell_escape(a))
-            .collect::<Vec<_>>()
-            .join(" ");
-        println!("{} cd {cwd_str} && {bin_escaped} {args}", job.schedule);
+        let mut command = shell_escape(job.program.as_deref().unwrap_or(bin));
+        for arg in &job.args {
+            command.push(' ');
+            command.push_str(&shell_escape(arg));
+        }
+        println!("{} cd {cwd_str} && {command}", job.schedule);
     }
 }
 
@@ -110,7 +212,12 @@ fn print_cron(bin: &str, cwd: &std::path::Path, jobs: &[Job]) {
 ///
 /// Jobs are emitted rather than written so the operator reviews before installing — these
 /// files run unattended with the user's credentials.
-fn print_launchd(bin: &str, cwd: &std::path::Path, jobs: &[Job]) -> miette::Result<()> {
+fn print_launchd(
+    bin: &str,
+    cwd: &std::path::Path,
+    jobs: &[Job],
+    env: &[(String, String)],
+) -> miette::Result<()> {
     // Every path in a plist must be absolute. launchd execs the program directly and does
     // NOT search a PATH, and it expands no shell syntax — neither a bare name nor a `~` nor
     // a relative path resolves. Each yields a job that fails to spawn with nothing but a
@@ -173,11 +280,31 @@ fn print_launchd(bin: &str, cwd: &std::path::Path, jobs: &[Job]) -> miette::Resu
         println!("  <key>Label</key><string>{label}</string>");
         println!("  <key>ProgramArguments</key>");
         println!("  <array>");
-        println!("    <string>{}</string>", xml_escape(bin));
+        // A pipeline runs under an explicit interpreter rather than its shebang: the script
+        // is installed by a shell installer that may not have kept the executable bit, and
+        // launchd reports a failure to exec as an opaque status.
+        if let Some(program) = &job.program {
+            println!("    <string>/bin/bash</string>");
+            println!("    <string>{}</string>", xml_escape(program));
+        } else {
+            println!("    <string>{}</string>", xml_escape(bin));
+        }
         for arg in &job.args {
             println!("    <string>{}</string>", xml_escape(arg));
         }
         println!("  </array>");
+        if job.is_pipeline() && !env.is_empty() {
+            println!("  <key>EnvironmentVariables</key>");
+            println!("  <dict>");
+            for (key, value) in env {
+                println!(
+                    "    <key>{}</key><string>{}</string>",
+                    xml_escape(key),
+                    xml_escape(value)
+                );
+            }
+            println!("  </dict>");
+        }
         println!(
             "  <key>WorkingDirectory</key><string>{}</string>",
             xml_escape(&cwd.display().to_string())
@@ -323,6 +450,57 @@ fn shell_escape(s: &str) -> String {
 mod tests {
     use super::*;
 
+    fn config_with_schedules() -> lk_core::config::Config {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(
+            &path,
+            "vault:\n  root: .\nidentity:\n  name: A\n  email: a@b.c\ningest:\n  schedule: \"0 9 * * *\"\n\
+             synthesis:\n  weekly:\n    enabled: true\n    schedule: \"0 8 * * 1\"\n\
+             maintenance:\n  schedule: \"0 3 * * *\"\n\
+             sources:\n  notes:\n    type: manual\n    enabled: true\n    params:\n      inbox_dir: inbox\n",
+        )
+        .unwrap();
+        lk_core::config::Config::load(&path).unwrap()
+    }
+
+    #[test]
+    fn a_pipeline_dir_replaces_the_two_jobs_that_are_only_a_pipeline_stage() {
+        // Ingest and weekly synthesis are the FIRST stage of their pipeline; the queue drain
+        // and `queue apply` exist only in the scripts. Scheduling the bare subcommands
+        // ingests every morning and never materializes a summary or a concept.
+        let config = config_with_schedules();
+        let dir = std::path::Path::new("/data/pipelines");
+        let jobs = build_jobs(&config, &[], Some(dir));
+
+        let by_name = |n: &str| jobs.iter().find(|j| j.name == n).map(|j| j.program.clone());
+        assert_eq!(
+            by_name("daily"),
+            Some(Some("/data/pipelines/lore-daily.sh".to_string()))
+        );
+        assert_eq!(
+            by_name("weekly"),
+            Some(Some("/data/pipelines/lore-weekly.sh".to_string()))
+        );
+        // The janitors have no LLM stage, so they stay plain `lore` invocations.
+        assert_eq!(by_name("maintenance"), Some(None));
+        assert_eq!(by_name("queue-prune"), Some(None));
+        assert!(
+            jobs.iter().all(|j| j.name != "ingest"),
+            "the bare ingest job must not also be scheduled — it would double-run"
+        );
+    }
+
+    #[test]
+    fn without_a_pipeline_dir_the_bare_subcommands_are_emitted() {
+        let config = config_with_schedules();
+        let jobs = build_jobs(&config, &[], None);
+        assert!(jobs.iter().all(|j| j.program.is_none()));
+        let names: Vec<&str> = jobs.iter().map(|j| j.name.as_str()).collect();
+        assert!(names.contains(&"ingest"), "{names:?}");
+        assert!(names.contains(&"synthesis-weekly"), "{names:?}");
+    }
+
     #[test]
     fn launchd_refuses_a_binary_path_it_cannot_exec() {
         // launchd resolves neither a PATH lookup nor a relative path, so both are refused.
@@ -331,12 +509,13 @@ mod tests {
         let jobs = [Job {
             name: "daily".into(),
             schedule: "0 9 * * *".into(),
+            program: None,
             args: vec!["ingest".into()],
         }];
         let cwd = std::path::Path::new("/vault");
         for bin in ["lore", "./lore", "target/release/lore", "../bin/lore"] {
             assert!(
-                print_launchd(bin, cwd, &jobs).is_err(),
+                print_launchd(bin, cwd, &jobs, &[]).is_err(),
                 "`{bin}` is not something launchd can exec"
             );
         }

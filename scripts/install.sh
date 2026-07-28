@@ -366,6 +366,30 @@ install_pipelines() {
     [ "$installed" -gt 0 ] && log_ok "Pipelines installed to ${dest_dir}"
 }
 
+# Print how to schedule what was just installed, with this machine's paths resolved.
+#
+# `--pipeline-dir` is what makes the daily and weekly entries run the installed scripts
+# rather than bare `lore ingest` / `lore synthesis weekly`. Those subcommands are only the
+# FIRST stage of their pipeline: the queue drain and `lore queue apply` live in the scripts,
+# so scheduling the bare commands ingests every morning and never fills a summary or
+# materializes a concept. Run interactively, `lore schedule` also picks up the PATH and the
+# `claude` binary the scripts need, which a scheduler does not provide on its own.
+print_pipeline_schedule() {
+    local lore_bin
+    lore_bin="$(command -v lore || printf '%s/lore' "$INSTALL_DIR")"
+
+    if [ "$(uname -s)" = "Darwin" ]; then
+        printf '       %slore schedule --format launchd --bin %s \\\n' "$C_BOLD" "$lore_bin"
+        printf '            --pipeline-dir %s/pipelines%s\n' "$DATA_DIR" "$C_RESET"
+        printf '       Review the plists it prints, write them to ~/Library/LaunchAgents/,\n'
+        printf '       then load each with launchctl bootstrap (the output shows how).\n'
+        printf '       launchd runs a job missed during sleep; cron silently skips it.\n'
+    else
+        printf '       %slore schedule --pipeline-dir %s/pipelines%s | crontab -\n' \
+            "$C_BOLD" "$DATA_DIR" "$C_RESET"
+    fi
+}
+
 # Legacy Claude Code scheduled-task definitions, installed by versions up to 0.10. They
 # scheduled `lore ingest` through Claude Desktop, which meant a day was silently skipped
 # whenever the app was not running; the pipelines above replace them with a system
@@ -643,9 +667,8 @@ main() {
     printf '  %s2.%s %slore init credentials%s   Enter API tokens interactively\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
     printf '  %s3.%s %slore validate%s           Verify config + credentials\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
     printf '  %s4.%s %slore ingest --dry-run%s   Preview ingest without writing\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
-    printf '  %s5.%s Schedule %s/pipelines/lore-daily.sh (and lore-weekly.sh):\n' "$C_BOLD" "$C_RESET" "$DATA_DIR"
-    printf '       macOS: %slore schedule --format launchd --bin "$(command -v lore)"%s\n' "$C_BOLD" "$C_RESET"
-    printf '       Linux: %slore schedule%s | crontab -   (then point the ingest line at the pipeline)\n' "$C_BOLD" "$C_RESET"
+    printf '  %s5.%s Schedule the two pipelines, then the janitors:\n' "$C_BOLD" "$C_RESET"
+    print_pipeline_schedule
     printf '  %s/lore-setup%s · %s/lore-ingest%s · %s/lore-process%s · %s/lore-wiki%s · %s/lore-capture%s · %s/lore-extract%s\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
 }
 

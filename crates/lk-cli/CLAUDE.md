@@ -29,8 +29,13 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   a full run still writes: the failure is loud (non-zero exit) and the next full run
   re-renders the page complete, while blocking on `had_failure` would freeze the work-log
   on any persistently failing source, news feeds included.
-- **`lore schedule`** emits ONE all-source `lore ingest` line from `ingest.schedule` —
-  never per source — plus synthesis/maintenance/queue-prune lines from their own keys.
+- **`lore schedule`** emits ONE all-source entry from `ingest.schedule` — never per source —
+  plus synthesis/maintenance/queue-prune entries from their own keys. `build_jobs` is the
+  testable job list; `--pipeline-dir` swaps the ingest and weekly-synthesis entries for the
+  installed `lore-daily.sh`/`lore-weekly.sh` (those subcommands are only the pipelines' first
+  stage — the drain and `queue apply` live in the scripts), and `pipeline_env` attaches the
+  `PATH`/`LORE_BIN`/`LORE_CONFIG`/`CLAUDE_BIN` a scheduler does not provide, inherited from
+  the session this command runs in.
 - **`lore ingest` startup** sweeps stale `*.jsonl.tmp` from crashed runs and
   warns if pending queue files exist (run `/lore-process` first to avoid duplicate
   LLM work).

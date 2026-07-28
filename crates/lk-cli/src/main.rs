@@ -74,6 +74,13 @@ enum Command {
         /// sleep once the machine wakes, whereas cron drops it.
         #[arg(long, value_enum, default_value_t = commands::schedule::Format::Cron)]
         format: commands::schedule::Format,
+        /// Absolute directory holding the installed pipeline scripts (the installer's
+        /// `<data>/pipelines`). With it, the daily and weekly entries run those scripts —
+        /// ingest and weekly synthesis are only their FIRST stage, and the bare subcommands
+        /// never drain the LLM queue or apply its results. Without it, those two entries are
+        /// the bare subcommands and the drain must be scheduled some other way.
+        #[arg(long)]
+        pipeline_dir: Option<std::path::PathBuf>,
     },
     /// Generate wiki/AGENTS.md — single source of truth for page formats
     Schema {
@@ -164,7 +171,11 @@ async fn main() -> miette::Result<()> {
         Command::Health { strict } => commands::health::run(&opts, strict).await,
         Command::Doctor => commands::doctor::run(&opts).await,
         Command::Performance => commands::performance::run(&opts).await,
-        Command::Schedule { bin, format } => commands::schedule::run(&opts, &bin, format).await,
+        Command::Schedule {
+            bin,
+            format,
+            pipeline_dir,
+        } => commands::schedule::run(&opts, &bin, format, pipeline_dir.as_deref()).await,
         Command::Maintenance => commands::maintenance::run(&opts).await,
         Command::Graph { .. } => unreachable!(),
         Command::Wiki { cmd } => commands::wiki::run(&opts, cmd).await,
