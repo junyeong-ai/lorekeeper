@@ -205,8 +205,7 @@ pub struct DuplicateConcept {
 /// Deliberately EXACT: no score, no threshold, and no morphology. Two names collide only
 /// when `lk_core::concept::identity_key` reduces them to one identity, and that fold covers
 /// typography alone — case, punctuation, and every break except one between two numerals.
-/// So a finding is never
-/// a similarity guess; it is a name the vault spells two ways.
+/// So a finding is never a similarity guess; it is a name the vault spells two ways.
 ///
 /// A scored variant (Sørensen-Dice over slug character bigrams) preceded this and was
 /// measured on a 1,599-concept vault: 298 findings, of which one was a real duplicate. The

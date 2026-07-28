@@ -131,15 +131,16 @@ on-disk state, never from a cached snapshot.
   Each page claims a set of names — its slug, `title`, and every `aliases` entry — and a
   finding is two pages claiming one name. `lk_core::concept::identity_key` is that rule —
   `slugify` (the normalization that mints page ids and keys the pipeline's alias index)
-  keeping only the breaks that mean something: every break is typography
-  (`vector-db` ~ `vectordb` ~ `Vector DB`, and `claude-35` ~ `claude35`) EXCEPT one between
-  two numerals, which is the name (`claude-3-5` ≠ `claude-35`). Pages are grouped by key in a `BTreeMap` — ordered rather
-  than hashed, so output order needs no final sort — which costs a log factor no vault will
-  notice and replaces the O(n²) pair scan the similarity check needed. **A finding is
-  therefore never a similarity guess**: the two names reduce to one identity under a rule
-  that folds only typography. What the lint CANNOT see is the defect that never becomes two
-  pages — the router folding an extraction into an established page leaves nothing to
-  compare — which is why the fold itself has to be narrow rather than the lint forgiving.
+  keeping only the breaks that mean something: every break is typography (`vector-db` ~
+  `vectordb` ~ `Vector DB`, and `claude-35` ~ `claude35`) EXCEPT one between two numerals,
+  which is the name (`claude-3-5` ≠ `claude-35`). Pages are grouped by key in a `BTreeMap`
+  — ordered rather than hashed, so output order needs no final sort — which costs a log
+  factor no vault will notice and replaces the O(n²) pair scan the similarity check needed.
+  **A finding is therefore never a similarity guess**: the two names reduce to one identity
+  under a rule that folds only typography. What the lint CANNOT see is the defect that
+  never becomes two pages — the router folding an extraction into an established page
+  leaves nothing to compare — which is why the fold itself has to be narrow rather than
+  the lint forgiving.
   **There is deliberately no score, no threshold, and no morphology.** The predecessor
   scored slug character bigrams (Sørensen-Dice ≥ `concept_near_duplicate_threshold`, since
   removed from config); measured on a 1,599-concept vault it returned 298 findings

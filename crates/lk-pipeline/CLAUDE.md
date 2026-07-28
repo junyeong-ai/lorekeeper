@@ -138,10 +138,10 @@ domain-neutral engine — then no work-log, reviews, or `is_personal` are produc
   **This index is the one place a fold ACTS rather than reports**, and the act is not
   reviewable afterwards: a name folded onto an established page leaves only one page, so
   the lint has no pair to compare and the extraction's synthesis is dropped as a later
-  mention. That is why `identity_key` keeps a break between digits — see lk-core — and why
-  nothing meaning-shaped may ever be added to it. A page owning its OWN
-  address is what stops a stale alias elsewhere
-  from redirecting a concept away from its page. Deriving that claim from title/aliases
+  mention. That is why `identity_key` keeps a break between numerals — see lk-core — and
+  why nothing meaning-shaped may ever be added to it. A page owning its OWN address is what
+  stops a stale alias elsewhere from redirecting a concept away from its page. Deriving
+  that claim from title/aliases
   alone would only protect pages whose names happen to reproduce the stem — and a page
   titled more descriptively than its file (`access-ingress-2axis-model` ←
   "Access × Ingress 2-Axis Deployment Model") has NO such name, leaving its address free
