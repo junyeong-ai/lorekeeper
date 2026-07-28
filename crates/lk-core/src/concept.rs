@@ -55,6 +55,14 @@ pub fn slugify(name: &str) -> Option<String> {
 /// names — whether they name the same concept is a question about meaning, which this
 /// cannot and must not answer.
 ///
+/// Two boundaries this deliberately does not cross. A break between digits is kept even
+/// when it only GROUPS one number for reading, so `978-0-13-468599-1` and `9780134685991`
+/// are two names; that is the price of telling `Claude 3.5` from `Claude 35`, and version
+/// numbers are what a technology vault is full of while grouped identifiers are not. And
+/// separator TYPE is already gone before this runs — [`slugify`] maps `:`, `.`, `/` and
+/// space alike, so `16:9` and `16-9` share an identity. Recovering that would mean a slug
+/// that is no longer filename-safe, which is the one thing a slug must be.
+///
 /// Single-sourced because two consumers must agree exactly: `lk_pipeline`'s alias index
 /// resolves an extracted name to the page that owns it, and `lk_graph`'s duplicate lint
 /// reports two pages owning one name. The lint only reports, but the index ACTS — it can

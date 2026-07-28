@@ -3161,6 +3161,70 @@ async fn a_grounding_from_a_later_result_still_seeds_a_new_concept_page() {
     );
 }
 
+/// Two pages whose own ADDRESSES claim one identity is the state the duplicate lint exists
+/// to report, and until a human resolves it the router still has to answer. It answers
+/// deterministically — the concepts dir is read in sorted order and the last stem seen
+/// holds the key — and says so with a `tracing::warn`, because a citation landing on the
+/// page a reader did not expect is otherwise unexplainable. Neither page is deleted: the
+/// pair stays on disk for `graph lint` to surface.
+#[tokio::test]
+async fn two_pages_claiming_one_address_resolve_deterministically() {
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let config = base_config(vault);
+
+    let concepts = vault.join("wiki").join("concepts");
+    std::fs::create_dir_all(&concepts).unwrap();
+    // `-` sorts before `3`, so `claude-35.md` is read first and `claude35.md` last.
+    for slug in ["claude-35", "claude35"] {
+        std::fs::write(
+            concepts.join(format!("{slug}.md")),
+            format!(
+                "---\nid: {slug}\ntype: concept\ntitle: \"{slug}\"\naliases: [\"{slug}\"]\n\
+                 created: 2026-06-06\nupdated: 2026-06-06\nsource_count: 1\n---\n\n\
+                 ## Synthesis\n\nBody of {slug}.\n\n## Sources\n\n- x\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    let ctx = build_ctx(&config, Arc::new(NoopLlmClient));
+    let mut pipeline = Pipeline::new(vault, ctx);
+
+    let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
+    let result = lk_queue::TaskResult {
+        task_id: "ext-1".into(),
+        cache_hash: "h".into(),
+        target: lk_queue::TaskTarget {
+            vault_path: "daily/test-source/2026-05-23.md".into(),
+            kind: lk_queue::TargetKind::DailyConcepts,
+            anchor: "## Related Concepts".into(),
+            concepts_dir: "../../wiki/concepts".into(),
+        },
+        date: jiff::civil::date(2026, 5, 23),
+        concepts: vec![lk_queue::ReportedConcept {
+            concept: ExtractedConcept {
+                name: "claude 35".into(),
+                category: None,
+            },
+            synthesis: None,
+        }],
+    };
+
+    let rewritten = pipeline.apply_concept_result(&result, page).await.unwrap();
+    assert!(
+        rewritten.contains("../../wiki/concepts/claude35.md"),
+        "the last stem read holds the key, and it must do so every run: {rewritten}"
+    );
+    let pages = pipeline.render_concept_pages().await.unwrap();
+    assert_eq!(pages.len(), 1);
+    assert!(pages[0].path.to_string().ends_with("claude35.md"));
+    assert!(
+        concepts.join("claude-35.md").exists(),
+        "the losing page must survive for `graph lint` to report the pair"
+    );
+}
+
 /// The index is read from disk once per run, so a page the run itself creates has to be
 /// registered as it is committed — otherwise two spellings arriving in the SAME run each
 /// miss the other and mint rival pages, which is exactly the pair the index exists to

@@ -58,7 +58,12 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   typography (`GPT-4o` = `gpt4o`, `ISO-8601` = `iso8601`).
   Nothing else is folded: word order and every character are identity (`agent-harness` ≠
   `harness-agent`, `http` ≠ `https`, `doc-hub` ≠ `docs-hub`) — whether two names mean one
-  concept is a judgment, and lives in `/lore-wiki audit`, never here. Single-sourced because
+  concept is a judgment, and lives in `/lore-wiki audit`, never here.
+  Two boundaries stay uncrossed on purpose. A digit break is kept even when it only GROUPS
+  one number (`978-0-13-468599-1` ≠ `9780134685991`) — the price of telling `Claude 3.5`
+  from `Claude 35`, paid in a vault full of version numbers and empty of ISBNs. And
+  separator TYPE is gone before this runs (`slugify` maps `:`/`.`/`/`/space alike, so
+  `16:9` = `16-9`); recovering it would cost the slug its filename safety. Single-sourced because
   two consumers must agree EXACTLY: `lk_pipeline`'s alias index routes an extracted name to
   the page owning it, and `lk_graph`'s duplicate lint reports two pages owning one name.
   **The lint only REPORTS; the index ACTS** — it can fold an extraction into an established
