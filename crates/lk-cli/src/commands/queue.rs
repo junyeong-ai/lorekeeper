@@ -613,6 +613,30 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn quarantine_never_overwrites_an_earlier_file() {
+        // Moving rather than deleting exists to keep the bytes for a human; an overwrite
+        // would destroy exactly the evidence being preserved.
+        let dir = TempDir::new().unwrap();
+        let corrupt = dir.path().join("corrupt");
+        std::fs::create_dir_all(&corrupt).unwrap();
+        let source = dir.path().join("ext-1.json");
+
+        let first = free_path(&corrupt, &source);
+        assert_eq!(first, corrupt.join("ext-1.json"));
+        std::fs::write(&first, "one").unwrap();
+
+        let second = free_path(&corrupt, &source);
+        assert_ne!(second, first, "a taken name must not be reused");
+        std::fs::write(&second, "two").unwrap();
+
+        let third = free_path(&corrupt, &source);
+        assert!(![first.clone(), second.clone()].contains(&third));
+        // The earlier files are still there with their own contents.
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "one");
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), "two");
+    }
+
+    #[test]
     fn a_target_path_never_addresses_anything_outside_the_vault() {
         // Result files are written by the drain session; this is the boundary where that
         // text becomes a path the command reads and then WRITES. The property is

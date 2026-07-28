@@ -494,6 +494,25 @@ fn shell_escape(s: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_line_break_anywhere_in_an_assembled_line_is_refused() {
+        // The check moved onto the composed line precisely so it covers values nobody
+        // enumerated — a schedule expression included, since `validate_cron` splits on
+        // whitespace and accepts a newline as a field separator.
+        assert!(checked_line("0 9 * * * cd /v && lore ingest".into()).is_ok());
+        for broken in [
+            "PATH=/a\n/b",
+            "0 9 * *\n1 cd /v && lore ingest",
+            "0 9 * * * cd /v && /pipe\nlines/lore-daily.sh",
+            "LORE_CONFIG=/a/b\r/c",
+        ] {
+            assert!(
+                checked_line(broken.to_string()).is_err(),
+                "must refuse: {broken:?}"
+            );
+        }
+    }
+
     fn config_with_schedules() -> lk_core::config::Config {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("config.yaml");
