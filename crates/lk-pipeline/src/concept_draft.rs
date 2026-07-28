@@ -485,9 +485,6 @@ async fn build_alias_index(
                     .flatten()
                     .filter_map(|v| v.as_str()),
             );
-        let Some(own_key) = identity_key(slug) else {
-            continue;
-        };
         let identity = ConceptIdentity {
             name: title.clone(),
             slug: slug.to_string(),
@@ -499,7 +496,11 @@ async fn build_alias_index(
         // to reproduce the stem, and a page titled more descriptively than its file
         // (`access-ingress-2axis-model` ← "Access × Ingress 2-Axis Deployment Model") has
         // no name that does — leaving its address free for another page's alias to take.
-        index.insert(own_key, identity.clone());
+        // A stem that carries no identity at all has no address to seed; its names still
+        // register, so the page keeps answering to them.
+        if let Some(own_key) = identity_key(slug) {
+            index.insert(own_key, identity.clone());
+        }
         for name in names {
             let Some(key) = identity_key(name) else {
                 continue;
