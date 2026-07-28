@@ -37,8 +37,22 @@ map to `RawItem`.
     clause). With no stable filter the window would fall to mailbox read-state and the daily
     page would drift between runs, breaking complete-refetch. Using `is:unread` *inside* an
     explicit query is the operator's visible choice — only the silent empty default is forbidden.
-  - **Jira**: current `GET /rest/api/3/search/jql` (the old `/search` was removed, returns
-    410), paginated via `nextPageToken` (NOT the legacy `startAt`). `description` is ADF
+  - **Atlassian (`atlassian/`)**: the shared auth + routing facade both Atlassian adapters
+    use. `AtlassianAuth` answers three questions — `api_base(product)`, `header()`,
+    `deployment()` — so no adapter branches on the credential form. `Deployment` is DERIVED
+    from the auth method (oauth/api-token ⇒ Cloud, pat ⇒ DataCenter) and owns every
+    Cloud/Server dialect difference in one place: search path, pagination style
+    (`JiraPaging::Token` vs `Offset`), and the user-identity key (`accountId` vs
+    `name`/`username`). OAuth routes through `api.atlassian.com/ex/{product}/{cloud_id}`;
+    everything else talks to `site_url` (Confluence Cloud adds `/wiki`, Data Center already
+    has its context path). A PAT authenticates as **Bearer, not Basic** — sending it as a
+    Basic password is the classic Data Center misconfiguration. Refresh tokens ROTATE, so
+    the refresh is the one request deliberately NOT wrapped in `send_with_retry` (replaying
+    a committed rotation strands the grant), the successor is persisted before returning,
+    and the ONE `AtlassianAuth` per instance must be shared across adapters.
+  - **Jira**: on Cloud, `GET /rest/api/3/search/jql` (the old `/search` was removed, returns
+    410) paginated via `nextPageToken`; on Data Center, v2 `/search` paginated by `startAt`
+    against the reported `total`. The dialect comes from `Deployment`, never from sniffing. `description` is ADF
     JSON → `markdown::adf_to_markdown`. The user supplies a
     `jql` query string directly in config; convention is to search by `updated` for daily
     work snapshots. `duedate` + a configurable `start_date_field` (the Jira start-date
@@ -59,6 +73,17 @@ map to `RawItem`.
     reads like a heading — never a code fence/mention/URL, which would corrupt the body).
     `search.messages` (slack-search) is user-token-only per Slack. Tokens: `history_token`
     prefers bot (xoxb), `search_token` requires user (xoxp).
+  - **Confluence** (`confluence.rs`): CQL search over `/rest/api/content/search`, following
+    the server-supplied `_links.next` (re-anchored on the API base, which is a different
+    host than the one that produced it) under the shared `page_step` termination rule. The
+    user's `cql` selects WHICH pages and must carry NO time clause — `validate_params`
+    rejects one — because the adapter appends the `day_window` itself; a hand-written
+    `lastModified` would anchor the query to the wall clock and break `--date` backfill.
+    `external_id` is `confluence:{id}:v{version}`, making an edit a new event and an
+    unchanged re-fetch a dedup no-op. `is_self` = the CURRENT version's author (Cloud
+    `accountId` / DC `username`) matching the authenticated account, and `only_my_edits`
+    (default true) drops pages last touched by someone else. Storage format is XHTML → the
+    shared `markdown::html_to_markdown`.
   - **RSS** (`rss.rs`): one source polls many public feeds (`feeds: [{id, url}]`) via
     `feed-rs` (RSS/Atom/JSON Feed) — no credentials. A feed that 404s or fails to parse is
     `tracing::warn!`-skipped, never aborting the source. `body` is `content`→`summary` HTML

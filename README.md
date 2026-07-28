@@ -364,7 +364,7 @@ lore schedule | crontab -
 
 `ingest.schedule`은 **전체 소스를 한 번에** 도는 `lore ingest` 한 줄을 발행합니다(work-log가 cross-source 일일 집계라 소스별 분할 실행은 페이지를 부분 덮어씀). 각 합성 주기(weekly/monthly/quarterly/annual)는 자기 cron을 발행하고, `maintenance.schedule`이 있으면 청소 작업도 자동화됩니다.
 
-무인 운영용으로 설치 시 두 개의 Claude 예약작업 정의(`lore-daily-ingest`, `lore-weekly-ingest`)도 함께 제공됩니다 — 일일 수집+큐 처리+그래프 정합, 주간 합성+지식 감사.
+무인 운영용으로 두 개의 파이프라인 스크립트(`lore-daily.sh`, `lore-weekly.sh`)가 함께 설치됩니다 — 일일 수집+큐 처리+그래프 정합, 주간 합성+지식 감사. 시스템 스케줄러(launchd/cron)가 이를 실행하므로 Claude 데스크탑이 떠 있지 않아도 동작합니다.
 
 ---
 

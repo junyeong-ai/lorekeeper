@@ -79,6 +79,8 @@ sources:
   my-tasks:
     type: jira
     enabled: true
+    # instance: default         # (optional) which credentials.atlassian entry authenticates
+                                # this source; required only when several are configured
     params:
       # Issues changed (= worked on) that day = a work-history snapshot. Due/start dates are
       # shown on the page as their values as-of that day, but the search key is `updated`
@@ -89,6 +91,30 @@ sources:
         ORDER BY updated DESC
       # max_issues: 200           # (optional) per-run cap; the fetch paginates the whole
                                   # JQL result and warns if this cap actually drops issues
+    labels: [personal]
+    extract_concepts: true
+
+  # Wiki pages I wrote or edited that day. A Confluence page is a LIVING document, so the
+  # page version is folded into the event identity: re-ingesting an unchanged page dedups
+  # away (zero LLM work), while an edit produces a new event that is re-summarized and
+  # re-conceptualized. That is the whole freshness mechanism — no separate sync pass.
+  my-wiki:
+    type: confluence
+    enabled: true
+    # instance: default
+    params:
+      # WHICH pages matter. Must NOT contain a time clause: the adapter appends the target
+      # day's window itself, so `lore ingest --date <past>` backfills correctly (a
+      # hand-written `lastModified` would pin the query to the wall clock instead).
+      cql: >
+        type = page AND contributor = currentUser()
+      # lookback_hours: 24
+      # max_pages: 50             # per-run cap; the fetch paginates the whole CQL result
+      # only_my_edits: true       # keep only pages whose CURRENT version I authored.
+                                  # `contributor = currentUser()` also matches pages someone
+                                  # else last edited — knowledge to read, but not my work.
+                                  # Set false to ingest those too (they stay is_self: false,
+                                  # so they never reach the work-log).
     labels: [personal]
     extract_concepts: true
 

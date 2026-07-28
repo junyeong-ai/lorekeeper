@@ -91,3 +91,12 @@ knows about; provider choice is config-driven (`build_llm_client` in lk-cli).
   - `MockLlmClient` — tests only, with configurable `summary`, `concepts`, `themes`.
     Behind the `test-util` feature (dependents enable it as a dev-dependency), so it is
     never compiled into the release binary.
+- **Results travel back for the kinds this workspace materializes itself.** Most drained
+  tasks write one section of one page and the drain writes it directly. `extract-concepts`
+  does not: its output lands on concept pages SHARED between origin pages, so the drain
+  writes a [`TaskResult`] to `<queue>/results/{task_id}.json` and `lore queue apply` merges
+  it through `lk-pipeline`'s `ConceptDrafts` — the same code the synchronous LLM route uses.
+  The result carries `target` and `cache_hash` verbatim so the applier can re-run the queue's
+  one staleness check: the page may have been re-rendered while the drain was working.
+  `read_results` treats a malformed file as an ERROR, never a skip — dropping it would lose
+  an extraction that cannot be reproduced without another LLM session.

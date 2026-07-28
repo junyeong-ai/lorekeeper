@@ -367,7 +367,7 @@ lore schedule | crontab -
 
 `ingest.schedule` emits a single `lore ingest` line that runs **every source in one process** (the work-log is a cross-source daily aggregate, so per-source runs would overwrite it partially). Each synthesis period (weekly/monthly/quarterly/annual) emits its own cron line, and `maintenance.schedule` automates the janitors.
 
-For unattended operation the installer also ships two Claude scheduled-task definitions (`lore-daily-ingest`, `lore-weekly-ingest`) — daily ingest + queue drain + graph reconcile, and weekly synthesis + knowledge audit.
+For unattended operation the installer ships two pipeline scripts (`lore-daily.sh`, `lore-weekly.sh`) — daily ingest + queue drain + graph reconcile, and weekly synthesis + knowledge audit. A system scheduler (launchd or cron) fires them, so they run whether or not Claude Desktop is open.
 
 ---
 
