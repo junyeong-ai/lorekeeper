@@ -168,6 +168,9 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
+          # The annotated tag's message IS the release note, and a shallow clone
+          # fetches the commit without the tag object that carries it.
+          fetch-depth: 0
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
@@ -179,7 +182,23 @@ jobs:
         run: |
           set -euo pipefail
           ls -la artifacts
-          gh release create "$TAG" \
-            --title "$TAG" \
-            --generate-notes \
-            artifacts/*
+          # Each release is tagged with an annotated message explaining what changed and
+          # why. Publishing only `--generate-notes` left that unread on GitHub and the
+          # body a bare commit list, so the note is taken from the tag; the generated
+          # commit list is appended under it, never in place of it. A lightweight tag has
+          # no message, so fall back rather than publishing an empty body.
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
+          notes=$(git tag -l --format='%(contents)' "$TAG")
+          if [ -n "${notes//[[:space:]]/}" ]; then
+            printf '%s\n' "$notes" > release-notes.md
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --notes-file release-notes.md \
+              --generate-notes \
+              artifacts/*
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --generate-notes \
+              artifacts/*
+          fi
