@@ -3021,6 +3021,63 @@ async fn a_page_that_cannot_record_completion_is_an_error() {
     );
 }
 
+/// Two results in one apply run can name the same new concept, and only one of them may
+/// carry a grounding sentence. Whichever arrives first stages the draft, so seeding the
+/// synthesis only on that merge would leave the created page's `## Synthesis` empty or
+/// filled depending on the order the run happened to read the result files in.
+#[tokio::test]
+async fn a_grounding_from_a_later_result_still_seeds_a_new_concept_page() {
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let config = base_config(vault);
+    let ctx = build_ctx(&config, Arc::new(NoopLlmClient));
+    let mut pipeline = Pipeline::new(vault, ctx);
+
+    let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
+    let result = |vault_path: &str, synthesis: Option<&str>| lk_queue::TaskResult {
+        task_id: "ext".into(),
+        cache_hash: "h".into(),
+        target: lk_queue::TaskTarget {
+            vault_path: vault_path.into(),
+            kind: lk_queue::TargetKind::DailyConcepts,
+            anchor: "## Related Concepts".into(),
+            concepts_dir: "../../wiki/concepts".into(),
+        },
+        date: jiff::civil::date(2026, 5, 23),
+        concepts: vec![lk_queue::ReportedConcept {
+            concept: ExtractedConcept {
+                name: "Retrieval Augmented Generation".into(),
+                category: None,
+            },
+            synthesis: synthesis.map(str::to_string),
+        }],
+    };
+
+    // First result names the concept with no grounding; the second supplies one.
+    pipeline
+        .apply_concept_result(&result("daily/a/2026-05-23.md", None), page)
+        .await
+        .unwrap();
+    pipeline
+        .apply_concept_result(
+            &result(
+                "daily/b/2026-05-23.md",
+                Some("Grounding a generation step."),
+            ),
+            page,
+        )
+        .await
+        .unwrap();
+
+    let pages = pipeline.render_concept_pages().await.unwrap();
+    assert_eq!(pages.len(), 1, "one concept, one page");
+    assert!(
+        pages[0].content.contains("Grounding a generation step."),
+        "the grounding must survive the order it arrived in: {}",
+        pages[0].content
+    );
+}
+
 /// A concept page's id is not always `slugify(title)` — a renamed or merged page keeps its
 /// original id and records the other names as aliases, which is what keeps existing
 /// citations resolving. An extraction naming an alias must land on that page, not mint a

@@ -133,6 +133,7 @@ impl ConceptDrafts {
 
         if let Some(draft) = self.drafts.get_mut(&safe_slug) {
             draft.observe(date);
+            draft.seed_synthesis(synthesis);
             warn_category_conflict(
                 &safe_slug,
                 draft.category.as_deref(),
@@ -231,11 +232,7 @@ impl ConceptDrafts {
         };
 
         draft.observe(date);
-        if draft.preserved_synthesis.is_none()
-            && let Some(text) = synthesis.map(str::trim).filter(|t| !t.is_empty())
-        {
-            draft.preserved_synthesis = Some(text.to_string());
-        }
+        draft.seed_synthesis(synthesis);
         let identity = ConceptIdentity {
             name: draft.name.clone(),
             slug: safe_slug.clone(),
@@ -270,6 +267,22 @@ impl ConceptDraft {
     fn observe(&mut self, date: jiff::civil::Date) {
         self.first_seen = self.first_seen.min(date);
         self.last_seen = self.last_seen.max(date);
+    }
+
+    /// Fill `## Synthesis` from a grounding sentence, but only when there is nothing there
+    /// yet — an established synthesis is accumulated meaning across every source that cited
+    /// the concept, so one new mention never overwrites it.
+    ///
+    /// Applied on every merge, not just the one that stages the draft: two results in a run
+    /// can name the same new concept and only one of them carry a grounding. Seeding solely
+    /// on the staging merge would leave the created page's synthesis empty or filled
+    /// depending on which result the run happened to read first.
+    fn seed_synthesis(&mut self, synthesis: Option<&str>) {
+        if self.preserved_synthesis.is_none()
+            && let Some(text) = synthesis.map(str::trim).filter(|t| !t.is_empty())
+        {
+            self.preserved_synthesis = Some(text.to_string());
+        }
     }
 
     fn render(
@@ -417,17 +430,36 @@ async fn build_alias_index(
                     .filter_map(|v| v.as_str()),
             );
         for name in names {
-            if let Some(key) = slugify(name) {
-                let identity = ConceptIdentity {
-                    name: title.clone(),
-                    slug: slug.to_string(),
-                };
-                // The page's own slug wins over any alias claiming the same key, so a stale
-                // alias on another page can never redirect a concept away from its own page.
-                if key == slug {
-                    index.insert(key, identity);
-                } else {
-                    index.entry(key).or_insert(identity);
+            let Some(key) = slugify(name) else { continue };
+            let identity = ConceptIdentity {
+                name: title.clone(),
+                slug: slug.to_string(),
+            };
+            // The page's own slug wins over any alias claiming the same key, so a stale
+            // alias on another page can never redirect a concept away from its own page.
+            if key == slug {
+                index.insert(key, identity);
+                continue;
+            }
+            match index.entry(key) {
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert(identity);
+                }
+                std::collections::btree_map::Entry::Occupied(held) => {
+                    // Two pages registering the same alias is a vault defect, not something
+                    // to settle silently. The winner is deterministic (pages are read in
+                    // sorted path order) but arbitrary, and every citation naming the alias
+                    // lands on one page while the other's meaning stays uncited — so it is
+                    // reported like a category conflict and left for a human to merge.
+                    // Losing to a page's OWN slug is the rule above working, not a conflict.
+                    if held.get().slug != slug && held.key() != &held.get().slug {
+                        tracing::warn!(
+                            alias = %held.key(),
+                            resolves_to = %held.get().slug,
+                            also_claimed_by = %slug,
+                            "two concept pages register the same alias"
+                        );
+                    }
                 }
             }
         }
