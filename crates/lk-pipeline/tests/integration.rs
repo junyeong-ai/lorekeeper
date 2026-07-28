@@ -3033,12 +3033,6 @@ async fn a_concept_that_fails_to_stage_takes_its_whole_result_with_it() {
 
     let concepts = vault.join("wiki").join("concepts");
     std::fs::create_dir_all(&concepts).unwrap();
-    // The SECOND concept's page has an unclosed frontmatter block, so reading it errors.
-    std::fs::write(
-        concepts.join("vector-database.md"),
-        "---\nid: vector-database\ntype: concept\nno closing delimiter\n",
-    )
-    .unwrap();
 
     let ctx = build_ctx(&config, Arc::new(NoopLlmClient));
     let mut pipeline = Pipeline::new(vault, ctx);
@@ -3051,8 +3045,8 @@ async fn a_concept_that_fails_to_stage_takes_its_whole_result_with_it() {
         },
         synthesis: None,
     };
-    let result = lk_queue::TaskResult {
-        task_id: "ext-1".into(),
+    let result = |names: &[&str]| lk_queue::TaskResult {
+        task_id: "ext".into(),
         cache_hash: "h".into(),
         target: lk_queue::TaskTarget {
             vault_path: "daily/test-source/2026-05-23.md".into(),
@@ -3061,20 +3055,52 @@ async fn a_concept_that_fails_to_stage_takes_its_whole_result_with_it() {
             concepts_dir: "../../wiki/concepts".into(),
         },
         date: jiff::civil::date(2026, 5, 23),
-        // The first merges cleanly; the second cannot be read.
-        concepts: vec![
-            named("Retrieval Augmented Generation"),
-            named("Vector Database"),
-        ],
+        concepts: names.iter().map(|n| named(n)).collect(),
     };
 
+    // Build the alias index while the vault is readable, so the failure below lands in the
+    // per-concept read and not in the one-time index scan (which fails before anything is
+    // staged, and would make this test pass for the wrong reason).
+    pipeline
+        .apply_concept_result(&result(&["Established Concept"]), page)
+        .await
+        .unwrap();
+
+    // Only now does a page the next result names become unreadable.
+    std::fs::write(
+        concepts.join("vector-database.md"),
+        "---\nid: vector-database\ntype: concept\nno closing delimiter\n",
+    )
+    .unwrap();
+
     assert!(
-        pipeline.apply_concept_result(&result, page).await.is_err(),
+        pipeline
+            .apply_concept_result(
+                &result(&["Retrieval Augmented Generation", "Vector Database"]),
+                page
+            )
+            .await
+            .is_err(),
         "an unreadable concept page must fail the result"
     );
+
+    let rendered: Vec<String> = pipeline
+        .render_concept_pages()
+        .await
+        .unwrap()
+        .iter()
+        .map(|p| p.path.to_string())
+        .collect();
     assert!(
-        pipeline.render_concept_pages().await.unwrap().is_empty(),
-        "the concept that staged cleanly must not be written on its own"
+        !rendered
+            .iter()
+            .any(|p| p.contains("retrieval-augmented-generation")),
+        "the concept that staged cleanly must not be written while its origin page was \
+         discarded with the error: {rendered:?}"
+    );
+    assert!(
+        rendered.iter().any(|p| p.contains("established-concept")),
+        "the earlier result's concept must still be emitted: {rendered:?}"
     );
 }
 
