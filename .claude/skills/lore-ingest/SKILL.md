@@ -73,7 +73,9 @@ Templates are embedded in the binary. Override with `--template-dir`.
 |--------|---------|
 | Google (Gmail/Drive/Calendar) | `LORE_GOOGLE_CLIENT_ID`, `LORE_GOOGLE_CLIENT_SECRET`, `LORE_GOOGLE_REFRESH_TOKEN` |
 | Slack | `LORE_SLACK_TOKEN` |
-| Jira | `LORE_JIRA_URL`, `LORE_JIRA_EMAIL`, `LORE_JIRA_TOKEN` |
+| Atlassian (Jira/Confluence) | `LORE_ATLASSIAN_SITE_URL` + `LORE_ATLASSIAN_PAT`, or `+ LORE_ATLASSIAN_EMAIL` + `LORE_ATLASSIAN_API_TOKEN` |
+
+OAuth is not env-supplied: its refresh token rotates and must be written back, so `lore init credentials` owns it.
 
 Default provider is `queue` (buffers tasks to JSONL for `/lore-process`).
 `provider: noop` selects `NoopLlmClient` (no summarisation/concepts).

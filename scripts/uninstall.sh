@@ -45,7 +45,7 @@ Removes:
   - ~/.claude/skills/lore-*                        (user-level skills)
   - ./.claude/skills/lore-*                        (project-level skills, if present)
   - $DATA_DIR/pipelines                            (scheduled pipeline scripts)
-#   - ~/.claude/scheduled-tasks/lore-*-ingest        (superseded, pre-0.11)
+  - ~/.claude/scheduled-tasks/lore-*-ingest        (superseded, pre-0.11)
 
 Flags:
   --yes, -y       Skip all confirmations
