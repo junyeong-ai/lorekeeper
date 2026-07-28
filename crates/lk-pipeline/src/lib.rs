@@ -524,32 +524,11 @@ impl Pipeline {
         result: &lk_queue::TaskResult,
         page: &str,
     ) -> Result<String, PipelineError> {
-        let reported: Vec<&lk_queue::ReportedConcept> = result
-            .concepts
-            .iter()
-            .filter(|r| {
-                !filter_valid_concepts(vec![r.concept.clone()], &self.ctx.concept_categories)
-                    .is_empty()
-            })
-            .collect();
-        let mut identities = Vec::with_capacity(reported.len());
-        for reported in reported {
-            let concept =
-                filter_valid_concepts(vec![reported.concept.clone()], &self.ctx.concept_categories)
-                    .remove(0);
-            identities.push(
-                self.concept_drafts
-                    .merge_with_synthesis(
-                        &concept,
-                        reported.synthesis.as_deref(),
-                        result.date,
-                        self.reader.as_ref(),
-                        &self.ctx.dirs,
-                    )
-                    .await?,
-            );
-        }
-
+        // Both edits are settled before any concept is folded into the run's drafts.
+        // `render_concept_pages` emits those drafts whatever happens here, so a result that
+        // failed afterwards would leave concept pages behind with nothing citing them while
+        // its own file waits for a retry.
+        //
         // The heading comes from the task's own anchor, which is the value the queue
         // contract carries for exactly this purpose. Deriving it from the CURRENT locale
         // instead would break the moment `vault.locale` changed between the drain and the
@@ -570,25 +549,51 @@ impl Pipeline {
                 result.target.vault_path, result.target.anchor
             )));
         }
-
-        let links = render::concept_links(&identities, &result.target.vault_path, &self.ctx.dirs);
-        let filled = lk_vault::replace_section(page, heading, &links.join("\n"));
-        // Stamp the completion marker in the SAME edit that fills the section. `llm_cache`
-        // decides a section's fate purely on this marker, never on whether the body looks
-        // filled — so a section written without it is erased by the next render and its task
-        // re-enqueued, forever. A page with nowhere to record it is that same failure, and
-        // is reported rather than written half-applied.
+        // The completion marker rides the same edit as the links. `llm_cache` decides a
+        // section's fate purely on this marker, never on whether the body looks filled, so
+        // links written without one are erased by the next render and the task re-enqueued
+        // forever. The marker lives in frontmatter and the links in a section body, so
+        // stamping first yields the same page and keeps every failure ahead of the merge.
         let stamp = serde_json::to_string(&result.cache_hash)
             .map_err(|e| PipelineError::Render(format!("serialize cache hash: {e}")))?;
-        lk_vault::set_llm_input(&filled, &result.target.kind.completion_key(), &stamp).ok_or_else(
-            || {
-                PipelineError::Render(format!(
-                    "{}: no `{}` frontmatter mapping to record completion in",
-                    result.target.vault_path,
-                    lk_core::frontmatter::field::LLM_INPUTS,
-                ))
-            },
-        )
+        let stamped = lk_vault::set_llm_input(page, &result.target.kind.completion_key(), &stamp)
+            .ok_or_else(|| {
+            PipelineError::Render(format!(
+                "{}: no `{}` frontmatter mapping to record completion in",
+                result.target.vault_path,
+                lk_core::frontmatter::field::LLM_INPUTS,
+            ))
+        })?;
+
+        let mut identities = Vec::with_capacity(result.concepts.len());
+        for reported in &result.concepts {
+            // The same filter the synchronous path applies: an unslugifiable name is
+            // dropped, an invented category stripped.
+            let Some(concept) =
+                filter_valid_concepts(vec![reported.concept.clone()], &self.ctx.concept_categories)
+                    .pop()
+            else {
+                continue;
+            };
+            identities.push(
+                self.concept_drafts
+                    .merge_with_synthesis(
+                        &concept,
+                        reported.synthesis.as_deref(),
+                        result.date,
+                        self.reader.as_ref(),
+                        &self.ctx.dirs,
+                    )
+                    .await?,
+            );
+        }
+
+        let links = render::concept_links(&identities, &result.target.vault_path, &self.ctx.dirs);
+        Ok(lk_vault::replace_section(
+            &stamped,
+            heading,
+            &links.join("\n"),
+        ))
     }
 
     /// Render the concept pages accumulated across every `plan` call in this run.

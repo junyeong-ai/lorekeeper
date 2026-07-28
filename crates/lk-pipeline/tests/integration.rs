@@ -3013,6 +3013,12 @@ async fn a_page_that_cannot_record_completion_is_an_error() {
         err.to_string().contains("llm_inputs"),
         "error must name what is missing: {err}"
     );
+    // Nothing was folded into the run's drafts, so the retry this result is kept for is
+    // not preceded by concept pages that nothing cites.
+    assert!(
+        pipeline.render_concept_pages().await.unwrap().is_empty(),
+        "a failed result must leave no concept pages behind"
+    );
 }
 
 /// A concept page's id is not always `slugify(title)` — a renamed or merged page keeps its
