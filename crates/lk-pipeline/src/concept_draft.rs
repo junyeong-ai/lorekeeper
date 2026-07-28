@@ -26,7 +26,7 @@ pub struct ConceptDrafts {
     /// A concept page's id is NOT always `slugify(title)`: a page renamed or merged keeps
     /// its original id and records the other names as aliases, which is what makes every
     /// existing citation to it keep resolving. Extractions arrive under any of those names,
-    /// so resolving by slug alone would mint a near-duplicate page beside the canonical one
+    /// so resolving by slug alone would mint a second page beside the canonical one
     /// — splitting a concept's citations in two and leaving the synthesis on the old page.
     /// The lookup is exact (both sides through `slugify`), never fuzzy: a name either IS a
     /// recorded alias or it is a new concept.

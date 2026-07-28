@@ -269,7 +269,7 @@ The source key becomes the vault subfolder name. You can define several of the s
 - **Materialized views** — a page has two layers. The **structural layer** (frontmatter, raw items, headings) re-renders every ingest; the **semantic layer** (summary, concepts, synthesis) is LLM-owned and preserved across re-renders. Unchanged input enqueues zero LLM work (a BLAKE3 hash decides).
 - **No data loss** — re-runs are idempotent (byte-identical). Streaming sources (RSS) keep a permanent event log, so scrolled-out items are never lost.
 - **Realized-only** — a future date materializes no page (a forecast isn't knowledge yet). It becomes knowledge once the date arrives.
-- **The graph does the bookkeeping** — `backlinks-sync` (re-derive citation counts), `lint` (orphans, broken links, near-dupes), `merge` (fold duplicate concepts), `cluster` / `suggest-links` (discover relationships).
+- **The graph does the bookkeeping** — `backlinks-sync` (re-derive citation counts), `lint` (orphans, broken links, duplicate concepts), `merge` (fold duplicate concepts), `cluster` / `suggest-links` (discover relationships).
 
 ---
 
@@ -281,21 +281,29 @@ lore ingest [source]          # ingest (all sources, or a single one)
 lore ingest --dry-run         # preview without writing to the vault
 lore ingest --date 2026-06-01 # re-materialize a specific day (backfill / repair)
 lore synthesis weekly         # weekly synthesis + personal review (monthly/quarterly/annual too)
+lore status                   # last ingest time per source
+lore health                   # warn when a source is overdue vs ingest.schedule
 lore schedule | crontab -     # emit cron lines
 lore wiki concepts            # list concepts
 lore wiki index / log / map   # rebuild by-topic index / by-time timeline / citation-cluster map
-lore graph lint               # structural health (orphans, broken links, near-dupes, …)
+lore graph lint               # structural health (orphans, broken links, duplicate concepts, …)
 lore graph suggest-links      # concept-relationship candidates (Adamic-Adar)
 lore graph cluster            # topic communities (Louvain)
 lore graph backlinks-sync     # re-derive each concept's ## Sources + citation count
 lore graph merge <from> <into># fold a duplicate concept into the canonical one
+lore graph normalize --fix    # normalize link spelling across the vault
+lore graph index-sync --fix   # repair missing/phantom entries in index.md
 lore doctor                   # vault text-cleanliness audit
+lore maintenance              # prune ingest logs and drained queue files past retention
 lore queue status / prune     # LLM task queue status / clear dead tasks
 lore queue apply              # materialize the concept extractions a drain produced
 lore queue count              # current task count as a bare integer (for scripts)
 lore config vault-root        # the vault's absolute path, and nothing else (for scripts)
 lore schema                   # generate wiki/AGENTS.md (the page-format schema)
 ```
+
+These are the ones you reach for day to day. `lore --help` lists the full surface;
+`lore <command> --help` has each command's flags.
 
 ---
 

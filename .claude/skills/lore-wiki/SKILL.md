@@ -57,8 +57,10 @@ each as an independent source, and report the aggregate results.
 5. **Finalize**: `lore graph backlinks-sync`, then `lore wiki index`, then
    `lore wiki map` (refresh the citation-cluster navigation map), then
    `lore graph lint` to confirm no structural drift (index/broken links).
-   Pre-existing review items (uncategorized, near-dup, open conflicts) may
-   legitimately remain — they are not introduced by this add.
+   Pre-existing review items (uncategorized, open conflicts) may legitimately
+   remain — they are not introduced by this add. A `duplicate_concepts` entry
+   naming a page this add touched is different: it means the new page claims a
+   name another page already answers to, so resolve it before reporting done.
 6. Report what was created/updated, grouped by source file.
 
 ### `/lore-wiki query <question>`

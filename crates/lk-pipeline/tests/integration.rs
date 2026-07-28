@@ -3244,7 +3244,7 @@ async fn a_stale_alias_cannot_capture_another_pages_address() {
 /// A concept page's id is not always `slugify(title)` — a renamed or merged page keeps its
 /// original id and records the other names as aliases, which is what keeps existing
 /// citations resolving. An extraction naming an alias must land on that page, not mint a
-/// near-duplicate beside it (which would split the concept's citations and strand its
+/// second page beside it (which would split the concept's citations and strand its
 /// synthesis on the old page).
 #[tokio::test]
 async fn an_extraction_naming_an_alias_lands_on_the_established_page() {

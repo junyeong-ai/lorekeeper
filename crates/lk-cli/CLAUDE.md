@@ -59,6 +59,15 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   files. All-current files stay byte-identical; a file left with no tasks is deleted (it
   never produced page edits, so nothing belongs in `processed/`). `--dry-run` reports the
   same counts with zero writes.
+- **`lore queue apply`** materializes the concept extractions a drain wrote to
+  `queue/results/*.json` through the same `ConceptDrafts` merge the ingest path uses, then
+  deletes each result it consumed — so an empty `results/` after a pipeline run is evidence
+  of success, not of a drain that produced nothing. A result file that fails to PARSE is not
+  fatal and is not left to be retried forever: it moves to `results/{CORRUPT_SUBDIR}/` via
+  `quarantine`, under a name `free_path` guarantees is unused so an earlier quarantined file
+  is never overwritten, and `finish_apply` reports all/some/none distinctly. I/O errors
+  still fail the command — only malformed CONTENT is quarantined, because a disk that
+  cannot be read is not a corrupt payload.
 - **`lore init credentials`** (in `init.rs`) is the interactive credential wizard. UX
   (dialoguer prompts, masked secrets, TTY guard) lives here; the JSON shape + atomic
   `0600` write live in `lk_source::credentials` (`load_file`/`load`/`save`). The Google branch

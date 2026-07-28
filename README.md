@@ -266,7 +266,7 @@ flowchart LR
 - **자료화된 뷰(materialized view)** — 페이지는 두 층. **구조 층**(frontmatter·원본·헤딩)은 매 수집마다 재생성, **의미 층**(요약·개념·합성)은 LLM 소유이며 재렌더에도 보존됩니다. 입력이 안 바뀌면 LLM 작업 0건(BLAKE3 해시로 판정).
 - **무손실** — 재실행은 멱등(byte-identical). 스트리밍 소스(RSS)는 영구 이벤트 로그로 스크롤아웃된 항목도 보존.
 - **현재만 실체화** — 미래 날짜는 페이지를 만들지 않음(forecast는 지식이 아님). 날짜가 오면 지식이 됩니다.
-- **그래프가 부기를 한다** — `backlinks-sync`(인용 카운트 재도출), `lint`(고아·깨진링크·근접중복), `merge`(중복 개념 통합), `cluster`/`suggest-links`(관계 발견).
+- **그래프가 부기를 한다** — `backlinks-sync`(인용 카운트 재도출), `lint`(고아·깨진링크·중복개념), `merge`(중복 개념 통합), `cluster`/`suggest-links`(관계 발견).
 
 ---
 
@@ -278,21 +278,29 @@ lore ingest [소스]            # 수집 (전체 또는 단일 소스)
 lore ingest --dry-run         # vault 변경 없이 미리보기
 lore ingest --date 2026-06-01 # 특정 날짜 재실체화(백필/복구)
 lore synthesis weekly         # 주간 합성 + 개인 리뷰 (monthly/quarterly/annual)
+lore status                   # 소스별 마지막 수집 시각
+lore health                   # 수집이 밀린 소스 경고 (ingest.schedule 기준)
 lore schedule | crontab -     # cron 발행
 lore wiki concepts            # 개념 목록
 lore wiki index / log / map   # 주제별 인덱스 / 시간순 타임라인 / 인용 클러스터 맵 재생성
-lore graph lint               # 구조 건강검진(고아·깨진링크·근접중복·…)
+lore graph lint               # 구조 건강검진(고아·깨진링크·중복개념·…)
 lore graph suggest-links      # 개념 간 관계 후보(Adamic-Adar)
 lore graph cluster            # 토픽 커뮤니티(Louvain)
 lore graph backlinks-sync     # 개념의 ## Sources·인용수 재도출
 lore graph merge <from> <into># 중복 개념 통합
+lore graph normalize --fix    # 링크 표기 정규화
+lore graph index-sync --fix   # index.md 누락/유령 항목 정정
 lore doctor                   # vault 텍스트 청결도 감사
+lore maintenance              # 보관기한 지난 ingest 로그·드레인된 큐 파일 정리
 lore queue status / prune     # LLM 작업 큐 상태 / 죽은 작업 정리
 lore queue apply              # 드레인이 낸 개념 추출을 페이지로 실체화
 lore queue count              # current 작업 수만 정수로 출력(스크립트용)
 lore config vault-root        # vault 절대경로만 출력(스크립트용)
 lore schema                   # wiki/AGENTS.md(페이지 포맷 스키마) 생성
 ```
+
+일상적으로 쓰는 것들만 추렸다. 전체 목록은 `lore --help`, 각 명령의 플래그는
+`lore <명령> --help`.
 
 ---
 

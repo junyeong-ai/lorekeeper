@@ -131,7 +131,7 @@ checks pass:
 lore graph backlinks-sync   # re-derive every concept's ## Sources + source_count
 lore wiki index             # rebuild the catalog so `lore graph lint` is clean
 lore wiki map               # refresh the citation-cluster navigation map
-lore graph lint             # confirm no structural drift (index/broken links); pre-existing review items (uncategorized, near-dup, open conflicts) may legitimately remain
+lore graph lint             # confirm no structural drift (index/broken links). Pre-existing orphans and open conflicts may legitimately remain; a duplicate-concept entry naming a page you just wrote does NOT — it means this capture claimed a name another page already answers to
 ```
 
 ### 7. Report
