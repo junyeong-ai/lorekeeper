@@ -84,7 +84,7 @@ domain-neutral engine — then no work-log, reviews, or `is_personal` are produc
   on it would false-merge. Cross-run (event log) and cross-source (concept/graph layer)
   convergence is owned elsewhere: the same item on two sources stays on both timelines
   (provenance) and converges at the page layer via `concept-merge` / `backlinks-sync` /
-  `near-duplicate-concepts`.
+  `duplicate-concepts`.
 - **classify**: ownership (`is_self`, root invariant; set by the adapter) is carried by
   `normalize` to `Event::is_self`; `assign_personal(events, tracked)` sets `is_personal` +
   the `personal` label only when the source is in `personal.tracked_sources` (so an absent

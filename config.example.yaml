@@ -362,7 +362,6 @@ concepts:
 #   metrics:
 #     min_hub_degree: 5              # minimum total degree to flag as hub in lint
 #     orphan_exclude: []             # page ids excluded from orphan reports
-#     concept_near_duplicate_threshold: 0.6  # slug similarity to flag as near-dup merge candidate
 #   cluster:
 #     resolution: 1.0                # Louvain resolution (higher = more, smaller communities)
 #     max_iterations: 100            # max local-moving passes per aggregation level

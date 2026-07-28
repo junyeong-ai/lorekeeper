@@ -203,10 +203,7 @@ fn run_inner(
                 .map_err(|e| format!("{e}"))?;
             let invalid_categories =
                 concept_lint::find_invalid_categories(&concept_pages, &rc.concept_categories);
-            let near_duplicate_concepts = concept_lint::find_near_duplicate_concepts(
-                &concept_pages,
-                rc.graph.metrics.concept_near_duplicate_threshold,
-            );
+            let duplicate_concepts = concept_lint::find_duplicate_concepts(&concept_pages);
             let unresolved_conflicts = concept_lint::find_unresolved_conflicts(&concept_pages);
 
             let findings = orphans.len()
@@ -214,7 +211,7 @@ fn run_inner(
                 + drift.missing_from_index.len()
                 + drift.missing_from_disk.len()
                 + invalid_categories.len()
-                + near_duplicate_concepts.len()
+                + duplicate_concepts.len()
                 + unresolved_conflicts.len();
 
             let report = output::LintReport {
@@ -230,7 +227,7 @@ fn run_inner(
                     fixed: None,
                 },
                 invalid_categories,
-                near_duplicate_concepts,
+                duplicate_concepts,
                 unresolved_conflicts,
                 findings,
             };

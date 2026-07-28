@@ -4,7 +4,7 @@ Surface findings for human review — never auto-resolve. Read AGENTS.md to
 resolve section headings before inspecting pages.
 
 1. **Structural** — run `lore graph --json lint`. ONE pass returns ALL of:
-   `orphans`, `broken`, `hubs`, `invalid_categories`, `near_duplicate_concepts`,
+   `orphans`, `broken`, `hubs`, `invalid_categories`, `duplicate_concepts`,
    `unresolved_conflicts`, and index drift
    (`missing_from_index`/`_from_disk`).
    Surface every non-empty list. NOTE: a clean lint (`findings: 0`) means no
@@ -42,22 +42,32 @@ resolve section headings before inspecting pages.
    This layer is LLM judgment, not a deterministic check. Surface as questions
    for human review, never auto-create pages.
 5. **Concept convergence** — two parts:
-   - **Near-duplicates** from layer 1's `near_duplicate_concepts`: for a true
-     variant-spelling pair (`vector-db` ~ `vector-database`), recommend consolidating
-     it with `lore graph merge <from> <into>` followed by `lore graph backlinks-sync`
-     (the merge rewires every link and deletes the `from` page; it refuses if `from`
-     has authored prose unless `--force`, so any authored prose is salvaged into the
-     survivor first). Like every audit finding the merge is **surfaced, not run** — it
-     deletes a page, so a human makes the call. Leave deliberate model-version siblings
-     (`gpt-4`/`gpt-5`) split — they are distinct concepts.
-   - **Synonym / abbreviation aliases**: `near_duplicate_concepts` is string-similarity,
-     so it cannot see an acronym and its expansion (`rag` ↔ `retrieval-augmented-generation`,
-     `k8s` ↔ `kubernetes`) — they share almost no characters. From the `lore wiki concepts`
-     registry you already loaded, read down the list ONCE and spot equivalent pairs by
-     meaning. Recommend declaring the non-canonical form as an `aliases` entry on the
-     canonical concept (the `lore wiki concepts` registry returns aliases, so future
-     extractions converge on the one page instead of minting a variant), or a
-     `merge` when one side has no distinct content. Read-only suggestion — a human edits
+   The two halves split on what is DECIDABLE. Layer 1 owns spelling; you own meaning.
+   - **Duplicates** from layer 1's `duplicate_concepts`: two pages answering to one
+     name (`doc-hub` ~ `docs-hub`, or an alias on one page that is another page's
+     title). This is a fact, not a candidate — that name cannot route deterministically
+     — so every entry needs resolving. Recommend `lore graph merge <from> <into>`
+     followed by `lore graph backlinks-sync` (the merge rewires every link and deletes
+     the `from` page; it refuses if `from` has authored prose unless `--force`, so
+     salvage that prose into the survivor first). Like every audit finding the merge is
+     **surfaced, not run** — it deletes a page, so a human makes the call. When the two
+     pages turn out to be genuinely different things that merely share a name, the fix
+     is the opposite one: rename the mistaken side, or drop the alias that reaches
+     across.
+   - **Synonyms, abbreviations, and short forms**: layer 1 compares names, so by
+     construction it cannot see two DIFFERENT names for one thing — an acronym and its
+     expansion (`rag` ↔ `retrieval-augmented-generation`, `k8s` ↔ `kubernetes`), or a
+     team's shorthand and the full id (`enterprise-prd` ↔ `oy-gemini-enterprise-prd`).
+     That judgment is yours and it is where this layer earns its keep. From the
+     `lore wiki concepts` registry you already loaded, read down the list ONCE and spot
+     equivalent pairs by meaning; check the cited daily pages when a short form might
+     just be how the team writes the long one. Recommend declaring the non-canonical
+     form as an `aliases` entry on the canonical concept (the registry returns aliases,
+     so future extractions converge on the one page instead of minting a variant), or a
+     `merge` when one side has no distinct content. Leave deliberate siblings split —
+     model versions (`gpt-4`/`gpt-5`), namespace members (`agentcore-memory` ~
+     `agentcore-identity`), and a qualifier that narrows a concept (`agent-harness` ~
+     `code-as-agent-harness`) are distinct concepts. Read-only suggestion — a human edits
      frontmatter. This is a registry scan WITHOUT the source text, so an acronym can be
      genuinely ambiguous here (`rag` could be red-amber-green) — surface the candidate for
      human confirmation, don't auto-alias at audit time. (Aliasing AT extraction is the

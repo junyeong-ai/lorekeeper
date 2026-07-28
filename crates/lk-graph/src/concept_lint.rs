@@ -1,24 +1,25 @@
 //! Structural lints for `{wiki}/concepts/*.md` pages.
 //!
-//! At ingest time the pipeline silently strips any `category` value the LLM invented
-//! outside the configured slate (see `Pipeline::plan` → `filter_valid_concepts`). But
-//! the queue-mode path defers concept-page creation to `/lore-process`, which writes
-//! the page directly. If the skill emits a category not in `config.concepts.categories`
-//! — a category id renamed in config, an LLM-side hallucination — the page lands with
-//! a category the rest of the system doesn't recognize: the wiki index can't bucket it,
-//! and downstream tooling that filters by category silently drops it.
+//! Concept pages are the one page kind an LLM creates directly: the queue-mode path
+//! defers creation to `/lore-process`, which writes frontmatter and body itself rather
+//! than through a template. So the defects this module looks for are the ones a
+//! generated page can carry past every earlier gate — a `category` outside the
+//! configured slate, a name that already belongs to another page, a contradiction a
+//! human has yet to resolve.
 //!
-//! This module scans concept pages and surfaces those mismatches as a `graph lint`
-//! finding. Pure read; the lint reports, it does not repair.
+//! Every check here is DECIDABLE from the pages themselves: it reports a fact about
+//! the vault, never a guess about whether two ideas match. That is why `graph lint`
+//! exiting non-zero can stay meaningful — a check that fires on judgment calls trains
+//! its reader to ignore it. All three lints are pure functions over the single
+//! `scan_concept_pages` pass; they report, they never repair.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use lk_core::config::ConceptCategory;
 use lk_core::frontmatter;
 use lk_core::markdown::FenceState;
 use serde::Serialize;
-use strsim::sorensen_dice;
 
 use crate::GraphError;
 
@@ -57,6 +58,12 @@ pub struct ConceptPage {
     pub path: PathBuf,
     /// `category` frontmatter value, if present.
     pub category: Option<String>,
+    /// Every name this page answers to: its slug, its `title`, and each `aliases`
+    /// entry. `aliases` is the registry the pipeline's dedup resolves incoming concept
+    /// names against, so this is the page's full claim on the name space — what
+    /// `find_duplicate_concepts` compares. A page with unreadable frontmatter still
+    /// contributes its slug, which it holds by owning the file.
+    pub names: Vec<String>,
     /// Page body (frontmatter stripped), for conflict-callout scanning.
     pub body: String,
 }
@@ -102,7 +109,9 @@ pub fn scan_concept_pages(
             .to_owned();
         let rel_path = path.strip_prefix(vault_root).unwrap_or(&path).to_path_buf();
         // Slug is always the file stem (the graph's canonical page identity); only
-        // category and body come from parsing, and a malformed page degrades to none/empty.
+        // category, names and body come from parsing, and a malformed page degrades to
+        // none/slug-only/empty.
+        let mut names = vec![file_stem.clone()];
         let (category, body) = match frontmatter::parse_page(&raw) {
             Ok(page) => {
                 let category = page
@@ -110,6 +119,21 @@ pub fn scan_concept_pages(
                     .get("category")
                     .and_then(|v| v.as_str())
                     .map(str::to_owned);
+                names.extend(
+                    page.frontmatter
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned),
+                );
+                names.extend(
+                    page.frontmatter
+                        .get("aliases")
+                        .and_then(|v| v.as_array())
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|v| v.as_str())
+                        .map(str::to_owned),
+                );
                 (category, page.body)
             }
             Err(_) => (None, String::new()),
@@ -118,6 +142,7 @@ pub fn scan_concept_pages(
             slug: file_stem,
             path: rel_path,
             category,
+            names,
             body,
         });
     }
@@ -155,225 +180,111 @@ pub fn find_invalid_categories(
         .collect()
 }
 
-/// A pair of concept pages whose slugs are near-identical — likely variant-spelling
-/// duplicates the LLM dedup hint missed (`vector-db` vs `vector-database`).
+/// Two concept pages that answer to the SAME name — one page's slug, `title` or alias
+/// reduces to the same identity as one of the other's (`doc-hub` / `docs-hub`).
 #[derive(Debug, Clone, Serialize)]
-pub struct NearDuplicateConcept {
+pub struct DuplicateConcept {
     /// The two concept slugs, ordered lexicographically for deterministic output.
     pub a: String,
     pub b: String,
-    /// Sørensen-Dice similarity of the two slugs, in `[threshold, 1.0]`. It reaches `1.0`
-    /// when two DISTINCT file stems reduce to the same deslugged string (`vector-db` and
-    /// `vectordb`) — a genuine variant pair, not the same file twice.
-    pub similarity: f64,
+    /// The colliding name as written on `a`, and as written on `b` — so the reason a
+    /// pair is reported is visible without opening either page (an alias claiming
+    /// another page's title reads very differently from two variant slugs).
+    pub a_name: String,
+    pub b_name: String,
 }
 
-/// Concept slug pairs whose Sørensen-Dice similarity is at or above `threshold`. `1.0` is
-/// included: two distinct stems can deslug to the same string (`vector-db`/`vectordb`), and
-/// a short pair is flagged ONLY at an exact deslug match (see `SHORT_SLUG_LEN`). These are
-/// candidate merges: a variant spelling that fragments the concept graph. Read-only;
-/// the lint reports, a human decides. `threshold` outside `(0, 1]` yields nothing.
-pub fn find_near_duplicate_concepts(
-    pages: &[ConceptPage],
-    threshold: f64,
-) -> Vec<NearDuplicateConcept> {
-    if !(0.0..=1.0).contains(&threshold) || threshold == 0.0 {
-        return Vec::new();
-    }
-
-    // Score on separator-stripped slugs so the kebab `-` doesn't inflate bigram
-    // overlap between otherwise-different slugs.
-    let deslugged: Vec<String> = pages.iter().map(|p| deslug(&p.slug)).collect();
-
-    // Blocking via a character-bigram inverted index. Sørensen-Dice is bigram
-    // overlap, so two slugs can have non-zero similarity ONLY if they share at least
-    // one bigram. Indexing each slug's bigrams and scoring only co-bucketed pairs
-    // keeps the scan near-linear in the number of concepts instead of comparing all
-    // O(n²) pairs — the lint stays cheap as a vault grows to tens of thousands of
-    // concepts. Safe by construction: a pair sharing no bigram has similarity 0,
-    // below any positive `threshold`, so it could never be a finding.
-    let mut by_bigram: BTreeMap<(char, char), Vec<usize>> = BTreeMap::new();
-    // A string shorter than two chars has no bigram, so it would never co-bucket. Index
-    // those by their whole value too, so two distinct slugs that reduce to the same
-    // sub-bigram string (e.g. `a` and `a-` → `a`) are still compared.
-    let mut by_short: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
-    for (i, s) in deslugged.iter().enumerate() {
-        let chars: Vec<char> = s.chars().collect();
-        if chars.len() < 2 {
-            by_short.entry(s.as_str()).or_default().push(i);
-            continue;
-        }
-        let mut seen = BTreeSet::new();
-        for w in chars.windows(2) {
-            let bigram = (w[0], w[1]);
-            if seen.insert(bigram) {
-                by_bigram.entry(bigram).or_default().push(i);
+/// Concept page pairs whose NAME SETS intersect: some name — a slug, a `title`, an alias —
+/// resolves to both pages at once. That is a defect about the vault, not a guess about
+/// the ideas: a name addressing two pages cannot route deterministically, so the
+/// pipeline's alias index picks one and the other's citations fragment away from it.
+/// Read-only; `lore graph merge` is the remedy a human triggers.
+///
+/// Deliberately EXACT, with no similarity score and no threshold. A scored variant
+/// (Sørensen-Dice over slug character bigrams) preceded this and was measured on a
+/// 1,599-concept vault: 298 findings, of which one was a real duplicate — the signal is
+/// morphology, so it fires on every shared namespace prefix (`amazon-sagemaker-ai` ~
+/// `amazon-sagemaker-hyperpod`), every shared head noun (`robot-foundation-model` ~
+/// `tabular-foundation-model`) and on plain character coincidence (`agentops` ~ `gentoo`),
+/// while missing acronym pairs entirely. No cutoff separates those from real duplicates,
+/// because the difference is meaning, not spelling distance. A permanently-red lint is
+/// worse than a silent one, so the check now reports only what it can decide — and it
+/// needs no version-variant escape hatch, since `gpt-4`/`gpt-5` and `gemini-3-1-flash`/
+/// `gemini-3-5-flash` simply claim different names.
+pub fn find_duplicate_concepts(pages: &[ConceptPage]) -> Vec<DuplicateConcept> {
+    // key → the pages claiming it, each with the first name on that page that produced it.
+    // BTreeMaps throughout: iteration order is the key order and then page order, so the
+    // output is deterministic without a final sort.
+    let mut claims: BTreeMap<String, BTreeMap<usize, &str>> = BTreeMap::new();
+    for (i, page) in pages.iter().enumerate() {
+        for name in &page.names {
+            for key in identity_keys(name) {
+                claims.entry(key).or_default().entry(i).or_insert(name);
             }
         }
     }
 
-    // Candidate pairs: any two slugs that co-occur in a bigram bucket (or a short-string
-    // bucket). `pages` is slug-sorted and each bucket's indices are ascending, so `(i, j)`
-    // with `i < j` yields lexicographically-ordered `(a, b)` output without a re-sort.
-    let mut candidates: BTreeSet<(usize, usize)> = BTreeSet::new();
-    for indices in by_bigram.values().chain(by_short.values()) {
-        for a in 0..indices.len() {
-            for b in (a + 1)..indices.len() {
-                candidates.insert((indices[a], indices[b]));
+    // A pair can collide under both keys; report it once, keyed on the page pair.
+    // `pages` is slug-sorted, so `i < j` already yields lexicographically-ordered `(a, b)`.
+    let mut pairs: BTreeMap<(usize, usize), (&str, &str)> = BTreeMap::new();
+    for holders in claims.values() {
+        let claimants: Vec<(usize, &str)> = holders.iter().map(|(i, name)| (*i, *name)).collect();
+        for x in 0..claimants.len() {
+            for y in (x + 1)..claimants.len() {
+                pairs
+                    .entry((claimants[x].0, claimants[y].0))
+                    .or_insert((claimants[x].1, claimants[y].1));
             }
         }
     }
 
-    let mut findings = Vec::new();
-    for (i, j) in candidates {
-        // Version variants (`gpt-4`/`gpt-4o`, `claude-3`/`claude-3-5`) are
-        // intentionally distinct concepts, not spelling duplicates — skip them.
-        if is_version_variant(&pages[i].slug, &pages[j].slug) {
-            continue;
-        }
-        let similarity = sorensen_dice(&deslugged[i], &deslugged[j]);
-        let shorter = deslugged[i]
-            .chars()
-            .count()
-            .min(deslugged[j].chars().count());
-        // Below SHORT_SLUG_LEN, Sørensen-Dice partial overlap is dominated by length, not
-        // meaning (`rag`/`raga` ≈ 0.8 on a single coincidental shared bigram), so a short
-        // pair is trusted only on an exact deslug match (`ai`/`a-i`, `vector-db`/`vectordb`).
-        let flagged = if shorter < SHORT_SLUG_LEN {
-            similarity >= 1.0
-        } else {
-            similarity >= threshold
-        };
-        if flagged {
-            findings.push(NearDuplicateConcept {
-                a: pages[i].slug.clone(),
-                b: pages[j].slug.clone(),
-                similarity,
-            });
-        }
-    }
-    findings
-}
-
-/// Below this deslugged length a slug carries ≤2 bigrams, so a single coincidental shared
-/// bigram already yields a 0.5+ Sørensen-Dice score — partial overlap is length noise, not
-/// meaning. Pairs shorter than this are flagged only on an exact deslug match, which keeps
-/// `rag`/`raga` (one shared bigram) off the list while still surfacing `ai`/`a-i`.
-const SHORT_SLUG_LEN: usize = 4;
-
-/// Slug with separators AND whitespace removed — the exact characters
-/// `strsim::sorensen_dice` scores on (it ignores whitespace internally). Used for
-/// BOTH the bigram blocking index and the similarity score so they always agree:
-/// `vector-db` → `vectordb`, and a hand-created `vector db.md` (whose stem keeps the
-/// space) → `vectordb` too, so a spaced variant can never slip past blocking.
-fn deslug(slug: &str) -> String {
-    slug.chars()
-        .filter(|c| *c != '-' && !c.is_whitespace())
+    pairs
+        .into_iter()
+        .map(|((i, j), (a_name, b_name))| DuplicateConcept {
+            a: pages[i].slug.clone(),
+            b: pages[j].slug.clone(),
+            a_name: a_name.to_owned(),
+            b_name: b_name.to_owned(),
+        })
         .collect()
 }
 
-/// True when two slugs are the same model/version family that should stay split,
-/// not a spelling duplicate. Two independent signatures qualify:
+/// The identity keys a name claims — the forms under which two spellings are the same
+/// name. Both are derived from `lk_core::concept::slugify`, so a claim is compared under
+/// the very normalization (NFKC, case, punctuation) that mints page ids and the
+/// pipeline's alias index: a name that collides here is a name that routes ambiguously
+/// there. Empty for a name that slugifies to nothing (pure punctuation).
 ///
-/// 1. **Prefix extension** — `long` extends a digit-ending `short` by a pure
-///    version suffix: directly attached (`gpt-4` ⊂ `gpt-4o`) or a `-<digits>`
-///    segment (`claude-3` ⊂ `claude-3-5`). A `-<word>` suffix names a DIFFERENT
-///    concept and is NOT skipped (`s3` ⊄ `s3-bucket`, `gpt-4` ⊄ `gpt-4-api`).
-/// 2. **Sibling version** — identical base, differing trailing version token
-///    (`gpt-4`/`gpt-5`, `claude-3`/`claude-4`, `llama-2`/`llama-3`). These are
-///    distinct releases, not variant spellings — but they are NOT prefixes of
-///    each other, so signature (1) alone misses them and the near-duplicate
-///    lint would false-fire on every adjacent model generation.
-fn is_version_variant(a: &str, b: &str) -> bool {
-    is_prefix_version_variant(a, b) || is_sibling_version_variant(a, b)
-}
-
-/// Signature (1): one slug is the other extended by a pure version suffix.
-fn is_prefix_version_variant(a: &str, b: &str) -> bool {
-    let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
-    if short == long || !long.starts_with(short) {
-        return false;
-    }
-    if !short
-        .chars()
-        .next_back()
-        .is_some_and(|c| c.is_ascii_digit())
-    {
-        return false;
-    }
-    // The shared prefix must name a model family, not a bare short id — `s3`⊂`s30`
-    // is two distinct identifiers, not a version extension (same gate as `version_split`).
-    if short.chars().filter(|c| c.is_ascii_alphabetic()).count() < MIN_VERSION_BASE_ALPHA {
-        return false;
-    }
-    let suffix = &long[short.len()..];
-    match suffix.strip_prefix('-') {
-        // `-<segment>`: a version variant only when the segment is all digits.
-        Some(rest) => !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()),
-        // Directly-attached suffix (no separator): a model-letter variant like `4o` — at
-        // most a letter or two. A longer attached run (`claude3beta`) names a different
-        // concept, so it is NOT a version variant and stays eligible for the scorer.
-        None => {
-            !suffix.is_empty()
-                && suffix.len() <= 2
-                && suffix.chars().all(|c| c.is_ascii_alphabetic())
-        }
-    }
-}
-
-/// Signature (2): both slugs end in a version token and share an identical base.
-fn is_sibling_version_variant(a: &str, b: &str) -> bool {
-    match (version_split(a), version_split(b)) {
-        (Some((base_a, ver_a)), Some((base_b, ver_b))) => base_a == base_b && ver_a != ver_b,
-        _ => false,
-    }
-}
-
-/// Minimum alphabetic characters a base must carry to count as a model-family name.
-/// A real version family (`gpt`-4, `claude`-3, `llama`-2) names itself with a word;
-/// a bare letter+digit slug (`s3`/`s4`, `h2`/`h3`, `q1`/`q2`) is two distinct short
-/// identifiers, not a versioned family. Requiring ≥2 alphabetic chars in the base
-/// keeps genuine families split while letting unrelated short slugs fall through to
-/// the normal near-duplicate scorer (so a real spelling-variant pair still surfaces).
-const MIN_VERSION_BASE_ALPHA: usize = 2;
-
-/// Split a trailing version token off a slug, returning `(base, version)` when the
-/// slug ends in a token of the form `<digits>[<letter>]` (optionally preceded by a
-/// single `-`) over a base that names a model family (≥2 alphabetic chars).
-/// `gpt-4`→`("gpt","4")`, `gpt-4o`→`("gpt","4o")`, `claude-3-5`→`("claude-3","5")`.
-/// Returns `None` when there is no trailing digit run (`vector-db`, `s3-bucket`) or
-/// the base is too short to be a family name (`s3`, `h2`) — so neither non-versioned
-/// slugs nor bare letter+digit identifiers are ever treated as version siblings.
-fn version_split(slug: &str) -> Option<(&str, &str)> {
-    let bytes = slug.as_bytes();
-    let len = bytes.len();
-    let mut i = len;
-    // An optional single trailing lowercase letter (the model letter in `4o`).
-    if i > 0 && bytes[i - 1].is_ascii_lowercase() {
-        i -= 1;
-    }
-    let digits_end = i;
-    while i > 0 && bytes[i - 1].is_ascii_digit() {
-        i -= 1;
-    }
-    if i == digits_end {
-        return None; // no digit run → not a version token
-    }
-    let version = &slug[i..len];
-    // Consume one separating `-` so the base excludes it.
-    let base_end = if i > 0 && bytes[i - 1] == b'-' {
-        i - 1
-    } else {
-        i
+/// * `words:` — the token multiset, singularized. Absorbs separator, case, order and
+///   plural variance (`doc-hub` ~ `docs-hub`, `Chain of Thought` ~ `chain-of-thought`).
+/// * `chars:` — the tokens concatenated. Absorbs separator PLACEMENT, which a multiset
+///   cannot see (`vector-db` ~ `vectordb`).
+fn identity_keys(name: &str) -> Vec<String> {
+    let Some(slug) = lk_core::concept::slugify(name) else {
+        return Vec::new();
     };
-    let base = &slug[..base_end];
-    // A version family is named by a word, not a single letter — `s3`/`s4` and
-    // `h2`/`h3` are distinct short ids, not a versioned family. Gate on alphabetic
-    // content so they fall through to the normal duplicate scorer.
-    if base.chars().filter(|c| c.is_ascii_alphabetic()).count() < MIN_VERSION_BASE_ALPHA {
-        return None;
+    // slugify collapses separator runs and trims the edges, so no segment is empty.
+    let mut words: Vec<&str> = slug.split('-').map(singular).collect();
+    words.sort_unstable();
+    vec![
+        format!("words:{}", words.join("-")),
+        format!("chars:{}", slug.replace('-', "")),
+    ]
+}
+
+/// A token with an English plural `s` removed, so `docs-hub` and `doc-hub` claim one
+/// name. Three exclusions keep it from mangling words that merely end in `s`: a stem
+/// under three characters (`ops`, `aws`, `k8s` — the `s` belongs to the word), and a
+/// stem already ending in `s`, `u` or `i` (`css`, `status`, `analysis`). A CJK token
+/// never ends in `s`, so it is returned untouched.
+fn singular(token: &str) -> &str {
+    let Some(stem) = token.strip_suffix('s') else {
+        return token;
+    };
+    if stem.chars().count() < 3 || stem.ends_with(['s', 'u', 'i']) {
+        return token;
     }
-    Some((base, version))
+    stem
 }
 
 /// A concept page carrying an unresolved `> [!conflict]` callout — a contradiction
@@ -469,20 +380,30 @@ mod tests {
     }
 
     #[test]
-    fn scan_extracts_slug_category_and_body() {
+    fn scan_extracts_slug_category_names_and_body() {
         let tmp = TempDir::new().unwrap();
-        write_concept(tmp.path(), "rag", "id: rag\ncategory: ai-ml");
+        write_concept(
+            tmp.path(),
+            "rag",
+            "id: rag\ncategory: ai-ml\ntitle: \"RAG\"\naliases: [\"RAG\", \"Retrieval-Augmented Generation\"]",
+        );
         let pages = scan(tmp.path());
         assert_eq!(pages.len(), 1);
         assert_eq!(pages[0].slug, "rag");
         assert_eq!(pages[0].category.as_deref(), Some("ai-ml"));
+        assert_eq!(
+            pages[0].names,
+            vec!["rag", "RAG", "RAG", "Retrieval-Augmented Generation"],
+            "the name set is slug + title + every alias, verbatim"
+        );
         assert!(pages[0].body.contains("# rag"));
     }
 
     #[test]
     fn scan_is_resilient_to_malformed_frontmatter() {
         // An unclosed frontmatter block fails to parse; the page must still surface by
-        // its file stem (so slug-only lints see it) with no category and empty body.
+        // its file stem (so slug-only lints see it) with no category, slug-only names
+        // and empty body.
         let tmp = TempDir::new().unwrap();
         let dir = tmp
             .path()
@@ -498,6 +419,7 @@ mod tests {
         assert_eq!(pages.len(), 1);
         assert_eq!(pages[0].slug, "broken");
         assert!(pages[0].category.is_none());
+        assert_eq!(pages[0].names, vec!["broken"]);
         assert!(pages[0].body.is_empty());
     }
 
@@ -561,161 +483,150 @@ mod tests {
     }
 
     #[test]
-    fn near_duplicate_slugs_are_flagged_distinct_ones_are_not() {
+    fn spelling_variants_of_one_name_are_flagged() {
         let tmp = TempDir::new().unwrap();
-        write_concept(tmp.path(), "vector-database", "id: vector-database");
+        // Plural (`words:` key) and separator placement (`chars:` key) — the two forms
+        // in which one name is written two ways.
+        write_concept(tmp.path(), "doc-hub", "id: doc-hub");
+        write_concept(tmp.path(), "docs-hub", "id: docs-hub");
         write_concept(tmp.path(), "vector-db", "id: vector-db");
+        write_concept(tmp.path(), "vectordb", "id: vectordb");
         write_concept(tmp.path(), "kubernetes", "id: kubernetes");
-        let result = find_near_duplicate_concepts(&scan(tmp.path()), 0.6);
-        assert!(
-            result
-                .iter()
-                .any(|d| d.a == "vector-database" && d.b == "vector-db"),
-            "variant spellings must be flagged: {result:?}"
-        );
-        assert!(
-            !result
-                .iter()
-                .any(|d| d.a == "kubernetes" || d.b == "kubernetes"),
-            "an unrelated slug must not be flagged"
+        let result = find_duplicate_concepts(&scan(tmp.path()));
+        let pairs: Vec<(&str, &str)> = result.iter().map(|d| (&*d.a, &*d.b)).collect();
+        assert_eq!(
+            pairs,
+            vec![("doc-hub", "docs-hub"), ("vector-db", "vectordb")],
+            "one name spelled two ways must be flagged, sorted, and nothing else: {result:?}"
         );
     }
 
     #[test]
-    fn whitespace_in_stem_does_not_evade_blocking() {
-        // A hand-created `a i.md` and `ai.md`: strsim scores them 1.0 (it ignores
-        // whitespace internally), so the bigram index must too. `deslug` strips
-        // whitespace, so the pair co-buckets and is flagged rather than slipping past.
+    fn an_alias_claiming_another_pages_name_is_flagged() {
+        // The defect this lint exists for: a page registers an alias that is another
+        // page's own name, so the pipeline's alias index routes that name at whichever
+        // page it indexed first and the other's citations fragment away from it. The
+        // finding names both sides of the claim so the reason needs no page opened.
         let tmp = TempDir::new().unwrap();
-        write_concept(tmp.path(), "a i", "id: a i");
-        write_concept(tmp.path(), "ai", "id: ai");
-        let result = find_near_duplicate_concepts(&scan(tmp.path()), 0.6);
-        assert!(
-            result
-                .iter()
-                .any(|d| (d.a == "a i" && d.b == "ai") || (d.a == "ai" && d.b == "a i")),
-            "a spaced-stem near-duplicate must still be flagged: {result:?}"
+        write_concept(tmp.path(), "htmx", "id: htmx\ntitle: \"HTMX\"");
+        write_concept(
+            tmp.path(),
+            "hypermedia-driven-frontend",
+            "id: hypermedia-driven-frontend\naliases: [\"HTMX\"]",
         );
+        let result = find_duplicate_concepts(&scan(tmp.path()));
+        assert_eq!(result.len(), 1, "{result:?}");
+        assert_eq!(result[0].a, "htmx");
+        assert_eq!(result[0].b, "hypermedia-driven-frontend");
+        // Each side reports the first of its own names that claimed the key — for `htmx`
+        // that is its slug, for the other page the alias that reaches across.
+        assert_eq!(result[0].a_name, "htmx");
+        assert_eq!(result[0].b_name, "HTMX");
     }
 
     #[test]
-    fn short_slug_partial_overlap_is_not_flagged() {
-        // `rag`/`raga` score ≈0.8 on one coincidental shared bigram — length-dominated
-        // noise, not a spelling variant. Below the short-slug length only an exact deslug
-        // match is trusted, so this must stay off the near-duplicate list.
+    fn a_page_pair_is_reported_once_however_many_names_collide() {
+        // Two pages can collide under both keys and via several names each. The finding
+        // is about the PAIR, so it is emitted once.
         let tmp = TempDir::new().unwrap();
-        write_concept(tmp.path(), "rag", "id: rag");
-        write_concept(tmp.path(), "raga", "id: raga");
-        let result = find_near_duplicate_concepts(&scan(tmp.path()), 0.6);
-        assert!(
-            result.is_empty(),
-            "short partial overlap must not be flagged: {result:?}"
+        write_concept(
+            tmp.path(),
+            "vector-db",
+            "id: vector-db\ntitle: \"Vector DB\"\naliases: [\"vectordb\"]",
         );
+        write_concept(
+            tmp.path(),
+            "vectordb",
+            "id: vectordb\ntitle: \"VectorDB\"\naliases: [\"vector db\"]",
+        );
+        let result = find_duplicate_concepts(&scan(tmp.path()));
+        assert_eq!(result.len(), 1, "{result:?}");
     }
 
     #[test]
-    fn bigram_blocking_finds_lone_near_dup_among_many_unrelated() {
-        // The bigram-blocked scan must still surface a real variant-spelling pair when
-        // it is buried among many concepts that share no bigram with it, and must not
-        // invent pairs between the unrelated ones. Guards the O(n²)→blocked rewrite.
+    fn a_pages_own_names_never_collide_with_itself() {
+        // slug, title and alias are normally three spellings of one name; that is the
+        // healthy state, not a finding.
+        let tmp = TempDir::new().unwrap();
+        write_concept(
+            tmp.path(),
+            "vector-db",
+            "id: vector-db\ntitle: \"Vector DB\"\naliases: [\"Vector DB\", \"vectordb\"]",
+        );
+        assert!(find_duplicate_concepts(&scan(tmp.path())).is_empty());
+    }
+
+    #[test]
+    fn distinct_names_are_not_flagged() {
+        // The four classes the previous similarity scorer false-fired on, measured on a
+        // real 1,599-concept vault. None of them claims another page's name, so none is
+        // a finding — and no version-variant escape hatch is needed to keep them off.
         let tmp = TempDir::new().unwrap();
         for slug in [
-            "kubernetes",
-            "postgres",
-            "grafana",
-            "terraform",
-            "kafka",
-            "redis",
-            "observability",
-            "vector-database",
-            "vector-db",
+            // shared namespace prefix
+            "amazon-sagemaker-ai",
+            "amazon-sagemaker-hyperpod",
+            // shared head noun
+            "robot-foundation-model",
+            "tabular-foundation-model",
+            // character coincidence
+            "agentops",
+            "gentoo",
+            // version families, medial and trailing
+            "gpt-4",
+            "gpt-4o",
+            "gpt-5",
+            "claude-3",
+            "claude-3-5",
+            "gemini-3-1-flash-lite",
+            "gemini-3-5-flash-lite",
+            // a qualifier that narrows the concept
+            "s3",
+            "s3-bucket",
+            // short partial overlap
+            "rag",
+            "raga",
         ] {
             write_concept(tmp.path(), slug, &format!("id: {slug}"));
         }
-        let result = find_near_duplicate_concepts(&scan(tmp.path()), 0.6);
+        let result = find_duplicate_concepts(&scan(tmp.path()));
+        assert!(result.is_empty(), "false positives: {result:?}");
+    }
+
+    #[test]
+    fn case_punctuation_order_and_script_folding_cannot_hide_a_collision() {
+        // Names are compared through `slugify`, the same normalization that mints page
+        // ids — so display styling never lets one name address two pages unnoticed.
         assert_eq!(
-            result.len(),
-            1,
-            "exactly one near-dup pair expected: {result:?}"
+            identity_keys("Chain of Thought"),
+            identity_keys("chain-of-thought")
         );
-        assert_eq!(result[0].a, "vector-database");
-        assert_eq!(result[0].b, "vector-db");
-    }
-
-    #[test]
-    fn version_variants_are_not_flagged_as_duplicates() {
-        let tmp = TempDir::new().unwrap();
-        write_concept(tmp.path(), "gpt-4", "id: gpt-4");
-        write_concept(tmp.path(), "gpt-4o", "id: gpt-4o");
-        write_concept(tmp.path(), "claude-3", "id: claude-3");
-        write_concept(tmp.path(), "claude-3-5", "id: claude-3-5");
-        let result = find_near_duplicate_concepts(&scan(tmp.path()), 0.6);
-        assert!(
-            result.is_empty(),
-            "model version variants are distinct concepts, not duplicates: {result:?}"
+        assert_eq!(identity_keys("A/I"), identity_keys("a i"));
+        assert_eq!(identity_keys("ＲＡＧ"), identity_keys("rag")); // NFKC full-width
+        assert_eq!(
+            identity_keys("agent harness")[0],
+            identity_keys("harness agent")[0],
+            "the `words:` key is a multiset, so token order does not matter"
         );
+        assert!(identity_keys("!!!").is_empty());
     }
 
     #[test]
-    fn sibling_model_generations_are_not_flagged() {
-        // Adjacent model generations share a base and differ only in the version
-        // token; they are NOT prefixes of each other, so the prefix rule misses them.
-        // The near-duplicate lint must not flag every new model release.
-        let tmp = TempDir::new().unwrap();
-        write_concept(tmp.path(), "gpt-4", "id: gpt-4");
-        write_concept(tmp.path(), "gpt-5", "id: gpt-5");
-        write_concept(tmp.path(), "claude-3", "id: claude-3");
-        write_concept(tmp.path(), "claude-4", "id: claude-4");
-        write_concept(tmp.path(), "llama-2", "id: llama-2");
-        write_concept(tmp.path(), "llama-3", "id: llama-3");
-        let result = find_near_duplicate_concepts(&scan(tmp.path()), 0.6);
-        assert!(
-            result.is_empty(),
-            "sibling model generations must not be flagged as duplicates: {result:?}"
-        );
-    }
-
-    #[test]
-    fn sibling_version_detection_is_precise() {
-        // Same base, differing version token → sibling (distinct).
-        assert!(is_version_variant("gpt-4", "gpt-5"));
-        assert!(is_version_variant("claude-3", "claude-4"));
-        assert!(is_version_variant("llama-2", "llama-3"));
-        assert!(is_version_variant("gpt-4", "gpt-4o")); // prefix rule still holds
-        // Different base, or no version token → NOT a version variant: a genuine
-        // variant-spelling pair must still surface for review.
-        assert!(!is_version_variant("vector-db", "vector-database"));
-        assert!(!is_version_variant("gpt-4", "bert-4")); // different base
-        assert!(!is_version_variant("s3", "s3-bucket")); // word suffix, not a version
-    }
-
-    #[test]
-    fn bare_letter_digit_slugs_are_not_version_families() {
-        // A single-letter base + digit is two distinct short identifiers, NOT a
-        // version family — they must still be eligible for near-duplicate review
-        // (the version-variant skip must not swallow them via either signature).
-        assert!(!is_version_variant("s3", "s4")); // AWS S3 vs an unrelated `s4`
-        assert!(!is_version_variant("h2", "h3")); // HTTP/2 vs HTTP/3 — distinct, but not "merge candidates" swallowed silently
-        assert!(!is_version_variant("q1", "q2"));
-        assert!(!is_version_variant("s3", "s30")); // prefix-extension of a bare id, not a family
-        assert!(!is_version_variant("v2", "v3")); // single-letter `v` base: not a family
-        // The genuine families (≥2 alphabetic base chars) are still recognised.
-        assert!(is_version_variant("gpt-4", "gpt-5"));
-    }
-
-    #[test]
-    fn word_suffix_after_digit_is_not_treated_as_version_variant() {
-        // `s3` ⊂ `s3-bucket` and `gpt-4` ⊂ `gpt-4-api` share a digit-ending prefix but
-        // the `-<word>` suffix names a DIFFERENT concept — the version-variant skip must
-        // NOT suppress them (they're simply distinct, scored normally).
-        assert!(!is_version_variant("s3", "s3-bucket"));
-        assert!(!is_version_variant("gpt-4", "gpt-4-api"));
-        // A directly-attached *word* after a digit (no separator) is a different concept,
-        // not a model-letter version — it must stay eligible for the near-duplicate scorer.
-        assert!(!is_version_variant("claude3", "claude3beta"));
-        // Genuine version suffixes are still recognised.
-        assert!(is_version_variant("gpt-4", "gpt-4o"));
-        assert!(is_version_variant("claude-3", "claude-3-5"));
+    fn singular_only_strips_a_real_plural() {
+        assert_eq!(singular("docs"), "doc");
+        assert_eq!(singular("agents"), "agent");
+        // The `s` belongs to the word: too short to be a plural stem…
+        assert_eq!(singular("ops"), "ops");
+        assert_eq!(singular("aws"), "aws");
+        assert_eq!(singular("k8s"), "k8s");
+        // …or the stem already ends in a letter that makes the `s` part of the word.
+        assert_eq!(singular("css"), "css");
+        assert_eq!(singular("status"), "status");
+        assert_eq!(singular("analysis"), "analysis");
+        assert_eq!(singular("harness"), "harness");
+        // No trailing `s` at all, including CJK.
+        assert_eq!(singular("agent"), "agent");
+        assert_eq!(singular("에이전트"), "에이전트");
     }
 
     #[test]
@@ -764,12 +675,8 @@ mod tests {
     }
 
     #[test]
-    fn near_duplicate_threshold_zero_or_missing_dir_is_empty() {
-        let tmp = TempDir::new().unwrap();
-        write_concept(tmp.path(), "vector-database", "id: vector-database");
-        write_concept(tmp.path(), "vector-db", "id: vector-db");
-        assert!(find_near_duplicate_concepts(&scan(tmp.path()), 0.0).is_empty());
+    fn missing_concepts_dir_yields_no_duplicates() {
         let empty = TempDir::new().unwrap();
-        assert!(find_near_duplicate_concepts(&scan(empty.path()), 0.85).is_empty());
+        assert!(find_duplicate_concepts(&scan(empty.path())).is_empty());
     }
 }

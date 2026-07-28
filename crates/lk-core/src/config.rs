@@ -257,12 +257,6 @@ impl Config {
                 "graph.metrics.min_hub_degree must be >= 1".into(),
             ));
         }
-        if !(0.0..=1.0).contains(&self.graph.metrics.concept_near_duplicate_threshold) {
-            return Err(ConfigError::Validation(format!(
-                "graph.metrics.concept_near_duplicate_threshold must be in [0.0, 1.0], got {}",
-                self.graph.metrics.concept_near_duplicate_threshold
-            )));
-        }
         if self.graph.cluster.min_community_size == 0 {
             return Err(ConfigError::Validation(
                 "graph.cluster.min_community_size must be >= 1".into(),
@@ -1111,10 +1105,6 @@ pub struct GraphMetricsConfig {
     pub min_hub_degree: usize,
     /// Page ids never reported as orphans (e.g. index/MOC pages).
     pub orphan_exclude: Vec<String>,
-    /// Sørensen-Dice similarity (on separator-stripped slugs) at or above which two
-    /// concept slugs are reported as near-duplicate merge candidates by `lint`.
-    /// Higher = fewer, higher-confidence pairs.
-    pub concept_near_duplicate_threshold: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1138,12 +1128,6 @@ impl Default for GraphMetricsConfig {
         Self {
             min_hub_degree: 5,
             orphan_exclude: Vec::new(),
-            // 0.6 catches genuine spelling variants (`vector-db` ~ `vector-database`
-            // = 0.6) that fragment the graph. Version families (`gpt-4`/`gpt-4o`) are
-            // excluded separately by `is_version_variant`, so this can favor recall
-            // without the model-version false positives that would otherwise need a
-            // higher cutoff.
-            concept_near_duplicate_threshold: 0.6,
         }
     }
 }
@@ -1292,18 +1276,6 @@ sources:
         assert!(
             ok.validate().is_ok(),
             "a name merely containing '..' (no parent segment) must be allowed"
-        );
-    }
-
-    #[test]
-    fn near_duplicate_threshold_default_catches_real_spelling_variants() {
-        // 0.6 is deliberate: `vector-db` ~ `vector-database` scores exactly 0.6, and
-        // version families are excluded separately by `is_version_variant`, so the
-        // default favors recall without model-version false positives. A bump to 0.7
-        // would silently stop catching that canonical variant — trip this test first.
-        assert_eq!(
-            GraphMetricsConfig::default().concept_near_duplicate_threshold,
-            0.6
         );
     }
 

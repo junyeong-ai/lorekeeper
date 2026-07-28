@@ -16,7 +16,7 @@ on-disk state, never from a cached snapshot.
   for display (e.g. `BacklinksSyncResult` → `BacklinksSyncReport`).
 - **Config**: `config.yaml` `graph:` section (`GraphConfig` in lk-core).
   `scope.dirs` (derived from `vault.dirs.wiki` when absent), `metrics.*`
-  (`min_hub_degree`, `orphan_exclude`, `concept_near_duplicate_threshold`), `cluster.*`.
+  (`min_hub_degree`, `orphan_exclude`), `cluster.*`.
   All `deny_unknown_fields`. Validated: relative, no `..`.
 - **Link resolution happens at scan time** (`scan::parse_file`): every internal inline
   markdown-link destination is resolved against its page's own location
@@ -112,10 +112,11 @@ on-disk state, never from a cached snapshot.
   LLM confirms genuine relationships before any edge is written. `## Sources`
   (citation-derived, `backlinks-sync`) is the only machine-maintained concept relation.
 - **`concept_lint::scan_concept_pages`** reads `{wiki}/concepts/*.md` ONCE into `Vec<ConceptPage>`
-  (slug = file stem, path, category, body), sorted by slug. The three concept lints below
-  are pure functions over `&[ConceptPage]` — `graph lint` walks the concepts dir a single
-  time, not once per check. A page with malformed frontmatter still yields one (slug from file
-  stem, no category, empty body) so slug-only checks see it while content checks skip it.
+  (slug = file stem, path, category, `names` = slug + `title` + `aliases`, body), sorted by
+  slug. The three concept lints below are pure functions over `&[ConceptPage]` — `graph lint`
+  walks the concepts dir a single time, not once per check. A page with malformed frontmatter
+  still yields one (slug from file stem, no category, slug-only names, empty body) so
+  slug-only checks see it while content checks skip it.
 - **`concept_lint::find_invalid_categories`**: surfaces concept pages whose `category`
   frontmatter value is not in `config.concepts.categories[].id`. The ingest
   pipeline strips invalid categories synchronously, but queue-mode concept
@@ -125,20 +126,27 @@ on-disk state, never from a cached snapshot.
   list (categorisation off) suppresses every finding. Pages without a
   `category` field are not flagged — that is the documented uncategorised
   state.
-- **`concept_lint::find_near_duplicate_concepts`**: reports concept-slug pairs whose
-  Sørensen-Dice similarity (on separator-stripped slugs) ≥
-  `graph.metrics.concept_near_duplicate_threshold` — variant-spelling
-  duplicates (`vector-db` ~ `vector-database`) the LLM dedup hint missed. Digit-boundary
-  version variants (`gpt-4`/`gpt-4o`, `claude-3`/`claude-3-5`) are deliberately distinct
-  concepts and are skipped (`is_version_variant`) — that orthogonal exclusion is why the
-  threshold can favor recall without model-version false positives. Short slugs
-  (deslugged length < `SHORT_SLUG_LEN`) are flagged only on an EXACT deslug match, never
-  on partial overlap: below that length a slug has only a bigram or two, so one coincidental
-  shared bigram inflates Dice (`rag`/`raga`) — length noise, not meaning — while exact matches
-  (`ai`/`a-i`) still surface. Pairs are found via a **character-bigram inverted index** (only
-  slugs sharing a bigram are scored), so the scan is near-linear, not O(n²), as the vault
-  grows — safe because Sørensen-Dice > 0 implies a shared bigram. Read-only merge candidates
-  surfaced in `graph lint`; a human decides.
+- **`concept_lint::find_duplicate_concepts` reports NAME COLLISIONS, not similarity.**
+  Each page claims a set of names — its slug, `title`, and every `aliases` entry — and a
+  finding is two pages claiming one name. `identity_keys` reduces a name through
+  `lk_core::concept::slugify` (the same normalization that mints page ids and the
+  pipeline's alias index, so a collision here is exactly a name that routes ambiguously
+  there) to two exact keys: the singularized token MULTISET (`doc-hub` ~ `docs-hub`,
+  order/case/separator/plural) and the tokens CONCATENATED (`vector-db` ~ `vectordb`,
+  separator placement). Both keys are hash-grouped, so the scan is linear.
+  **There is deliberately no score and no threshold.** The predecessor scored slug
+  character bigrams (Sørensen-Dice ≥ `concept_near_duplicate_threshold`, since removed
+  from config); measured on a 1,599-concept vault it returned 298 findings containing one
+  real duplicate. Character overlap is morphology, so it fires on shared namespace
+  prefixes (`amazon-sagemaker-ai` ~ `amazon-sagemaker-hyperpod`), shared head nouns
+  (`robot-foundation-model` ~ `tabular-foundation-model`) and coincidence (`agentops` ~
+  `gentoo`), while missing acronym pairs outright — and no cutoff separates those from
+  duplicates, because the difference is meaning. A permanently-red lint is worse than a
+  silent one. The exact rule also needs no `is_version_variant` escape hatch: `gpt-4`/
+  `gpt-5` and `gemini-3-1-flash-lite`/`gemini-3-5-flash-lite` simply claim different
+  names. Semantic equivalence (`k8s` ↔ `kubernetes`) is out of scope BY CONSTRUCTION and
+  belongs to `/lore-wiki audit` layer 5, which reads meaning. Read-only; `graph merge` is
+  the remedy a human triggers.
 - **`concept_lint::find_unresolved_conflicts`**: reports concept pages whose body carries an
   unresolved `> [!conflict]` callout — a contradiction `/lore-wiki audit` flagged
   between cited sources. The marker lives in the LLM-owned synthesis body (NOT

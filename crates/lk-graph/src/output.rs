@@ -3,7 +3,7 @@ use serde::Serialize;
 use crate::audit::AuditCandidate;
 use crate::backlinks::{BacklinksSyncResult, ConceptUpdate};
 use crate::cluster::{ClusterResult, LinkSuggestion};
-use crate::concept_lint::{InvalidCategoryConcept, NearDuplicateConcept, UnresolvedConflict};
+use crate::concept_lint::{DuplicateConcept, InvalidCategoryConcept, UnresolvedConflict};
 use crate::export::GraphExport;
 use crate::graph::{BrokenLink, HubPageReference};
 use crate::merge::MergeResult;
@@ -61,7 +61,7 @@ pub struct LintReport {
     pub broken: Vec<BrokenLink>,
     pub index: IndexSyncReport,
     pub invalid_categories: Vec<InvalidCategoryConcept>,
-    pub near_duplicate_concepts: Vec<NearDuplicateConcept>,
+    pub duplicate_concepts: Vec<DuplicateConcept>,
     pub unresolved_conflicts: Vec<UnresolvedConflict>,
     pub findings: usize,
 }
@@ -231,13 +231,10 @@ pub fn print_lint(r: &LintReport) {
         }
     }
 
-    if !r.near_duplicate_concepts.is_empty() {
-        println!(
-            "\nNear-duplicate concepts ({}):",
-            r.near_duplicate_concepts.len()
-        );
-        for d in &r.near_duplicate_concepts {
-            println!("  {} ~ {}  ({:.2})", d.a, d.b, d.similarity);
+    if !r.duplicate_concepts.is_empty() {
+        println!("\nDuplicate concepts ({}):", r.duplicate_concepts.len());
+        for d in &r.duplicate_concepts {
+            println!("  {} ~ {}  (\"{}\" = \"{}\")", d.a, d.b, d.a_name, d.b_name);
         }
     }
 

@@ -1,8 +1,8 @@
 //! Concept merge: fold a duplicate concept page into a canonical one.
 //!
-//! `find_near_duplicate_concepts` (in `concepts`) only *reports* variant-spelling
-//! duplicates (`vector-db` ~ `vector-database`); this module is the execution
-//! counterpart that resolves one. It repoints every link that targets the `from`
+//! `concept_lint::find_duplicate_concepts` only *reports* pages that answer to one
+//! name (`doc-hub` ~ `docs-hub`); this module is the execution counterpart a human
+//! triggers to resolve one. It repoints every link that targets the `from`
 //! concept at `into`, folds `from`'s names (title + aliases) into `into`'s `aliases`
 //! so the synonym stays in the concept registry the LLM dedups against, then deletes
 //! the now-orphaned `from` page. The `## Sources` body and `source_count` are
