@@ -179,15 +179,30 @@ async fn apply(
     let mut origin_pages: Vec<(PathBuf, String)> = Vec::new();
     let mut consumed: Vec<PathBuf> = Vec::new();
 
+    // Everything a result can get wrong is that result's problem, not the batch's: aborting
+    // would strand every other valid extraction in the run. Each failure leaves the file in
+    // place so a fixed page picks it up next time, and the run still exits non-zero.
     for (path, result) in &results {
+        let fail = |reason: String| {
+            eprintln!(
+                "  ✗ {} ({}): {reason}",
+                result.task_id, result.target.vault_path
+            );
+        };
+
+        let Some(rel_path) = resolve_target_path(&result.target.vault_path) else {
+            fail("target path escapes the vault root".into());
+            failed += 1;
+            continue;
+        };
         match classify_against_page(
             &vault_root,
-            &result.target.vault_path,
+            &rel_path,
             result.target.kind,
             &result.cache_hash,
-        )? {
-            TaskStatus::Current => {}
-            status => {
+        ) {
+            Ok(TaskStatus::Current) => {}
+            Ok(status) => {
                 eprintln!(
                     "  dropped {} ({}): {}",
                     result.task_id,
@@ -198,13 +213,20 @@ async fn apply(
                 consumed.push(path.clone());
                 continue;
             }
+            Err(e) => {
+                fail(e.to_string());
+                failed += 1;
+                continue;
+            }
         }
-        let rel_path = PathBuf::from(&result.target.vault_path);
-        let content = std::fs::read_to_string(vault_root.join(&rel_path))
-            .map_err(|e| miette::miette!("read {}: {e}", rel_path.display()))?;
-        // A result whose page cannot receive links is that result's problem, not the
-        // batch's: aborting here would strand every other valid extraction in the run.
-        // The file is LEFT in place so a fixed page picks it up next time.
+        let content = match std::fs::read_to_string(vault_root.join(&rel_path)) {
+            Ok(c) => c,
+            Err(e) => {
+                fail(format!("read {}: {e}", rel_path.display()));
+                failed += 1;
+                continue;
+            }
+        };
         match pipeline.apply_concept_result(result, &content).await {
             Ok(rewritten) => {
                 origin_pages.push((rel_path, rewritten));
@@ -212,7 +234,7 @@ async fn apply(
                 applied += 1;
             }
             Err(e) => {
-                eprintln!("  ✗ {} ({}): {e}", result.task_id, result.target.vault_path);
+                fail(e.to_string());
                 failed += 1;
             }
         }
@@ -458,12 +480,25 @@ async fn prune(
 /// pipeline stamped into the target page's `llm_inputs.<key>` frontmatter. This is
 /// the deterministic form of the stale-task guard `/lore-process` must honor.
 fn classify_task(vault_root: &Path, task: &QueueTask) -> miette::Result<TaskStatus> {
-    classify_against_page(
-        vault_root,
-        &task.target.vault_path,
-        task.target.kind,
-        &task.cache_hash,
-    )
+    let rel_path = resolve_target_path(&task.target.vault_path).ok_or_else(|| {
+        miette::miette!(
+            "task {}: target `{}` escapes the vault root",
+            task.task_id,
+            task.target.vault_path
+        )
+    })?;
+    classify_against_page(vault_root, &rel_path, task.target.kind, &task.cache_hash)
+}
+
+/// Resolve a task or result `target.vault_path` to the vault-relative path it addresses,
+/// or `None` when it escapes the root.
+///
+/// A result file is written by the drain session, so this is the boundary where untrusted
+/// text becomes a filesystem path that is read and then WRITTEN. It goes through the same
+/// lexical rule as every other vault address (`.`/`..` folded, absolute and escaping forms
+/// refused) rather than being joined onto the root as-is.
+fn resolve_target_path(vault_path: &str) -> Option<PathBuf> {
+    lk_core::link::resolve_dest(Path::new(""), vault_path)
 }
 
 /// The queue's one staleness rule: a task or result is current exactly when the page still
@@ -471,11 +506,11 @@ fn classify_task(vault_root: &Path, task: &QueueTask) -> miette::Result<TaskStat
 /// are classified by the same code so they can never disagree about what "stale" means.
 fn classify_against_page(
     vault_root: &Path,
-    vault_path: &str,
+    rel_path: &Path,
     kind: lk_queue::TargetKind,
     cache_hash: &str,
 ) -> miette::Result<TaskStatus> {
-    let page_path = vault_root.join(vault_path);
+    let page_path = vault_root.join(rel_path);
     let content = match std::fs::read_to_string(&page_path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -502,6 +537,32 @@ mod tests {
     use super::*;
     use lk_queue::{TargetKind, TaskKind, TaskTarget};
     use tempfile::TempDir;
+
+    #[test]
+    fn a_target_path_never_addresses_anything_outside_the_vault() {
+        // Result files are written by the drain session; this is the boundary where that
+        // text becomes a path the command reads and then WRITES. The property is
+        // containment: whatever a result asks for, the address either lands inside the
+        // vault or is refused outright.
+        for escaping in ["../outside.md", "daily/../../outside.md", "wiki/../../x.md"] {
+            assert_eq!(resolve_target_path(escaping), None, "{escaping}");
+        }
+        // A leading `/` is the OKF vault-root-relative form, not a filesystem absolute —
+        // it addresses a page inside the vault, so it resolves rather than escaping.
+        assert_eq!(
+            resolve_target_path("/etc/passwd"),
+            Some(PathBuf::from("etc/passwd"))
+        );
+        // Ordinary addresses resolve, and `.`/`..` inside the vault fold normally.
+        assert_eq!(
+            resolve_target_path("daily/src/2026-05-23.md"),
+            Some(PathBuf::from("daily/src/2026-05-23.md"))
+        );
+        assert_eq!(
+            resolve_target_path("daily/src/../other/p.md"),
+            Some(PathBuf::from("daily/other/p.md"))
+        );
+    }
 
     fn task(vault_path: &str, hash: &str) -> QueueTask {
         QueueTask {
