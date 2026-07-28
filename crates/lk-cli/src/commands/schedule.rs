@@ -111,16 +111,24 @@ fn print_cron(bin: &str, cwd: &std::path::Path, jobs: &[Job]) {
 /// Jobs are emitted rather than written so the operator reviews before installing — these
 /// files run unattended with the user's credentials.
 fn print_launchd(bin: &str, cwd: &std::path::Path, jobs: &[Job]) -> miette::Result<()> {
-    // launchd execs the program directly and does NOT search a PATH, so a bare name yields
-    // a job that fails to spawn with nothing but a cryptic status in `launchctl print`.
-    // Refuse up front rather than emit a plist that looks right and never runs.
-    if !bin.contains('/') {
+    // Every path in a plist must be absolute. launchd execs the program directly and does
+    // NOT search a PATH, and it expands no shell syntax — neither a bare name nor a `~` nor
+    // a relative path resolves. Each yields a job that fails to spawn with nothing but a
+    // cryptic status in `launchctl print`, so both are refused up front rather than emitted
+    // as a plist that looks right and never runs.
+    if !std::path::Path::new(bin).is_absolute() {
         return Err(miette::miette!(
             "launchd needs an absolute path to the binary — it does not search PATH.\n\
              Re-run with: lore schedule --format launchd --bin \"$(command -v {bin})\""
         ));
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| "~".into());
+    let home = std::env::var("HOME").map_err(|_| {
+        miette::miette!(
+            "HOME is unset, so the absolute log and LaunchAgents paths a plist needs \
+             cannot be resolved.\nRun `lore schedule --format launchd` from a normal \
+             user session."
+        )
+    })?;
     println!("# lorekeeper scheduled tasks (launchd)");
     println!("#");
     println!("# launchd does not create the log directory, and a job whose StandardOutPath");
@@ -306,6 +314,25 @@ fn shell_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launchd_refuses_a_binary_path_it_cannot_exec() {
+        // launchd resolves neither a PATH lookup nor a relative path, so both are refused.
+        // A relative path is the one that would otherwise slip through a has-a-slash check
+        // and emit a plist that looks right.
+        let jobs = [Job {
+            name: "daily".into(),
+            schedule: "0 9 * * *".into(),
+            args: vec!["ingest".into()],
+        }];
+        let cwd = std::path::Path::new("/vault");
+        for bin in ["lore", "./lore", "target/release/lore", "../bin/lore"] {
+            assert!(
+                print_launchd(bin, cwd, &jobs).is_err(),
+                "`{bin}` is not something launchd can exec"
+            );
+        }
+    }
 
     #[test]
     fn escape_simple() {
