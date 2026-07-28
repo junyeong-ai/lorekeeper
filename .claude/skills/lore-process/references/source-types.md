@@ -30,6 +30,15 @@ the work-log), apply the generic guidance without a type bias.
 ### `jira`
 - Summarize key task status changes and deliverables
 
+### `confluence`
+- A wiki page the user WROTE or last edited — treat it as their own authored
+  reference, not as news: preserve its argument and structure, distil to what a
+  reader would need to act on
+- An edit re-enters the pipeline as a new event (the page version is part of its
+  identity), so summarize the page AS IT NOW READS; never describe the change
+- Long pages carry headings, tables and code — keep the load-bearing specifics
+  (names, values, thresholds, endpoints) and drop navigation scaffolding
+
 ### `google-drive`, `manual`
 - Treat as curated documents: preserve the author's structure, distill to the
   core argument and supporting detail
@@ -41,4 +50,7 @@ Use `input.source_type` to scope what counts as a concept:
 - `rss` → techniques, products, announcements
 - `jira` → issues, epics
 - `google-calendar` → recurring meetings, projects and people discussed
+- `confluence` → the systems, contracts and decisions the page documents; a page
+  the user authored is usually the definitive statement of them, so prefer its
+  naming over a synonym seen elsewhere
 - `google-drive` / `manual` → document subject matter

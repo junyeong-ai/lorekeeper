@@ -8,6 +8,7 @@
 
 use std::path::PathBuf;
 
+use lk_core::config::SourceType;
 use lk_queue::{TargetKind, TaskKind};
 use strum::IntoEnumIterator;
 
@@ -51,6 +52,32 @@ fn queue_format_documents_every_task_kind_wire_name() {
             "references/queue-format.md must list kind {needle} \
              (TaskKind::{kind:?} changed without updating the skill docs?)"
         );
+    }
+}
+
+/// A task carries `input.source_type` and the skill is told to key its synthesis and
+/// extraction strategy on it, so a source type with no entry leaves the skill guessing on
+/// every page that source ever writes. `confluence` shipped exactly that way — added as a
+/// source type in v0.11.0 and absent from both sections of the reference until a drain run
+/// went looking for it.
+#[test]
+fn source_types_documents_every_source_type_in_both_sections() {
+    let doc = read_skill_file("references/source-types.md");
+    let (summarize, extract) = doc
+        .split_once("## Extract-concepts")
+        .expect("references/source-types.md must keep its two per-type sections");
+    for source in SourceType::iter() {
+        let needle = format!(
+            "`{}`",
+            serde_json::to_value(source).unwrap().as_str().unwrap()
+        );
+        for (section, name) in [(summarize, "Summarize"), (extract, "Extract-concepts")] {
+            assert!(
+                section.contains(&needle),
+                "references/source-types.md § {name} must give a strategy for {needle} \
+                 (SourceType::{source:?} added without updating the skill docs?)"
+            );
+        }
     }
 }
 
