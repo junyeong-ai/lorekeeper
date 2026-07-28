@@ -191,7 +191,17 @@ fn content_len(lines: &[&str]) -> usize {
 /// trailing blanks and comments stay with whatever follows them rather than being swallowed
 /// by a rewrite.
 fn continuation_span(lines: &[&str], start: usize, end: usize) -> Option<std::ops::Range<usize>> {
-    let base = indent_of(unterminated(lines[start])).len();
+    let head = unterminated(lines[start]);
+    let base = indent_of(head).len();
+    // Whether this entry's value is a BLOCK SCALAR (`key: |`, `key: >-`, …). That is the one
+    // place a `#` line is value text rather than a comment, and it is decided by the key line
+    // rather than by indentation — indentation cannot tell a comment sitting inside a value
+    // apart from one merely indented past it.
+    let block_scalar = head
+        .split_once(':')
+        .map(|(_, value)| value.trim_start())
+        .is_some_and(|value| value.starts_with('|') || value.starts_with('>'));
+
     let (mut first, mut last) = (None, None);
     for (i, line) in lines.iter().enumerate().take(end).skip(start + 1) {
         let line = unterminated(line);
@@ -200,17 +210,14 @@ fn continuation_span(lines: &[&str], start: usize, end: usize) -> Option<std::op
         if trimmed.is_empty() {
             continue;
         }
+        // Outside a block scalar a comment belongs to whatever FOLLOWS it, at any
+        // indentation: it neither ends this entry nor is carried away with it.
+        if trimmed.starts_with('#') && !block_scalar {
+            continue;
+        }
         if indent_of(line).len() <= base {
-            // At or outside the entry's own indentation, a comment belongs to whatever
-            // follows it and anything else starts the next entry.
-            if trimmed.starts_with('#') {
-                continue;
-            }
             break;
         }
-        // Indented deeper, so it is part of this entry's value — a `#` line included, which
-        // inside a block scalar is content rather than a comment. Leaving it behind would
-        // turn value text into a comment, or split the scalar around an inserted key.
         first.get_or_insert(i);
         last = Some(i);
     }
@@ -884,6 +891,42 @@ mod llm_input_tests {
         let doc = "---\nid: d\nllm_inputs: \n  summary: \"a\"\n---\n\nbody\n";
         let out = stamp(doc, "concepts_done", "z").expect("mapping must still be found");
         assert!(out.contains("  concepts_done: \"z\""), "{out}");
+    }
+
+    #[test]
+    fn a_comment_indented_past_the_children_is_still_a_comment() {
+        // Valid YAML, and a plausible human edit ("do not edit" notes go above the block).
+        // Inferring the children's indentation from it puts the marker at the comment's
+        // depth, which leaves a duplicate key and a page that no longer parses.
+        let doc = "---\nid: d\nllm_inputs:\n      # written by lore; do not edit\n  summary: \"a\"\n  concepts: \"b\"\n---\n";
+        let out = stamp(doc, "concepts", "NEW").unwrap();
+        assert_eq!(
+            out.matches("concepts:").count(),
+            1,
+            "must replace in place, not duplicate at the comment's indent: {out}"
+        );
+        let page = lk_core::frontmatter::parse_page(&out).expect("page must still parse");
+        assert_eq!(
+            page.frontmatter
+                .get("llm_inputs")
+                .and_then(|v| v.get("concepts"))
+                .and_then(|v| v.as_str()),
+            Some("NEW")
+        );
+        assert!(out.contains("      # written by lore"), "{out}");
+    }
+
+    #[test]
+    fn a_comment_trailing_a_block_value_survives_its_replacement() {
+        // The comment annotates the list, but it is user-authored text: deleting it as part
+        // of rewriting the value is a silent loss. Only a block SCALAR carries `#` content.
+        let doc =
+            "---\naliases:\n  - RAG\n  # human note: keep RAG spelled out\nsource_count: 2\n---\n";
+        let out = super::set_frontmatter_field(doc, "aliases", "[]").unwrap();
+        assert_eq!(
+            out,
+            "---\naliases: []\n  # human note: keep RAG spelled out\nsource_count: 2\n---\n"
+        );
     }
 
     #[test]

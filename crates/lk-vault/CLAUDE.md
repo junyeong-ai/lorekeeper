@@ -66,6 +66,17 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   end of the document and appending it to the body, where `llm_cache` would never read it and
   the task would re-enqueue forever, growing the page each round. Callers turn `None` into a
   named error rather than a silent no-op.
+- **What belongs to an entry is `continuation_span`'s answer**, and every defect found in
+  these writers has been a wrong one. Each rule below fixed a page-corrupting bug, so change
+  none of them casually: a continuation is a line indented DEEPER than the entry's own line
+  (one function serves a top-level key and an `llm_inputs` child — a sibling ends the latter,
+  a column-0 key the former); a BLANK line neither ends an entry nor belongs to it; a COMMENT
+  belongs to whatever FOLLOWS it, at ANY indentation — except inside a BLOCK SCALAR
+  (`key: |`, `key: >`), the one place a `#` line is value text, which is why that is decided
+  from the key line's indicator and never from indentation. Replacing a key takes its whole
+  span, so a block-style value never outlives the key it belonged to. And `set_llm_input`
+  reads the child indentation from the first REAL child, never from the span's first line,
+  which may be a comment indented past them.
 - **`VaultWriter::write_page_sync`** calls `lk_core::fs::write_atomic` directly (no tokio
   runtime). Used by graph commands — the same single atomic-write implementation as the
   async path, not a separate one.
