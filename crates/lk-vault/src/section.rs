@@ -277,10 +277,18 @@ pub fn set_llm_input(content: &str, key: &str, value: &str) -> Option<String> {
         .map(|i| i + block.start)?;
 
     let children = continuation_span(&lines, parent_idx, block.end);
+    // The span reaches everything under the mapping, grandchildren included. The marker
+    // lives one level down, so only that level is searched — otherwise a same-named key
+    // nested deeper would be matched first and the real child left stale.
+    let child_indent = children
+        .clone()
+        .map(|s| indent_of(unterminated(lines[s.start])).len());
     let prefix = format!("{key}:");
     let existing = children.clone().and_then(|span| {
-        span.into_iter()
-            .find(|&i| unterminated(lines[i]).trim_start().starts_with(&prefix))
+        span.into_iter().find(|&i| {
+            let line = unterminated(lines[i]);
+            Some(indent_of(line).len()) == child_indent && line.trim_start().starts_with(&prefix)
+        })
     });
 
     // A replacement keeps its own line's indentation; a new key joins the mapping directly
@@ -867,6 +875,19 @@ mod llm_input_tests {
         let doc = "---\nid: d\nllm_inputs: \n  summary: \"a\"\n---\n\nbody\n";
         let out = stamp(doc, "concepts_done", "z").expect("mapping must still be found");
         assert!(out.contains("  concepts_done: \"z\""), "{out}");
+    }
+
+    #[test]
+    fn a_same_named_key_nested_deeper_is_not_the_marker() {
+        // The marker lives one level under `llm_inputs`. A grandchild sharing its name must
+        // not be matched first, or the real child stays stale and the task re-enqueues.
+        let doc =
+            "---\nllm_inputs:\n  nested:\n    concepts: \"deep\"\n  concepts: \"real\"\n---\n";
+        let out = stamp(doc, "concepts", "NEW").unwrap();
+        assert_eq!(
+            out,
+            "---\nllm_inputs:\n  nested:\n    concepts: \"deep\"\n  concepts: \"NEW\"\n---\n"
+        );
     }
 
     #[test]
