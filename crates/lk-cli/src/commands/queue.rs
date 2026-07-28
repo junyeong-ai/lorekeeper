@@ -170,38 +170,17 @@ async fn apply(
     // which is the same "one bad file blocks the batch" shape, reached through I/O instead
     // of through parsing. A file that cannot be moved simply stays put and is retried.
     let unreadable = batch.unreadable.len();
+    let mut moved = 0usize;
     if unreadable > 0 {
         let corrupt_dir = queue_dir
             .join(lk_queue::RESULTS_SUBDIR)
             .join(lk_queue::CORRUPT_SUBDIR);
-        let dir_ready = dry_run || std::fs::create_dir_all(&corrupt_dir).is_ok();
-        for (path, reason) in &batch.unreadable {
-            if dry_run {
-                eprintln!("  [dry-run] would quarantine {}: {reason}", path.display());
-                continue;
-            }
-            let dest = dir_ready.then(|| free_path(&corrupt_dir, path));
-            match dest.filter(|dest| std::fs::rename(path, dest).is_ok()) {
-                Some(dest) => {
-                    eprintln!(
-                        "  quarantined {} → {}: {reason}",
-                        path.display(),
-                        dest.display()
-                    );
-                }
-                None => eprintln!(
-                    "  ✗ {} is unreadable ({reason}) and could not be moved to {}; it stays \
-                     put and will be retried",
-                    path.display(),
-                    corrupt_dir.display()
-                ),
-            }
-        }
+        moved = quarantine(&corrupt_dir, &batch.unreadable, dry_run);
     }
 
     if results.is_empty() {
         eprintln!("queue apply: no results pending");
-        return finish_apply(0, unreadable, dry_run);
+        return finish_apply(0, unreadable, moved, dry_run);
     }
 
     let ctx = std::sync::Arc::new(
@@ -298,7 +277,7 @@ async fn apply(
              {} concept page(s)",
             concept_pages.len()
         );
-        return finish_apply(failed, unreadable, dry_run);
+        return finish_apply(failed, unreadable, moved, dry_run);
     }
 
     // Concept pages before origin pages. A crash between the two then leaves concept pages
@@ -326,31 +305,92 @@ async fn apply(
          {} concept page(s)",
         concept_pages.len()
     );
-    finish_apply(failed, unreadable, dry_run)
+    finish_apply(failed, unreadable, moved, dry_run)
 }
 
 /// Exit non-zero when anything needs a human: a retryable failure, or a file that could not
 /// be parsed. `unreadable` counts every such file whether or not it was successfully moved —
 /// one left in place still needs attention — while the per-file lines above say what actually
 /// happened to each, which under `--dry-run` is nothing.
-fn finish_apply(failed: usize, unreadable: usize, dry_run: bool) -> miette::Result<()> {
-    let fate = if dry_run { "would move" } else { "moved" };
+fn finish_apply(
+    failed: usize,
+    unreadable: usize,
+    moved: usize,
+    dry_run: bool,
+) -> miette::Result<()> {
+    // The last line of the run is what a pipeline log ends on, so it states what actually
+    // happened to the files rather than what was attempted: under `--dry-run` nothing moved,
+    // and a move can also fail, in which case the file is still sitting in `results/`.
+    let fate = match (dry_run, moved, unreadable) {
+        (true, ..) => format!(
+            "none moved yet; would go to results/{}/",
+            lk_queue::CORRUPT_SUBDIR
+        ),
+        (false, m, u) if m == u => format!("moved to results/{}/", lk_queue::CORRUPT_SUBDIR),
+        (false, 0, _) => "none could be moved; they stay in results/".to_string(),
+        (false, m, u) => format!(
+            "{m} of {u} moved to results/{}/, the rest stay in results/",
+            lk_queue::CORRUPT_SUBDIR
+        ),
+    };
     match (failed, unreadable) {
         (0, 0) => Ok(()),
         (0, u) => Err(miette::miette!(
-            "{u} unreadable result file(s) ({fate} to results/{}/); the concepts they held \
-             re-enqueue on the next ingest that re-renders their page",
-            lk_queue::CORRUPT_SUBDIR
+            "{u} unreadable result file(s) ({fate}); the concepts they held re-enqueue on the \
+             next ingest that re-renders their page"
         )),
         (f, 0) => Err(miette::miette!(
             "{f} result(s) could not be applied; their files were kept for retry"
         )),
         (f, u) => Err(miette::miette!(
-            "{f} result(s) could not be applied (kept for retry); {u} unreadable file(s) \
-             ({fate} to results/{}/)",
-            lk_queue::CORRUPT_SUBDIR
+            "{f} result(s) could not be applied (kept for retry); {u} unreadable file(s) ({fate})"
         )),
     }
+}
+
+/// Move each unreadable result into `corrupt_dir`, returning how many actually moved.
+///
+/// Every failure is reported with the OS error that caused it — `EACCES` and `EXDEV` need
+/// different fixes — and none of them is fatal: a `?` here would strand every ready result
+/// behind an unwritable directory, which is the same "one bad file blocks the batch" shape
+/// this quarantine exists to remove, reached through I/O instead of through parsing. A file
+/// that cannot be moved stays put and is retried.
+fn quarantine(corrupt_dir: &Path, unreadable: &[(PathBuf, String)], dry_run: bool) -> usize {
+    if dry_run {
+        for (path, reason) in unreadable {
+            eprintln!("  [dry-run] would quarantine {}: {reason}", path.display());
+        }
+        return 0;
+    }
+    if let Err(e) = std::fs::create_dir_all(corrupt_dir) {
+        eprintln!(
+            "  ✗ cannot create {}: {e}; {} unreadable file(s) stay put and will be retried",
+            corrupt_dir.display(),
+            unreadable.len()
+        );
+        return 0;
+    }
+    let mut moved = 0;
+    for (path, reason) in unreadable {
+        let dest = free_path(corrupt_dir, path);
+        match std::fs::rename(path, &dest) {
+            Ok(()) => {
+                eprintln!(
+                    "  quarantined {} → {}: {reason}",
+                    path.display(),
+                    dest.display()
+                );
+                moved += 1;
+            }
+            Err(e) => eprintln!(
+                "  ✗ {} is unreadable ({reason}) and could not be moved to {}: {e}; it stays \
+                 put and will be retried",
+                path.display(),
+                dest.display()
+            ),
+        }
+    }
+    moved
 }
 
 /// A path in `dir` for `source`'s file name that is not already taken. Quarantine preserves
@@ -619,6 +659,45 @@ mod tests {
     use super::*;
     use lk_queue::{TargetKind, TaskKind, TaskTarget};
     use tempfile::TempDir;
+
+    #[test]
+    fn a_quarantine_that_cannot_run_leaves_the_files_and_reports_none_moved() {
+        // Housekeeping failing must not do what the housekeeping exists to prevent. A
+        // `corrupt` path that is a FILE makes `create_dir_all` fail, and the caller has to
+        // learn that nothing moved so the summary does not claim otherwise.
+        let dir = TempDir::new().unwrap();
+        let corrupt = dir.path().join("corrupt");
+        std::fs::write(&corrupt, "not a directory").unwrap();
+        let stuck = dir.path().join("ext-1.json");
+        std::fs::write(&stuck, "{trunc").unwrap();
+
+        let unreadable = vec![(stuck.clone(), "parse error".to_string())];
+        assert_eq!(quarantine(&corrupt, &unreadable, false), 0);
+        assert!(stuck.exists(), "the file must stay put for the next run");
+
+        // The summary must not say they moved.
+        let err = finish_apply(0, 1, 0, false).unwrap_err().to_string();
+        assert!(err.contains("none could be moved"), "{err}");
+        assert!(!err.contains("moved to results/corrupt/"), "{err}");
+    }
+
+    #[test]
+    fn a_dry_run_quarantine_moves_nothing_and_says_so() {
+        let dir = TempDir::new().unwrap();
+        let corrupt = dir.path().join("corrupt");
+        let file = dir.path().join("ext-1.json");
+        std::fs::write(&file, "{trunc").unwrap();
+
+        assert_eq!(
+            quarantine(&corrupt, &[(file.clone(), "parse error".into())], true),
+            0
+        );
+        assert!(file.exists());
+        assert!(!corrupt.exists(), "dry-run must not create the directory");
+
+        let err = finish_apply(0, 1, 0, true).unwrap_err().to_string();
+        assert!(err.contains("none moved yet"), "{err}");
+    }
 
     #[test]
     fn quarantine_never_overwrites_an_earlier_file() {
