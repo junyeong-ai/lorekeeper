@@ -365,8 +365,14 @@ impl Source for ConfluenceSource {
 /// errs earlier at both ends, which widens the lower bound (safe) but TIGHTENS the upper one:
 /// a single day of slack there resolves before `max` whenever the profile timezone sits east
 /// of the vault's, silently dropping the tail of the target day. Two days of slack covers the
-/// worst inhabited offset with hours to spare, and under any looser resolution it is simply a
-/// wider superset — so the bound holds without depending on which reading is right.
+/// worst inhabited offset with ten hours to spare. Both bounds are proven against start-of-day
+/// resolution, which is what Atlassian documents; the UPPER one additionally holds under any
+/// later resolution, since a later cutoff only widens it.
+///
+/// Ordered ASCENDING so the `max_pages` cap, which keeps the first results, spends its budget
+/// on the target window and discards the padding after it. Descending would fill the budget
+/// with the two padding days that sort newest and truncate the very day being ingested. The
+/// pipeline sorts events canonically before rendering, so this order is not otherwise visible.
 ///
 /// Exactness matters beyond accuracy here. `day_window` returns bounds on day boundaries, so
 /// a correctly-cut batch holds only WHOLE days; Confluence is non-streaming, and the pipeline
@@ -380,7 +386,7 @@ fn build_windowed_cql(base: &str, min: jiff::Timestamp, max: jiff::Timestamp) ->
     let forward = jiff::SignedDuration::from_hours(48);
     format!(
         "({base}) AND lastModified >= \"{}\" AND lastModified <= \"{}\" \
-         ORDER BY lastModified DESC",
+         ORDER BY lastModified ASC",
         format_cql_date(min.checked_sub(back).unwrap_or(min)),
         format_cql_date(max.checked_add(forward).unwrap_or(max)),
     )
@@ -575,7 +581,7 @@ mod tests {
         assert!(cql.starts_with("(type = page AND contributor = currentUser())"));
         assert!(cql.contains(r#"lastModified >= "2026/07/25""#), "{cql}");
         assert!(cql.contains(r#"lastModified <= "2026/07/29""#), "{cql}");
-        assert!(cql.ends_with("ORDER BY lastModified DESC"));
+        assert!(cql.ends_with("ORDER BY lastModified ASC"));
         // A wall clock in the literal would re-introduce the timezone assumption.
         assert!(!cql.contains(':'), "date-only literal expected: {cql}");
     }
