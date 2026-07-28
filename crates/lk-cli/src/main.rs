@@ -65,11 +65,15 @@ enum Command {
         #[command(subcommand)]
         cmd: commands::config::ConfigCommand,
     },
-    /// Print crontab entries (ingest, synthesis, maintenance)
+    /// Print scheduled-task definitions (ingest, synthesis, maintenance)
     Schedule {
         /// Override the binary path used in the generated entries (default: "lore")
         #[arg(long, default_value = "lore")]
         bin: String,
+        /// Output format. `launchd` is preferred on macOS: it runs a job missed during
+        /// sleep once the machine wakes, whereas cron drops it.
+        #[arg(long, value_enum, default_value_t = commands::schedule::Format::Cron)]
+        format: commands::schedule::Format,
     },
     /// Generate wiki/AGENTS.md — single source of truth for page formats
     Schema {
@@ -160,7 +164,7 @@ async fn main() -> miette::Result<()> {
         Command::Health { strict } => commands::health::run(&opts, strict).await,
         Command::Doctor => commands::doctor::run(&opts).await,
         Command::Performance => commands::performance::run(&opts).await,
-        Command::Schedule { bin } => commands::schedule::run(&opts, &bin).await,
+        Command::Schedule { bin, format } => commands::schedule::run(&opts, &bin, format).await,
         Command::Maintenance => commands::maintenance::run(&opts).await,
         Command::Graph { .. } => unreachable!(),
         Command::Wiki { cmd } => commands::wiki::run(&opts, cmd).await,
