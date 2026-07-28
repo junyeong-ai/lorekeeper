@@ -349,9 +349,25 @@ impl Source for ConfluenceSource {
                     items.truncate(p.max_pages);
                     break;
                 }
+                // Exhausting the budget with NOTHING kept is a different failure from a
+                // partial one, and worth saying so: the query matched more than the budget
+                // in padding alone, so the target window was never reached and the day
+                // comes back empty. It is a query-scope problem, not a transient one, so
+                // the message names the fix rather than leaving "may be incomplete".
+                crate::paging::PageStep::Exhausted if items.is_empty() => {
+                    tracing::warn!(
+                        pages = crate::paging::MAX_PAGES,
+                        "confluence: page budget exhausted before any page inside the target \
+                         window was reached — this cql matches far more than the window, so \
+                         the day will be empty. Scope it (e.g. `contributor = currentUser()`) \
+                         rather than relying on `only_my_edits` to filter afterwards."
+                    );
+                    break;
+                }
                 crate::paging::PageStep::Exhausted => {
                     tracing::warn!(
                         pages = crate::paging::MAX_PAGES,
+                        kept = items.len(),
                         "confluence: page budget exhausted before the search completed; \
                          results may be incomplete"
                     );
