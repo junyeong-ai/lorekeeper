@@ -137,7 +137,14 @@ fn unterminated(line: &str) -> &str {
 ///
 /// Sequence markers are stripped first so a list ITEM is read like the entry it holds: a
 /// keyless `- |` has no colon to look behind, and skipping it leaves its content lines to be
-/// mistaken for comments.
+/// mistaken for comments. An anchor or tag may then sit between the colon and the indicator
+/// (`key: &a |`, `- !!str >`), so the first token that is neither is the one to test.
+///
+/// Deliberately NOT a YAML parser: a key that is itself quoted AND contains a colon
+/// (`"a:b": |`) reads as no indicator here. Every writer in this repo emits plain
+/// `snake_case` keys, and the alternative is a quoting-aware tokenizer maintained against
+/// hand-edited input — more surface than the case it defends. A page like that loses a
+/// trailing comment inside the scalar; it does not become unparseable.
 fn opens_block_scalar(line: &str) -> bool {
     let mut rest = line.trim_start();
     while let Some(item) = rest.strip_prefix('-') {
@@ -147,8 +154,11 @@ fn opens_block_scalar(line: &str) -> bool {
         }
         rest = item.trim_start();
     }
-    let value = rest.split_once(':').map_or(rest, |(_, v)| v.trim_start());
-    value.starts_with('|') || value.starts_with('>')
+    let value = rest.split_once(':').map_or(rest, |(_, v)| v);
+    value
+        .split_whitespace()
+        .find(|token| !token.starts_with(['&', '!']))
+        .is_some_and(|token| token.starts_with(['|', '>']))
 }
 
 /// The terminator a written line takes, copied from the line it replaces or joins, so a
@@ -969,6 +979,16 @@ mod llm_input_tests {
         assert_eq!(
             out,
             "---\naliases: []\n  # human note: keep RAG spelled out\nsource_count: 2\n---\n"
+        );
+    }
+
+    #[test]
+    fn an_anchor_between_the_colon_and_the_indicator_does_not_hide_it() {
+        let doc = "---\nllm_inputs:\n  summary: &anch |\n    real\n    # tail\nid: d\n---\n";
+        let out = stamp(doc, "concepts_done", "z").unwrap();
+        assert_eq!(
+            out,
+            "---\nllm_inputs:\n  summary: &anch |\n    real\n    # tail\n  concepts_done: \"z\"\nid: d\n---\n"
         );
     }
 
