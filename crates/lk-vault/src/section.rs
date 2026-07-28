@@ -130,6 +130,16 @@ fn unterminated(line: &str) -> &str {
     line.trim_end_matches(['\n', '\r'])
 }
 
+/// True when this key line opens a BLOCK SCALAR (`key: |`, `key: >-`, `key: |2`, …) — the
+/// one construct whose following `#` lines are value text rather than comments. Decided from
+/// the indicator after the key's colon, since indentation cannot tell a comment sitting
+/// inside a value apart from one merely indented past it.
+fn opens_block_scalar(line: &str) -> bool {
+    line.split_once(':')
+        .map(|(_, value)| value.trim_start())
+        .is_some_and(|value| value.starts_with('|') || value.starts_with('>'))
+}
+
 /// The terminator a written line takes, copied from the line it replaces or joins, so a
 /// CRLF page does not come back with one stray LF among its lines.
 fn terminator(line: &str) -> &str {
@@ -193,14 +203,12 @@ fn content_len(lines: &[&str]) -> usize {
 fn continuation_span(lines: &[&str], start: usize, end: usize) -> Option<std::ops::Range<usize>> {
     let head = unterminated(lines[start]);
     let base = indent_of(head).len();
-    // Whether this entry's value is a BLOCK SCALAR (`key: |`, `key: >-`, …). That is the one
-    // place a `#` line is value text rather than a comment, and it is decided by the key line
-    // rather than by indentation — indentation cannot tell a comment sitting inside a value
-    // apart from one merely indented past it.
-    let block_scalar = head
-        .split_once(':')
-        .map(|(_, value)| value.trim_start())
-        .is_some_and(|value| value.starts_with('|') || value.starts_with('>'));
+    // Indentation of the key line that opened the block scalar we are currently inside, if
+    // any. A `#` line is VALUE TEXT exactly when it sits inside one, and only the nearest
+    // preceding shallower key can answer that — never the entry this span belongs to. A span
+    // over `llm_inputs:` walks its children, and `llm_inputs:` is not a block scalar even
+    // when one of them is.
+    let mut scalar = opens_block_scalar(head).then_some(base);
 
     let (mut first, mut last) = (None, None);
     for (i, line) in lines.iter().enumerate().take(end).skip(start + 1) {
@@ -210,13 +218,21 @@ fn continuation_span(lines: &[&str], start: usize, end: usize) -> Option<std::op
         if trimmed.is_empty() {
             continue;
         }
-        // Outside a block scalar a comment belongs to whatever FOLLOWS it, at any
-        // indentation: it neither ends this entry nor is carried away with it.
-        if trimmed.starts_with('#') && !block_scalar {
-            continue;
-        }
-        if indent_of(line).len() <= base {
-            break;
+        let indent = indent_of(line).len();
+        if !scalar.is_some_and(|open| indent > open) {
+            // Out of any block scalar, so this line is structure.
+            scalar = None;
+            // A comment belongs to whatever FOLLOWS it, at any indentation: it neither ends
+            // this entry nor is carried away with it.
+            if trimmed.starts_with('#') {
+                continue;
+            }
+            if indent <= base {
+                break;
+            }
+            if opens_block_scalar(line) {
+                scalar = Some(indent);
+            }
         }
         first.get_or_insert(i);
         last = Some(i);
@@ -926,6 +942,28 @@ mod llm_input_tests {
         assert_eq!(
             out,
             "---\naliases: []\n  # human note: keep RAG spelled out\nsource_count: 2\n---\n"
+        );
+    }
+
+    #[test]
+    fn a_block_scalar_child_with_no_sibling_after_it_still_owns_its_hash_lines() {
+        // The span here is over `llm_inputs:`, which is NOT a block scalar — but its child
+        // is. Reading the indicator off the entry the span belongs to answers for the parent
+        // and gets the child wrong, so the mapping ends before the scalar's trailing `#`
+        // lines: an insert lands INSIDE the value, and a replace strands them.
+        let doc = "---\nllm_inputs:\n  summary: |\n    real\n    # hashline\nid: d\n---\n";
+
+        let inserted = stamp(doc, "concepts_done", "z").unwrap();
+        assert_eq!(
+            inserted,
+            "---\nllm_inputs:\n  summary: |\n    real\n    # hashline\n  concepts_done: \"z\"\nid: d\n---\n",
+            "the new key joins after the whole scalar, not inside it"
+        );
+
+        let replaced = stamp(doc, "summary", "z").unwrap();
+        assert_eq!(
+            replaced, "---\nllm_inputs:\n  summary: \"z\"\nid: d\n---\n",
+            "replacing the child takes every line of its scalar"
         );
     }
 
