@@ -164,31 +164,35 @@ async fn apply(
     // A file that will never parse is moved out of the apply path, once and loudly. Leaving
     // it would fail this command — and so the scheduled pipeline — on every run forever,
     // while the concepts it held are re-derived anyway: its page carries no completion
-    // marker, so the next ingest re-enqueues the task.
-    let mut quarantined = 0usize;
-    if !batch.unreadable.is_empty() && !dry_run {
+    // marker, so the next ingest that re-renders that page re-enqueues the task.
+    let quarantined = batch.unreadable.len();
+    if quarantined > 0 {
         let corrupt_dir = queue_dir
             .join(lk_queue::RESULTS_SUBDIR)
             .join(lk_queue::CORRUPT_SUBDIR);
-        std::fs::create_dir_all(&corrupt_dir)
-            .map_err(|e| miette::miette!("create {}: {e}", corrupt_dir.display()))?;
-        for (path, reason) in &batch.unreadable {
-            let name = path.file_name().unwrap_or(path.as_os_str());
-            std::fs::rename(path, corrupt_dir.join(name))
-                .map_err(|e| miette::miette!("quarantine {}: {e}", path.display()))?;
-            eprintln!("  quarantined {}: {reason}", path.display());
-            quarantined += 1;
+        if !dry_run {
+            std::fs::create_dir_all(&corrupt_dir)
+                .map_err(|e| miette::miette!("create {}: {e}", corrupt_dir.display()))?;
         }
-    } else {
         for (path, reason) in &batch.unreadable {
-            eprintln!("  unreadable {}: {reason}", path.display());
-            quarantined += 1;
+            if dry_run {
+                eprintln!("  [dry-run] would quarantine {}: {reason}", path.display());
+                continue;
+            }
+            let dest = free_path(&corrupt_dir, path);
+            std::fs::rename(path, &dest)
+                .map_err(|e| miette::miette!("quarantine {}: {e}", path.display()))?;
+            eprintln!(
+                "  quarantined {} → {}: {reason}",
+                path.display(),
+                dest.display()
+            );
         }
     }
 
     if results.is_empty() {
         eprintln!("queue apply: no results pending");
-        return finish_apply(0, quarantined);
+        return finish_apply(0, quarantined, dry_run);
     }
 
     let ctx = std::sync::Arc::new(
@@ -285,7 +289,7 @@ async fn apply(
              {} concept page(s)",
             concept_pages.len()
         );
-        return finish_apply(failed, quarantined);
+        return finish_apply(failed, quarantined, dry_run);
     }
 
     // Concept pages before origin pages. A crash between the two then leaves concept pages
@@ -313,29 +317,48 @@ async fn apply(
          {} concept page(s)",
         concept_pages.len()
     );
-    finish_apply(failed, quarantined)
+    finish_apply(failed, quarantined, dry_run)
 }
 
 /// Exit non-zero when anything needs a human: a retryable failure, or a file that had to be
 /// quarantined. Quarantining is reported once — the next run is clean, since the file is no
-/// longer in the apply path.
-fn finish_apply(failed: usize, quarantined: usize) -> miette::Result<()> {
+/// longer in the apply path — so the summary says what actually happened on THIS run, which
+/// under `--dry-run` is nothing.
+fn finish_apply(failed: usize, quarantined: usize, dry_run: bool) -> miette::Result<()> {
+    let moved = if dry_run {
+        format!("would be moved to results/{}/", lk_queue::CORRUPT_SUBDIR)
+    } else {
+        format!("moved to results/{}/", lk_queue::CORRUPT_SUBDIR)
+    };
     match (failed, quarantined) {
         (0, 0) => Ok(()),
         (0, q) => Err(miette::miette!(
-            "{q} unreadable result file(s) moved to results/{}/; the concepts they held \
-             re-enqueue on the next ingest",
-            lk_queue::CORRUPT_SUBDIR
+            "{q} unreadable result file(s) {moved}; the concepts they held re-enqueue on the \
+             next ingest that re-renders their page"
         )),
         (f, 0) => Err(miette::miette!(
             "{f} result(s) could not be applied; their files were kept for retry"
         )),
         (f, q) => Err(miette::miette!(
-            "{f} result(s) could not be applied (kept for retry); {q} unreadable file(s) \
-             moved to results/{}/",
-            lk_queue::CORRUPT_SUBDIR
+            "{f} result(s) could not be applied (kept for retry); {q} unreadable file(s) {moved}"
         )),
     }
+}
+
+/// A path in `dir` for `source`'s file name that is not already taken. Quarantine preserves
+/// a file for inspection, so it must not overwrite an earlier one that happens to share a
+/// name — that would destroy the very evidence it exists to keep.
+fn free_path(dir: &Path, source: &Path) -> PathBuf {
+    let name = source.file_name().unwrap_or(source.as_os_str());
+    let candidate = dir.join(name);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let stem = source.file_stem().unwrap_or(name).to_string_lossy();
+    (1u32..)
+        .map(|n| dir.join(format!("{stem}.{n}.json")))
+        .find(|p| !p.exists())
+        .expect("an unused suffix always exists")
 }
 
 async fn count(opts: &super::GlobalOptions, root: Option<PathBuf>) -> miette::Result<()> {
