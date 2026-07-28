@@ -116,15 +116,11 @@ When `input.categories` is absent or empty, omit the field unconditionally.
 
 ## Per-kind target formatting
 
-- **`daily-concepts`**: replace the section body with one link per line —
-  `- [Concept Name]({target.concepts_dir}/{slug}.md)`. `target.concepts_dir` is
-  carried on every task (the precomputed relative path from the target page to
-  the concepts directory — concatenate, never compute paths yourself); `{slug}`
-  is the concept name slugified per AGENTS.md § Concept convergence. The display
-  text is the concept's name verbatim (any character is fine — the slug lives
-  only in the destination). Create each concept page (path from AGENTS.md) if it
-  doesn't exist, following the concept page format above, and include
-  `aliases: ["Concept Name"]` so the registry recognizes the surface form.
+- **`daily-concepts`, `document-concepts`**: nothing to format. These are the
+  `extract-concepts` kinds, and they write a RESULT FILE rather than editing the
+  target — `lore queue apply` writes both the concept pages and the origin
+  page's links, through the same merge the synchronous ingest path uses. Report
+  the concepts; the link format and slug rule are not yours to restate.
 
 - **`work-log-synthesis`**: the input text contains personal events from
   multiple sources, each prefixed with `[source_id]`. Instead of a plain

@@ -3161,6 +3161,26 @@ async fn a_grounding_from_a_later_result_still_seeds_a_new_concept_page() {
     );
 }
 
+/// A `tracing` writer that hands every line it is given back to the test.
+#[derive(Clone, Default)]
+struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CapturedLogs {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl CapturedLogs {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+}
+
 /// Two pages whose own ADDRESSES claim one identity is the state the duplicate lint exists
 /// to report, and until a human resolves it the router still has to answer. It answers
 /// deterministically — the concepts dir is read in sorted order and the last stem seen
@@ -3211,10 +3231,30 @@ async fn two_pages_claiming_one_address_resolve_deterministically() {
         }],
     };
 
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer({
+            let logs = logs.clone();
+            move || logs.clone()
+        })
+        .with_ansi(false)
+        .finish();
+    // `set_default` rather than `with_default`: the guard spans the await, and
+    // `#[tokio::test]` keeps this on one thread, so the thread-local default holds.
+    let guard = tracing::subscriber::set_default(subscriber);
     let rewritten = pipeline.apply_concept_result(&result, page).await.unwrap();
+    drop(guard);
     assert!(
         rewritten.contains("../../wiki/concepts/claude35.md"),
         "the last stem read holds the key, and it must do so every run: {rewritten}"
+    );
+    let logged = logs.text();
+    assert!(
+        logged.contains("two concept pages are addressed by the same name")
+            && logged.contains("claude-35")
+            && logged.contains("claude35"),
+        "the arbitrary winner must be said out loud, or a citation landing on the \
+         unexpected page is unexplainable:\n{logged}"
     );
     let pages = pipeline.render_concept_pages().await.unwrap();
     assert_eq!(pages.len(), 1);
@@ -3225,10 +3265,56 @@ async fn two_pages_claiming_one_address_resolve_deterministically() {
     );
 }
 
-/// The index is read from disk once per run, so a page the run itself creates has to be
-/// registered as it is committed — otherwise two spellings arriving in the SAME run each
-/// miss the other and mint rival pages, which is exactly the pair the index exists to
-/// prevent and which only a later `graph merge` could undo.
+/// The narrowest version of the same guarantee, and the one the pipeline actually
+/// exercises: `apply_concept_result` stages a whole extraction before folding any of it,
+/// so two spellings of one name inside a SINGLE result both resolve before either is
+/// committed. Registering at commit time would be too late for exactly this path.
+#[tokio::test]
+async fn two_spellings_in_one_extraction_resolve_to_one_page() {
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let config = base_config(vault);
+    std::fs::create_dir_all(vault.join("wiki").join("concepts")).unwrap();
+
+    let ctx = build_ctx(&config, Arc::new(NoopLlmClient));
+    let mut pipeline = Pipeline::new(vault, ctx);
+
+    let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
+    let reported = |name: &str| lk_queue::ReportedConcept {
+        concept: ExtractedConcept {
+            name: name.into(),
+            category: None,
+        },
+        synthesis: Some("Seeded on creation.".into()),
+    };
+    let result = lk_queue::TaskResult {
+        task_id: "ext-1".into(),
+        cache_hash: "h".into(),
+        target: lk_queue::TaskTarget {
+            vault_path: "daily/test-source/2026-05-23.md".into(),
+            kind: lk_queue::TargetKind::DailyConcepts,
+            anchor: "## Related Concepts".into(),
+            concepts_dir: "../../wiki/concepts".into(),
+        },
+        date: jiff::civil::date(2026, 5, 23),
+        concepts: vec![reported("Vector DB"), reported("VectorDB")],
+    };
+
+    let rewritten = pipeline.apply_concept_result(&result, page).await.unwrap();
+    assert!(
+        !rewritten.contains("vectordb.md"),
+        "one name spelled twice in one extraction must not mint a rival page: {rewritten}"
+    );
+    let pages = pipeline.render_concept_pages().await.unwrap();
+    let paths: Vec<String> = pages.iter().map(|p| p.path.to_string()).collect();
+    assert_eq!(pages.len(), 1, "one concept, one page: {paths:?}");
+    assert!(paths[0].ends_with("vector-db.md"), "{paths:?}");
+}
+
+/// The same guarantee across separate results in one run: the index is read from disk once,
+/// so a page the run itself created has to be findable by a later spelling — otherwise the
+/// two mint rival pages, exactly the pair the index exists to prevent and one only a later
+/// `graph merge` could undo.
 #[tokio::test]
 async fn a_page_created_earlier_in_the_run_is_found_by_a_later_spelling() {
     let dir = TempDir::new().unwrap();
