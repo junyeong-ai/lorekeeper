@@ -45,16 +45,22 @@ resolve section headings before inspecting pages.
    The two halves split on what is DECIDABLE. Layer 1 owns spelling; you own meaning.
    - **Duplicates** from layer 1's `duplicate_concepts`: two pages answering to one
      name (`vector-db` ~ `vectordb`, or an alias on one page that is another page's
-     title). Layer 1 folds only what carries no identity — case, punctuation, and where
-     the separators fall — so this is a fact, not a candidate: that name cannot route
-     deterministically, and every entry needs resolving. Recommend `lore graph merge <from> <into>`
+     title). Layer 1 folds only what carries no identity — case, punctuation, and a break
+     between letters — so this is a fact, not a candidate: one name reaches two pages, so
+     citations fragment by spelling, and every entry needs resolving. Recommend
+     `lore graph merge <from> <into>`
      followed by `lore graph backlinks-sync` (the merge rewires every link and deletes
      the `from` page; it refuses if `from` has authored prose unless `--force`, so
      salvage that prose into the survivor first). Like every audit finding the merge is
-     **surfaced, not run** — it deletes a page, so a human makes the call. When the two
-     pages turn out to be genuinely different things that merely share a name, the fix
-     is the opposite one: rename the mistaken side, or drop the alias that reaches
-     across.
+     **surfaced, not run** — it deletes a page, so a human makes the call.
+     When the two pages turn out to be genuinely DIFFERENT things that merely share a
+     name, the fix is the opposite one and it matters more than it looks: **disambiguate
+     the name itself** — rename one page (`Go (programming language)` beside `Go (board
+     game)`), or drop the alias that reaches across. Nothing downstream can tell two
+     things apart while they answer to one name: ingest routes an extraction to whichever
+     page owns it, and the loser silently accumulates none of its own mentions. Giving
+     them distinct names is what makes every later citation land correctly, and it is why
+     an encyclopedia disambiguates rather than tolerating the collision.
    - **Synonyms, abbreviations, plurals, and short forms**: layer 1 compares names, so by
      construction it cannot see two DIFFERENT names for one thing — an acronym and its
      expansion (`rag` ↔ `retrieval-augmented-generation`, `k8s` ↔ `kubernetes`), a plural
