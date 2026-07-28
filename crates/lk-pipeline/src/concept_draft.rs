@@ -103,17 +103,14 @@ impl ConceptDrafts {
     ) -> Result<ConceptIdentity, PipelineError> {
         let slug =
             slugify(name).expect("concepts are slug-filtered via has_valid_slug before merge");
-        if self.alias_index.is_none() {
-            self.alias_index = Some(build_alias_index(reader, dirs).await?);
-        }
-        let key = identity_key(name).expect("a name with a slug always has an identity");
-        let index = self
-            .alias_index
-            .as_mut()
-            .expect("the index was just built if it was absent");
+        let index = match &mut self.alias_index {
+            Some(index) => index,
+            slot => slot.insert(build_alias_index(reader, dirs).await?),
+        };
+        let key = identity_key(&slug).expect("a slug always carries an identity");
         Ok(index
             .entry(key)
-            .or_insert(ConceptIdentity {
+            .or_insert_with(|| ConceptIdentity {
                 name: name.to_string(),
                 slug,
             })
