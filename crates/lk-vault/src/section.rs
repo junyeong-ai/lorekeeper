@@ -112,14 +112,99 @@ pub fn section_body<'a>(content: &'a str, heading: &str) -> Option<&'a str> {
     Some(&content[body_start..body_end])
 }
 
-/// Set a scalar `key: value` inside the frontmatter block ONLY (between the first two
-/// `---` lines). Matches only a TOP-LEVEL (column-0) key, so a `key:` in body prose, a
-/// code fence, or nested under a mapping (e.g. `summary:` under `llm_inputs:`) is never
-/// touched. If the field is absent it is inserted just before the closing `---`, so a
-/// later run sees it and the operation is idempotent. A page with no frontmatter block is
-/// returned unchanged. A leading BOM is recognized (mirroring `parse_page`) and preserved.
-/// The single source of truth for setting a frontmatter scalar — used by `backlinks-sync`
-/// (`source_count`) and the audit marker (`audited_sources_hash`).
+/// Split off a leading BOM the way `parse_page` does, so it can be restored and the page
+/// round-trips byte-faithfully.
+fn split_bom(content: &str) -> (&str, &str) {
+    content
+        .strip_prefix('\u{feff}')
+        .map_or(("", content), |rest| ("\u{feff}", rest))
+}
+
+/// A line's leading-space indentation.
+fn indent_of(line: &str) -> &str {
+    &line[..line.len() - line.trim_start_matches(' ').len()]
+}
+
+/// Strip a line's terminator, leaving the text the YAML sees.
+fn unterminated(line: &str) -> &str {
+    line.trim_end_matches(['\n', '\r'])
+}
+
+/// The frontmatter block's key lines, as a range over `lines`: it starts after the opening
+/// `---` and ends AT the closing one, so `Range::end` doubles as the insertion point for a
+/// key the block does not have yet. `None` when the document has no frontmatter block.
+///
+/// The opening delimiter must be the document's FIRST line — the same rule as
+/// [`lk_core::frontmatter::parse_page`], so a body thematic break is never mistaken for an
+/// opener — and delimiter recognition is single-sourced with it, so the two can never
+/// disagree on what closes a block.
+///
+/// Every frontmatter writer here is bounded by this range. That is what keeps a key the
+/// writer cannot place from landing in the body instead: a write that does not fit inside
+/// the block does not happen at all.
+fn frontmatter_block(lines: &[&str]) -> Option<std::ops::Range<usize>> {
+    use lk_core::frontmatter::is_delimiter_line;
+    if !is_delimiter_line(lines.first()?) {
+        return None;
+    }
+    let closing = lines[1..].iter().position(|l| is_delimiter_line(l))? + 1;
+    Some(1..closing)
+}
+
+/// Rebuild the document with `line` written at index `at` — replacing the line already
+/// there when `replace`, otherwise inserting before it. Every other line is copied byte
+/// for byte.
+fn splice_line(bom: &str, lines: &[&str], at: usize, line: &str, replace: bool) -> String {
+    let mut out = String::with_capacity(bom.len() + line.len() + content_len(lines));
+    out.push_str(bom);
+    for existing in &lines[..at] {
+        out.push_str(existing);
+    }
+    out.push_str(line);
+    for existing in &lines[at + usize::from(replace)..] {
+        out.push_str(existing);
+    }
+    out
+}
+
+fn content_len(lines: &[&str]) -> usize {
+    lines.iter().map(|l| l.len()).sum()
+}
+
+/// Set a scalar `key: value` inside the frontmatter block ONLY. Matches a TOP-LEVEL
+/// (column-0) key, so a `key:` in body prose, a code fence, or nested under a mapping
+/// (e.g. `summary:` under `llm_inputs:`) is never touched. If the field is absent it is
+/// inserted just before the closing `---`, so a later run sees it and the operation is
+/// idempotent. A leading BOM is preserved. The single source of truth for setting a
+/// frontmatter scalar — used by `backlinks-sync` (`source_count`), the audit marker
+/// (`audited_sources_hash`) and the merge's `aliases`.
+///
+/// `value` is written verbatim, so the caller owns serialization (`serde_json::to_string`
+/// for anything that could need quoting).
+///
+/// `None` when the page has no frontmatter block — there is nowhere to put the field, and
+/// a caller that dropped it silently would report a write it never made.
+pub fn set_frontmatter_field(content: &str, key: &str, value: &str) -> Option<String> {
+    let (bom, body) = split_bom(content);
+    let lines: Vec<&str> = body.split_inclusive('\n').collect();
+    let block = frontmatter_block(&lines)?;
+
+    let prefix = format!("{key}:");
+    let existing = lines[block.clone()]
+        .iter()
+        .position(|line| line.starts_with(&prefix))
+        .map(|i| i + block.start);
+
+    let at = existing.unwrap_or(block.end);
+    Some(splice_line(
+        bom,
+        &lines,
+        at,
+        &format!("{key}: {value}\n"),
+        existing.is_some(),
+    ))
+}
+
 /// Set `llm_inputs.<key>` in a page's frontmatter, leaving every other line byte-identical.
 ///
 /// The completion markers live one level down, so [`set_frontmatter_field`] — which owns
@@ -128,126 +213,58 @@ pub fn section_body<'a>(content: &'a str, heading: &str) -> Option<&'a str> {
 /// looks filled, so a section written without one is erased by the next re-render and its
 /// task re-enqueued forever.
 ///
-/// Returns the content unchanged when there is no `llm_inputs` block — the page was not
-/// rendered by this pipeline, and inventing the block would misrepresent it as cached.
-pub fn set_llm_input(content: &str, key: &str, value: &str) -> String {
-    let Some(page) = lk_core::frontmatter::parse_page(content).ok() else {
-        return content.to_string();
-    };
-    if page
-        .frontmatter
-        .get(lk_core::frontmatter::field::LLM_INPUTS)
-        .is_none()
-    {
-        return content.to_string();
-    }
+/// `value` is written verbatim, as in [`set_frontmatter_field`].
+///
+/// `None` when the frontmatter carries no block-style `llm_inputs:` mapping to write into.
+/// Inventing one would misrepresent an unrendered page as cached, and writing the marker
+/// anywhere else would leave the loop above running forever against a page that never
+/// records completion — so the caller is told instead.
+pub fn set_llm_input(content: &str, key: &str, value: &str) -> Option<String> {
+    let (bom, body) = split_bom(content);
+    let lines: Vec<&str> = body.split_inclusive('\n').collect();
+    let block = frontmatter_block(&lines)?;
 
-    let mut out = String::with_capacity(content.len() + key.len() + value.len() + 8);
-    let mut state = LlmInputScan::Before;
-    let mut written = false;
-    let mut indent = String::from("  ");
+    let parent = format!("{}:", lk_core::frontmatter::field::LLM_INPUTS);
+    let parent_idx = lines[block.clone()]
+        .iter()
+        .position(|line| unterminated(line) == parent)
+        .map(|i| i + block.start)?;
 
-    for line in content.split_inclusive('\n') {
-        match state {
-            LlmInputScan::Before => {
-                out.push_str(line);
-                if line.trim_end() == format!("{}:", lk_core::frontmatter::field::LLM_INPUTS) {
-                    state = LlmInputScan::Inside;
-                }
-            }
-            LlmInputScan::Inside => {
-                let body = line.trim_end_matches(['\n', '\r']);
-                let child_indent: String = body.chars().take_while(|c| *c == ' ').collect();
-                let is_child = !child_indent.is_empty() && !body.trim().is_empty();
-                if is_child {
-                    indent = child_indent;
-                    if body.trim_start().starts_with(&format!("{key}:")) {
-                        out.push_str(&format!("{indent}{key}: \"{value}\"\n"));
-                        written = true;
-                    } else {
-                        out.push_str(line);
-                    }
-                } else {
-                    if !written {
-                        out.push_str(&format!("{indent}{key}: \"{value}\"\n"));
-                        written = true;
-                    }
-                    out.push_str(line);
-                    state = LlmInputScan::Past;
-                }
-            }
-            LlmInputScan::Past => out.push_str(line),
+    // The mapping's children are the indented, non-blank lines under it; the first line
+    // that is neither ends it, whether that is the next top-level key or the closing
+    // delimiter.
+    let mut children_end = parent_idx + 1;
+    while children_end < block.end {
+        let line = unterminated(lines[children_end]);
+        if indent_of(line).is_empty() || line.trim().is_empty() {
+            break;
         }
+        children_end += 1;
     }
-    if !written {
-        out.push_str(&format!("{indent}{key}: \"{value}\"\n"));
-    }
-    out
-}
+    let children = parent_idx + 1..children_end;
 
-/// Where the line-by-line rewrite currently sits relative to the `llm_inputs` block.
-enum LlmInputScan {
-    Before,
-    Inside,
-    Past,
-}
+    let prefix = format!("{key}:");
+    let existing = lines[children.clone()]
+        .iter()
+        .position(|line| unterminated(line).trim_start().starts_with(&prefix))
+        .map(|i| i + children.start);
 
-pub fn set_frontmatter_field(content: &str, key: &str, value: &str) -> String {
-    // Recognize a leading BOM the way `parse_page` does, then restore it so the page
-    // round-trips byte-faithfully.
-    let (bom, body) = content
-        .strip_prefix('\u{feff}')
-        .map_or(("", content), |rest| ("\u{feff}", rest));
-    let mut out = String::with_capacity(content.len());
-    out.push_str(bom);
-    let mut in_frontmatter = false;
-    let mut seen_open = false;
-    let mut done = false;
-    let mut first_line = true;
-    let field_prefix = format!("{key}:");
-    for line in body.split_inclusive('\n') {
-        // Delimiter recognition is single-sourced with `parse_page` so the two can't
-        // disagree on what closes a frontmatter block (e.g. trailing-whitespace tolerance).
-        let is_fence = lk_core::frontmatter::is_delimiter_line(line);
-        // The opening fence must be the document's FIRST line — same rule as
-        // `frontmatter::parse_page` — so a body thematic break (`---`) in a page with no
-        // frontmatter is never mistaken for a frontmatter opener.
-        let was_first = first_line;
-        first_line = false;
-        if is_fence && !seen_open && was_first {
-            seen_open = true;
-            in_frontmatter = true;
-            out.push_str(line);
-            continue;
-        }
-        if is_fence && in_frontmatter {
-            if !done {
-                out.push_str(key);
-                out.push_str(": ");
-                out.push_str(value);
-                out.push('\n');
-                done = true;
-            }
-            in_frontmatter = false;
-            out.push_str(line);
-            continue;
-        }
-        // Match ONLY a top-level key (no leading whitespace). An indented key nested under
-        // a mapping must be left alone — rewriting it would orphan the real top-level field
-        // and break idempotency.
-        if in_frontmatter && !done && line.starts_with(&field_prefix) {
-            out.push_str(key);
-            out.push_str(": ");
-            out.push_str(value);
-            if line.ends_with('\n') {
-                out.push('\n');
-            }
-            done = true;
-        } else {
-            out.push_str(line);
-        }
-    }
-    out
+    // A replacement keeps its own line's indentation; a new key joins the mapping at the
+    // indentation its first child already uses.
+    let at = existing.unwrap_or(children.end);
+    let indent = lines
+        .get(existing.unwrap_or(children.start))
+        .map(|line| indent_of(unterminated(line)))
+        .filter(|_| !children.is_empty())
+        .unwrap_or("  ");
+
+    Some(splice_line(
+        bom,
+        &lines,
+        at,
+        &format!("{indent}{key}: {value}\n"),
+        existing.is_some(),
+    ))
 }
 
 #[cfg(test)]
@@ -265,22 +282,22 @@ mod tests {
     #[test]
     fn set_frontmatter_field_inserts_when_absent() {
         let doc = "---\nid: x\n---\n\n# X\n";
-        let out = set_frontmatter_field(doc, "source_count", "3");
+        let out = set_frontmatter_field(doc, "source_count", "3").unwrap();
         assert_eq!(out, "---\nid: x\nsource_count: 3\n---\n\n# X\n");
     }
 
     #[test]
     fn set_frontmatter_field_replaces_when_present() {
         let doc = "---\nid: x\nsource_count: 1\n---\n\n# X\n";
-        let out = set_frontmatter_field(doc, "source_count", "9");
+        let out = set_frontmatter_field(doc, "source_count", "9").unwrap();
         assert_eq!(out, "---\nid: x\nsource_count: 9\n---\n\n# X\n");
     }
 
     #[test]
     fn set_frontmatter_field_is_idempotent() {
         let doc = "---\nid: x\n---\n\n# X\n";
-        let once = set_frontmatter_field(doc, "h", "abc");
-        let twice = set_frontmatter_field(&once, "h", "abc");
+        let once = set_frontmatter_field(doc, "h", "abc").unwrap();
+        let twice = set_frontmatter_field(&once, "h", "abc").unwrap();
         assert_eq!(once, twice);
     }
 
@@ -291,7 +308,7 @@ mod tests {
         // Windows/`autocrlf`-edited page's frontmatter block is never found and the update
         // silently no-ops inside what looks like body text. Regression guard for that.
         let doc = "---\r\nid: x\r\nsource_count: 1\r\n---\r\n\r\n# X\r\n";
-        let out = set_frontmatter_field(doc, "source_count", "9");
+        let out = set_frontmatter_field(doc, "source_count", "9").unwrap();
         // The field was updated INSIDE the frontmatter block (not appended/ignored), and the
         // body survives — i.e. the CRLF delimiters were recognized.
         assert!(
@@ -317,7 +334,7 @@ mod tests {
         // A `source_count:` in the BODY (prose or a code fence) must never be mutated —
         // only the frontmatter block between the first two `---` lines is touched.
         let doc = "---\nid: x\nsource_count: 1\n---\n\n# X\n\n```\nsource_count: 999\n```\n";
-        let out = set_frontmatter_field(doc, "source_count", "2");
+        let out = set_frontmatter_field(doc, "source_count", "2").unwrap();
         assert_eq!(
             out,
             "---\nid: x\nsource_count: 2\n---\n\n# X\n\n```\nsource_count: 999\n```\n"
@@ -329,7 +346,7 @@ mod tests {
         // First line is not a `---` fence → no frontmatter; a later body `---` thematic
         // break must not be mistaken for a frontmatter opener.
         let doc = "# X\n\nbody\n\n---\n\nmore\n";
-        assert_eq!(set_frontmatter_field(doc, "k", "v"), doc);
+        assert_eq!(set_frontmatter_field(doc, "k", "v"), None);
     }
 
     #[test]
@@ -337,7 +354,7 @@ mod tests {
         // An indented key nested under a mapping must NOT be matched; the top-level field
         // is inserted independently (keeps the op idempotent on pages with nested YAML).
         let doc = "---\nllm_inputs:\n  source_count: 5\n---\n";
-        let out = set_frontmatter_field(doc, "source_count", "2");
+        let out = set_frontmatter_field(doc, "source_count", "2").unwrap();
         assert_eq!(
             out,
             "---\nllm_inputs:\n  source_count: 5\nsource_count: 2\n---\n"
@@ -347,7 +364,7 @@ mod tests {
     #[test]
     fn set_frontmatter_field_recognizes_and_preserves_bom() {
         let doc = "\u{feff}---\nid: x\n---\n";
-        let out = set_frontmatter_field(doc, "source_count", "2");
+        let out = set_frontmatter_field(doc, "source_count", "2").unwrap();
         assert_eq!(out, "\u{feff}---\nid: x\nsource_count: 2\n---\n");
     }
 
@@ -356,7 +373,7 @@ mod tests {
         // Setting `source_count` must not touch a different key that merely shares a
         // prefix — the trailing `:` anchors the match.
         let doc = "---\nsource_count_extra: keep\nsource_count: 1\n---\n";
-        let out = set_frontmatter_field(doc, "source_count", "5");
+        let out = set_frontmatter_field(doc, "source_count", "5").unwrap();
         assert_eq!(out, "---\nsource_count_extra: keep\nsource_count: 5\n---\n");
     }
 
@@ -584,9 +601,15 @@ mod llm_input_tests {
 
     const PAGE: &str = "---\nid: d\ntype: daily\nllm_inputs:\n  summary: \"a\"\n  concepts: \"b\"\n---\n\n## Summary\n\nx\n";
 
+    /// The marker as the pipeline stamps it — the caller serializes, as for
+    /// `set_frontmatter_field`.
+    fn stamp(content: &str, key: &str, hash: &str) -> Option<String> {
+        set_llm_input(content, key, &serde_json::to_string(hash).unwrap())
+    }
+
     #[test]
     fn replaces_an_existing_marker_in_place() {
-        let out = set_llm_input(PAGE, "concepts", "z");
+        let out = stamp(PAGE, "concepts", "z").unwrap();
         assert!(out.contains("  concepts: \"z\""));
         assert!(
             out.contains("  summary: \"a\""),
@@ -597,28 +620,108 @@ mod llm_input_tests {
 
     #[test]
     fn appends_a_marker_the_block_does_not_have_yet() {
-        let out = set_llm_input(PAGE, "concepts_done", "z");
+        let out = stamp(PAGE, "concepts_done", "z").unwrap();
         assert!(out.contains("  concepts_done: \"z\""));
         assert!(out.contains("  concepts: \"b\""));
-        // The new key belongs inside the block, above the closing fence.
-        let block = out.split("---").nth(1).unwrap();
-        assert!(
-            block.contains("concepts_done"),
-            "must land inside frontmatter: {out}"
+        let page = lk_core::frontmatter::parse_page(&out).unwrap();
+        assert_eq!(
+            page.frontmatter
+                .get("llm_inputs")
+                .and_then(|v| v.get("concepts_done"))
+                .and_then(|v| v.as_str()),
+            Some("z"),
+            "the marker must be readable as frontmatter, not merely present: {out}"
         );
     }
 
     #[test]
-    fn a_page_with_no_llm_inputs_block_is_left_alone() {
-        // Inventing the block would claim the page is cached when nothing rendered it.
+    fn a_page_with_no_llm_inputs_block_is_refused() {
+        // Inventing the block would claim the page is cached when nothing rendered it;
+        // writing the marker anywhere else would leave the task re-enqueueing forever.
         let plain = "---\nid: d\n---\n\n## Summary\n\nx\n";
-        assert_eq!(set_llm_input(plain, "concepts_done", "z"), plain);
+        assert_eq!(stamp(plain, "concepts_done", "z"), None);
+    }
+
+    #[test]
+    fn a_flow_style_mapping_is_refused_rather_than_written_past() {
+        // A user template may emit `llm_inputs` as a flow mapping. There is no child line
+        // to join, so the marker cannot be placed — and a writer that fell through to the
+        // end of the document would append it to the BODY, where `llm_cache` never reads
+        // it: the task re-enqueues forever and each run appends another stray line.
+        let flow = "---\nid: d\nllm_inputs: {summary: \"a\"}\n---\n\n## Summary\n\nx\n";
+        assert_eq!(stamp(flow, "concepts_done", "z"), None);
+    }
+
+    #[test]
+    fn a_body_llm_inputs_line_is_out_of_reach() {
+        // The scan is bounded by the frontmatter block, so prose that happens to contain
+        // the parent key is not a place to write into.
+        let doc = "---\nid: d\n---\n\n## Notes\n\nllm_inputs:\n  summary: \"a\"\n";
+        assert_eq!(stamp(doc, "concepts_done", "z"), None);
     }
 
     #[test]
     fn indentation_follows_the_block_it_joins() {
         let four = "---\nid: d\nllm_inputs:\n    summary: \"a\"\n---\n\nbody\n";
-        let out = set_llm_input(four, "concepts_done", "z");
+        let out = stamp(four, "concepts_done", "z").unwrap();
         assert!(out.contains("    concepts_done: \"z\""), "{out}");
+    }
+
+    #[test]
+    fn a_sibling_key_sharing_a_prefix_is_not_overwritten() {
+        let out = stamp(PAGE, "concepts_done", "z").unwrap();
+        let out = stamp(&out, "concepts", "b2").unwrap();
+        assert!(out.contains("  concepts: \"b2\""), "{out}");
+        assert!(out.contains("  concepts_done: \"z\""), "{out}");
+    }
+
+    #[test]
+    fn stamping_the_same_value_twice_is_idempotent() {
+        let once = stamp(PAGE, "concepts_done", "z").unwrap();
+        let twice = stamp(&once, "concepts_done", "z").unwrap();
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn a_following_top_level_key_bounds_the_mapping() {
+        let doc = "---\nllm_inputs:\n  summary: \"a\"\nsource_count: 3\n---\n\nbody\n";
+        let out = stamp(doc, "concepts_done", "z").unwrap();
+        assert_eq!(
+            out,
+            "---\nllm_inputs:\n  summary: \"a\"\n  concepts_done: \"z\"\nsource_count: 3\n---\n\nbody\n"
+        );
+    }
+
+    #[test]
+    fn a_mapping_with_no_children_yet_gets_one() {
+        let doc = "---\nllm_inputs:\n---\n\nbody\n";
+        let out = stamp(doc, "concepts_done", "z").unwrap();
+        assert_eq!(
+            out,
+            "---\nllm_inputs:\n  concepts_done: \"z\"\n---\n\nbody\n"
+        );
+    }
+
+    #[test]
+    fn crlf_frontmatter_is_written_inside_the_block() {
+        let doc = "---\r\nid: d\r\nllm_inputs:\r\n  summary: \"a\"\r\n---\r\n\r\nbody\r\n";
+        let out = stamp(doc, "concepts_done", "z").unwrap();
+        let page = lk_core::frontmatter::parse_page(&out).unwrap();
+        assert_eq!(
+            page.frontmatter
+                .get("llm_inputs")
+                .and_then(|v| v.get("concepts_done"))
+                .and_then(|v| v.as_str()),
+            Some("z"),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn a_bom_is_preserved() {
+        let doc = format!("\u{feff}{PAGE}");
+        let out = stamp(&doc, "concepts_done", "z").unwrap();
+        assert!(out.starts_with('\u{feff}'), "{out:?}");
+        assert!(out.contains("  concepts_done: \"z\""));
     }
 }

@@ -576,12 +576,19 @@ impl Pipeline {
         // Stamp the completion marker in the SAME edit that fills the section. `llm_cache`
         // decides a section's fate purely on this marker, never on whether the body looks
         // filled — so a section written without it is erased by the next render and its task
-        // re-enqueued, forever.
-        Ok(lk_vault::set_llm_input(
-            &filled,
-            &result.target.kind.completion_key(),
-            &result.cache_hash,
-        ))
+        // re-enqueued, forever. A page with nowhere to record it is that same failure, and
+        // is reported rather than written half-applied.
+        let stamp = serde_json::to_string(&result.cache_hash)
+            .map_err(|e| PipelineError::Render(format!("serialize cache hash: {e}")))?;
+        lk_vault::set_llm_input(&filled, &result.target.kind.completion_key(), &stamp).ok_or_else(
+            || {
+                PipelineError::Render(format!(
+                    "{}: no `{}` frontmatter mapping to record completion in",
+                    result.target.vault_path,
+                    lk_core::frontmatter::field::LLM_INPUTS,
+                ))
+            },
+        )
     }
 
     /// Render the concept pages accumulated across every `plan` call in this run.

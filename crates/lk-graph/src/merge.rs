@@ -234,7 +234,13 @@ fn apply_aliases(vault_root: &Path, into_rel: &Path, aliases: &[String]) -> Resu
         .map_err(|e| GraphError::Io(format!("read {}: {e}", into_rel.display())))?;
     let value = serde_json::to_string(aliases)
         .map_err(|e| GraphError::Io(format!("serialize aliases: {e}")))?;
-    let updated = lk_vault::set_frontmatter_field(&into_raw, "aliases", &value);
+    let updated =
+        lk_vault::set_frontmatter_field(&into_raw, "aliases", &value).ok_or_else(|| {
+            GraphError::Io(format!(
+                "{}: no frontmatter block to record aliases in",
+                into_rel.display()
+            ))
+        })?;
     lk_core::fs::write_atomic(&vault_root.join(into_rel), updated.as_bytes(), None)
         .map_err(|e| GraphError::Io(format!("write {}: {e}", into_rel.display())))?;
     Ok(())

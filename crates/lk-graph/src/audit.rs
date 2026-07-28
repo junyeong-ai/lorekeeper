@@ -132,7 +132,13 @@ pub fn mark_audited(
         &raw,
         frontmatter::field::AUDITED_SOURCES_HASH,
         &sources_hash(&raw, locale),
-    );
+    )
+    .ok_or_else(|| {
+        GraphError::Io(format!(
+            "{}: no frontmatter block to record the audit marker in",
+            rel_path.display()
+        ))
+    })?;
     if updated == raw {
         return Ok(false);
     }

@@ -163,7 +163,13 @@ pub fn sync_concept_backlinks(
 
         let new_body = render_sources_body(&sources, &page.path, &by_id);
         let updated_content =
-            set_source_count(&replace_section(&raw, heading, &new_body), desired_count);
+            set_source_count(&replace_section(&raw, heading, &new_body), desired_count)
+                .ok_or_else(|| {
+                    GraphError::Io(format!(
+                        "{}: no frontmatter block to record source_count in",
+                        page.path.display()
+                    ))
+                })?;
 
         if !dry_run && updated_content != raw {
             writer
@@ -208,7 +214,7 @@ pub(crate) fn parse_existing_sources(
 
 /// Set the frontmatter `source_count` — a thin wrapper over the single-sourced
 /// `set_frontmatter_field` so backlinks and the audit marker share one writer.
-fn set_source_count(content: &str, count: u64) -> String {
+fn set_source_count(content: &str, count: u64) -> Option<String> {
     set_frontmatter_field(
         content,
         frontmatter::field::SOURCE_COUNT,

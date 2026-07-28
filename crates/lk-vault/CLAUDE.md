@@ -52,10 +52,20 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   `index.md` — every knowledge node ever created appears, never truncated (text-only,
   grows linearly in node count). `log.md` is in `RESERVED_WIKI_FILES`, so the graph
   never flags it as an orphan or index drift.
-- **`set_frontmatter_field`** sets a scalar inside the frontmatter block, matching ONLY a
-  top-level (column-0) key — never an indented key nested under a mapping (e.g. `summary:`
-  under `llm_inputs:`) — and recognizes a leading BOM. The single source of truth for
-  `backlinks-sync`'s `source_count` and the audit marker's `audited_sources_hash`.
+- **Frontmatter writers are bounded by `frontmatter_block`** — the shared line range between
+  the delimiters, recognized by the same first-line rule and `is_delimiter_line` predicate as
+  `parse_page`. `set_frontmatter_field` sets a TOP-LEVEL (column-0) key — never an indented
+  one nested under a mapping (e.g. `summary:` under `llm_inputs:`) — inserting before the
+  closing `---` when absent; `set_llm_input` sets a key one level under the block-style
+  `llm_inputs:` mapping, which `set_frontmatter_field` cannot reach. Both preserve a leading
+  BOM, copy every other line byte for byte, and take `value` VERBATIM — the caller owns
+  serialization (`serde_json::to_string`), so neither hand-rolls quoting. Both return
+  `Option`: `None` when the key has no place in the block (no frontmatter at all; for
+  `set_llm_input`, no block-style `llm_inputs:` line). That is the whole point of the shared
+  range — a writer that cannot place a key writes NOTHING rather than falling through to the
+  end of the document and appending it to the body, where `llm_cache` would never read it and
+  the task would re-enqueue forever, growing the page each round. Callers turn `None` into a
+  named error rather than a silent no-op.
 - **`VaultWriter::write_page_sync`** calls `lk_core::fs::write_atomic` directly (no tokio
   runtime). Used by graph commands — the same single atomic-write implementation as the
   async path, not a separate one.

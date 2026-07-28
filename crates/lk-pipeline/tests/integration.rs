@@ -2972,6 +2972,49 @@ async fn a_page_without_the_concepts_section_is_an_error_not_a_silent_no_op() {
     );
 }
 
+/// The completion marker is the other half of the same edit: `llm_cache` decides a
+/// section's fate on the marker alone, so links written to a page that cannot record one
+/// are erased by the next render and the task re-enqueued — forever, growing the page each
+/// round. A page with nowhere to stamp it fails here instead of being half-applied.
+#[tokio::test]
+async fn a_page_that_cannot_record_completion_is_an_error() {
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let config = base_config(vault);
+    let ctx = build_ctx(&config, Arc::new(NoopLlmClient));
+    let mut pipeline = Pipeline::new(vault, ctx);
+
+    let page =
+        "---\nid: daily-1\ntype: daily\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
+    let result = lk_queue::TaskResult {
+        task_id: "ext-1".into(),
+        cache_hash: "h".into(),
+        target: lk_queue::TaskTarget {
+            vault_path: "daily/test-source/2026-05-23.md".into(),
+            kind: lk_queue::TargetKind::DailyConcepts,
+            anchor: "## Related Concepts".into(),
+            concepts_dir: "../../wiki/concepts".into(),
+        },
+        date: jiff::civil::date(2026, 5, 23),
+        concepts: vec![lk_queue::ReportedConcept {
+            concept: ExtractedConcept {
+                name: "Retrieval Augmented Generation".into(),
+                category: None,
+            },
+            synthesis: None,
+        }],
+    };
+
+    let err = pipeline
+        .apply_concept_result(&result, page)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("llm_inputs"),
+        "error must name what is missing: {err}"
+    );
+}
+
 /// A concept page's id is not always `slugify(title)` — a renamed or merged page keeps its
 /// original id and records the other names as aliases, which is what keeps existing
 /// citations resolving. An extraction naming an alias must land on that page, not mint a
@@ -2998,8 +3041,7 @@ async fn an_extraction_naming_an_alias_lands_on_the_established_page() {
     let ctx = build_ctx(&config, Arc::new(NoopLlmClient));
     let mut pipeline = Pipeline::new(vault, ctx);
 
-    let page =
-        "---\nid: daily-1\ntype: daily\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
+    let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
     let result = lk_queue::TaskResult {
         task_id: "ext-1".into(),
         cache_hash: "h".into(),
