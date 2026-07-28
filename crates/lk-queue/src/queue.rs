@@ -323,6 +323,53 @@ mod tests {
     use crate::TargetKind;
     use tempfile::TempDir;
 
+    #[test]
+    fn one_unreadable_result_does_not_hide_the_readable_ones() {
+        // The whole point of the split: a drain killed mid-write leaves a truncated file,
+        // and failing the read there stranded every other pending result behind it.
+        let dir = TempDir::new().unwrap();
+        let results = dir.path().join(RESULTS_SUBDIR);
+        std::fs::create_dir_all(&results).unwrap();
+
+        let good = TaskResult {
+            task_id: "ext-1".into(),
+            cache_hash: "h".into(),
+            target: crate::TaskTarget {
+                vault_path: "daily/src/2026-05-23.md".into(),
+                kind: TargetKind::DailyConcepts,
+                anchor: "## Related Concepts".into(),
+                concepts_dir: "../../wiki/concepts".into(),
+            },
+            date: jiff::civil::date(2026, 5, 23),
+            concepts: Vec::new(),
+        };
+        std::fs::write(
+            results.join("a-good.json"),
+            serde_json::to_string(&good).unwrap(),
+        )
+        .unwrap();
+        // Truncated mid-write, and sorting BEFORE the good one so a read that failed on it
+        // would never reach the good one either.
+        std::fs::write(results.join("a-bad.json"), "{\"task_id\": \"ext-2\", \"ca").unwrap();
+
+        let batch = read_results(dir.path()).unwrap();
+        assert_eq!(batch.ready.len(), 1, "the readable result must survive");
+        assert_eq!(batch.ready[0].1.task_id, "ext-1");
+        assert_eq!(batch.unreadable.len(), 1);
+        assert!(batch.unreadable[0].0.ends_with("a-bad.json"));
+        assert!(
+            !batch.unreadable[0].1.is_empty(),
+            "the reason must be carried for the operator"
+        );
+    }
+
+    #[test]
+    fn a_missing_results_dir_is_an_empty_batch() {
+        let dir = TempDir::new().unwrap();
+        let batch = read_results(dir.path()).unwrap();
+        assert!(batch.ready.is_empty() && batch.unreadable.is_empty());
+    }
+
     /// Any stranded `*.jsonl.tmp` left in `dir` (the temp name is per-writer-unique,
     /// so tests assert on the suffix rather than a fixed path).
     fn any_tmp_in(dir: &std::path::Path) -> bool {

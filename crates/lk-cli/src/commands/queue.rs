@@ -165,34 +165,43 @@ async fn apply(
     // it would fail this command — and so the scheduled pipeline — on every run forever,
     // while the concepts it held are re-derived anyway: its page carries no completion
     // marker, so the next ingest that re-renders that page re-enqueues the task.
-    let quarantined = batch.unreadable.len();
-    if quarantined > 0 {
+    // Quarantining is housekeeping, so its own failures must not do what it exists to
+    // prevent: a `?` here would strand every ready result behind an unwritable directory,
+    // which is the same "one bad file blocks the batch" shape, reached through I/O instead
+    // of through parsing. A file that cannot be moved simply stays put and is retried.
+    let unreadable = batch.unreadable.len();
+    if unreadable > 0 {
         let corrupt_dir = queue_dir
             .join(lk_queue::RESULTS_SUBDIR)
             .join(lk_queue::CORRUPT_SUBDIR);
-        if !dry_run {
-            std::fs::create_dir_all(&corrupt_dir)
-                .map_err(|e| miette::miette!("create {}: {e}", corrupt_dir.display()))?;
-        }
+        let dir_ready = dry_run || std::fs::create_dir_all(&corrupt_dir).is_ok();
         for (path, reason) in &batch.unreadable {
             if dry_run {
                 eprintln!("  [dry-run] would quarantine {}: {reason}", path.display());
                 continue;
             }
-            let dest = free_path(&corrupt_dir, path);
-            std::fs::rename(path, &dest)
-                .map_err(|e| miette::miette!("quarantine {}: {e}", path.display()))?;
-            eprintln!(
-                "  quarantined {} → {}: {reason}",
-                path.display(),
-                dest.display()
-            );
+            let dest = dir_ready.then(|| free_path(&corrupt_dir, path));
+            match dest.filter(|dest| std::fs::rename(path, dest).is_ok()) {
+                Some(dest) => {
+                    eprintln!(
+                        "  quarantined {} → {}: {reason}",
+                        path.display(),
+                        dest.display()
+                    );
+                }
+                None => eprintln!(
+                    "  ✗ {} is unreadable ({reason}) and could not be moved to {}; it stays \
+                     put and will be retried",
+                    path.display(),
+                    corrupt_dir.display()
+                ),
+            }
         }
     }
 
     if results.is_empty() {
         eprintln!("queue apply: no results pending");
-        return finish_apply(0, quarantined, dry_run);
+        return finish_apply(0, unreadable, dry_run);
     }
 
     let ctx = std::sync::Arc::new(
@@ -289,7 +298,7 @@ async fn apply(
              {} concept page(s)",
             concept_pages.len()
         );
-        return finish_apply(failed, quarantined, dry_run);
+        return finish_apply(failed, unreadable, dry_run);
     }
 
     // Concept pages before origin pages. A crash between the two then leaves concept pages
@@ -317,30 +326,29 @@ async fn apply(
          {} concept page(s)",
         concept_pages.len()
     );
-    finish_apply(failed, quarantined, dry_run)
+    finish_apply(failed, unreadable, dry_run)
 }
 
-/// Exit non-zero when anything needs a human: a retryable failure, or a file that had to be
-/// quarantined. Quarantining is reported once — the next run is clean, since the file is no
-/// longer in the apply path — so the summary says what actually happened on THIS run, which
-/// under `--dry-run` is nothing.
-fn finish_apply(failed: usize, quarantined: usize, dry_run: bool) -> miette::Result<()> {
-    let moved = if dry_run {
-        format!("would be moved to results/{}/", lk_queue::CORRUPT_SUBDIR)
-    } else {
-        format!("moved to results/{}/", lk_queue::CORRUPT_SUBDIR)
-    };
-    match (failed, quarantined) {
+/// Exit non-zero when anything needs a human: a retryable failure, or a file that could not
+/// be parsed. `unreadable` counts every such file whether or not it was successfully moved —
+/// one left in place still needs attention — while the per-file lines above say what actually
+/// happened to each, which under `--dry-run` is nothing.
+fn finish_apply(failed: usize, unreadable: usize, dry_run: bool) -> miette::Result<()> {
+    let fate = if dry_run { "would move" } else { "moved" };
+    match (failed, unreadable) {
         (0, 0) => Ok(()),
-        (0, q) => Err(miette::miette!(
-            "{q} unreadable result file(s) {moved}; the concepts they held re-enqueue on the \
-             next ingest that re-renders their page"
+        (0, u) => Err(miette::miette!(
+            "{u} unreadable result file(s) ({fate} to results/{}/); the concepts they held \
+             re-enqueue on the next ingest that re-renders their page",
+            lk_queue::CORRUPT_SUBDIR
         )),
         (f, 0) => Err(miette::miette!(
             "{f} result(s) could not be applied; their files were kept for retry"
         )),
-        (f, q) => Err(miette::miette!(
-            "{f} result(s) could not be applied (kept for retry); {q} unreadable file(s) {moved}"
+        (f, u) => Err(miette::miette!(
+            "{f} result(s) could not be applied (kept for retry); {u} unreadable file(s) \
+             ({fate} to results/{}/)",
+            lk_queue::CORRUPT_SUBDIR
         )),
     }
 }
