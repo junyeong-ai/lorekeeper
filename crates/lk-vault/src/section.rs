@@ -130,6 +130,12 @@ fn unterminated(line: &str) -> &str {
     line.trim_end_matches(['\n', '\r'])
 }
 
+/// The terminator a written line takes, copied from the line it replaces or joins, so a
+/// CRLF page does not come back with one stray LF among its lines.
+fn terminator(line: &str) -> &str {
+    if line.ends_with("\r\n") { "\r\n" } else { "\n" }
+}
+
 /// The frontmatter block's key lines, as a range over `lines`: it starts after the opening
 /// `---` and ends AT the closing one, so `Range::end` doubles as the insertion point for a
 /// key the block does not have yet. `None` when the document has no frontmatter block.
@@ -196,11 +202,12 @@ pub fn set_frontmatter_field(content: &str, key: &str, value: &str) -> Option<St
         .map(|i| i + block.start);
 
     let at = existing.unwrap_or(block.end);
+    let eol = terminator(lines[at]);
     Some(splice_line(
         bom,
         &lines,
         at,
-        &format!("{key}: {value}\n"),
+        &format!("{key}: {value}{eol}"),
         existing.is_some(),
     ))
 }
@@ -230,39 +237,49 @@ pub fn set_llm_input(content: &str, key: &str, value: &str) -> Option<String> {
         .position(|line| unterminated(line) == parent)
         .map(|i| i + block.start)?;
 
-    // The mapping's children are the indented, non-blank lines under it; the first line
-    // that is neither ends it, whether that is the next top-level key or the closing
-    // delimiter.
-    let mut children_end = parent_idx + 1;
-    while children_end < block.end {
-        let line = unterminated(lines[children_end]);
-        if indent_of(line).is_empty() || line.trim().is_empty() {
+    // The mapping runs to the first non-blank line at column 0 — a new top-level key — or to
+    // the end of the block. A BLANK line does NOT end a YAML block mapping: stopping at one
+    // would insert the key above a child that lives below it, leaving two copies of the same
+    // key in one mapping, and on the next parse the stale one wins — the write silently
+    // undone.
+    let mut first_child = None;
+    let mut last_child = None;
+    for (i, line) in lines
+        .iter()
+        .enumerate()
+        .take(block.end)
+        .skip(parent_idx + 1)
+    {
+        let line = unterminated(line);
+        if line.trim().is_empty() {
+            continue;
+        }
+        if indent_of(line).is_empty() {
             break;
         }
-        children_end += 1;
+        first_child.get_or_insert(i);
+        last_child = Some(i);
     }
-    let children = parent_idx + 1..children_end;
 
     let prefix = format!("{key}:");
-    let existing = lines[children.clone()]
-        .iter()
-        .position(|line| unterminated(line).trim_start().starts_with(&prefix))
-        .map(|i| i + children.start);
+    let after_last = last_child.map_or(parent_idx + 1, |i| i + 1);
+    let existing = (parent_idx + 1..after_last)
+        .find(|&i| unterminated(lines[i]).trim_start().starts_with(&prefix));
 
-    // A replacement keeps its own line's indentation; a new key joins the mapping at the
-    // indentation its first child already uses.
-    let at = existing.unwrap_or(children.end);
-    let indent = lines
-        .get(existing.unwrap_or(children.start))
-        .map(|line| indent_of(unterminated(line)))
-        .filter(|_| !children.is_empty())
+    // A replacement keeps its own line's indentation; a new key joins the mapping directly
+    // after its last child, at the indentation the first one already uses.
+    let at = existing.unwrap_or(after_last);
+    let indent = existing
+        .or(first_child)
+        .map(|i| indent_of(unterminated(lines[i])))
         .unwrap_or("  ");
+    let eol = terminator(lines[at]);
 
     Some(splice_line(
         bom,
         &lines,
         at,
-        &format!("{indent}{key}: {value}\n"),
+        &format!("{indent}{key}: {value}{eol}"),
         existing.is_some(),
     ))
 }
@@ -703,7 +720,7 @@ mod llm_input_tests {
     }
 
     #[test]
-    fn crlf_frontmatter_is_written_inside_the_block() {
+    fn crlf_frontmatter_is_written_inside_the_block_and_keeps_its_terminators() {
         let doc = "---\r\nid: d\r\nllm_inputs:\r\n  summary: \"a\"\r\n---\r\n\r\nbody\r\n";
         let out = stamp(doc, "concepts_done", "z").unwrap();
         let page = lk_core::frontmatter::parse_page(&out).unwrap();
@@ -714,6 +731,43 @@ mod llm_input_tests {
                 .and_then(|v| v.as_str()),
             Some("z"),
             "{out:?}"
+        );
+        assert!(
+            !out.replace("\r\n", "").contains('\n'),
+            "a CRLF page must not come back with a stray LF: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_blank_line_does_not_end_the_mapping() {
+        // A blank line is legal inside a YAML block mapping. Treating it as the end would
+        // write the key above the child below it — two copies in one mapping, and the
+        // stale one wins on the next parse, silently undoing the write.
+        let doc = "---\nid: d\nllm_inputs:\n  summary: \"a\"\n\n  concepts: \"b\"\n---\n\nbody\n";
+        let out = stamp(doc, "concepts", "NEW").unwrap();
+        assert_eq!(
+            out.matches("concepts:").count(),
+            1,
+            "the key must be replaced, not duplicated: {out}"
+        );
+        let page = lk_core::frontmatter::parse_page(&out).unwrap();
+        assert_eq!(
+            page.frontmatter
+                .get("llm_inputs")
+                .and_then(|v| v.get("concepts"))
+                .and_then(|v| v.as_str()),
+            Some("NEW"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_new_key_joins_after_the_last_child_across_a_blank_line() {
+        let doc = "---\nllm_inputs:\n  summary: \"a\"\n\n  concepts: \"b\"\nid: d\n---\n\nbody\n";
+        let out = stamp(doc, "concepts_done", "z").unwrap();
+        assert_eq!(
+            out,
+            "---\nllm_inputs:\n  summary: \"a\"\n\n  concepts: \"b\"\n  concepts_done: \"z\"\nid: d\n---\n\nbody\n"
         );
     }
 
