@@ -363,8 +363,8 @@ pub fn print_backlinks(r: &BacklinksSyncReport) {
 
     if !r.sync.skipped.is_empty() {
         println!(
-            "\nSkipped: {} concept page(s) with no frontmatter block — their source_count \
-             stays stale until one is added",
+            "\nSkipped: {} concept page(s) with no frontmatter block — their sources section \
+             and source_count both stay stale until one is added",
             r.sync.skipped.len()
         );
         for path in &r.sync.skipped {
