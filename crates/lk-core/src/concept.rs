@@ -139,6 +139,20 @@ mod tests {
     }
 
     #[test]
+    fn a_numeral_is_a_numeral_in_any_script() {
+        // The break test asks `is_numeric`, not `is_ascii_digit`: NFKC folds full-width,
+        // superscript and enclosed forms to ASCII, but Arabic-Indic and Devanagari digits
+        // survive it and are still numerals. A Roman numeral folds to LETTERS under NFKC
+        // (`Ⅴ` → `v`), and Korean number words are letters, so both are typography.
+        assert_ne!(identity_key("x ٥ ٦"), identity_key("x ٥٦")); // Arabic-Indic
+        assert_ne!(identity_key("x ५ ६"), identity_key("x ५६")); // Devanagari
+        assert_ne!(identity_key("x ５ ６"), identity_key("x ５６")); // full-width
+        assert_ne!(identity_key("x²·³"), identity_key("x²³")); // superscript
+        assert_eq!(identity_key("x Ⅴ Ⅵ"), identity_key("xⅤⅥ")); // Roman → letters
+        assert_eq!(identity_key("x 오 육"), identity_key("x오육")); // Hangul → letters
+    }
+
+    #[test]
     fn identity_key_folds_nothing_about_meaning() {
         // Order and every character are identity; whether two of these name one concept
         // is a question about meaning, which this must not answer.
