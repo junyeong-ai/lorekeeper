@@ -60,11 +60,24 @@ fn pipeline_env(bin: &str, config_path: &std::path::Path) -> Vec<(String, String
     env
 }
 
-/// First executable named `name` on `PATH`.
+/// First EXECUTABLE named `name` on `PATH`, resolved the way a shell would. A non-executable
+/// file of that name earlier on the path is skipped rather than returned, since pointing the
+/// job at it produces the permission-denied failure this lookup exists to avoid.
 fn find_on_path(name: &str) -> Option<std::path::PathBuf> {
     std::env::split_paths(&std::env::var_os("PATH")?)
         .map(|dir| dir.join(name))
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| is_executable_file(candidate))
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &std::path::Path) -> bool {
+    path.is_file()
 }
 
 pub async fn run(
@@ -132,6 +145,12 @@ fn build_jobs(
     // concepts stay empty while tasks pile up. With the scripts installed those two jobs run
     // them; every other job is a plain `lore` invocation with no LLM stage, which is why the
     // scripts themselves say those belong on their own schedules.
+    //
+    // A job's NAME is its scheduling slot — the config key it comes from — never the program
+    // that fills it. Renaming the slot when the program changes would leave an operator who
+    // re-runs this command with the old agent still loaded beside the new one: both fire at
+    // the same instant, and two concurrent ingests each refresh the rotating Atlassian token,
+    // stranding the grant. Keeping the slot stable makes the second install REPLACE the first.
     let pipeline_job = |dir: &std::path::Path, name: &str, schedule: &str, script: &str| Job {
         name: name.to_string(),
         schedule: schedule.to_string(),
@@ -142,7 +161,7 @@ fn build_jobs(
     let mut jobs: Vec<Job> = Vec::new();
     if let Some(ref sched) = config.ingest.schedule {
         jobs.push(match pipeline_dir {
-            Some(dir) => pipeline_job(dir, "daily", sched, "lore-daily.sh"),
+            Some(dir) => pipeline_job(dir, "ingest", sched, "lore-daily.sh"),
             None => lore_job("ingest", sched, &["ingest"]),
         });
     }
@@ -150,7 +169,7 @@ fn build_jobs(
         && let Some(sched) = &config.synthesis.weekly.schedule
     {
         jobs.push(match pipeline_dir {
-            Some(dir) => pipeline_job(dir, "weekly", sched, "lore-weekly.sh"),
+            Some(dir) => pipeline_job(dir, "synthesis-weekly", sched, "lore-weekly.sh"),
             None => lore_job(
                 "synthesis-weekly",
                 sched,
@@ -475,20 +494,32 @@ mod tests {
 
         let by_name = |n: &str| jobs.iter().find(|j| j.name == n).map(|j| j.program.clone());
         assert_eq!(
-            by_name("daily"),
+            by_name("ingest"),
             Some(Some("/data/pipelines/lore-daily.sh".to_string()))
         );
         assert_eq!(
-            by_name("weekly"),
+            by_name("synthesis-weekly"),
             Some(Some("/data/pipelines/lore-weekly.sh".to_string()))
         );
         // The janitors have no LLM stage, so they stay plain `lore` invocations.
         assert_eq!(by_name("maintenance"), Some(None));
         assert_eq!(by_name("queue-prune"), Some(None));
-        assert!(
-            jobs.iter().all(|j| j.name != "ingest"),
-            "the bare ingest job must not also be scheduled — it would double-run"
-        );
+    }
+
+    #[test]
+    fn a_job_keeps_its_name_whichever_program_fills_the_slot() {
+        // The name is the launchd label and the identity an operator re-installs over. If it
+        // changed with the program, re-running this command would leave the old agent loaded
+        // beside the new one: both fire at the same instant, and two concurrent ingests each
+        // refresh the rotating Atlassian token and strand the grant.
+        let config = config_with_schedules();
+        let named = |dir: Option<&std::path::Path>| -> Vec<String> {
+            build_jobs(&config, &[], dir)
+                .iter()
+                .map(|j| j.name.clone())
+                .collect()
+        };
+        assert_eq!(named(None), named(Some(std::path::Path::new("/data/p"))));
     }
 
     #[test]
