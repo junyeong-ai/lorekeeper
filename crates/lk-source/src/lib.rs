@@ -252,7 +252,7 @@ fn resolve_atlassian(
     registry: &AtlassianRegistry,
     instance: Option<&str>,
 ) -> Result<Arc<atlassian::AtlassianAuth>, SourceError> {
-    let (name, _) = creds.atlassian_instance(instance)?;
+    let (name, _) = creds.resolve_atlassian_instance(instance)?;
     registry
         .get(name)
         .cloned()

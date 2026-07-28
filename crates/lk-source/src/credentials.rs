@@ -229,7 +229,7 @@ impl Credentials {
     /// An explicit name wins. With no name, a lone configured instance is unambiguous and is
     /// used regardless of its key; more than one is a genuine ambiguity, so the error names
     /// the available instances rather than guessing.
-    pub fn atlassian_instance(
+    pub fn resolve_atlassian_instance(
         &self,
         name: Option<&str>,
     ) -> Result<(&str, &AtlassianCredentials), SourceError> {
@@ -282,6 +282,13 @@ impl Credentials {
     /// Returns `false` when there is no file entry to update (credentials came from the
     /// environment), which the caller surfaces as a warning: an env-supplied refresh token
     /// cannot survive rotation, since only the environment's owner can update it.
+    ///
+    /// The read-modify-write is unlocked, so two `lore` processes refreshing DIFFERENT
+    /// instances at once can have one overwrite the other's rotation. That is left alone
+    /// deliberately: the losing instance's next refresh fails with `invalid_grant`, which is
+    /// already the loud, self-healing path (re-authorize once), whereas a lock file adds a
+    /// stale-lock failure mode to every unattended run to prevent a race that needs two
+    /// concurrent ingests — something the single-cron scheduling model does not produce.
     pub fn persist_atlassian_refresh_token(
         vault_root: &Path,
         instance: &str,
@@ -385,7 +392,7 @@ mod tests {
         creds
             .atlassian
             .insert("whatever".into(), instance("https://a.net", oauth_method()));
-        let (name, _) = creds.atlassian_instance(None).unwrap();
+        let (name, _) = creds.resolve_atlassian_instance(None).unwrap();
         assert_eq!(name, "whatever");
     }
 
@@ -403,15 +410,18 @@ mod tests {
             ),
         );
 
-        let err = creds.atlassian_instance(None).unwrap_err().to_string();
+        let err = creds
+            .resolve_atlassian_instance(None)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("cloud") && err.contains("onprem"), "{err}");
 
         assert_eq!(
-            creds.atlassian_instance(Some("onprem")).unwrap().0,
+            creds.resolve_atlassian_instance(Some("onprem")).unwrap().0,
             "onprem"
         );
         let missing = creds
-            .atlassian_instance(Some("nope"))
+            .resolve_atlassian_instance(Some("nope"))
             .unwrap_err()
             .to_string();
         assert!(missing.contains("cloud, onprem"), "{missing}");
@@ -420,7 +430,7 @@ mod tests {
     #[test]
     fn no_instance_configured_points_at_the_setup_command() {
         let err = Credentials::default()
-            .atlassian_instance(None)
+            .resolve_atlassian_instance(None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("lore init credentials"), "{err}");

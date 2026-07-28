@@ -373,6 +373,9 @@ impl Source for ConfluenceSource {
 /// re-renders a daily page for every date it sees, from the fetch alone. A batch carrying a
 /// PARTIAL day would overwrite that date's page with whatever fragment fell inside the window.
 fn build_windowed_cql(base: &str, min: jiff::Timestamp, max: jiff::Timestamp) -> String {
+    // A YAML folded scalar (`cql: >`) is the natural way to write a long query in config and
+    // it ends with a newline, which would land inside the parentheses below.
+    let base = base.trim();
     let back = jiff::SignedDuration::from_hours(24);
     let forward = jiff::SignedDuration::from_hours(48);
     format!(
