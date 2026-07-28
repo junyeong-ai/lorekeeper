@@ -291,6 +291,9 @@ lore graph backlinks-sync     # re-derive each concept's ## Sources + citation c
 lore graph merge <from> <into># fold a duplicate concept into the canonical one
 lore doctor                   # vault text-cleanliness audit
 lore queue status / prune     # LLM task queue status / clear dead tasks
+lore queue apply              # materialize the concept extractions a drain produced
+lore queue count              # current task count as a bare integer (for scripts)
+lore config vault-root        # the vault's absolute path, and nothing else (for scripts)
 lore schema                   # generate wiki/AGENTS.md (the page-format schema)
 ```
 
@@ -362,12 +365,16 @@ lore init credentials   # interactive wizard — Google tokens minted via browse
 ## Scheduling
 
 ```bash
-lore schedule | crontab -
+lore schedule --pipeline-dir ~/.local/share/lorekeeper/pipelines | crontab -   # Linux
+lore schedule --format launchd --bin "$(command -v lore)" \
+              --pipeline-dir ~/.local/share/lorekeeper/pipelines               # macOS
 ```
 
 `ingest.schedule` emits a single `lore ingest` line that runs **every source in one process** (the work-log is a cross-source daily aggregate, so per-source runs would overwrite it partially). Each synthesis period (weekly/monthly/quarterly/annual) emits its own cron line, and `maintenance.schedule` automates the janitors.
 
 For unattended operation the installer ships two pipeline scripts (`lore-daily.sh`, `lore-weekly.sh`) — daily ingest + queue drain + graph reconcile, and weekly synthesis + knowledge audit. A system scheduler (launchd or cron) fires them, so they run whether or not Claude Desktop is open.
+
+`--pipeline-dir` is what actually puts those scripts on the schedule. `lore ingest` and `lore synthesis weekly` are only a pipeline's FIRST stage — the queue drain and `queue apply` live in the scripts — so emitting without it ingests every morning and leaves summaries and concepts empty forever. A scheduler hands a job almost no environment, so the entry also carries the `PATH`, `lore`, `claude` and config path the scripts need, inherited from the session that ran the command rather than guessed. Prefer launchd on macOS: it runs a job missed during sleep once the machine wakes, where cron silently drops it.
 
 ---
 

@@ -288,6 +288,9 @@ lore graph backlinks-sync     # 개념의 ## Sources·인용수 재도출
 lore graph merge <from> <into># 중복 개념 통합
 lore doctor                   # vault 텍스트 청결도 감사
 lore queue status / prune     # LLM 작업 큐 상태 / 죽은 작업 정리
+lore queue apply              # 드레인이 낸 개념 추출을 페이지로 실체화
+lore queue count              # current 작업 수만 정수로 출력(스크립트용)
+lore config vault-root        # vault 절대경로만 출력(스크립트용)
 lore schema                   # wiki/AGENTS.md(페이지 포맷 스키마) 생성
 ```
 
@@ -359,12 +362,16 @@ lore init credentials   # 대화형 마법사 — Google 토큰은 브라우저 
 ## 스케줄링
 
 ```bash
-lore schedule | crontab -
+lore schedule --pipeline-dir ~/.local/share/lorekeeper/pipelines | crontab -   # Linux
+lore schedule --format launchd --bin "$(command -v lore)" \
+              --pipeline-dir ~/.local/share/lorekeeper/pipelines               # macOS
 ```
 
 `ingest.schedule`은 **전체 소스를 한 번에** 도는 `lore ingest` 한 줄을 발행합니다(work-log가 cross-source 일일 집계라 소스별 분할 실행은 페이지를 부분 덮어씀). 각 합성 주기(weekly/monthly/quarterly/annual)는 자기 cron을 발행하고, `maintenance.schedule`이 있으면 청소 작업도 자동화됩니다.
 
 무인 운영용으로 두 개의 파이프라인 스크립트(`lore-daily.sh`, `lore-weekly.sh`)가 함께 설치됩니다 — 일일 수집+큐 처리+그래프 정합, 주간 합성+지식 감사. 시스템 스케줄러(launchd/cron)가 이를 실행하므로 Claude 데스크탑이 떠 있지 않아도 동작합니다.
+
+`--pipeline-dir`가 그 스크립트를 **실제로 스케줄에 태우는** 플래그입니다. `lore ingest`와 `lore synthesis weekly`는 파이프라인의 첫 단계일 뿐이고 큐 드레인과 `queue apply`는 스크립트에만 있으므로, 이 플래그 없이 발행하면 매일 수집만 하고 요약·개념은 영원히 비어 있게 됩니다. 스케줄러는 환경을 거의 물려주지 않으므로 스크립트가 필요로 하는 `PATH`/`lore`/`claude`/config 경로도 함께 실립니다 — 추측이 아니라 이 명령을 실행한 세션에서 그대로 상속합니다. macOS는 launchd를 권합니다: 잠든 사이 놓친 작업을 깨어나면 실행하지만 cron은 조용히 건너뜁니다.
 
 ---
 
