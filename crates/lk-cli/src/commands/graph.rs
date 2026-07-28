@@ -449,6 +449,9 @@ fn run_backlinks(
         backlinks::sync_concept_backlinks(&pages, &rc.root, rc.locale, dry_run, &rc.vault_dirs)
             .map_err(|e| format!("{e}"))?;
     let changed = sync.updated.len();
+    // A page the sweep could not record a count on is a finding: it is left with a stale
+    // count, and only a human adding frontmatter fixes it.
+    let has_findings = !sync.skipped.is_empty();
     let report = output::BacklinksSyncReport { sync, changed };
 
     if json {
@@ -457,7 +460,7 @@ fn run_backlinks(
         output::print_backlinks(&report);
     }
 
-    Ok(false)
+    Ok(has_findings)
 }
 
 fn run_merge(

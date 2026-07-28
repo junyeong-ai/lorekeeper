@@ -44,6 +44,11 @@ pub struct BacklinksSyncResult {
     pub updated: Vec<ConceptUpdate>,
     /// Count of concept pages whose existing sources section was already correct.
     pub unchanged: usize,
+    /// Concept pages that could not record `source_count` because they carry no frontmatter
+    /// block. Reported rather than silently skipped — their citation counts are stale until
+    /// a human gives them frontmatter — and the command exits non-zero while any remain.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<PathBuf>,
     /// Whether this was a dry run (no writes were performed).
     pub dry_run: bool,
 }
@@ -162,14 +167,17 @@ pub fn sync_concept_backlinks(
             .collect();
 
         let new_body = render_sources_body(&sources, &page.path, &by_id);
-        let updated_content =
+        // A page with no frontmatter block (hand-created in Obsidian, say) has nowhere to
+        // record the count. That is this page's defect, not the sweep's: aborting here would
+        // leave the pages already written synced and every page after it not, and one such
+        // page would block the janitor forever. It is recorded and skipped, and the command
+        // still exits non-zero.
+        let Some(updated_content) =
             set_source_count(&replace_section(&raw, heading, &new_body), desired_count)
-                .ok_or_else(|| {
-                    GraphError::Io(format!(
-                        "{}: no frontmatter block to record source_count in",
-                        page.path.display()
-                    ))
-                })?;
+        else {
+            report.skipped.push(page.path.clone());
+            continue;
+        };
 
         if !dry_run && updated_content != raw {
             writer

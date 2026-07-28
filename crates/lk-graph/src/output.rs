@@ -353,14 +353,24 @@ pub fn print_backlinks(r: &BacklinksSyncReport) {
 
     if r.sync.updated.is_empty() {
         println!("\nAll {} concept page(s) in sync.", r.sync.unchanged);
-        return;
+    } else {
+        println!("\nUpdated: {} concept page(s)", r.sync.updated.len());
+        for entry in &r.sync.updated {
+            println!("  {}{}", entry.path.display(), format_diff(entry));
+        }
+        println!("Unchanged: {} concept page(s)", r.sync.unchanged);
     }
 
-    println!("\nUpdated: {} concept page(s)", r.sync.updated.len());
-    for entry in &r.sync.updated {
-        println!("  {}{}", entry.path.display(), format_diff(entry));
+    if !r.sync.skipped.is_empty() {
+        println!(
+            "\nSkipped: {} concept page(s) with no frontmatter block — their source_count \
+             stays stale until one is added",
+            r.sync.skipped.len()
+        );
+        for path in &r.sync.skipped {
+            println!("  {}", path.display());
+        }
     }
-    println!("Unchanged: {} concept page(s)", r.sync.unchanged);
 }
 
 fn format_diff(update: &ConceptUpdate) -> String {
