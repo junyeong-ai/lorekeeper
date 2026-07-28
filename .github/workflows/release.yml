@@ -186,8 +186,10 @@ jobs:
           # back to the tagged commit's for a lightweight tag — either way the text a human
           # wrote for this release. `--notes-from-tag` would say this in one flag but
           # refuses to combine with `--generate-notes`, which would cost the compare link.
-          # Checkout leaves a shallow clone with no tag object, so fetch just this one.
-          git fetch --force --depth=1 origin "refs/tags/$TAG:refs/tags/$TAG"
+          # Checkout leaves a shallow clone with no tag object, so fetch just this one —
+          # by name rather than as a refspec, which keeps a `$TAG:` adjacency out of the
+          # string (harmless in bash, a modifier that silently truncates it in zsh).
+          git fetch --force --depth=1 origin tag "$TAG"
           git tag -l --format='%(contents)' "$TAG" > release-notes.md
           gh release create "$TAG" \
             --title "$TAG" \
