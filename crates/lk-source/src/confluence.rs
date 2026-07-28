@@ -356,23 +356,30 @@ impl Source for ConfluenceSource {
 
 /// Append a date-granular prefilter to the user's CQL.
 ///
-/// CQL date literals carry no UTC offset — Confluence resolves them in the querying user's
-/// timezone, which no API exposes to a client. So the query asks for a deliberate SUPERSET:
-/// whole dates padded a day on each side, which contains the target window under any offset
-/// on Earth. The precise cut happens in `extract`, against each version's `when` — an
-/// ISO-8601 instant that needs no assumption about anyone's clock.
+/// CQL date literals carry no UTC offset and no time — Confluence resolves them in the
+/// querying user's profile timezone, which no API exposes to a client. So the query asks for
+/// a deliberate SUPERSET of whole dates, and the precise cut happens in `extract`, against
+/// each version's `when` — an ISO-8601 instant that needs no assumption about anyone's clock.
+///
+/// The padding is asymmetric because a date literal resolves to the START of its day. That
+/// errs earlier at both ends, which widens the lower bound (safe) but TIGHTENS the upper one:
+/// a single day of slack there resolves before `max` whenever the profile timezone sits east
+/// of the vault's, silently dropping the tail of the target day. Two days of slack covers the
+/// worst inhabited offset with hours to spare, and under any looser resolution it is simply a
+/// wider superset — so the bound holds without depending on which reading is right.
 ///
 /// Exactness matters beyond accuracy here. `day_window` returns bounds on day boundaries, so
 /// a correctly-cut batch holds only WHOLE days; Confluence is non-streaming, and the pipeline
 /// re-renders a daily page for every date it sees, from the fetch alone. A batch carrying a
 /// PARTIAL day would overwrite that date's page with whatever fragment fell inside the window.
 fn build_windowed_cql(base: &str, min: jiff::Timestamp, max: jiff::Timestamp) -> String {
-    let pad = jiff::SignedDuration::from_hours(24);
+    let back = jiff::SignedDuration::from_hours(24);
+    let forward = jiff::SignedDuration::from_hours(48);
     format!(
         "({base}) AND lastModified >= \"{}\" AND lastModified <= \"{}\" \
          ORDER BY lastModified DESC",
-        format_cql_date(min.checked_sub(pad).unwrap_or(min)),
-        format_cql_date(max.checked_add(pad).unwrap_or(max)),
+        format_cql_date(min.checked_sub(back).unwrap_or(min)),
+        format_cql_date(max.checked_add(forward).unwrap_or(max)),
     )
 }
 
@@ -559,31 +566,53 @@ mod tests {
 
     #[test]
     fn cql_prefilter_is_a_date_granular_superset() {
-        // Whole dates, padded a day each side, so the true window is contained no matter
-        // which timezone Confluence resolves the literal in.
         let min: jiff::Timestamp = "2026-07-26T15:00:00Z".parse().unwrap();
         let max: jiff::Timestamp = "2026-07-27T15:00:00Z".parse().unwrap();
         let cql = build_windowed_cql("type = page AND contributor = currentUser()", min, max);
         assert!(cql.starts_with("(type = page AND contributor = currentUser())"));
         assert!(cql.contains(r#"lastModified >= "2026/07/25""#), "{cql}");
-        assert!(cql.contains(r#"lastModified <= "2026/07/28""#), "{cql}");
+        assert!(cql.contains(r#"lastModified <= "2026/07/29""#), "{cql}");
         assert!(cql.ends_with("ORDER BY lastModified DESC"));
         // A wall clock in the literal would re-introduce the timezone assumption.
         assert!(!cql.contains(':'), "date-only literal expected: {cql}");
     }
 
+    /// The two `yyyy/MM/dd` literals the query actually carries, so the coverage test below
+    /// measures what is sent rather than re-deriving it.
+    fn literal_dates(cql: &str) -> (jiff::civil::Date, jiff::civil::Date) {
+        let mut found = cql.split('"').skip(1).step_by(2).map(|lit| {
+            let parts: Vec<i16> = lit.split('/').map(|p| p.parse().unwrap()).collect();
+            jiff::civil::date(parts[0], parts[1] as i8, parts[2] as i8)
+        });
+        (found.next().unwrap(), found.next().unwrap())
+    }
+
     #[test]
-    fn prefilter_covers_the_window_from_any_site_timezone() {
+    fn prefilter_covers_the_window_under_start_of_day_resolution() {
+        // A date literal carries no time, so it resolves to the START of its day in the
+        // querying user's profile timezone — the pessimistic reading, and the one that can
+        // pull the upper bound BEFORE `max`. Proving coverage under it proves coverage
+        // under any looser reading too, so the window holds without the code depending on
+        // which resolution Atlassian actually applies.
         let min: jiff::Timestamp = "2026-07-26T15:00:00Z".parse().unwrap();
         let max: jiff::Timestamp = "2026-07-27T15:00:00Z".parse().unwrap();
-        let pad = jiff::SignedDuration::from_hours(24);
+        let (lower, upper) = literal_dates(&build_windowed_cql("type = page", min, max));
+
         // Baker Island (UTC-12) through Line Islands (UTC+14) bound the inhabited range.
         for offset in -12..=14 {
-            let o = jiff::SignedDuration::from_hours(offset);
-            let lower = (min - pad) - o;
-            let upper = (max + pad) + jiff::SignedDuration::from_hours(24) - o;
-            assert!(lower <= min, "UTC{offset:+} lower {lower} misses {min}");
-            assert!(upper >= max, "UTC{offset:+} upper {upper} misses {max}");
+            let start_of_day = |d: jiff::civil::Date| {
+                d.to_zoned(jiff::tz::TimeZone::UTC).unwrap().timestamp()
+                    - jiff::SignedDuration::from_hours(offset)
+            };
+            assert!(
+                start_of_day(lower) <= min,
+                "UTC{offset:+} lower {lower} resolves after {min}"
+            );
+            assert!(
+                start_of_day(upper) >= max,
+                "UTC{offset:+} upper {upper} resolves before {max} — the tail of the \
+                 target day would be dropped"
+            );
         }
     }
 
