@@ -157,11 +157,38 @@ async fn apply(
     let vault_root = root.unwrap_or_else(|| config.vault.root_path());
     let queue_dir = vault_root.join(".lorekeeper").join("queue");
 
-    let results = lk_queue::read_results(&queue_dir)
+    let batch = lk_queue::read_results(&queue_dir)
         .map_err(|e| miette::miette!("read queue results: {e}"))?;
+    let results = batch.ready;
+
+    // A file that will never parse is moved out of the apply path, once and loudly. Leaving
+    // it would fail this command — and so the scheduled pipeline — on every run forever,
+    // while the concepts it held are re-derived anyway: its page carries no completion
+    // marker, so the next ingest re-enqueues the task.
+    let mut quarantined = 0usize;
+    if !batch.unreadable.is_empty() && !dry_run {
+        let corrupt_dir = queue_dir
+            .join(lk_queue::RESULTS_SUBDIR)
+            .join(lk_queue::CORRUPT_SUBDIR);
+        std::fs::create_dir_all(&corrupt_dir)
+            .map_err(|e| miette::miette!("create {}: {e}", corrupt_dir.display()))?;
+        for (path, reason) in &batch.unreadable {
+            let name = path.file_name().unwrap_or(path.as_os_str());
+            std::fs::rename(path, corrupt_dir.join(name))
+                .map_err(|e| miette::miette!("quarantine {}: {e}", path.display()))?;
+            eprintln!("  quarantined {}: {reason}", path.display());
+            quarantined += 1;
+        }
+    } else {
+        for (path, reason) in &batch.unreadable {
+            eprintln!("  unreadable {}: {reason}", path.display());
+            quarantined += 1;
+        }
+    }
+
     if results.is_empty() {
         eprintln!("queue apply: no results pending");
-        return Ok(());
+        return finish_apply(0, quarantined);
     }
 
     let ctx = std::sync::Arc::new(
@@ -258,7 +285,7 @@ async fn apply(
              {} concept page(s)",
             concept_pages.len()
         );
-        return Ok(());
+        return finish_apply(failed, quarantined);
     }
 
     // Concept pages before origin pages. A crash between the two then leaves concept pages
@@ -286,12 +313,29 @@ async fn apply(
          {} concept page(s)",
         concept_pages.len()
     );
-    if failed > 0 {
-        return Err(miette::miette!(
-            "{failed} result(s) could not be applied; their files were kept for retry"
-        ));
+    finish_apply(failed, quarantined)
+}
+
+/// Exit non-zero when anything needs a human: a retryable failure, or a file that had to be
+/// quarantined. Quarantining is reported once — the next run is clean, since the file is no
+/// longer in the apply path.
+fn finish_apply(failed: usize, quarantined: usize) -> miette::Result<()> {
+    match (failed, quarantined) {
+        (0, 0) => Ok(()),
+        (0, q) => Err(miette::miette!(
+            "{q} unreadable result file(s) moved to results/{}/; the concepts they held \
+             re-enqueue on the next ingest",
+            lk_queue::CORRUPT_SUBDIR
+        )),
+        (f, 0) => Err(miette::miette!(
+            "{f} result(s) could not be applied; their files were kept for retry"
+        )),
+        (f, q) => Err(miette::miette!(
+            "{f} result(s) could not be applied (kept for retry); {q} unreadable file(s) \
+             moved to results/{}/",
+            lk_queue::CORRUPT_SUBDIR
+        )),
     }
-    Ok(())
 }
 
 async fn count(opts: &super::GlobalOptions, root: Option<PathBuf>) -> miette::Result<()> {

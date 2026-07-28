@@ -98,15 +98,36 @@ pub struct ReportedConcept {
 /// Subdirectory of the queue holding results awaiting `lore queue apply`.
 pub const RESULTS_SUBDIR: &str = "results";
 
+/// Subdirectory results that cannot be parsed are moved to, out of the apply path.
+pub const CORRUPT_SUBDIR: &str = "corrupt";
+
+/// Every result file in `<queue_dir>/results/`, oldest first, split by whether it parses.
+pub struct ResultBatch {
+    /// Results ready to apply, in filename order.
+    pub ready: Vec<(PathBuf, TaskResult)>,
+    /// Files that could not be parsed, with the reason.
+    pub unreadable: Vec<(PathBuf, String)>,
+}
+
 /// Read every result file in `<queue_dir>/results/`, oldest first.
 ///
-/// A malformed file is an error, not a skip: silently ignoring one would drop the concepts
-/// of a whole page while reporting success, and the extraction that produced them is not
-/// repeatable without another LLM session.
-pub fn read_results(queue_dir: &Path) -> std::io::Result<Vec<(PathBuf, TaskResult)>> {
+/// A malformed file — a drain session killed mid-write — is separated rather than failing
+/// the read. Failing it would strand every OTHER pending result behind one truncated file,
+/// on every run, forever: nothing prunes results, so only a human noticing a red pipeline
+/// would clear it. The caller quarantines it instead, which is safe because the concepts are
+/// not lost with the file. The drain writes results only; `queue apply` is what stamps the
+/// completion marker — so an unapplied result means its page still carries no marker, and
+/// the next ingest re-enqueues the task off the unchanged input hash.
+///
+/// (`event_log` is strict about a corrupt line for a reason that does not apply here: its
+/// caller REWRITES the log from what it parsed, so skipping would destroy the record.)
+pub fn read_results(queue_dir: &Path) -> std::io::Result<ResultBatch> {
     let dir = queue_dir.join(RESULTS_SUBDIR);
     if !dir.exists() {
-        return Ok(Vec::new());
+        return Ok(ResultBatch {
+            ready: Vec::new(),
+            unreadable: Vec::new(),
+        });
     }
     let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)?
         .filter_map(Result::ok)
@@ -115,18 +136,20 @@ pub fn read_results(queue_dir: &Path) -> std::io::Result<Vec<(PathBuf, TaskResul
         .collect();
     paths.sort();
 
-    let mut out = Vec::with_capacity(paths.len());
+    let mut batch = ResultBatch {
+        ready: Vec::with_capacity(paths.len()),
+        unreadable: Vec::new(),
+    };
     for path in paths {
+        // An I/O failure is NOT a malformed file: the bytes may be perfectly good and
+        // unreadable for a reason retrying fixes, so it still fails the read.
         let raw = std::fs::read_to_string(&path)?;
-        let result: TaskResult = serde_json::from_str(&raw).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("{}: {e}", path.display()),
-            )
-        })?;
-        out.push((path, result));
+        match serde_json::from_str::<TaskResult>(&raw) {
+            Ok(result) => batch.ready.push((path, result)),
+            Err(e) => batch.unreadable.push((path, e.to_string())),
+        }
     }
-    Ok(out)
+    Ok(batch)
 }
 
 /// `EnumIter` exists for the skill-contract tests — see [`crate::TargetKind`].
