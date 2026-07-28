@@ -292,6 +292,15 @@ impl ConceptDrafts {
             name: draft.name.clone(),
             slug: safe_slug.clone(),
         };
+        // A page this run has decided to create is as established as one already on disk.
+        // The index is read from disk once, so without this a second extraction spelling
+        // the same name differently would miss it and mint a rival page — the very pair
+        // the index exists to prevent, and one only a later `graph merge` could undo.
+        if let Some(index) = self.alias_index.as_mut()
+            && let Some(key) = identity_key(&safe_slug)
+        {
+            index.entry(key).or_insert_with(|| identity.clone());
+        }
         self.drafts.insert(safe_slug, draft);
         identity
     }

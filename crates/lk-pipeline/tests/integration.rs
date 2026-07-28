@@ -3161,6 +3161,59 @@ async fn a_grounding_from_a_later_result_still_seeds_a_new_concept_page() {
     );
 }
 
+/// The index is read from disk once per run, so a page the run itself creates has to be
+/// registered as it is committed — otherwise two spellings arriving in the SAME run each
+/// miss the other and mint rival pages, which is exactly the pair the index exists to
+/// prevent and which only a later `graph merge` could undo.
+#[tokio::test]
+async fn a_page_created_earlier_in_the_run_is_found_by_a_later_spelling() {
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let config = base_config(vault);
+    std::fs::create_dir_all(vault.join("wiki").join("concepts")).unwrap();
+
+    let ctx = build_ctx(&config, Arc::new(NoopLlmClient));
+    let mut pipeline = Pipeline::new(vault, ctx);
+
+    let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
+    let result = |task: &str, name: &str| lk_queue::TaskResult {
+        task_id: task.into(),
+        cache_hash: "h".into(),
+        target: lk_queue::TaskTarget {
+            vault_path: "daily/test-source/2026-05-23.md".into(),
+            kind: lk_queue::TargetKind::DailyConcepts,
+            anchor: "## Related Concepts".into(),
+            concepts_dir: "../../wiki/concepts".into(),
+        },
+        date: jiff::civil::date(2026, 5, 23),
+        concepts: vec![lk_queue::ReportedConcept {
+            concept: ExtractedConcept {
+                name: name.into(),
+                category: None,
+            },
+            synthesis: Some("Seeded on creation.".into()),
+        }],
+    };
+
+    pipeline
+        .apply_concept_result(&result("ext-1", "Vector DB"), page)
+        .await
+        .unwrap();
+    let second = pipeline
+        .apply_concept_result(&result("ext-2", "VectorDB"), page)
+        .await
+        .unwrap();
+
+    assert!(
+        second.contains("../../wiki/concepts/vector-db.md"),
+        "the second spelling must resolve to the page this run already created: {second}"
+    );
+    let pages = pipeline.render_concept_pages().await.unwrap();
+    let paths: Vec<String> = pages.iter().map(|p| p.path.to_string()).collect();
+    assert_eq!(pages.len(), 1, "one concept, one page: {paths:?}");
+    assert!(paths[0].ends_with("vector-db.md"), "{paths:?}");
+}
+
 /// A break BETWEEN DIGITS is the name, not typography: `3-5` is two numerals and `35` is
 /// one. The router acts on identity — it folds an extraction into an established page —
 /// so folding these together loses the second concept in a way nothing can report: only
@@ -3225,7 +3278,7 @@ async fn a_break_between_digits_does_not_fold_one_version_onto_another() {
     );
 }
 
-/// Where the separators fall carries no identity, so an extraction that spells an
+/// A break between letters is typography, so an extraction that spells an
 /// established name without them must land on that page rather than mint a second one at
 /// its own spelling. The alias index and `graph lint` share `identity_key` precisely so
 /// the page pair the lint calls a duplicate is the one the index refuses to create.

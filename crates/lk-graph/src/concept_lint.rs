@@ -196,15 +196,16 @@ pub struct DuplicateConcept {
 }
 
 /// Concept page pairs whose NAME SETS intersect: some name — a slug, a `title`, an alias —
-/// resolves to both pages at once. That is a defect about the vault, not a guess about
-/// the ideas: a name addressing two pages cannot route deterministically, so the
-/// pipeline's alias index picks one and the other's citations fragment away from it.
-/// Read-only; `lore graph merge` is the remedy a human triggers.
+/// belongs to both pages at once. That is a defect about the vault, not a guess about the
+/// ideas: one name reaching two pages fragments its citations by spelling, and the
+/// pipeline's alias index has to pick one of them. Read-only; `lore graph merge` is the
+/// remedy a human triggers — or, when the pages are genuinely different things that happen
+/// to share a name, renaming one of them is.
 ///
-/// Deliberately EXACT: no score, no threshold, and no morphology. Two names collide when
-/// they are the SAME SEQUENCE OF CHARACTERS under the vault's own normalization, and
-/// nothing else — so a finding can never be a false positive, only a page pair a human
-/// resolves by merging or renaming.
+/// Deliberately EXACT: no score, no threshold, and no morphology. Two names collide only
+/// when `lk_core::concept::identity_key` reduces them to one identity, and that fold covers
+/// typography alone — case, punctuation, and a break between letters. So a finding is never
+/// a similarity guess; it is a name the vault spells two ways.
 ///
 /// A scored variant (Sørensen-Dice over slug character bigrams) preceded this and was
 /// measured on a 1,599-concept vault: 298 findings, of which one was a real duplicate. The
@@ -466,7 +467,7 @@ mod tests {
         assert_eq!(
             pairs,
             vec![("vector-db", "vectordb")],
-            "separator placement carries no identity; nothing else may be flagged: {result:?}"
+            "a break between letters is typography; nothing else may be flagged: {result:?}"
         );
     }
 
