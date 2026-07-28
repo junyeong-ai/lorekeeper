@@ -44,7 +44,8 @@ Removes:
   - ~/.config/lorekeeper/config.example.yaml       (installed config template)
   - ~/.claude/skills/lore-*                        (user-level skills)
   - ./.claude/skills/lore-*                        (project-level skills, if present)
-  - ~/.claude/scheduled-tasks/lore-*-ingest        (scheduled-task definitions)
+  - $DATA_DIR/pipelines                            (scheduled pipeline scripts)
+#   - ~/.claude/scheduled-tasks/lore-*-ingest        (superseded, pre-0.11)
 
 Flags:
   --yes, -y       Skip all confirmations
@@ -131,14 +132,27 @@ for skill in "${SKILL_NAMES[@]}"; do
     fi
 done
 
-# Scheduled tasks (user-level only — installed alongside the skills).
+# The scheduled pipelines.
+pipelines_dir="$DATA_DIR/pipelines"
+if [ -d "$pipelines_dir" ]; then
+    if prompt_yesno "Remove pipelines $pipelines_dir?"; then
+        render_step "Removing $pipelines_dir"
+        rm -rf "$pipelines_dir"
+        log_ok "Pipelines removed"
+        removed=$((removed + 1))
+    fi
+fi
+printf '%sIf you registered them with launchd or cron, unload those jobs too.%s\n' "$C_DIM" "$C_RESET"
+
+# Scheduled tasks installed by versions up to 0.10, before the pipelines replaced them.
+# Still offered here so an upgrade path that never re-ran the installer can clean up.
 for sched_name in lore-daily-ingest lore-weekly-ingest; do
     sched_task="$HOME/.claude/scheduled-tasks/$sched_name"
     if [ -d "$sched_task" ]; then
         if prompt_yesno "Remove scheduled task $sched_task?"; then
             render_step "Removing $sched_task"
             rm -rf "$sched_task"
-            log_ok "Scheduled task removed: $sched_name"
+            log_ok "Superseded scheduled task removed: $sched_name"
             removed=$((removed + 1))
         fi
     fi

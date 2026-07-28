@@ -94,6 +94,8 @@ foreach ($skillName in $SkillNames) {
 }
 
 # Scheduled tasks (user-level only — installed alongside the skills).
+# Scheduled tasks installed by versions up to 0.10, before the pipelines replaced them.
+# Still offered so an upgrade that never re-ran the installer can clean up.
 foreach ($schedName in @('lore-daily-ingest', 'lore-weekly-ingest')) {
     $schedTask = Join-Path $env:USERPROFILE ".claude\scheduled-tasks\$schedName"
     if (Test-Path $schedTask) {

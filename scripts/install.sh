@@ -331,53 +331,61 @@ install_skill() {
     log_ok "Skill installed"
 }
 
-# Autonomous scheduled tasks: Claude Code agent definitions the user's cron /
-# remote-agent runner fires. `lore-daily-ingest` chains `lore ingest` →
-# /lore-process → graph reconcile; `lore-weekly-ingest` runs every synthesis period
-# + knowledge audit + retention janitors on Mondays. They are user-level agents (always under ~/.claude/scheduled-tasks/,
-# never project) and drive the skills, so they install only alongside them
-# (skill_level != none). This just places the definitions where the runner looks.
-SCHEDULED_TASKS="lore-daily-ingest lore-weekly-ingest"
+# The scheduled pipelines: one entry script per cadence plus the library they share.
+#
+# These are the deployment layer. `lore` exposes data and does the deterministic work; a
+# pipeline composes it into a run — ingest, then the LLM drain via `claude -p`, then the
+# graph sync — and a system scheduler fires the pipeline. Keeping the composition here
+# rather than inside `lore` is deliberate: the drain's invocation is a Claude Code CLI
+# detail, and binding the knowledge pipeline's own config to one CLI's flags would be the
+# worse coupling.
+#
+# They are POSIX shell and assume a system scheduler (launchd or cron), so they install on
+# Unix only.
+PIPELINES="lore-pipeline.sh lore-daily.sh lore-weekly.sh"
 
-install_scheduled_tasks() {
-    [ "$1" = "none" ] && return
-    local name
-    for name in $SCHEDULED_TASKS; do
-        install_one_scheduled_task "$name"
+install_pipelines() {
+    local dest_dir="$1/pipelines"
+    local name src installed=0
+    mkdir -p "$dest_dir"
+    for name in $PIPELINES; do
+        src=""
+        if [ -n "$repo_dir" ] && [ -f "$repo_dir/scripts/${name}" ]; then
+            src="$repo_dir/scripts/${name}"
+        elif curl -fsSL --retry 3 --retry-delay 2 \
+            -o "${TMP_DIR}/${name}" "${RELEASE_BASE}/v${version}/${name}" 2>/dev/null; then
+            src="${TMP_DIR}/${name}"
+        else
+            log_warn "Pipeline '${name}' unavailable; skipping"
+            continue
+        fi
+        cp "$src" "${dest_dir}/${name}"
+        chmod +x "${dest_dir}/${name}"
+        installed=$((installed + 1))
     done
+    [ "$installed" -gt 0 ] && log_ok "Pipelines installed to ${dest_dir}"
 }
 
-install_one_scheduled_task() {
-    local name="$1"
-    local src=""
-    if [ -n "$repo_dir" ] && [ -f "$repo_dir/scripts/${name}.md" ]; then
-        src="$repo_dir/scripts/${name}.md"
-    else
-        local url="${RELEASE_BASE}/v${version}/${name}.md"
-        if curl -fsSL --retry 3 --retry-delay 2 -o "${TMP_DIR}/${name}.md" "$url" 2>/dev/null; then
-            src="${TMP_DIR}/${name}.md"
-        else
-            log_warn "Scheduled-task template unavailable at $url; skipping"
-            return
-        fi
-    fi
+# Legacy Claude Code scheduled-task definitions, installed by versions up to 0.10. They
+# scheduled `lore ingest` through Claude Desktop, which meant a day was silently skipped
+# whenever the app was not running; the pipelines above replace them with a system
+# scheduler. Their definitions also describe a drain contract the code no longer has, so
+# leaving them in place would keep a stale agent spec on disk.
+LEGACY_SCHEDULED_TASKS="lore-daily-ingest lore-weekly-ingest"
 
-    local target="$HOME/.claude/scheduled-tasks/${name}/SKILL.md"
-    render_step "Installing scheduled task → $target"
-    if [ -f "$target" ]; then
-        local existing new
-        existing="$(skill_sha256 "$target")"
-        new="$(skill_sha256 "$src")"
-        if [ -n "$existing" ] && [ "$existing" = "$new" ]; then
-            if [ "$LORE_INSTALL_FORCE" != "1" ] && ! prompt_yesno "Scheduled task '$name' is already current. Reinstall?" "N"; then
-                log_info "Scheduled task '$name' kept"
-                return
-            fi
+remove_legacy_scheduled_tasks() {
+    local name dir removed=0
+    for name in $LEGACY_SCHEDULED_TASKS; do
+        dir="$HOME/.claude/scheduled-tasks/${name}"
+        if [ -d "$dir" ]; then
+            rm -rf "$dir"
+            removed=$((removed + 1))
         fi
+    done
+    if [ "$removed" -gt 0 ]; then
+        log_ok "Removed ${removed} superseded scheduled task(s); schedule the pipelines instead"
+        log_info "Also drop their entries from ~/.claude/scheduled-tasks/registry.json if present"
     fi
-    mkdir -p "$(dirname "$target")"
-    cp "$src" "$target"
-    log_ok "Scheduled task '$name' installed (register it with your cron / agent runner)"
 }
 
 # ═════════════════════════════ ORCHESTRATION ═══════════════════════════════
@@ -452,8 +460,7 @@ render_review() {
         project) printf '  %sskills%s    ./.claude/skills/lore-*\n' "$C_DIM" "$C_RESET" ;;
         none)    printf '  %sskill%s     (skipped)\n' "$C_DIM" "$C_RESET" ;;
     esac
-    [ "$skill_level" != "none" ] && \
-        printf '  %sschedule%s  ~/.claude/scheduled-tasks/lore-{daily,weekly}-ingest\n' "$C_DIM" "$C_RESET"
+    printf '  %spipeline%s  %s/pipelines/lore-{daily,weekly}.sh\n' "$C_DIM" "$C_RESET" "$DATA_DIR"
 }
 
 check_path() {
@@ -622,8 +629,8 @@ main() {
                 SKILL_NAME="$skill" install_skill "$skill_level" "$skill_src"
             fi
         done
-        # The scheduled tasks drive the skills, so install them with the skills.
-        install_scheduled_tasks "$skill_level"
+        install_pipelines "$DATA_DIR"
+        remove_legacy_scheduled_tasks
     fi
 
     printf '\n'
@@ -636,7 +643,9 @@ main() {
     printf '  %s2.%s %slore init credentials%s   Enter API tokens interactively\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
     printf '  %s3.%s %slore validate%s           Verify config + credentials\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
     printf '  %s4.%s %slore ingest --dry-run%s   Preview ingest without writing\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
-    printf '  %s5.%s %slore schedule%s | crontab -  Register the daily cron\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
+    printf '  %s5.%s Schedule %s/pipelines/lore-daily.sh (and lore-weekly.sh):\n' "$C_BOLD" "$C_RESET" "$DATA_DIR"
+    printf '       macOS: %slore schedule --format launchd --bin "$(command -v lore)"%s\n' "$C_BOLD" "$C_RESET"
+    printf '       Linux: %slore schedule%s | crontab -   (then point the ingest line at the pipeline)\n' "$C_BOLD" "$C_RESET"
     printf '  %s/lore-setup%s · %s/lore-ingest%s · %s/lore-process%s · %s/lore-wiki%s · %s/lore-capture%s · %s/lore-extract%s\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
 }
 

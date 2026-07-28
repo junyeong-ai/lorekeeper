@@ -170,45 +170,28 @@ function Install-Skill($level, $src, $skillName) {
     Write-Ok 'Skill installed'
 }
 
-# Autonomous scheduled tasks — user-level Claude Code agents the user's scheduler
-# fires: `lore-daily-ingest` chains `lore ingest` -> /lore-process -> graph reconcile;
-# `lore-weekly-ingest` runs every synthesis period + knowledge audit + retention
-# janitors on Mondays. Installed only with the skills (they drive them).
-$ScheduledTasks = @('lore-daily-ingest', 'lore-weekly-ingest')
+# Scheduled-task definitions installed by versions up to 0.10. They drove `lore ingest`
+# through Claude Desktop, so a day was silently skipped whenever the app was not running,
+# and their drain contract no longer matches the code. The replacement is a pair of POSIX
+# pipeline scripts fired by a system scheduler (launchd or cron) — Unix only, so this
+# installer removes the superseded definitions without installing a substitute. On Windows,
+# schedule the equivalent stages yourself with Task Scheduler: `lore ingest`, then
+# `claude -p /lore-process`, then `lore queue apply` and `lore graph backlinks-sync`.
+$LegacyScheduledTasks = @('lore-daily-ingest', 'lore-weekly-ingest')
 
-function Install-ScheduledTasks($level, $version, $repoDir) {
-    if ($level -eq 'none') { return }
-    foreach ($name in $ScheduledTasks) {
-        Install-OneScheduledTask $name $version $repoDir
-    }
-}
-
-function Install-OneScheduledTask($name, $version, $repoDir) {
-    $src = $null
-    if ($repoDir -and (Test-Path (Join-Path $repoDir "scripts\$name.md"))) {
-        $src = Join-Path $repoDir "scripts\$name.md"
-    } else {
-        $url = "$ReleaseBase/v$version/$name.md"
-        $tmp = New-TemporaryFile
-        try {
-            Invoke-WebRequest -Uri $url -OutFile $tmp.FullName -ErrorAction Stop
-            $src = $tmp.FullName
-        } catch {
-            Write-Warn "Scheduled-task template unavailable at $url; skipping"
-            return
+function Remove-LegacyScheduledTasks {
+    $removed = 0
+    foreach ($name in $LegacyScheduledTasks) {
+        $dir = Join-Path $env:USERPROFILE ".claude\scheduled-tasks\$name"
+        if (Test-Path $dir) {
+            Remove-Item -Path $dir -Recurse -Force
+            $removed++
         }
     }
-    $target = Join-Path $env:USERPROFILE ".claude\scheduled-tasks\$name\SKILL.md"
-    Write-Step "Installing scheduled task -> $target"
-    if (Test-Path $target) {
-        if ((Get-SkillHash $target) -eq (Get-SkillHash $src) -and -not $Force) {
-            Write-Host "  Scheduled task '$name' already current; kept" -ForegroundColor DarkGray
-            return
-        }
+    if ($removed -gt 0) {
+        Write-Ok "Removed $removed superseded scheduled task(s)"
+        Write-Host "  Also drop their entries from .claude\scheduled-tasks\registry.json if present" -ForegroundColor DarkGray
     }
-    New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
-    Copy-Item -Path $src -Destination $target -Force
-    Write-Ok "Scheduled task '$name' installed (register it with your scheduler)"
 }
 
 # ── main ─────────────────────────────────────────────────────────────────
@@ -248,7 +231,7 @@ switch ($Skill) {
     'none'    { Write-Host '  skills    (skipped)' }
 }
 if ($Skill -ne 'none') {
-    Write-Host "  schedule  $env:USERPROFILE\.claude\scheduled-tasks\lore-{daily,weekly}-ingest"
+    Write-Host "  schedule  (Windows: register the stages with Task Scheduler)" -ForegroundColor DarkGray
 }
 
 if ($DryRun) { Write-Host ''; Write-Warn '(dry-run) Not executing'; exit 0 }
@@ -294,7 +277,7 @@ if ($Skill -ne 'none') {
         if ($skillSrc) { Install-Skill $Skill $skillSrc $skillName }
         else { Write-Warn "Skill '$skillName' unavailable; skipping" }
     }
-    Install-ScheduledTasks $Skill $version $repoDir
+    Remove-LegacyScheduledTasks
 }
 
 Write-Host ''
@@ -316,5 +299,5 @@ Write-Host "       Copy-Item '$cfgDir\config.example.yaml' '$cfgDir\config.yaml'
 Write-Host "  2. $BinaryName init credentials   Enter API tokens interactively"
 Write-Host "  3. $BinaryName validate           Verify config + credentials"
 Write-Host "  4. $BinaryName ingest --dry-run   Preview ingest without writing"
-Write-Host "  5. $BinaryName schedule           Generate scheduled task entries"
+Write-Host "  5. $BinaryName schedule           Print the cron cadences from your config"
 Write-Host "  /lore-setup  /lore-ingest  /lore-process  /lore-wiki  /lore-capture  /lore-extract"
