@@ -158,7 +158,7 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs, personal: bool) -> Vec<PageSc
                 s(
                     "Grounding",
                     |i| i.exploration_grounding.to_string(),
-                    Owner::Machine,
+                    Owner::Llm,
                 ),
             ],
         },
@@ -594,6 +594,28 @@ mod tests {
         assert!(
             events.trim_end().ends_with("| machine |"),
             "raw Events list stays machine-owned: {events}"
+        );
+    }
+
+    #[test]
+    fn exploration_has_no_machine_owned_section() {
+        // No `lore` command renders an exploration page — it is authored whole by the
+        // knowledge-synthesis skill that answers the question. A `machine` owner would tell
+        // that author to leave the section for a pipeline that never runs, and Grounding is
+        // where the page's links live: `backlinks-sync` reads exactly those forward links to
+        // derive each cited concept's sources and `source_count`, so an empty Grounding costs
+        // the page its entire contribution to the graph, silently and with nothing to repair it.
+        let md = render_agents_md(Locale::En, &lk_core::config::VaultDirs::default(), false);
+        let section = md
+            .split("\n## exploration ")
+            .nth(1)
+            .expect("exploration page format present")
+            .split("\n## ")
+            .next()
+            .unwrap();
+        assert!(
+            !section.contains("| machine |"),
+            "exploration sections have no machine writer: {section}"
         );
     }
 

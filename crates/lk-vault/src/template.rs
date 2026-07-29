@@ -29,10 +29,6 @@ const EMBEDDED: &[(&str, &str)] = &[
         include_str!("../../../templates/document.md.jinja"),
     ),
     (
-        "exploration.md.jinja",
-        include_str!("../../../templates/exploration.md.jinja"),
-    ),
-    (
         "gmail.md.jinja",
         include_str!("../../../templates/gmail.md.jinja"),
     ),
@@ -154,6 +150,46 @@ impl TemplateEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Page templates the pipeline renders by name, as opposed to the per-source ones a
+    /// `SourceType` descriptor selects.
+    const RENDERED_BY_NAME: &[&str] = &[
+        "concept.md.jinja",
+        "document.md.jinja",
+        "work-log.md.jinja",
+        "weekly-synthesis.md.jinja",
+        "weekly-review.md.jinja",
+        "monthly-review.md.jinja",
+        "quarterly-review.md.jinja",
+        "annual-review.md.jinja",
+    ];
+
+    /// Every embedded template must be reachable by some renderer: a `SourceType` default, a
+    /// `RENDERED_BY_NAME` entry, or a `_`-prefixed partial that daily templates extend. One
+    /// that is reachable by none cannot be rendered at all, yet still reads as a machine
+    /// writer to anyone documenting the page format — which is exactly how the exploration
+    /// format came to advertise a machine-owned Grounding section that no command fills.
+    #[test]
+    fn every_embedded_template_has_a_renderer() {
+        use strum::IntoEnumIterator;
+        let mut reachable: std::collections::HashSet<&str> =
+            RENDERED_BY_NAME.iter().copied().collect();
+        for st in lk_core::config::SourceType::iter() {
+            reachable.insert(st.descriptor().default_template);
+        }
+        for (name, _) in EMBEDDED {
+            assert!(
+                name.starts_with('_') || reachable.contains(name),
+                "{name} is embedded but no renderer names it"
+            );
+        }
+        for name in RENDERED_BY_NAME {
+            assert!(
+                EMBEDDED.iter().any(|(n, _)| n == name),
+                "{name} is rendered by name but not embedded"
+            );
+        }
+    }
 
     /// Every `SourceType`'s `descriptor().default_template` must be an embedded template.
     /// Adding a source type is compiler-forced everywhere EXCEPT here — the template file
