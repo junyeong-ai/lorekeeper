@@ -5,7 +5,6 @@ description: Drain the Lorekeeper LLM work queue after `lore ingest` runs in que
 when_to_use: |
   queue process, drain queue, fill summaries,
   concept extraction run, enrich daily pages, post-ingest
-argument-hint: "[--vault path]"
 allowed-tools: |
   Bash(ls *)
   Bash(cat *)
@@ -53,8 +52,11 @@ you last read them.
    no longer carries means the heading vocabulary changed (a locale switch), which
    no amount of waiting undoes. A task you filled and
    stamped earlier in this run therefore reads `done` if you re-classify — that
-   is correct, and it is skipped, not failed. The "this run is finished" signal
-   is the queue file moving to `processed/`, not `queue status` reaching zero.
+   is correct, and it is skipped, not failed. A CONCEPT task never does: its
+   marker is `queue apply`'s, so it still reads `current` after you have written
+   its result, and re-running it would only rewrite the same file. **Never loop
+   on "until nothing reads `current`"** — the "this run is finished" signal is
+   the queue file moving to `processed/`, not `queue status` reaching zero.
 2. **Locate sections only by `target.anchor`** (the exact `## …` heading the
    pipeline wrote, resolved from i18n at queue time). Never hardcode a
    heading per `target.kind`.
@@ -184,8 +186,16 @@ The essentials: a visible `.jsonl` is fully written and every
          answered while it is still empty, which is what `llm_cache` believes —
          so the task never re-enqueues and the extraction is lost.
 
-   d. **Edit the target page** — the markdown file at `target.vault_path`,
-      using the Edit tool (section replace):
+   d. **Write the result.** For a CONCEPT kind (`daily-concepts`,
+      `document-concepts`) there is no page edit at all: write the result file per
+      [references/processing-kinds.md](references/processing-kinds.md) and move to
+      the next task. Do not touch the related-concepts section and do not stamp
+      `concepts_done` — `lore queue apply` writes both in one edit (safety rule 6),
+      and stamping it here claims an empty section is answered, which is what
+      `llm_cache` believes, so the task never re-enqueues and the extraction is lost.
+
+      For every OTHER kind, edit the markdown file at `target.vault_path` using the
+      Edit tool (section replace):
 
       1. Open the file at `target.vault_path`
       2. Locate the section heading `target.anchor` (literal match)
@@ -193,9 +203,6 @@ The essentials: a visible `.jsonl` is fully written and every
          (or EOF) with the generated content
       4. Preserve frontmatter and every other section unchanged, then stamp the
          task's `llm_inputs.<key>_done` completion marker (the table under 3c)
-
-      Concept pages created or merged along the way follow the
-      **Concept convergence** section of the vault's `AGENTS.md`.
 
    e. **On task failure** (page not found, edit error, malformed task):
       record the failed `task_id` and the reason. **Abort processing of

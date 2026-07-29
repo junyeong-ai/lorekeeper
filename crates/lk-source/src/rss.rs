@@ -158,12 +158,12 @@ impl Source for RssSource {
         let (min, max) = ctx.day_window(p.lookback_hours, 0)?;
 
         let mut items = Vec::new();
-        let mut unreachable = 0usize;
+        // Counted upward, never derived by subtraction — see `require_any_observation`.
+        let mut feeds_read = 0usize;
         for feed_cfg in &p.feeds {
             let feed = match self.fetch_feed(&feed_cfg.url).await {
                 Ok(f) => f,
                 Err(e) => {
-                    unreachable += 1;
                     // One unreachable/malformed feed must not abort the source.
                     tracing::warn!(
                         feed = %feed_cfg.id,
@@ -253,12 +253,13 @@ impl Source for RssSource {
             // by a format change instead of a moved URL. An EMPTY feed is observed: there
             // was nothing to misread.
             if seen > observed && observed == 0 {
-                unreachable += 1;
                 tracing::warn!(
                     feed = %feed_cfg.id,
                     unusable = seen,
                     "rss: every entry was unusable (no date or no title); treating the feed as unread"
                 );
+            } else {
+                feeds_read += 1;
             }
             tracing::info!(
                 feed = %feed_cfg.id,
@@ -268,12 +269,12 @@ impl Source for RssSource {
             );
         }
 
-        crate::require_any_observation("feed", unreachable, p.feeds.len())?;
+        crate::require_any_observation("feed", feeds_read, p.feeds.len())?;
 
         tracing::info!(
             total = items.len(),
             feeds = p.feeds.len(),
-            unreachable,
+            feeds_read,
             "rss: extraction complete"
         );
         Ok(items)
@@ -377,7 +378,8 @@ mod tests {
             .await
             .expect_err("every feed failed, so nothing was observed");
         assert!(
-            err.to_string().contains("every feed failed (2 of 2)"),
+            err.to_string()
+                .contains("none of the 2 feeds could be read"),
             "{err}"
         );
     }
@@ -404,7 +406,8 @@ mod tests {
             .await
             .expect_err("no entry could become an observation");
         assert!(
-            err.to_string().contains("every feed failed (1 of 1)"),
+            err.to_string()
+                .contains("none of the 1 feeds could be read"),
             "{err}"
         );
     }

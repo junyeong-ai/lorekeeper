@@ -270,7 +270,7 @@ impl Source for GoogleDriveSource {
         // metadata will not parse are equally absent. Subtracting what was produced from
         // what was listed makes a forgotten counter unrepresentable, which is the only way
         // a skip added later cannot quietly reopen this.
-        crate::require_any_observation("listed file", listed - items.len(), listed)?;
+        crate::require_any_observation("listed file", items.len(), listed)?;
 
         Ok(items)
     }

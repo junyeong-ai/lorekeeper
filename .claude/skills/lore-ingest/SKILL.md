@@ -28,7 +28,7 @@ an Obsidian vault. All commands accept `--config <path>` to override.
 | `lore synthesis monthly [--previous]` | Monthly performance review |
 | `lore synthesis quarterly [--previous]` | Quarterly review with category stats |
 | `lore synthesis annual [--previous]` | Annual review from quarterly reviews |
-| `lore status` | Last successful ingest per source |
+| `lore status` | Last time each source was COLLECTED — an empty run counts, so a quiet source shows its real timestamp with `0 events` |
 | `lore health [--strict]` | Warn if any source is overdue vs `ingest.schedule` (2 missed fires; 48h fallback) |
 | `lore performance` | Performance category distribution |
 | `lore doctor` | Audit materialized pages against the text-cleanliness contract (non-zero on any defect) |

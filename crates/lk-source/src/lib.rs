@@ -49,10 +49,9 @@ pub enum SourceError {
     Api { status: u16, message: String },
     #[error("parse: {0}")]
     Parse(String),
-    #[error("nothing observed: every {unit} failed ({failed} of {attempted}); see warnings above")]
+    #[error("nothing observed: none of the {attempted} {unit}s could be read; see warnings above")]
     NothingObserved {
         unit: &'static str,
-        failed: usize,
         attempted: usize,
     },
 }
@@ -70,17 +69,22 @@ pub enum SourceError {
 /// One item reaching means the source WAS observed, however partially, and stays a success;
 /// the failures are already `tracing::warn`-ed individually. `attempted == 0` is a genuinely
 /// empty listing, not a failure.
+///
+/// It takes what was OBSERVED, never what failed. A caller computing the failures itself
+/// would subtract, and a subtraction is what must not appear here: the identity it would
+/// rest on is "one attempt yields at most one observation", and the day that stops holding
+/// — a listing entry expanding into several items — the difference underflows a `usize`.
+/// Release builds carry no overflow checks, so it would wrap to near `usize::MAX`, never
+/// equal `attempted`, and this guard would silently stop firing FOREVER — reinstating the
+/// exact blindness it exists to remove, while debug builds panicked about something else.
+/// Counting observations upward cannot express that.
 pub(crate) fn require_any_observation(
     unit: &'static str,
-    failed: usize,
+    observed: usize,
     attempted: usize,
 ) -> Result<(), SourceError> {
-    if attempted > 0 && failed == attempted {
-        return Err(SourceError::NothingObserved {
-            unit,
-            failed,
-            attempted,
-        });
+    if attempted > 0 && observed == 0 {
+        return Err(SourceError::NothingObserved { unit, attempted });
     }
     Ok(())
 }
@@ -90,24 +94,32 @@ mod observation_tests {
     use super::require_any_observation;
 
     #[test]
-    fn one_success_among_failures_is_still_an_observation() {
-        assert!(require_any_observation("feed", 2, 3).is_ok());
-        assert!(require_any_observation("feed", 0, 3).is_ok());
+    fn one_observation_among_failures_is_still_an_observation() {
+        assert!(require_any_observation("feed", 1, 3).is_ok());
+        assert!(require_any_observation("feed", 3, 3).is_ok());
     }
 
     #[test]
-    fn every_attempt_failing_is_not_an_observation() {
-        let err = require_any_observation("feed", 3, 3)
+    fn observing_none_of_what_was_attempted_is_not_an_observation() {
+        let err = require_any_observation("feed", 0, 3)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("every feed failed (3 of 3)"), "{err}");
+        assert!(err.contains("none of the 3 feeds could be read"), "{err}");
     }
 
     /// Nothing to read is not the same as reading nothing — an empty folder or an empty
     /// feed list must never be reported as a failure.
     #[test]
     fn attempting_nothing_is_not_a_failure() {
-        assert!(require_any_observation("file", 0, 0).is_ok());
+        assert!(require_any_observation("listed file", 0, 0).is_ok());
+    }
+
+    /// Taking OBSERVATIONS means the input a subtraction would have produced — more
+    /// results than attempts — is a plain success, not a `usize` that wrapped past
+    /// `attempted` and silently disarmed the guard in release builds.
+    #[test]
+    fn more_observations_than_attempts_cannot_disarm_the_guard() {
+        assert!(require_any_observation("listed file", 5, 3).is_ok());
     }
 }
 

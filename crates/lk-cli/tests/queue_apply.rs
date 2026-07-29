@@ -80,9 +80,23 @@ impl Workspace {
         let out = self.run(&["queue", "apply"]);
         let err = String::from_utf8_lossy(&out.stderr);
         assert!(out.status.success(), "queue apply failed: {err}");
-        assert!(
-            err.contains(&format!("{applied} applied, {dropped} dropped")),
-            "expected {applied} applied / {dropped} dropped, got: {err}"
+        // Parsed, not substring-matched: `"1 applied"` is a substring of `"11 applied"`,
+        // so a run that applied ten times too many would satisfy a `contains` check.
+        let tally = err
+            .lines()
+            .find_map(|line| line.strip_prefix("queue apply: "))
+            .unwrap_or_else(|| panic!("no summary line in: {err}"));
+        let counted = |what: &str| -> usize {
+            tally
+                .split(", ")
+                .find_map(|part| part.strip_suffix(&format!(" {what}")))
+                .and_then(|n| n.parse().ok())
+                .unwrap_or_else(|| panic!("no `{what}` count in: {tally}"))
+        };
+        assert_eq!(
+            (counted("applied"), counted("dropped")),
+            (applied, dropped),
+            "in: {tally}"
         );
     }
 
