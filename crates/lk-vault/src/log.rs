@@ -28,6 +28,24 @@ pub enum LogStatus {
     Skipped,
 }
 
+impl LogStatus {
+    /// Whether this entry records a source whose window was actually OBSERVED. `Skipped`
+    /// is written at exactly one place — a fetch that succeeded and yielded no pages — so
+    /// it reports an answer ("nothing happened"), not an absence of one. Only `Failed`
+    /// leaves the window unobserved.
+    ///
+    /// The distinction is what keeps freshness reporting honest: a quiet source (a Jira
+    /// filter matching nothing today) is collected on schedule and must not read as
+    /// overdue, or the warning fires forever and trains its reader to ignore a real
+    /// outage. Exhaustive on purpose — a new status has to answer this.
+    pub fn is_collected(self) -> bool {
+        match self {
+            LogStatus::Success | LogStatus::Skipped => true,
+            LogStatus::Failed => false,
+        }
+    }
+}
+
 impl IngestLog {
     pub fn new(path: PathBuf) -> Self {
         Self { path }
@@ -50,7 +68,13 @@ impl IngestLog {
         Ok(())
     }
 
-    pub async fn find_last_success(&self, source_id: &str) -> Result<Option<LogEntry>, VaultError> {
+    /// The most recent entry in which `source_id` was collected — see
+    /// [`LogStatus::is_collected`] for why an empty collection counts and a failure
+    /// does not. `None` means the source has genuinely never been collected.
+    pub async fn find_last_collection(
+        &self,
+        source_id: &str,
+    ) -> Result<Option<LogEntry>, VaultError> {
         let content = match tokio::fs::read_to_string(&self.path).await {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -62,7 +86,7 @@ impl IngestLog {
                 continue;
             }
             match serde_json::from_str::<LogEntry>(line) {
-                Ok(e) if e.source_id == source_id && e.status == LogStatus::Success => {
+                Ok(e) if e.source_id == source_id && e.status.is_collected() => {
                     return Ok(Some(e));
                 }
                 Ok(_) => {}
@@ -71,5 +95,107 @@ impl IngestLog {
             }
         }
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(source_id: &str, status: LogStatus, secs: i64) -> LogEntry {
+        LogEntry {
+            timestamp: jiff::Timestamp::from_second(secs).unwrap(),
+            source_id: source_id.into(),
+            status,
+            event_count: 0,
+            duration_ms: 1,
+            error: None,
+        }
+    }
+
+    async fn log_with(entries: &[LogEntry]) -> (tempfile::TempDir, IngestLog) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log = IngestLog::new(dir.path().join("ingest.jsonl"));
+        for e in entries {
+            log.record(e).await.unwrap();
+        }
+        (dir, log)
+    }
+
+    /// A source whose window was fetched and found empty was COLLECTED. Reading it as
+    /// "never since the last non-empty day" is what made `lore health` report a quiet
+    /// Jira filter STALE for 49 days while it ran correctly every morning — a warning
+    /// that fires forever is one its reader stops seeing.
+    #[tokio::test]
+    async fn an_empty_collection_is_still_a_collection() {
+        let (_dir, log) = log_with(&[
+            entry("jira", LogStatus::Success, 1_000),
+            entry("jira", LogStatus::Skipped, 2_000),
+        ])
+        .await;
+        let found = log.find_last_collection("jira").await.unwrap().unwrap();
+        assert_eq!(
+            found.timestamp.as_second(),
+            2_000,
+            "the empty run is the source's last collection"
+        );
+    }
+
+    /// A failure leaves the window unobserved, so it must not refresh the answer.
+    #[tokio::test]
+    async fn a_failure_does_not_count_as_a_collection() {
+        let (_dir, log) = log_with(&[
+            entry("jira", LogStatus::Success, 1_000),
+            entry("jira", LogStatus::Failed, 2_000),
+        ])
+        .await;
+        let found = log.find_last_collection("jira").await.unwrap().unwrap();
+        assert_eq!(found.timestamp.as_second(), 1_000);
+    }
+
+    #[tokio::test]
+    async fn entries_are_scoped_to_their_source() {
+        let (_dir, log) = log_with(&[
+            entry("jira", LogStatus::Success, 1_000),
+            entry("gmail", LogStatus::Skipped, 2_000),
+        ])
+        .await;
+        assert_eq!(
+            log.find_last_collection("jira")
+                .await
+                .unwrap()
+                .unwrap()
+                .timestamp
+                .as_second(),
+            1_000
+        );
+        assert!(log.find_last_collection("slack").await.unwrap().is_none());
+    }
+
+    /// A missing log is "never ingested", never an error — the first run has no log yet.
+    #[tokio::test]
+    async fn a_missing_log_reads_as_no_history() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log = IngestLog::new(dir.path().join("nope.jsonl"));
+        assert!(log.find_last_collection("jira").await.unwrap().is_none());
+    }
+
+    /// Corruption stays observable without blanking the history behind it.
+    #[tokio::test]
+    async fn a_malformed_line_is_skipped_not_treated_as_no_history() {
+        let (dir, log) = log_with(&[entry("jira", LogStatus::Success, 1_000)]).await;
+        let path = dir.path().join("ingest.jsonl");
+        let mut content = std::fs::read_to_string(&path).unwrap();
+        content.push_str("{not json\n");
+        std::fs::write(&path, content).unwrap();
+        assert_eq!(
+            log.find_last_collection("jira")
+                .await
+                .unwrap()
+                .unwrap()
+                .timestamp
+                .as_second(),
+            1_000
+        );
     }
 }

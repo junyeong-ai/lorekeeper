@@ -27,6 +27,14 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
 - **`IngestLog`** distinguishes `NotFound` (→ empty/None, legitimate "never ingested")
   from real I/O errors (propagated). Malformed JSONL lines are `tracing::warn`-ed and
   skipped, not silently dropped — corruption stays observable without blanking history.
+  **`find_last_collection` answers "when was this source last OBSERVED", not "when did it
+  last produce something"** — the question `lore status` and `lore health` both actually
+  ask. `LogStatus::is_collected` owns the split, exhaustively: `Skipped` is written at
+  exactly one site (a fetch that succeeded and yielded no pages), so it carries an
+  answer — "nothing happened" — and only `Failed` leaves the window unobserved. Counting
+  an empty run as no run is what let a quiet source read as overdue indefinitely while it
+  ingested correctly every morning, and a warning that never clears is one its reader
+  stops reading.
 - Frontmatter values derived from LLM output (e.g. concept `title`) are emitted as JSON
   strings (`serde_json::to_string` / `| tojson`) so quotes/colons can't break the YAML.
 - **`section::{replace_section, section_body}`** operate on the body of a
