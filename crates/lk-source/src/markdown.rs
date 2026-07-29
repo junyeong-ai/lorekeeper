@@ -258,9 +258,10 @@ fn trimmed_link(
 /// comment and raw-text skipping, so inside a RAWTEXT element it escapes text a parser would
 /// have read as text — a CDATA section that closes, and equally the bare opening token of one
 /// that does not, which needs no escaping there because RAWTEXT has no bogus-comment state to
-/// protect against. The exposure is `xmp`/`iframe`/`noembed`/
-/// `noframes` — `textarea`/`title` are RCDATA and decode the entities back, and `script`/`style`/
-/// `noscript` are dropped — and the cost is a literal `&lt;` in the text. Nothing is deleted,
+/// protect against. The exposure is the raw-text elements that are KEPT — `xmp`, `iframe`,
+/// `noembed`, `noframes` and `noscript` — since `textarea`/`title` are RCDATA and decode the
+/// entities back, and only `script`/`style` are
+/// dropped outright. The cost is a literal `&lt;` in the text. Nothing is deleted,
 /// nothing injected, no element left open, which is a different class from every other defect
 /// this file records. Closing it means either a second scanner tracking the same spans — the
 /// duplication that lets two scanners diverge, which is what put most of those defects here — or
@@ -269,10 +270,11 @@ fn trimmed_link(
 /// whose trigger no source is known to reach.
 ///
 /// The ELEMENTS are reachable and it would be wrong to say otherwise — RSS full-text fetching
-/// pulls arbitrary web pages, where an `<iframe>` is ordinary. What has never been observed is
-/// the CONJUNCTION the gap needs: one of those four elements whose content ALSO spells CDATA
-/// syntax, since an iframe's fallback is a sentence about browsers when it is anything at all.
-/// The live vault carries none of either.
+/// pulls arbitrary web pages, where `<iframe>` and `<noscript>` are both ordinary. What has
+/// never been observed is the CONJUNCTION the gap needs: one of the five whose content ALSO
+/// spells CDATA syntax. An iframe's fallback is a sentence about browsers when it is anything at
+/// all, and what makes `noscript` common is the lazy-loaded `<img>` inside it, which carries no
+/// CDATA. The live vault holds none of either.
 fn normalize_storage_format(html: &str) -> std::borrow::Cow<'_, str> {
     let unwrapped = unwrap_cdata(html);
     match rewrite_tags(&unwrapped) {
@@ -1432,11 +1434,16 @@ mod tests {
             html_to_markdown("<xmp>text <![CDATA[ unterminated</xmp>"),
             "text &lt;!\\[CDATA\\[ unterminated"
         );
-        // `iframe` is the reachable one of the four — RSS full-text fetching pulls arbitrary
-        // pages — so it is pinned by name rather than left to stand behind `xmp`.
+        // `iframe` and `noscript` are the reachable two — RSS full-text fetching pulls arbitrary
+        // pages — so both are pinned by name rather than left standing behind `xmp`. `noscript`
+        // is raw text that is KEPT, which is what puts it in this set and not in the dropped one.
         assert_eq!(
             html_to_markdown("<iframe>fallback mentions <![CDATA[ never closes</iframe>"),
             "fallback mentions &lt;!\\[CDATA\\[ never closes"
+        );
+        assert_eq!(
+            html_to_markdown("<noscript>alt text <![CDATA[a < b]]> end</noscript>"),
+            "alt text a &lt; b end"
         );
         // A text box is RCDATA, so the entities decode again and nothing shows.
         assert_eq!(
