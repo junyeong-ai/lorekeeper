@@ -314,6 +314,38 @@ mod tests {
         assert!(linker.contains("[x](allusers.md)"), "{linker}");
     }
 
+    /// The other side of the case-only rename above. `is_same_file` exists to tell a
+    /// case-only rename (same file, must proceed) from a genuine collision (two distinct
+    /// pages, must refuse) — and only the first half was covered, so an `is_same_file` that
+    /// answered "same" to everything read as correct while `--fix` silently overwrote a real
+    /// page with another. A rename is destructive and there is no undo.
+    #[test]
+    fn a_rename_onto_a_different_page_refuses_rather_than_overwriting_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wiki = tmp.path().join("wiki");
+        std::fs::create_dir_all(&wiki).unwrap();
+        std::fs::write(wiki.join("Bad_Name.md"), "# the one being renamed\n").unwrap();
+        std::fs::write(wiki.join("bad-name.md"), "# a DIFFERENT page\n").unwrap();
+
+        let pages = vec![
+            build_page("wiki/Bad_Name.md", &[]),
+            build_page("wiki/bad-name.md", &[]),
+        ];
+        let renames = scan(&pages);
+        assert_eq!(renames.len(), 1, "{renames:?}");
+
+        let err = apply(&renames, &pages, tmp.path()).unwrap_err();
+        assert!(
+            format!("{err}").contains("already exists"),
+            "collision must be refused, got: {err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wiki.join("bad-name.md")).unwrap(),
+            "# a DIFFERENT page\n",
+            "the occupant must survive a refused rename"
+        );
+    }
+
     #[test]
     fn a_renamed_page_stops_recording_its_old_address() {
         // `id` is the page's own record of where it lives. A rename that leaves it behind

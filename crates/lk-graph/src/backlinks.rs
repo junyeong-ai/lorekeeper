@@ -321,6 +321,40 @@ mod tests {
         assert!(content.contains("source_count: 1"));
     }
 
+    /// `source_count` is re-derived, not merely kept consistent with the section beside it.
+    /// A page whose entries are already right but whose count is wrong — a hand edit, a run
+    /// that died between the two writes — is exactly the drift this command exists to
+    /// repair, and it is the one shape that looks unchanged if the two facts are checked as
+    /// alternatives rather than together.
+    #[test]
+    fn a_correct_source_list_with_a_wrong_count_is_still_repaired() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("wiki/concepts/oy365.md");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "---\nid: oy365\nsource_count: 7\n---\n\n# oy365\n\n## 출처\n\n- [daily/slack/2026-05-20](../../daily/slack/2026-05-20.md)\n\n## 메타\n\n- key: value\n",
+        )
+        .unwrap();
+
+        let pages = vec![
+            build_page("wiki/concepts/oy365", "wiki/concepts/oy365.md", &[]),
+            build_page(
+                "daily/slack/2026-05-20",
+                "daily/slack/2026-05-20.md",
+                &["wiki/concepts/oy365"],
+            ),
+        ];
+
+        let report =
+            sync_concept_backlinks(&pages, dir.path(), Locale::Ko, false, &VaultDirs::default())
+                .unwrap();
+        assert_eq!(report.unchanged, 0, "a wrong count is not 'unchanged'");
+        assert_eq!(report.updated.len(), 1);
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("source_count: 1"), "{content}");
+    }
+
     #[test]
     fn removes_stale_backlink() {
         let dir = TempDir::new().unwrap();

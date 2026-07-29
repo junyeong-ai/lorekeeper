@@ -299,6 +299,44 @@ mod tests {
         assert!(!is_reserved("wiki/concepts/index-fund"));
     }
 
+    /// `is_valid_source` is the single definition of what may cite a concept, and
+    /// `backlinks-sync` derives every concept's sources section and `source_count` from
+    /// exactly the pages it admits — wiping any entry not backed by an admitted one. So a
+    /// page class dropped here does not merely go uncounted: its citations are erased from
+    /// the concept pages that carry them, with nothing left recording that they existed.
+    /// Each accepted root therefore needs its own case; covering one incidentally leaves the
+    /// rest free to be narrowed silently.
+    #[test]
+    fn every_page_class_that_may_cite_a_concept_is_admitted() {
+        let dirs = VaultDirs::default();
+        for cites in [
+            "daily/team-slack/2026-05-22.md",
+            "me/work-log/2026-05-22.md",
+            "synthesis/weekly/2026-W21.md",
+            "wiki/documents/report.md",
+            "wiki/explorations/why-rag.md",
+        ] {
+            assert!(
+                is_valid_source(Path::new(cites), &dirs),
+                "{cites} may cite a concept"
+            );
+        }
+        // A concept's own links are curated structure, not provenance, and the meta pages
+        // are generated FROM the graph — admitting either would cite from the output.
+        for not_a_source in [
+            "wiki/concepts/rag.md",
+            "wiki/index.md",
+            "wiki/log.md",
+            "wiki/map.md",
+            "wiki/AGENTS.md",
+        ] {
+            assert!(
+                !is_valid_source(Path::new(not_a_source), &dirs),
+                "{not_a_source} is not provenance"
+            );
+        }
+    }
+
     #[test]
     fn vault_existence_tracks_ids_and_linked() {
         let pages = vec![
