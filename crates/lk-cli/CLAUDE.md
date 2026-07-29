@@ -58,8 +58,17 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   TWO independent questions of the target page: is it still the page this task was made for
   (`llm_inputs.<key>` vs `task.cache_hash`; `missing-target` when the page is gone, `stale`
   when the hash moved on), and has this exact input already been answered
-  (`llm_inputs.<key>_done` → `done`). A task passing the first and failing the second is
-  `current` — the only status that is WORK. `/lore-process` consumes `--json` and acts on
+  (`llm_inputs.<key>_done` → `done`), and — for work still to be written — does the page
+  still carry the SECTION it names (`missing-target` when not). That last one closes a
+  permanent-failure hole: a `vault.locale` switch re-renders every heading while leaving the
+  concept input hash untouched (locale is not in that cache identity), so a task or result
+  queued before the switch stayed hash-current while naming a section that no longer exists,
+  failing `queue apply` — and the whole scheduled pipeline — every run, with `prune`
+  classifying only TASKS and so unable to clear a result. Dropping loses nothing: the page
+  carries no completion marker, so the next ingest re-enqueues the work under the heading it
+  now has, the same self-healing an unparseable result file relies on. A task passing the
+  first, failing the second and having somewhere to land is `current` — the only status that
+  is WORK. `/lore-process` consumes `--json` and acts on
   those alone; the check lives here in tested Rust, never re-derived in skill prose.
   **`lore queue count` prints only that work count**, because it exists to tell a scheduled
   script whether to spend an LLM session, and a queue of already-answered tasks is not a

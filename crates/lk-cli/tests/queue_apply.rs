@@ -195,3 +195,42 @@ fn a_result_whose_page_moved_on_is_dropped() {
     );
     assert!(json_files(&results_dir(&ws)).is_empty(), "and is consumed");
 }
+
+/// A `vault.locale` switch re-renders every heading but leaves the concept input hash
+/// untouched, so a result drained before the switch stays hash-current while naming a
+/// section that no longer exists. It used to fail `queue apply` — and so the whole
+/// scheduled pipeline — on every run forever, since `queue prune` classifies tasks and
+/// never results. It is dropped instead: the page carries no completion marker, so the
+/// next ingest re-enqueues the work under the heading the page now has.
+#[test]
+fn a_result_whose_section_no_longer_exists_is_dropped_not_retried_forever() {
+    let ws = Workspace::new();
+    // Same input hash; the section is now named in another locale.
+    ws.write(
+        PAGE,
+        "---\nid: notes-2026-05-23\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n\
+         ## 관련 개념\n\n## Key Events\n\n- a\n",
+    );
+    ws.drop_result("ext-1", PAGE, "h", "Concept A");
+
+    let out = ws.run(&["queue", "apply"]);
+    assert!(
+        out.status.success(),
+        "a result with nowhere to land is dropped, not a failure: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        json_files(&results_dir(&ws)).is_empty(),
+        "it must be consumed, or it blocks every later run"
+    );
+    assert!(
+        !ws.vault().join("wiki/concepts/concept-a.md").exists(),
+        "and nothing may be written from it"
+    );
+    assert_eq!(
+        ws.read(PAGE).matches("## ").count(),
+        2,
+        "the page is untouched:\n{}",
+        ws.read(PAGE)
+    );
+}

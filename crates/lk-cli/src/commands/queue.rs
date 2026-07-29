@@ -88,7 +88,16 @@ enum TaskStatus {
     /// The page was re-rendered with a different input after this task was queued —
     /// drop it; a newer task carries the current hash.
     Stale,
-    /// The target page does not exist — the result has nowhere to land.
+    /// There is nowhere to land: the target page is gone, OR it no longer carries the
+    /// section this task names.
+    ///
+    /// A page's headings come from the render, and the anchor was recorded by the render
+    /// that created the task — so an anchor the page does not carry means the heading
+    /// vocabulary changed since (a `vault.locale` switch, a custom `--template-dir`), and
+    /// every later render uses the new one. Waiting cannot fix it. Nothing is lost by
+    /// dropping: the page carries no completion marker for this input, so the next ingest
+    /// that re-renders it re-enqueues the work under the heading the page now has — the
+    /// same self-healing an unparseable result file relies on.
     MissingTarget,
 }
 
@@ -259,6 +268,7 @@ async fn apply(
             &rel_path,
             result.target.kind,
             &result.cache_hash,
+            &result.target.anchor,
         ) {
             Ok(TaskStatus::Current) => {}
             Ok(status) => {
@@ -677,7 +687,13 @@ fn classify_task(vault_root: &Path, task: &QueueTask) -> miette::Result<TaskStat
             task.target.vault_path
         )
     })?;
-    classify_against_page(vault_root, &rel_path, task.target.kind, &task.cache_hash)
+    classify_against_page(
+        vault_root,
+        &rel_path,
+        task.target.kind,
+        &task.cache_hash,
+        &task.target.anchor,
+    )
 }
 
 /// Resolve a task or result `target.vault_path` to the vault-relative path it addresses,
@@ -691,14 +707,14 @@ fn resolve_target_path(vault_path: &str) -> Option<PathBuf> {
     lk_core::link::resolve_dest(Path::new(""), vault_path)
 }
 
-/// The queue's one staleness rule: a task or result is current exactly when the page still
-/// carries the `llm_inputs` hash it was created against. Pending tasks and drained results
-/// are classified by the same code so they can never disagree about what "stale" means.
+/// The queue's one classification rule. Pending tasks and drained results go through it
+/// together, so they can never disagree about what any status means.
 fn classify_against_page(
     vault_root: &Path,
     rel_path: &Path,
     kind: lk_queue::TargetKind,
     cache_hash: &str,
+    anchor: &str,
 ) -> miette::Result<TaskStatus> {
     let page_path = vault_root.join(rel_path);
     let content = match std::fs::read_to_string(&page_path) {
@@ -722,13 +738,20 @@ fn classify_against_page(
     if field(kind.llm_inputs_key()).as_deref() != Some(cache_hash) {
         return Ok(TaskStatus::Stale);
     }
-    Ok(
-        if field(&kind.completion_key()).as_deref() == Some(cache_hash) {
-            TaskStatus::Done
-        } else {
-            TaskStatus::Current
-        },
-    )
+    if field(&kind.completion_key()).as_deref() == Some(cache_hash) {
+        return Ok(TaskStatus::Done);
+    }
+    // Asked last, because it only decides the fate of work still to be written: the
+    // section named here must exist on the page to receive it. An anchor the page does
+    // not carry cannot come back — see `MissingTarget`.
+    let Some(heading) = anchor.strip_prefix("## ") else {
+        return Ok(TaskStatus::MissingTarget);
+    };
+    Ok(if lk_vault::section_body(&page.body, heading).is_some() {
+        TaskStatus::Current
+    } else {
+        TaskStatus::MissingTarget
+    })
 }
 
 #[cfg(test)]
@@ -968,6 +991,54 @@ mod tests {
     /// A task whose page already carries the completion marker for its exact input is
     /// answered, not pending. Counting it as work is what makes a scheduled pipeline spend
     /// an LLM session on a queue with nothing to do.
+    /// A `vault.locale` switch re-renders every page's headings but leaves the concept
+    /// input hash untouched (locale is not part of that cache identity), so a task queued
+    /// before the switch stays hash-current while naming a section that no longer exists.
+    /// Treating it as work makes `lore queue apply` — and the whole scheduled pipeline —
+    /// fail on it every day, with no janitor able to clear it. Nothing is lost by dropping:
+    /// the page carries no completion marker, so the next ingest re-enqueues the work under
+    /// the heading the page now has.
+    #[test]
+    fn a_task_whose_section_no_longer_exists_has_nowhere_to_land() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("daily/s/2026-05-23.md");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // Same input hash, headings re-rendered in another locale.
+        std::fs::write(
+            &path,
+            "---\nid: x\nllm_inputs:\n  summary: abc123\n---\n\n## Summary\n\nbody\n",
+        )
+        .unwrap();
+        assert_eq!(
+            classify_task(dir.path(), &task("daily/s/2026-05-23.md", "abc123")).unwrap(),
+            TaskStatus::MissingTarget,
+            "the task names `## 요약`, which this page no longer has"
+        );
+    }
+
+    /// The landing check must not fire before the ones that already decide the task's fate,
+    /// or a stale task would be reported as un-landable and an answered one re-examined.
+    #[test]
+    fn a_stale_or_answered_task_keeps_its_status_whatever_the_headings_say() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("daily/s/2026-05-23.md");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "---\nid: x\nllm_inputs:\n  summary: newhash\n  summary_done: newhash\n---\n\n\
+             ## Summary\n\nbody\n",
+        )
+        .unwrap();
+        assert_eq!(
+            classify_task(dir.path(), &task("daily/s/2026-05-23.md", "oldhash")).unwrap(),
+            TaskStatus::Stale
+        );
+        assert_eq!(
+            classify_task(dir.path(), &task("daily/s/2026-05-23.md", "newhash")).unwrap(),
+            TaskStatus::Done
+        );
+    }
+
     #[test]
     fn a_task_already_answered_on_its_page_is_done_not_current() {
         let dir = TempDir::new().unwrap();

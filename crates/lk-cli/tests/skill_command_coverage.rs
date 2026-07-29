@@ -31,11 +31,15 @@ fn subcommands() -> Vec<String> {
     assert!(out.status.success(), "lore --help failed: {out:?}");
     let help = String::from_utf8(out.stdout).expect("help is utf-8");
 
+    // A command line is indented exactly two spaces. Requiring that rather than trusting
+    // the first token means a wrapped description — which clap emits at a deeper indent
+    // once `wrap_help` is on — is never mistaken for a command name.
     let names: Vec<String> = help
         .lines()
         .skip_while(|line| !line.starts_with("Commands:"))
         .skip(1)
         .take_while(|line| !line.trim().is_empty())
+        .filter(|line| line.starts_with("  ") && !line.starts_with("   "))
         .filter_map(|line| line.split_whitespace().next().map(str::to_string))
         .collect();
     assert!(
@@ -71,23 +75,47 @@ fn skill_corpus() -> String {
     corpus
 }
 
+/// Whether `corpus` names `lore <name>` as a WHOLE word. A plain substring test would let a
+/// future `lore doc` pass on the strength of an existing `lore doctor` — the coverage gap
+/// this file exists to catch, reported as covered.
+fn names_command(corpus: &str, name: &str) -> bool {
+    let needle = format!("lore {name}");
+    corpus.match_indices(&needle).any(|(at, _)| {
+        corpus[at + needle.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric() && c != '-' && c != '_')
+    })
+}
+
 #[test]
 fn every_subcommand_is_named_by_a_skill() {
     let corpus = skill_corpus();
     for name in subcommands() {
         if let Some((_, why)) = EXEMPT.iter().find(|(exempt, _)| *exempt == name) {
             assert!(
-                !corpus.contains(&format!("lore {name}")),
+                !names_command(&corpus, &name),
                 "`lore {name}` is exempt ({why}) but a skill names it anyway — \
                  drop the exemption rather than keeping a stale one"
             );
             continue;
         }
         assert!(
-            corpus.contains(&format!("lore {name}")),
+            names_command(&corpus, &name),
             "no skill names `lore {name}`; a command no skill reaches is one no agent runs. \
              Document it (the `/lore-ingest` command table is the operator reference) or \
              add it to EXEMPT with the reason it is unreachable by design."
         );
     }
+}
+
+#[test]
+fn a_command_name_is_matched_whole_not_as_a_prefix() {
+    assert!(names_command("run `lore doctor` to audit", "doctor"));
+    assert!(
+        !names_command("run `lore doctor` to audit", "doc"),
+        "`lore doc` must not be covered by `lore doctor`"
+    );
+    assert!(names_command("`lore queue prune`", "queue"));
+    assert!(!names_command("`lore maintenance`", "maintain"));
 }

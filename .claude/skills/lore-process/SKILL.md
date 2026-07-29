@@ -45,10 +45,13 @@ you last read them.
 
 1. **Process only `current` tasks.** `lore queue status --json` is the
    authoritative classifier — never edit a page for a `done`, `stale`, or
-   `missing-target` task. It answers two questions per task: is the page still
-   the one this task was made for (`cache_hash` vs `llm_inputs.<key>`), and has
-   this exact input already been answered (`llm_inputs.<key>_done`). Only a task
-   that passes the first and fails the second is work. A task you filled and
+   `missing-target` task. It answers three questions per task: is the page still
+   the one this task was made for (`cache_hash` vs `llm_inputs.<key>`), has this
+   exact input already been answered (`llm_inputs.<key>_done`), and does the page
+   still carry the section the task's `anchor` names. Only a task that passes the
+   first, fails the second, and has somewhere to land is work — an anchor the page
+   no longer carries means the heading vocabulary changed (a locale switch), which
+   no amount of waiting undoes. A task you filled and
    stamped earlier in this run therefore reads `done` if you re-classify — that
    is correct, and it is skipped, not failed. The "this run is finished" signal
    is the queue file moving to `processed/`, not `queue status` reaching zero.
