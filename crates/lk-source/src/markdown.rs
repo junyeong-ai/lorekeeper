@@ -1704,6 +1704,42 @@ mod tests {
                 }
                 prop_assert!(lk_core::markdown::scan_defects(&md).is_empty());
             }
+
+            /// `expand_self_closing` walks bytes itself rather than parsing, so it owns every
+            /// slice boundary it takes — and a `&str` sliced off a char boundary is a panic,
+            /// not a wrong answer. Adapters feed it whatever a server returned, so arbitrary
+            /// text with multibyte characters pressed against tag syntax is the real input
+            /// rather than a hypothetical one.
+            ///
+            /// The other half of the property is that it leaves alone what it has no business
+            /// touching: nothing can need expanding where nothing spells an empty element, and
+            /// borrowing rather than rewriting is what keeps every non-Confluence source —
+            /// Gmail, RSS, Calendar — converting exactly as it did before.
+            #[test]
+            fn expanding_empty_elements_survives_arbitrary_bytes(
+                text in r#"[\PC]{0,60}"#,
+                tail in r#"[\PC]{0,20}"#,
+            ) {
+                for shape in [
+                    format!("<p>{text}</p>"),
+                    format!("<{text}/>{tail}"),
+                    format!("<p a=\"{text}\"/>{tail}"),
+                    format!("<p a={text}/>{tail}"),
+                    format!("<!--{text}--><x/>{tail}"),
+                    format!("<x a='{text}'{tail}"),
+                    format!("{text}<"),
+                    format!("<![CDATA[{text}]]><y/>{tail}"),
+                ] {
+                    match expand_self_closing(&shape) {
+                        std::borrow::Cow::Borrowed(same) => prop_assert_eq!(same, &shape),
+                        std::borrow::Cow::Owned(grown) => prop_assert!(
+                            shape.contains("/>") && grown.len() > shape.len(),
+                            "rewrote an input that spells no empty element:\n{}", shape
+                        ),
+                    }
+                    let _ = html_to_markdown(&shape);
+                }
+            }
         }
     }
 }
