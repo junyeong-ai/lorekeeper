@@ -88,12 +88,9 @@ configured locale for all section headings and frontmatter fields —
 AGENTS.md is the authoritative source for both.
 
 This skill writes a COMPLETE page directly — no ingest pipeline runs
-afterward. AGENTS.md's `Owner` column describes the *automated* pipeline
-(`machine` = filled by `lore ingest`, `LLM` = filled by `/lore-process`);
-for a hand-authored capture there is no such later pass, so you fill EVERY
-section yourself, including the one marked `machine` (a document's content
-section). The only exception is each concept's sources section
-+ `source_count`, which `backlinks-sync` re-derives in step 6 (leave empty).
+afterward, so the directly-authored rule in AGENTS.md's ownership legend applies:
+you fill every section yourself, and `backlinks-sync` owns the concept sources
+section + `source_count` in step 6.
 Omit the `llm_inputs` frontmatter block entirely — it belongs to the
 pipeline cache, not to directly-authored pages. An in-the-moment capture has
 no originating file or URL, so omit `source_file`/`source_url` too (set them

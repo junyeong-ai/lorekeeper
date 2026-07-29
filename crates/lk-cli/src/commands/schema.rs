@@ -331,6 +331,22 @@ pub fn render_agents_md(
     writeln!(out).unwrap();
     writeln!(
         out,
+        "Each table's `Owner` column names who fills that section's body: `machine` = `lore` \
+         writes it, under whichever command produces the page (`lore ingest` for daily and \
+         document pages, `lore synthesis` for the periodic ones, `lore graph \
+         backlinks-sync` for a concept's citations); `LLM` = an agent writes it, which in \
+         the automated pipeline is `/lore-process`. A page you author DIRECTLY has no \
+         pipeline behind it, so you fill EVERY section yourself, `machine` ones included — \
+         except a concept's `## {}` section and its `{}`, which `lore graph backlinks-sync` \
+         re-derives wholesale from the forward links on citing pages every time it runs, so \
+         leave those empty and let it.",
+        strings.concept_sources,
+        lk_core::frontmatter::field::SOURCE_COUNT,
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
         "Every page's `type` frontmatter is its page-format id — exactly the `## \
          {{type}}` names below (`concept`, `daily`, `document`, …). It is the one \
          REQUIRED key of the Open Knowledge Format, so any OKF consumer can classify \
@@ -595,6 +611,39 @@ mod tests {
             events.trim_end().ends_with("| machine |"),
             "raw Events list stays machine-owned: {events}"
         );
+    }
+
+    #[test]
+    fn agents_md_defines_the_ownership_column() {
+        // The Owner column decides whether an agent writes a section, so a reader who does
+        // not already know the vocabulary cannot act on the tables. Every authoring skill
+        // used to restate the rule in its own prose — three copies to drift, and the one
+        // skill that lacked it was the one creating the page format with no pipeline at all.
+        //
+        // `machine` cannot be equated with any ONE command: `lore ingest` writes only the
+        // daily/document/work-log rows, while `lore synthesis` writes every machine row on
+        // the five periodic pages and `lore graph backlinks-sync` writes a concept's. Naming
+        // a single writer would be false for most of the column, and false in the direction
+        // that makes an author leave a section for a command that will never touch it. The
+        // localized heading reference must come from the i18n bundle like every other one.
+        for (locale, sources) in [(Locale::Ko, "## 출처"), (Locale::En, "## Sources")] {
+            let md = render_agents_md(locale, &lk_core::config::VaultDirs::default(), true);
+            let legend = md
+                .lines()
+                .find(|l| l.starts_with("Each table's `Owner` column"))
+                .unwrap_or_else(|| panic!("{locale:?}: ownership legend present"));
+            for writer in ["lore ingest", "lore synthesis", "lore graph backlinks-sync"] {
+                assert!(
+                    legend.contains(writer),
+                    "{locale:?}: legend omits the writer {writer:?}: {legend}"
+                );
+            }
+            assert!(legend.contains("`LLM` = an agent writes it"), "{legend}");
+            assert!(
+                legend.contains(&format!("`{sources}`")),
+                "{locale:?}: legend names the localized sources heading: {legend}"
+            );
+        }
     }
 
     #[test]
