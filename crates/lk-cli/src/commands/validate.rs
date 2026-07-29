@@ -95,28 +95,38 @@ async fn folded_vault_dirs(config: &lk_core::config::Config) -> Vec<(&'static st
             if !child.exists() {
                 break;
             }
-            if !directory_lists(&parent, segment).await {
-                found.push((label, value.clone()));
-                break;
+            match directory_lists(&parent, segment).await {
+                Some(false) => {
+                    found.push((label, value.clone()));
+                    break;
+                }
+                // Unreadable: the listing is unknown, which is not evidence of a fold.
+                None => break,
+                Some(true) => parent = child,
             }
-            parent = child;
         }
     }
     found
 }
 
 /// Whether `parent`'s listing contains `name` byte for byte — the question `Path::exists`
-/// cannot answer, since it is the filesystem's folded answer that is wanted here.
-async fn directory_lists(parent: &std::path::Path, name: &std::ffi::OsStr) -> bool {
-    let Ok(mut entries) = tokio::fs::read_dir(parent).await else {
-        return false;
-    };
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        if entry.file_name() == name {
-            return true;
+/// cannot answer, since it is the filesystem's folded answer that is wanted here. `None` when
+/// the listing could not be read.
+///
+/// The three outcomes are distinct and collapsing them is a wrong warning, not a missing one:
+/// a directory can be traversable without being readable (`chmod 111` — `exists` succeeds on a
+/// child while `read_dir` fails), and reading "could not list" as "not listed" reports a
+/// spelling the filesystem folded when nothing was folded at all.
+async fn directory_lists(parent: &std::path::Path, name: &std::ffi::OsStr) -> Option<bool> {
+    let mut entries = tokio::fs::read_dir(parent).await.ok()?;
+    loop {
+        match entries.next_entry().await {
+            Ok(Some(entry)) if entry.file_name() == name => return Some(true),
+            Ok(Some(_)) => {}
+            Ok(None) => return Some(false),
+            Err(_) => return None,
         }
     }
-    false
 }
 
 /// Pairs of configured vault roots that overlap ON DISK — one inside the other, or the two
@@ -207,14 +217,48 @@ mod tests {
         }
     }
 
+    /// A directory can be traversable without being listable, so `exists` on a child succeeds
+    /// while `read_dir` on its parent fails. Reading that as "the name is not listed" reports
+    /// a fold where nothing was folded — a warning that is not merely useless but says
+    /// something false about a correct config.
+    #[tokio::test]
+    async fn an_unlistable_parent_is_not_reported_as_a_fold() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("vault");
+        std::fs::create_dir_all(root.join("wiki")).unwrap();
+        let config = write_config_at(&root, tmp.path(), "    wiki: wiki\n", "perm");
+
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o111)).unwrap();
+        let found = folded_vault_dirs(&config).await;
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(
+            found.is_empty(),
+            "an unreadable listing is unknown, not evidence: {found:?}"
+        );
+    }
+
     fn write_config(root: &std::path::Path, dirs: &str, tag: &str) -> lk_core::config::Config {
-        let path = root.join(format!("{tag}.config.yaml"));
+        write_config_at(root, root, dirs, tag)
+    }
+
+    /// The config file and the vault root are separate here, so a test can make the vault
+    /// unreadable without also hiding the config from the loader.
+    fn write_config_at(
+        vault_root: &std::path::Path,
+        beside: &std::path::Path,
+        dirs: &str,
+        tag: &str,
+    ) -> lk_core::config::Config {
+        let path = beside.join(format!("{tag}.config.yaml"));
         std::fs::write(
             &path,
             format!(
                 "vault:\n  root: {}\n  dirs:\n{dirs}identity:\n  name: t\n  \
                  email: t@t.com\nsources:\n  s1:\n    type: gmail\n",
-                root.display()
+                vault_root.display()
             ),
         )
         .unwrap();
