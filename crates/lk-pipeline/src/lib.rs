@@ -359,14 +359,22 @@ impl Pipeline {
             // Resolve before rendering so the link carries the slug the fold will use —
             // resolution records its decision, so the fold below cannot pick another.
             // Nothing is staged here; that still happens after every page renders.
-            let mut concept_names = Vec::with_capacity(day_concepts.len());
+            let mut extracted = Vec::with_capacity(day_concepts.len());
             for c in &day_concepts {
-                concept_names.push(
+                extracted.push(
                     self.concept_drafts
                         .resolve_identity(&c.name, self.reader.as_ref(), &self.ctx.dirs)
                         .await?,
                 );
             }
+            let concept_names = render::accumulate_concepts(
+                existing
+                    .as_ref()
+                    .and_then(|p| lk_vault::section_body(&p.body, concepts_heading)),
+                extracted,
+                &daily_path,
+                &self.ctx.dirs,
+            );
 
             let labels: Vec<String> = {
                 let mut set = std::collections::BTreeSet::new();
@@ -603,7 +611,13 @@ impl Pipeline {
             .map(|s| self.concept_drafts.commit(s, result.date))
             .collect();
 
-        let links = render::concept_links(&identities, &result.target.vault_path, &self.ctx.dirs);
+        let concepts = render::accumulate_concepts(
+            lk_vault::section_body(&stamped, heading),
+            identities,
+            &result.target.vault_path,
+            &self.ctx.dirs,
+        );
+        let links = render::concept_links(&concepts, &result.target.vault_path, &self.ctx.dirs);
         Ok(lk_vault::replace_section(
             &stamped,
             heading,
@@ -827,14 +841,22 @@ impl Pipeline {
 
             // Resolve before rendering so the link carries the slug the fold will use;
             // resolution records its decision, so the fold below cannot pick another.
-            let mut concept_names = Vec::with_capacity(doc_concepts.len());
+            let mut extracted = Vec::with_capacity(doc_concepts.len());
             for c in &doc_concepts {
-                concept_names.push(
+                extracted.push(
                     self.concept_drafts
                         .resolve_identity(&c.name, self.reader.as_ref(), &self.ctx.dirs)
                         .await?,
                 );
             }
+            let concept_names = render::accumulate_concepts(
+                existing
+                    .as_ref()
+                    .and_then(|p| lk_vault::section_body(&p.body, concepts_heading)),
+                extracted,
+                &vault_path,
+                &self.ctx.dirs,
+            );
 
             // Completion markers are valid only on a cache hit — see the daily path.
             let summary_done = summary_decision

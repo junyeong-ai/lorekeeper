@@ -178,12 +178,26 @@ pub fn resolve_dest(from_page: &Path, dest: &str) -> Option<PathBuf> {
     Some(resolved.iter().collect())
 }
 
-/// Extract the decoded page destination of every internal inline link in `body`,
-/// anchors stripped, in first-appearance order (duplicates preserved — callers dedup
-/// as needed). Skips links inside fenced code blocks and inline code spans, image
-/// embeds, external destinations, and anchor-only links.
-pub fn extract_dests(body: &str) -> Vec<String> {
-    let mut dests = Vec::new();
+/// An internal page link read back out of a body: the display text with [`md_link`]'s
+/// escaping resolved, and the destination decoded with its anchor stripped. Both halves
+/// are in the form [`md_link`] accepts, so a link that is read and re-rendered
+/// reproduces itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageLink {
+    pub text: String,
+    pub dest: String,
+}
+
+/// Extract every internal inline page link in `body`, in first-appearance order
+/// (duplicates preserved — callers dedup as needed). Skips links inside fenced code
+/// blocks and inline code spans, image embeds, external destinations, and anchor-only
+/// links.
+///
+/// The text-carrying counterpart of [`extract_dests`], for a consumer that must keep a
+/// link it read rather than merely observe where it points — re-deriving the display
+/// name instead would rename someone else's link.
+pub fn extract_page_links(body: &str) -> Vec<PageLink> {
+    let mut links = Vec::new();
     let mut fence = FenceState::new();
 
     for line in body.split_inclusive('\n') {
@@ -194,19 +208,30 @@ pub fn extract_dests(body: &str) -> Vec<String> {
         }
         for_each_code_free_segment(line, |segment| {
             for cap in MD_LINK_RE.captures_iter(segment) {
-                if let Some(dest) = internal_page_dest(&cap) {
-                    dests.push(dest);
+                if let Some(link) = internal_page_link(&cap) {
+                    links.push(link);
                 }
             }
         });
     }
 
-    dests
+    links
 }
 
-/// The decoded, anchor-free page destination of a captured link — `None` for image
-/// embeds, external/empty/anchor-only destinations.
-fn internal_page_dest(cap: &Captures) -> Option<String> {
+/// Extract the decoded page destination of every internal inline link in `body`,
+/// anchors stripped, in first-appearance order (duplicates preserved — callers dedup
+/// as needed). Skips links inside fenced code blocks and inline code spans, image
+/// embeds, external destinations, and anchor-only links.
+pub fn extract_dests(body: &str) -> Vec<String> {
+    extract_page_links(body)
+        .into_iter()
+        .map(|link| link.dest)
+        .collect()
+}
+
+/// A captured link as a [`PageLink`] — `None` for image embeds and
+/// external/empty/anchor-only destinations.
+fn internal_page_link(cap: &Captures) -> Option<PageLink> {
     if !cap[1].is_empty() {
         return None; // image embed
     }
@@ -214,7 +239,17 @@ fn internal_page_dest(cap: &Captures) -> Option<String> {
     if page.is_empty() || is_external(page) {
         return None;
     }
-    Some(decode_dest(page))
+    Some(PageLink {
+        text: unescape_text(&cap[2]),
+        dest: decode_dest(page),
+    })
+}
+
+/// The inverse of the display-text escaping [`md_link`] applies.
+fn unescape_text(text: &str) -> String {
+    text.replace("\\[", "[")
+        .replace("\\]", "]")
+        .replace("\\\\", "\\")
 }
 
 /// Rewrite inline links that sit OUTSIDE code (block fences AND inline spans),
@@ -262,10 +297,7 @@ pub fn strip_links(text: &str) -> String {
         if !cap[1].is_empty() {
             return cap[0].to_owned();
         }
-        cap[2]
-            .replace("\\[", "[")
-            .replace("\\]", "]")
-            .replace("\\\\", "\\")
+        unescape_text(&cap[2])
     });
     stripped.into_owned()
 }
@@ -377,6 +409,59 @@ Inline `[span](c.md)` and [live2](d.md).
     fn extract_handles_escaped_brackets_in_text() {
         let text = r"[RAG \[retrieval\]](rag.md)";
         assert_eq!(extract_dests(text), vec!["rag.md"]);
+    }
+
+    /// A link read back out and re-rendered must reproduce itself — otherwise a consumer
+    /// that carries someone else's link forward renames it a little on every pass.
+    #[test]
+    fn a_page_link_survives_being_read_and_written_again() {
+        for name in [
+            r"RAG [retrieval]",
+            r"C:\path",
+            "Wisely — 지식베이스",
+            "Claude 3.5",
+        ] {
+            let dest = relative_dest(
+                Path::new("daily/ai-news/2026-07-15.md"),
+                Path::new("wiki/concepts/x y.md"),
+            );
+            let rendered = md_link(name, &dest);
+            let read = extract_page_links(&rendered);
+            assert_eq!(
+                read,
+                vec![PageLink {
+                    text: name.to_string(),
+                    dest: decode_dest(&dest),
+                }],
+                "reading {rendered} back"
+            );
+            assert_eq!(
+                md_link(&read[0].text, &encode_dest(&read[0].dest)),
+                rendered,
+                "re-rendering {rendered}"
+            );
+        }
+    }
+
+    /// `extract_dests` is defined on top of the pair extractor, so the two can never
+    /// disagree about which links a body carries.
+    #[test]
+    fn page_links_and_dests_report_the_same_links() {
+        let text = "\
+[A](../wiki/concepts/a.md) and `[code](no.md)` and ![img](i.png)
+[ext](https://x.y/z.md) and [B](b.md#sec)
+```
+[fenced](f.md)
+```
+";
+        assert_eq!(
+            extract_page_links(text)
+                .into_iter()
+                .map(|l| l.dest)
+                .collect::<Vec<_>>(),
+            extract_dests(text)
+        );
+        assert_eq!(extract_dests(text), vec!["../wiki/concepts/a.md", "b.md"]);
     }
 
     #[test]

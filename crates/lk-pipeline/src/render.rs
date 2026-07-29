@@ -64,6 +64,68 @@ pub(crate) fn concept_links(
         .collect()
 }
 
+/// The concepts a page cites once an extraction has been applied to it: everything the
+/// page already cited, plus everything the extraction reported that it didn't.
+///
+/// Concept extraction is the one LLM-owned section whose result creates durable pages
+/// OUTSIDE the page it is written on, and `lore graph backlinks-sync` re-derives each of
+/// those pages' sources section and `source_count` from exactly these forward links. So a
+/// section that merely restated the newest extraction would not just drop a link: it would
+/// strip a page that still asserts knowledge of the evidence justifying it, permanently,
+/// because nothing records what the superseded extraction had cited. Every other section
+/// states something about its own input and is replaced wholesale.
+///
+/// A page's concept links therefore only ever accumulate. That is sound because a page's
+/// content only ever accumulates too: a streaming source's date unions each fetch into its
+/// event log, and a complete-refetch source's date is a closed window — so a concept
+/// extracted from a page's content stays true of it.
+///
+/// The carried links are read back through the same gate `lore graph backlinks-sync`
+/// counts an edge by — resolved relative to the citing page, `.md`, landing in the
+/// concepts directory — so what a page cites and what the graph credits it with cannot
+/// disagree. Anything else in the section (a hand-written note, a link elsewhere in the
+/// vault) is not a concept citation and is left to the section body it lives in.
+pub(crate) fn accumulate_concepts(
+    cited: Option<&str>,
+    extracted: Vec<crate::concept_draft::ConceptIdentity>,
+    vault_path: &str,
+    dirs: &VaultDirs,
+) -> Vec<crate::concept_draft::ConceptIdentity> {
+    let page = Path::new(vault_path);
+    let concepts_dir = lk_core::vault_path::concepts_dir(dirs);
+    let mut seen = std::collections::HashSet::new();
+    let mut concepts = Vec::new();
+
+    let carried = cited.map(link::extract_page_links).unwrap_or_default();
+    for cite in carried {
+        let Some(resolved) = link::resolve_dest(page, &cite.dest) else {
+            continue;
+        };
+        if resolved.parent() != Some(concepts_dir.as_path())
+            || resolved.extension() != Some(std::ffi::OsStr::new("md"))
+        {
+            continue;
+        }
+        let Some(slug) = resolved.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if seen.insert(slug.to_string()) {
+            concepts.push(crate::concept_draft::ConceptIdentity {
+                name: cite.text,
+                slug: slug.to_string(),
+            });
+        }
+    }
+
+    for concept in extracted {
+        if seen.insert(concept.slug.clone()) {
+            concepts.push(concept);
+        }
+    }
+
+    concepts
+}
+
 /// Per-page LLM input hashes stamped into the rendered frontmatter. Subsequent
 /// re-ingests read these back to decide whether each LLM task is still necessary.
 /// `concepts` is optional because not every source extracts concepts.
@@ -413,6 +475,116 @@ mod tests {
             hash: "h".into(),
             cached: false,
             preserved_body: None,
+        }
+    }
+
+    fn identity(name: &str, slug: &str) -> crate::concept_draft::ConceptIdentity {
+        crate::concept_draft::ConceptIdentity {
+            name: name.into(),
+            slug: slug.into(),
+        }
+    }
+
+    fn accumulated(
+        cited: Option<&str>,
+        extracted: Vec<crate::concept_draft::ConceptIdentity>,
+    ) -> Vec<(String, String)> {
+        accumulate_concepts(
+            cited,
+            extracted,
+            "daily/ai-news/2026-07-15.md",
+            &VaultDirs::default(),
+        )
+        .into_iter()
+        .map(|c| (c.name, c.slug))
+        .collect()
+    }
+
+    /// The defect this exists to prevent: an extraction reporting a different set than the
+    /// one before it silently un-cites every concept page the earlier one created, leaving
+    /// pages that assert knowledge with no evidence and no record of what they lost.
+    #[test]
+    fn a_later_extraction_never_un_cites_what_an_earlier_one_created() {
+        let cited = "\
+- [Lethal Trifecta](../../wiki/concepts/lethal-trifecta.md)
+- [AB-MCTS](../../wiki/concepts/ab-mcts.md)
+";
+        assert_eq!(
+            accumulated(Some(cited), vec![identity("Wero", "wero")]),
+            vec![
+                ("Lethal Trifecta".to_string(), "lethal-trifecta".to_string()),
+                ("AB-MCTS".to_string(), "ab-mcts".to_string()),
+                ("Wero".to_string(), "wero".to_string()),
+            ],
+            "the newest extraction adds to the page's citations; it never replaces them"
+        );
+    }
+
+    /// Re-reporting what a page already cites must reproduce the page, not double it — the
+    /// common case, since a re-extraction of grown input names most of the same concepts.
+    #[test]
+    fn re_reporting_a_cited_concept_leaves_the_page_unchanged() {
+        let cited = "- [AB-MCTS](../../wiki/concepts/ab-mcts.md)\n";
+        assert_eq!(
+            accumulated(Some(cited), vec![identity("AB-MCTS", "ab-mcts")]),
+            vec![("AB-MCTS".to_string(), "ab-mcts".to_string())]
+        );
+        // The carried spelling wins over the newest one: the citation already on the page
+        // is the one `backlinks-sync` has counted, so re-rendering must not churn it.
+        assert_eq!(
+            accumulated(Some(cited), vec![identity("AB MCTS", "ab-mcts")]),
+            vec![("AB-MCTS".to_string(), "ab-mcts".to_string())]
+        );
+    }
+
+    /// Only what the graph counts as a citation is carried. Anything else in the section is
+    /// not this function's to re-render — carrying it as a concept would rewrite its
+    /// destination into the concepts directory and invent a citation that never existed.
+    #[test]
+    fn only_a_link_the_graph_counts_as_a_citation_is_carried() {
+        let cited = "\
+A note with [a daily page](../team-slack/2026-07-15.md) and
+[an attachment](../../wiki/concepts/a.pdf) and [the wiki index](../../wiki/index.md)
+and [an external](https://example.com/wiki/concepts/x.md) and `[code](../../wiki/concepts/c.md)`
+and [a real one](../../wiki/concepts/nl2sql.md)
+";
+        assert_eq!(
+            accumulated(Some(cited), vec![]),
+            vec![("a real one".to_string(), "nl2sql".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_page_with_no_section_yet_carries_only_the_extraction() {
+        assert_eq!(
+            accumulated(None, vec![identity("Wero", "wero")]),
+            vec![("Wero".to_string(), "wero".to_string())]
+        );
+        assert_eq!(accumulated(Some(""), vec![]), vec![]);
+    }
+
+    /// `concept_links` writes the citation and this reads it back, so whatever address form
+    /// it produces must recover the same identity — otherwise the second render of a page
+    /// carries a citation the first one wrote as a stranger, and duplicates it.
+    #[test]
+    fn every_address_concept_links_writes_reads_back_as_the_same_identity() {
+        for (name, slug) in [
+            ("에이전트 하니스", "에이전트-하니스"),
+            ("RAG [retrieval]", "rag-retrieval"),
+            ("Claude 3.5", "claude-3-5"),
+        ] {
+            let extracted = vec![identity(name, slug)];
+            let cited = concept_links(
+                &extracted,
+                "daily/ai-news/2026-07-15.md",
+                &VaultDirs::default(),
+            )
+            .join("\n");
+            assert_eq!(
+                accumulated(Some(&cited), vec![identity(name, slug)]),
+                vec![(name.to_string(), slug.to_string())],
+                "reading back {cited}"
+            );
         }
     }
 

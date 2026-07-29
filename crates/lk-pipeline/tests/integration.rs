@@ -3828,3 +3828,123 @@ async fn an_extraction_naming_an_alias_lands_on_the_established_page() {
         page.content
     );
 }
+
+/// A concept extraction is the one LLM section whose result creates durable pages OUTSIDE
+/// the page it writes, and `backlinks-sync` derives every one of those pages' sources from
+/// exactly these forward links. So an extraction that merely restated the section would
+/// strip each page the previous extraction created of its evidence — permanently, since
+/// nothing else records what it had cited. That is not hypothetical: it is how a live vault
+/// reached 256 of 1598 concept pages citing nothing.
+#[tokio::test]
+async fn a_re_extraction_keeps_the_citations_the_one_before_it_created() {
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let config = base_config(vault);
+    let source = config.sources.get("test-source").unwrap().clone();
+    let options = IngestOptions {
+        target_date: None,
+        today: far_future(),
+        dry_run: false,
+    };
+    let ts: jiff::Timestamp = "2026-05-23T10:00:00Z".parse().unwrap();
+
+    let llm = ConceptsPerCall::build(vec![vec!["First Concept"], vec!["Second Concept"]]);
+    let mut pipeline = Pipeline::new(vault, build_ctx(&config, llm));
+
+    let first = pipeline
+        .plan(
+            "test-source",
+            &source,
+            vec![raw_item("first", "...", "MSG-1", ts)],
+            &options,
+        )
+        .await
+        .unwrap();
+    let page = &first.daily_pages[0];
+    assert!(page.content.contains("first-concept.md"));
+
+    // The next run reads the page the last one wrote, so persist it the way the CLI does.
+    let path = vault.join(page.path.to_string());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, &page.content).unwrap();
+
+    // A second item on the same date changes the extraction input, so the section is a
+    // cache miss and runs again — the ordinary case for a feed that grows through the day.
+    let second = pipeline
+        .plan(
+            "test-source",
+            &source,
+            vec![raw_item("second", "...", "MSG-2", ts)],
+            &options,
+        )
+        .await
+        .unwrap();
+    let rendered = &second.daily_pages[0].content;
+    assert!(
+        rendered.contains("second-concept.md"),
+        "the newest extraction must be cited: {rendered}"
+    );
+    assert!(
+        rendered.contains("first-concept.md"),
+        "the earlier extraction's concept page still exists — dropping its citation leaves \
+         it asserting knowledge with no evidence: {rendered}"
+    );
+}
+
+/// The same guarantee on the queue path, which is the one production runs: `plan` leaves the
+/// section for the drain, and `queue apply` is what writes the links. Both must accumulate,
+/// or the half that doesn't reintroduces the leak on its own.
+#[tokio::test]
+async fn applying_a_result_adds_to_a_pages_citations_rather_than_replacing_them() {
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let config = base_config(vault);
+    let ctx = build_ctx(&config, Arc::new(NoopLlmClient));
+    let mut pipeline = Pipeline::new(vault, ctx);
+
+    let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n- [Cited Earlier](../../wiki/concepts/cited-earlier.md)\n\n## Key Events\n\n- a\n";
+    let result = lk_queue::TaskResult {
+        task_id: "ext-1".into(),
+        cache_hash: "h".into(),
+        target: lk_queue::TaskTarget {
+            vault_path: "daily/test-source/2026-05-23.md".into(),
+            kind: lk_queue::TargetKind::DailyConcepts,
+            anchor: "## Related Concepts".into(),
+        },
+        date: jiff::civil::date(2026, 5, 23),
+        concepts: vec![lk_queue::ReportedConcept {
+            concept: ExtractedConcept {
+                name: "Reported Now".into(),
+                category: None,
+            },
+            synthesis: None,
+        }],
+    };
+
+    let rewritten = pipeline.apply_concept_result(&result, page).await.unwrap();
+    assert!(
+        rewritten.contains("[Cited Earlier](../../wiki/concepts/cited-earlier.md)"),
+        "applying a result must not un-cite what the page already cites: {rewritten}"
+    );
+    assert!(
+        rewritten.contains("[Reported Now](../../wiki/concepts/reported-now.md)"),
+        "the reported concept must be cited: {rewritten}"
+    );
+    // Only the concept this result reported is folded into the run's drafts — a carried
+    // citation names a page that already exists and must not be re-rendered from a name.
+    let written: Vec<String> = pipeline
+        .render_concept_pages()
+        .await
+        .unwrap()
+        .iter()
+        .map(|p| p.path.to_string())
+        .collect();
+    assert!(
+        written.iter().any(|p| p.contains("reported-now")),
+        "the reported concept's page must be written: {written:?}"
+    );
+    assert!(
+        !written.iter().any(|p| p.contains("cited-earlier")),
+        "a carried citation must not resurrect a page from its link text: {written:?}"
+    );
+}

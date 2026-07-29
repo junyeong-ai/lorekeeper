@@ -76,8 +76,11 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
 - **`link`** is the single implementation of the vault's link vocabulary: inline
   markdown links `[Display](relative/path.md)`, destinations relative to the containing
   page and always `.md`-suffixed. Construction (`md_link` + `relative_dest`, CommonMark
-  percent-encoding), extraction (`extract_dests` — fence/inline-code-aware, images and
-  external schemes excluded), rewriting (`rewrite_links_outside_code`), and lexical
+  percent-encoding), extraction (`extract_page_links` — fence/inline-code-aware, images and
+  external schemes excluded — and `extract_dests`, defined on top of it so the two can never
+  disagree about which links a body carries; take the pair form when a link must be KEPT rather
+  than merely observed, since its display text is someone else's to preserve, and the escaping
+  it resolves is exactly what `md_link` applies), rewriting (`rewrite_links_outside_code`), and lexical
   resolution (`resolve_dest` — folds `.`/`..`, accepts the OKF `/`-absolute form,
   refuses to escape the vault root). Consumed by lk-graph/lk-vault/lk-pipeline —
   never re-derive link syntax elsewhere.

@@ -72,6 +72,18 @@ domain-neutral engine — then no work-log, reviews, or `is_personal` are produc
   before flush, an unprocessed page, OR a changed-input re-ingest all converge. Force a
   re-run by deleting the `*_done` line — wiping the body alone does NOT (it is data, not
   completion state).
+- **Concept links ACCUMULATE; every other semantic section is replaced.** `render::accumulate_concepts`
+  is the one rule, and both writers go through it: the plan render (which passes the existing
+  section's links alongside whatever the extraction resolved) and `apply_concept_result` (which
+  passes the section it is about to rewrite). Restating the section instead would un-cite every
+  concept page the superseded extraction created — see the root invariant for why that is
+  unrecoverable. On the queue path a cache miss leaves the extraction empty, so accumulating is
+  what keeps the page's citations through the window between ingest and drain; on a synchronous
+  provider it merges the two sets. Only the reported concepts are staged into the run's drafts —
+  a carried citation names a page that already exists, and re-deriving it from link text would
+  mint a page from a display name. Carried links are gated exactly as `lk-graph` gates an edge
+  (resolved against the citing page, `.md`, landing in the concepts directory), so anything else
+  in the section is left to the body it lives in.
 - **Cache identity vs queue payload**: `Request::cache_identity()` in `lk-queue` is the
   hashable subset that shapes the LLM's output; `Request::task_input()` is the queue
   payload (identity PLUS `source_type`). `cache_hash()` BLAKE3-128s the identity;
