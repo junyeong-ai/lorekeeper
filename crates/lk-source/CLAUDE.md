@@ -45,10 +45,13 @@ map to `RawItem`.
   which is right until the text is not prose. (1) `ac:parameter` and a task's
   `ac:task-id`/`-uuid`/`-status` carry MACHINE STATE, and degraded they weld onto the
   surrounding words unseparated (`170e6f1a-9cincompleteShip the thing`); they are dropped,
-  at the documented cost that a body-less macro loses its visible label. (2) `ri:page`/
-  `ri:attachment` carry their label in an ATTRIBUTE, so degrading found nothing to degrade
-  and every Confluence→Confluence cross-reference vanished; their label is recovered
-  (`ri:user` is not — an opaque account id is machine state). (3) CDATA is not HTML: an
+  at the documented cost that a body-less macro loses its visible label. (2) Some constructs
+  carry what the reader saw in an ATTRIBUTE, so degrading found nothing to degrade and the
+  thing vanished silently — every Confluence→Confluence cross-reference, and the same for an
+  external reference, an inline date and an emoji. `ATTRIBUTE_BORNE_TEXT` pairs each element
+  with the attribute that carries its value, and the handler prefers the element's own text
+  where it has any (only `time` does), so one rule covers all of them; `ri:user` is
+  deliberately absent, since an opaque account id is machine state. (3) CDATA is not HTML: an
   HTML5 parser reads `<![CDATA[…]]>` as a bogus COMMENT and drops it, so every code macro
   arrived EMPTY — one real page grew 4.6x once `normalize_storage_format` unwrapped it ahead
   of the converter. Recovering that text is only half the job: an unknown `ac:plain-text-body`

@@ -25,7 +25,10 @@ pub fn html_to_markdown(html: &str) -> String {
         })
         .add_handler(vec!["img"], img_without_data_uris)
         .add_handler(MACHINE_STATE_ELEMENTS.to_vec(), drop_element)
-        .add_handler(vec!["ri:page", "ri:attachment"], resource_label)
+        .add_handler(
+            ATTRIBUTE_BORNE_TEXT.iter().map(|(tag, _)| *tag).collect(),
+            attribute_borne_text,
+        )
         .add_handler(
             vec!["ac:link-body", "ac:plain-text-link-body"],
             spaced_link_body,
@@ -71,28 +74,48 @@ fn drop_element(
     Some(String::new().into())
 }
 
-/// The mirror of the rule above: a resource identifier carries its label in an ATTRIBUTE,
-/// so degrading it to its (empty) text drops the reference entirely — `See <ac:link><ri:page
+/// The mirror of the rule above: these carry what the reader saw in an ATTRIBUTE, so
+/// degrading them to their (empty) text drops the thing entirely — `See <ac:link><ri:page
 /// ri:content-title="Design Notes"/></ac:link>` becomes a dangling `See`. Every
 /// Confluence→Confluence cross-reference is lost that way, which is precisely the material a
-/// knowledge vault wants.
+/// knowledge vault wants, and an external reference, an inline date and an emoji go the same
+/// way for the same reason.
 ///
-/// Only identifiers whose attribute IS a human label are recovered. `ri:user` carries an
-/// opaque account id, and emitting that would commit the same defect this file exists to
-/// prevent, so it stays dropped.
-fn resource_label(
-    _: &dyn htmd::element_handler::Handlers,
+/// Only attributes that ARE what the reader saw belong here. `ri:user` carries an opaque
+/// account id, so a mention stays dropped rather than becoming `557058:abc` — emitting that
+/// would commit the machine-state defect from the opposite direction.
+const ATTRIBUTE_BORNE_TEXT: &[(&str, &str)] = &[
+    ("ri:page", "ri:content-title"),
+    ("ri:attachment", "ri:filename"),
+    ("ri:url", "ri:value"),
+    ("ac:emoticon", "ac:emoji-fallback"),
+    ("time", "datetime"),
+];
+
+/// Render an element from [`ATTRIBUTE_BORNE_TEXT`], preferring the text it actually has.
+///
+/// Only `time` can carry both — `<time datetime="2020-12-25">Christmas</time>` — and there
+/// the word is what the page reads. The rest are empty elements, for which this degenerates
+/// to the attribute, so one rule covers both without a special case.
+fn attribute_borne_text(
+    handlers: &dyn htmd::element_handler::Handlers,
     element: htmd::Element,
 ) -> Option<htmd::element_handler::HandlerResult> {
-    // The parser keeps the `ri:` prefix in the attribute's local name, since storage
+    let text = handlers.walk_children(element.node).content;
+    if !text.trim().is_empty() {
+        return Some(text.into());
+    }
+    // The parser keeps the `ri:`/`ac:` prefix in the attribute's local name, since storage
     // format declares no namespace an HTML parser would resolve.
-    let label = element
-        .attrs
+    let carrier = ATTRIBUTE_BORNE_TEXT
         .iter()
-        .find(|a| matches!(&*a.name.local, "ri:content-title" | "ri:filename"))
+        .find(|(tag, _)| *tag == element.tag)
+        .map(|(_, attr)| *attr);
+    let value = carrier
+        .and_then(|attr| element.attrs.iter().find(|a| &*a.name.local == attr))
         .map(|a| a.value.to_string())
         .unwrap_or_default();
-    Some(label.into())
+    Some(value.into())
 }
 
 /// A link may carry BOTH halves of a reference: the label of the page it points at and the
@@ -1092,6 +1115,33 @@ mod tests {
                 r#"<p>Ask <ac:link><ri:user ri:account-id="557058:abc"/></ac:link></p>"#
             ),
             "Ask"
+        );
+    }
+
+    /// An external reference, an inline date and an emoji carry what the reader saw in an
+    /// attribute exactly as a page reference does, so degrading them to their empty text
+    /// dropped them silently — a sentence lost its link, its date, or its glyph with nothing
+    /// left behind to notice.
+    #[test]
+    fn every_attribute_borne_value_survives_its_empty_element() {
+        assert_eq!(
+            html_to_markdown(
+                r#"<p>See <ac:link><ri:url ri:value="https://example.com/doc"/></ac:link>.</p>"#
+            ),
+            "See https://example.com/doc."
+        );
+        assert_eq!(
+            html_to_markdown(r#"<p>Due <time datetime="2020-12-25"/> for review.</p>"#),
+            "Due 2020-12-25 for review."
+        );
+        assert_eq!(
+            html_to_markdown(r#"<p>Great <ac:emoticon ac:emoji-fallback="🙂"/> work</p>"#),
+            "Great 🙂 work"
+        );
+        // Where an element carries both, its text is what the page reads.
+        assert_eq!(
+            html_to_markdown(r#"<p>On <time datetime="2020-12-25">Christmas</time>.</p>"#),
+            "On Christmas."
         );
     }
 
