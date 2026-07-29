@@ -644,6 +644,11 @@ fn prune_queue(vault_root: &Path, queue_dir: &Path, dry_run: bool) -> miette::Re
             // the archive would then hold two records for one run. Pruning after the move
             // still leaves the archive honest about the tasks the summary counted as
             // dropped, which is what the rewrite is for.
+            // Counted from the classification, like every other tally here, so `--dry-run`
+            // reports what a real run would do. In the race where a drain wins the acquire,
+            // prune's dead tasks stay in the drain's record and these counts describe a
+            // removal prune did not perform — accepted: the run IS retired and its dead
+            // tasks WERE dead, the archive is simply someone else's copy.
             summary.files_archived += 1;
             if !dry_run
                 && let Some(archived) = archive_queue_file(queue_dir, &file)?
@@ -1204,6 +1209,48 @@ mod tests {
             content.lines().filter(|l| !l.trim().is_empty()).count(),
             1,
             "only the answered task belongs in the archive:\n{content}"
+        );
+    }
+
+    /// The rename is the EXCLUSIVE step, so it must come first. Rewriting the pending path
+    /// before acquiring the run RECREATES a file a concurrent drain may already have
+    /// retired — an atomic write is temp+rename, which creates regardless of what was
+    /// there — and the archive would then hold two records for one run.
+    ///
+    /// Observable without staging a race: when the archive cannot happen at all, the
+    /// pending run must be exactly as it was. That also pins what the janitor's idempotence
+    /// rests on — a failed archive leaves the run replayable.
+    #[test]
+    fn a_settled_run_is_acquired_before_any_of_it_is_pruned() {
+        let dir = TempDir::new().unwrap();
+        let queue_dir = dir.path().join(".lorekeeper").join("queue");
+        write_page(
+            dir.path(),
+            "daily/s/2026-05-23.md",
+            "id: x\nllm_inputs:\n  summary: live\n  summary_done: live\n",
+        );
+        let file = write_queue_file(
+            &queue_dir,
+            "run-1.jsonl",
+            &[
+                task("daily/s/2026-05-23.md", "live"), // done
+                task("daily/s/2026-05-23.md", "old"),  // stale, so a rewrite is wanted
+            ],
+        );
+        let before = std::fs::read_to_string(&file).unwrap();
+        // `processed` as a FILE: the archive cannot even create its directory, so the
+        // acquire fails before the rename — the same idiom the quarantine tests use.
+        std::fs::write(
+            queue_dir.join(lk_queue::PROCESSED_SUBDIR),
+            "not a directory",
+        )
+        .unwrap();
+
+        assert!(prune_queue(dir.path(), &queue_dir, false).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            before,
+            "a run that was never acquired must not have been pruned"
         );
     }
 
