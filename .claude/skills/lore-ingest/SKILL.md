@@ -33,8 +33,8 @@ an Obsidian vault. All commands accept `--config <path>` to override.
 | `lore performance` | Performance category distribution |
 | `lore doctor` | Audit materialized pages against the text-cleanliness contract (non-zero on any defect) |
 | `lore schedule --format launchd --pipeline-dir <dir>` | Print scheduled-task definitions. See the flag notes below — the bare form is rarely the one you want |
-| `lore maintenance` | Prune operational history (ingest log, drained queue files) past `maintenance.retention_days` (default 90d); streaming event logs are permanent |
-| `lore queue prune [--dry-run]` | Drop dead pending tasks (stale / missing-target) without an LLM session |
+| `lore maintenance [--dry-run]` | Prune operational history (ingest log, drained queue files) past `maintenance.retention_days` (default 90d). Streaming event logs are permanent, and each source's latest log entry survives any horizon — it is the state `lore health` reads, not history |
+| `lore queue prune [--dry-run]` | Leave the queue holding only work that still needs an LLM session: drop dead tasks (stale / missing-target), retire a run whose every task is already answered |
 
 ## Trigger mapping
 

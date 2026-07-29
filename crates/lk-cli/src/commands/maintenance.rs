@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use super::{find_config, load_config};
 
 /// Seconds-since-epoch cutoff for pruning: entries with `seen_at`/mtime older than this
@@ -10,12 +12,39 @@ fn prune_cutoff_secs(now_secs: i64, retention_days: i64) -> i64 {
         .max(0)
 }
 
-pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
+/// Line numbers of the newest entry for each source, which retention must keep whatever
+/// their age.
+///
+/// The ingest log is two things at once: a HISTORY of runs, and the state store
+/// `IngestLog::find_last_collection` reads to answer when a source was last collected. A
+/// retention horizon may prune the history; pruning the state would make `lore health`'s
+/// verdict a function of how long a source has been broken. Past the horizon, every entry
+/// for a dead source disappears and it stops reading `stale` (which exits non-zero) and
+/// starts reading "never ingested" (which does not, without `--strict`) — the alarm turns
+/// itself off precisely as the problem gets older.
+fn newest_entry_per_source(entries: &[(usize, lk_vault::LogEntry)]) -> HashSet<usize> {
+    let mut newest: HashMap<&str, (i64, usize)> = HashMap::new();
+    for (line_no, entry) in entries {
+        let seen = (entry.timestamp.as_second(), *line_no);
+        newest
+            .entry(entry.source_id.as_str())
+            .and_modify(|held| {
+                if seen > *held {
+                    *held = seen;
+                }
+            })
+            .or_insert(seen);
+    }
+    newest.into_values().map(|(_, line_no)| line_no).collect()
+}
+
+pub async fn run(opts: &super::GlobalOptions, dry_run: bool) -> miette::Result<()> {
     let config = load_config(&find_config(opts)?)?;
     let vault_root = config.vault.root_path();
     let retention_days = config.maintenance.retention_days;
     let log_path = vault_root.join(".lorekeeper").join("ingest.jsonl");
     let cutoff_secs = prune_cutoff_secs(jiff::Timestamp::now().as_second(), retention_days);
+    let prefix = if dry_run { "[dry-run] " } else { "" };
 
     // 1. Prune ingest log
     if log_path.exists() {
@@ -23,37 +52,44 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
             .await
             .map_err(|e| miette::miette!("read log: {e}"))?;
 
-        let mut kept: Vec<String> = Vec::new();
-        let mut original = 0usize;
-        let mut dropped = 0usize;
+        // A malformed line is neither parsed nor pruned — it is carried through verbatim,
+        // so corruption stays visible instead of being quietly rewritten away.
+        let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+        let parsed: Vec<(usize, lk_vault::LogEntry)> = lines
+            .iter()
+            .enumerate()
+            .filter_map(|(i, line)| serde_json::from_str(line).ok().map(|e| (i, e)))
+            .collect();
+        let state = newest_entry_per_source(&parsed);
+        let expired: HashSet<usize> = parsed
+            .iter()
+            .filter(|(i, e)| e.timestamp.as_second() < cutoff_secs && !state.contains(i))
+            .map(|(i, _)| *i)
+            .collect();
 
-        for line in content.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            original += 1;
-            let keep = match serde_json::from_str::<lk_vault::LogEntry>(line) {
-                Ok(entry) => entry.timestamp.as_second() >= cutoff_secs,
-                Err(_) => true,
-            };
-            if keep {
-                kept.push(line.to_string());
-            } else {
-                dropped += 1;
-            }
+        let kept: Vec<&str> = lines
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !expired.contains(i))
+            .map(|(_, line)| *line)
+            .collect();
+
+        if !dry_run && !expired.is_empty() {
+            let new_content = kept.join("\n") + "\n";
+            super::write_atomic(log_path.clone(), new_content.into_bytes())
+                .await
+                .map_err(|e| miette::miette!("write log: {e}"))?;
         }
 
-        let new_content = kept.join("\n") + "\n";
-        super::write_atomic(log_path.clone(), new_content.into_bytes())
-            .await
-            .map_err(|e| miette::miette!("write log: {e}"))?;
-
         eprintln!(
-            "log: pruned {dropped} entries older than {retention_days}d (kept {} of {original}).",
-            kept.len()
+            "{prefix}log: pruned {} entries older than {retention_days}d \
+             (kept {} of {}, including each source's latest).",
+            expired.len(),
+            kept.len(),
+            lines.len()
         );
     } else {
-        eprintln!("log: no log file to maintain.");
+        eprintln!("{prefix}log: no log file to maintain.");
     }
 
     // 2. Prune processed queue files (older than retention). Pending queue files
@@ -62,7 +98,7 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
     let processed_dir = vault_root
         .join(".lorekeeper")
         .join("queue")
-        .join("processed");
+        .join(lk_queue::PROCESSED_SUBDIR);
     if processed_dir.exists() {
         let mut entries = tokio::fs::read_dir(&processed_dir)
             .await
@@ -87,15 +123,17 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
                     .map(|d| d.as_secs() as i64)
             });
             if mtime_secs.is_some_and(|m| m < cutoff_secs) {
-                tokio::fs::remove_file(&path)
-                    .await
-                    .map_err(|e| miette::miette!("remove {}: {e}", path.display()))?;
+                if !dry_run {
+                    tokio::fs::remove_file(&path)
+                        .await
+                        .map_err(|e| miette::miette!("remove {}: {e}", path.display()))?;
+                }
                 pruned += 1;
             }
         }
-        eprintln!("queue: pruned {pruned} processed file(s) older than {retention_days}d.");
+        eprintln!("{prefix}queue: pruned {pruned} processed file(s) older than {retention_days}d.");
     } else {
-        eprintln!("queue: no processed/ directory to maintain.");
+        eprintln!("{prefix}queue: no processed/ directory to maintain.");
     }
 
     // Stale `.jsonl.tmp` files left over from crashes mid-flush are NOT pruned here —
@@ -113,7 +151,59 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::prune_cutoff_secs;
+    use super::{newest_entry_per_source, prune_cutoff_secs};
+
+    fn entry(source_id: &str, secs: i64) -> lk_vault::LogEntry {
+        lk_vault::LogEntry {
+            timestamp: jiff::Timestamp::from_second(secs).unwrap(),
+            source_id: source_id.into(),
+            status: lk_vault::LogStatus::Skipped,
+            event_count: 0,
+            duration_ms: 1,
+            error: None,
+        }
+    }
+
+    /// Retention prunes HISTORY. The newest entry per source is not history — it is the
+    /// state `lore health` reads, and pruning it makes a source that has been dead longer
+    /// than the horizon report "never ingested" (silent) instead of stale (exit 1).
+    #[test]
+    fn each_sources_latest_entry_survives_any_horizon() {
+        let entries = vec![
+            (0, entry("jira", 100)),
+            (1, entry("jira", 200)),
+            (2, entry("gmail", 50)),
+        ];
+        let mut state: Vec<usize> = newest_entry_per_source(&entries).into_iter().collect();
+        state.sort();
+        assert_eq!(
+            state,
+            vec![1, 2],
+            "the newest line per source, and only those"
+        );
+    }
+
+    /// Ties cannot leave a source unrepresented, and cannot pick two lines for one source.
+    #[test]
+    fn a_tie_on_timestamp_still_yields_exactly_one_line_per_source() {
+        let entries = vec![
+            (0, entry("jira", 100)),
+            (1, entry("jira", 100)),
+            (2, entry("gmail", 100)),
+        ];
+        let state = newest_entry_per_source(&entries);
+        assert_eq!(state.len(), 2, "one line per source: {state:?}");
+        assert!(state.contains(&2), "gmail must be represented");
+        assert!(
+            state.contains(&1),
+            "the later line wins a tie deterministically"
+        );
+    }
+
+    #[test]
+    fn an_empty_log_has_no_state_to_protect() {
+        assert!(newest_entry_per_source(&[]).is_empty());
+    }
 
     #[test]
     fn cutoff_is_now_minus_retention() {

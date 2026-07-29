@@ -7,8 +7,8 @@ mod queue;
 pub use mock::MockLlmClient;
 pub use noop::NoopLlmClient;
 pub use queue::{
-    CORRUPT_SUBDIR, QueueLlmClient, QueueTask, RESULTS_SUBDIR, ReportedConcept, ResultBatch,
-    TaskKind, TaskResult, read_results, write_tasks_atomic,
+    CORRUPT_SUBDIR, PROCESSED_SUBDIR, QueueLlmClient, QueueTask, RESULTS_SUBDIR, ReportedConcept,
+    ResultBatch, TaskKind, TaskResult, read_results, write_tasks_atomic,
 };
 
 use async_trait::async_trait;

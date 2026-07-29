@@ -88,8 +88,12 @@ enum Command {
         #[arg(long)]
         root: Option<PathBuf>,
     },
-    /// Prune the ingest log and drained queue files past the configured retention (default 90 days); streaming event logs are permanent
-    Maintenance,
+    /// Prune the ingest log and drained queue files past the configured retention (default 90 days); streaming event logs are permanent, and each source's latest log entry is kept whatever its age
+    Maintenance {
+        /// Report what would be pruned, and delete nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Link graph analysis for the vault
     Graph {
         /// Root directory of the vault (overrides config.yaml vault.root)
@@ -176,7 +180,7 @@ async fn main() -> miette::Result<()> {
             format,
             pipeline_dir,
         } => commands::schedule::run(&opts, &bin, format, pipeline_dir.as_deref()).await,
-        Command::Maintenance => commands::maintenance::run(&opts).await,
+        Command::Maintenance { dry_run } => commands::maintenance::run(&opts, dry_run).await,
         Command::Graph { .. } => unreachable!(),
         Command::Wiki { cmd } => commands::wiki::run(&opts, cmd).await,
         Command::Queue { command } => commands::queue::run(&opts, command).await,

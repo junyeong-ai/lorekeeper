@@ -95,6 +95,11 @@ pub struct ReportedConcept {
     pub synthesis: Option<String>,
 }
 
+/// Subdirectory a queue file is moved to once every task in it is settled. Written by
+/// `/lore-process` when it finishes a run and by `lore queue prune` when it retires one,
+/// read by `lore maintenance` — a path three components agree on, so it is named once.
+pub const PROCESSED_SUBDIR: &str = "processed";
+
 /// Subdirectory of the queue holding results awaiting `lore queue apply`.
 pub const RESULTS_SUBDIR: &str = "results";
 

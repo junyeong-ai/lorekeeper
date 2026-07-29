@@ -8,10 +8,10 @@ use super::{find_config, load_config};
 #[derive(clap::Subcommand)]
 pub enum QueueCommand {
     /// Classify every pending queue task against its target page. `/lore-process`
-    /// consults this instead of comparing hashes itself: it processes `current`
-    /// tasks, drops `stale` ones (the page was re-rendered by a newer ingest), and
-    /// reports `missing-target`. The stale-task guard is computed here in tested
-    /// Rust, not in prose.
+    /// consults this instead of comparing hashes itself: it processes `current` tasks,
+    /// skips `done` ones (this exact input is already answered on the page), drops
+    /// `stale` ones (the page was re-rendered by a newer ingest), and reports
+    /// `missing-target`. The guard is computed here in tested Rust, not in prose.
     Status {
         /// Vault root override (default: vault.root from config)
         #[arg(long)]
@@ -36,23 +36,30 @@ pub enum QueueCommand {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Print the number of `current` tasks — the count a drain would actually process —
-    /// as a bare integer on stdout, and nothing else.
+    /// Print the number of tasks that still need an LLM session — the count a drain would
+    /// actually do work for — as a bare integer on stdout, and nothing else.
     ///
     /// `status` is written for a human and `--json` needs a JSON parser; a scheduled script
     /// deciding whether to spend an LLM session on the queue should not have to grep prose
-    /// or take a dependency on `jq` to learn one number.
+    /// or take a dependency on `jq` to learn one number. A task already answered on its page
+    /// is not work, so it is not counted — otherwise the script spends a session on a queue
+    /// with nothing to do.
     Count {
         /// Vault root override (default: vault.root from config)
         #[arg(long)]
         root: Option<PathBuf>,
     },
-    /// Remove dead tasks from pending queue files using the same classification as
-    /// `status`: `stale` and `missing-target` tasks are exactly what `/lore-process`
-    /// would drop without editing anything, so pruning them is that drop performed
-    /// deterministically, without an LLM session. Files are rewritten atomically
-    /// keeping only `current` tasks; a file left with none is deleted (it never
-    /// produced page edits, so there is nothing to archive in `processed/`).
+    /// Leave the pending queue holding only work that still needs an LLM session, using the
+    /// same classification as `status`.
+    ///
+    /// `stale` and `missing-target` tasks are exactly what `/lore-process` would drop
+    /// without editing anything, so removing them is that drop performed deterministically,
+    /// without spending a session. A `done` task is kept — its answer is on the page and the
+    /// run's record stays whole — but a run whose every remaining task is `done` needs no
+    /// session, so nothing would ever archive it; it is retired to `processed/` exactly as a
+    /// drain retires a finished run. A file left holding nothing never edited a page, so it
+    /// is deleted rather than archived. Rewrites are atomic; a file needing no change is
+    /// left byte-identical.
     Prune {
         /// Vault root override (default: vault.root from config)
         #[arg(long)]
@@ -66,11 +73,18 @@ pub enum QueueCommand {
     },
 }
 
-/// Where a queued task stands relative to its target page's current input hash.
+/// Where a queued task stands against its target page. Two independent questions decide
+/// it: is the page still the one this task was made for (input hash, existence), and has
+/// the work already been done (completion marker). Only a task that passes the first and
+/// fails the second is work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TaskStatus {
-    /// `llm_inputs.<key>` on the page equals the task's `cache_hash` — process it.
+    /// `llm_inputs.<key>` on the page equals the task's `cache_hash` and no completion
+    /// marker matches it — process it.
     Current,
+    /// `llm_inputs.<key>_done` already equals the task's `cache_hash`: this exact input
+    /// has been answered. Nothing is left to do, and nothing was lost.
+    Done,
     /// The page was re-rendered with a different input after this task was queued —
     /// drop it; a newer task carries the current hash.
     Stale,
@@ -82,9 +96,22 @@ impl TaskStatus {
     fn as_str(self) -> &'static str {
         match self {
             TaskStatus::Current => "current",
+            TaskStatus::Done => "done",
             TaskStatus::Stale => "stale",
             TaskStatus::MissingTarget => "missing-target",
         }
+    }
+
+    /// Whether this task still needs an LLM session. The one question `lore queue count`
+    /// answers for a scheduled script deciding whether to spend one.
+    fn is_work(self) -> bool {
+        matches!(self, TaskStatus::Current)
+    }
+
+    /// Whether the task already produced page edits. A run made only of tasks that did
+    /// not is a run that never touched the vault, so retiring it leaves nothing to record.
+    fn edited_its_page(self) -> bool {
+        matches!(self, TaskStatus::Done)
     }
 }
 
@@ -425,7 +452,7 @@ async fn count(opts: &super::GlobalOptions, root: Option<PathBuf>) -> miette::Re
     let mut current = 0usize;
     for file in pending_queue_files(&queue_dir)? {
         for task in read_tasks(&file)? {
-            if classify_task(&vault_root, &task)? == TaskStatus::Current {
+            if classify_task(&vault_root, &task)?.is_work() {
                 current += 1;
             }
         }
@@ -455,18 +482,11 @@ async fn status(
         }
     }
 
-    let current = reports
-        .iter()
-        .filter(|r| r.status == TaskStatus::Current)
-        .count();
-    let stale = reports
-        .iter()
-        .filter(|r| r.status == TaskStatus::Stale)
-        .count();
-    let missing = reports
-        .iter()
-        .filter(|r| r.status == TaskStatus::MissingTarget)
-        .count();
+    let tally = |want: TaskStatus| reports.iter().filter(|r| r.status == want).count();
+    let current = tally(TaskStatus::Current);
+    let done = tally(TaskStatus::Done);
+    let stale = tally(TaskStatus::Stale);
+    let missing = tally(TaskStatus::MissingTarget);
 
     if json {
         let tasks: Vec<serde_json::Value> = reports
@@ -484,6 +504,7 @@ async fn status(
             "ok": true,
             "data": {
                 "current": current,
+                "done": done,
                 "stale": stale,
                 "missing_target": missing,
                 "tasks": tasks,
@@ -501,7 +522,7 @@ async fn status(
             );
         }
         eprintln!(
-            "queue: {current} current, {stale} stale, {missing} missing-target \
+            "queue: {current} current, {done} done, {stale} stale, {missing} missing-target \
              across {} task(s)",
             reports.len()
         );
@@ -514,26 +535,50 @@ struct PruneSummary {
     pruned_stale: usize,
     pruned_missing_target: usize,
     kept_current: usize,
+    retired_done: usize,
     files_rewritten: usize,
     files_deleted: usize,
+    files_archived: usize,
 }
 
-/// Drop every `stale` and `missing-target` task from the pending queue, keeping
-/// `current` ones. Safe by construction: a pending file's tasks targeted pages that
-/// existed when the file was renamed into place (flush invariant), so missing-target
-/// means the page was deleted afterwards — the result has nowhere to land — and
-/// stale means `/lore-process` would drop the task on contact without editing.
-/// Files all-current are left untouched; rewrites go through
-/// `lk_queue::write_tasks_atomic` (temp + fsync + rename).
+/// Leave the pending queue holding only work that still needs an LLM session.
+///
+/// A dead task — `stale` or `missing-target` — is dropped: `/lore-process` would discard
+/// it on contact without editing anything, so removing it here is that discard performed
+/// without spending a session. Safe by construction, since a pending file's tasks all
+/// targeted pages that existed when it was renamed into place (the flush invariant), so
+/// `missing-target` means the page was deleted afterwards.
+///
+/// A `done` task is not dead — its answer is already on the page — so it is retained,
+/// keeping the run's record whole for whoever archives it. What it must not do is keep the
+/// run alive: a file whose every remaining task is `done` needs no session, so nothing
+/// would ever archive it, and it would sit in the queue making `lore ingest` warn about
+/// pending work forever. This retires it exactly as a drain does — the file moved to
+/// `processed/` as it stands — so the two agree on what a finished run looks like.
+///
+/// A file with nothing retained held only dead tasks, so it never edited a page and there
+/// is nothing to archive; it is deleted. Rewrites go through `lk_queue::write_tasks_atomic`
+/// (temp + fsync + rename), and a file needing no change stays byte-identical.
 fn prune_queue(vault_root: &Path, queue_dir: &Path, dry_run: bool) -> miette::Result<PruneSummary> {
     let mut summary = PruneSummary::default();
     for file in pending_queue_files(queue_dir)? {
         let tasks = read_tasks(&file)?;
-        let mut kept = Vec::with_capacity(tasks.len());
-        let mut dropped = 0usize;
+        let mut retained = Vec::with_capacity(tasks.len());
+        let (mut dropped, mut work_left) = (0usize, 0usize);
+        let mut edited_a_page = false;
         for task in tasks {
-            match classify_task(vault_root, &task)? {
-                TaskStatus::Current => kept.push(task),
+            let status = classify_task(vault_root, &task)?;
+            edited_a_page |= status.edited_its_page();
+            match status {
+                TaskStatus::Current => {
+                    work_left += 1;
+                    summary.kept_current += 1;
+                    retained.push(task);
+                }
+                TaskStatus::Done => {
+                    summary.retired_done += 1;
+                    retained.push(task);
+                }
                 TaskStatus::Stale => {
                     summary.pruned_stale += 1;
                     dropped += 1;
@@ -544,26 +589,41 @@ fn prune_queue(vault_root: &Path, queue_dir: &Path, dry_run: bool) -> miette::Re
                 }
             }
         }
-        summary.kept_current += kept.len();
-        if dropped == 0 {
-            // All-current file: stays byte-identical on disk.
-            continue;
-        }
-        if kept.is_empty() {
-            summary.files_deleted += 1;
-            if !dry_run {
-                std::fs::remove_file(&file)
-                    .map_err(|e| miette::miette!("remove {}: {e}", file.display()))?;
+
+        if retained.is_empty() {
+            if dropped > 0 {
+                summary.files_deleted += 1;
+                if !dry_run {
+                    std::fs::remove_file(&file)
+                        .map_err(|e| miette::miette!("remove {}: {e}", file.display()))?;
+                }
             }
-        } else {
+        } else if work_left == 0 && edited_a_page {
+            summary.files_archived += 1;
+            if !dry_run {
+                archive_queue_file(queue_dir, &file)?;
+            }
+        } else if dropped > 0 {
             summary.files_rewritten += 1;
             if !dry_run {
-                lk_queue::write_tasks_atomic(&file, &kept)
+                lk_queue::write_tasks_atomic(&file, &retained)
                     .map_err(|e| miette::miette!("rewrite {}: {e}", file.display()))?;
             }
         }
     }
     Ok(summary)
+}
+
+/// Move a settled run into `processed/`, the same retirement `/lore-process` performs when
+/// every task in a file has succeeded.
+fn archive_queue_file(queue_dir: &Path, file: &Path) -> miette::Result<()> {
+    let dir = queue_dir.join(lk_queue::PROCESSED_SUBDIR);
+    std::fs::create_dir_all(&dir).map_err(|e| miette::miette!("create {}: {e}", dir.display()))?;
+    let name = file
+        .file_name()
+        .ok_or_else(|| miette::miette!("queue file has no name: {}", file.display()))?;
+    std::fs::rename(file, dir.join(name))
+        .map_err(|e| miette::miette!("archive {}: {e}", file.display()))
 }
 
 async fn prune(
@@ -584,8 +644,10 @@ async fn prune(
                 "pruned_stale": summary.pruned_stale,
                 "pruned_missing_target": summary.pruned_missing_target,
                 "kept_current": summary.kept_current,
+                "retired_done": summary.retired_done,
                 "files_rewritten": summary.files_rewritten,
                 "files_deleted": summary.files_deleted,
+                "files_archived": summary.files_archived,
             }
         });
         println!("{}", serde_json::to_string_pretty(&envelope).unwrap());
@@ -596,12 +658,14 @@ async fn prune(
             "queue prune"
         };
         eprintln!(
-            "{label}: dropped {} stale + {} missing-target, kept {} current; \
-             {} file(s) rewritten, {} deleted",
+            "{label}: dropped {} stale + {} missing-target, kept {} current, \
+             {} already done; {} file(s) rewritten, {} archived, {} deleted",
             summary.pruned_stale,
             summary.pruned_missing_target,
             summary.kept_current,
+            summary.retired_done,
             summary.files_rewritten,
+            summary.files_archived,
             summary.files_deleted
         );
     }
@@ -652,16 +716,25 @@ fn classify_against_page(
     };
     let page = lk_core::frontmatter::parse_page(&content)
         .map_err(|e| miette::miette!("parse {}: {e}", page_path.display()))?;
-    let stored = page
+    let llm_inputs = page
         .frontmatter
-        .get(lk_core::frontmatter::field::LLM_INPUTS)
-        .and_then(|v| v.get(kind.llm_inputs_key()))
-        .and_then(|v| v.as_str());
-    Ok(if stored == Some(cache_hash) {
-        TaskStatus::Current
-    } else {
-        TaskStatus::Stale
-    })
+        .get(lk_core::frontmatter::field::LLM_INPUTS);
+    let field = |key: &str| {
+        llm_inputs
+            .and_then(|v| v.get(key))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    };
+    if field(kind.llm_inputs_key()).as_deref() != Some(cache_hash) {
+        return Ok(TaskStatus::Stale);
+    }
+    Ok(
+        if field(&kind.completion_key()).as_deref() == Some(cache_hash) {
+            TaskStatus::Done
+        } else {
+            TaskStatus::Current
+        },
+    )
 }
 
 #[cfg(test)]
@@ -885,8 +958,10 @@ mod tests {
                 pruned_stale: 1,
                 pruned_missing_target: 1,
                 kept_current: 1,
+                retired_done: 0,
                 files_rewritten: 1,
                 files_deleted: 0,
+                files_archived: 0,
             }
         );
         let content = std::fs::read_to_string(&file).unwrap();
@@ -894,6 +969,121 @@ mod tests {
         let survivor: QueueTask = serde_json::from_str(content.trim()).unwrap();
         assert_eq!(survivor.cache_hash, "live");
         assert_eq!(survivor.target.vault_path, "daily/s/2026-05-23.md");
+    }
+
+    /// A task whose page already carries the completion marker for its exact input is
+    /// answered, not pending. Counting it as work is what makes a scheduled pipeline spend
+    /// an LLM session on a queue with nothing to do.
+    #[test]
+    fn a_task_already_answered_on_its_page_is_done_not_current() {
+        let dir = TempDir::new().unwrap();
+        write_page(
+            dir.path(),
+            "daily/s/2026-05-23.md",
+            "id: x\nllm_inputs:\n  summary: abc123\n  summary_done: abc123\n",
+        );
+        assert_eq!(
+            classify_task(dir.path(), &task("daily/s/2026-05-23.md", "abc123")).unwrap(),
+            TaskStatus::Done
+        );
+        assert!(!TaskStatus::Done.is_work());
+    }
+
+    /// A completion marker left over from an EARLIER input does not answer this task —
+    /// the input key decides staleness first, and it wins.
+    #[test]
+    fn a_marker_from_an_older_input_does_not_make_a_task_done() {
+        let dir = TempDir::new().unwrap();
+        write_page(
+            dir.path(),
+            "daily/s/2026-05-23.md",
+            "id: x\nllm_inputs:\n  summary: newhash\n  summary_done: oldhash\n",
+        );
+        assert_eq!(
+            classify_task(dir.path(), &task("daily/s/2026-05-23.md", "newhash")).unwrap(),
+            TaskStatus::Current,
+            "the page moved to a new input and has not been answered for it"
+        );
+        assert_eq!(
+            classify_task(dir.path(), &task("daily/s/2026-05-23.md", "oldhash")).unwrap(),
+            TaskStatus::Stale,
+            "a task for the old input is stale regardless of the marker"
+        );
+    }
+
+    /// A run with nothing left to do would otherwise sit in the queue forever: no session
+    /// is spent on it, so nothing ever archives it, and `lore ingest` warns about pending
+    /// work on every run. Prune retires it exactly as a drain retires a finished run.
+    #[test]
+    fn prune_archives_a_run_whose_every_task_is_answered() {
+        let dir = TempDir::new().unwrap();
+        let queue_dir = dir.path().join(".lorekeeper").join("queue");
+        write_page(
+            dir.path(),
+            "daily/s/2026-05-23.md",
+            "id: x\nllm_inputs:\n  summary: live\n  summary_done: live\n",
+        );
+        let file = write_queue_file(
+            &queue_dir,
+            "run-1.jsonl",
+            &[task("daily/s/2026-05-23.md", "live")],
+        );
+
+        let dry = prune_queue(dir.path(), &queue_dir, true).unwrap();
+        assert_eq!(dry.files_archived, 1, "dry-run reports the same retirement");
+        assert!(file.exists(), "dry-run archives nothing");
+
+        let summary = prune_queue(dir.path(), &queue_dir, false).unwrap();
+        assert_eq!(summary.retired_done, 1);
+        assert_eq!(summary.files_archived, 1);
+        assert_eq!(summary.kept_current, 0);
+        assert!(!file.exists(), "the settled run leaves the pending queue");
+        assert!(
+            queue_dir
+                .join(lk_queue::PROCESSED_SUBDIR)
+                .join("run-1.jsonl")
+                .exists(),
+            "and lands in processed/, where a drain would have put it"
+        );
+    }
+
+    /// A run that still has work keeps its answered tasks, so the record a drain archives
+    /// stays whole. Only dead tasks are removed.
+    #[test]
+    fn prune_keeps_answered_tasks_in_a_run_that_still_has_work() {
+        let dir = TempDir::new().unwrap();
+        let queue_dir = dir.path().join(".lorekeeper").join("queue");
+        write_page(
+            dir.path(),
+            "daily/s/2026-05-23.md",
+            "id: x\nllm_inputs:\n  summary: live\n  summary_done: live\n",
+        );
+        write_page(
+            dir.path(),
+            "daily/s/2026-05-24.md",
+            "id: y\nllm_inputs:\n  summary: live\n",
+        );
+        let file = write_queue_file(
+            &queue_dir,
+            "run-1.jsonl",
+            &[
+                task("daily/s/2026-05-23.md", "live"), // done
+                task("daily/s/2026-05-24.md", "live"), // current
+                task("daily/s/2026-05-99.md", "live"), // missing-target
+            ],
+        );
+
+        let summary = prune_queue(dir.path(), &queue_dir, false).unwrap();
+        assert_eq!(summary.retired_done, 1);
+        assert_eq!(summary.kept_current, 1);
+        assert_eq!(summary.pruned_missing_target, 1);
+        assert_eq!(summary.files_rewritten, 1);
+        assert_eq!(summary.files_archived, 0);
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap().lines().count(),
+            2,
+            "the answered task stays; only the dead one goes"
+        );
     }
 
     #[test]

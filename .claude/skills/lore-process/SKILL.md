@@ -44,12 +44,14 @@ you last read them.
 ## Safety rules (never violate, even mid-session)
 
 1. **Process only `current` tasks.** `lore queue status --json` is the
-   authoritative classifier — never edit a page for a `stale` or
-   `missing-target` task. Note it classifies by the INPUT key (`cache_hash`
-   vs `llm_inputs.<key>`) and deliberately ignores the `<key>_done` marker, so
-   a task you have already filled and stamped still reads `current` while its
-   file is pending — that is expected. The only "this run is done" signal is the
-   queue file moving to `processed/`, not `queue status` reaching zero.
+   authoritative classifier — never edit a page for a `done`, `stale`, or
+   `missing-target` task. It answers two questions per task: is the page still
+   the one this task was made for (`cache_hash` vs `llm_inputs.<key>`), and has
+   this exact input already been answered (`llm_inputs.<key>_done`). Only a task
+   that passes the first and fails the second is work. A task you filled and
+   stamped earlier in this run therefore reads `done` if you re-classify — that
+   is correct, and it is skipped, not failed. The "this run is finished" signal
+   is the queue file moving to `processed/`, not `queue status` reaching zero.
 2. **Locate sections only by `target.anchor`** (the exact `## …` heading the
    pipeline wrote, resolved from i18n at queue time). Never hardcode a
    heading per `target.kind`.
@@ -129,11 +131,11 @@ The essentials: a visible `.jsonl` is fully written and every
       lore queue status --json
       ```
 
-      It classifies every pending task as `current`, `stale`, or
-      `missing-target` by comparing each `task.cache_hash` against its
-      target page's `llm_inputs.<key>` — computed in tested Rust. **Process
-      only `current` tasks; skip `stale` and `missing-target` without
-      editing their pages.** Match tasks by `task_id`.
+      It classifies every pending task as `current`, `done`, `stale`, or
+      `missing-target` from its target page's `llm_inputs.<key>` and
+      `llm_inputs.<key>_done` — computed in tested Rust. **Process only
+      `current` tasks; skip the rest without editing their pages.** Match tasks
+      by `task_id`.
 
    c. **For each `current` task** (in file order), resolve its state from the
       page's frontmatter. Completion is **uniformly marker-signalled**: every kind
