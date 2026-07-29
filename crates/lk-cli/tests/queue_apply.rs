@@ -282,3 +282,48 @@ fn applying_the_same_result_twice_is_idempotent() {
         "a re-applied result must change nothing"
     );
 }
+
+/// The safety argument for a result ignoring the completion marker is that re-applying is
+/// idempotent — so it has to hold for the CONCEPT page too, not just the origin. A merge
+/// that reset an established page's accumulated state would trade a silent loss for a
+/// silent corruption, which is worse.
+#[test]
+fn re_applying_preserves_everything_an_established_concept_page_accumulated() {
+    let ws = Workspace::new();
+    ws.write(PAGE, &daily_page("h"));
+    ws.drop_result("ext-1", PAGE, "h", "Concept A");
+    assert!(ws.run(&["queue", "apply"]).status.success());
+
+    // Stand in for what the rest of the system writes onto an established page:
+    // `backlinks-sync` owns the count, a human or a later audit owns the synthesis and
+    // aliases, and `created` is the day it entered the vault.
+    let concept = "wiki/concepts/concept-a.md";
+    let enriched = ws
+        .read(concept)
+        .replace("source_count: 0", "source_count: 3")
+        .replace("created: 2026-05-23", "created: 2020-01-01")
+        .replace(
+            "aliases: [\"Concept A\"]",
+            "aliases: [\"Concept A\", \"CA\"]",
+        )
+        + "\nA human wrote this.\n";
+    ws.write(concept, &enriched);
+
+    ws.drop_result("ext-1", PAGE, "h", "Concept A");
+    assert!(ws.run(&["queue", "apply"]).status.success());
+
+    let after = ws.read(concept);
+    assert!(
+        after.contains("source_count: 3"),
+        "count preserved:\n{after}"
+    );
+    assert!(
+        after.contains("created: 2020-01-01"),
+        "origin date preserved:\n{after}"
+    );
+    assert!(after.contains("\"CA\""), "alias preserved:\n{after}");
+    assert!(
+        after.contains("A human wrote this."),
+        "authored prose preserved:\n{after}"
+    );
+}
