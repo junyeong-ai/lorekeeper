@@ -24,30 +24,105 @@ pub fn html_to_markdown(html: &str) -> String {
             ..Default::default()
         })
         .add_handler(vec!["img"], img_without_data_uris)
-        .add_handler(vec![MACRO_PARAMETER], drop_macro_parameter)
+        .add_handler(MACHINE_STATE_ELEMENTS.to_vec(), drop_element)
+        .add_handler(vec!["ri:page", "ri:attachment"], resource_label)
         .build();
     converter
-        .convert(html)
+        .convert(&unwrap_cdata(html))
         .map(|md| md.trim().to_string())
         .unwrap_or_default()
 }
 
-/// The one element whose text is CONFIGURATION rather than prose, so the loss-averse rule
-/// above — degrade an unmapped construct to its text — is wrong for it and only it.
+/// Elements whose TEXT is machine state rather than prose, so the loss-averse rule above —
+/// degrade an unmapped construct to its text — is wrong for them.
 ///
-/// Confluence storage format is XHTML carrying macros as `<ac:structured-macro>`, whose
-/// `<ac:parameter>` children hold the macro's settings: a status macro's colour names, a
-/// roadmap's base64 state blob. Degrading those emits them INLINE and unseparated, so a
-/// page reads `검증JTdCJTIybmFtZSUyMi…` — the macro's title welded to a kilobyte of
-/// encoded settings. One real page came out 30% that. The macro's actual content lives in
-/// `ac:rich-text-body`/`ac:plain-text-body` and is untouched by this.
-const MACRO_PARAMETER: &str = "ac:parameter";
+/// Confluence storage format is XHTML. A macro's `<ac:parameter>` children hold its
+/// settings (a status macro's colour, a roadmap's base64 state blob) and a task's
+/// `<ac:task-id>`/`<ac:task-uuid>`/`<ac:task-status>` hold its identity. Degraded, they are
+/// emitted INLINE and unseparated: a page reads `검증JTdCJTIybmFtZSUyMi…` or
+/// `170e6f1a-9cincompleteShip the thing`. One real page came out 30% encoded settings.
+///
+/// This is a deliberate trade, not a free win. A macro WITH a body loses nothing — the body
+/// is `ac:rich-text-body`/`ac:plain-text-body` and is untouched. A macro WITHOUT one loses
+/// its visible value: a `status` lozenge's label and a `jira` macro's issue key are
+/// parameters, so `State: APPROVED` becomes `State:`. Keeping those would take a whitelist
+/// of parameter names per macro type — real machinery, permanently incomplete — and a
+/// kilobyte of base64 mid-sentence is the worse of the two costs.
+const MACHINE_STATE_ELEMENTS: &[&str] = &[
+    "ac:parameter",
+    "ac:task-id",
+    "ac:task-uuid",
+    "ac:task-status",
+];
 
-fn drop_macro_parameter(
+fn drop_element(
     _: &dyn htmd::element_handler::Handlers,
     _: htmd::Element,
 ) -> Option<htmd::element_handler::HandlerResult> {
     Some(String::new().into())
+}
+
+/// The mirror of the rule above: a resource identifier carries its label in an ATTRIBUTE,
+/// so degrading it to its (empty) text drops the reference entirely — `See <ac:link><ri:page
+/// ri:content-title="Design Notes"/></ac:link>` becomes a dangling `See`. Every
+/// Confluence→Confluence cross-reference is lost that way, which is precisely the material a
+/// knowledge vault wants.
+///
+/// Only identifiers whose attribute IS a human label are recovered. `ri:user` carries an
+/// opaque account id, and emitting that would commit the same defect this file exists to
+/// prevent, so it stays dropped.
+fn resource_label(
+    _: &dyn htmd::element_handler::Handlers,
+    element: htmd::Element,
+) -> Option<htmd::element_handler::HandlerResult> {
+    // The parser keeps the `ri:` prefix in the attribute's local name, since storage
+    // format declares no namespace an HTML parser would resolve.
+    let label = element
+        .attrs
+        .iter()
+        .find(|a| matches!(&*a.name.local, "ri:content-title" | "ri:filename"))
+        .map(|a| a.value.to_string())
+        .unwrap_or_default();
+    Some(label.into())
+}
+
+/// Replace every CDATA section with its text, escaped for HTML.
+///
+/// Storage format is XHTML and puts a code macro's body — and a link's display text — in
+/// `<![CDATA[…]]>`. An HTML5 parser has no CDATA outside foreign content: it reads the
+/// whole section as a bogus COMMENT and drops the contents. So every Confluence code block
+/// arrived empty, silently, which on an engineering wiki is the most valuable text on the
+/// page. CDATA cannot nest and ends at the first `]]>`, so this rewrite is exact rather
+/// than a guess, and an input containing no CDATA is returned untouched.
+fn unwrap_cdata(html: &str) -> std::borrow::Cow<'_, str> {
+    const OPEN: &str = "<![CDATA[";
+    const CLOSE: &str = "]]>";
+    if !html.contains(OPEN) {
+        return std::borrow::Cow::Borrowed(html);
+    }
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(start) = rest.find(OPEN) {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + OPEN.len()..];
+        let (text, tail) = match after.find(CLOSE) {
+            Some(end) => (&after[..end], &after[end + CLOSE.len()..]),
+            // Unterminated: the rest of the document is its content, which is what an XML
+            // parser would also conclude.
+            None => (after, ""),
+        };
+        for c in text.chars() {
+            match c {
+                '&' => out.push_str("&amp;"),
+                '<' => out.push_str("&lt;"),
+                '>' => out.push_str("&gt;"),
+                _ => out.push(c),
+            }
+        }
+        rest = tail;
+    }
+    out.push_str(rest);
+    std::borrow::Cow::Owned(out)
 }
 
 /// Whether a URL is a `data:` URI, tested on the prefix of a borrowed `&str` so a
@@ -686,13 +761,13 @@ fn render_prose_shortcodes(text: &str, out: &mut String) {
 mod tests {
     use super::*;
 
-    /// A macro's settings are not prose. Degrading them to text welds them onto the
-    /// surrounding words with no separator — a status macro's colour names and a roadmap's
-    /// base64 state blob land mid-sentence, and one real Confluence page came out 30% that.
-    /// Its actual content, which lives in the rich/plain-text body, must survive intact.
+    /// Machine state is not prose. Degraded to text it welds onto the surrounding words
+    /// with no separator — a status macro's base64 state blob and a task's UUID land
+    /// mid-sentence, and one real Confluence page came out 30% that. The macro's and the
+    /// task's actual content must survive intact.
     #[test]
-    fn a_macro_parameter_is_configuration_and_never_becomes_body_text() {
-        let storage = concat!(
+    fn machine_state_never_becomes_body_text() {
+        let macro_html = concat!(
             "<p>Before</p>",
             r#"<ac:structured-macro ac:name="status">"#,
             r#"<ac:parameter ac:name="title">검증</ac:parameter>"#,
@@ -701,7 +776,7 @@ mod tests {
             "</ac:structured-macro>",
             "<p>After</p>",
         );
-        let md = html_to_markdown(storage);
+        let md = html_to_markdown(macro_html);
         assert!(
             !md.contains("JTdC"),
             "no encoded settings may reach the page:\n{md}"
@@ -717,6 +792,78 @@ mod tests {
         assert!(
             md.contains("Real body"),
             "the macro's own content survives:\n{md}"
+        );
+
+        // A task list is far more common than a roadmap macro, and carries three of these.
+        let task_html = concat!(
+            "<ac:task-list><ac:task>",
+            "<ac:task-id>17</ac:task-id>",
+            "<ac:task-uuid>0e6f1a-9c</ac:task-uuid>",
+            "<ac:task-status>incomplete</ac:task-status>",
+            "<ac:task-body><span>Ship the thing</span></ac:task-body>",
+            "</ac:task></ac:task-list>",
+        );
+        let md = html_to_markdown(task_html);
+        assert_eq!(
+            md, "Ship the thing",
+            "a task keeps its prose and nothing of its identity:\n{md}"
+        );
+    }
+
+    /// Storage format puts a code macro's body in CDATA, which an HTML5 parser reads as a
+    /// bogus COMMENT and drops — so every Confluence code block arrived empty, silently.
+    #[test]
+    fn cdata_content_survives_rather_than_being_read_as_a_comment() {
+        let md = html_to_markdown(concat!(
+            r#"<ac:structured-macro ac:name="code">"#,
+            r#"<ac:parameter ac:name="language">rust</ac:parameter>"#,
+            "<ac:plain-text-body><![CDATA[fn main() { if a < b && c > d {} }]]></ac:plain-text-body>",
+            "</ac:structured-macro>",
+        ));
+        assert!(
+            md.contains("fn main()"),
+            "the code body must survive:\n{md}"
+        );
+        assert!(md.contains("a < b && c > d"), "and its literal text:\n{md}");
+        assert!(
+            !md.contains("rust"),
+            "while the language parameter stays out:\n{md}"
+        );
+    }
+
+    /// An unterminated section is what an XML parser would also read to the end, and a
+    /// document with no CDATA at all must come back untouched.
+    #[test]
+    fn cdata_edges_are_exact() {
+        assert!(html_to_markdown("<p><![CDATA[tail forever</p>").contains("tail forever"));
+        assert_eq!(html_to_markdown("<p>plain</p>"), "plain");
+        assert_eq!(html_to_markdown("<p><![CDATA[]]>empty</p>"), "empty");
+    }
+
+    /// A resource identifier carries its label in an ATTRIBUTE, so degrading it to its
+    /// empty text drops the reference entirely — every Confluence→Confluence
+    /// cross-reference, which is exactly the material a knowledge vault wants.
+    #[test]
+    fn a_resource_identifier_keeps_the_label_its_attribute_carries() {
+        assert_eq!(
+            html_to_markdown(
+                r#"<p>See <ac:link><ri:page ri:content-title="Design Notes"/></ac:link></p>"#
+            ),
+            "See Design Notes"
+        );
+        assert_eq!(
+            html_to_markdown(
+                r#"<p>File <ac:link><ri:attachment ri:filename="spec.pdf"/></ac:link></p>"#
+            ),
+            "File spec.pdf"
+        );
+        // An opaque account id is machine state; emitting it would be the very defect the
+        // rest of this file prevents, so a user mention stays dropped.
+        assert_eq!(
+            html_to_markdown(
+                r#"<p>Ask <ac:link><ri:user ri:account-id="557058:abc"/></ac:link></p>"#
+            ),
+            "Ask"
         );
     }
 

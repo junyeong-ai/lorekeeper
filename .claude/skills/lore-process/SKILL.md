@@ -68,7 +68,8 @@ you last read them.
    that file.
 5. **The target page's frontmatter is read-only**, except for the one
    `llm_inputs.<key>_done` completion marker you own and MUST stamp when a task
-   finishes (the per-kind key is in the step 3c table).
+   finishes (the per-kind key is in the step 3c table) — **except the concept
+   kinds, whose marker is `lore queue apply`'s** and which you never stamp.
 6. **Never write a concept page, and never write a related-concepts section.**
    `extract-concepts` emits a result file; `lore queue apply` materializes both.
    Concept pages are shared between origin pages and merge under rules that
@@ -90,7 +91,8 @@ The pipeline decides what needs work before the queue file exists: a task is
 enqueued only when its section is missing or its inputs changed. This skill's
 sole obligation to that machinery is to write **only** LLM-produced content
 into the target sections, never structural artifacts, and to stamp the section's
-`llm_inputs.<key>_done` completion marker when finished (step 3c). Completion is
+`llm_inputs.<key>_done` completion marker when finished (step 3c) — the concept
+kinds excepted, whose section and marker both belong to `lore queue apply`. Completion is
 uniformly marker-signalled — a non-empty body never signals done — so a section
 that is legitimately empty (a focus-filtered summary, an extraction that found
 nothing, a trivial-only work-log, an empty-period review) stays done instead of

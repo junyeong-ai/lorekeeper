@@ -40,6 +40,18 @@ map to `RawItem`.
   threshold, which is a finding-style check (`doctor`/`lint`), not a freshness signal; the
   individual failures are `tracing::warn`ed meanwhile. A new
   many-item adapter inherits the guarantee by counting its failures and calling the rule.
+- **Confluence storage format is XHTML, and three of its constructs break the HTML rule.**
+  `markdown::html_to_markdown` is loss-averse — an unmapped construct degrades to its text —
+  which is right until the text is not prose. (1) `ac:parameter` and a task's
+  `ac:task-id`/`-uuid`/`-status` carry MACHINE STATE, and degraded they weld onto the
+  surrounding words unseparated (`170e6f1a-9cincompleteShip the thing`); they are dropped,
+  at the documented cost that a body-less macro loses its visible label. (2) `ri:page`/
+  `ri:attachment` carry their label in an ATTRIBUTE, so degrading found nothing to degrade
+  and every Confluence→Confluence cross-reference vanished; their label is recovered
+  (`ri:user` is not — an opaque account id is machine state). (3) CDATA is not HTML: an
+  HTML5 parser reads `<![CDATA[…]]>` as a bogus COMMENT and drops it, so every code macro
+  arrived EMPTY — one real page grew 4.6x when `unwrap_cdata` was added ahead of the
+  converter. All three were invisible until a real page was drained.
 - **Ownership (root invariant) — the per-adapter exact-match fields**: each adapter sets
   `RawItem::is_self` by EXACT-matching its structured authorship field to
   `ExtractContext::identity` — Gmail `From` vs `identity.email`, Slack author id vs

@@ -178,10 +178,9 @@ impl Source for RssSource {
 
             // Per feed: how many entries this feed offered, against how many became an
             // observation (kept, or dated for another day). `seen` is incremented before
-            // any branch and `observed` only where an entry actually became one, so the
-            // unusable count is DERIVED — a skip added later cannot quietly go uncounted,
-            // and a success path added without marking itself fails loudly rather than
-            // silently.
+            // any branch and `observed` only where an entry actually became one, so a skip
+            // added later cannot quietly go uncounted, and a success path added without
+            // marking itself fails loudly rather than silently.
             let (mut seen, mut observed) = (0usize, 0usize);
             let mut kept = 0usize;
             for entry in feed.entries {
@@ -379,7 +378,7 @@ mod tests {
             .expect_err("every feed failed, so nothing was observed");
         assert!(
             err.to_string()
-                .contains("none of the 2 feeds could be read"),
+                .contains("no feed could be read (of 2 tried)"),
             "{err}"
         );
     }
@@ -407,7 +406,7 @@ mod tests {
             .expect_err("no entry could become an observation");
         assert!(
             err.to_string()
-                .contains("none of the 1 feeds could be read"),
+                .contains("no feed could be read (of 1 tried)"),
             "{err}"
         );
     }

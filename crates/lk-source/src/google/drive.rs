@@ -264,12 +264,11 @@ impl Source for GoogleDriveSource {
             });
         }
 
-        // The failures are DERIVED, never accumulated: the listing already decided every
-        // one of these files belongs to the window, so a file that produced no item
-        // produced nothing, whatever the reason — an undownloadable one and one whose
-        // metadata will not parse are equally absent. Subtracting what was produced from
-        // what was listed makes a forgotten counter unrepresentable, which is the only way
-        // a skip added later cannot quietly reopen this.
+        // What was OBSERVED is passed, never a failure count — see `require_any_observation`
+        // for why this must not be a subtraction. The listing already decided every one of
+        // these files belongs to the window, so a file that produced no item produced
+        // nothing, whatever the reason: an undownloadable one and one whose metadata will
+        // not parse are equally absent.
         crate::require_any_observation("listed file", items.len(), listed)?;
 
         Ok(items)

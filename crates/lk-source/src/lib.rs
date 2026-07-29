@@ -49,7 +49,7 @@ pub enum SourceError {
     Api { status: u16, message: String },
     #[error("parse: {0}")]
     Parse(String),
-    #[error("nothing observed: none of the {attempted} {unit}s could be read; see warnings above")]
+    #[error("nothing observed: no {unit} could be read (of {attempted} tried); see warnings above")]
     NothingObserved {
         unit: &'static str,
         attempted: usize,
@@ -104,7 +104,7 @@ mod observation_tests {
         let err = require_any_observation("feed", 0, 3)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("none of the 3 feeds could be read"), "{err}");
+        assert!(err.contains("no feed could be read (of 3 tried)"), "{err}");
     }
 
     /// Nothing to read is not the same as reading nothing — an empty folder or an empty
