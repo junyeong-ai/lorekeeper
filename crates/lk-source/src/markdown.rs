@@ -310,7 +310,7 @@ fn rewrite_tags(html: &str) -> std::borrow::Cow<'_, str> {
         at = tag.end + 1;
         let name = &html[tag.name.clone()];
         if is_raw_text_element(name) {
-            at = skip_past(html, at, &format!("</{}", name.to_ascii_lowercase()));
+            at = skip_raw_text(html, at, name);
             continue;
         }
         if let Some((open, close)) = rewritten(name) {
@@ -364,15 +364,38 @@ fn scan_end_tag(html: &str, lt: usize) -> Option<Tag> {
 }
 
 /// The index just past a LOWERCASE `needle`, or the end of the input when it never appears —
-/// an unterminated comment or raw-text element runs to EOF, which is what a parser concludes
-/// too. Matching is ASCII-case-insensitive, which leaves every byte index intact because
-/// ASCII case folding cannot change a character's width.
+/// an unterminated comment runs to EOF, which is what a parser concludes too. Matching is
+/// ASCII-case-insensitive, which leaves every byte index intact because ASCII case folding
+/// cannot change a character's width.
 fn skip_past(html: &str, from: usize, needle: &str) -> usize {
     debug_assert_eq!(needle, needle.to_ascii_lowercase());
     html[from..]
         .to_ascii_lowercase()
         .find(needle)
         .map_or(html.len(), |end| from + end + needle.len())
+}
+
+/// The index just past the name of the end tag that closes raw-text element `name`.
+///
+/// What ends a raw-text element is an end tag whose name MATCHES, and HTML decides that on the
+/// character after the name — whitespace, `/` or `>`. A plain substring search does not: a
+/// person typing `</textareas>` inside a text box ended the protected span at their own words,
+/// so everything after them was rescanned as markup and rewritten. Text boxes are the case that
+/// matters, since they hold prose and are the one raw-text element kept rather than dropped.
+fn skip_raw_text(html: &str, from: usize, name: &str) -> usize {
+    let close = format!("</{}", name.to_ascii_lowercase());
+    let hay = html[from..].to_ascii_lowercase();
+    let mut at = 0;
+    while let Some(found) = hay[at..].find(&close) {
+        let past_name = at + found + close.len();
+        match hay[past_name..].chars().next() {
+            Some(c) if c.is_whitespace() || c == '/' || c == '>' => return from + past_name,
+            // A longer name (`</textareas>`) is somebody's text, not this element's end tag.
+            Some(_) => at = past_name,
+            None => break,
+        }
+    }
+    html.len()
 }
 
 /// Elements whose content a parser reads as TEXT, not markup, so a `/>` inside one belongs to
@@ -1432,11 +1455,29 @@ mod tests {
             r#"<p>A</p><script>var x = "<div/>";</script>"#,
             r#"<p>A</p><style>.x{content:"<i/>"}</style>"#,
             r#"<p>A</p><TEXTAREA><ac:parameter/></TEXTAREA>"#,
+            // What ends the span is an end tag whose NAME matches, which HTML decides on the
+            // character after it. Matching the name as a mere prefix ended the span at a
+            // person's own words and rewrote everything they typed after them — and a text
+            // box is the raw-text element whose content is kept rather than dropped, so
+            // nothing else would have caught it.
+            r#"<textarea>I typed </textareas> then <div/> too</textarea>"#,
+            r#"<p>A</p><iframe>x </iframes> <div/> y</iframe>"#,
+            r#"<p>A</p><textarea>never closed <div/>"#,
         ] {
             let md = html_to_markdown(html);
             assert!(
                 !md.contains("</div>") && !md.contains("</i>") && !md.contains("</ac:parameter>"),
                 "an end tag was injected into raw text:\n{md}"
+            );
+        }
+        // The span still ends where it really ends, whatever the end tag's case or spacing.
+        for html in [
+            "<TEXTAREA>typed</TEXTAREA><p>After</p>",
+            "<textarea>typed</textarea ><p>After</p>",
+        ] {
+            assert!(
+                html_to_markdown(html).contains("After"),
+                "the raw-text span swallowed the document"
             );
         }
     }
