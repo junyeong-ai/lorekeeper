@@ -86,8 +86,9 @@ map to `RawItem`.
   which HTML decides on the character after it, **ASCII** whitespace / `/` / `>`: matching the
   name as a mere prefix ended the span at a person typing `</textareas>`, and `char::is_whitespace`
   ends it at `</textarea\u{3000}>` where a parser would not — the same early ending twice over,
-  and everything after it gets rewritten. A text box is the one raw-text element whose content is
-  KEPT rather than dropped, so nothing else masks the bug there. **One gap here is deliberate**:
+  and everything after it gets rewritten. A text box is the raw-text element a person types prose
+  into, and its content is KEPT rather than dropped, so nothing masks the bug there. **One gap
+  here is deliberate**:
   `unwrap_cdata` does not share the skips, so inside a RAWTEXT element it escapes text a parser
   would have read as text — a section that closes, and the bare opening token of one that does
   not — leaving literal entities. The exposure is the raw-text elements that are KEPT, `noscript`

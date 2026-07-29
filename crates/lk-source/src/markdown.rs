@@ -428,7 +428,8 @@ fn skip_past(html: &str, from: usize, needle: &str) -> usize {
 /// character after the name — ASCII whitespace, `/` or `>`. A plain substring search does not:
 /// a person typing `</textareas>` inside a text box ended the protected span at their own words,
 /// so everything after them was rescanned as markup and rewritten. Text boxes are the case that
-/// matters, since they hold prose and are the one raw-text element kept rather than dropped.
+/// matters, since they hold prose someone typed and, like every raw-text element but `script` and
+/// `style`, their content is kept rather than dropped.
 ///
 /// ASCII whitespace exactly, not `char::is_whitespace`: HTML's terminator set is the five ASCII
 /// ones, so a parser reads `</textarea\u{3000}>` as an unclosed span and a Unicode test reads it
