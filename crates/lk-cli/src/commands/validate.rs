@@ -19,13 +19,22 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
     eprintln!("  timezone: {:?}", config.vault.timezone);
     eprintln!("  sources ({}): {}", enabled.len(), enabled.join(", "));
 
-    for (label, value) in folded_vault_dirs(&config).await {
-        eprintln!(
-            "  warning: vault.dirs.{label} is '{value}' but the vault holds no directory of \
-             that name — the filesystem is folding the spelling for you. Every link that \
-             crosses into it carries the configured spelling, so the vault resolves here and \
-             breaks the moment it is read where case or Unicode is not folded"
-        );
+    for (label, value, sibling) in folded_vault_dirs(&config).await {
+        match sibling {
+            Some(sibling) => eprintln!(
+                "  warning: vault.dirs.{label} is '{value}' and does not exist, but the vault \
+                 holds '{sibling}'. This filesystem does not fold case, so the next run \
+                 creates '{value}' beside it and writes there — every page already under \
+                 '{sibling}' then goes unscanned, invisible to the index, the graph and \
+                 `doctor`"
+            ),
+            None => eprintln!(
+                "  warning: vault.dirs.{label} is '{value}' but the vault holds no directory \
+                 of that name — the filesystem is folding the spelling for you. Every link \
+                 that crosses into it carries the configured spelling, so the vault resolves \
+                 here and breaks the moment it is read where case is not folded"
+            ),
+        }
     }
 
     for (a, b, shared) in overlapping_vault_dirs(&config) {
@@ -77,7 +86,9 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
 /// them exactly, which is what an earlier version of this check flagged wrongly. Comparing
 /// literal entries rather than folding case also leaves a deliberate symlink alone: its own
 /// name is a real entry.
-async fn folded_vault_dirs(config: &lk_core::config::Config) -> Vec<(&'static str, String)> {
+async fn folded_vault_dirs(
+    config: &lk_core::config::Config,
+) -> Vec<(&'static str, String, Option<String>)> {
     let dirs = &config.vault.dirs;
     let mut found = Vec::new();
     for (label, value) in [
@@ -93,11 +104,22 @@ async fn folded_vault_dirs(config: &lk_core::config::Config) -> Vec<(&'static st
             };
             let child = parent.join(segment);
             if !child.exists() {
+                // Absent is normally the first run. But on a filesystem that does NOT fold
+                // case, a misspelling is simply a different directory — and if the name it
+                // was meant to be is sitting right there, `lore ingest` will create the
+                // misspelled one beside it and write there, while every page under the real
+                // one goes unscanned: invisible to the index, to the graph, and to `doctor`,
+                // which reports no defect because it never sees them. Reproduced on a
+                // case-sensitive APFS volume. Absence alone is silent; absence next to the
+                // name it differs from only in case is not.
+                if let Some(sibling) = case_variant_sibling(&parent, segment).await {
+                    found.push((label, value.clone(), Some(sibling)));
+                }
                 break;
             }
             match directory_lists(&parent, segment).await {
                 Some(false) => {
-                    found.push((label, value.clone()));
+                    found.push((label, value.clone(), None));
                     break;
                 }
                 // Unreadable: the listing is unknown, which is not evidence of a fold.
@@ -107,6 +129,29 @@ async fn folded_vault_dirs(config: &lk_core::config::Config) -> Vec<(&'static st
         }
     }
     found
+}
+
+/// A directory in `parent` whose name equals `name` under ASCII case folding — the name the
+/// configured one was probably meant to be.
+///
+/// Only asked when the configured name is ABSENT, which is what keeps it from repeating the
+/// mistake of an earlier version of this check: that one scanned for a case-fold near-match
+/// unconditionally and so fired on a case-sensitive volume legitimately holding `Wiki` and
+/// `wiki` with the config naming one of them exactly. A bound worth stating: two names
+/// differing only by Unicode normalization are not compared, so a normalization-SENSITIVE
+/// filesystem could hide that pairing here. On the volumes this ships to, normalization is
+/// folded, which means the configured name resolves and the fold check above sees it instead.
+async fn case_variant_sibling(parent: &std::path::Path, name: &std::ffi::OsStr) -> Option<String> {
+    let target = name.to_string_lossy();
+    let mut entries = tokio::fs::read_dir(parent).await.ok()?;
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let found = entry.file_name();
+        let found = found.to_string_lossy();
+        if found != target && found.eq_ignore_ascii_case(&target) {
+            return Some(found.into_owned());
+        }
+    }
+    None
 }
 
 /// Whether `parent`'s listing contains `name` byte for byte — the question `Path::exists`
@@ -193,7 +238,11 @@ mod tests {
         // Resolves (this filesystem folds case) but the vault lists no `Wiki`.
         let found =
             folded_vault_dirs(&write_config(tmp.path(), "    wiki: Wiki\n", "folded")).await;
-        assert_eq!(found, vec![("wiki", "Wiki".to_owned())], "{found:?}");
+        assert_eq!(
+            found,
+            vec![("wiki", "Wiki".to_owned(), None)],
+            "a fold, not an absence: {found:?}"
+        );
 
         // The name as given is a real entry — nothing is being folded.
         assert!(
@@ -215,6 +264,32 @@ mod tests {
                     .is_empty()
             );
         }
+    }
+
+    /// The other half of "the vault does not hold this name": on a filesystem that does not
+    /// fold case, the misspelled root simply does not exist, and the next run creates it beside
+    /// the real one and writes there while every page already filed goes unscanned. Absence
+    /// alone is the first run and must stay silent; absence beside the name it differs from
+    /// only in case is a typo about to cost the user their vault's visibility.
+    #[tokio::test]
+    async fn an_absent_root_beside_its_case_variant_is_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("wiki")).unwrap();
+
+        // `Wiki` is absent. On a case-FOLDING filesystem it resolves and the fold branch
+        // reports it; on a case-sensitive one this branch does. Either way it is reported, and
+        // the two are distinguished by whether a sibling was named.
+        let found =
+            folded_vault_dirs(&write_config(tmp.path(), "    wiki: Wiki\n", "variant")).await;
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].1, "Wiki");
+
+        // Nothing similar there: the first run, silent.
+        assert!(
+            folded_vault_dirs(&write_config(tmp.path(), "    wiki: notes\n", "fresh"))
+                .await
+                .is_empty()
+        );
     }
 
     /// A directory can be traversable without being listable, so `exists` on a child succeeds
