@@ -46,6 +46,27 @@ fn newest_collection_per_source(entries: &[(usize, lk_vault::LogEntry)]) -> Hash
     newest.into_values().map(|(_, line_no)| line_no).collect()
 }
 
+/// Which lines of the ingest log this run deletes: those older than the horizon that are
+/// not some source's newest collection. Both halves must hold — an expired line that IS
+/// state stays, which is the whole rule, and it is decided here rather than inline so the
+/// rule has one testable statement instead of only the helper that feeds it.
+///
+/// A malformed line parses as nothing, so it is never state and never expired: it is
+/// carried through verbatim, leaving corruption visible instead of quietly rewritten away.
+fn expired_log_lines(lines: &[&str], cutoff_secs: i64) -> HashSet<usize> {
+    let parsed: Vec<(usize, lk_vault::LogEntry)> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(i, line)| serde_json::from_str(line).ok().map(|e| (i, e)))
+        .collect();
+    let state = newest_collection_per_source(&parsed);
+    parsed
+        .iter()
+        .filter(|(i, e)| e.timestamp.as_second() < cutoff_secs && !state.contains(i))
+        .map(|(i, _)| *i)
+        .collect()
+}
+
 pub async fn run(opts: &super::GlobalOptions, dry_run: bool) -> miette::Result<()> {
     let config = load_config(&find_config(opts)?)?;
     let vault_root = config.vault.root_path();
@@ -60,20 +81,8 @@ pub async fn run(opts: &super::GlobalOptions, dry_run: bool) -> miette::Result<(
             .await
             .map_err(|e| miette::miette!("read log: {e}"))?;
 
-        // A malformed line is neither parsed nor pruned — it is carried through verbatim,
-        // so corruption stays visible instead of being quietly rewritten away.
         let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
-        let parsed: Vec<(usize, lk_vault::LogEntry)> = lines
-            .iter()
-            .enumerate()
-            .filter_map(|(i, line)| serde_json::from_str(line).ok().map(|e| (i, e)))
-            .collect();
-        let state = newest_collection_per_source(&parsed);
-        let expired: HashSet<usize> = parsed
-            .iter()
-            .filter(|(i, e)| e.timestamp.as_second() < cutoff_secs && !state.contains(i))
-            .map(|(i, _)| *i)
-            .collect();
+        let expired = expired_log_lines(&lines, cutoff_secs);
 
         let kept: Vec<&str> = lines
             .iter()
@@ -159,7 +168,55 @@ pub async fn run(opts: &super::GlobalOptions, dry_run: bool) -> miette::Result<(
 
 #[cfg(test)]
 mod tests {
-    use super::{newest_collection_per_source, prune_cutoff_secs};
+    use super::{expired_log_lines, newest_collection_per_source, prune_cutoff_secs};
+
+    fn line(source_id: &str, secs: i64, status: lk_vault::LogStatus) -> String {
+        serde_json::to_string(&entry(source_id, secs, status)).unwrap()
+    }
+
+    /// The helper below computes the protected set; this is the only statement that the
+    /// prune HONOURS it. Both halves of the rule are exercised at once — the old line that
+    /// is state must survive, and the old line that is not must go — because an
+    /// implementation that dropped either half still satisfies the other.
+    #[test]
+    fn an_expired_line_that_is_a_sources_only_collection_is_not_pruned() {
+        let owned = [
+            line("jira", 100, lk_vault::LogStatus::Skipped), // ancient, but jira's state
+            line("jira", 200, lk_vault::LogStatus::Failed),  // ancient history
+            line("gmail", 5_000, lk_vault::LogStatus::Skipped), // inside the horizon
+            "{ not json".to_owned(),                         // corruption, carried verbatim
+        ];
+        let lines: Vec<&str> = owned.iter().map(String::as_str).collect();
+
+        let mut expired: Vec<usize> = expired_log_lines(&lines, 1_000).into_iter().collect();
+        expired.sort();
+        assert_eq!(
+            expired,
+            vec![1],
+            "only the ancient failure is history; the ancient collection is jira's state, \
+             the recent line is inside the horizon, and the malformed line is neither"
+        );
+    }
+
+    /// Age alone is not enough and state alone is not enough — the rule is the conjunction.
+    /// A recent line is never pruned even though it is not anyone's state.
+    #[test]
+    fn a_line_inside_the_horizon_survives_whether_or_not_it_is_state() {
+        let owned = [
+            line("jira", 5_000, lk_vault::LogStatus::Failed),
+            line("jira", 6_000, lk_vault::LogStatus::Skipped),
+            // The horizon itself: an entry exactly `retention_days` old has reached the
+            // horizon, not passed it, so it is kept. Pinned because either boundary reads
+            // as reasonable and the difference is invisible until a day's history vanishes
+            // one run early.
+            line("jira", 1_000, lk_vault::LogStatus::Failed),
+        ];
+        let lines: Vec<&str> = owned.iter().map(String::as_str).collect();
+        assert!(
+            expired_log_lines(&lines, 1_000).is_empty(),
+            "nothing has passed the horizon here"
+        );
+    }
 
     fn entry(source_id: &str, secs: i64, status: lk_vault::LogStatus) -> lk_vault::LogEntry {
         lk_vault::LogEntry {
