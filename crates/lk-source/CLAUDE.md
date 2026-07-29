@@ -42,7 +42,10 @@ map to `RawItem`.
   many-item adapter inherits the guarantee by counting its failures and calling the rule.
 - **Confluence storage format is XHTML, and three of its constructs break the HTML rule.**
   `markdown::html_to_markdown` is loss-averse — an unmapped construct degrades to its text —
-  which is right until the text is not prose. (1) `ac:parameter` and a task's
+  which is right until the text is not prose — and what the text IS, not where it came from,
+  is the test: a `<style>` or `<script>` block out of an email or a feed is machine state on the
+  same grounds as any `ac:` construct, and one real vault page carries an RSS feed's CSS rules
+  mid-article because it was not. (1) `ac:parameter` and a task's
   `ac:task-id`/`-uuid`/`-status` carry MACHINE STATE, and degraded they weld onto the
   surrounding words unseparated (`170e6f1a-9cincompleteShip the thing`); they are dropped,
   at the documented cost that a body-less macro loses its visible label. (2) Some constructs
@@ -54,7 +57,10 @@ map to `RawItem`.
   deliberately absent, since an opaque account id is machine state. (3) CDATA is not HTML: an
   HTML5 parser reads `<![CDATA[…]]>` as a bogus COMMENT and drops it, so every code macro
   arrived EMPTY — one real page grew 4.6x once `normalize_storage_format` unwrapped it ahead
-  of the converter. Recovering that text is only half the job: an unknown `ac:plain-text-body`
+  of the converter. Only a section that CLOSES is one: every HTML source shares this converter,
+  so an unterminated `<![CDATA[` is likelier prose about XML than a truncated Confluence body,
+  and reading the document's remainder as its content escaped the rest of a newsletter into
+  literal markup. Recovering that text is only half the job: an unknown `ac:plain-text-body`
   degrades to a PARAGRAPH, which the converter then markdown-escapes (`[1, 2]` → `\[1, 2\]`,
   backslashes injected into JSON), so it is mapped to `<pre><code>` — the one form that both
   fences and stops escaping. All of this was invisible until a real page was drained.

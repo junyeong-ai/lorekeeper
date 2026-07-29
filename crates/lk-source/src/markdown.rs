@@ -44,7 +44,9 @@ pub fn html_to_markdown(html: &str) -> String {
 }
 
 /// Elements whose TEXT is machine state rather than prose, so the loss-averse rule above —
-/// degrade an unmapped construct to its text — is wrong for them.
+/// degrade an unmapped construct to its text — is wrong for them. Most come from Confluence,
+/// but the rule is about what the text IS, not where it came from, so a `<style>` block out of
+/// an email or a feed belongs here on the same grounds.
 ///
 /// Confluence storage format is XHTML. A macro's `<ac:parameter>` children hold its
 /// settings (a status macro's colour, a roadmap's base64 state blob) and a task's
@@ -72,6 +74,12 @@ const MACHINE_STATE_ELEMENTS: &[&str] = &[
     // representations is the human-readable one is `one_adf_representation`'s question, not
     // this list's — for a bodyless card it is the fallback, for a panel either would do.
     "ac:adf-attribute",
+    // A stylesheet and a script are the same thing arriving from ordinary HTML rather than
+    // from Confluence. Degraded to text they land in the page as themselves: one real vault
+    // page carries `.abbel-fig { display: block; text-align: center; … }` mid-article,
+    // lifted verbatim out of an RSS feed's `<style>` block.
+    "style",
+    "script",
 ];
 
 /// A task's state as the reader saw it: a ticked or unticked box, which is most of what a
@@ -478,12 +486,17 @@ fn unwrap_cdata(html: &str) -> std::borrow::Cow<'_, str> {
     while let Some(start) = rest.find(OPEN) {
         out.push_str(&rest[..start]);
         let after = &rest[start + OPEN.len()..];
-        let (text, tail) = match after.find(CLOSE) {
-            Some(end) => (&after[..end], &after[end + CLOSE.len()..]),
-            // Unterminated: the rest of the document is its content, which is what an XML
-            // parser would also conclude.
-            None => (after, ""),
+        // Only a section that CLOSES is one. Every HTML source shares this converter, and an
+        // unterminated `<![CDATA[` is far likelier to be prose about XML than a truncated
+        // Confluence body — reading the document's remainder as its content turned the rest
+        // of a newsletter into escaped literal markup (`raw token\</p>\<p>TAIL`), where
+        // leaving it alone costs only the words an HTML parser was already discarding.
+        let Some(end) = after.find(CLOSE) else {
+            out.push_str(&rest[start..]);
+            rest = "";
+            break;
         };
+        let (text, tail) = (&after[..end], &after[end + CLOSE.len()..]);
         for c in text.chars() {
             match c {
                 '&' => out.push_str("&amp;"),
@@ -1243,11 +1256,19 @@ mod tests {
         );
     }
 
-    /// An unterminated section is what an XML parser would also read to the end, and a
-    /// document with no CDATA at all must come back untouched.
+    /// Only a section that CLOSES is one, and a document with no CDATA at all must come back
+    /// untouched.
+    ///
+    /// Every HTML source shares this converter, so an unterminated `<![CDATA[` is far likelier
+    /// to be prose about XML than a truncated Confluence body. Reading the remainder of the
+    /// document as its content escaped the rest of a newsletter into literal markup — while
+    /// leaving it alone costs only the words an HTML parser was discarding anyway.
     #[test]
     fn cdata_edges_are_exact() {
-        assert!(html_to_markdown("<p><![CDATA[tail forever</p>").contains("tail forever"));
+        assert_eq!(
+            html_to_markdown("<p>raw <![CDATA[ token</p><p>Next paragraph</p>"),
+            "raw \n\nNext paragraph"
+        );
         assert_eq!(html_to_markdown("<p>plain</p>"), "plain");
         assert_eq!(html_to_markdown("<p><![CDATA[]]>empty</p>"), "empty");
     }
@@ -1352,6 +1373,26 @@ mod tests {
         assert_eq!(
             html_to_markdown(r#"<p><img src="https://x.example/a.png" alt="ALT"/>after</p>"#),
             "![ALT](https://x.example/a.png)after"
+        );
+    }
+
+    /// A stylesheet and a script are machine state arriving from ordinary HTML rather than from
+    /// Confluence, and the rule is about what the text IS. One real vault page carries
+    /// `.abbel-fig { display: block; … }` mid-article, lifted out of an RSS feed's `<style>`.
+    #[test]
+    fn a_stylesheet_is_not_prose() {
+        assert_eq!(
+            html_to_markdown("<p>Lead</p><style>.fig { display: block; }</style><p>Body</p>"),
+            "Lead\n\nBody"
+        );
+        assert_eq!(
+            html_to_markdown(r#"<p>Lead</p><script>var x = "<div/>";</script><p>Body</p>"#),
+            "Lead\n\nBody"
+        );
+        // A text box holds what a person typed, so it is prose and stays.
+        assert_eq!(
+            html_to_markdown("<textarea>user typed this</textarea>"),
+            "user typed this"
         );
     }
 
