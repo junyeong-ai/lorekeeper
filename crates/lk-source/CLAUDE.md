@@ -78,11 +78,13 @@ map to `RawItem`.
   left alone (`<br></br>` is TWO breaks), and so is anything inside a comment or a RAW-TEXT
   element (`script`/`style`/`textarea`/`title`/…), whose content is text — rewriting there
   injected a `</div>` into a JavaScript string, the pre-parse pass corrupting the document it
-  exists to leave alone. What ENDS such a span is an end tag whose NAME matches, which HTML
-  decides on the character after it (whitespace/`/`/`>`) — matching the name as a mere prefix
-  ended the span at a person typing `</textareas>` and rewrote everything after their words,
-  and a text box is the one raw-text element whose content is kept rather than dropped, so no
-  other rule would have caught it. The same pass renames the storage-format containers that HAVE an exact
+  exists to leave alone. `noscript` is one of them — scripting is a parser's default — and it is
+  ordinary in email and fetched articles. What ENDS such a span is an end tag whose NAME matches,
+  which HTML decides on the character after it, **ASCII** whitespace / `/` / `>`: matching the
+  name as a mere prefix ended the span at a person typing `</textareas>`, and `char::is_whitespace`
+  ends it at `</textarea\u{3000}>` where a parser would not — the same early ending twice over,
+  and everything after it gets rewritten. A text box is the one raw-text element whose content is
+  KEPT rather than dropped, so nothing else masks the bug there. The same pass renames the storage-format containers that HAVE an exact
   HTML counterpart (`REWRITTEN_ELEMENTS`), because structure has to reach the converter as
   structure: an `ac:task-list` must arrive as `<ul>` to come out a list, and unmapped its items
   ran together into one string. Both halves are matched BY NAME — testing for a bare open token

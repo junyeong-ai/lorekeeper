@@ -179,11 +179,15 @@ fn spaced_link_body(
 /// as siblings printed a Cloud panel's prose twice, once from each — and Cloud emits both for
 /// every extension that has a body.
 ///
-/// So exactly one is emitted. The last renderable alternative wins, which is the fallback where
-/// there is one — the form written for a consumer like this converter — and the node's own
-/// content where there is not, so an extension that offers no fallback still says what it says.
-/// An `inlineCard` is the mirror case: its node is nothing but attributes, so it renders empty
-/// and the fallback is the only alternative that carries the link.
+/// So exactly one is emitted: the FIRST alternative that renders to anything. A fallback is by
+/// definition what to use when the thing before it cannot be used, so preferring the earlier one
+/// is the format's own rule rather than a guess about which reads better. It also makes the
+/// choice independent of what each alternative happens to contain — a fallback that is only a
+/// placeholder (`This macro is not available.`) never displaces the body it stands in for.
+///
+/// An `inlineCard` is the case the rule exists to cover from the other side: its node is nothing
+/// but attributes, so it renders to nothing and the fallback is the first alternative that says
+/// anything.
 fn one_adf_representation(
     handlers: &dyn htmd::element_handler::Handlers,
     element: htmd::Element,
@@ -193,8 +197,10 @@ fn one_adf_representation(
         .children
         .borrow()
         .iter()
-        .map(|child| handlers.walk_children(child).content)
-        .rfind(|rendered| !rendered.trim().is_empty())
+        // `handle`, not `walk_children`: the child's OWN rendering, so a child that is not an
+        // element wrapper — bare text — is not silently skipped over.
+        .filter_map(|child| handlers.handle(child).map(|result| result.content))
+        .find(|rendered| !rendered.trim().is_empty())
         .unwrap_or_default();
     Some(chosen.into())
 }
@@ -353,7 +359,7 @@ fn scan_end_tag(html: &str, lt: usize) -> Option<Tag> {
     }
     let name_end = rest
         .char_indices()
-        .find(|(_, c)| c.is_whitespace() || *c == '>')
+        .find(|(_, c)| c.is_ascii_whitespace() || *c == '>')
         .map(|(i, _)| i)?;
     let gt = name_end + rest[name_end..].find('>')?;
     Some(Tag {
@@ -378,10 +384,15 @@ fn skip_past(html: &str, from: usize, needle: &str) -> usize {
 /// The index just past the name of the end tag that closes raw-text element `name`.
 ///
 /// What ends a raw-text element is an end tag whose name MATCHES, and HTML decides that on the
-/// character after the name — whitespace, `/` or `>`. A plain substring search does not: a
-/// person typing `</textareas>` inside a text box ended the protected span at their own words,
+/// character after the name — ASCII whitespace, `/` or `>`. A plain substring search does not:
+/// a person typing `</textareas>` inside a text box ended the protected span at their own words,
 /// so everything after them was rescanned as markup and rewritten. Text boxes are the case that
 /// matters, since they hold prose and are the one raw-text element kept rather than dropped.
+///
+/// ASCII whitespace exactly, not `char::is_whitespace`: HTML's terminator set is the five ASCII
+/// ones, so a parser reads `</textarea\u{3000}>` as an unclosed span and a Unicode test reads it
+/// as a closed one — the same early ending by a different route, and an ideographic space is
+/// ordinary text in a CJK vault.
 fn skip_raw_text(html: &str, from: usize, name: &str) -> usize {
     let close = format!("</{}", name.to_ascii_lowercase());
     let hay = html[from..].to_ascii_lowercase();
@@ -389,7 +400,7 @@ fn skip_raw_text(html: &str, from: usize, name: &str) -> usize {
     while let Some(found) = hay[at..].find(&close) {
         let past_name = at + found + close.len();
         match hay[past_name..].chars().next() {
-            Some(c) if c.is_whitespace() || c == '/' || c == '>' => return from + past_name,
+            Some(c) if c.is_ascii_whitespace() || c == '/' || c == '>' => return from + past_name,
             // A longer name (`</textareas>`) is somebody's text, not this element's end tag.
             Some(_) => at = past_name,
             None => break,
@@ -405,6 +416,10 @@ fn skip_raw_text(html: &str, from: usize, name: &str) -> usize {
 fn is_raw_text_element(name: &str) -> bool {
     const RAW_TEXT: &[&str] = &[
         "script", "style", "textarea", "title", "xmp", "iframe", "noembed", "noframes",
+        // Scripting is a parser's default, and with it on this is raw text like the rest.
+        // It is ordinary in email and in fetched articles — a lazy-loaded image's fallback,
+        // a tracking pixel — so leaving it off meant rewriting the document's own text there.
+        "noscript",
     ];
     RAW_TEXT.iter().any(|raw| name.eq_ignore_ascii_case(raw))
 }
@@ -446,7 +461,7 @@ fn scan_start_tag(html: &str, lt: usize) -> Option<Tag> {
     }
     let name_end = rest
         .char_indices()
-        .find(|(_, c)| c.is_whitespace() || *c == '/' || *c == '>')
+        .find(|(_, c)| c.is_ascii_whitespace() || *c == '/' || *c == '>')
         .map(|(i, _)| i)?;
     let name = lt + 1..lt + 1 + name_end;
 
@@ -474,20 +489,20 @@ fn scan_start_tag(html: &str, lt: usize) -> Option<Tag> {
             }
             State::Unquoted => match c {
                 '>' => return close(false),
-                c if c.is_whitespace() => state = State::BeforeAttrName,
+                c if c.is_ascii_whitespace() => state = State::BeforeAttrName,
                 _ => {}
             },
             State::BeforeAttrValue => match c {
                 '"' | '\'' => state = State::Quoted(c),
                 '>' => return close(false),
-                c if c.is_whitespace() => {}
+                c if c.is_ascii_whitespace() => {}
                 _ => state = State::Unquoted,
             },
             State::BeforeAttrName | State::AttrName => match c {
                 '>' => return close(false),
                 '/' => state = State::SelfClosing,
                 '=' if matches!(state, State::AttrName) => state = State::BeforeAttrValue,
-                c if c.is_whitespace() => state = State::BeforeAttrName,
+                c if c.is_ascii_whitespace() => state = State::BeforeAttrName,
                 _ => state = State::AttrName,
             },
             State::SelfClosing => unreachable!("resolved above"),
@@ -512,8 +527,13 @@ fn unwrap_cdata(html: &str) -> std::borrow::Cow<'_, str> {
         // Only a section that CLOSES is one. Every HTML source shares this converter, and an
         // unterminated `<![CDATA[` is far likelier to be prose about XML than a truncated
         // Confluence body — reading the document's remainder as its content turned the rest
-        // of a newsletter into escaped literal markup (`raw token\</p>\<p>TAIL`), where
-        // leaving it alone costs only the words an HTML parser was already discarding.
+        // of a newsletter into escaped literal markup (`raw token\</p>\<p>TAIL`).
+        //
+        // The cost falls on malformed STORAGE format, which Confluence does not emit: an
+        // unterminated section inside a code macro loses the body and leaves the `<code>`
+        // element open, so the prose after it renders as inline code. That is worse than
+        // losing the section alone, and it is the price of not corrupting the four sources
+        // that are not Confluence.
         let Some(end) = after.find(CLOSE) else {
             out.push_str(&rest[start..]);
             rest = "";
@@ -1277,6 +1297,23 @@ mod tests {
             )),
             "Only copy."
         );
+        // A fallback is what to use when the thing before it cannot be used, so a fallback
+        // that is only a placeholder never displaces the body it stands in for.
+        assert_eq!(
+            html_to_markdown(concat!(
+                r#"<ac:adf-extension><ac:adf-node type="extension">"#,
+                "<ac:adf-content><p>The real macro body.</p></ac:adf-content></ac:adf-node>",
+                "<ac:adf-fallback><p>This macro is not available.</p></ac:adf-fallback>",
+                "</ac:adf-extension>",
+            )),
+            "The real macro body."
+        );
+        // Each child is asked for its OWN rendering, so one that is not an element wrapper
+        // is not skipped over into nothing.
+        assert_eq!(
+            html_to_markdown("<p>Before</p><ac:adf-extension>Bare text</ac:adf-extension>"),
+            "Before\n\nBare text"
+        );
     }
 
     /// Only a section that CLOSES is one, and a document with no CDATA at all must come back
@@ -1284,8 +1321,9 @@ mod tests {
     ///
     /// Every HTML source shares this converter, so an unterminated `<![CDATA[` is far likelier
     /// to be prose about XML than a truncated Confluence body. Reading the remainder of the
-    /// document as its content escaped the rest of a newsletter into literal markup — while
-    /// leaving it alone costs only the words an HTML parser was discarding anyway.
+    /// document as its content escaped the rest of a newsletter into literal markup. The cost
+    /// falls on malformed storage format, which Confluence does not emit — see the comment on
+    /// the branch; it is not free.
     #[test]
     fn cdata_edges_are_exact() {
         assert_eq!(
@@ -1496,6 +1534,14 @@ mod tests {
             r#"<textarea>I typed </textareas> then <div/> too</textarea>"#,
             r#"<p>A</p><iframe>x </iframes> <div/> y</iframe>"#,
             r#"<p>A</p><textarea>never closed <div/>"#,
+            // HTML ends a tag name on ASCII whitespace only, so a parser reads these as
+            // unclosed spans. A Unicode whitespace test closes them instead — the same early
+            // ending by another route, and an ideographic space is ordinary CJK text.
+            "<textarea>t</textarea\u{3000}> x <div/> y</textarea>",
+            "<textarea>t</textarea\u{00A0}> x <div/> y</textarea>",
+            // Scripting is a parser's default, which makes this raw text like the rest; it is
+            // ordinary in email and fetched articles as a lazy-loaded image's fallback.
+            r#"<p>A</p><noscript>var x = "<div/>";</noscript><p>B</p>"#,
         ] {
             let md = html_to_markdown(html);
             assert!(
