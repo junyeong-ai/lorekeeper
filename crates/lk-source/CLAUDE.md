@@ -60,7 +60,10 @@ map to `RawItem`.
   of the converter. Only a section that CLOSES is one: every HTML source shares this converter,
   so an unterminated `<![CDATA[` is likelier prose about XML than a truncated Confluence body,
   and reading the document's remainder as its content escaped the rest of a newsletter into
-  literal markup. Recovering that text is only half the job: an unknown `ac:plain-text-body`
+  literal markup. Having judged it TEXT it is escaped as text, the same as an unwrapped
+  section: left as live bytes it was still markup to the parser — `<!…` opens a bogus comment
+  running to the next `>`, which inside the `<pre><code>` a code macro becomes is the one in
+  `</code>`, so the body disappeared and the element never closed. Recovering that text is only half the job: an unknown `ac:plain-text-body`
   degrades to a PARAGRAPH, which the converter then markdown-escapes (`[1, 2]` → `\[1, 2\]`,
   backslashes injected into JSON), so it is mapped to `<pre><code>` — the one form that both
   fences and stops escaping. All of this was invisible until a real page was drained.

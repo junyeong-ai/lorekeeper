@@ -529,13 +529,15 @@ fn unwrap_cdata(html: &str) -> std::borrow::Cow<'_, str> {
         // Confluence body — reading the document's remainder as its content turned the rest
         // of a newsletter into escaped literal markup (`raw token\</p>\<p>TAIL`).
         //
-        // The cost falls on malformed STORAGE format, which Confluence does not emit: an
-        // unterminated section inside a code macro loses the body and leaves the `<code>`
-        // element open, so the prose after it renders as inline code. That is worse than
-        // losing the section alone, and it is the price of not corrupting the four sources
-        // that are not Confluence.
+        // Having judged it text, ESCAPE it as text — the same thing this does to a section it
+        // unwraps, for the same reason. Left as live bytes it is still markup to the parser,
+        // which reads `<!…` as a bogus comment running to the next `>`: inside the `<pre><code>`
+        // a code macro becomes, that `>` belongs to `</code>`, so the body vanished and the
+        // element never closed, rendering the prose after it as inline code. Only the opening
+        // token is escaped; the rest of the document is untouched, which is the whole point.
         let Some(end) = after.find(CLOSE) else {
-            out.push_str(&rest[start..]);
+            out.push_str("&lt;![CDATA[");
+            out.push_str(after);
             rest = "";
             break;
         };
@@ -1321,14 +1323,26 @@ mod tests {
     ///
     /// Every HTML source shares this converter, so an unterminated `<![CDATA[` is far likelier
     /// to be prose about XML than a truncated Confluence body. Reading the remainder of the
-    /// document as its content escaped the rest of a newsletter into literal markup. The cost
-    /// falls on malformed storage format, which Confluence does not emit — see the comment on
-    /// the branch; it is not free.
+    /// document as its content escaped the rest of a newsletter into literal markup.
+    ///
+    /// Having judged it text, it is escaped AS text. Left as live bytes it was still markup to
+    /// the parser — `<!…` opens a bogus comment running to the next `>`, which inside the
+    /// `<pre><code>` a code macro becomes is the one in `</code>`, so the body disappeared and
+    /// the element never closed, rendering the prose after it as inline code.
     #[test]
     fn cdata_edges_are_exact() {
         assert_eq!(
             html_to_markdown("<p>raw <![CDATA[ token</p><p>Next paragraph</p>"),
-            "raw \n\nNext paragraph"
+            "raw <!\\[CDATA\\[ token\n\nNext paragraph"
+        );
+        // The shape that corrupted: a well-formed code body whose section never closes. The
+        // body survives, the fence closes, and the paragraph after it is a paragraph.
+        assert_eq!(
+            html_to_markdown(concat!(
+                "<ac:plain-text-body><![CDATA[fn main() {}</ac:plain-text-body>",
+                "<p>Next section</p>",
+            )),
+            "```\n<![CDATA[fn main() {}\n```\n\nNext section"
         );
         assert_eq!(html_to_markdown("<p>plain</p>"), "plain");
         assert_eq!(html_to_markdown("<p><![CDATA[]]>empty</p>"), "empty");
