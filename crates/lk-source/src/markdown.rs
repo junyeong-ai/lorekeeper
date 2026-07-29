@@ -1419,9 +1419,10 @@ mod tests {
     /// property rather than an accident — and so anything that changes it has to say why.
     ///
     /// `unwrap_cdata` does not share the raw-text skipping, so inside a RAWTEXT element it
-    /// escapes text a parser would have read as text. `xmp`/`iframe`/`noembed`/`noframes` are
-    /// the whole exposure and the cost is a literal entity; see `normalize_storage_format` for
-    /// why closing it is not worth what closing it would cost.
+    /// escapes text a parser would have read as text. The exposure is the raw-text elements
+    /// whose content is KEPT — `xmp`/`iframe`/`noembed`/`noframes`/`noscript`, the cases below —
+    /// and the cost is a literal entity; see `normalize_storage_format` for why closing it is
+    /// not worth what closing it would cost.
     #[test]
     fn cdata_inside_a_raw_text_element_keeps_its_entities() {
         assert_eq!(

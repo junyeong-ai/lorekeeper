@@ -332,8 +332,8 @@ pub fn render_agents_md(
     writeln!(
         out,
         "Each table's `Owner` column names who fills that section's body: `machine` = `lore` \
-         writes it, under whichever command produces the page (`lore ingest` for daily and \
-         document pages, `lore synthesis` for the periodic ones, `lore graph \
+         writes it, under whichever command produces the page (`lore ingest` for the daily, \
+         document and work-log pages, `lore synthesis` for the periodic ones, `lore graph \
          backlinks-sync` for a concept's citations); `LLM` = an agent writes it, which in \
          the automated pipeline is `/lore-process`. A page you author DIRECTLY has no \
          pipeline behind it, so you fill EVERY section yourself, `machine` ones included — \

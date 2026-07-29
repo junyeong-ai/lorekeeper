@@ -297,6 +297,39 @@ mod tests {
         }
     }
 
+    /// A document page carries the same second-writer section as a daily page, through its own
+    /// template rather than the shared base — so the daily loop above proves nothing about it,
+    /// and a bullet restated here would double every citation on every document page with no
+    /// test to notice.
+    #[test]
+    fn a_document_renders_its_concept_links_exactly_as_a_daily_page_does() {
+        let engine = TemplateEngine::build(None).unwrap();
+        let i18n = serde_json::to_value(lk_core::i18n::Locale::En.strings()).unwrap();
+        let out = engine
+            .render(
+                "document.md.jinja",
+                &serde_json::json!({
+                    "slug": "d",
+                    "title": "D",
+                    "created": "2026-06-14",
+                    "updated": "2026-06-14",
+                    "document_type": "note",
+                    "tags": ["document"],
+                    "summary": "sum",
+                    "content": "body",
+                    "concepts": ["- [C1](../concepts/c1.md)", "- [C2](../concepts/c2.md)"],
+                    "extract_concepts": true,
+                    "i18n": i18n,
+                    "llm_inputs": {"summary": "h1", "concepts": "h2"},
+                }),
+            )
+            .expect("document.md.jinja renders");
+        assert!(
+            out.contains("- [C1](../concepts/c1.md)\n- [C2](../concepts/c2.md)"),
+            "concept links must render as a tight list of the prerendered entries:\n{out}"
+        );
+    }
+
     /// A configured highlight renders ABOVE the event list on any daily source — the loop
     /// lives in the shared base, no longer a Gmail special-case.
     #[test]
