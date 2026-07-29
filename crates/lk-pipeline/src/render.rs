@@ -80,11 +80,18 @@ pub(crate) fn concept_links(
 /// event log, and a complete-refetch source's date is a closed window — so a concept
 /// extracted from a page's content stays true of it.
 ///
-/// The carried links are read back through the same gate `lore graph backlinks-sync`
-/// counts an edge by — resolved relative to the citing page, `.md`, landing in the
-/// concepts directory — so what a page cites and what the graph credits it with cannot
-/// disagree. Anything else in the section (a hand-written note, a link elsewhere in the
-/// vault) is not a concept citation and is left to the section body it lives in.
+/// A link is carried only when it addresses a concept page at the address
+/// [`concept_links`] writes — resolved relative to the citing page, `.md`, a DIRECT child
+/// of the concepts directory. That is narrower than the prefix match `lore graph
+/// backlinks-sync` counts an edge by, and deliberately: this set is re-RENDERED through
+/// `concept_links`, which flattens any slug to one path segment, so carrying a nested
+/// destination would rewrite it into a link that resolves nowhere. Nothing the pipeline
+/// writes is ever nested (`slugify` maps `/` to `-`), so the two agree on every link this
+/// system produces.
+///
+/// The section is rebuilt from the returned set, so anything else living in it does not
+/// survive — as was already true when each extraction replaced the section outright. It is
+/// LLM-owned; hand-authored prose belongs in a section that is not.
 pub(crate) fn accumulate_concepts(
     cited: Option<&str>,
     extracted: Vec<crate::concept_draft::ConceptIdentity>,
