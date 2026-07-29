@@ -40,8 +40,15 @@ pub fn concepts_dir_dest(vault_path: &str, dirs: &VaultDirs) -> String {
     )
 }
 
-/// Render resolved concept identities into `[Name](<concepts_dir>/<slug>.md)` links for a
-/// page at `vault_path`.
+/// Render resolved concept identities into the LINES of a page's related-concepts section:
+/// `- [Name](<concepts_dir>/<slug>.md)`, one per concept.
+///
+/// The bullet belongs here and not in the templates because this section has TWO writers —
+/// the plan render, which goes through a template, and `lore queue apply`, which writes the
+/// body directly — and whichever of them ran last decided the markup. They disagreed: the
+/// templates bulleted the list and apply did not, so an ingest and a drain flipped a page
+/// between a list and a run of paragraphs. Returning the finished line leaves one place that
+/// says what a citation looks like.
 ///
 /// The slug is the one `ConceptDrafts` resolved, never re-derived from the display name: a
 /// page's slug is not always `slugify(title)` — an alias or a renamed page resolves
@@ -56,9 +63,12 @@ pub(crate) fn concept_links(
     concepts
         .iter()
         .map(|c| {
-            link::md_link(
-                &c.name,
-                &format!("{base}/{}.md", link::encode_dest(&c.slug)),
+            format!(
+                "- {}",
+                link::md_link(
+                    &c.name,
+                    &format!("{base}/{}.md", link::encode_dest(&c.slug))
+                )
             )
         })
         .collect()
@@ -650,6 +660,36 @@ and [a real one](../../wiki/concepts/nl2sql.md)
                 "reading back {cited}"
             );
         }
+    }
+
+    /// A citation is a finished LINE, bullet included, because two writers put it on a page:
+    /// the plan render through a template and `lore queue apply` writing the body directly.
+    /// When the bullet lived in the templates instead, apply wrote bare links — so a page
+    /// flipped between a list and a run of paragraphs every time an ingest and a drain took
+    /// turns, and neither writer was wrong on its own.
+    #[test]
+    fn a_citation_is_a_finished_line_so_both_writers_produce_the_same_markup() {
+        let lines = concept_links(
+            &[identity("Wero", "wero"), identity("uv", "uv")],
+            "daily/ai-news/2026-07-15.md",
+            &VaultDirs::default(),
+        );
+        assert_eq!(
+            lines,
+            vec![
+                "- [Wero](../../wiki/concepts/wero.md)",
+                "- [uv](../../wiki/concepts/uv.md)",
+            ]
+        );
+        // And the finished line still reads back as the identity it names, so accumulating
+        // over a page written by either writer recovers the same citation.
+        assert_eq!(
+            accumulated(Some(&lines.join("\n")), vec![]),
+            vec![
+                ("Wero".to_string(), "wero".to_string()),
+                ("uv".to_string(), "uv".to_string()),
+            ]
+        );
     }
 
     #[test]

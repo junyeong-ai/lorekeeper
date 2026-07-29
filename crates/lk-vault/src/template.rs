@@ -191,7 +191,7 @@ mod tests {
             "event_count": 1,
             "events": [{"title": "T", "body": "B", "author": "a", "url": "https://x"}],
             "summary": "sum",
-            "concepts": ["[C1](../../wiki/concepts/c1.md)", "[C2](../../wiki/concepts/c2.md)"],
+            "concepts": ["- [C1](../../wiki/concepts/c1.md)", "- [C2](../../wiki/concepts/c2.md)"],
             "extract_concepts": true,
             "highlights": [{"label": "HL", "items": [{"subject": "Subj", "sender": "me"}]}],
             "i18n": i18n,
@@ -242,9 +242,11 @@ mod tests {
                 )),
                 "{name}: missing summary heading:\n{out}"
             );
-            // The concept list is a TIGHT markdown list (no blank line between bullets) —
+            // The concept list is a TIGHT markdown list (no blank line between entries) —
             // uniform across all daily templates via the shared base loop. Entries arrive
-            // prerendered (`render::concept_links`), so the template emits them verbatim.
+            // FULLY prerendered including their bullet (`render::concept_links`), because the
+            // section has a second writer — `lore queue apply` — and a bullet stated here as
+            // well would be a second answer to what a citation looks like.
             assert!(
                 out.contains(
                     "- [C1](../../wiki/concepts/c1.md)\n- [C2](../../wiki/concepts/c2.md)"
