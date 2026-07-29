@@ -28,7 +28,7 @@ pub fn html_to_markdown(html: &str) -> String {
         .add_handler(vec!["ri:page", "ri:attachment"], resource_label)
         .build();
     converter
-        .convert(&unwrap_cdata(html))
+        .convert(&normalize_storage_format(html))
         .map(|md| md.trim().to_string())
         .unwrap_or_default()
 }
@@ -53,6 +53,10 @@ const MACHINE_STATE_ELEMENTS: &[&str] = &[
     "ac:task-id",
     "ac:task-uuid",
     "ac:task-status",
+    // Cloud smart-links carry their settings the same way, welding a URL onto the fallback
+    // text they sit beside (`https://x.example/1fallback text`). `ac:adf-fallback` is the
+    // human-readable half and is left alone.
+    "ac:adf-attribute",
 ];
 
 fn drop_element(
@@ -86,14 +90,37 @@ fn resource_label(
     Some(label.into())
 }
 
-/// Replace every CDATA section with its text, escaped for HTML.
+/// Rewrite the parts of Confluence storage format that an HTML parser reads wrongly, so the
+/// shared converter sees ordinary HTML. Two rewrites, both literal-token exact rather than
+/// guesses, and an input carrying neither is returned untouched.
 ///
-/// Storage format is XHTML and puts a code macro's body — and a link's display text — in
-/// `<![CDATA[…]]>`. An HTML5 parser has no CDATA outside foreign content: it reads the
-/// whole section as a bogus COMMENT and drops the contents. So every Confluence code block
-/// arrived empty, silently, which on an engineering wiki is the most valuable text on the
-/// page. CDATA cannot nest and ends at the first `]]>`, so this rewrite is exact rather
-/// than a guess, and an input containing no CDATA is returned untouched.
+/// **CDATA.** Storage format is XHTML and puts a code macro's body — and a link's display
+/// text — in `<![CDATA[…]]>`. An HTML5 parser has no CDATA outside foreign content: it reads
+/// the whole section as a bogus COMMENT and drops the contents, so every Confluence code
+/// block arrived empty, silently, which on an engineering wiki is the most valuable text on
+/// the page. CDATA cannot nest and ends at the first `]]>`.
+///
+/// **A code body is a code block.** `<ac:plain-text-body>` is where a `code`/`noformat`
+/// macro keeps its body; left as an unknown element it degrades to a paragraph, and the
+/// converter then MARKDOWN-ESCAPES it — `[1, 2]` arrives as `\[1, 2\]`, backslashes
+/// injected into JSON. Mapping it to `<pre><code>` is what makes the converter emit a fenced
+/// block and stop escaping, which is the only form that reproduces the source text.
+fn normalize_storage_format(html: &str) -> std::borrow::Cow<'_, str> {
+    let unwrapped = unwrap_cdata(html);
+    if !unwrapped.contains(PLAIN_TEXT_BODY_OPEN) {
+        return unwrapped;
+    }
+    std::borrow::Cow::Owned(
+        unwrapped
+            .replace(PLAIN_TEXT_BODY_OPEN, "<pre><code>")
+            .replace("</ac:plain-text-body>", "</code></pre>"),
+    )
+}
+
+const PLAIN_TEXT_BODY_OPEN: &str = "<ac:plain-text-body>";
+
+/// Replace every CDATA section with its text, escaped for HTML — see
+/// [`normalize_storage_format`] for why.
 fn unwrap_cdata(html: &str) -> std::borrow::Cow<'_, str> {
     const OPEN: &str = "<![CDATA[";
     const CLOSE: &str = "]]>";
@@ -812,23 +839,36 @@ mod tests {
 
     /// Storage format puts a code macro's body in CDATA, which an HTML5 parser reads as a
     /// bogus COMMENT and drops — so every Confluence code block arrived empty, silently.
+    /// Recovering it is only half: left as an unknown element the body degrades to a
+    /// paragraph and the converter MARKDOWN-ESCAPES it, injecting backslashes into the
+    /// code. It has to arrive as a fenced block, which is the only form that reproduces
+    /// the source text.
     #[test]
-    fn cdata_content_survives_rather_than_being_read_as_a_comment() {
+    fn a_code_body_survives_cdata_and_arrives_as_code_not_escaped_prose() {
         let md = html_to_markdown(concat!(
             r#"<ac:structured-macro ac:name="code">"#,
-            r#"<ac:parameter ac:name="language">rust</ac:parameter>"#,
-            "<ac:plain-text-body><![CDATA[fn main() { if a < b && c > d {} }]]></ac:plain-text-body>",
+            r#"<ac:parameter ac:name="language">json</ac:parameter>"#,
+            r#"<ac:plain-text-body><![CDATA[{ "a": [1, 2], "b": "x_y", "c": a < b }]]></ac:plain-text-body>"#,
             "</ac:structured-macro>",
         ));
+        assert!(md.starts_with("```"), "a code body is a code block:\n{md}");
         assert!(
-            md.contains("fn main()"),
-            "the code body must survive:\n{md}"
+            md.contains(r#"{ "a": [1, 2], "b": "x_y", "c": a < b }"#),
+            "reproduced verbatim — no markdown escaping, no lost `<`:\n{md}"
         );
-        assert!(md.contains("a < b && c > d"), "and its literal text:\n{md}");
-        assert!(
-            !md.contains("rust"),
-            "while the language parameter stays out:\n{md}"
-        );
+        assert!(!md.contains("\\["), "no injected backslashes:\n{md}");
+    }
+
+    /// A Cloud smart-link carries its settings the same way a macro does, welding a URL
+    /// onto the fallback text beside it. The fallback is the readable half and stays.
+    #[test]
+    fn a_smart_link_keeps_its_fallback_and_drops_its_settings() {
+        let md = html_to_markdown(concat!(
+            "<p>See <ac:adf-extension><ac:adf-node type=\"inline-card\">",
+            r#"<ac:adf-attribute key="url">https://x.example/1</ac:adf-attribute>"#,
+            "</ac:adf-node><ac:adf-fallback>the card</ac:adf-fallback></ac:adf-extension></p>",
+        ));
+        assert_eq!(md, "See the card", "settings out, fallback kept:\n{md}");
     }
 
     /// An unterminated section is what an XML parser would also read to the end, and a

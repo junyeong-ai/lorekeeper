@@ -50,8 +50,11 @@ map to `RawItem`.
   and every Confluence→Confluence cross-reference vanished; their label is recovered
   (`ri:user` is not — an opaque account id is machine state). (3) CDATA is not HTML: an
   HTML5 parser reads `<![CDATA[…]]>` as a bogus COMMENT and drops it, so every code macro
-  arrived EMPTY — one real page grew 4.6x when `unwrap_cdata` was added ahead of the
-  converter. All three were invisible until a real page was drained.
+  arrived EMPTY — one real page grew 4.6x once `normalize_storage_format` unwrapped it ahead
+  of the converter. Recovering that text is only half the job: an unknown `ac:plain-text-body`
+  degrades to a PARAGRAPH, which the converter then markdown-escapes (`[1, 2]` → `\[1, 2\]`,
+  backslashes injected into JSON), so it is mapped to `<pre><code>` — the one form that both
+  fences and stops escaping. All of this was invisible until a real page was drained.
 - **Ownership (root invariant) — the per-adapter exact-match fields**: each adapter sets
   `RawItem::is_self` by EXACT-matching its structured authorship field to
   `ExtractContext::identity` — Gmail `From` vs `identity.email`, Slack author id vs
