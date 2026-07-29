@@ -84,9 +84,9 @@ Answer a question grounded in vault content, with compounding.
    - **Reusable** (synthesis, comparison, multi-source analysis) → write an
      **exploration** page (path from AGENTS.md). Read AGENTS.md
      for the exploration page format (frontmatter keys, section headings, ownership).
-     Use slug-only values (no link syntax) in the `grounded_concepts` and
-     `grounded_documents` frontmatter arrays; links belong in the body's
-     Grounding section. Then **finalize** so the new page leaves the graph clean:
+     What the answer is grounded in is recorded ONCE, as links in the body's
+     Grounding section — that is the form every consumer reads.
+     Then **finalize** so the new page leaves the graph clean:
      `lore graph backlinks-sync` (its Grounding links are real citations that
      raise each grounded concept's `source_count`), then `lore wiki index` (so the
      exploration is catalogued and the next audit shows no index drift), then

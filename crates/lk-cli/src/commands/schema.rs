@@ -134,15 +134,7 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs, personal: bool) -> Vec<PageSc
             type_name: "exploration",
             path_pattern: format!("{}/{EXPLORATIONS_SUBDIR}/{{slug}}.md", dirs.wiki),
             frontmatter: &[
-                "id",
-                "type",
-                "title",
-                "aliases",
-                "created",
-                "updated",
-                "tags",
-                "grounded_concepts",
-                "grounded_documents",
+                "id", "type", "title", "aliases", "created", "updated", "tags",
             ],
             sections: vec![
                 s(
@@ -644,6 +636,28 @@ mod tests {
                 "{locale:?}: legend names the localized sources heading: {legend}"
             );
         }
+    }
+
+    #[test]
+    fn an_exploration_records_its_grounding_once() {
+        // `grounded_concepts`/`grounded_documents` restated, as bare slugs, what the Grounding
+        // section already holds as links — and links are the form with readers: citations come
+        // from them (`backlinks-sync`), edges come from them (`scan`), and a merge repoints
+        // them. Nothing ever read the arrays and no rewriter maintained them, so a merged
+        // concept left them naming a page that no longer exists. One record, in the form that
+        // is checked.
+        let md = render_agents_md(Locale::En, &lk_core::config::VaultDirs::default(), false);
+        let section = md
+            .split("\n## exploration ")
+            .nth(1)
+            .expect("exploration page format present")
+            .split("\n## ")
+            .next()
+            .unwrap();
+        assert!(
+            !section.contains("grounded_"),
+            "grounding is recorded as links, not as frontmatter slugs: {section}"
+        );
     }
 
     #[test]
