@@ -346,8 +346,19 @@ fn run_inner(
                 // full-vault view `merge` uses. Rewriting only the rename scope would
                 // leave those citations pointing at a file that no longer exists, and
                 // `graph broken` matches at the id level so it would not report them.
+                //
+                // The analysis scope is UNIONed in rather than assumed to sit inside those
+                // dirs: `graph.scope.dirs` is validated only as a relative in-vault path,
+                // so it can name a directory outside the standard four — and a page renamed
+                // out of one whose citations were never visited is the very defect this
+                // rewrite exists to prevent.
                 let mut cfg = rc.graph.clone();
                 cfg.scope.dirs = vault_page_dirs(&rc.root, &rc.vault_dirs);
+                for dir in &rc.graph.scope.dirs {
+                    if !cfg.scope.dirs.contains(dir) {
+                        cfg.scope.dirs.push(dir.clone());
+                    }
+                }
                 let everywhere = scan::scan_vault(&rc.root, &cfg).map_err(|e| format!("{e}"))?;
                 Some(
                     normalize::apply(&renames, &everywhere, &rc.root)

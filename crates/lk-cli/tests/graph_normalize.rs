@@ -17,13 +17,21 @@ struct Workspace {
 
 impl Workspace {
     fn new() -> Self {
+        Self::with_config("")
+    }
+
+    /// `extra` is appended verbatim to the config, for a non-default `graph.scope`.
+    fn with_config(extra: &str) -> Self {
         let root = tempfile::TempDir::new().expect("tempdir");
         std::fs::create_dir_all(root.path().join("vault")).expect("vault dir");
         std::fs::write(
             root.path().join("config.yaml"),
-            "vault:\n  root: vault\n  locale: en\n\
-             identity:\n  name: Tester\n  email: tester@example.com\n\
-             sources:\n  notes:\n    type: manual\n    params:\n      inbox_dir: inbox\n",
+            format!(
+                "vault:\n  root: vault\n  locale: en\n\
+                 identity:\n  name: Tester\n  email: tester@example.com\n\
+                 sources:\n  notes:\n    type: manual\n    params:\n      inbox_dir: inbox\n\
+                 {extra}"
+            ),
         )
         .expect("config");
         Self { root }
@@ -148,4 +156,54 @@ fn without_fix_nothing_is_renamed_or_repointed() {
     );
     assert!(ws.vault().join("wiki/concepts/Bad_Name.md").exists());
     assert_eq!(ws.read(DAILY), before);
+}
+
+/// `graph.scope.dirs` is validated only as a relative in-vault path, so it can name a
+/// directory outside the standard four the full-vault scan is built from. A page renamed out
+/// of such a scope whose citations were never visited is the very defect the rewrite exists
+/// to prevent — so the rewrite's page set must be a superset of the rename scope, not a
+/// fixed list that happens to contain it.
+#[test]
+fn a_rename_scope_outside_the_standard_dirs_still_gets_its_citations_repointed() {
+    let ws = Workspace::with_config("graph:\n  scope:\n    dirs: [\"archive\"]\n");
+    ws.write("archive/Bad_Name.md", &concept("Bad_Name"));
+    // A sibling INSIDE the scope, and the renamed page's own `id` — both are rewritten by
+    // iterating the scanned page set, so both are missed when that set is a fixed list.
+    ws.write(
+        "archive/sibling.md",
+        "---\nid: sibling\ntype: concept\n---\n\n\
+         ## Related\n\n- [Bad Name](Bad_Name.md)\n",
+    );
+    ws.write(
+        DAILY,
+        "---\nid: notes-2026-05-23\ntype: daily\n---\n\n\
+         ## Related Concepts\n\n- [Bad Name](../../archive/Bad_Name.md)\n",
+    );
+
+    let out = ws.run(&["graph", "normalize", "--fix"]);
+    assert!(
+        out.status.success(),
+        "normalize --fix failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        ws.vault().join("archive/bad-name.md").exists(),
+        "the page in the configured scope must be renamed"
+    );
+    assert!(
+        ws.read(DAILY).contains("../../archive/bad-name.md"),
+        "the citation outside it must follow:\n{}",
+        ws.read(DAILY)
+    );
+    assert!(
+        ws.read("archive/sibling.md").contains("(bad-name.md)"),
+        "and so must one INSIDE it:\n{}",
+        ws.read("archive/sibling.md")
+    );
+    assert!(
+        ws.read("archive/bad-name.md").contains("bad-name")
+            && !ws.read("archive/bad-name.md").contains("Bad_Name"),
+        "the renamed page must stop recording an address it no longer has:\n{}",
+        ws.read("archive/bad-name.md")
+    );
 }

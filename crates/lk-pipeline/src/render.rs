@@ -116,7 +116,16 @@ pub(crate) fn accumulate_concepts(
     // edges. Deduping on the raw stem instead would let a non-canonical spelling ride
     // alongside the canonical one, and since these links only ever accumulate, the double
     // citation would be permanent.
-    let mut claim = |stem: &str| lk_core::concept::slugify(stem).is_some_and(|id| seen.insert(id));
+    let mut claim = |stem: &str| match lk_core::concept::slugify(stem) {
+        Some(id) => seen.insert(id),
+        // Not a name this vault can address, so it cannot be reconciled with anything —
+        // said out loud rather than folded into the dedup, where a dropped citation would
+        // be indistinguishable from a deduplicated one.
+        None => {
+            tracing::warn!(stem, "concept citation has no addressable id; dropping it");
+            false
+        }
+    };
 
     let carried = cited.map(link::extract_page_links).unwrap_or_default();
     for cite in carried {

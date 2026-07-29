@@ -22,7 +22,14 @@ map to `RawItem`.
 - **Per-item isolation stops where NOTHING was reached.** RSS skips an unreachable feed and
   Drive skips an undownloadable file so one broken item doesn't cost the others their day.
   Both then go through `require_any_observation`: if EVERY attempt failed the adapter returns
-  `SourceError::NothingObserved` instead of an empty success. The window was never observed,
+  `SourceError::NothingObserved` instead of an empty success. **The unit is the thing fetched,
+  and "failed" covers unusable as well as unreachable** — a Drive file whose metadata will not
+  parse yielded nothing just as surely as one that would not download, and an RSS feed that
+  answered with entries none of which can become an observation was not read either. RSS
+  therefore separates MAPPING from WINDOWING (`map_entry` decides only whether an entry can
+  become an item; the caller decides whether it belongs to this day), because an entry dated
+  for another day is a perfectly good observation — conflating the two would make every quiet
+  feed look broken, the false positive this must never produce. The window was never observed,
   and downstream cannot tell that apart from a quiet day — `lore ingest` logs `Skipped`
   either way, and `lore health` reads that log as its only evidence the source is alive. An
   empty listing (nothing attempted) is genuinely empty and stays a success. A new

@@ -591,7 +591,15 @@ struct PruneSummary {
 fn prune_queue(vault_root: &Path, queue_dir: &Path, dry_run: bool) -> miette::Result<PruneSummary> {
     let mut summary = PruneSummary::default();
     for file in pending_queue_files(queue_dir)? {
-        let tasks = read_tasks(&file)?;
+        // A drain runs on its own schedule and may have retired this file between the
+        // listing and here. That is the outcome prune wanted for it, and nothing is lost
+        // (the drain read every task before moving it) — failing would abandon every OTHER
+        // file in the directory over a race whose result is already correct.
+        let tasks = match read_tasks(&file) {
+            Ok(tasks) => tasks,
+            Err(_) if !file.exists() => continue,
+            Err(e) => return Err(e),
+        };
         let mut retained = Vec::with_capacity(tasks.len());
         let (mut dropped, mut work_left) = (0usize, 0usize);
         for task in tasks {
@@ -617,13 +625,13 @@ fn prune_queue(vault_root: &Path, queue_dir: &Path, dry_run: bool) -> miette::Re
         }
 
         if retained.is_empty() {
-            // Only dead tasks, so the run never edited a page: nothing to archive.
-            if dropped > 0 {
-                summary.files_deleted += 1;
-                if !dry_run {
-                    std::fs::remove_file(&file)
-                        .map_err(|e| miette::miette!("remove {}: {e}", file.display()))?;
-                }
+            // Nothing worth keeping: only dead tasks, or none at all. Either way the run
+            // never edited a page, so there is no record to archive — and leaving it would
+            // keep `lore ingest` warning about pending work no session will ever do.
+            summary.files_deleted += 1;
+            if !dry_run {
+                std::fs::remove_file(&file)
+                    .map_err(|e| miette::miette!("remove {}: {e}", file.display()))?;
             }
         } else if work_left == 0 {
             // Retained but no work left, so every retained task is `done`: the run is
@@ -1269,6 +1277,74 @@ mod tests {
         assert_eq!(summary.pruned_missing_target, 1);
         assert_eq!(summary.files_deleted, 1);
         assert!(!file.exists(), "an all-dead file must be deleted");
+    }
+
+    /// A drain retiring a file between the listing and the read must not abandon every
+    /// other file in the directory. `prune` and the drain race by design — 1206709 taught
+    /// the drain that side; this is the same race seen from here.
+    ///
+    /// A dangling symlink reproduces the exact state deterministically: `read_dir` lists it,
+    /// the read fails `NotFound`, and the existence probe follows it to nothing — which is
+    /// what a file moved out from under the scan looks like.
+    #[test]
+    fn a_run_retired_mid_scan_does_not_abort_the_whole_prune() {
+        let dir = TempDir::new().unwrap();
+        let queue_dir = dir.path().join(".lorekeeper").join("queue");
+        write_page(
+            dir.path(),
+            "daily/s/2026-05-23.md",
+            "id: x\nllm_inputs:\n  summary: live\n",
+        );
+        // `pending_queue_files` sorts by name, so the vanished one is visited first.
+        write_queue_file(
+            &queue_dir,
+            "b-real.jsonl",
+            &[
+                task("daily/s/2026-05-23.md", "live"),
+                task("daily/s/2026-05-99.md", "live"), // missing-target
+            ],
+        );
+        std::os::unix::fs::symlink(
+            queue_dir.join("already-archived.jsonl"),
+            queue_dir.join("a-gone.jsonl"),
+        )
+        .unwrap();
+
+        let summary = prune_queue(dir.path(), &queue_dir, false)
+            .expect("a file that raced away is not a failure");
+        assert_eq!(
+            summary.pruned_missing_target, 1,
+            "the surviving file must still be pruned"
+        );
+        assert_eq!(summary.files_rewritten, 1);
+    }
+
+    /// A read that fails for any OTHER reason is a real failure and must still surface —
+    /// the guard asks whether the file is gone, not whether reading was inconvenient.
+    #[test]
+    fn a_file_that_exists_but_cannot_be_parsed_still_fails_the_prune() {
+        let dir = TempDir::new().unwrap();
+        let queue_dir = dir.path().join(".lorekeeper").join("queue");
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        std::fs::write(queue_dir.join("run-1.jsonl"), "{not json\n").unwrap();
+        assert!(prune_queue(dir.path(), &queue_dir, false).is_err());
+    }
+
+    /// A file holding no tasks at all edited no page, so there is nothing to archive — and
+    /// leaving it keeps `lore ingest` warning about pending work no session will ever do.
+    #[test]
+    fn a_task_less_file_is_retired_rather_than_left_warning_forever() {
+        let dir = TempDir::new().unwrap();
+        let queue_dir = dir.path().join(".lorekeeper").join("queue");
+        let file = write_queue_file(&queue_dir, "run-1.jsonl", &[]);
+
+        let dry = prune_queue(dir.path(), &queue_dir, true).unwrap();
+        assert_eq!(dry.files_deleted, 1, "dry-run reports the same retirement");
+        assert!(file.exists(), "and deletes nothing");
+
+        let summary = prune_queue(dir.path(), &queue_dir, false).unwrap();
+        assert_eq!(summary.files_deleted, 1);
+        assert!(!file.exists());
     }
 
     #[test]

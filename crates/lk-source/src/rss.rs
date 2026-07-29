@@ -176,6 +176,9 @@ impl Source for RssSource {
             };
             let feed_title = feed.title.map(|t| t.content);
 
+            // Per feed: entries that became an observation (kept, or dated for another
+            // day) against entries that could not become one at all.
+            let (mut observed, mut unusable) = (0usize, 0usize);
             let mut kept = 0usize;
             for entry in feed.entries {
                 if kept >= p.max_items_per_feed {
@@ -189,10 +192,16 @@ impl Source for RssSource {
                     );
                     break;
                 }
-                let mut item = match map_entry(&feed_cfg.id, &feed_title, entry, min, max) {
-                    Some(item) => item,
-                    None => continue,
+                let Some(mut item) = map_entry(&feed_cfg.id, &feed_title, entry) else {
+                    unusable += 1;
+                    continue;
                 };
+                if item.timestamp < min || item.timestamp >= max {
+                    // Another day's item. This is what a quiet feed is made of, so it is
+                    // never a sign that anything is wrong.
+                    observed += 1;
+                    continue;
+                }
                 // Optionally replace the feed summary with the full article.
                 if feed_cfg.fetch_full_text
                     && let Some(ref article_url) = item.url
@@ -231,8 +240,21 @@ impl Source for RssSource {
                 }
                 items.push(item);
                 kept += 1;
+                observed += 1;
             }
-            tracing::info!(feed = %feed_cfg.id, kept, "rss: feed extracted");
+            // A feed that returned entries and yielded not one observation was not read,
+            // whatever the transport said — the same state as an unreachable feed, reached
+            // by a format change instead of a moved URL. An EMPTY feed is observed: there
+            // was nothing to misread.
+            if observed == 0 && unusable > 0 {
+                unreachable += 1;
+                tracing::warn!(
+                    feed = %feed_cfg.id,
+                    unusable,
+                    "rss: every entry was unusable (no date or no title); treating the feed as unread"
+                );
+            }
+            tracing::info!(feed = %feed_cfg.id, kept, unusable, "rss: feed extracted");
         }
 
         crate::require_any_observation("feed", unreachable, p.feeds.len())?;
@@ -250,18 +272,17 @@ impl Source for RssSource {
 /// Map one feed entry to a [`RawItem`], or `None` if it can't be placed/used:
 /// undated (can't assign a day — never defaults to `now`), out of the day window,
 /// or title-less.
+/// Map one feed entry to a [`RawItem`], or `None` when it cannot become an observation at
+/// all: no usable publication date, or no title. The day window is deliberately NOT decided
+/// here — an entry outside it is a perfectly good observation belonging to another day, and
+/// conflating the two would make a quiet feed indistinguishable from a broken one.
 fn map_entry(
     feed_id: &str,
     feed_title: &Option<String>,
     entry: feed_rs::model::Entry,
-    min: jiff::Timestamp,
-    max: jiff::Timestamp,
 ) -> Option<RawItem> {
     let dt = entry.published.or(entry.updated)?;
     let ts = jiff::Timestamp::from_millisecond(dt.timestamp_millis()).ok()?;
-    if ts < min || ts >= max {
-        return None;
-    }
 
     let title = entry.title.map(|t| t.content)?;
     if title.trim().is_empty() {
@@ -348,6 +369,81 @@ mod tests {
             err.to_string().contains("every feed failed (2 of 2)"),
             "{err}"
         );
+    }
+
+    /// A feed that answered but whose every entry is unreadable was not read either — the
+    /// same state as an unreachable one, reached by a format change instead of a moved URL.
+    /// Guarding only the fetch would leave that total outage reporting a clean, quiet run.
+    #[tokio::test]
+    async fn a_feed_whose_every_entry_is_unusable_counts_as_unread() {
+        let server = tiny_feed_server(
+            r#"<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry><title>No date</title><id>a</id></entry>
+  <entry><title>Also undated</title><id>b</id></entry>
+</feed>"#,
+        )
+        .await;
+        let params = serde_json::json!({
+            "feeds": [{"id": "a", "url": format!("http://{}/f.xml", server.addr)}]
+        });
+        let source = RssSource::new(crate::build_http_client().unwrap());
+        let err = source
+            .extract(&params, &test_ctx())
+            .await
+            .expect_err("no entry could become an observation");
+        assert!(
+            err.to_string().contains("every feed failed (1 of 1)"),
+            "{err}"
+        );
+    }
+
+    /// A feed whose entries are all dated for OTHER days is a quiet feed, not a broken one.
+    /// This is the false positive the split between mapping and windowing exists to prevent.
+    #[tokio::test]
+    async fn a_feed_with_only_out_of_window_entries_is_quiet_not_broken() {
+        let server = tiny_feed_server(
+            r#"<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry><title>Old news</title><id>a</id><updated>2020-01-01T00:00:00Z</updated></entry>
+</feed>"#,
+        )
+        .await;
+        let params = serde_json::json!({
+            "feeds": [{"id": "a", "url": format!("http://{}/f.xml", server.addr)}]
+        });
+        let source = RssSource::new(crate::build_http_client().unwrap());
+        let items = source
+            .extract(&params, &test_ctx())
+            .await
+            .expect("a quiet feed is a success");
+        assert!(items.is_empty(), "and it yields nothing for this day");
+    }
+
+    /// A single-response HTTP server on loopback — enough to answer one feed fetch without
+    /// taking a mocking dependency or leaving the machine.
+    struct TinyServer {
+        addr: std::net::SocketAddr,
+    }
+
+    async fn tiny_feed_server(body: &'static str) -> TinyServer {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/atom+xml\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+        TinyServer { addr }
     }
 
     fn test_ctx() -> ExtractContext {
@@ -453,15 +549,8 @@ mod tests {
     <summary type="html">&lt;p&gt;A &lt;b&gt;big&lt;/b&gt; release.&lt;/p&gt;</summary>
   </entry>
 </feed>"#;
-        let (min, max) = window();
-        let item = map_entry(
-            "vendor",
-            &Some("Vendor Blog".into()),
-            parse_one(xml),
-            min,
-            max,
-        )
-        .expect("entry maps");
+        let item =
+            map_entry("vendor", &Some("Vendor Blog".into()), parse_one(xml)).expect("entry maps");
         assert_eq!(item.title, "New model released");
         // external id is namespaced by feed id to avoid cross-feed collisions.
         assert_eq!(
@@ -473,14 +562,21 @@ mod tests {
         assert_eq!(item.timestamp.to_string(), "2026-05-21T08:00:00Z");
     }
 
+    /// An entry outside the day window still MAPS — it is a good observation belonging to
+    /// another day. The caller decides the window, so a quiet feed can never be mistaken
+    /// for one whose entries cannot be read at all.
     #[test]
-    fn skips_out_of_window_entry() {
+    fn an_out_of_window_entry_still_maps() {
         let xml = r#"<?xml version="1.0"?>
 <feed xmlns="http://www.w3.org/2005/Atom">
   <entry><title>Old</title><id>a</id><updated>2026-01-01T00:00:00Z</updated></entry>
 </feed>"#;
         let (min, max) = window();
-        assert!(map_entry("v", &None, parse_one(xml), min, max).is_none());
+        let item = map_entry("v", &None, parse_one(xml)).expect("a dated, titled entry maps");
+        assert!(
+            item.timestamp < min || item.timestamp >= max,
+            "and the caller is the one that finds it out of window"
+        );
     }
 
     #[test]
@@ -489,8 +585,16 @@ mod tests {
 <feed xmlns="http://www.w3.org/2005/Atom">
   <entry><title>No date</title><id>a</id></entry>
 </feed>"#;
-        let (min, max) = window();
-        assert!(map_entry("v", &None, parse_one(xml), min, max).is_none());
+        assert!(map_entry("v", &None, parse_one(xml)).is_none());
+    }
+
+    #[test]
+    fn skips_titleless_entry() {
+        let xml = r#"<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry><id>a</id><updated>2026-05-21T00:00:00Z</updated></entry>
+</feed>"#;
+        assert!(map_entry("v", &None, parse_one(xml)).is_none());
     }
 
     #[test]
@@ -499,8 +603,7 @@ mod tests {
 <feed xmlns="http://www.w3.org/2005/Atom">
   <entry><title>T</title><id>a</id><updated>2026-05-21T00:00:00Z</updated></entry>
 </feed>"#;
-        let (min, max) = window();
-        let item = map_entry("feedx", &None, parse_one(xml), min, max).unwrap();
+        let item = map_entry("feedx", &None, parse_one(xml)).unwrap();
         assert_eq!(item.author.as_deref(), Some("feedx"));
     }
 }
