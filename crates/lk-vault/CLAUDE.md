@@ -24,6 +24,13 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   `default_template`. `template::tests::every_daily_template_renders_with_expected_frontmatter`
   renders every embedded daily template so a child block typo (or the `self.title()` wiring)
   fails at test time, not in production.
+- **`concepts` entries arrive FULLY RENDERED, bullet included** — a template emits `{{ c }}`,
+  never `- {{ c }}`. That section has a second writer, `lore queue apply`, which replaces it
+  without going through any template, so a bullet stated in the template as well would be a
+  second answer to what a citation looks like. A `--template-dir` override participates in this
+  contract: a user template still carrying the prefix renders `- - [C](…)` on every page it
+  owns, and nothing detects it. The daily and document legs are each pinned by a test so the
+  embedded copies cannot drift; an override is the user's to keep in step.
 - **`IngestLog`** distinguishes `NotFound` (→ empty/None, legitimate "never ingested")
   from real I/O errors (propagated). Malformed JSONL lines are `tracing::warn`-ed and
   skipped, not silently dropped — corruption stays observable without blanking history.
