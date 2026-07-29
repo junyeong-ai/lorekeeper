@@ -35,6 +35,7 @@ pub fn html_to_markdown(html: &str) -> String {
             spaced_link_body,
         )
         .add_handler(vec!["ac:link"], trimmed_link)
+        .add_handler(vec!["ac:adf-extension"], one_adf_representation)
         .build();
     converter
         .convert(&normalize_storage_format(html))
@@ -67,8 +68,9 @@ const MACHINE_STATE_ELEMENTS: &[&str] = &[
     "ac:task-id",
     "ac:task-uuid",
     // Cloud smart-links carry their settings the same way, welding a URL onto the fallback
-    // text they sit beside (`https://x.example/1fallback text`). `ac:adf-fallback` is the
-    // human-readable half and is left alone.
+    // text they sit beside (`https://x.example/1fallback text`). Which of the extension's
+    // representations is the human-readable one is `one_adf_representation`'s question, not
+    // this list's — for a bodyless card it is the fallback, for a panel either would do.
     "ac:adf-attribute",
 ];
 
@@ -162,6 +164,31 @@ fn spaced_link_body(
     } else {
         format!(" {body}").into()
     })
+}
+
+/// An ADF extension's children are ALTERNATIVE renderings of one thing, not a sequence: the
+/// ADF node itself, and a fallback authored for consumers that do not read ADF. Rendering them
+/// as siblings printed a Cloud panel's prose twice, once from each — and Cloud emits both for
+/// every extension that has a body.
+///
+/// So exactly one is emitted. The last renderable alternative wins, which is the fallback where
+/// there is one — the form written for a consumer like this converter — and the node's own
+/// content where there is not, so an extension that offers no fallback still says what it says.
+/// An `inlineCard` is the mirror case: its node is nothing but attributes, so it renders empty
+/// and the fallback is the only alternative that carries the link.
+fn one_adf_representation(
+    handlers: &dyn htmd::element_handler::Handlers,
+    element: htmd::Element,
+) -> Option<htmd::element_handler::HandlerResult> {
+    let chosen = element
+        .node
+        .children
+        .borrow()
+        .iter()
+        .map(|child| handlers.walk_children(child).content)
+        .rfind(|rendered| !rendered.trim().is_empty())
+        .unwrap_or_default();
+    Some(chosen.into())
 }
 
 /// See [`spaced_link_body`] — this is the half that keeps the separator internal.
@@ -1188,6 +1215,32 @@ mod tests {
             "</ac:adf-node><ac:adf-fallback>the card</ac:adf-fallback></ac:adf-extension></p>",
         ));
         assert_eq!(md, "See the card", "settings out, fallback kept:\n{md}");
+    }
+
+    /// An extension's children are ALTERNATIVE renderings of one thing — the ADF node, and a
+    /// fallback written for consumers that do not read ADF. Emitted as siblings, a Cloud
+    /// panel said everything twice, and Cloud emits both halves for every bodied extension.
+    #[test]
+    fn an_adf_extension_is_rendered_once() {
+        assert_eq!(
+            html_to_markdown(concat!(
+                r#"<ac:adf-extension><ac:adf-node type="panel">"#,
+                r#"<ac:adf-attribute key="panel-type">warning</ac:adf-attribute>"#,
+                "<ac:adf-content><p>Do not deploy on Friday.</p></ac:adf-content></ac:adf-node>",
+                r#"<ac:adf-fallback><div class="panel"><p>Do not deploy on Friday.</p></div>"#,
+                "</ac:adf-fallback></ac:adf-extension>",
+            )),
+            "Do not deploy on Friday."
+        );
+        // Offering no fallback, the node's own content is the only alternative there is.
+        assert_eq!(
+            html_to_markdown(concat!(
+                r#"<ac:adf-extension><ac:adf-node type="panel">"#,
+                "<ac:adf-content><p>Only copy.</p></ac:adf-content>",
+                "</ac:adf-node></ac:adf-extension>",
+            )),
+            "Only copy."
+        );
     }
 
     /// An unterminated section is what an XML parser would also read to the end, and a
