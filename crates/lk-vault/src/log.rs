@@ -65,6 +65,18 @@ impl IngestLog {
             .open(&self.path)
             .await?;
         file.write_all(format!("{line}\n").as_bytes()).await?;
+        // `tokio::fs::File` buffers, and dropping one only schedules a best-effort
+        // background flush — so without this the bytes may not have reached the OS when
+        // `record` returns, and the next reader sees a log missing its newest entry. That
+        // entry is not history: `find_last_collection` reads it as the state `lore health`
+        // reports, so losing it makes a live source read stale. It surfaced as a test that
+        // wrote and immediately read passing on one platform and failing on another, which
+        // is what an unflushed buffer looks like from the outside.
+        //
+        // Only `flush`, not `sync_all`: reaching the OS is what makes the entry visible to
+        // every reader, and the log is append-only, so a machine crash losing the last
+        // entry self-heals on the next run rather than corrupting anything.
+        file.flush().await?;
         Ok(())
     }
 
@@ -178,6 +190,26 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let log = IngestLog::new(dir.path().join("nope.jsonl"));
         assert!(log.find_last_collection("jira").await.unwrap().is_none());
+    }
+
+    /// An entry must be on disk when `record` returns. `tokio::fs::File` buffers and its
+    /// drop only schedules a best-effort flush, so without an explicit one the newest entry
+    /// can be invisible to the next reader — and that entry is the state `lore health`
+    /// reports, not history, so losing it makes a live source read stale.
+    #[tokio::test]
+    async fn a_recorded_entry_is_readable_the_moment_record_returns() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("ingest.jsonl");
+        let log = IngestLog::new(path.clone());
+        log.record(&entry("jira", LogStatus::Success, 1_000))
+            .await
+            .unwrap();
+        // Read through the filesystem rather than through `log`, which is the position
+        // every other process — and every other handle — is in.
+        assert!(
+            std::fs::read_to_string(&path).unwrap().contains("\"jira\""),
+            "the entry must have reached the OS, not just tokio's buffer"
+        );
     }
 
     /// Corruption stays observable without blanking the history behind it.
