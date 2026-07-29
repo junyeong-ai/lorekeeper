@@ -2877,11 +2877,14 @@ async fn queue_results_materialize_through_the_same_merge_path() {
     let rewritten = pipeline.apply_concept_result(&result, page).await.unwrap();
 
     // Links are built by the same helper the synchronous render uses, so the slug in the
-    // page and the concept page's filename cannot disagree.
+    // page and the concept page's filename cannot disagree — and the helper emits the
+    // FINISHED line, bullet included, since the template writer emits no prefix of its own.
+    // Asserting the link alone would pass either way and leave the two writers free to
+    // diverge on markup here, which is the one place this path can be caught end to end.
     assert!(rewritten.contains(
-        "[Retrieval Augmented Generation](../../wiki/concepts/retrieval-augmented-generation.md)"
+        "- [Retrieval Augmented Generation](../../wiki/concepts/retrieval-augmented-generation.md)"
     ));
-    assert!(rewritten.contains("[Vector Database](../../wiki/concepts/vector-database.md)"));
+    assert!(rewritten.contains("- [Vector Database](../../wiki/concepts/vector-database.md)"));
     // Sections other than the anchor are untouched.
     assert!(rewritten.contains("## Summary\n\nbody"));
     assert!(rewritten.contains("- a\n"));
