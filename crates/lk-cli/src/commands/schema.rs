@@ -41,6 +41,11 @@ struct PageSchema {
     /// Frontmatter keys.
     frontmatter: &'static [&'static str],
     sections: Vec<Section>,
+    /// The `lore` command that fills this format's `machine` sections, or `None` when it has
+    /// none. Required, so a new page format cannot be added without naming its writer — the
+    /// ownership legend is generated from these, and a hand-written one went out of date the
+    /// moment it named a single command for a column fourteen rows wide.
+    machine_writer: Option<&'static str>,
 }
 
 fn s(name: &'static str, heading: fn(&Strings) -> String, owner: Owner) -> Section {
@@ -49,6 +54,39 @@ fn s(name: &'static str, heading: fn(&Strings) -> String, owner: Owner) -> Secti
         heading,
         owner,
     }
+}
+
+/// The `machine` column's writers, each with the page formats it fills, read off the schemas
+/// themselves.
+///
+/// Generated rather than written, because the column is what tells an author whether to fill a
+/// section and a legend naming the wrong command sends them to wait for a run that will never
+/// touch it. Naming ONE command was false for eleven of the fourteen machine rows; naming
+/// three by hand was true only until a format arrived with a fourth. Adding a format now
+/// forces its writer to be declared, and this reads the declarations.
+fn machine_writers(schemas: &[PageSchema]) -> String {
+    let mut grouped: Vec<(&str, Vec<&str>)> = Vec::new();
+    for schema in schemas {
+        let Some(writer) = schema.machine_writer else {
+            continue;
+        };
+        if !schema
+            .sections
+            .iter()
+            .any(|section| matches!(section.owner, Owner::Machine))
+        {
+            continue;
+        }
+        match grouped.iter_mut().find(|(name, _)| *name == writer) {
+            Some((_, formats)) => formats.push(schema.type_name),
+            None => grouped.push((writer, vec![schema.type_name])),
+        }
+    }
+    grouped
+        .iter()
+        .map(|(writer, formats)| format!("`{writer}` for {}", formats.join(", ")))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 fn page_schemas(dirs: &lk_core::config::VaultDirs, personal: bool) -> Vec<PageSchema> {
@@ -73,6 +111,7 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs, personal: bool) -> Vec<PageSc
                 s("Sources", |i| i.concept_sources.to_string(), Owner::Machine),
                 s("Related", |i| i.related.to_string(), Owner::Llm),
             ],
+            machine_writer: Some("lore graph backlinks-sync"),
         },
         PageSchema {
             type_name: "daily",
@@ -99,6 +138,7 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs, personal: bool) -> Vec<PageSc
                 // machine-owned (the LLM merely refines each event's body in place).
                 s("Concepts", |i| i.related_concepts.to_string(), Owner::Llm),
             ],
+            machine_writer: Some("lore ingest"),
         },
         PageSchema {
             type_name: "document",
@@ -129,6 +169,7 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs, personal: bool) -> Vec<PageSc
                     Owner::Llm,
                 ),
             ],
+            machine_writer: Some("lore ingest"),
         },
         PageSchema {
             type_name: "exploration",
@@ -153,6 +194,7 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs, personal: bool) -> Vec<PageSc
                     Owner::Llm,
                 ),
             ],
+            machine_writer: None,
         },
         PageSchema {
             type_name: "weekly-synthesis",
@@ -171,6 +213,7 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs, personal: bool) -> Vec<PageSc
                 |i| i.key_themes_this_week.to_string(),
                 Owner::Llm,
             )],
+            machine_writer: None,
         },
     ];
 
@@ -195,6 +238,7 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs, personal: bool) -> Vec<PageSc
                     s("Topic Summary", |i| i.topic_summary.to_string(), Owner::Llm),
                     s("Sources", |i| i.concept_sources.to_string(), Owner::Machine),
                 ],
+                machine_writer: Some("lore ingest"),
             },
             PageSchema {
                 type_name: "weekly-review",
@@ -217,6 +261,7 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs, personal: bool) -> Vec<PageSc
                         Owner::Machine,
                     ),
                 ],
+                machine_writer: Some("lore synthesis"),
             },
             PageSchema {
                 type_name: "monthly-review",
@@ -239,6 +284,7 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs, personal: bool) -> Vec<PageSc
                         Owner::Machine,
                     ),
                 ],
+                machine_writer: Some("lore synthesis"),
             },
             PageSchema {
                 type_name: "quarterly-review",
@@ -258,6 +304,7 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs, personal: bool) -> Vec<PageSc
                         Owner::Machine,
                     ),
                 ],
+                machine_writer: Some("lore synthesis"),
             },
             PageSchema {
                 type_name: "annual-review",
@@ -276,6 +323,7 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs, personal: bool) -> Vec<PageSc
                         Owner::Machine,
                     ),
                 ],
+                machine_writer: Some("lore synthesis"),
             },
         ]);
     }
@@ -291,6 +339,7 @@ pub fn render_agents_md(
 ) -> String {
     let strings = locale.strings();
     let locale_tag = locale.tag();
+    let schemas = page_schemas(dirs, personal);
 
     let mut out = String::new();
     writeln!(out, "---\ntype: schema\n---\n").unwrap();
@@ -324,14 +373,13 @@ pub fn render_agents_md(
     writeln!(
         out,
         "Each table's `Owner` column names who fills that section's body: `machine` = `lore` \
-         writes it, under whichever command produces the page (`lore ingest` for the daily, \
-         document and work-log pages, `lore synthesis` for the periodic ones, `lore graph \
-         backlinks-sync` for a concept's citations); `LLM` = an agent writes it, which in \
-         the automated pipeline is `/lore-process`. A page you author DIRECTLY has no \
-         pipeline behind it, so you fill EVERY section yourself, `machine` ones included — \
-         except a concept's `## {}` section and its `{}`, which `lore graph backlinks-sync` \
-         re-derives wholesale from the forward links on citing pages every time it runs, so \
-         leave those empty and let it.",
+         writes it, under whichever command produces the page ({}); `LLM` = an agent writes \
+         it, which in the automated pipeline is `/lore-process`. A page you author DIRECTLY \
+         has no pipeline behind it, so you fill EVERY section yourself, `machine` ones \
+         included — except a concept's `## {}` section and its `{}`, which `lore graph \
+         backlinks-sync` re-derives wholesale from the forward links on citing pages every \
+         time it runs, so leave those empty and let it.",
+        machine_writers(&schemas),
         strings.concept_sources,
         lk_core::frontmatter::field::SOURCE_COUNT,
     )
@@ -400,7 +448,7 @@ pub fn render_agents_md(
     )
     .unwrap();
 
-    for schema in page_schemas(dirs, personal) {
+    for schema in &schemas {
         writeln!(out).unwrap();
         writeln!(out, "## {} (`{}`)", schema.type_name, schema.path_pattern).unwrap();
         writeln!(out).unwrap();
@@ -624,10 +672,54 @@ mod tests {
                 .lines()
                 .find(|l| l.starts_with("Each table's `Owner` column"))
                 .unwrap_or_else(|| panic!("{locale:?}: ownership legend present"));
-            for writer in ["lore ingest", "lore synthesis", "lore graph backlinks-sync"] {
+            // Read off the schemas, so a format added with a fourth writer cannot leave the
+            // legend naming only the three that existed when it was written.
+            let schemas = page_schemas(&lk_core::config::VaultDirs::default(), true);
+            let declared: std::collections::BTreeSet<&str> = schemas
+                .iter()
+                .filter(|schema| {
+                    schema
+                        .sections
+                        .iter()
+                        .any(|section| matches!(section.owner, Owner::Machine))
+                })
+                .filter_map(|schema| schema.machine_writer)
+                .collect();
+            assert!(
+                declared.len() >= 3,
+                "expected several writers: {declared:?}"
+            );
+            for writer in &declared {
                 assert!(
                     legend.contains(writer),
                     "{locale:?}: legend omits the writer {writer:?}: {legend}"
+                );
+            }
+            // The legend states one carve-out in prose — a concept's sources section belongs
+            // to `backlinks-sync` even on a hand-authored page — so the concept format must
+            // declare that same writer. Generated list and prose are two statements about one
+            // fact, and nothing else would notice them disagreeing.
+            let concept = schemas
+                .iter()
+                .find(|schema| schema.type_name == "concept")
+                .expect("concept format present");
+            assert_eq!(
+                concept.machine_writer,
+                Some("lore graph backlinks-sync"),
+                "the generated writer list must agree with the legend's carve-out"
+            );
+
+            // And a format whose sections are all agent-written contributes no writer.
+            for schema in &schemas {
+                let machine = schema
+                    .sections
+                    .iter()
+                    .any(|section| matches!(section.owner, Owner::Machine));
+                assert_eq!(
+                    machine,
+                    schema.machine_writer.is_some(),
+                    "{}: a machine section needs a writer and only a machine section has one",
+                    schema.type_name
                 );
             }
             assert!(legend.contains("`LLM` = an agent writes it"), "{legend}");
