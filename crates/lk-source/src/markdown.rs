@@ -25,6 +25,7 @@ pub fn html_to_markdown(html: &str) -> String {
         })
         .add_handler(vec!["img"], img_without_data_uris)
         .add_handler(MACHINE_STATE_ELEMENTS.to_vec(), drop_element)
+        .add_handler(vec!["ac:task-status"], task_checkbox)
         .add_handler(
             ATTRIBUTE_BORNE_TEXT.iter().map(|(tag, _)| *tag).collect(),
             attribute_borne_text,
@@ -46,9 +47,14 @@ pub fn html_to_markdown(html: &str) -> String {
 ///
 /// Confluence storage format is XHTML. A macro's `<ac:parameter>` children hold its
 /// settings (a status macro's colour, a roadmap's base64 state blob) and a task's
-/// `<ac:task-id>`/`<ac:task-uuid>`/`<ac:task-status>` hold its identity. Degraded, they are
-/// emitted INLINE and unseparated: a page reads `검증JTdCJTIybmFtZSUyMi…` or
-/// `170e6f1a-9cincompleteShip the thing`. One real page came out 30% encoded settings.
+/// `<ac:task-id>`/`<ac:task-uuid>` hold its identity. Degraded, they are emitted INLINE and
+/// unseparated: a page reads `검증JTdCJTIybmFtZSUyMi…` or `170e6f1a-9cincompleteShip the
+/// thing`. One real page came out 30% encoded settings.
+///
+/// A task's `ac:task-status` is NOT in that company — a reader sees it, as a ticked or
+/// unticked box, and whether the thing was done is most of what a checklist says. It is the
+/// text `complete`/`incomplete` that is machine state, so it is translated rather than
+/// dropped ([`task_checkbox`]).
 ///
 /// This is a deliberate trade, not a free win. A macro WITH a body loses nothing — the body
 /// is `ac:rich-text-body`/`ac:plain-text-body` and is untouched. A macro WITHOUT one loses
@@ -60,12 +66,27 @@ const MACHINE_STATE_ELEMENTS: &[&str] = &[
     "ac:parameter",
     "ac:task-id",
     "ac:task-uuid",
-    "ac:task-status",
     // Cloud smart-links carry their settings the same way, welding a URL onto the fallback
     // text they sit beside (`https://x.example/1fallback text`). `ac:adf-fallback` is the
     // human-readable half and is left alone.
     "ac:adf-attribute",
 ];
+
+/// A task's state as the reader saw it: a ticked or unticked box, which is most of what a
+/// checklist says. The storage words `complete`/`incomplete` are the machine's spelling of it,
+/// so anything else — a status this converter has no translation for — degrades to nothing
+/// rather than leaking that vocabulary into the prose.
+fn task_checkbox(
+    handlers: &dyn htmd::element_handler::Handlers,
+    element: htmd::Element,
+) -> Option<htmd::element_handler::HandlerResult> {
+    let state = handlers.walk_children(element.node).content;
+    Some(match state.trim() {
+        "complete" => "[x] ".to_string().into(),
+        "incomplete" => "[ ] ".to_string().into(),
+        _ => String::new().into(),
+    })
+}
 
 fn drop_element(
     _: &dyn htmd::element_handler::Handlers,
@@ -161,7 +182,8 @@ fn trimmed_link(
 /// block arrived empty, silently, which on an engineering wiki is the most valuable text on
 /// the page. CDATA cannot nest and ends at the first `]]>`.
 ///
-/// **An empty element is empty.** See [`expand_self_closing`] — the rewrite that decides
+/// **An empty element is empty, and a container is its HTML counterpart.** See
+/// [`rewrite_tags`] — the rewrite that decides
 /// whether the content after it survives at all. It runs AFTER the CDATA unwrap, which
 /// escapes `<`/`>`, so tag-shaped text recovered from a code sample is never rescanned as
 /// markup.
@@ -173,21 +195,30 @@ fn trimmed_link(
 /// block and stop escaping, which is the only form that reproduces the source text.
 fn normalize_storage_format(html: &str) -> std::borrow::Cow<'_, str> {
     let unwrapped = unwrap_cdata(html);
-    let expanded = match expand_self_closing(&unwrapped) {
+    match rewrite_tags(&unwrapped) {
         std::borrow::Cow::Borrowed(_) => unwrapped,
         std::borrow::Cow::Owned(owned) => std::borrow::Cow::Owned(owned),
-    };
-    if !expanded.contains(PLAIN_TEXT_BODY_OPEN) {
-        return expanded;
     }
-    std::borrow::Cow::Owned(
-        expanded
-            .replace(PLAIN_TEXT_BODY_OPEN, "<pre><code>")
-            .replace("</ac:plain-text-body>", "</code></pre>"),
-    )
 }
 
-const PLAIN_TEXT_BODY_OPEN: &str = "<ac:plain-text-body>";
+/// Storage-format containers with an exact HTML counterpart, paired with the tags to write in
+/// their place. Rewriting them here rather than handling them in the converter is what gets
+/// the STRUCTURE: a list has to reach the converter as a list to come out as one.
+///
+/// `ac:plain-text-body` is where a `code`/`noformat` macro keeps its body. Left as an unknown
+/// element it degrades to a paragraph, which the converter then MARKDOWN-ESCAPES — `[1, 2]`
+/// arrives as `\[1, 2\]`, backslashes injected into JSON — so it becomes the one form that
+/// both fences and stops escaping.
+///
+/// `ac:task-list`/`ac:task` are a CHECKLIST, the construct a working wiki puts its decisions
+/// and follow-ups in. Unmapped, each task degraded to bare text and three of them ran together
+/// into `Rotate the signing keyUpdate the runbookNotify the on-call rota` — the list, and with
+/// it which items were done, gone.
+const REWRITTEN_ELEMENTS: &[(&str, &str, &str)] = &[
+    ("ac:plain-text-body", "<pre><code>", "</code></pre>"),
+    ("ac:task-list", "<ul>", "</ul>"),
+    ("ac:task", "<li>", "</li>"),
+];
 
 /// Give every XHTML empty element an explicit end tag, because HTML has no such syntax.
 ///
@@ -208,8 +239,14 @@ const PLAIN_TEXT_BODY_OPEN: &str = "<ac:plain-text-body>";
 /// expanding those would invent content instead of preserving it. Comments and raw-text
 /// elements are skipped whole, since what is inside them is text and rewriting text is how a
 /// pre-parse pass corrupts a document.
-fn expand_self_closing(html: &str) -> std::borrow::Cow<'_, str> {
-    if !html.contains("/>") {
+fn rewrite_tags(html: &str) -> std::borrow::Cow<'_, str> {
+    let rewritten = |name: &str| {
+        REWRITTEN_ELEMENTS
+            .iter()
+            .find(|(tag, _, _)| *tag == name)
+            .map(|(_, open, close)| (*open, *close))
+    };
+    if !html.contains("/>") && !REWRITTEN_ELEMENTS.iter().any(|(t, _, _)| html.contains(t)) {
         return std::borrow::Cow::Borrowed(html);
     }
     let mut out = String::with_capacity(html.len());
@@ -222,6 +259,15 @@ fn expand_self_closing(html: &str) -> std::borrow::Cow<'_, str> {
             at = skip_past(html, lt, "-->");
             continue;
         }
+        if let Some(tag) = scan_end_tag(html, lt) {
+            at = tag.end + 1;
+            if let Some((_, close)) = rewritten(&html[tag.name.clone()]) {
+                out.push_str(&html[cursor..lt]);
+                out.push_str(close);
+                cursor = tag.end + 1;
+            }
+            continue;
+        }
         let Some(tag) = scan_start_tag(html, lt) else {
             at = lt + 1;
             continue;
@@ -230,6 +276,17 @@ fn expand_self_closing(html: &str) -> std::borrow::Cow<'_, str> {
         let name = &html[tag.name.clone()];
         if is_raw_text_element(name) {
             at = skip_past(html, at, &format!("</{}", name.to_ascii_lowercase()));
+            continue;
+        }
+        if let Some((open, close)) = rewritten(name) {
+            out.push_str(&html[cursor..lt]);
+            out.push_str(open);
+            // Written as empty, it still needs both halves, or the replacement opens an
+            // element nothing closes.
+            if tag.self_closing {
+                out.push_str(close);
+            }
+            cursor = tag.end + 1;
             continue;
         }
         if !tag.self_closing || is_void_element(name) {
@@ -246,6 +303,29 @@ fn expand_self_closing(html: &str) -> std::borrow::Cow<'_, str> {
     }
     out.push_str(&html[cursor..]);
     std::borrow::Cow::Owned(out)
+}
+
+/// Read the end tag opening at `lt`, or `None` when that is not what is there.
+///
+/// A rewritten element is matched by NAME on both halves. Testing for the literal
+/// `<ac:plain-text-body>` while replacing every `</ac:plain-text-body>` is what let one
+/// carrying an attribute go unmatched on open and matched on close, leaving an orphan
+/// `</code></pre>` that closed an enclosing block early and spilled its tail into the page.
+fn scan_end_tag(html: &str, lt: usize) -> Option<Tag> {
+    let rest = html.get(lt + 1..)?.strip_prefix('/')?;
+    if !rest.chars().next()?.is_ascii_alphabetic() {
+        return None;
+    }
+    let name_end = rest
+        .char_indices()
+        .find(|(_, c)| c.is_whitespace() || *c == '>')
+        .map(|(i, _)| i)?;
+    let gt = name_end + rest[name_end..].find('>')?;
+    Some(Tag {
+        name: lt + 2..lt + 2 + name_end,
+        end: lt + 2 + gt,
+        self_closing: false,
+    })
 }
 
 /// The index just past a LOWERCASE `needle`, or the end of the input when it never appears —
@@ -280,7 +360,7 @@ fn is_void_element(name: &str) -> bool {
     VOID.iter().any(|void| name.eq_ignore_ascii_case(void))
 }
 
-struct StartTag {
+struct Tag {
     name: std::ops::Range<usize>,
     /// Index of the `>` closing the tag.
     end: usize,
@@ -293,7 +373,7 @@ struct StartTag {
 /// self-closing only where the tokenizer would see one: `<ri:url ri:value="https://x/>y"/>`
 /// closes at the LAST `>` with the quoted `/>` left alone, and an unquoted `href=/a/` keeps
 /// its slash as value text instead of turning the element empty.
-fn scan_start_tag(html: &str, lt: usize) -> Option<StartTag> {
+fn scan_start_tag(html: &str, lt: usize) -> Option<Tag> {
     enum State {
         BeforeAttrName,
         AttrName,
@@ -316,7 +396,7 @@ fn scan_start_tag(html: &str, lt: usize) -> Option<StartTag> {
     for (i, c) in rest[name_end..].char_indices() {
         let end = lt + 1 + name_end + i;
         let close = |self_closing| {
-            Some(StartTag {
+            Some(Tag {
                 name: name.clone(),
                 end,
                 self_closing,
@@ -1071,8 +1151,8 @@ mod tests {
         );
         let md = html_to_markdown(task_html);
         assert_eq!(
-            md, "Ship the thing",
-            "a task keeps its prose and nothing of its identity:\n{md}"
+            md, "-   [ ] Ship the thing",
+            "a task keeps its prose and its state, and nothing of its identity:\n{md}"
         );
     }
 
@@ -1199,7 +1279,7 @@ mod tests {
             html_to_markdown(
                 r#"<ac:task-list><ac:task><ac:task-id/><ac:task-status>incomplete</ac:task-status><ac:task-body>Ship the thing</ac:task-body></ac:task></ac:task-list>"#
             ),
-            "Ship the thing"
+            "-   [ ] Ship the thing"
         );
         // And a resource identifier — handled by attribute, children ignored — takes the
         // rest of the paragraph with it.
@@ -1219,6 +1299,32 @@ mod tests {
         assert_eq!(
             html_to_markdown(r#"<p><img src="https://x.example/a.png" alt="ALT"/>after</p>"#),
             "![ALT](https://x.example/a.png)after"
+        );
+    }
+
+    /// A checklist is where a working page keeps its decisions and follow-ups. Left unmapped,
+    /// its items degraded to bare text and ran together into one string, taking the list —
+    /// and with it which items were done — with them.
+    #[test]
+    fn a_task_list_arrives_as_a_checklist() {
+        assert_eq!(
+            html_to_markdown(
+                r#"<ac:task-list><ac:task><ac:task-id>1</ac:task-id><ac:task-status>complete</ac:task-status><ac:task-body>Rotate the signing key</ac:task-body></ac:task><ac:task><ac:task-id>2</ac:task-id><ac:task-status>incomplete</ac:task-status><ac:task-body>Update the runbook</ac:task-body></ac:task></ac:task-list>"#
+            ),
+            "-   [x] Rotate the signing key\n-   [ ] Update the runbook"
+        );
+    }
+
+    /// A rewritten element is matched by NAME on both halves. Testing for the bare open token
+    /// while replacing every close tag left one carrying an attribute unmatched on open and
+    /// matched on close, so the replacement closed an enclosing block early.
+    #[test]
+    fn a_rewritten_element_is_matched_with_its_attributes() {
+        assert_eq!(
+            html_to_markdown(
+                r#"<ac:plain-text-body id="x"><![CDATA[let x = 1;]]></ac:plain-text-body>"#
+            ),
+            "```\nlet x = 1;\n```"
         );
     }
 
@@ -1752,7 +1858,7 @@ mod tests {
                 prop_assert!(lk_core::markdown::scan_defects(&md).is_empty());
             }
 
-            /// `expand_self_closing` walks bytes itself rather than parsing, so it owns every
+            /// `rewrite_tags` walks bytes itself rather than parsing, so it owns every
             /// slice boundary it takes — and a `&str` sliced off a char boundary is a panic,
             /// not a wrong answer. Adapters feed it whatever a server returned, so arbitrary
             /// text with multibyte characters pressed against tag syntax is the real input
@@ -1777,11 +1883,12 @@ mod tests {
                     format!("{text}<"),
                     format!("<![CDATA[{text}]]><y/>{tail}"),
                 ] {
-                    match expand_self_closing(&shape) {
+                    match rewrite_tags(&shape) {
                         std::borrow::Cow::Borrowed(same) => prop_assert_eq!(same, &shape),
-                        std::borrow::Cow::Owned(grown) => prop_assert!(
-                            shape.contains("/>") && grown.len() > shape.len(),
-                            "rewrote an input that spells no empty element:\n{}", shape
+                        std::borrow::Cow::Owned(_) => prop_assert!(
+                            shape.contains("/>")
+                                || REWRITTEN_ELEMENTS.iter().any(|(t, _, _)| shape.contains(t)),
+                            "rewrote an input naming nothing it rewrites:\n{}", shape
                         ),
                     }
                     let _ = html_to_markdown(&shape);

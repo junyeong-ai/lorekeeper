@@ -69,7 +69,17 @@ map to `RawItem`.
   CONSTRUCTION rather than by luck — and it holds for constructs nobody has enumerated yet,
   where a per-handler patch would not. It follows the tokenizer's tag states rather than
   matching `/>`, so a slash inside a quoted attribute value stays value text; void elements are
-  left alone (`<br></br>` is TWO breaks). The mirror case is a link carrying BOTH a target label
+  left alone (`<br></br>` is TWO breaks), and so is anything inside a comment or a RAW-TEXT
+  element (`script`/`style`/`textarea`/`title`/…), whose content is text — rewriting there
+  injected a `</div>` into a JavaScript string, the pre-parse pass corrupting the document it
+  exists to leave alone. The same pass renames the storage-format containers that HAVE an exact
+  HTML counterpart (`REWRITTEN_ELEMENTS`), because structure has to reach the converter as
+  structure: an `ac:task-list` must arrive as `<ul>` to come out a list, and unmapped its items
+  ran together into one string. Both halves are matched BY NAME — testing for a bare open token
+  while replacing every close tag left an attributed one unmatched on open and matched on close,
+  closing an enclosing block early. `ac:task-status` is NOT machine state: the reader sees a
+  ticked box, so it is translated to one, and only its `complete`/`incomplete` spelling is the
+  machine's. The mirror case is a link carrying BOTH a target label
   and the display text its author typed: emitted as siblings they weld (`Design Notesthe
   notes`), so the body contributes a separator and `ac:link` trims it back off, confining the
   space to the gap between them.
