@@ -266,7 +266,13 @@ fn trimmed_link(
 /// duplication that lets two scanners diverge, which is what put most of those defects here — or
 /// merging the passes, which would trade a call ORDER anyone can check by reading two lines for
 /// an invariant about a cursor that never rewinds. Neither is worth paying for a cosmetic gap
-/// that no source is known to reach.
+/// whose trigger no source is known to reach.
+///
+/// The ELEMENTS are reachable and it would be wrong to say otherwise — RSS full-text fetching
+/// pulls arbitrary web pages, where an `<iframe>` is ordinary. What has never been observed is
+/// the CONJUNCTION the gap needs: one of those four elements whose content ALSO spells CDATA
+/// syntax, since an iframe's fallback is a sentence about browsers when it is anything at all.
+/// The live vault carries none of either.
 fn normalize_storage_format(html: &str) -> std::borrow::Cow<'_, str> {
     let unwrapped = unwrap_cdata(html);
     match rewrite_tags(&unwrapped) {
@@ -1425,6 +1431,12 @@ mod tests {
         assert_eq!(
             html_to_markdown("<xmp>text <![CDATA[ unterminated</xmp>"),
             "text &lt;!\\[CDATA\\[ unterminated"
+        );
+        // `iframe` is the reachable one of the four — RSS full-text fetching pulls arbitrary
+        // pages — so it is pinned by name rather than left to stand behind `xmp`.
+        assert_eq!(
+            html_to_markdown("<iframe>fallback mentions <![CDATA[ never closes</iframe>"),
+            "fallback mentions &lt;!\\[CDATA\\[ never closes"
         );
         // A text box is RCDATA, so the entities decode again and nothing shows.
         assert_eq!(

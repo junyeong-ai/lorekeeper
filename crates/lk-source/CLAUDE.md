@@ -90,7 +90,9 @@ map to `RawItem`.
   KEPT rather than dropped, so nothing else masks the bug there. **One gap here is deliberate**:
   `unwrap_cdata` does not share the skips, so inside a RAWTEXT element it escapes text a parser
   would have read as text — a section that closes, and the bare opening token of one that does
-  not — leaving literal entities. Pinned by a test, argued in `normalize_storage_format`, left because closing it
+  not — leaving literal entities. The elements ARE reachable (`iframe` via RSS full-text
+  fetching); what is unobserved is one of them whose content also spells CDATA syntax. Pinned by
+  a test, argued in `normalize_storage_format`, left because closing it
   costs either a second scanner that can diverge or a merged walk whose ordering invariant is
   harder to audit than the call order it replaces. The same pass renames the storage-format containers that HAVE an exact
   HTML counterpart (`REWRITTEN_ELEMENTS`), because structure has to reach the converter as
