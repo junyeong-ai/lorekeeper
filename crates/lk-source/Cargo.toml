@@ -17,6 +17,7 @@ async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 htmd = { workspace = true }
+markup5ever_rcdom = { workspace = true }
 feed-rs = { workspace = true }
 dom_smoothie = { workspace = true }
 url = { workspace = true }

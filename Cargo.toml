@@ -31,6 +31,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 minijinja = { version = "2", features = ["loader", "json"] }
 blake3 = "1"
 htmd = "0.5"
+# Pinned to the rcdom instance htmd itself resolves — `htmd::Node` IS this crate's
+# `Node`, so a second copy would make the two types incompatible rather than merely
+# duplicated. A different version here is a loud compile error, never a silent drift.
+markup5ever_rcdom = "0.38"
 feed-rs = "2"
 dom_smoothie = "0.18"
 url = "2"

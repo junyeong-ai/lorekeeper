@@ -87,14 +87,22 @@ map to `RawItem`.
   name as a mere prefix ended the span at a person typing `</textareas>`, and `char::is_whitespace`
   ends it at `</textarea\u{3000}>` where a parser would not — the same early ending twice over,
   and everything after it gets rewritten. A text box is the one raw-text element whose content is
-  KEPT rather than dropped, so nothing else masks the bug there. The same pass renames the storage-format containers that HAVE an exact
+  KEPT rather than dropped, so nothing else masks the bug there. **One gap here is deliberate**:
+  `unwrap_cdata` does not share the skips, so CDATA inside a RAWTEXT element keeps literal
+  entities — pinned by a test, argued in `normalize_storage_format`, and left because closing it
+  costs either a second scanner that can diverge or a merged walk whose ordering invariant is
+  harder to audit than the call order it replaces. The same pass renames the storage-format containers that HAVE an exact
   HTML counterpart (`REWRITTEN_ELEMENTS`), because structure has to reach the converter as
   structure: an `ac:task-list` must arrive as `<ul>` to come out a list, and unmapped its items
   ran together into one string. Both halves are matched BY NAME — testing for a bare open token
   while replacing every close tag left an attributed one unmatched on open and matched on close,
   closing an enclosing block early. `ac:task-status` is NOT machine state: the reader sees a
   ticked box, so it is translated to one, and only its `complete`/`incomplete` spelling is the
-  machine's. The mirror case is a link carrying BOTH a target label
+  machine's. An `ac:adf-extension`'s children are ALTERNATIVE renderings of one thing (Cloud
+  emits both for every bodied extension, so both printed), and exactly one is emitted: the
+  `ac:adf-node`, falling back to `ac:adf-fallback` only where the node renders to nothing — asked
+  BY NAME, because a rule keyed to position carries the premise that the stand-in comes second,
+  and a premise that fails does so silently. The mirror case is a link carrying BOTH a target label
   and the display text its author typed: emitted as siblings they weld (`Design Notesthe
   notes`), so the body contributes a separator and `ac:link` trims it back off, confining the
   space to the gap between them.

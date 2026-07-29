@@ -1409,6 +1409,7 @@ dependencies = [
  "htmd",
  "jiff",
  "lk-core",
+ "markup5ever_rcdom",
  "proptest",
  "rand 0.9.4",
  "regex",

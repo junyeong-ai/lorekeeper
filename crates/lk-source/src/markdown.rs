@@ -179,30 +179,49 @@ fn spaced_link_body(
 /// as siblings printed a Cloud panel's prose twice, once from each — and Cloud emits both for
 /// every extension that has a body.
 ///
-/// So exactly one is emitted: the FIRST alternative that renders to anything. A fallback is by
-/// definition what to use when the thing before it cannot be used, so preferring the earlier one
-/// is the format's own rule rather than a guess about which reads better. It also makes the
-/// choice independent of what each alternative happens to contain — a fallback that is only a
-/// placeholder (`This macro is not available.`) never displaces the body it stands in for.
+/// So exactly one is emitted: the NODE's own rendering, and the fallback only where the node
+/// renders to nothing. A fallback is a stand-in, so it may never displace what it stands in for
+/// — a Cloud extension whose fallback reads `This macro is not available.` must still say what
+/// its body says. An `inlineCard` is the case from the other side: its node is nothing but
+/// attributes, so it renders empty and the fallback carries the only link there is.
 ///
-/// An `inlineCard` is the case the rule exists to cover from the other side: its node is nothing
-/// but attributes, so it renders to nothing and the fallback is the first alternative that says
-/// anything.
+/// Asking WHICH CHILD rather than which position is the point. Position is a premise — that the
+/// fallback comes second — and a premise that fails does so silently, inverting the rule into
+/// exactly the stand-in-wins outcome it was chosen to prevent. Naming the children has no
+/// premise to fail.
 fn one_adf_representation(
     handlers: &dyn htmd::element_handler::Handlers,
     element: htmd::Element,
 ) -> Option<htmd::element_handler::HandlerResult> {
-    let chosen = element
-        .node
-        .children
-        .borrow()
-        .iter()
-        // `handle`, not `walk_children`: the child's OWN rendering, so a child that is not an
-        // element wrapper — bare text — is not silently skipped over.
-        .filter_map(|child| handlers.handle(child).map(|result| result.content))
-        .find(|rendered| !rendered.trim().is_empty())
+    let children = element.node.children.borrow();
+    // `handle`, not `walk_children`: a child's OWN rendering, so one that is not an element
+    // wrapper — bare text — is not silently skipped over.
+    let render = |rendered: &std::rc::Rc<markup5ever_rcdom::Node>| {
+        handlers
+            .handle(rendered)
+            .map(|result| result.content)
+            .filter(|content| !content.trim().is_empty())
+    };
+    let named = |name: &'static str| {
+        children
+            .iter()
+            .filter(|child| element_name(child) == Some(name))
+            .find_map(render)
+    };
+    let chosen = named("ac:adf-node")
+        .or_else(|| named("ac:adf-fallback"))
+        // An extension holding neither still says whatever it holds.
+        .or_else(|| children.iter().find_map(render))
         .unwrap_or_default();
     Some(chosen.into())
+}
+
+/// The tag name of `node`, or `None` when it is not an element.
+fn element_name(node: &std::rc::Rc<markup5ever_rcdom::Node>) -> Option<&str> {
+    match &node.data {
+        markup5ever_rcdom::NodeData::Element { name, .. } => Some(&name.local),
+        _ => None,
+    }
 }
 
 /// See [`spaced_link_body`] — this is the half that keeps the separator internal.
@@ -234,6 +253,18 @@ fn trimmed_link(
 /// converter then MARKDOWN-ESCAPES it — `[1, 2]` arrives as `\[1, 2\]`, backslashes
 /// injected into JSON. Mapping it to `<pre><code>` is what makes the converter emit a fenced
 /// block and stop escaping, which is the only form that reproduces the source text.
+///
+/// **A known gap, left open deliberately.** `unwrap_cdata` does not share [`rewrite_tags`]'s
+/// comment and raw-text skipping, so a CDATA section inside a RAWTEXT element is unwrapped and
+/// escaped where a parser would have read it as text. The exposure is `xmp`/`iframe`/`noembed`/
+/// `noframes` — `textarea`/`title` are RCDATA and decode the entities back, and `script`/`style`/
+/// `noscript` are dropped — and the cost is a literal `&lt;` in the text. Nothing is deleted,
+/// nothing injected, no element left open, which is a different class from every other defect
+/// this file records. Closing it means either a second scanner tracking the same spans — the
+/// duplication that lets two scanners diverge, which is what put most of those defects here — or
+/// merging the passes, which would trade a call ORDER anyone can check by reading two lines for
+/// an invariant about a cursor that never rewinds. Neither is worth paying for a cosmetic gap
+/// that no source is known to reach.
 fn normalize_storage_format(html: &str) -> std::borrow::Cow<'_, str> {
     let unwrapped = unwrap_cdata(html);
     match rewrite_tags(&unwrapped) {
@@ -1316,6 +1347,17 @@ mod tests {
             html_to_markdown("<p>Before</p><ac:adf-extension>Bare text</ac:adf-extension>"),
             "Before\n\nBare text"
         );
+        // The children are asked WHICH they are, never where they sit — a rule keyed to
+        // position carries the premise that the fallback comes second, and a premise that
+        // fails does so silently, handing the stand-in the win it must never have.
+        assert_eq!(
+            html_to_markdown(concat!(
+                "<ac:adf-extension><ac:adf-fallback>STAND-IN</ac:adf-fallback>",
+                r#"<ac:adf-node type="panel"><ac:adf-content><p>The body.</p>"#,
+                "</ac:adf-content></ac:adf-node></ac:adf-extension>",
+            )),
+            "The body."
+        );
     }
 
     /// Only a section that CLOSES is one, and a document with no CDATA at all must come back
@@ -1346,6 +1388,26 @@ mod tests {
         );
         assert_eq!(html_to_markdown("<p>plain</p>"), "plain");
         assert_eq!(html_to_markdown("<p><![CDATA[]]>empty</p>"), "empty");
+    }
+
+    /// The one place the CDATA unwrap and the tag rewrite disagree, pinned so it is a decided
+    /// property rather than an accident — and so anything that changes it has to say why.
+    ///
+    /// `unwrap_cdata` does not share the raw-text skipping, so inside a RAWTEXT element it
+    /// escapes text a parser would have read as text. `xmp`/`iframe`/`noembed`/`noframes` are
+    /// the whole exposure and the cost is a literal entity; see `normalize_storage_format` for
+    /// why closing it is not worth what closing it would cost.
+    #[test]
+    fn cdata_inside_a_raw_text_element_keeps_its_entities() {
+        assert_eq!(
+            html_to_markdown("<xmp>sample <![CDATA[a < b & c]]> end</xmp>"),
+            "sample a &lt; b &amp; c end"
+        );
+        // A text box is RCDATA, so the entities decode again and nothing shows.
+        assert_eq!(
+            html_to_markdown("<textarea>note <![CDATA[a < b & c]]> end</textarea>"),
+            "note a < b & c end"
+        );
     }
 
     /// A resource identifier carries its label in an ATTRIBUTE, so degrading it to its
