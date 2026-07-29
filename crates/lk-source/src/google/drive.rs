@@ -213,6 +213,8 @@ impl Source for GoogleDriveSource {
 
         tracing::info!(count = files.len(), folder = %p.folder, "drive: files found");
 
+        let listed = files.len();
+        let mut undownloadable = 0usize;
         let mut items = Vec::new();
         for file in files {
             let download = async {
@@ -231,6 +233,7 @@ impl Source for GoogleDriveSource {
             let content = match download.await {
                 Ok(c) => c,
                 Err(e) => {
+                    undownloadable += 1;
                     tracing::warn!(
                         file = %file.name,
                         error = %e,
@@ -262,6 +265,8 @@ impl Source for GoogleDriveSource {
                 }),
             });
         }
+
+        crate::require_any_observation("listed file", undownloadable, listed)?;
 
         Ok(items)
     }

@@ -49,6 +49,66 @@ pub enum SourceError {
     Api { status: u16, message: String },
     #[error("parse: {0}")]
     Parse(String),
+    #[error("nothing observed: every {unit} failed ({failed} of {attempted}); see warnings above")]
+    NothingObserved {
+        unit: &'static str,
+        failed: usize,
+        attempted: usize,
+    },
+}
+
+/// Fail a source that reached NONE of the things it tried to read.
+///
+/// Adapters that fetch many independent things — RSS feeds, Drive files — isolate a
+/// per-item failure so one broken item does not cost the others their day. That isolation
+/// must stop short of the case where every item failed: the source's window was never
+/// observed, yet an empty success is indistinguishable from a quiet day. The ingest log
+/// records only that one bit, and `lore health` reads the log as its sole evidence a source
+/// is alive — so a source whose every URL has moved would report fresh indefinitely, with
+/// nothing else in the system able to notice.
+///
+/// One item reaching means the source WAS observed, however partially, and stays a success;
+/// the failures are already `tracing::warn`-ed individually. `attempted == 0` is a genuinely
+/// empty listing, not a failure.
+pub(crate) fn require_any_observation(
+    unit: &'static str,
+    failed: usize,
+    attempted: usize,
+) -> Result<(), SourceError> {
+    if attempted > 0 && failed == attempted {
+        return Err(SourceError::NothingObserved {
+            unit,
+            failed,
+            attempted,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::require_any_observation;
+
+    #[test]
+    fn one_success_among_failures_is_still_an_observation() {
+        assert!(require_any_observation("feed", 2, 3).is_ok());
+        assert!(require_any_observation("feed", 0, 3).is_ok());
+    }
+
+    #[test]
+    fn every_attempt_failing_is_not_an_observation() {
+        let err = require_any_observation("feed", 3, 3)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("every feed failed (3 of 3)"), "{err}");
+    }
+
+    /// Nothing to read is not the same as reading nothing — an empty folder or an empty
+    /// feed list must never be reported as a failure.
+    #[test]
+    fn attempting_nothing_is_not_a_failure() {
+        assert!(require_any_observation("file", 0, 0).is_ok());
+    }
 }
 
 #[derive(Debug, Clone)]

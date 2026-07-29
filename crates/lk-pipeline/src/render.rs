@@ -110,6 +110,14 @@ pub(crate) fn accumulate_concepts(
     let mut seen = std::collections::HashSet::new();
     let mut concepts = Vec::new();
 
+    // Two citations are the same citation when they address the same PAGE, and the vault
+    // decides that at the id level — the graph resolves a destination to `slugify` of its
+    // stem, so `Bad_Name.md` and `bad-name.md` are one page to every consumer that counts
+    // edges. Deduping on the raw stem instead would let a non-canonical spelling ride
+    // alongside the canonical one, and since these links only ever accumulate, the double
+    // citation would be permanent.
+    let mut claim = |stem: &str| lk_core::concept::slugify(stem).is_some_and(|id| seen.insert(id));
+
     let carried = cited.map(link::extract_page_links).unwrap_or_default();
     for cite in carried {
         let Some(resolved) = link::resolve_dest(page, &cite.dest) else {
@@ -123,7 +131,10 @@ pub(crate) fn accumulate_concepts(
         let Some(slug) = resolved.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
-        if seen.insert(slug.to_string()) {
+        // The destination is kept exactly as written. Rewriting it to the canonical
+        // spelling here would repoint a citation on the strength of a name, which is
+        // `lore graph normalize`'s job — it renames the page in the same pass.
+        if claim(slug) {
             concepts.push(crate::concept_draft::ConceptIdentity {
                 name: cite.text,
                 slug: slug.to_string(),
@@ -132,7 +143,7 @@ pub(crate) fn accumulate_concepts(
     }
 
     for concept in extracted {
-        if seen.insert(concept.slug.clone()) {
+        if claim(&concept.slug) {
             concepts.push(concept);
         }
     }
@@ -531,6 +542,19 @@ mod tests {
                 ("Wero".to_string(), "wero".to_string()),
             ],
             "the newest extraction adds to the page's citations; it never replaces them"
+        );
+    }
+
+    /// A citation whose destination is not the canonical spelling still addresses the same
+    /// PAGE — that is how the graph counts it — so re-reporting it must not add a second
+    /// link beside it. Accumulation makes any such double permanent.
+    #[test]
+    fn a_non_canonical_destination_is_the_same_citation_as_its_canonical_form() {
+        let cited = "- [Bad Name](../../wiki/concepts/Bad_Name.md)\n";
+        assert_eq!(
+            accumulated(Some(cited), vec![identity("Bad Name", "bad-name")]),
+            vec![("Bad Name".to_string(), "Bad_Name".to_string())],
+            "one citation, kept at the address the page already carries"
         );
     }
 

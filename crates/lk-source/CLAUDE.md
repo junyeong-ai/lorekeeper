@@ -19,6 +19,14 @@ map to `RawItem`.
   target day's bounds in the configured timezone — never `now`. Time-windowed adapters
   must build their windows from it so `lore ingest --date <past>` backfills the right day
   (the pipeline still date-filters afterward).
+- **Per-item isolation stops where NOTHING was reached.** RSS skips an unreachable feed and
+  Drive skips an undownloadable file so one broken item doesn't cost the others their day.
+  Both then go through `require_any_observation`: if EVERY attempt failed the adapter returns
+  `SourceError::NothingObserved` instead of an empty success. The window was never observed,
+  and downstream cannot tell that apart from a quiet day — `lore ingest` logs `Skipped`
+  either way, and `lore health` reads that log as its only evidence the source is alive. An
+  empty listing (nothing attempted) is genuinely empty and stays a success. A new
+  many-item adapter inherits the guarantee by counting its failures and calling the rule.
 - **Ownership (root invariant) — the per-adapter exact-match fields**: each adapter sets
   `RawItem::is_self` by EXACT-matching its structured authorship field to
   `ExtractContext::identity` — Gmail `From` vs `identity.email`, Slack author id vs

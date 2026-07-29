@@ -158,10 +158,12 @@ impl Source for RssSource {
         let (min, max) = ctx.day_window(p.lookback_hours, 0)?;
 
         let mut items = Vec::new();
+        let mut unreachable = 0usize;
         for feed_cfg in &p.feeds {
             let feed = match self.fetch_feed(&feed_cfg.url).await {
                 Ok(f) => f,
                 Err(e) => {
+                    unreachable += 1;
                     // One unreachable/malformed feed must not abort the source.
                     tracing::warn!(
                         feed = %feed_cfg.id,
@@ -233,9 +235,12 @@ impl Source for RssSource {
             tracing::info!(feed = %feed_cfg.id, kept, "rss: feed extracted");
         }
 
+        crate::require_any_observation("feed", unreachable, p.feeds.len())?;
+
         tracing::info!(
             total = items.len(),
             feeds = p.feeds.len(),
+            unreachable,
             "rss: extraction complete"
         );
         Ok(items)
@@ -320,6 +325,44 @@ fn map_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Per-feed isolation must not extend to a source that reached NOTHING. An empty
+    /// success there is indistinguishable from a quiet day, and the ingest log records only
+    /// that one bit — so `lore health`, whose only evidence is that log, would report a
+    /// source whose every feed URL has moved as fresh indefinitely.
+    #[tokio::test]
+    async fn a_source_whose_every_feed_is_unreachable_fails_rather_than_reporting_nothing() {
+        // Connection-refused on the discard port: no network egress, no timeout wait.
+        let params = serde_json::json!({
+            "feeds": [
+                {"id": "a", "url": "http://127.0.0.1:1/a.xml"},
+                {"id": "b", "url": "http://127.0.0.1:1/b.xml"},
+            ]
+        });
+        let source = RssSource::new(crate::build_http_client().unwrap());
+        let err = source
+            .extract(&params, &test_ctx())
+            .await
+            .expect_err("every feed failed, so nothing was observed");
+        assert!(
+            err.to_string().contains("every feed failed (2 of 2)"),
+            "{err}"
+        );
+    }
+
+    fn test_ctx() -> ExtractContext {
+        ExtractContext {
+            target_date: jiff::civil::date(2026, 5, 23),
+            timezone: jiff::tz::TimeZone::UTC,
+            locale: lk_core::i18n::Locale::En,
+            identity: lk_core::config::Identity {
+                name: "T".into(),
+                email: "t@example.com".into(),
+                slack_id: None,
+            },
+            vault_root: std::path::PathBuf::from("."),
+        }
+    }
 
     fn window() -> (jiff::Timestamp, jiff::Timestamp) {
         (

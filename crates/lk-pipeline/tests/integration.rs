@@ -3948,3 +3948,70 @@ async fn applying_a_result_adds_to_a_pages_citations_rather_than_replacing_them(
         "a carried citation must not resurrect a page from its link text: {written:?}"
     );
 }
+
+/// The document path has its own concept loop, and a fix applied to the daily one has
+/// silently skipped it before. A document page is a citation source to the graph exactly
+/// like a daily page, and the manual source re-renders it whenever the note is re-dropped
+/// with an edit — so the same loss is live here and needs its own guard.
+#[tokio::test]
+async fn a_re_extracted_document_keeps_the_citations_the_one_before_it_created() {
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let mut config = base_config(vault);
+    config.sources.get_mut("test-source").unwrap().source_type = SourceType::Manual;
+    let source = config.sources.get("test-source").unwrap().clone();
+    let options = IngestOptions {
+        target_date: None,
+        today: far_future(),
+        dry_run: false,
+    };
+    let ts: jiff::Timestamp = "2026-05-23T10:00:00Z".parse().unwrap();
+    let llm = ConceptsPerCall::build(vec![vec!["First Concept"], vec!["Second Concept"]]);
+
+    let first = Pipeline::new(vault, build_ctx(&config, llm.clone()))
+        .plan(
+            "test-source",
+            &source,
+            vec![raw_item("A Note", "original body", "DOC-A", ts)],
+            &options,
+        )
+        .await
+        .unwrap();
+    let page = &first.document_pages[0];
+    assert!(
+        page.content.contains("first-concept.md"),
+        "the first extraction must be cited: {}",
+        page.content
+    );
+
+    let path = vault.join(page.path.to_string());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, &page.content).unwrap();
+
+    // A separate run, as every `lore ingest` is: the same note re-dropped with edited
+    // content, which is a new extraction input for a document that already has a page.
+    let second = Pipeline::new(vault, build_ctx(&config, llm))
+        .plan(
+            "test-source",
+            &source,
+            vec![raw_item("A Note", "edited body", "DOC-A", ts)],
+            &options,
+        )
+        .await
+        .unwrap();
+    let rendered = &second.document_pages[0].content;
+    assert_eq!(
+        second.document_pages[0].path.to_string(),
+        page.path.to_string(),
+        "the edited note must re-render the same document page, not a disambiguated one"
+    );
+    assert!(
+        rendered.contains("second-concept.md"),
+        "the newest extraction must be cited: {rendered}"
+    );
+    assert!(
+        rendered.contains("first-concept.md"),
+        "the earlier extraction's concept page still exists — dropping its citation \
+         leaves it asserting knowledge with no evidence: {rendered}"
+    );
+}

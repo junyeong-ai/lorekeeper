@@ -334,10 +334,25 @@ fn run_inner(
             has && (fixed.is_none() || has_unfixable)
         }
         GraphCommand::Normalize { fix } => {
+            // Rename candidates come from the analysis scope: only the wiki's own pages
+            // are addressed by slug. A daily or synthesis page's filename is a DATE
+            // (`2026-W30`), which slugifying would lowercase into a path the pipeline
+            // does not write.
             let renames = normalize::scan(&pages);
             let has = !renames.is_empty();
             let applied = if fix && has {
-                Some(normalize::apply(&renames, &pages, &rc.root).map_err(|e| format!("{e}"))?)
+                // Citations of a renamed page live anywhere in the vault — a daily page
+                // is the usual case — so the rewrite reads every page dir, the same
+                // full-vault view `merge` uses. Rewriting only the rename scope would
+                // leave those citations pointing at a file that no longer exists, and
+                // `graph broken` matches at the id level so it would not report them.
+                let mut cfg = rc.graph.clone();
+                cfg.scope.dirs = vault_page_dirs(&rc.root, &rc.vault_dirs);
+                let everywhere = scan::scan_vault(&rc.root, &cfg).map_err(|e| format!("{e}"))?;
+                Some(
+                    normalize::apply(&renames, &everywhere, &rc.root)
+                        .map_err(|e| format!("{e}"))?,
+                )
             } else {
                 None
             };

@@ -59,6 +59,14 @@ on-disk state, never from a cached snapshot.
 - **Mutations gated**: `index_drift::fix()`, `normalize::apply()`, and
   `backlinks::sync_concept_backlinks` touch the filesystem — the first two only
   with `--fix`, backlinks only without `--dry-run`. All renames pre-checked.
+- **`normalize` reads two different page sets, and conflating them is a defect.** Rename
+  candidates come from the ANALYSIS scope (`graph.scope.dirs`, the wiki): only the wiki's
+  pages are addressed by slug, and slugifying a dated filename elsewhere (`2026-W30` →
+  `2026-w30`) would rewrite it into a path the pipeline never writes. The link rewrite
+  reads EVERY page dir, like `merge`, because a citation of a renamed page usually lives
+  outside the wiki — a daily page is the ordinary case. Rewriting only the rename scope
+  strands those citations, and `broken` cannot report it: it matches destinations at
+  `path_slug`, so a link to the old spelling still resolves to the renamed page's id.
 - **Age is not a signal.** There is deliberately no staleness/decay check: reference
   knowledge does not expire by going unmentioned, so "old and uncited" identifies
   nothing actionable and would misdirect curator attention. A concept becomes due for

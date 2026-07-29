@@ -16,8 +16,15 @@ use std::process::Command;
 const EXEMPT: &[(&str, &str)] = &[("help", "clap's own; not a pipeline operation")];
 
 /// Subcommand names as clap prints them under `Commands:` in the top-level help.
+///
+/// Colour is forced off on the child: anstream honours an ambient `CLICOLOR_FORCE`, which
+/// would wrap the `Commands:` header in SGR escapes and leave this parsing nothing — a
+/// failure blaming a help-layout change for the developer's terminal settings.
 fn subcommands() -> Vec<String> {
     let out = Command::new(env!("CARGO_BIN_EXE_lore"))
+        .env("NO_COLOR", "1")
+        .env_remove("CLICOLOR_FORCE")
+        .env_remove("FORCE_COLOR")
         .arg("--help")
         .output()
         .expect("run lore --help");
