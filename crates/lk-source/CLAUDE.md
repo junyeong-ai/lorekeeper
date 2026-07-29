@@ -55,6 +55,21 @@ map to `RawItem`.
   degrades to a PARAGRAPH, which the converter then markdown-escapes (`[1, 2]` → `\[1, 2\]`,
   backslashes injected into JSON), so it is mapped to `<pre><code>` — the one form that both
   fences and stops escaping. All of this was invisible until a real page was drained.
+- **An XHTML empty element must be made empty before anything reads it.** HTML has no
+  self-closing syntax for a non-void element, so a parser reads `<ac:parameter ac:name="icon"/>`
+  as an OPEN tag and hands it every following sibling as a CHILD. Both rules above answer from
+  the element ALONE — one drops it, the other replaces it with an attribute — so those adopted
+  siblings are discarded with it: an unset parameter (which Confluence writes exactly this way,
+  BEFORE the body) deletes the macro's entire content, and a self-closed `<ac:task-id/>` deletes
+  the task list. `normalize_storage_format` therefore gives every non-void self-closed tag an
+  explicit end tag, which is what makes ignoring a handled element's children correct BY
+  CONSTRUCTION rather than by luck — and it holds for constructs nobody has enumerated yet,
+  where a per-handler patch would not. It follows the tokenizer's tag states rather than
+  matching `/>`, so a slash inside a quoted attribute value stays value text; void elements are
+  left alone (`<br></br>` is TWO breaks). The mirror case is a link carrying BOTH a target label
+  and the display text its author typed: emitted as siblings they weld (`Design Notesthe
+  notes`), so the body contributes a separator and `ac:link` trims it back off, confining the
+  space to the gap between them.
 - **Ownership (root invariant) — the per-adapter exact-match fields**: each adapter sets
   `RawItem::is_self` by EXACT-matching its structured authorship field to
   `ExtractContext::identity` — Gmail `From` vs `identity.email`, Slack author id vs

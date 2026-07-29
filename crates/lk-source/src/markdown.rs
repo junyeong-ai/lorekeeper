@@ -26,6 +26,11 @@ pub fn html_to_markdown(html: &str) -> String {
         .add_handler(vec!["img"], img_without_data_uris)
         .add_handler(MACHINE_STATE_ELEMENTS.to_vec(), drop_element)
         .add_handler(vec!["ri:page", "ri:attachment"], resource_label)
+        .add_handler(
+            vec!["ac:link-body", "ac:plain-text-link-body"],
+            spaced_link_body,
+        )
+        .add_handler(vec!["ac:link"], trimmed_link)
         .build();
     converter
         .convert(&normalize_storage_format(html))
@@ -90,15 +95,53 @@ fn resource_label(
     Some(label.into())
 }
 
+/// A link may carry BOTH halves of a reference: the label of the page it points at and the
+/// display text its author typed — `<ac:link><ri:page ri:content-title="Design Notes"/>
+/// <ac:plain-text-link-body><![CDATA[the notes]]></ac:plain-text-link-body></ac:link>`.
+/// Rendered as plain siblings they weld into `Design Notesthe notes`, a word that is on
+/// neither the page nor in any vocabulary a reader or an extractor would recognise — the same
+/// defect the machine-state rule exists to prevent, arriving from the opposite direction. Both
+/// halves are text the reader saw, so both are kept, separated.
+///
+/// The space is emitted by the BODY and trimmed off again by the LINK, which is what confines
+/// it to the gap BETWEEN the two: a link with no resource label — an anchor link, the form
+/// where the body stands alone — renders its body and trims the leading space away, so it
+/// never gains a stray one before the sentence's next character.
+fn spaced_link_body(
+    handlers: &dyn htmd::element_handler::Handlers,
+    element: htmd::Element,
+) -> Option<htmd::element_handler::HandlerResult> {
+    let body = handlers.walk_children(element.node).content;
+    let body = body.trim();
+    Some(if body.is_empty() {
+        String::new().into()
+    } else {
+        format!(" {body}").into()
+    })
+}
+
+/// See [`spaced_link_body`] — this is the half that keeps the separator internal.
+fn trimmed_link(
+    handlers: &dyn htmd::element_handler::Handlers,
+    element: htmd::Element,
+) -> Option<htmd::element_handler::HandlerResult> {
+    Some(handlers.walk_children(element.node).content.trim().into())
+}
+
 /// Rewrite the parts of Confluence storage format that an HTML parser reads wrongly, so the
-/// shared converter sees ordinary HTML. Two rewrites, both literal-token exact rather than
-/// guesses, and an input carrying neither is returned untouched.
+/// shared converter sees ordinary HTML. Three rewrites, all literal-token exact rather than
+/// guesses, and an input carrying none is returned untouched.
 ///
 /// **CDATA.** Storage format is XHTML and puts a code macro's body — and a link's display
 /// text — in `<![CDATA[…]]>`. An HTML5 parser has no CDATA outside foreign content: it reads
 /// the whole section as a bogus COMMENT and drops the contents, so every Confluence code
 /// block arrived empty, silently, which on an engineering wiki is the most valuable text on
 /// the page. CDATA cannot nest and ends at the first `]]>`.
+///
+/// **An empty element is empty.** See [`expand_self_closing`] — the rewrite that decides
+/// whether the content after it survives at all. It runs AFTER the CDATA unwrap, which
+/// escapes `<`/`>`, so tag-shaped text recovered from a code sample is never rescanned as
+/// markup.
 ///
 /// **A code body is a code block.** `<ac:plain-text-body>` is where a `code`/`noformat`
 /// macro keeps its body; left as an unknown element it degrades to a paragraph, and the
@@ -107,17 +150,162 @@ fn resource_label(
 /// block and stop escaping, which is the only form that reproduces the source text.
 fn normalize_storage_format(html: &str) -> std::borrow::Cow<'_, str> {
     let unwrapped = unwrap_cdata(html);
-    if !unwrapped.contains(PLAIN_TEXT_BODY_OPEN) {
-        return unwrapped;
+    let expanded = match expand_self_closing(&unwrapped) {
+        std::borrow::Cow::Borrowed(_) => unwrapped,
+        std::borrow::Cow::Owned(owned) => std::borrow::Cow::Owned(owned),
+    };
+    if !expanded.contains(PLAIN_TEXT_BODY_OPEN) {
+        return expanded;
     }
     std::borrow::Cow::Owned(
-        unwrapped
+        expanded
             .replace(PLAIN_TEXT_BODY_OPEN, "<pre><code>")
             .replace("</ac:plain-text-body>", "</code></pre>"),
     )
 }
 
 const PLAIN_TEXT_BODY_OPEN: &str = "<ac:plain-text-body>";
+
+/// Give every XHTML empty element an explicit end tag, because HTML has no such syntax.
+///
+/// `<ac:parameter ac:name="icon"/>` is an EMPTY element in XHTML. An HTML parser has no
+/// self-closing form for a non-void element: it reads that as an OPEN tag and hands it every
+/// following sibling as a CHILD. The handlers above answer from the element alone — one drops
+/// it, the other replaces it with an attribute — so those adopted siblings are discarded
+/// along with it. An empty parameter ahead of a macro's body therefore deletes the body, and
+/// a self-closed `<ac:task-id/>` deletes the whole task list. Confluence writes empty elements
+/// this way as a matter of course, so this is the ordinary shape of the input rather than a
+/// corner case, and the loss is silent and total.
+///
+/// Fixing it in the parse rather than in each handler is what makes it hold for constructs
+/// nobody has enumerated yet: afterwards an element the source wrote as empty IS empty, so
+/// ignoring a handled element's children is correct by construction rather than by luck.
+///
+/// Void elements keep their form: `<br></br>` is TWO line breaks to an HTML parser, so
+/// expanding those would invent content instead of preserving it.
+fn expand_self_closing(html: &str) -> std::borrow::Cow<'_, str> {
+    if !html.contains("/>") {
+        return std::borrow::Cow::Borrowed(html);
+    }
+    let mut out = String::with_capacity(html.len());
+    let mut cursor = 0;
+    let mut at = 0;
+    while let Some(offset) = html[at..].find('<') {
+        let lt = at + offset;
+        if html[lt..].starts_with("<!--") {
+            // A comment's contents are not markup, so a `/>` inside one is not a tag.
+            at = html[lt..]
+                .find("-->")
+                .map_or(html.len(), |end| lt + end + "-->".len());
+            continue;
+        }
+        let Some(tag) = scan_start_tag(html, lt) else {
+            at = lt + 1;
+            continue;
+        };
+        at = tag.end + 1;
+        if !tag.self_closing || is_void_element(&html[tag.name.clone()]) {
+            continue;
+        }
+        out.push_str(&html[cursor..=tag.end]);
+        out.push_str("</");
+        out.push_str(&html[tag.name.clone()]);
+        out.push('>');
+        cursor = tag.end + 1;
+    }
+    if cursor == 0 {
+        return std::borrow::Cow::Borrowed(html);
+    }
+    out.push_str(&html[cursor..]);
+    std::borrow::Cow::Owned(out)
+}
+
+/// Elements an HTML parser closes on its own, for which `<x/>` is already the whole element.
+fn is_void_element(name: &str) -> bool {
+    const VOID: &[&str] = &[
+        "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param",
+        "source", "track", "wbr",
+    ];
+    VOID.iter().any(|void| name.eq_ignore_ascii_case(void))
+}
+
+struct StartTag {
+    name: std::ops::Range<usize>,
+    /// Index of the `>` closing the tag.
+    end: usize,
+    self_closing: bool,
+}
+
+/// Read the start tag opening at `lt`, following the HTML tokenizer's tag states.
+///
+/// Those states are exactly what decides the question this is asked, so a `/` counts as
+/// self-closing only where the tokenizer would see one: `<ri:url ri:value="https://x/>y"/>`
+/// closes at the LAST `>` with the quoted `/>` left alone, and an unquoted `href=/a/` keeps
+/// its slash as value text instead of turning the element empty.
+fn scan_start_tag(html: &str, lt: usize) -> Option<StartTag> {
+    enum State {
+        BeforeAttrName,
+        AttrName,
+        BeforeAttrValue,
+        Quoted(char),
+        Unquoted,
+        SelfClosing,
+    }
+    let rest = &html[lt + 1..];
+    if !rest.chars().next()?.is_ascii_alphabetic() {
+        return None;
+    }
+    let name_end = rest
+        .char_indices()
+        .find(|(_, c)| c.is_whitespace() || *c == '/' || *c == '>')
+        .map(|(i, _)| i)?;
+    let name = lt + 1..lt + 1 + name_end;
+
+    let mut state = State::BeforeAttrName;
+    for (i, c) in rest[name_end..].char_indices() {
+        let end = lt + 1 + name_end + i;
+        let close = |self_closing| {
+            Some(StartTag {
+                name: name.clone(),
+                end,
+                self_closing,
+            })
+        };
+        if let State::SelfClosing = state {
+            if c == '>' {
+                return close(true);
+            }
+            state = State::BeforeAttrName;
+        }
+        match state {
+            State::Quoted(quote) => {
+                if c == quote {
+                    state = State::BeforeAttrName;
+                }
+            }
+            State::Unquoted => match c {
+                '>' => return close(false),
+                c if c.is_whitespace() => state = State::BeforeAttrName,
+                _ => {}
+            },
+            State::BeforeAttrValue => match c {
+                '"' | '\'' => state = State::Quoted(c),
+                '>' => return close(false),
+                c if c.is_whitespace() => {}
+                _ => state = State::Unquoted,
+            },
+            State::BeforeAttrName | State::AttrName => match c {
+                '>' => return close(false),
+                '/' => state = State::SelfClosing,
+                '=' if matches!(state, State::AttrName) => state = State::BeforeAttrValue,
+                c if c.is_whitespace() => state = State::BeforeAttrName,
+                _ => state = State::AttrName,
+            },
+            State::SelfClosing => unreachable!("resolved above"),
+        }
+    }
+    None
+}
 
 /// Replace every CDATA section with its text, escaped for HTML — see
 /// [`normalize_storage_format`] for why.
@@ -904,6 +1092,97 @@ mod tests {
                 r#"<p>Ask <ac:link><ri:user ri:account-id="557058:abc"/></ac:link></p>"#
             ),
             "Ask"
+        );
+    }
+
+    /// An XHTML empty element must not adopt the content that follows it. HTML has no
+    /// self-closing form for a non-void element, so `<ac:parameter …/>` opens one and takes
+    /// every following sibling as a child — which the handler that drops it then drops too.
+    /// Confluence writes an unset parameter exactly this way and puts parameters BEFORE the
+    /// body, so the macro's entire content disappeared: total, silent, and on the ordinary
+    /// shape of the input rather than an exotic one.
+    #[test]
+    fn an_empty_element_does_not_swallow_what_follows_it() {
+        assert_eq!(
+            html_to_markdown(
+                r#"<ac:structured-macro ac:name="info"><ac:parameter ac:name="icon"/><ac:rich-text-body><p>IMPORTANT NOTICE</p></ac:rich-text-body></ac:structured-macro>"#
+            ),
+            "IMPORTANT NOTICE"
+        );
+        // The same shape costs a code macro the body the CDATA fix exists to recover.
+        assert_eq!(
+            html_to_markdown(
+                r#"<ac:structured-macro ac:name="code"><ac:parameter ac:name="language"/><ac:plain-text-body><![CDATA[let x = 1;]]></ac:plain-text-body></ac:structured-macro>"#
+            ),
+            "```\nlet x = 1;\n```"
+        );
+        // A task list is deleted whole, since its id opens before the body that names it.
+        assert_eq!(
+            html_to_markdown(
+                r#"<ac:task-list><ac:task><ac:task-id/><ac:task-status>incomplete</ac:task-status><ac:task-body>Ship the thing</ac:task-body></ac:task></ac:task-list>"#
+            ),
+            "Ship the thing"
+        );
+        // And a resource identifier — handled by attribute, children ignored — takes the
+        // rest of the paragraph with it.
+        assert_eq!(
+            html_to_markdown(
+                r#"<p>A <ac:link><ri:page ri:content-title="T"/></ac:link> <span>and B</span></p>"#
+            ),
+            "A T and B"
+        );
+    }
+
+    /// Void elements keep their form: an HTML parser reads `<br></br>` as TWO breaks, so
+    /// expanding those would invent content instead of preserving it.
+    #[test]
+    fn a_void_element_is_not_given_a_closing_tag() {
+        assert_eq!(html_to_markdown("<p>one<br/>two</p>"), "one  \ntwo");
+        assert_eq!(
+            html_to_markdown(r#"<p><img src="https://x.example/a.png" alt="ALT"/>after</p>"#),
+            "![ALT](https://x.example/a.png)after"
+        );
+    }
+
+    /// The scan follows the tokenizer's tag states, so a `/>` counts only where the parser
+    /// would see one — inside a quoted attribute value it is value text, and a URL ending in
+    /// a slash does not turn its element empty.
+    #[test]
+    fn a_slash_inside_an_attribute_value_does_not_close_the_tag() {
+        assert_eq!(
+            html_to_markdown(r#"<p>A <ac:link><ri:page ri:content-title="a/>b"/></ac:link> B</p>"#),
+            "A a/>b B"
+        );
+        // A comment's contents are not markup either.
+        assert_eq!(
+            html_to_markdown(r#"<p>A<!-- <ac:parameter ac:name="x"/> -->B</p>"#),
+            "AB"
+        );
+    }
+
+    /// A link can carry the label of its target AND the display text its author typed. Left
+    /// as siblings they weld into one word that is on neither the page nor in any vocabulary
+    /// downstream recognises — so they are separated, and a link carrying only one of the two
+    /// gains no stray space from the rule.
+    #[test]
+    fn a_link_keeps_its_target_and_its_display_text_apart() {
+        assert_eq!(
+            html_to_markdown(
+                r#"<p>See <ac:link><ri:page ri:content-title="Design Notes"/><ac:plain-text-link-body><![CDATA[the notes]]></ac:plain-text-link-body></ac:link>.</p>"#
+            ),
+            "See Design Notes the notes."
+        );
+        assert_eq!(
+            html_to_markdown(
+                r#"<p>See <ac:link ac:anchor="Sec"><ac:plain-text-link-body><![CDATA[that section]]></ac:plain-text-link-body></ac:link>.</p>"#
+            ),
+            "See that section."
+        );
+        assert_eq!(
+            html_to_markdown(
+                r#"<p>See <ac:link><ri:page ri:content-title="Design Notes"/></ac:link>.</p>"#
+            ),
+            "See Design Notes."
         );
     }
 
