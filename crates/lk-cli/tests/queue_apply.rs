@@ -234,3 +234,51 @@ fn a_result_whose_section_no_longer_exists_is_dropped_not_retried_forever() {
         ws.read(PAGE)
     );
 }
+
+/// A result is a VALUE IN FLIGHT, not a request for work. The page already carrying the
+/// completion marker for this input does not make the result redundant — for concepts the
+/// marker is stamped by the very edit that writes them, and a drain following the skill's
+/// own step-3c table stamps it before `queue apply` ever runs. Dropping such a result
+/// discards the extraction permanently and silently: the marker keeps the empty section
+/// looking cached, so nothing re-enqueues, and the command still exits 0.
+#[test]
+fn a_result_lands_even_when_its_page_is_already_marked_done() {
+    let ws = Workspace::new();
+    ws.write(
+        PAGE,
+        "---\nid: notes-2026-05-23\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n  concepts_done: \"h\"\n---\n\n\
+         ## Related Concepts\n\n## Key Events\n\n- a\n",
+    );
+    ws.drop_result("ext-1", PAGE, "h", "Concept A");
+
+    let out = ws.run(&["queue", "apply"]);
+    assert!(out.status.success(), "queue apply must succeed");
+    assert!(
+        ws.read(PAGE).contains("wiki/concepts/concept-a.md"),
+        "the citation must be written:\n{}",
+        ws.read(PAGE)
+    );
+    assert!(
+        ws.vault().join("wiki/concepts/concept-a.md").exists(),
+        "and the concept page it points at must exist"
+    );
+}
+
+/// Re-applying a result that already landed reproduces the page rather than doubling it —
+/// which is what makes it safe for a result to ignore the completion marker.
+#[test]
+fn applying_the_same_result_twice_is_idempotent() {
+    let ws = Workspace::new();
+    ws.write(PAGE, &daily_page("h"));
+    ws.drop_result("ext-1", PAGE, "h", "Concept A");
+    assert!(ws.run(&["queue", "apply"]).status.success());
+    let once = ws.read(PAGE);
+
+    ws.drop_result("ext-1", PAGE, "h", "Concept A");
+    assert!(ws.run(&["queue", "apply"]).status.success());
+    assert_eq!(
+        ws.read(PAGE),
+        once,
+        "a re-applied result must change nothing"
+    );
+}

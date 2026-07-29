@@ -12,19 +12,27 @@ fn prune_cutoff_secs(now_secs: i64, retention_days: i64) -> i64 {
         .max(0)
 }
 
-/// Line numbers of the newest entry for each source, which retention must keep whatever
-/// their age.
+/// Line numbers retention must keep whatever their age: each source's newest COLLECTED
+/// entry, which is the exact line `IngestLog::find_last_collection` returns.
 ///
-/// The ingest log is two things at once: a HISTORY of runs, and the state store
-/// `IngestLog::find_last_collection` reads to answer when a source was last collected. A
-/// retention horizon may prune the history; pruning the state would make `lore health`'s
-/// verdict a function of how long a source has been broken. Past the horizon, every entry
-/// for a dead source disappears and it stops reading `stale` (which exits non-zero) and
-/// starts reading "never ingested" (which does not, without `--strict`) — the alarm turns
-/// itself off precisely as the problem gets older.
-fn newest_entry_per_source(entries: &[(usize, lk_vault::LogEntry)]) -> HashSet<usize> {
+/// The ingest log is two things at once — a HISTORY of runs, and the state store `lore
+/// health` and `lore status` read. A retention horizon may prune the history; pruning the
+/// state would make health's verdict a function of how long a source has been broken.
+///
+/// It has to be the newest COLLECTED entry, not merely the newest one. A source failing
+/// daily has a recent `failed` entry and a much older success, and `find_last_collection`
+/// skips failures — so protecting the newest line protects a `failed` the reader ignores
+/// while the success it actually wants ages past the cutoff and is pruned. The source then
+/// stops reading `stale` (which exits non-zero) and starts reading "never ingested" (which
+/// does not, without `--strict`): the alarm turning itself off precisely as the problem
+/// gets older, which is the whole thing this exists to prevent. A source that has never
+/// been collected has no state to protect, and "never ingested" is then the truth.
+fn newest_collection_per_source(entries: &[(usize, lk_vault::LogEntry)]) -> HashSet<usize> {
     let mut newest: HashMap<&str, (i64, usize)> = HashMap::new();
     for (line_no, entry) in entries {
+        if !entry.status.is_collected() {
+            continue;
+        }
         let seen = (entry.timestamp.as_second(), *line_no);
         newest
             .entry(entry.source_id.as_str())
@@ -60,7 +68,7 @@ pub async fn run(opts: &super::GlobalOptions, dry_run: bool) -> miette::Result<(
             .enumerate()
             .filter_map(|(i, line)| serde_json::from_str(line).ok().map(|e| (i, e)))
             .collect();
-        let state = newest_entry_per_source(&parsed);
+        let state = newest_collection_per_source(&parsed);
         let expired: HashSet<usize> = parsed
             .iter()
             .filter(|(i, e)| e.timestamp.as_second() < cutoff_secs && !state.contains(i))
@@ -83,7 +91,7 @@ pub async fn run(opts: &super::GlobalOptions, dry_run: bool) -> miette::Result<(
 
         eprintln!(
             "{prefix}log: pruned {} entries older than {retention_days}d \
-             (kept {} of {}, including each source's latest).",
+             (kept {} of {}, including each source's latest collection).",
             expired.len(),
             kept.len(),
             lines.len()
@@ -151,47 +159,73 @@ pub async fn run(opts: &super::GlobalOptions, dry_run: bool) -> miette::Result<(
 
 #[cfg(test)]
 mod tests {
-    use super::{newest_entry_per_source, prune_cutoff_secs};
+    use super::{newest_collection_per_source, prune_cutoff_secs};
 
-    fn entry(source_id: &str, secs: i64) -> lk_vault::LogEntry {
+    fn entry(source_id: &str, secs: i64, status: lk_vault::LogStatus) -> lk_vault::LogEntry {
         lk_vault::LogEntry {
             timestamp: jiff::Timestamp::from_second(secs).unwrap(),
             source_id: source_id.into(),
-            status: lk_vault::LogStatus::Skipped,
+            status,
             event_count: 0,
             duration_ms: 1,
             error: None,
         }
     }
 
-    /// Retention prunes HISTORY. The newest entry per source is not history — it is the
-    /// state `lore health` reads, and pruning it makes a source that has been dead longer
-    /// than the horizon report "never ingested" (silent) instead of stale (exit 1).
+    fn collected(source_id: &str, secs: i64) -> lk_vault::LogEntry {
+        entry(source_id, secs, lk_vault::LogStatus::Skipped)
+    }
+
+    fn failed(source_id: &str, secs: i64) -> lk_vault::LogEntry {
+        entry(source_id, secs, lk_vault::LogStatus::Failed)
+    }
+
+    /// Retention prunes HISTORY. The newest COLLECTED entry per source is not history — it
+    /// is the state `lore health` reads — so it survives any horizon.
     #[test]
-    fn each_sources_latest_entry_survives_any_horizon() {
+    fn each_sources_latest_collection_survives_any_horizon() {
         let entries = vec![
-            (0, entry("jira", 100)),
-            (1, entry("jira", 200)),
-            (2, entry("gmail", 50)),
+            (0, collected("jira", 100)),
+            (1, collected("jira", 200)),
+            (2, collected("gmail", 50)),
         ];
-        let mut state: Vec<usize> = newest_entry_per_source(&entries).into_iter().collect();
+        let mut state: Vec<usize> = newest_collection_per_source(&entries).into_iter().collect();
         state.sort();
         assert_eq!(
             state,
             vec![1, 2],
-            "the newest line per source, and only those"
+            "the newest collection per source, and only those"
         );
     }
 
-    /// Ties cannot leave a source unrepresented, and cannot pick two lines for one source.
+    /// The line to protect is the one the reader RETURNS. A source failing daily has a
+    /// recent failure and an old success; `find_last_collection` skips the failure, so
+    /// protecting the newest line would protect a line nobody reads and let the success
+    /// age out — turning `stale` (exit 1) into "never ingested" (silent) as the outage
+    /// gets older, which is exactly what this rule exists to prevent.
+    #[test]
+    fn a_recent_failure_never_shadows_the_older_success_a_health_check_reads() {
+        let entries = vec![
+            (0, collected("jira", 100)),
+            (1, failed("jira", 200)),
+            (2, failed("jira", 300)),
+        ];
+        let state = newest_collection_per_source(&entries);
+        assert_eq!(
+            state.into_iter().collect::<Vec<_>>(),
+            vec![0],
+            "the old success is the state; the recent failures are history"
+        );
+    }
+
     #[test]
     fn a_tie_on_timestamp_still_yields_exactly_one_line_per_source() {
         let entries = vec![
-            (0, entry("jira", 100)),
-            (1, entry("jira", 100)),
-            (2, entry("gmail", 100)),
+            (0, collected("jira", 100)),
+            (1, collected("jira", 100)),
+            (2, collected("gmail", 100)),
         ];
-        let state = newest_entry_per_source(&entries);
+        let state = newest_collection_per_source(&entries);
         assert_eq!(state.len(), 2, "one line per source: {state:?}");
         assert!(state.contains(&2), "gmail must be represented");
         assert!(
@@ -200,9 +234,12 @@ mod tests {
         );
     }
 
+    /// A source that has never been collected has no state to protect — and then "never
+    /// ingested" is the truth, not a signal that went quiet.
     #[test]
-    fn an_empty_log_has_no_state_to_protect() {
-        assert!(newest_entry_per_source(&[]).is_empty());
+    fn a_source_with_only_failures_has_no_state_to_protect() {
+        assert!(newest_collection_per_source(&[(0, failed("jira", 100))]).is_empty());
+        assert!(newest_collection_per_source(&[]).is_empty());
     }
 
     #[test]

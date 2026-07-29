@@ -101,6 +101,25 @@ enum TaskStatus {
     MissingTarget,
 }
 
+/// Which queued artifact is being classified. They share every fact about the target page
+/// and differ on one question.
+///
+/// A TASK is a REQUEST for work, so a section already answered for its input makes it
+/// redundant. A RESULT is the ANSWER, in flight: it exists and has not been written to the
+/// page yet. For concepts the completion marker is stamped by the very edit that writes
+/// them, so asking a result whether the page is already answered would discard the value
+/// that is about to answer it — permanently and silently, since the marker then keeps the
+/// empty section looking cached and nothing re-enqueues.
+///
+/// Ignoring the marker is safe rather than merely necessary: re-applying a result
+/// reproduces the page, because `accumulate_concepts` dedups citations by id and the
+/// concept merge preserves everything an earlier application wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Artifact {
+    Task,
+    Result,
+}
+
 impl TaskStatus {
     fn as_str(self) -> &'static str {
         match self {
@@ -269,6 +288,7 @@ async fn apply(
             result.target.kind,
             &result.cache_hash,
             &result.target.anchor,
+            Artifact::Result,
         ) {
             Ok(TaskStatus::Current) => {}
             Ok(status) => {
@@ -434,9 +454,10 @@ fn quarantine(corrupt_dir: &Path, unreadable: &[(PathBuf, String)], dry_run: boo
     moved
 }
 
-/// A path in `dir` for `source`'s file name that is not already taken. Quarantine preserves
-/// a file for inspection, so it must not overwrite an earlier one that happens to share a
-/// name — that would destroy the very evidence it exists to keep.
+/// A path in `dir` for `source`'s file name that is not already taken, keeping its
+/// extension. Every mover in this file preserves a file rather than replacing one — a
+/// quarantined result is evidence, an archived run is a record — so neither may overwrite
+/// an earlier file that happens to share a name.
 fn free_path(dir: &Path, source: &Path) -> PathBuf {
     let name = source.file_name().unwrap_or(source.as_os_str());
     let candidate = dir.join(name);
@@ -444,8 +465,12 @@ fn free_path(dir: &Path, source: &Path) -> PathBuf {
         return candidate;
     }
     let stem = source.file_stem().unwrap_or(name).to_string_lossy();
+    let ext = source
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
     (1u32..)
-        .map(|n| dir.join(format!("{stem}.{n}.json")))
+        .map(|n| dir.join(format!("{stem}.{n}{ext}")))
         .find(|p| !p.exists())
         .expect("an unused suffix always exists")
 }
@@ -602,9 +627,15 @@ fn prune_queue(vault_root: &Path, queue_dir: &Path, dry_run: bool) -> miette::Re
             }
         } else if work_left == 0 {
             // Retained but no work left, so every retained task is `done`: the run is
-            // finished and nothing else will ever retire it.
+            // finished and nothing else will ever retire it. Drop its dead tasks BEFORE
+            // archiving — the summary counts them as removed, and an archive still holding
+            // them would make that count a lie.
             summary.files_archived += 1;
             if !dry_run {
+                if dropped > 0 {
+                    lk_queue::write_tasks_atomic(&file, &retained)
+                        .map_err(|e| miette::miette!("rewrite {}: {e}", file.display()))?;
+                }
                 archive_queue_file(queue_dir, &file)?;
             }
         } else if dropped > 0 {
@@ -620,14 +651,19 @@ fn prune_queue(vault_root: &Path, queue_dir: &Path, dry_run: bool) -> miette::Re
 
 /// Move a settled run into `processed/`, the same retirement `/lore-process` performs when
 /// every task in a file has succeeded.
+///
+/// A drain runs on its own schedule and may have retired this very file between the scan
+/// and here. That is the outcome this wanted, so a vanished source is success — failing
+/// would take down the janitor over a race whose result is already correct. The archive
+/// is a record, so it never overwrites an earlier file of the same name.
 fn archive_queue_file(queue_dir: &Path, file: &Path) -> miette::Result<()> {
     let dir = queue_dir.join(lk_queue::PROCESSED_SUBDIR);
     std::fs::create_dir_all(&dir).map_err(|e| miette::miette!("create {}: {e}", dir.display()))?;
-    let name = file
-        .file_name()
-        .ok_or_else(|| miette::miette!("queue file has no name: {}", file.display()))?;
-    std::fs::rename(file, dir.join(name))
-        .map_err(|e| miette::miette!("archive {}: {e}", file.display()))
+    match std::fs::rename(file, free_path(&dir, file)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(miette::miette!("archive {}: {e}", file.display())),
+    }
 }
 
 async fn prune(
@@ -693,6 +729,7 @@ fn classify_task(vault_root: &Path, task: &QueueTask) -> miette::Result<TaskStat
         task.target.kind,
         &task.cache_hash,
         &task.target.anchor,
+        Artifact::Task,
     )
 }
 
@@ -715,6 +752,7 @@ fn classify_against_page(
     kind: lk_queue::TargetKind,
     cache_hash: &str,
     anchor: &str,
+    artifact: Artifact,
 ) -> miette::Result<TaskStatus> {
     let page_path = vault_root.join(rel_path);
     let content = match std::fs::read_to_string(&page_path) {
@@ -738,7 +776,7 @@ fn classify_against_page(
     if field(kind.llm_inputs_key()).as_deref() != Some(cache_hash) {
         return Ok(TaskStatus::Stale);
     }
-    if field(&kind.completion_key()).as_deref() == Some(cache_hash) {
+    if artifact == Artifact::Task && field(&kind.completion_key()).as_deref() == Some(cache_hash) {
         return Ok(TaskStatus::Done);
     }
     // Asked last, because it only decides the fate of work still to be written: the
@@ -1114,6 +1152,72 @@ mod tests {
 
     /// A run that still has work keeps its answered tasks, so the record a drain archives
     /// stays whole. Only dead tasks are removed.
+    /// The summary counts a dead task as pruned; the archive must not still contain it, or
+    /// the count asserts a removal that did not happen.
+    #[test]
+    fn an_archived_run_no_longer_holds_the_tasks_prune_reported_dropping() {
+        let dir = TempDir::new().unwrap();
+        let queue_dir = dir.path().join(".lorekeeper").join("queue");
+        write_page(
+            dir.path(),
+            "daily/s/2026-05-23.md",
+            "id: x\nllm_inputs:\n  summary: live\n  summary_done: live\n",
+        );
+        write_queue_file(
+            &queue_dir,
+            "run-1.jsonl",
+            &[
+                task("daily/s/2026-05-23.md", "live"),    // done
+                task("daily/s/2026-05-23.md", "oldhash"), // stale
+                task("daily/s/2026-05-99.md", "live"),    // missing-target
+            ],
+        );
+
+        let summary = prune_queue(dir.path(), &queue_dir, false).unwrap();
+        assert_eq!(summary.files_archived, 1);
+        assert_eq!(summary.pruned_stale, 1);
+        assert_eq!(summary.pruned_missing_target, 1);
+
+        let archived = queue_dir
+            .join(lk_queue::PROCESSED_SUBDIR)
+            .join("run-1.jsonl");
+        let content = std::fs::read_to_string(&archived).unwrap();
+        assert_eq!(
+            content.lines().filter(|l| !l.trim().is_empty()).count(),
+            1,
+            "only the answered task belongs in the archive:\n{content}"
+        );
+    }
+
+    /// The archive is a record. A drain retiring a run of the same name must not have its
+    /// file replaced, and a drain that already moved THIS file is the outcome prune wanted.
+    #[test]
+    fn archiving_never_overwrites_and_never_fails_on_an_already_retired_run() {
+        let dir = TempDir::new().unwrap();
+        let queue_dir = dir.path().join(".lorekeeper").join("queue");
+        let processed = queue_dir.join(lk_queue::PROCESSED_SUBDIR);
+        std::fs::create_dir_all(&processed).unwrap();
+        std::fs::write(processed.join("run-1.jsonl"), "earlier run\n").unwrap();
+
+        let file = queue_dir.join("run-1.jsonl");
+        std::fs::write(&file, "later run\n").unwrap();
+        archive_queue_file(&queue_dir, &file).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(processed.join("run-1.jsonl")).unwrap(),
+            "earlier run\n",
+            "the earlier record must survive"
+        );
+        assert_eq!(
+            std::fs::read_to_string(processed.join("run-1.1.jsonl")).unwrap(),
+            "later run\n",
+            "and the later one keeps its extension"
+        );
+
+        // Already gone: a drain retired it between the scan and here.
+        archive_queue_file(&queue_dir, &queue_dir.join("never-existed.jsonl"))
+            .expect("a vanished source is the outcome this wanted");
+    }
+
     #[test]
     fn prune_keeps_answered_tasks_in_a_run_that_still_has_work() {
         let dir = TempDir::new().unwrap();

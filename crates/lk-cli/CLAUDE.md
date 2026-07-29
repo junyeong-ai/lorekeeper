@@ -41,11 +41,14 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   LLM work).
 - **`lore maintenance`** prunes the ingest log and drained `queue/processed/` files past
   `maintenance.retention_days` — operational history only, and `--dry-run` reports the same
-  counts without deleting. **It keeps each source's newest log entry whatever its age**: the
-  log is both a history and the store `IngestLog::find_last_collection` reads, so pruning
-  the newest entry would prune STATE. Without that rule a source dead longer than the
-  horizon loses every entry and stops reading `stale` (non-zero) to read "never ingested"
-  (silent without `--strict`) — the health signal going quiet as the outage ages. The
+  counts without deleting. **It keeps each source's newest COLLECTED entry whatever its age**:
+  the log is both a history and the store `IngestLog::find_last_collection` reads, so
+  pruning that line would prune STATE. It must be the newest *collected* one, not the newest
+  overall — a source failing daily has a recent `failed` entry the reader skips and a much
+  older success it actually returns, so protecting the newest line protects the wrong one
+  and lets the success age out. Either way the source then stops reading `stale` (non-zero)
+  to read "never ingested" (silent without `--strict`) — the health signal going quiet as
+  the outage ages. The
   streaming
   `events/{source}/{date}.jsonl` logs are the permanent raw layer (`lore ingest --date
   <past>` re-projects any day from them) and are NEVER pruned. It also never touches
@@ -68,7 +71,13 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   carries no completion marker, so the next ingest re-enqueues the work under the heading it
   now has, the same self-healing an unparseable result file relies on. A task passing the
   first, failing the second and having somewhere to land is `current` — the only status that
-  is WORK. `/lore-process` consumes `--json` and acts on
+  is WORK. **A RESULT never asks the completion question** (`Artifact::Result`): a task is a
+  REQUEST, so an answered section makes it redundant, while a result IS the answer in
+  flight, and for concepts the marker is stamped by the very edit that writes them. Asking
+  it would discard the value about to answer the section — silently and forever, since the
+  marker then keeps the empty section looking cached. Ignoring it is safe as well as
+  necessary: re-applying reproduces the page (`accumulate_concepts` dedups by id, the
+  concept merge preserves). `/lore-process` consumes `--json` and acts on
   those alone; the check lives here in tested Rust, never re-derived in skill prose.
   **`lore queue count` prints only that work count**, because it exists to tell a scheduled
   script whether to spend an LLM session, and a queue of already-answered tasks is not a

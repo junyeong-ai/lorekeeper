@@ -154,7 +154,7 @@ The essentials: a visible `.jsonl` is fully written and every
       |-------------|-----------|-------------------------------|
       | `daily-summary`, `document-summary` | `summary` | `summary_done` |
       | `daily-refine-events` | `refine_events` | `refine_events_done` |
-      | `daily-concepts`, `document-concepts` | `concepts` | `concepts_done` |
+      | `daily-concepts`, `document-concepts` | `concepts` | **not yours** — `lore queue apply` stamps `concepts_done` in the same edit that writes the links (safety rule 6). Write the result file and stop. |
       | `work-log-synthesis` | `topic_summary` | `topic_summary_done` |
       | `weekly-synthesis-themes` | `themes` | `themes_done` |
       | `weekly-review-narrative`, `monthly-review-narrative` | `narrative` | `narrative_done` |
@@ -177,6 +177,12 @@ The essentials: a visible `.jsonl` is fully written and every
          rather than invent low-value content) — then set `llm_inputs.<marker>` =
          `task.cache_hash`, copied verbatim (a 32-char hex string). Leave the
          pipeline-owned input key untouched.
+
+         **Except the concept kinds**, whose marker row says "not yours": their
+         value goes to a result file and `lore queue apply` writes the links and
+         the marker in one edit. Stamping it yourself claims the section is
+         answered while it is still empty, which is what `llm_cache` believes —
+         so the task never re-enqueues and the extraction is lost.
 
    d. **Edit the target page** — the markdown file at `target.vault_path`,
       using the Edit tool (section replace):
