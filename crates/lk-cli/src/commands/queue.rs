@@ -635,16 +635,22 @@ fn prune_queue(vault_root: &Path, queue_dir: &Path, dry_run: bool) -> miette::Re
             }
         } else if work_left == 0 {
             // Retained but no work left, so every retained task is `done`: the run is
-            // finished and nothing else will ever retire it. Drop its dead tasks BEFORE
-            // archiving — the summary counts them as removed, and an archive still holding
-            // them would make that count a lie.
+            // finished and nothing else will ever retire it.
+            //
+            // ACQUIRE FIRST, then prune what we own. The rename is atomic and exclusive, so
+            // winning it means no one else can be moving this file. Rewriting the pending
+            // path first would RECREATE a run a concurrent drain had already retired — an
+            // atomic write is temp+rename, which creates regardless of what was there — and
+            // the archive would then hold two records for one run. Pruning after the move
+            // still leaves the archive honest about the tasks the summary counted as
+            // dropped, which is what the rewrite is for.
             summary.files_archived += 1;
-            if !dry_run {
-                if dropped > 0 {
-                    lk_queue::write_tasks_atomic(&file, &retained)
-                        .map_err(|e| miette::miette!("rewrite {}: {e}", file.display()))?;
-                }
-                archive_queue_file(queue_dir, &file)?;
+            if !dry_run
+                && let Some(archived) = archive_queue_file(queue_dir, &file)?
+                && dropped > 0
+            {
+                lk_queue::write_tasks_atomic(&archived, &retained)
+                    .map_err(|e| miette::miette!("rewrite {}: {e}", archived.display()))?;
             }
         } else if dropped > 0 {
             summary.files_rewritten += 1;
@@ -658,18 +664,22 @@ fn prune_queue(vault_root: &Path, queue_dir: &Path, dry_run: bool) -> miette::Re
 }
 
 /// Move a settled run into `processed/`, the same retirement `/lore-process` performs when
-/// every task in a file has succeeded.
+/// every task in a file has succeeded. Returns where it landed — or `None` when there was
+/// nothing left to move.
 ///
 /// A drain runs on its own schedule and may have retired this very file between the scan
 /// and here. That is the outcome this wanted, so a vanished source is success — failing
-/// would take down the janitor over a race whose result is already correct. The archive
-/// is a record, so it never overwrites an earlier file of the same name.
-fn archive_queue_file(queue_dir: &Path, file: &Path) -> miette::Result<()> {
+/// would take down the janitor over a race whose result is already correct. Reporting
+/// WHERE it landed is what lets the caller edit the archived run without ever writing back
+/// to the pending path, which would resurrect a file someone else had already retired.
+/// The archive is a record, so it never overwrites an earlier file of the same name.
+fn archive_queue_file(queue_dir: &Path, file: &Path) -> miette::Result<Option<PathBuf>> {
     let dir = queue_dir.join(lk_queue::PROCESSED_SUBDIR);
     std::fs::create_dir_all(&dir).map_err(|e| miette::miette!("create {}: {e}", dir.display()))?;
-    match std::fs::rename(file, free_path(&dir, file)) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+    let dest = free_path(&dir, file);
+    match std::fs::rename(file, &dest) {
+        Ok(()) => Ok(Some(dest)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(miette::miette!("archive {}: {e}", file.display())),
     }
 }
@@ -1209,7 +1219,11 @@ mod tests {
 
         let file = queue_dir.join("run-1.jsonl");
         std::fs::write(&file, "later run\n").unwrap();
-        archive_queue_file(&queue_dir, &file).unwrap();
+        assert_eq!(
+            archive_queue_file(&queue_dir, &file).unwrap(),
+            Some(processed.join("run-1.1.jsonl")),
+            "it must report where the run landed"
+        );
         assert_eq!(
             std::fs::read_to_string(processed.join("run-1.jsonl")).unwrap(),
             "earlier run\n",
@@ -1221,9 +1235,14 @@ mod tests {
             "and the later one keeps its extension"
         );
 
-        // Already gone: a drain retired it between the scan and here.
-        archive_queue_file(&queue_dir, &queue_dir.join("never-existed.jsonl"))
-            .expect("a vanished source is the outcome this wanted");
+        // Already gone: a drain retired it between the scan and here. Reporting no
+        // destination is what stops the caller writing back to the pending path, which an
+        // atomic write would RECREATE — leaving two archive records for one run.
+        assert_eq!(
+            archive_queue_file(&queue_dir, &queue_dir.join("never-existed.jsonl"))
+                .expect("a vanished source is the outcome this wanted"),
+            None
+        );
     }
 
     #[test]
@@ -1333,7 +1352,7 @@ mod tests {
     /// A file holding no tasks at all edited no page, so there is nothing to archive — and
     /// leaving it keeps `lore ingest` warning about pending work no session will ever do.
     #[test]
-    fn a_task_less_file_is_retired_rather_than_left_warning_forever() {
+    fn a_task_less_file_is_deleted_rather_than_left_warning_forever() {
         let dir = TempDir::new().unwrap();
         let queue_dir = dir.path().join(".lorekeeper").join("queue");
         let file = write_queue_file(&queue_dir, "run-1.jsonl", &[]);

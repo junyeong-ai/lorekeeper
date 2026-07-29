@@ -33,7 +33,12 @@ map to `RawItem`.
   feed look broken, the false positive this must never produce. The window was never observed,
   and downstream cannot tell that apart from a quiet day — `lore ingest` logs `Skipped`
   either way, and `lore health` reads that log as its only evidence the source is alive. An
-  empty listing (nothing attempted) is genuinely empty and stays a success. A new
+  empty listing (nothing attempted) is genuinely empty and stays a success. **A PARTIAL
+  outage stays invisible to the ingest log by design** — four of five feeds dead still
+  reports a collection, because the source WAS observed and the log records only that one
+  bit. Surfacing degradation rather than absence needs a per-source expectation and a
+  threshold, which is a finding-style check (`doctor`/`lint`), not a freshness signal; the
+  individual failures are `tracing::warn`ed meanwhile. A new
   many-item adapter inherits the guarantee by counting its failures and calling the rule.
 - **Ownership (root invariant) — the per-adapter exact-match fields**: each adapter sets
   `RawItem::is_self` by EXACT-matching its structured authorship field to

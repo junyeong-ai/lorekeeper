@@ -120,9 +120,10 @@ pub(crate) fn accumulate_concepts(
         Some(id) => seen.insert(id),
         // Not a name this vault can address, so it cannot be reconciled with anything —
         // said out loud rather than folded into the dedup, where a dropped citation would
-        // be indistinguishable from a deduplicated one.
+        // be indistinguishable from a deduplicated one. Only a carried destination can
+        // reach this: an extracted concept's slug is already `slugify` output.
         None => {
-            tracing::warn!(stem, "concept citation has no addressable id; dropping it");
+            tracing::warn!(stem, "carried citation has no addressable id; dropping it");
             false
         }
     };
