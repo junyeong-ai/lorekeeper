@@ -24,11 +24,30 @@ pub fn html_to_markdown(html: &str) -> String {
             ..Default::default()
         })
         .add_handler(vec!["img"], img_without_data_uris)
+        .add_handler(vec![MACRO_PARAMETER], drop_macro_parameter)
         .build();
     converter
         .convert(html)
         .map(|md| md.trim().to_string())
         .unwrap_or_default()
+}
+
+/// The one element whose text is CONFIGURATION rather than prose, so the loss-averse rule
+/// above — degrade an unmapped construct to its text — is wrong for it and only it.
+///
+/// Confluence storage format is XHTML carrying macros as `<ac:structured-macro>`, whose
+/// `<ac:parameter>` children hold the macro's settings: a status macro's colour names, a
+/// roadmap's base64 state blob. Degrading those emits them INLINE and unseparated, so a
+/// page reads `검증JTdCJTIybmFtZSUyMi…` — the macro's title welded to a kilobyte of
+/// encoded settings. One real page came out 30% that. The macro's actual content lives in
+/// `ac:rich-text-body`/`ac:plain-text-body` and is untouched by this.
+const MACRO_PARAMETER: &str = "ac:parameter";
+
+fn drop_macro_parameter(
+    _: &dyn htmd::element_handler::Handlers,
+    _: htmd::Element,
+) -> Option<htmd::element_handler::HandlerResult> {
+    Some(String::new().into())
 }
 
 /// Whether a URL is a `data:` URI, tested on the prefix of a borrowed `&str` so a
@@ -666,6 +685,41 @@ fn render_prose_shortcodes(text: &str, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A macro's settings are not prose. Degrading them to text welds them onto the
+    /// surrounding words with no separator — a status macro's colour names and a roadmap's
+    /// base64 state blob land mid-sentence, and one real Confluence page came out 30% that.
+    /// Its actual content, which lives in the rich/plain-text body, must survive intact.
+    #[test]
+    fn a_macro_parameter_is_configuration_and_never_becomes_body_text() {
+        let storage = concat!(
+            "<p>Before</p>",
+            r#"<ac:structured-macro ac:name="status">"#,
+            r#"<ac:parameter ac:name="title">검증</ac:parameter>"#,
+            r#"<ac:parameter ac:name="source">JTdCJTIybmFtZSUyMiUzQQ==</ac:parameter>"#,
+            "<ac:rich-text-body><p>Real body</p></ac:rich-text-body>",
+            "</ac:structured-macro>",
+            "<p>After</p>",
+        );
+        let md = html_to_markdown(storage);
+        assert!(
+            !md.contains("JTdC"),
+            "no encoded settings may reach the page:\n{md}"
+        );
+        assert!(
+            !md.contains("검증"),
+            "nor a parameter's display value:\n{md}"
+        );
+        assert!(
+            md.contains("Before") && md.contains("After"),
+            "prose survives:\n{md}"
+        );
+        assert!(
+            md.contains("Real body"),
+            "the macro's own content survives:\n{md}"
+        );
+    }
+
     use serde_json::json;
 
     #[test]
