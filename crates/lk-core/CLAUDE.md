@@ -2,6 +2,22 @@
 
 Domain types and config — no I/O, no async. Depended on by every other crate.
 
+- **A dead `Strings` field is a page-format section no page has, and no test can find it.**
+  Both locale tables initialize every field, so `dead_code` sees them all used; the fields
+  are `pub`, so it would assume downstream readers even if they did not. Two fields had
+  outlived their readers before anyone noticed — one a concept heading the template stopped
+  emitting, one a title the manual source stopped using — and `lore schema` publishes this
+  bundle as the page-format spec, so each described a section of a page that does not exist.
+  A gate over it was tried and REMOVED: deciding whether a name is read as `Strings::status`
+  or as `resp.status()` needs the receiver's type, and every text-level narrowing either
+  whitelists receivers (`resp`, `out`, `entry` are not labels; the list is open) or curates a
+  renderer file list (silently stale the first time a renderer is added). It protected the
+  distinctively-named fields and not the common ones while reading as uniform, which is worse
+  than the sweep it replaced. The sweep, run when a label's last reader might have gone:
+  `for f in $(rg -o 'pub (\w+): &.static str' -r '$1' crates/lk-core/src/i18n.rs); do rg -q
+  "\.$f\b" --glob '!crates/lk-core/src/i18n.rs' crates templates || echo "$f"; done` — then
+  read each hit, since that command has the same ambiguity and only a human resolves it.
+
 - **`Config::load` validates eagerly**: `validate()` rejects empty/`/`-containing source
   IDs, bad cron, out-of-range thresholds, unknown synthesis/category references, and
   `vault.dirs.*` values that are absolute or contain `..` (path-traversal guard before any
