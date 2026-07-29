@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use lk_queue::QueueTask;
@@ -195,7 +196,13 @@ async fn apply(
     let writer = lk_vault::VaultWriter::new(&vault_root);
 
     let (mut applied, mut dropped, mut failed) = (0usize, 0usize, 0usize);
-    let mut origin_pages: Vec<(PathBuf, String)> = Vec::new();
+    // Keyed by page, because ONE page can receive several results in a batch: two ingests
+    // before a single drain enqueue the same target twice under the same input hash, and
+    // both classify current. Every write lands after this loop, so a second fold that read
+    // the page from disk would see a version predating the first — and its write would then
+    // drop the citations the first added, the exact loss the accumulating render exists to
+    // prevent. Within a batch, the pending version IS the page.
+    let mut origin_pages: BTreeMap<PathBuf, String> = BTreeMap::new();
     let mut consumed: Vec<PathBuf> = Vec::new();
 
     // Everything a result can get wrong is that result's problem, not the batch's: aborting
@@ -245,17 +252,20 @@ async fn apply(
                 continue;
             }
         }
-        let content = match std::fs::read_to_string(vault_root.join(&rel_path)) {
-            Ok(c) => c,
-            Err(e) => {
-                fail(format!("read {}: {e}", rel_path.display()));
-                failed += 1;
-                continue;
-            }
+        let content = match origin_pages.get(&rel_path) {
+            Some(pending) => pending.clone(),
+            None => match std::fs::read_to_string(vault_root.join(&rel_path)) {
+                Ok(c) => c,
+                Err(e) => {
+                    fail(format!("read {}: {e}", rel_path.display()));
+                    failed += 1;
+                    continue;
+                }
+            },
         };
         match pipeline.apply_concept_result(result, &content).await {
             Ok(rewritten) => {
-                origin_pages.push((rel_path, rewritten));
+                origin_pages.insert(rel_path, rewritten);
                 consumed.push(path.clone());
                 applied += 1;
             }
