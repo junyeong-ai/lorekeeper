@@ -205,7 +205,9 @@ const PLAIN_TEXT_BODY_OPEN: &str = "<ac:plain-text-body>";
 /// ignoring a handled element's children is correct by construction rather than by luck.
 ///
 /// Void elements keep their form: `<br></br>` is TWO line breaks to an HTML parser, so
-/// expanding those would invent content instead of preserving it.
+/// expanding those would invent content instead of preserving it. Comments and raw-text
+/// elements are skipped whole, since what is inside them is text and rewriting text is how a
+/// pre-parse pass corrupts a document.
 fn expand_self_closing(html: &str) -> std::borrow::Cow<'_, str> {
     if !html.contains("/>") {
         return std::borrow::Cow::Borrowed(html);
@@ -217,9 +219,7 @@ fn expand_self_closing(html: &str) -> std::borrow::Cow<'_, str> {
         let lt = at + offset;
         if html[lt..].starts_with("<!--") {
             // A comment's contents are not markup, so a `/>` inside one is not a tag.
-            at = html[lt..]
-                .find("-->")
-                .map_or(html.len(), |end| lt + end + "-->".len());
+            at = skip_past(html, lt, "-->");
             continue;
         }
         let Some(tag) = scan_start_tag(html, lt) else {
@@ -227,12 +227,17 @@ fn expand_self_closing(html: &str) -> std::borrow::Cow<'_, str> {
             continue;
         };
         at = tag.end + 1;
-        if !tag.self_closing || is_void_element(&html[tag.name.clone()]) {
+        let name = &html[tag.name.clone()];
+        if is_raw_text_element(name) {
+            at = skip_past(html, at, &format!("</{}", name.to_ascii_lowercase()));
+            continue;
+        }
+        if !tag.self_closing || is_void_element(name) {
             continue;
         }
         out.push_str(&html[cursor..=tag.end]);
         out.push_str("</");
-        out.push_str(&html[tag.name.clone()]);
+        out.push_str(name);
         out.push('>');
         cursor = tag.end + 1;
     }
@@ -241,6 +246,29 @@ fn expand_self_closing(html: &str) -> std::borrow::Cow<'_, str> {
     }
     out.push_str(&html[cursor..]);
     std::borrow::Cow::Owned(out)
+}
+
+/// The index just past a LOWERCASE `needle`, or the end of the input when it never appears —
+/// an unterminated comment or raw-text element runs to EOF, which is what a parser concludes
+/// too. Matching is ASCII-case-insensitive, which leaves every byte index intact because
+/// ASCII case folding cannot change a character's width.
+fn skip_past(html: &str, from: usize, needle: &str) -> usize {
+    debug_assert_eq!(needle, needle.to_ascii_lowercase());
+    html[from..]
+        .to_ascii_lowercase()
+        .find(needle)
+        .map_or(html.len(), |end| from + end + needle.len())
+}
+
+/// Elements whose content a parser reads as TEXT, not markup, so a `/>` inside one belongs to
+/// a script, a stylesheet or a text box rather than to a tag. Rewriting there would inject
+/// `</div>` into a JavaScript string — the pre-parse pass corrupting exactly the document it
+/// was meant to leave alone.
+fn is_raw_text_element(name: &str) -> bool {
+    const RAW_TEXT: &[&str] = &[
+        "script", "style", "textarea", "title", "xmp", "iframe", "noembed", "noframes",
+    ];
+    RAW_TEXT.iter().any(|raw| name.eq_ignore_ascii_case(raw))
 }
 
 /// Elements an HTML parser closes on its own, for which `<x/>` is already the whole element.
@@ -1192,6 +1220,25 @@ mod tests {
             html_to_markdown(r#"<p><img src="https://x.example/a.png" alt="ALT"/>after</p>"#),
             "![ALT](https://x.example/a.png)after"
         );
+    }
+
+    /// A parser reads a script, a stylesheet and a text box as TEXT, so a `/>` inside one is
+    /// not a tag. Rewriting there is a pre-parse pass corrupting the document it exists to
+    /// leave alone: `var x = "<div/>"` came back carrying an injected `</div>` inside the
+    /// JavaScript string.
+    #[test]
+    fn raw_text_content_is_never_rewritten() {
+        for html in [
+            r#"<p>A</p><script>var x = "<div/>";</script>"#,
+            r#"<p>A</p><style>.x{content:"<i/>"}</style>"#,
+            r#"<p>A</p><TEXTAREA><ac:parameter/></TEXTAREA>"#,
+        ] {
+            let md = html_to_markdown(html);
+            assert!(
+                !md.contains("</div>") && !md.contains("</i>") && !md.contains("</ac:parameter>"),
+                "an end tag was injected into raw text:\n{md}"
+            );
+        }
     }
 
     /// The scan follows the tokenizer's tag states, so a `/>` counts only where the parser
