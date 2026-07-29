@@ -75,10 +75,17 @@ pub(crate) fn concept_links(
 /// because nothing records what the superseded extraction had cited. Every other section
 /// states something about its own input and is replaced wholesale.
 ///
-/// A page's concept links therefore only ever accumulate. That is sound because a page's
-/// content only ever accumulates too: a streaming source's date unions each fetch into its
-/// event log, and a complete-refetch source's date is a closed window — so a concept
-/// extracted from a page's content stays true of it.
+/// A page's concept links therefore only ever accumulate. What that rests on is that a
+/// page's set of OBSERVATIONS only grows: a streaming source's date unions each fetch into
+/// its event log, and a complete-refetch source's date is a closed window.
+///
+/// It does NOT rest on any one observation's text being fixed, and for most adapters it
+/// isn't. Only `confluence` and `manual` key an item's identity to its content (page
+/// version, file fingerprint); the rest key it to the item's id, so an in-place edit
+/// re-reads under the same `EventId` and re-renders the day. A concept extracted before
+/// such an edit keeps its citation afterwards. That is the intended reading: the citation
+/// records that this page's material named the concept when it was observed, which stays
+/// true, and the alternative — letting a later extraction retract it — is the loss above.
 ///
 /// A link is carried only when it addresses a concept page at the address
 /// [`concept_links`] writes — resolved relative to the citing page, `.md`, a DIRECT child
