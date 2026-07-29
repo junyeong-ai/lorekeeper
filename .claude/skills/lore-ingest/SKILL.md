@@ -31,7 +31,8 @@ an Obsidian vault. All commands accept `--config <path>` to override.
 | `lore status` | Last successful ingest per source |
 | `lore health [--strict]` | Warn if any source is overdue vs `ingest.schedule` (2 missed fires; 48h fallback) |
 | `lore performance` | Performance category distribution |
-| `lore schedule [--bin <path>]` | Print crontab entries |
+| `lore doctor` | Audit materialized pages against the text-cleanliness contract (non-zero on any defect) |
+| `lore schedule --format launchd --pipeline-dir <dir>` | Print scheduled-task definitions. See the flag notes below — the bare form is rarely the one you want |
 | `lore maintenance` | Prune operational history (ingest log, drained queue files) past `maintenance.retention_days` (default 90d); streaming event logs are permanent |
 | `lore queue prune [--dry-run]` | Drop dead pending tasks (stale / missing-target) without an LLM session |
 
@@ -46,9 +47,29 @@ an Obsidian vault. All commands accept `--config <path>` to override.
 - "show performance" → `lore performance`
 - "check status" → `lore status`
 - "health check" → `lore health`
-- "generate cron" → `lore schedule`
+- "generate cron" / "schedule it" → `lore schedule` (read the flag notes first)
 - "prune old logs" → `lore maintenance`
 - "clean dead queue tasks" → `lore queue prune`
+- "check the vault for defects" → `lore doctor`
+
+## Scheduling flags
+
+`lore schedule` with no flags emits cron entries running the bare subcommands. Both
+defaults are usually wrong, and both fail SILENTLY:
+
+- **`--format launchd` on macOS.** `StartCalendarInterval` runs a job missed while the
+  machine slept as soon as it wakes; cron just skips it — and a closed laptop at 09:00
+  is the normal case, so cron simply never ingests. Syntax launchd cannot express
+  (`*/5`, `1-5`) is refused rather than approximated.
+- **`--pipeline-dir <dir>`** points the ingest and weekly jobs at `lore-daily.sh` /
+  `lore-weekly.sh`. `lore ingest` and `lore synthesis weekly` are only stage ONE of those
+  scripts: the queue drain and `lore queue apply` live in the scripts alone, so without
+  this flag the schedule ingests every morning and never fills a summary or materializes
+  a concept. Only those two jobs take it — the janitors and monthly+ syntheses have no
+  LLM stage.
+
+Every emitted path must be absolute (`--bin`, `--pipeline-dir`): launchd searches no
+`PATH` and expands no `~`.
 
 ## Output semantics
 

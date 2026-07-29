@@ -34,8 +34,10 @@ into the Lorekeeper vault. Three-phase workflow with a persisted
 scan (discover → manifest) → run (manifest → vault pages) → audit (verify)
 ```
 
-Run `lore validate` to find the vault root and AGENTS.md path.
-Read AGENTS.md before creating pages — it defines path patterns,
+Run `lore config vault-root` for the resolved vault path — a bare line, never
+parsed out of prose or read from `config.yaml` (a relative `vault.root` resolves
+against the config file's own directory). AGENTS.md sits under the wiki dir.
+Read it before creating pages — it defines path patterns,
 frontmatter, and section headings. If missing, run `lore schema`.
 
 This skill writes COMPLETE pages directly — no ingest pipeline runs over

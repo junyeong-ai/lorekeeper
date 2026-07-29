@@ -100,9 +100,12 @@ The essentials: a visible `.jsonl` is fully written and every
 
 ## Processing protocol
 
-1. **Discover the vault root.** Read `vault.root` from `config.yaml`
-   (auto-discovered at `./config.yaml` → `~/.config/lorekeeper/config.yaml`).
-   The user may override with `--vault <path>`. The wiki dir is
+1. **Discover the vault root.** Run `lore config vault-root` — it prints the
+   resolved absolute path and nothing else. Never read `vault.root` out of
+   `config.yaml` yourself: a relative value there resolves against the config
+   file's directory (not the CWD), and the config file itself is auto-discovered
+   (`./config.yaml` → `~/.config/lorekeeper/config.yaml`), so parsing the YAML
+   reproduces two resolution rules that already exist in the binary. The wiki dir is
    `vault.dirs.wiki` (default `wiki`); its `AGENTS.md` carries the page formats
    and the Concept convergence contract. Then load the concept registry
    for this run: `lore wiki concepts` (slugs, names, aliases) — the queue task
