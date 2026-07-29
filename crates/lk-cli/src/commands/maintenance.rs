@@ -182,17 +182,21 @@ mod tests {
     fn an_expired_line_that_is_a_sources_only_collection_is_not_pruned() {
         let owned = [
             line("jira", 100, lk_vault::LogStatus::Skipped), // ancient, but jira's state
+            "{ not json".to_owned(),                         // corruption, carried verbatim
             line("jira", 200, lk_vault::LogStatus::Failed),  // ancient history
             line("gmail", 5_000, lk_vault::LogStatus::Skipped), // inside the horizon
-            "{ not json".to_owned(),                         // corruption, carried verbatim
         ];
         let lines: Vec<&str> = owned.iter().map(String::as_str).collect();
 
         let mut expired: Vec<usize> = expired_log_lines(&lines, 1_000).into_iter().collect();
         expired.sort();
+        // The malformed line sits BETWEEN the two that matter, so the returned indices
+        // address positions in the input rather than in the parsed subset — the two diverge
+        // the moment a line fails to parse, and this function's answer is fed straight back
+        // as an index into the input.
         assert_eq!(
             expired,
-            vec![1],
+            vec![2],
             "only the ancient failure is history; the ancient collection is jira's state, \
              the recent line is inside the horizon, and the malformed line is neither"
         );
