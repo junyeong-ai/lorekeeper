@@ -196,20 +196,32 @@ mod tests {
     /// drop only schedules a best-effort flush, so without an explicit one the newest entry
     /// can be invisible to the next reader — and that entry is the state `lore health`
     /// reports, not history, so losing it makes a live source read stale.
+    ///
+    /// Losing the race is what the defect looks like from outside, so a single round observes
+    /// it only sometimes: on macOS the unflushed write usually wins anyway, which is why this
+    /// first surfaced as a Linux-only CI failure and why one round caught it once in thirty
+    /// tries here. A thousand caught it every time, for under half a second. Repetition can
+    /// never make this fail against correct code — every round asserts a property that holds
+    /// unconditionally once the write is flushed — so it only ever buys back the regressions
+    /// a single round would have waved through.
     #[tokio::test]
     async fn a_recorded_entry_is_readable_the_moment_record_returns() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("ingest.jsonl");
         let log = IngestLog::new(path.clone());
-        log.record(&entry("jira", LogStatus::Success, 1_000))
-            .await
-            .unwrap();
-        // Read through the filesystem rather than through `log`, which is the position
-        // every other process — and every other handle — is in.
-        assert!(
-            std::fs::read_to_string(&path).unwrap().contains("\"jira\""),
-            "the entry must have reached the OS, not just tokio's buffer"
-        );
+        for round in 1..=1_000 {
+            log.record(&entry("jira", LogStatus::Success, round))
+                .await
+                .unwrap();
+            // Read through the filesystem rather than through `log`, which is the position
+            // every other process — and every other handle — is in.
+            let written = std::fs::read_to_string(&path).unwrap();
+            assert_eq!(
+                written.lines().count(),
+                round as usize,
+                "round {round}: the entry must have reached the OS, not just tokio's buffer"
+            );
+        }
     }
 
     /// Corruption stays observable without blanking the history behind it.
