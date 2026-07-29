@@ -107,12 +107,6 @@ impl TaskStatus {
     fn is_work(self) -> bool {
         matches!(self, TaskStatus::Current)
     }
-
-    /// Whether the task already produced page edits. A run made only of tasks that did
-    /// not is a run that never touched the vault, so retiring it leaves nothing to record.
-    fn edited_its_page(self) -> bool {
-        matches!(self, TaskStatus::Done)
-    }
 }
 
 struct TaskReport {
@@ -565,11 +559,8 @@ fn prune_queue(vault_root: &Path, queue_dir: &Path, dry_run: bool) -> miette::Re
         let tasks = read_tasks(&file)?;
         let mut retained = Vec::with_capacity(tasks.len());
         let (mut dropped, mut work_left) = (0usize, 0usize);
-        let mut edited_a_page = false;
         for task in tasks {
-            let status = classify_task(vault_root, &task)?;
-            edited_a_page |= status.edited_its_page();
-            match status {
+            match classify_task(vault_root, &task)? {
                 TaskStatus::Current => {
                     work_left += 1;
                     summary.kept_current += 1;
@@ -591,6 +582,7 @@ fn prune_queue(vault_root: &Path, queue_dir: &Path, dry_run: bool) -> miette::Re
         }
 
         if retained.is_empty() {
+            // Only dead tasks, so the run never edited a page: nothing to archive.
             if dropped > 0 {
                 summary.files_deleted += 1;
                 if !dry_run {
@@ -598,7 +590,9 @@ fn prune_queue(vault_root: &Path, queue_dir: &Path, dry_run: bool) -> miette::Re
                         .map_err(|e| miette::miette!("remove {}: {e}", file.display()))?;
                 }
             }
-        } else if work_left == 0 && edited_a_page {
+        } else if work_left == 0 {
+            // Retained but no work left, so every retained task is `done`: the run is
+            // finished and nothing else will ever retire it.
             summary.files_archived += 1;
             if !dry_run {
                 archive_queue_file(queue_dir, &file)?;

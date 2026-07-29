@@ -198,8 +198,15 @@ The essentials: a visible `.jsonl` is fully written and every
    archive. If any task failed, leave the file in place:
    ```bash
    mkdir -p "$VAULT/.lorekeeper/queue/processed"
-   mv "$file" "$VAULT/.lorekeeper/queue/processed/"
+   mv "$file" "$VAULT/.lorekeeper/queue/processed/" 2>/dev/null \
+     || [ -f "$VAULT/.lorekeeper/queue/processed/$(basename "$file")" ]
    ```
+   The fallback is not error-swallowing: `lore queue prune` runs on its own
+   schedule and retires a run whose every task is already answered, so it can
+   archive this file while you are working through it (you read every task in
+   step 3a, so nothing is lost). A file already sitting in `processed/` is the
+   outcome this step wanted — treat it as success. Any other `mv` failure leaves
+   neither file present and fails the check, which is a real failure to report.
 
 5. **Finalize (mandatory — do not skip).** Concept `## Sources` sections and
    `source_count` are deliberately left empty during processing; they are
