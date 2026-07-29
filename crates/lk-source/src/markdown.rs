@@ -255,8 +255,10 @@ fn trimmed_link(
 /// block and stop escaping, which is the only form that reproduces the source text.
 ///
 /// **A known gap, left open deliberately.** `unwrap_cdata` does not share [`rewrite_tags`]'s
-/// comment and raw-text skipping, so a CDATA section inside a RAWTEXT element is unwrapped and
-/// escaped where a parser would have read it as text. The exposure is `xmp`/`iframe`/`noembed`/
+/// comment and raw-text skipping, so inside a RAWTEXT element it escapes text a parser would
+/// have read as text — a CDATA section that closes, and equally the bare opening token of one
+/// that does not, which needs no escaping there because RAWTEXT has no bogus-comment state to
+/// protect against. The exposure is `xmp`/`iframe`/`noembed`/
 /// `noframes` — `textarea`/`title` are RCDATA and decode the entities back, and `script`/`style`/
 /// `noscript` are dropped — and the cost is a literal `&lt;` in the text. Nothing is deleted,
 /// nothing injected, no element left open, which is a different class from every other defect
@@ -547,6 +549,7 @@ fn scan_start_tag(html: &str, lt: usize) -> Option<Tag> {
 fn unwrap_cdata(html: &str) -> std::borrow::Cow<'_, str> {
     const OPEN: &str = "<![CDATA[";
     const CLOSE: &str = "]]>";
+    const ESCAPED_OPEN: &str = "&lt;![CDATA[";
     if !html.contains(OPEN) {
         return std::borrow::Cow::Borrowed(html);
     }
@@ -565,10 +568,15 @@ fn unwrap_cdata(html: &str) -> std::borrow::Cow<'_, str> {
         // which reads `<!…` as a bogus comment running to the next `>`: inside the `<pre><code>`
         // a code macro becomes, that `>` belongs to `</code>`, so the body vanished and the
         // element never closed, rendering the prose after it as inline code. Only the opening
-        // token is escaped; the rest of the document is untouched, which is the whole point.
+        // tokens are escaped; nothing else in the remainder is touched, which is the point.
+        //
+        // Every LATER opener gets the same treatment, and that is a deduction rather than a
+        // guess: reaching this branch means no `]]>` exists anywhere in the remainder, so each
+        // one of them fails the very same test. A document that mentions CDATA once mentions it
+        // twice, and escaping only the first left every other one eating to the next `>`.
         let Some(end) = after.find(CLOSE) else {
-            out.push_str("&lt;![CDATA[");
-            out.push_str(after);
+            out.push_str(ESCAPED_OPEN);
+            out.push_str(&after.replace(OPEN, ESCAPED_OPEN));
             rest = "";
             break;
         };
@@ -1377,6 +1385,14 @@ mod tests {
             html_to_markdown("<p>raw <![CDATA[ token</p><p>Next paragraph</p>"),
             "raw <!\\[CDATA\\[ token\n\nNext paragraph"
         );
+        // And every LATER opener, which is a deduction rather than a guess: no `]]>` exists
+        // anywhere in the remainder, so each one fails the same test. Escaping only the first
+        // left the rest eating to the next `>`, and a document that mentions CDATA once
+        // mentions it twice.
+        assert_eq!(
+            html_to_markdown("<p>a <![CDATA[ x</p><p>b <![CDATA[ y</p><p>TAIL</p>"),
+            "a <!\\[CDATA\\[ x\n\nb <!\\[CDATA\\[ y\n\nTAIL"
+        );
         // The shape that corrupted: a well-formed code body whose section never closes. The
         // body survives, the fence closes, and the paragraph after it is a paragraph.
         assert_eq!(
@@ -1402,6 +1418,13 @@ mod tests {
         assert_eq!(
             html_to_markdown("<xmp>sample <![CDATA[a < b & c]]> end</xmp>"),
             "sample a &lt; b &amp; c end"
+        );
+        // The same holds for the bare opening token of a section that never closes. Escaping
+        // that one buys nothing here — RAWTEXT has no bogus-comment state to protect against —
+        // so this is the second shape the gap takes, not a separate one.
+        assert_eq!(
+            html_to_markdown("<xmp>text <![CDATA[ unterminated</xmp>"),
+            "text &lt;!\\[CDATA\\[ unterminated"
         );
         // A text box is RCDATA, so the entities decode again and nothing shows.
         assert_eq!(
