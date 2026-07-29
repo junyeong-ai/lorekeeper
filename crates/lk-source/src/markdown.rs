@@ -1399,6 +1399,39 @@ mod tests {
         );
     }
 
+    /// Each element this converter treats specially is claimed by exactly ONE rule.
+    ///
+    /// Registering a tag twice is silent: the later handler wins and the earlier becomes dead
+    /// code that still reads as live. Naming a REWRITTEN element is silent the other way — the
+    /// rewrite runs first, so by the time handlers see the document that name is gone and its
+    /// handler never fires. Neither surfaces as a failure anywhere, so the overlap is what has
+    /// to be impossible rather than the symptom.
+    #[test]
+    fn no_element_is_claimed_by_two_rules() {
+        let mut claimed: Vec<&str> = Vec::new();
+        for handled in [
+            MACHINE_STATE_ELEMENTS,
+            &["ac:task-status"],
+            &["ac:link-body", "ac:plain-text-link-body"],
+            &["ac:link"],
+            &["ac:adf-extension"],
+            &["img"],
+        ] {
+            claimed.extend(handled);
+        }
+        claimed.extend(ATTRIBUTE_BORNE_TEXT.iter().map(|(tag, _)| *tag));
+        let mut seen = std::collections::HashSet::new();
+        for tag in &claimed {
+            assert!(seen.insert(*tag), "`{tag}` is registered by two handlers");
+        }
+        for (rewritten, _, _) in REWRITTEN_ELEMENTS {
+            assert!(
+                !seen.contains(rewritten),
+                "`{rewritten}` is rewritten before any handler could see it"
+            );
+        }
+    }
+
     /// A stylesheet and a script are machine state arriving from ordinary HTML rather than from
     /// Confluence, and the rule is about what the text IS. One real vault page carries
     /// `.abbel-fig { display: block; … }` mid-article, lifted out of an RSS feed's `<style>`.
