@@ -68,8 +68,25 @@ pub fn scan_vault(root: &Path, config: &GraphConfig) -> Result<Vec<ScannedPage>,
         }
     }
 
+    // Deduplicating on the path TEXT is not enough, and the text is exactly what differs: two
+    // scope directories can name ONE directory while spelling it differently — case on a
+    // case-insensitive filesystem, NFC against NFD on APFS, a symlink — and the same physical
+    // file then arrives under both prefixes. Both copies carry the same page id, but a page's
+    // type is decided by prefix-matching its raw path, so one copy reads as a concept page
+    // and the other as a page citing it, and `backlinks-sync` writes the concept's own
+    // curated cross-references into its sources. Canonical identity is the filesystem's
+    // answer to "the same file", which is the question being asked; a path that cannot be
+    // canonicalized stands for itself, since a file that no longer resolves cannot collide
+    // with one that does.
+    //
+    // Resolved in WALK order, before sorting: the surviving spelling is the one the
+    // earliest-listed scope directory gave it, and that order is the vault's own precedence
+    // (`wiki` first). Keeping the sort-first copy would let an alias outrank the directory
+    // every other page addresses, so links to it from elsewhere would resolve nowhere.
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    file_paths
+        .retain(|path| seen.insert(std::fs::canonicalize(path).unwrap_or_else(|_| path.clone())));
     file_paths.sort();
-    file_paths.dedup();
 
     let mut pages: Vec<ScannedPage> = file_paths
         .par_iter()
@@ -432,6 +449,35 @@ mod tests {
         let s = parse_file(&wiki.join("s.md"), tmp.path()).unwrap();
         assert_eq!(h.title, "Just A Heading");
         assert_eq!(s.title, "s");
+    }
+
+    /// Two scope directories that name ONE directory must yield each page once. The
+    /// filesystem calls them the same directory for spellings the config sees as distinct —
+    /// case on macOS, NFC against NFD on APFS, a `.` segment — and a page scanned twice is
+    /// scanned under two prefixes, so one copy types as a concept page and the other as a
+    /// page citing it. `backlinks-sync` then writes the concept's own curated
+    /// cross-references into its sources, which is the one thing citation derivation must
+    /// never do. A `.` segment will not stand in for the case here: Rust's `Path` equality
+    /// already folds it, so the text dedup this replaced would pass such a case while still
+    /// failing on the spellings that actually occur. A second name for one directory is the
+    /// real shape, and a symlink is the portable way to make one.
+    #[test]
+    fn a_page_reached_through_two_names_for_one_directory_is_scanned_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wiki = tmp.path().join("wiki");
+        std::fs::create_dir_all(&wiki).unwrap();
+        std::fs::write(wiki.join("a.md"), "# A\n\n[b](b.md)\n").unwrap();
+        std::fs::write(wiki.join("b.md"), "# B\n").unwrap();
+        if std::os::unix::fs::symlink(&wiki, tmp.path().join("notes")).is_err() {
+            return;
+        }
+
+        let mut config = GraphConfig::default();
+        config.scope.dirs = vec![PathBuf::from("wiki"), PathBuf::from("notes")];
+        let pages = scan_vault(tmp.path(), &config).unwrap();
+
+        let ids: Vec<&str> = pages.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, vec!["wiki/a", "wiki/b"], "each page exactly once");
     }
 
     #[test]
