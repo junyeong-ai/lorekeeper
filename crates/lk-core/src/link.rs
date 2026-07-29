@@ -473,6 +473,19 @@ Inline `[span](c.md)` and [live2](d.md).
         assert!(!is_external("concepts/a.md"));
         // A Korean-slug destination has no scheme.
         assert!(!is_external("개념/에이전트.md"));
+
+        // The answer decides whether a destination is a vault page at all, so it follows
+        // RFC 3986's scheme grammar exactly rather than looking for a colon. A scheme starts
+        // ALPHA — a destination beginning with anything else has none, however it continues.
+        assert!(!is_external("2026:notes.md"));
+        assert!(!is_external("-tricky:x"));
+        assert!(!is_external(".hidden:x"));
+        // …and continues ALPHA / DIGIT / `+` `-` `.` only. A colon reached over any other
+        // character is part of a path, and calling that path a scheme would hide the link
+        // from extraction and from every rewriter, silently dropping the citation.
+        assert!(!is_external("../wiki/con cepts:a.md"));
+        assert!(!is_external("wiki/concepts/a:b.md"));
+        assert!(is_external("h2+x.y-z:payload"));
     }
 
     #[test]
@@ -575,6 +588,36 @@ Inline `[Old](../concepts/old.md)` and ![img](old.png).
         assert!(out.contains("code [Old](../concepts/old.md)"));
         assert!(out.contains("Inline `[Old](../concepts/old.md)`"));
         assert!(out.contains("![img](old.png)"));
+    }
+
+    /// A code span is closed by a backtick run of the SAME length, which is how CommonMark
+    /// lets a span contain backticks of its own. The rewriters that use this are `merge` and
+    /// `normalize` — both repoint links across the whole vault in place — so a run whose end
+    /// is misread hands them a slice of quoted example markdown as if it were live text, and
+    /// the page's own illustration of a link silently becomes a different link.
+    #[test]
+    fn a_code_span_ends_only_on_a_backtick_run_of_its_own_length() {
+        let body = "\
+Live [Old](../concepts/old.md).
+Quoted ``a ` b [Old](../concepts/old.md)`` then live [Old](../concepts/old.md).
+Triple ```x ` y `` z [Old](../concepts/old.md)``` done.
+";
+        let out = rewrite_links_outside_code(body, |text, dest| {
+            (dest == "../concepts/old.md").then(|| md_link(text, "../concepts/new.md"))
+        });
+        assert_eq!(
+            out.matches("../concepts/new.md").count(),
+            2,
+            "only the two live links are repointed:\n{out}"
+        );
+        assert!(
+            out.contains("``a ` b [Old](../concepts/old.md)``"),
+            "double-backtick span untouched:\n{out}"
+        );
+        assert!(
+            out.contains("```x ` y `` z [Old](../concepts/old.md)```"),
+            "triple-backtick span untouched:\n{out}"
+        );
     }
 
     #[test]
