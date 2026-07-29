@@ -54,6 +54,30 @@ fn readers(root: &Path) -> Vec<String> {
     out
 }
 
+/// Whether `text` names `field` as a whole identifier rather than merely containing its
+/// letters. A substring search reads `key_summary` as a reader of `summary`, so the three
+/// fields whose names are prefixes or suffixes of another field's — `summary`, `related`,
+/// `log_title` — would pass forever after losing their last real reader, which is the one
+/// outcome this file exists to prevent.
+fn names_identifier(text: &str, field: &str) -> bool {
+    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    text.match_indices(field).any(|(at, _)| {
+        let before = text[..at].chars().next_back();
+        let after = text[at + field.len()..].chars().next();
+        !before.is_some_and(ident) && !after.is_some_and(ident)
+    })
+}
+
+#[test]
+fn a_longer_field_name_is_not_a_reader_of_the_shorter_one_it_contains() {
+    assert!(names_identifier("out.push_str(i18n.summary);", "summary"));
+    assert!(names_identifier("## {{ i18n.summary }}", "summary"));
+    assert!(!names_identifier("let h = i.key_summary;", "summary"));
+    assert!(!names_identifier("i.topic_summary", "summary"));
+    assert!(!names_identifier("i.related_concepts", "related"));
+    assert!(!names_identifier("i.work_log_title", "log_title"));
+}
+
 #[test]
 fn every_label_has_a_reader() {
     let root = workspace_root();
@@ -76,7 +100,7 @@ fn every_label_has_a_reader() {
     let orphans: Vec<&str> = fields
         .iter()
         .copied()
-        .filter(|field| !corpus.iter().any(|text| text.contains(*field)))
+        .filter(|field| !corpus.iter().any(|text| names_identifier(text, field)))
         .collect();
 
     assert!(
