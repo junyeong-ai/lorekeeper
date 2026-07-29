@@ -536,6 +536,33 @@ impl VaultDirs {
         for (name, value) in fields {
             validate_relative_vault_path(&format!("vault.dirs.{name}"), value)?;
         }
+
+        // `daily`, `personal`, `synthesis` and `wiki` each ROOT a path, and every consumer
+        // classifies a page by which of them it sits under. Nested or equal roots make one
+        // page answer to two of those questions at once: a concept under a `wiki` inside
+        // `daily` is both a concept page and a daily page, so `lore graph backlinks-sync`
+        // reads its curated `## Related` cross-references as provenance and inflates every
+        // cited concept's `source_count`. `weekly`/`monthly`/`quarterly`/`annual` are leaf
+        // names joined UNDER `personal` or `synthesis` (`{personal}/{weekly}`,
+        // `{synthesis}/{weekly}`), so they are expected to repeat and are not compared.
+        let roots = [
+            ("daily", &self.daily),
+            ("personal", &self.personal),
+            ("synthesis", &self.synthesis),
+            ("wiki", &self.wiki),
+        ];
+        for (index, (outer_name, outer)) in roots.iter().enumerate() {
+            for (inner_name, inner) in &roots[index + 1..] {
+                if is_within(outer, inner) || is_within(inner, outer) {
+                    return Err(ConfigError::Validation(format!(
+                        "vault.dirs.{outer_name} ('{outer}') and vault.dirs.{inner_name} \
+                         ('{inner}') must name separate directories — one contains the other, \
+                         so a page under it belongs to both and the link graph would count a \
+                         concept's curated cross-references as citations"
+                    )));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -571,6 +598,27 @@ impl VaultDirs {
 /// messages. The single source for the vault-relative-path guard, shared by `vault.dirs.*`
 /// and `graph.scope.dirs` so the two can't drift to different (e.g. substring-vs-component)
 /// `..` checks.
+/// Whether `outer`'s named segments are a prefix of `inner`'s, equal paths included.
+///
+/// Compared as segments rather than strings, and before `normalize()` runs, so `./wiki` and
+/// `wiki` are one directory here as they will be on disk — and `wiki` is not read as
+/// containing `wiki-archive`.
+fn is_within(outer: &str, inner: &str) -> bool {
+    use std::path::{Component, Path};
+
+    let segments = |value: &str| -> Vec<std::ffi::OsString> {
+        Path::new(value)
+            .components()
+            .filter_map(|component| match component {
+                Component::Normal(segment) => Some(segment.to_owned()),
+                _ => None,
+            })
+            .collect()
+    };
+    let (outer, inner) = (segments(outer), segments(inner));
+    outer.len() <= inner.len() && inner[..outer.len()] == outer[..]
+}
+
 fn validate_relative_vault_path(label: &str, value: &str) -> Result<(), ConfigError> {
     use std::path::{Component, Path};
 
@@ -1257,6 +1305,51 @@ sources:
 "#;
         let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(config.validate().is_err(), "'..' segment must be rejected");
+    }
+
+    /// Nested or equal top-level dirs make one page answer to two classifications, and the
+    /// consequence is silent: `backlinks-sync` reads a concept's curated `## Related`
+    /// cross-references as provenance and inflates every cited concept's `source_count`,
+    /// reproducibly, on a config that otherwise loads clean.
+    #[test]
+    fn validate_rejects_a_vault_dir_nested_in_another() {
+        let with = |dirs: &str| -> Config {
+            serde_yaml_ng::from_str(&format!(
+                "vault:\n  root: /tmp/vault\n  dirs:\n{dirs}identity:\n  name: t\n  \
+                 email: t@t.com\nsources:\n  s1:\n    type: gmail\n"
+            ))
+            .unwrap()
+        };
+        // Containment is checked BOTH ways: the comparison walks a fixed field order, so a
+        // one-directional test would pass while a root that contains an earlier one slipped
+        // through. `daily` precedes `wiki`, so both arrangements are needed.
+        for dirs in [
+            "    daily: pages\n    wiki: pages/wiki\n",
+            "    wiki: pages\n    daily: pages/daily\n",
+            "    daily: x\n    wiki: x\n",
+            "    personal: me\n    synthesis: me/synthesis\n",
+            "    daily: ./pages\n    wiki: pages/wiki\n",
+        ] {
+            assert!(
+                with(dirs).validate().is_err(),
+                "overlapping roots must be rejected:\n{dirs}"
+            );
+        }
+
+        // What the rule must NOT reject: siblings that merely share a prefix STRING, and the
+        // period names, which are leaf segments joined under `personal` and `synthesis` and
+        // are therefore expected to be equal to each other.
+        for dirs in [
+            "    wiki: wiki\n    daily: wiki-archive\n",
+            // A period name may equal a ROOT: it is a leaf segment, so this asks for
+            // `me/daily/2026-W21.md`, and comparing it as a root would refuse a legal vault.
+            "    daily: daily\n    weekly: daily\n",
+        ] {
+            assert!(
+                with(dirs).validate().is_ok(),
+                "separate directories must be accepted:\n{dirs}"
+            );
+        }
     }
 
     #[test]
