@@ -567,6 +567,22 @@ mod tests {
         );
     }
 
+    /// A destination whose stem has no addressable id cannot be reconciled with anything, so
+    /// it is dropped — and said out loud, because a silently dropped citation and a
+    /// deduplicated one are the same absence in the result and would be the same silence in
+    /// the log.
+    #[test]
+    fn a_citation_with_no_addressable_id_is_dropped_and_the_rest_survive() {
+        let cited = "\
+- [Punctuation](../../wiki/concepts/---.md)
+- [Real](../../wiki/concepts/real.md)
+";
+        assert_eq!(
+            accumulated(Some(cited), vec![]),
+            vec![("Real".to_string(), "real".to_string())]
+        );
+    }
+
     /// Re-reporting what a page already cites must reproduce the page, not double it — the
     /// common case, since a re-extraction of grown input names most of the same concepts.
     #[test]

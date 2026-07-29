@@ -214,7 +214,6 @@ impl Source for GoogleDriveSource {
         tracing::info!(count = files.len(), folder = %p.folder, "drive: files found");
 
         let listed = files.len();
-        let mut unusable = 0usize;
         let mut items = Vec::new();
         for file in files {
             let download = async {
@@ -233,7 +232,6 @@ impl Source for GoogleDriveSource {
             let content = match download.await {
                 Ok(c) => c,
                 Err(e) => {
-                    unusable += 1;
                     tracing::warn!(
                         file = %file.name,
                         error = %e,
@@ -248,11 +246,6 @@ impl Source for GoogleDriveSource {
                 .as_deref()
                 .and_then(|s| s.parse::<jiff::Timestamp>().ok())
             else {
-                // Counted with the download failures: the listing already decided this file
-                // belongs to the window, so there is no legitimate reason for it to yield
-                // nothing. Every listed file failing this way is as much a total outage as
-                // every download failing, and reads identically downstream.
-                unusable += 1;
                 tracing::warn!(file_id = %file.id, "drive: skipping file with unparseable timestamp");
                 continue;
             };
@@ -271,7 +264,13 @@ impl Source for GoogleDriveSource {
             });
         }
 
-        crate::require_any_observation("listed file", unusable, listed)?;
+        // The failures are DERIVED, never accumulated: the listing already decided every
+        // one of these files belongs to the window, so a file that produced no item
+        // produced nothing, whatever the reason — an undownloadable one and one whose
+        // metadata will not parse are equally absent. Subtracting what was produced from
+        // what was listed makes a forgotten counter unrepresentable, which is the only way
+        // a skip added later cannot quietly reopen this.
+        crate::require_any_observation("listed file", listed - items.len(), listed)?;
 
         Ok(items)
     }

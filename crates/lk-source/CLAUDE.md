@@ -22,8 +22,9 @@ map to `RawItem`.
 - **Per-item isolation stops where NOTHING was reached.** RSS skips an unreachable feed and
   Drive skips an undownloadable file so one broken item doesn't cost the others their day.
   Both then go through `require_any_observation`: if EVERY attempt failed the adapter returns
-  `SourceError::NothingObserved` instead of an empty success. **The unit is the thing fetched,
-  and "failed" covers unusable as well as unreachable** — a Drive file whose metadata will not
+  `SourceError::NothingObserved` instead of an empty success. **The unit is the thing fetched, the failure count is DERIVED rather than accumulated
+  (listed minus produced; entries seen minus observed), so a skip added later cannot quietly
+  go uncounted — and "failed" covers unusable as well as unreachable** — a Drive file whose metadata will not
   parse yielded nothing just as surely as one that would not download, and an RSS feed that
   answered with entries none of which can become an observation was not read either. RSS
   therefore separates MAPPING from WINDOWING (`map_entry` decides only whether an entry can

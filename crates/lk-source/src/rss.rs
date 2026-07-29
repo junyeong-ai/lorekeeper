@@ -176,9 +176,13 @@ impl Source for RssSource {
             };
             let feed_title = feed.title.map(|t| t.content);
 
-            // Per feed: entries that became an observation (kept, or dated for another
-            // day) against entries that could not become one at all.
-            let (mut observed, mut unusable) = (0usize, 0usize);
+            // Per feed: how many entries this feed offered, against how many became an
+            // observation (kept, or dated for another day). `seen` is incremented before
+            // any branch and `observed` only where an entry actually became one, so the
+            // unusable count is DERIVED — a skip added later cannot quietly go uncounted,
+            // and a success path added without marking itself fails loudly rather than
+            // silently.
+            let (mut seen, mut observed) = (0usize, 0usize);
             let mut kept = 0usize;
             for entry in feed.entries {
                 if kept >= p.max_items_per_feed {
@@ -192,8 +196,10 @@ impl Source for RssSource {
                     );
                     break;
                 }
+                // Counted here, where the entry is actually examined — the cap breaks out
+                // above without looking at one.
+                seen += 1;
                 let Some(mut item) = map_entry(&feed_cfg.id, &feed_title, entry) else {
-                    unusable += 1;
                     continue;
                 };
                 if item.timestamp < min || item.timestamp >= max {
@@ -246,15 +252,20 @@ impl Source for RssSource {
             // whatever the transport said — the same state as an unreachable feed, reached
             // by a format change instead of a moved URL. An EMPTY feed is observed: there
             // was nothing to misread.
-            if observed == 0 && unusable > 0 {
+            if seen > observed && observed == 0 {
                 unreachable += 1;
                 tracing::warn!(
                     feed = %feed_cfg.id,
-                    unusable,
+                    unusable = seen,
                     "rss: every entry was unusable (no date or no title); treating the feed as unread"
                 );
             }
-            tracing::info!(feed = %feed_cfg.id, kept, unusable, "rss: feed extracted");
+            tracing::info!(
+                feed = %feed_cfg.id,
+                kept,
+                unusable = seen - observed,
+                "rss: feed extracted"
+            );
         }
 
         crate::require_any_observation("feed", unreachable, p.feeds.len())?;

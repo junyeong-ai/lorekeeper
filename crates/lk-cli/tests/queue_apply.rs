@@ -70,6 +70,22 @@ impl Workspace {
         std::fs::write(dir.join(format!("{task_id}.json")), body).expect("result");
     }
 
+    /// Run `queue apply` and require it to have APPLIED `applied` results and dropped
+    /// `dropped`.
+    ///
+    /// Asserting the resulting page alone cannot tell a correct re-apply from a silent
+    /// drop — both leave it unchanged — so an idempotency test written that way passes
+    /// against the very bug it is named after. What happened is part of the assertion.
+    fn apply_expecting(&self, applied: usize, dropped: usize) {
+        let out = self.run(&["queue", "apply"]);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "queue apply failed: {err}");
+        assert!(
+            err.contains(&format!("{applied} applied, {dropped} dropped")),
+            "expected {applied} applied / {dropped} dropped, got: {err}"
+        );
+    }
+
     fn run(&self, args: &[&str]) -> Output {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_lore"));
         for (key, _) in std::env::vars() {
@@ -271,11 +287,14 @@ fn applying_the_same_result_twice_is_idempotent() {
     let ws = Workspace::new();
     ws.write(PAGE, &daily_page("h"));
     ws.drop_result("ext-1", PAGE, "h", "Concept A");
-    assert!(ws.run(&["queue", "apply"]).status.success());
+    ws.apply_expecting(1, 0);
     let once = ws.read(PAGE);
 
     ws.drop_result("ext-1", PAGE, "h", "Concept A");
-    assert!(ws.run(&["queue", "apply"]).status.success());
+    // APPLIED again, not dropped: the first apply stamped the completion marker, so a
+    // result judged by that marker would be discarded here — leaving the page identical,
+    // which is exactly what idempotence looks like from the bytes alone.
+    ws.apply_expecting(1, 0);
     assert_eq!(
         ws.read(PAGE),
         once,
@@ -292,7 +311,7 @@ fn re_applying_preserves_everything_an_established_concept_page_accumulated() {
     let ws = Workspace::new();
     ws.write(PAGE, &daily_page("h"));
     ws.drop_result("ext-1", PAGE, "h", "Concept A");
-    assert!(ws.run(&["queue", "apply"]).status.success());
+    ws.apply_expecting(1, 0);
 
     // Stand in for what the rest of the system writes onto an established page:
     // `backlinks-sync` owns the count, a human or a later audit owns the synthesis and
@@ -310,7 +329,8 @@ fn re_applying_preserves_everything_an_established_concept_page_accumulated() {
     ws.write(concept, &enriched);
 
     ws.drop_result("ext-1", PAGE, "h", "Concept A");
-    assert!(ws.run(&["queue", "apply"]).status.success());
+    // Applied, not dropped — see `applying_the_same_result_twice_is_idempotent`.
+    ws.apply_expecting(1, 0);
 
     let after = ws.read(concept);
     assert!(
