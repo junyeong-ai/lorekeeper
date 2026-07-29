@@ -10,7 +10,7 @@
 //! Section labels and heading targets come from [`lk_core::i18n`] so the index honors
 //! `vault.locale` like the rest of the pipeline.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -41,11 +41,13 @@ pub fn build_index(
 ) -> Result<String, VaultError> {
     let strings = locale.strings();
 
-    let concepts = collect_dir_grouped(vault_root, &concepts_dir(dirs), "category");
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let concepts = collect_dir_grouped(vault_root, &concepts_dir(dirs), "category", &mut seen);
     // Group documents by `document_type` — a field EVERY document carries — so the
     // catalog buckets consistently (vs `source_project`, which only some documents have).
-    let documents = collect_dir_grouped(vault_root, &documents_dir(dirs), "document_type");
-    let explorations = collect_dir(vault_root, &explorations_dir(dirs));
+    let documents =
+        collect_dir_grouped(vault_root, &documents_dir(dirs), "document_type", &mut seen);
+    let explorations = collect_dir(vault_root, &explorations_dir(dirs), &mut seen);
 
     // daily/ holds one sub-directory per source ID. We keep them as separate groups so
     // the index shows pages-per-source counts and stable ordering.
@@ -63,14 +65,14 @@ pub fn build_index(
         sub_dirs.sort_by(|a, b| a.0.cmp(&b.0));
         for (source_id, dir) in sub_dirs {
             let rel = Path::new(&dirs.daily).join(&source_id);
-            let entries = collect_files(&rel, &dir, "category");
+            let entries = collect_files(&rel, &dir, "category", &mut seen);
             if !entries.is_empty() {
                 daily_groups.insert(source_id, entries);
             }
         }
     }
 
-    let work_log = collect_dir(vault_root, &work_log_dir(dirs));
+    let work_log = collect_dir(vault_root, &work_log_dir(dirs), &mut seen);
 
     // Synthesis tiers are merged into one bucket so the index has a single "synthesis"
     // section. Each entry keeps its full vault-relative path so the link destination is
@@ -84,7 +86,7 @@ pub fn build_index(
         PathBuf::from(&dirs.personal).join(&dirs.annual),
     ];
     for sub in &synthesis_dirs {
-        synthesis.extend(collect_dir(vault_root, sub));
+        synthesis.extend(collect_dir(vault_root, sub, &mut seen));
     }
     synthesis.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
 
@@ -252,19 +254,35 @@ struct IndexEntry {
     category: Option<String>,
 }
 
-fn collect_dir(vault_root: &Path, rel: &Path) -> Vec<IndexEntry> {
-    collect_dir_grouped(vault_root, rel, "category")
+fn collect_dir(vault_root: &Path, rel: &Path, seen: &mut HashSet<PathBuf>) -> Vec<IndexEntry> {
+    collect_dir_grouped(vault_root, rel, "category", seen)
 }
 
-fn collect_dir_grouped(vault_root: &Path, rel: &Path, group_field: &str) -> Vec<IndexEntry> {
+fn collect_dir_grouped(
+    vault_root: &Path,
+    rel: &Path,
+    group_field: &str,
+    seen: &mut HashSet<PathBuf>,
+) -> Vec<IndexEntry> {
     let abs = vault_root.join(rel);
     if !abs.is_dir() {
         return Vec::new();
     }
-    collect_files(rel, &abs, group_field)
+    collect_files(rel, &abs, group_field, seen)
 }
 
-fn collect_files(rel_dir: &Path, abs_dir: &Path, group_field: &str) -> Vec<IndexEntry> {
+/// `seen` carries canonical page identity across every directory one index run collects, so
+/// a page reached through two of them is catalogued once. Two configured roots can be one
+/// directory on disk while differing as strings — case on a case-insensitive filesystem, NFC
+/// against NFD on APFS, a symlink — and the same page then arrives under two rel paths, once
+/// as a concept and once as whatever the other root makes it. `scan_vault` resolves the same
+/// collision for the link graph; the catalog is the other reader that walks per directory.
+fn collect_files(
+    rel_dir: &Path,
+    abs_dir: &Path,
+    group_field: &str,
+    seen: &mut HashSet<PathBuf>,
+) -> Vec<IndexEntry> {
     let mut entries: Vec<IndexEntry> = Vec::new();
     for w in WalkDir::new(abs_dir).follow_links(false) {
         let w = match w {
@@ -286,6 +304,10 @@ fn collect_files(rel_dir: &Path, abs_dir: &Path, group_field: &str) -> Vec<Index
         if let Some(name) = path.file_name().and_then(|n| n.to_str())
             && lk_core::vault_path::RESERVED_WIKI_FILES.contains(&name)
         {
+            continue;
+        }
+
+        if !seen.insert(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())) {
             continue;
         }
 
@@ -567,6 +589,35 @@ mod tests {
             std::fs::create_dir_all(parent).unwrap();
         }
         std::fs::write(path, content).unwrap();
+    }
+
+    /// The catalog walks per directory, so a page reached through two of them would be listed
+    /// twice — once as the type the first root gives it and once as the type the second does.
+    /// Two configured roots become one directory whenever the filesystem folds their spelling
+    /// (case here, NFC against NFD on APFS), and the catalog is what a reader navigates by.
+    /// Spelled with a symlink so the case holds wherever the tests run.
+    #[test]
+    fn a_page_reached_through_two_roots_is_catalogued_once() {
+        let tmp = TempDir::new().unwrap();
+        write_file(
+            tmp.path(),
+            "wiki/concepts/rag.md",
+            "---\nid: rag\ntype: concept\ntitle: RAG\n---\n\n# RAG\n\n## 핵심\n\nx.\n",
+        );
+        if std::os::unix::fs::symlink(tmp.path().join("wiki"), tmp.path().join("alias")).is_err() {
+            return;
+        }
+
+        let dirs = VaultDirs {
+            daily: "alias".to_owned(),
+            ..VaultDirs::default()
+        };
+        let out = build_index(tmp.path(), Locale::Ko, &dirs).unwrap();
+        assert_eq!(
+            out.matches("rag.md").count(),
+            1,
+            "one entry per page, whichever root reached it first:\n{out}"
+        );
     }
 
     #[test]
