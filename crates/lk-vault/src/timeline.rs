@@ -122,6 +122,9 @@ pub fn write_timeline(
 /// puts a daily page inside one of them, and the timeline promises durable knowledge nodes
 /// only. It was reached that way: a daily digest became a permanent entry in the knowledge
 /// timeline, which is the one thing this file says it will not do.
+/// The page formats this timeline is a timeline OF — one per directory it walks.
+const KNOWLEDGE_FORMATS: &[&str] = &["concept", "document", "exploration"];
+
 fn collect_into(
     entries: &mut Vec<TimelineEntry>,
     vault_root: &Path,
@@ -149,6 +152,21 @@ fn collect_into(
         let Ok(page) = parse_page(&raw) else {
             continue;
         };
+        // The three directories walked here hold the three durable knowledge formats, and a
+        // page declaring any other one is foreign to them however it arrived — a `vault.dirs`
+        // root the filesystem folds onto another lands a daily digest inside `wiki/concepts`,
+        // and this file promises knowledge nodes only. Directory membership was the whole test
+        // before, which made that promise depend on nothing checkable. A page declaring no
+        // type at all predates the field and stays: the check names what is foreign, not what
+        // is permitted.
+        if page
+            .frontmatter
+            .get("type")
+            .and_then(|value| value.as_str())
+            .is_some_and(|declared| !KNOWLEDGE_FORMATS.contains(&declared))
+        {
+            continue;
+        }
         let Some(created) = fm_date(&page, "created") else {
             continue;
         };
@@ -197,6 +215,40 @@ mod tests {
             &format!("wiki/concepts/{slug}.md"),
             &format!("---\nid: {slug}\ntitle: {title}\ncreated: {created}\n---\n"),
         );
+    }
+
+    /// The timeline is a timeline of durable knowledge, and directory membership was the whole
+    /// test — so an operational record that landed in one of these directories became a
+    /// permanent knowledge entry. It lands there when a `vault.dirs` root the filesystem folds
+    /// puts `<daily>` inside `wiki`. A page declaring no type predates the field and stays,
+    /// since the check names what is foreign rather than what is permitted.
+    #[test]
+    fn an_operational_record_inside_a_knowledge_directory_is_not_a_knowledge_node() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "wiki/concepts/2026-02-10.md",
+            "---\nid: d\ntype: daily\ntitle: Digest\ncreated: 2026-02-10\n---\n",
+        );
+        write(
+            tmp.path(),
+            "wiki/concepts/rag.md",
+            "---\nid: rag\ntype: concept\ntitle: RAG\ncreated: 2026-02-11\n---\n",
+        );
+        // No `type` at all: a page from before the field, which must not be dropped.
+        write(
+            tmp.path(),
+            "wiki/documents/old.md",
+            "---\nid: old\ntitle: Old\ncreated: 2026-02-12\n---\n",
+        );
+
+        let out = build_timeline(tmp.path(), Locale::Ko, &VaultDirs::default()).unwrap();
+        assert!(
+            !out.contains("Digest"),
+            "a daily record is not knowledge:\n{out}"
+        );
+        assert!(out.contains("RAG"), "{out}");
+        assert!(out.contains("Old"), "an untyped page stays:\n{out}");
     }
 
     #[test]
