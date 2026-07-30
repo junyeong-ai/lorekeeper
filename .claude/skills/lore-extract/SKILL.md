@@ -217,7 +217,7 @@ Extract knowledge using the manifest. Requires a prior scan.
       title: "{Generalised Title}"
       created: {today}
       updated: {today}
-      document_type: note          # FORMAT only (note|report|data); the knowledge's
+      document_type: note          # a FORMAT value AGENTS.md lists; the knowledge's
                                    # nature (project-knowledge, guide, ADR) goes in tags
       source_url: {repo-remote-url}  # the repo's REMOTE url; OMIT for a local-only repo —
                                      # a local/temp path is unstable provenance, worse than none
@@ -253,9 +253,7 @@ Extract knowledge using the manifest. Requires a prior scan.
    authoritative and health checks pass:
    ```bash
    lore graph backlinks-sync   # re-derive every concept's ## Sources + source_count
-   lore wiki index             # rebuild the catalog (lint flags index drift until this runs)
-   lore wiki log               # refresh the knowledge timeline these pages now belong to
-   lore wiki map               # refresh the citation-cluster navigation map
+   lore wiki refresh           # re-derive the catalog, timeline and map these pages join
    lore graph lint             # confirm no structural drift; pre-existing review items may remain
    ```
 8. Report created/merged/skipped counts.

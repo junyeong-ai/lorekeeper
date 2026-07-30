@@ -47,8 +47,8 @@ each as an independent source, and report the aggregate results.
 1. Read AGENTS.md for the document AND concept page formats.
 2. If `<source>` is a folder, list all readable files and process each below.
 3. For EACH source, create a **document page** (per AGENTS.md): preserve the
-   original content, set `document_type` from the format vocabulary
-   (`note`|`report`|`data`; the source's nature goes in `tags`), and link the
+   original content, set `document_type` from the format vocabulary AGENTS.md
+   states (the source's nature goes in `tags`), and link the
    extracted concepts as relative markdown links (`[Name](<concepts-dir>/<slug>.md)`,
    per AGENTS.md § Links) in the related-concepts section.
 4. Extract every named entity, technology, and topic as concepts (typically
@@ -59,9 +59,8 @@ each as an independent source, and report the aggregate results.
    fields. Fill the Synthesis section with a 1-2 sentence definition for a new
    concept; the document's forward concept link from step 3 is what
    `backlinks-sync` counts as the citation.
-5. **Finalize**: `lore graph backlinks-sync`, then `lore wiki index`, then
-   `lore wiki log` (refresh the knowledge timeline the new pages belong to), then
-   `lore wiki map` (refresh the citation-cluster navigation map), then
+5. **Finalize**: `lore graph backlinks-sync`, then `lore wiki refresh` (re-derive
+   the catalog, the knowledge timeline and the citation-cluster map), then
    `lore graph lint` to confirm no structural drift (index/broken links).
    Pre-existing review items (uncategorized, open conflicts) may legitimately
    remain — they are not introduced by this add. A `duplicate_concepts` entry
@@ -89,10 +88,8 @@ Answer a question grounded in vault content, with compounding.
      Grounding section — that is the form every consumer reads.
      Then **finalize** so the new page leaves the graph clean:
      `lore graph backlinks-sync` (its Grounding links are real citations that
-     raise each grounded concept's `source_count`), then `lore wiki index` (so the
-     exploration is catalogued and the next audit shows no index drift), then
-     `lore wiki log` (so it joins the knowledge timeline), then
-     `lore wiki map` (so the new exploration joins the navigation map and its links
+     raise each grounded concept's `source_count`), then `lore wiki refresh` (so the
+     exploration is catalogued, the next audit shows no index drift, and its links
      compound the cluster structure). Tell the user where it landed.
    - **Ephemeral** (single-fact, navigational lookup) → do not file.
 

@@ -30,6 +30,12 @@ pub enum WikiCommand {
         #[arg(long)]
         root: Option<PathBuf>,
     },
+    /// Regenerate every page derived from the vault: the catalog, the timeline and the map
+    Refresh {
+        /// Vault root override (default: vault.root from config)
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
     /// List all concept pages in the vault
     Concepts {
         /// Output as JSON array
@@ -43,8 +49,28 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
         WikiCommand::Index { root } => run_index(opts, root).await,
         WikiCommand::Log { root } => run_log(opts, root).await,
         WikiCommand::Map { root } => run_map(opts, root).await,
+        WikiCommand::Refresh { root } => run_refresh(opts, root).await,
         WikiCommand::Concepts { json } => run_concepts(opts, json).await,
     }
+}
+
+/// Regenerate every page derived from the vault's contents, in one call.
+///
+/// Each of these is a materialized view, true only while something re-derives it — and every
+/// caller that adds pages has to re-derive all of them. Listing the commands at each call site is
+/// what left `log.md` refreshed by nothing while the catalog and the map were refreshed by five
+/// separate places: the scheduled pipeline and four skills. One command means a caller cannot
+/// name a subset, and a page added to the set reaches every caller without any of them changing.
+///
+/// `lore schema` stays separate: `AGENTS.md` derives from config, not from the vault, so a run
+/// that only added pages has nothing to refresh there.
+pub async fn run_refresh(
+    opts: &super::GlobalOptions,
+    root_override: Option<PathBuf>,
+) -> miette::Result<()> {
+    run_index(opts, root_override.clone()).await?;
+    run_log(opts, root_override.clone()).await?;
+    run_map(opts, root_override).await
 }
 
 pub async fn run_map(

@@ -100,8 +100,8 @@ Link the relevant concepts as relative markdown links (AGENTS.md § Links) in th
 related-concepts section (heading from AGENTS.md) — these forward links are
 what `backlinks-sync` reads to derive each concept's sources section in step 6.
 
-`document_type` is a FORMAT value from the AGENTS.md vocabulary
-(`note` for prose/markdown, `report` for HTML, `data` for structured) —
+`document_type` is a FORMAT value, and AGENTS.md lists the vocabulary and what
+each value means — read it there rather than from memory —
 the insight's nature (troubleshooting, constraint, pattern) belongs in
 `tags`, never in `document_type`.
 
@@ -128,9 +128,7 @@ checks pass:
 
 ```bash
 lore graph backlinks-sync   # re-derive every concept's ## Sources + source_count
-lore wiki index             # rebuild the catalog so `lore graph lint` is clean
-lore wiki log               # refresh the knowledge timeline this page now belongs to
-lore wiki map               # refresh the citation-cluster navigation map
+lore wiki refresh           # re-derive the catalog, timeline and map this page joins
 lore graph lint             # confirm no structural drift (index/broken links). Pre-existing orphans and open conflicts may legitimately remain; a duplicate-concept entry naming a page you just wrote does NOT — it means this capture claimed a name another page already answers to
 ```
 

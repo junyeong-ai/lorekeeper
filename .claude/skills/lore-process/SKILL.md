@@ -233,9 +233,7 @@ The essentials: a visible `.jsonl` is fully written and every
    ```bash
    lore queue apply            # materialize reported concepts into pages + links
    lore graph backlinks-sync   # re-derive every concept's ## Sources + source_count
-   lore wiki index             # refresh the catalog
-   lore wiki log               # refresh the knowledge timeline
-   lore wiki map               # refresh the citation-cluster navigation map
+   lore wiki refresh           # re-derive the catalog, the timeline and the map
    ```
    Run these on EVERY `/lore-process` invocation that processed at least one
    task — skipping them leaves new concepts with no `## Sources` and a stale

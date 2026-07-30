@@ -789,6 +789,21 @@ mod tests {
         }
     }
 
+    /// The generated page carries the `document_type` vocabulary, which is what lets every skill
+    /// point at it instead of restating the values — three of them used to, and the copies were
+    /// only detectable by a windowed word search, because `data` is an ordinary English word.
+    #[test]
+    fn agents_md_states_the_document_type_vocabulary() {
+        let content = render_agents_md(Locale::Ko, &lk_core::config::VaultDirs::default(), true);
+        for value in lk_core::document::DOCUMENT_TYPES {
+            assert!(
+                content.contains(&format!("`{value}`")),
+                "AGENTS.md must state the `{value}` document type — every skill is told to read \
+                 the vocabulary there rather than carry its own copy"
+            );
+        }
+    }
+
     /// `AGENTS.md` tells an agent which frontmatter keys a page format carries, and the template
     /// is what actually renders them. Nothing compared the two, so renaming `source_url` to
     /// `source_uri` in the schema left every author instructed to write a key the vault never

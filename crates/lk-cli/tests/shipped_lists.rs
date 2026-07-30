@@ -103,54 +103,34 @@ fn every_target_an_installer_asks_for_is_one_the_release_builds() {
     }
 }
 
-/// The skills are what an agent reads before writing a document page's frontmatter, and three of
-/// them enumerate the `document_type` values by hand while `lk_core::document::DOCUMENT_TYPES` is
-/// what the vault accepts. A value added there and not here leaves every skill telling agents to
-/// choose from a shorter list; a value renamed leaves them writing one the schema does not admit.
+/// No skill spells out a vocabulary `AGENTS.md` already generates.
 ///
-/// The files are discovered rather than named: any skill markdown whose text near `document_type`
-/// enumerates values must enumerate all of them. That catches both drifts, because a rename
-/// removes the old name from the code and the file that still lacks the new one fails.
-///
-/// Judged on the window around each mention rather than the whole file, because `data` is an
-/// ordinary English word that appears in prose everywhere — a whole-file search for it would pass
-/// no matter what the enumeration said. A mention whose window names SOME of the values is an
-/// enumeration and must name them all; one that names none is prose about the field, not a list.
+/// Three of them enumerated the `document_type` values in prose, which is a copy of a list the
+/// schema generator emits from `DOCUMENT_TYPES` into the very file those skills are told to read
+/// ("derive everything from AGENTS.md — never hardcode"). Detecting drift between the copies took
+/// a windowed word search, because `data` is an ordinary English word; deleting the copies takes
+/// nothing, and leaves the generated page as the only place the vocabulary appears.
 #[test]
-fn every_skill_that_enumerates_document_types_enumerates_all_of_them() {
-    const WINDOW: usize = 240;
-    let declared = lk_core::document::DOCUMENT_TYPES;
-    let mut enumerations = 0;
+fn no_skill_restates_a_vocabulary_agents_md_generates() {
     for skill in glob_skill_markdown() {
         let body = read(&skill);
         for (at, _) in body.match_indices("document_type") {
-            let start = body[..at]
-                .char_indices()
-                .rev()
-                .nth(WINDOW)
-                .map_or(0, |(i, _)| i);
-            let end = body[at..]
-                .char_indices()
-                .nth(WINDOW)
-                .map_or(body.len(), |(i, _)| at + i);
-            let window = &body[start..end];
-            let named: Vec<&&str> = declared.iter().filter(|v| names_word(window, v)).collect();
-            if named.is_empty() {
-                continue;
-            }
-            enumerations += 1;
-            assert_eq!(
-                named.len(),
-                declared.len(),
-                "{} enumerates document_type values but names only {named:?} of {declared:?}",
+            let line = body[..at].rfind('\n').map_or(0, |i| i + 1);
+            let line = &body[line..at + body[at..].find('\n').unwrap_or(0)];
+            let named: Vec<&&str> = lk_core::document::DOCUMENT_TYPES
+                .iter()
+                .filter(|value| names_word(line, value))
+                .collect();
+            // One value is a legitimate example (`document_type: note` in a sample page); two or
+            // more on one line is the vocabulary restated.
+            assert!(
+                named.len() < 2,
+                "{} restates the document_type vocabulary ({named:?}) that AGENTS.md generates \
+                 from DOCUMENT_TYPES — point at it instead:\n  {line}",
                 skill.display()
             );
         }
     }
-    assert!(
-        enumerations > 0,
-        "no skill markdown enumerates the document_type values — did they move?"
-    );
 }
 
 /// Whether `text` contains `word` as a whole word, so `note` does not match `notebook`.
@@ -185,54 +165,63 @@ fn glob_skill_markdown() -> Vec<PathBuf> {
 }
 
 /// A page derived wholesale is only true while something re-derives it, and everything that adds
-/// pages to the vault has to. The shipped pipeline must refresh all four, because config can
-/// change between scheduled runs; every skill that writes pages must refresh the ones derived
-/// from vault CONTENTS, since writing pages is what makes them stale.
+/// pages to the vault has to re-derive ALL of them.
 ///
-/// The pipeline ran three of the four: `log.md` was refreshed by nothing, so the knowledge
-/// timeline stopped at whenever a person last typed `lore wiki log` — stale on a live vault while
-/// a module comment claimed it was regenerated each run. Checking only the drain skill then missed
-/// the same omission in three others, which is why the skills are DISCOVERED here: any skill that
-/// refreshes one vault-derived page is a skill that writes pages, and must refresh them all.
+/// Listing the commands at each call site is what left `log.md` refreshed by nothing while the
+/// catalog and the map were refreshed by five separate places. `lore wiki refresh` re-derives the
+/// whole set in one call, so a caller cannot name a subset and a page added to the set reaches
+/// every caller without any of them changing — which is why this checks for one command rather
+/// than comparing lists. `lore schema` stays separate and per-page, because `AGENTS.md` derives
+/// from config rather than from the vault.
 #[test]
-fn everything_that_writes_pages_regenerates_every_generated_wiki_page() {
+fn everything_that_writes_pages_refreshes_the_pages_derived_from_the_vault() {
     use lk_core::vault_path::Derivation;
 
     let vault_derived: Vec<&str> = lk_core::vault_path::GENERATED_WIKI_PAGES
         .iter()
         .filter(|(_, _, derivation)| *derivation == Derivation::VaultContents)
-        .map(|(_, command, _)| *command)
+        .map(|(page, _, _)| *page)
         .collect();
+    assert!(
+        vault_derived.len() > 1,
+        "one command for a single page would be indirection, not a contract"
+    );
 
     let pipeline = read(&repo_root().join("scripts/lore-pipeline.sh"));
-    for (page, command, _) in lk_core::vault_path::GENERATED_WIKI_PAGES {
-        assert!(
-            pipeline.contains(&format!("lore_cmd {command}")),
-            "scripts/lore-pipeline.sh never runs `lore {command}`, so {page} is never refreshed \
-             on a schedule"
-        );
+    assert!(
+        pipeline.contains("lore_cmd wiki refresh"),
+        "scripts/lore-pipeline.sh never refreshes the vault-derived pages: {vault_derived:?}"
+    );
+    for (page, command, derivation) in lk_core::vault_path::GENERATED_WIKI_PAGES {
+        if derivation == Derivation::Config {
+            assert!(
+                pipeline.contains(&format!("lore_cmd {command}")),
+                "scripts/lore-pipeline.sh never runs `lore {command}`, so {page} is never \
+                 refreshed on a schedule"
+            );
+        }
     }
 
+    // Any skill that finalizes a page-writing run must call it, and none may call the per-page
+    // commands instead — a subset is what went stale.
     let mut refreshing = 0;
     for skill in glob_skill_markdown() {
         let body = read(&skill);
-        let runs: Vec<&&str> = vault_derived
-            .iter()
-            .filter(|command| body.contains(&format!("lore {command}")))
-            .collect();
-        if runs.is_empty() {
-            continue;
+        if body.contains("lore wiki refresh") {
+            refreshing += 1;
         }
-        refreshing += 1;
-        assert_eq!(
-            runs.len(),
-            vault_derived.len(),
-            "{} refreshes {runs:?} but not all of {vault_derived:?} — a skill that writes pages \
-             leaves the rest stale",
-            skill.display()
-        );
+        for (page, command, derivation) in lk_core::vault_path::GENERATED_WIKI_PAGES {
+            if derivation == Derivation::VaultContents {
+                assert!(
+                    !body.contains(&format!("lore {command}")),
+                    "{} names `lore {command}` for {page} — call `lore wiki refresh` so no caller \
+                     can refresh a subset",
+                    skill.display()
+                );
+            }
+        }
     }
-    assert!(refreshing > 0, "no skill refreshes any generated wiki page");
+    assert!(refreshing > 0, "no skill refreshes the vault-derived pages");
 
     // And the two lists describe the same set of files.
     let mut named: Vec<&str> = lk_core::vault_path::GENERATED_WIKI_PAGES
