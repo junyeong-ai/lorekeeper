@@ -789,6 +789,49 @@ mod tests {
         }
     }
 
+    /// `AGENTS.md` tells an agent which frontmatter keys a page format carries, and the template
+    /// is what actually renders them. Nothing compared the two, so renaming `source_url` to
+    /// `source_uri` in the schema left every author instructed to write a key the vault never
+    /// reads — and the schema's own tests, which check its output against itself, all passed.
+    ///
+    /// Two formats are exempt, each for a stated reason rather than because it was inconvenient:
+    /// `exploration` has no template at all (the page is authored through `/lore-wiki`, which is
+    /// why the template was deleted), and `audited_sources_hash` is stamped onto an existing page
+    /// by `lore graph audit-mark`, so no render emits it.
+    #[test]
+    fn every_frontmatter_key_the_schema_advertises_is_one_a_template_renders() {
+        const AUTHORED_NOT_RENDERED: &[&str] = &["exploration"];
+        let templates =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../templates");
+        let mut checked = 0;
+        for schema in page_schemas(&lk_core::config::VaultDirs::default(), true) {
+            if AUTHORED_NOT_RENDERED.contains(&schema.type_name) {
+                continue;
+            }
+            // Daily pages render through the shared base; every other format has its own file.
+            let file = if schema.type_name == "daily" {
+                "_daily_base.md.jinja".to_string()
+            } else {
+                format!("{}.md.jinja", schema.type_name)
+            };
+            let path = templates.join(&file);
+            let body = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{} renders through {file}: {e}", schema.type_name));
+            for key in schema.frontmatter {
+                if *key == lk_core::frontmatter::field::AUDITED_SOURCES_HASH {
+                    continue;
+                }
+                assert!(
+                    body.contains(&format!("{key}:")),
+                    "AGENTS.md advertises `{key}` on a {} page, and {file} never renders it",
+                    schema.type_name
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "no schema frontmatter keys were compared");
+    }
+
     /// `PAGE_FORMATS` is what `holds_managed_pages` asks when deciding whether a directory holds
     /// Lorekeeper's output, and it lived in `lk-core` with nothing tying it to the registry those
     /// formats are actually defined by. A `"document"` renamed to `"bogus"` in the array left all

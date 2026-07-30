@@ -4,7 +4,7 @@
 //! `Locale` arm; everything else is compiler-checked.
 
 /// Output language for added labels/headers. `Ko` is the default.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, strum::EnumIter)]
 pub enum Locale {
     #[default]
     Ko,
@@ -281,6 +281,22 @@ static EN: Strings = Strings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `ALL` is what every "consider each locale" path iterates — resolving a section heading a
+    /// page was authored under, and the render tests that check both languages. A variant added
+    /// to the enum and left out of it is a locale the vault silently stops recognizing headings
+    /// for, which reads as a page with no such section rather than as a missing locale.
+    #[test]
+    fn all_locales_are_in_all() {
+        use strum::IntoEnumIterator;
+
+        let listed: Vec<Locale> = Locale::ALL.to_vec();
+        let declared: Vec<Locale> = Locale::iter().collect();
+        assert_eq!(
+            listed, declared,
+            "Locale::ALL must be every variant, in declaration order"
+        );
+    }
 
     #[test]
     fn from_tag_maps_language_subtag() {

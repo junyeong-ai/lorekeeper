@@ -42,6 +42,24 @@ fn queue_format_documents_every_target_kind_wire_name() {
     }
 }
 
+/// `queue-format.md` lists the kinds; `processing-kinds.md` is where each one's generation spec
+/// lives, under a `## \`kind: …\`` heading the drain looks for. Listing a kind and specifying it
+/// are different obligations, and only the first was checked — misspelling the `refine-events`
+/// heading left a real task kind with no instructions, silently, since the drain then has nothing
+/// to follow for it and every other kind still works.
+#[test]
+fn processing_kinds_specifies_every_task_kind() {
+    let doc = read_skill_file("references/processing-kinds.md");
+    for kind in TaskKind::iter() {
+        let heading = format!("## `kind: {}`", kind.as_str());
+        assert!(
+            doc.contains(&heading),
+            "references/processing-kinds.md has no `{heading}` section, so a drain receiving \
+             TaskKind::{kind:?} has no generation spec to follow"
+        );
+    }
+}
+
 #[test]
 fn queue_format_documents_every_task_kind_wire_name() {
     let doc = read_skill_file("references/queue-format.md");
