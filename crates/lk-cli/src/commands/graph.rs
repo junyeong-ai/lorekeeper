@@ -17,6 +17,60 @@ struct ResolvedConfig {
     concept_categories: Vec<ConceptCategory>,
 }
 
+/// ONE scan of the vault, partitioned into the three views that answer three different
+/// questions. Conflating any two of them reports something false.
+struct VaultViews {
+    /// Every page in the vault. The existence universe — "is a file addressed by this id" is
+    /// exact only over all of them — and the view the mutators repoint links across, since a
+    /// citation of a renamed or merged page lives wherever it was written.
+    scanned: Vec<scan::ScannedPage>,
+    existence: scan::VaultExistence,
+    /// The pages this tool writes and manages: the analysis scope ∪ every page directory. A
+    /// vault also holds the user's own folders, and a stray link in a hand-written note is
+    /// neither this tool's output nor something it can repair.
+    link_sources: Vec<scan::ScannedPage>,
+    /// The analysis scope — the graph's nodes and edges.
+    pages: Vec<scan::ScannedPage>,
+}
+
+impl VaultViews {
+    /// The walk is always the vault ROOT, and `scope.exclude` narrows the last two views only.
+    /// An excluded page still exists, so it still resolves a link and still has its own links
+    /// repointed; anything narrower makes "not scanned" indistinguishable from "not there", in
+    /// whichever direction the narrowing resolves it. `scan_vault` skips dot-directories, so
+    /// `.trash` — where Obsidian puts a DELETED page — never resolves.
+    fn resolve(rc: &ResolvedConfig) -> Result<Self, String> {
+        let mut scan_cfg = rc.graph.clone();
+        // An empty relative path joins to the root itself.
+        scan_cfg.scope.dirs = vec![PathBuf::new()];
+        scan_cfg.scope.exclude = Vec::new();
+        let scanned = scan::scan_vault(&rc.root, &scan_cfg).map_err(|e| format!("{e}"))?;
+        let existence = scan::VaultExistence::build(&scanned, &rc.vault_dirs);
+
+        let excluded =
+            scan::Excludes::compile(&rc.graph.scope.exclude).map_err(|e| format!("{e}"))?;
+        let in_scope = |page: &scan::ScannedPage, dirs: &[PathBuf]| {
+            dirs.iter().any(|d| page.path.starts_with(d)) && !excluded.matches(&page.path)
+        };
+        let managed = managed_dirs(&rc.graph.scope.dirs, &rc.root, &rc.vault_dirs);
+
+        Ok(Self {
+            link_sources: scanned
+                .iter()
+                .filter(|p| in_scope(p, &managed))
+                .cloned()
+                .collect(),
+            pages: scanned
+                .iter()
+                .filter(|p| in_scope(p, &rc.graph.scope.dirs))
+                .cloned()
+                .collect(),
+            scanned,
+            existence,
+        })
+    }
+}
+
 #[derive(clap::Subcommand)]
 pub enum GraphCommand {
     /// Run all graph checks in one pass
@@ -136,8 +190,7 @@ fn run_inner(
     json: bool,
     root_override: Option<PathBuf>,
 ) -> Result<bool, String> {
-    // `backlinks-sync` and the audit/merge commands need locale from the full config —
-    // dispatch them up front before paying the graph-build cost.
+    // These two read the concept pages directly and need no scan of the vault.
     match cmd {
         GraphCommand::AuditCandidates => {
             return run_audit_candidates(opts, root_override, json);
@@ -145,81 +198,20 @@ fn run_inner(
         GraphCommand::AuditMark { ref slug } => {
             return run_audit_mark(opts, root_override, json, slug);
         }
-        GraphCommand::BacklinksSync { dry_run } => {
-            return run_backlinks(opts, root_override, json, dry_run);
-        }
-        GraphCommand::Merge {
-            ref from,
-            ref into,
-            dry_run,
-            force,
-        } => {
-            return run_merge(opts, root_override, json, from, into, dry_run, force);
-        }
         _ => {}
     }
 
     let mut rc = resolve_config_full(opts, root_override)?;
-
-    // The SINGLE definition of what this command reads. Integrity commands resolve links
-    // against a whole-vault existence universe; analysis commands read `scope.dirs` only.
-    let integrity = matches!(
-        cmd,
-        GraphCommand::Lint
-            | GraphCommand::Broken
-            | GraphCommand::Orphans
-            | GraphCommand::IndexSync { .. }
-    );
-    let scan_dirs = command_scan_dirs(integrity, &rc.graph.scope.dirs);
-
-    // ONE scan, partitioned into three views that answer three different questions. Conflating
-    // any two of them reports something false:
-    //
-    // - `scanned` — every page in the vault. The existence universe: "is a file addressed by
-    //   this id" is exact only over all of them.
-    // - `link_sources` — the pages this tool writes and manages, `scope.dirs` ∪ the page dirs.
-    //   A user's own note is not the pipeline's output and not its to repair, so a stray link
-    //   inside one is not a violation of the vault's contract.
-    // - `pages` — the analysis scope, the graph's nodes and edges.
-    //
-    // `scope.exclude` narrows the last two, never the first: an excluded page still exists.
-    let mut scan_cfg = rc.graph.clone();
-    scan_cfg.scope.dirs = scan_dirs;
-    if integrity {
-        scan_cfg.scope.exclude = Vec::new();
-    }
-    let scanned = scan::scan_vault(&rc.root, &scan_cfg).map_err(|e| format!("{e}"))?;
-    let existence = scan::VaultExistence::build(&scanned, &rc.vault_dirs);
-    let excluded = scan::Excludes::compile(&rc.graph.scope.exclude).map_err(|e| format!("{e}"))?;
-    let in_scope = |page: &scan::ScannedPage, dirs: &[PathBuf]| {
-        dirs.iter().any(|d| page.path.starts_with(d)) && !excluded.matches(&page.path)
-    };
-    let managed_dirs = command_source_dirs(&rc.graph.scope.dirs, &rc.root, &rc.vault_dirs);
-    let link_sources: Vec<scan::ScannedPage> = scanned
-        .iter()
-        .filter(|p| in_scope(p, &managed_dirs))
-        .cloned()
-        .collect();
-    let pages: Vec<scan::ScannedPage> = scanned
-        .iter()
-        .filter(|p| in_scope(p, &rc.graph.scope.dirs))
-        .cloned()
-        .collect();
-    let g = graph::WikiGraph::build_with_existence(&pages, &existence, &rc.vault_dirs);
+    let views = VaultViews::resolve(&rc)?;
+    let g = graph::WikiGraph::build_with_existence(&views.pages, &views.existence, &rc.vault_dirs);
 
     let violated = match cmd {
         GraphCommand::Lint => {
             let hubs = g.hubs(10, rc.graph.metrics.min_hub_degree);
             let orphans = g.orphans(&rc.graph.metrics.orphan_exclude);
-            let broken = graph::broken_links(&link_sources, &existence, &rc.vault_dirs);
-            let drift = index_drift::diff(
-                &g,
-                &existence,
-                &rc.root,
-                Path::new(&rc.vault_dirs.wiki),
-                &rc.graph.metrics.orphan_exclude,
-            )
-            .map_err(|e| format!("{e}"))?;
+            let broken = graph::broken_links(&views.link_sources, &views.existence, &rc.vault_dirs);
+            let drift = index_drift::diff(&rc.root, rc.locale, &rc.vault_dirs)
+                .map_err(|e| format!("{e}"))?;
             // Read the concept pages once; the three concept lints are pure functions
             // over the result rather than each re-walking `{wiki}/concepts/`.
             let concept_pages = concept_lint::scan_concept_pages(&rc.root, &rc.vault_dirs.wiki)
@@ -280,7 +272,7 @@ fn run_inner(
             false
         }
         GraphCommand::Broken => {
-            let broken = graph::broken_links(&link_sources, &existence, &rc.vault_dirs);
+            let broken = graph::broken_links(&views.link_sources, &views.existence, &rc.vault_dirs);
             let count = broken.len();
             let report = output::BrokenReport { broken, count };
             let has = report.count > 0;
@@ -321,19 +313,14 @@ fn run_inner(
             false
         }
         GraphCommand::IndexSync { fix } => {
-            let drift = index_drift::diff(
-                &g,
-                &existence,
-                &rc.root,
-                Path::new(&rc.vault_dirs.wiki),
-                &rc.graph.metrics.orphan_exclude,
-            )
-            .map_err(|e| format!("{e}"))?;
+            let drift = index_drift::diff(&rc.root, rc.locale, &rc.vault_dirs)
+                .map_err(|e| format!("{e}"))?;
             let has = !drift.is_in_sync();
-            let has_unfixable = !drift.missing_from_disk.is_empty();
-            let fixed = if fix && !drift.missing_from_index.is_empty() {
+            // The repair re-derives the whole catalog, so it resolves drift in both
+            // directions at once — there is no half it can leave behind.
+            let fixed = if fix && has {
                 Some(
-                    index_drift::fix(&drift, &pages, &rc.root, Path::new(&rc.vault_dirs.wiki))
+                    index_drift::fix(&drift, &rc.root, &rc.vault_dirs)
                         .map_err(|e| format!("{e}"))?,
                 )
             } else {
@@ -349,37 +336,18 @@ fn run_inner(
             } else {
                 output::print_index_sync(&report);
             }
-            has && (fixed.is_none() || has_unfixable)
+            has && fixed.is_none()
         }
         GraphCommand::Normalize { fix } => {
             // Rename candidates come from the analysis scope: only the wiki's own pages
             // are addressed by slug. A daily or synthesis page's filename is a DATE
             // (`2026-W30`), which slugifying would lowercase into a path the pipeline
             // does not write.
-            let renames = normalize::scan(&pages);
+            let renames = normalize::scan(&views.pages);
             let has = !renames.is_empty();
             let applied = if fix && has {
-                // Citations of a renamed page live anywhere in the vault — a daily page
-                // is the usual case — so the rewrite reads every page dir, the same
-                // full-vault view `merge` uses. Rewriting only the rename scope would
-                // leave those citations pointing at a file that no longer exists, and
-                // `graph broken` matches at the id level so it would not report them.
-                //
-                // The analysis scope is UNIONed in rather than assumed to sit inside those
-                // dirs: `graph.scope.dirs` is validated only as a relative in-vault path,
-                // so it can name a directory outside the standard four — and a page renamed
-                // out of one whose citations were never visited is the very defect this
-                // rewrite exists to prevent.
-                let mut cfg = rc.graph.clone();
-                cfg.scope.dirs = vault_page_dirs(&rc.root, &rc.vault_dirs);
-                for dir in &rc.graph.scope.dirs {
-                    if !cfg.scope.dirs.contains(dir) {
-                        cfg.scope.dirs.push(dir.clone());
-                    }
-                }
-                let everywhere = scan::scan_vault(&rc.root, &cfg).map_err(|e| format!("{e}"))?;
                 Some(
-                    normalize::apply(&renames, &everywhere, &rc.root)
+                    normalize::apply(&renames, &views.scanned, &rc.root)
                         .map_err(|e| format!("{e}"))?,
                 )
             } else {
@@ -424,14 +392,53 @@ fn run_inner(
             }
             false
         }
-        // Dispatched at the top of `run_inner` because they need full-vault scope
-        // and/or config that doesn't touch the in-scope WikiGraph.
-        GraphCommand::AuditCandidates
-        | GraphCommand::AuditMark { .. }
-        | GraphCommand::BacklinksSync { .. }
-        | GraphCommand::Merge { .. } => {
-            unreachable!()
+        GraphCommand::BacklinksSync { dry_run } => {
+            let sync = backlinks::sync_concept_backlinks(
+                &views.scanned,
+                &rc.root,
+                rc.locale,
+                dry_run,
+                &rc.vault_dirs,
+            )
+            .map_err(|e| format!("{e}"))?;
+            let changed = sync.updated.len();
+            // A page the sweep could not record a count on keeps a `source_count` the graph
+            // contradicts, and only a human adding frontmatter fixes it.
+            let violated = !sync.skipped.is_empty();
+            let report = output::BacklinksSyncReport { sync, changed };
+            if json {
+                output::print_json(&report)?;
+            } else {
+                output::print_backlinks(&report);
+            }
+            violated
         }
+        GraphCommand::Merge {
+            ref from,
+            ref into,
+            dry_run,
+            force,
+        } => {
+            let result = merge::merge_concepts(
+                &views.scanned,
+                &rc.root,
+                &rc.vault_dirs.wiki,
+                from,
+                into,
+                dry_run,
+                force,
+            )
+            .map_err(|e| format!("{e}"))?;
+            if json {
+                output::print_json(&result)?;
+            } else {
+                output::print_merge(&result);
+            }
+            // A successful merge leaves nothing contradicted.
+            false
+        }
+        // Dispatched at the top of `run_inner`: they read the concept pages directly.
+        GraphCommand::AuditCandidates | GraphCommand::AuditMark { .. } => unreachable!(),
     };
 
     Ok(violated)
@@ -476,82 +483,11 @@ fn run_audit_mark(
     Ok(false)
 }
 
-fn run_backlinks(
-    opts: &GlobalOptions,
-    root_override: Option<PathBuf>,
-    json: bool,
-    dry_run: bool,
-) -> Result<bool, String> {
-    let mut rc = resolve_config_full(opts, root_override)?;
-
-    rc.graph.scope.dirs = vault_page_dirs(&rc.root, &rc.vault_dirs);
-
-    let pages = scan::scan_vault(&rc.root, &rc.graph).map_err(|e| format!("{e}"))?;
-
-    let sync =
-        backlinks::sync_concept_backlinks(&pages, &rc.root, rc.locale, dry_run, &rc.vault_dirs)
-            .map_err(|e| format!("{e}"))?;
-    let changed = sync.updated.len();
-    // A page the sweep could not record a count on keeps a `source_count` the graph
-    // contradicts, and only a human adding frontmatter fixes it.
-    let violated = !sync.skipped.is_empty();
-    let report = output::BacklinksSyncReport { sync, changed };
-
-    if json {
-        output::print_json(&report)?;
-    } else {
-        output::print_backlinks(&report);
-    }
-
-    Ok(violated)
-}
-
-fn run_merge(
-    opts: &GlobalOptions,
-    root_override: Option<PathBuf>,
-    json: bool,
-    from: &str,
-    into: &str,
-    dry_run: bool,
-    force: bool,
-) -> Result<bool, String> {
-    let mut rc = resolve_config_full(opts, root_override)?;
-    // Merge rewrites links across the whole vault, so scan every page dir, not just
-    // the analysis scope — the same full-vault view backlinks-sync uses.
-    rc.graph.scope.dirs = vault_page_dirs(&rc.root, &rc.vault_dirs);
-
-    let pages = scan::scan_vault(&rc.root, &rc.graph).map_err(|e| format!("{e}"))?;
-    let result = merge::merge_concepts(
-        &pages,
-        &rc.root,
-        &rc.vault_dirs.wiki,
-        from,
-        into,
-        dry_run,
-        force,
-    )
-    .map_err(|e| format!("{e}"))?;
-
-    if json {
-        output::print_json(&result)?;
-    } else {
-        output::print_merge(&result);
-    }
-    // A successful merge leaves nothing contradicted — exit 0.
-    Ok(false)
-}
-
-/// The directories a graph command reads. Analysis commands (hubs/cluster/…) read `scope.dirs`
-/// only — that narrowing is the whole point of the setting. Integrity commands
-/// (lint/broken/orphans/index-sync) read the VAULT ROOT, because they answer "does a page exist
-/// at this id", and that question is exact only over every page there is. Anything narrower
-/// makes "not scanned" indistinguishable from "not there", in whichever direction the narrowing
-/// resolves it. `scan_vault` skips dot-directories, so `.trash` never resolves.
 /// The pages whose links are CHECKED: the analysis scope plus every page directory this tool
 /// writes. A vault also holds the user's own folders, and a stray link in a hand-written note is
 /// neither the pipeline's output nor something it can repair — reporting one as a violation gates
 /// the scheduled pipeline on content the tool does not manage.
-fn command_source_dirs(scope_dirs: &[PathBuf], root: &Path, dirs: &VaultDirs) -> Vec<PathBuf> {
+fn managed_dirs(scope_dirs: &[PathBuf], root: &Path, dirs: &VaultDirs) -> Vec<PathBuf> {
     let mut sources = scope_dirs.to_vec();
     for dir in vault_page_dirs(root, dirs) {
         if !sources.contains(&dir) {
@@ -561,20 +497,8 @@ fn command_source_dirs(scope_dirs: &[PathBuf], root: &Path, dirs: &VaultDirs) ->
     sources
 }
 
-fn command_scan_dirs(integrity: bool, scope_dirs: &[PathBuf]) -> Vec<PathBuf> {
-    if integrity {
-        // The vault root: an empty relative path joins to `root` itself.
-        return vec![PathBuf::new()];
-    }
-    scope_dirs.to_vec()
-}
-
-/// Every vault-relative page directory that exists on disk — anything that can
-/// link another page. Used by commands that need a full-vault view
-/// (`backlinks-sync`, and the existence universe behind `lint`'s integrity
-/// checks) rather than the user-configured `graph.scope.dirs`, which stays
-/// narrowed for structural analysis (`hubs`/`cluster`/`suggest-links`). Missing
-/// directories are skipped so a partially-populated vault doesn't error out.
+/// Every vault-relative page directory that exists on disk — anything this tool writes a page
+/// into. Missing directories are skipped so a partially-populated vault doesn't error out.
 fn vault_page_dirs(root: &std::path::Path, dirs: &VaultDirs) -> Vec<PathBuf> {
     [&dirs.wiki, &dirs.daily, &dirs.personal, &dirs.synthesis]
         .iter()
@@ -618,28 +542,31 @@ fn resolve_config_full(
 
 #[cfg(test)]
 mod tests {
-    use super::command_scan_dirs;
-    use std::path::PathBuf;
+    use super::*;
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
     }
 
     #[test]
-    fn analysis_commands_read_scope_only() {
-        // The narrowing is the whole point of `graph.scope.dirs` for hubs/cluster/suggest-links.
-        assert_eq!(command_scan_dirs(false, &[p("wiki")]), vec![p("wiki")]);
-        assert_eq!(
-            command_scan_dirs(false, &[p("wiki"), p("docs")]),
-            vec![p("wiki"), p("docs")]
-        );
+    fn the_analysis_scope_is_a_link_source_even_outside_the_page_dirs() {
+        // `graph.scope.dirs` is validated only as a relative in-vault path, so it can name a
+        // directory outside the standard four. Its pages are still the tool's to check.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("wiki")).unwrap();
+        let dirs = VaultDirs::default();
+
+        let sources = managed_dirs(&[p("notes")], tmp.path(), &dirs);
+        assert!(sources.contains(&p("notes")));
+        assert!(sources.contains(&p("wiki")));
     }
 
     #[test]
-    fn integrity_commands_read_the_whole_vault_whatever_the_scope() {
-        // An empty relative path joins to the vault root.
-        for scope in [vec![p("wiki")], vec![p("wiki/concepts")], vec![]] {
-            assert_eq!(command_scan_dirs(true, &scope), vec![PathBuf::new()]);
-        }
+    fn a_page_directory_that_does_not_exist_is_not_scanned() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("wiki")).unwrap();
+        let dirs = VaultDirs::default();
+
+        assert_eq!(vault_page_dirs(tmp.path(), &dirs), vec![p("wiki")]);
     }
 }

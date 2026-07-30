@@ -89,6 +89,10 @@ impl Workspace {
         std::fs::write(path, content).expect("write");
     }
 
+    fn read(&self, rel: &str) -> String {
+        std::fs::read_to_string(self.root.path().join("vault").join(rel)).expect("read page")
+    }
+
     fn run(&self, args: &[&str]) -> Output {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_lore"));
         for (key, _) in std::env::vars() {
@@ -128,6 +132,27 @@ impl Workspace {
             .output()
             .expect("spawn bash")
     }
+}
+
+/// The base config plus a `graph:` section, written before any page so every command in the test
+/// reads the same one.
+fn with_graph(section: &str) -> Workspace {
+    let ws = Workspace::new();
+    let base = std::fs::read_to_string(ws.root.path().join("config.yaml")).expect("base config");
+    std::fs::write(
+        ws.root.path().join("config.yaml"),
+        format!("{base}graph:\n{section}"),
+    )
+    .expect("config");
+    ws
+}
+
+fn excluding(glob: &str) -> Workspace {
+    with_graph(&format!("  scope:\n    exclude: [\"{glob}\"]\n"))
+}
+
+fn excluding_from_orphans(id: &str) -> Workspace {
+    with_graph(&format!("  metrics:\n    orphan_exclude: [\"{id}\"]\n"))
 }
 
 fn concept(id: &str, title: &str, body: &str) -> String {
@@ -269,6 +294,86 @@ fn a_broken_link_written_outside_the_analysis_scope_still_gates() {
         stdout.contains("daily/notes/2026-05-24 -> wiki/concepts/ghost"),
         "{stdout}"
     );
+}
+
+/// A citation on an excluded page is still a citation. The mutating commands read the same
+/// whole-vault view the read-only ones do, so a narrowing meant for `hubs`/`cluster` cannot make
+/// a page they REWRITE disappear. Applying the globs to their scan instead makes an excluded
+/// citer invisible, and `backlinks-sync` then deletes the citation record it justifies — a
+/// silent data loss that exits 0 and that `graph broken` cannot report afterwards, because the
+/// dangling link it leaves behind sits on the very page the globs exclude.
+#[test]
+fn a_citation_on_an_excluded_page_survives_the_sweeps_that_rewrite_the_vault() {
+    let ws = excluding("daily/**");
+    ws.write(
+        "wiki/concepts/cited.md",
+        "---\nid: cited\ntype: concept\ntitle: \"Cited\"\ncategory: \"\"\n\
+         created: 2026-05-23\nupdated: 2026-05-23\nsource_count: 1\n---\n\n\
+         ## Synthesis\n\nA concept.\n\n## Sources\n\n\
+         - [Notes](../../daily/notes/2026-05-23.md)\n\n## Related\n",
+    );
+    ws.write(
+        "daily/notes/2026-05-23.md",
+        "---\nid: notes-2026-05-23\ntype: daily\ntitle: \"Notes\"\n\
+         created: 2026-05-23\nupdated: 2026-05-23\n---\n\n\
+         ## Related concepts\n\n- [Cited](../../wiki/concepts/cited.md)\n",
+    );
+
+    assert_eq!(ws.code(&["graph", "backlinks-sync"]), 0);
+    let page = ws.read("wiki/concepts/cited.md");
+    assert!(
+        page.contains("- [Notes](../../daily/notes/2026-05-23.md)"),
+        "the sweep deleted a citation its excluded citer justifies\n{page}"
+    );
+    assert!(page.contains("source_count: 1"), "{page}");
+}
+
+/// An observation-tuning knob must not be able to silence a violation. `orphan_exclude` is
+/// documented as "page ids never reported as orphans"; a catalog that disagrees with the disk is
+/// a different question, and answering it through the same filter makes one config key decide
+/// both channels.
+#[test]
+fn an_observation_knob_cannot_silence_a_violation() {
+    let ws = excluding_from_orphans("wiki/concepts/uncited");
+    ws.write(
+        "wiki/concepts/uncited.md",
+        &concept("uncited", "Uncited", "Nothing points here yet."),
+    );
+    ws.write("wiki/index.md", "# Index\n");
+
+    let out = ws.run(&["graph", "index-sync"]);
+    let stdout = String::from_utf8(out.stdout).expect("utf8");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a page the catalog omits is drift whatever the orphan filter says\n{stdout}"
+    );
+    assert!(stdout.contains("wiki/concepts/uncited"), "{stdout}");
+}
+
+/// Drift is the difference between the catalog on disk and the one its BUILDER produces, asked of
+/// the builder. A second opinion about what belongs in the catalog reports a page the builder
+/// does not carry: `--fix` appends it, the next `wiki index` (which the pipeline runs BEFORE
+/// `graph lint`) drops it again, and the vault stays contradicted by two repairs undoing each
+/// other — permanently red, with nothing a caller can do about it.
+#[test]
+fn a_page_the_catalog_does_not_carry_is_not_drift() {
+    let ws = sound_vault();
+    ws.write(
+        "wiki/scratch/note.md",
+        "---\nid: note\ntype: document\ntitle: \"Note\"\ncreated: 2026-05-23\n---\n\n# Note\n",
+    );
+
+    for pass in 0..2 {
+        let out = ws.run(&["graph", "index-sync"]);
+        let stdout = String::from_utf8(out.stdout).expect("utf8");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "pass {pass}: a page the builder never catalogs is not drift\n{stdout}"
+        );
+        assert_eq!(ws.code(&["wiki", "index"]), 0);
+    }
 }
 
 /// `graph.scope.exclude` narrows the ANALYSIS, not the vault: an excluded page still exists, so
