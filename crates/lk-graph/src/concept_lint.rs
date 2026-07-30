@@ -115,11 +115,15 @@ pub fn scan_concept_pages(
         let mut names = vec![file_stem.clone()];
         let (category, body) = match frontmatter::parse_page(&raw) {
             Ok(page) => {
-                let category = page
-                    .frontmatter
-                    .get("category")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_owned);
+                // A PRESENT field is reported as written, whatever its YAML type. Reading only
+                // strings made `category: 123` indistinguishable from no category at all, so a
+                // value that can match no configured id passed the check that exists to catch
+                // exactly that. `Value::to_string` renders a non-string faithfully, which is
+                // what the finding has to show for it to be actionable.
+                let category = page.frontmatter.get("category").map(|v| match v.as_str() {
+                    Some(s) => s.to_owned(),
+                    None => v.to_string(),
+                });
                 names.extend(
                     page.frontmatter
                         .get("title")
@@ -208,9 +212,18 @@ pub struct DuplicateConcept {
 /// to share a name, renaming one of them is.
 ///
 /// Deliberately EXACT: no score, no threshold, and no morphology. Two names collide only
-/// when `lk_core::concept::identity_key` reduces them to one identity, and that fold covers
-/// typography alone — case, punctuation, and every break except one between two numerals.
-/// So a finding is never a similarity guess; it is a name the vault spells two ways.
+/// when `lk_core::concept::identity_key` reduces them to one identity — no similarity guess is
+/// ever made.
+///
+/// KNOWN LIMITATION, and it is a false positive in a gating channel. `identity_key` builds on
+/// `slugify`, which DELETES a symbol rather than representing it, so a symbol that carries the
+/// name is gone before the fold runs: `C`, `C++` and `C#` all reduce to `c` and are reported as
+/// three pages answering to one name. The report is honest about the identity model — the same
+/// key drives the pipeline's alias index, so an extraction naming `C++` really can be routed
+/// onto the `C` page — but the two concepts are distinct and the finding gates. The fix belongs
+/// in `identity_key`: fold SEPARATORS only (keeping the numeral exception) instead of inheriting
+/// slugify's deletions. That changes which names dedup together, so it is a decision about the
+/// vault's concept identity rather than a lint tweak.
 ///
 /// A scored variant (Sørensen-Dice over slug character bigrams) preceded this and was
 /// measured on a 1,599-concept vault: 298 findings, of which one was a real duplicate. The
@@ -439,6 +452,20 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write_concept(tmp.path(), "x", "id: x");
         assert!(find_invalid_categories(&scan(tmp.path()), &cats(&["ai-ml"])).is_empty());
+    }
+
+    #[test]
+    fn a_category_that_is_not_a_string_is_still_a_category() {
+        // Reading only strings made `category: 123` indistinguishable from no category, so a
+        // value that can match no configured id passed the check that exists to catch it.
+        let tmp = TempDir::new().unwrap();
+        write_concept(tmp.path(), "x", "id: x\ncategory: 123");
+        let found = find_invalid_categories(&scan(tmp.path()), &cats(&["ai-ml"]));
+        assert_eq!(found.len(), 1, "a non-string category is not uncategorised");
+        assert_eq!(
+            found[0].category, "123",
+            "the finding shows what is on disk"
+        );
     }
 
     #[test]

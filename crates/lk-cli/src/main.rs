@@ -54,7 +54,9 @@ enum Command {
         #[arg(long)]
         strict: bool,
     },
-    /// Audit materialized vault pages against the text-cleanliness contract (exits non-zero on any defect)
+    /// Audit materialized vault pages against their contracts — text cleanliness, and a section
+    /// whose input was recorded and never answered (exits non-zero on any defect, or on a page
+    /// it could not read)
     Doctor,
     /// Show personal performance category distribution
     Performance,

@@ -50,8 +50,9 @@ on-disk state, never from a cached snapshot.
   Measured on a 2,106-page vault: 43 links pointing at pages that do not exist while `lint`
   read clean. Both `lint` and `broken` pass every scanned page; the scope narrowing applies
   only to the graph's nodes. Reserved meta pages are skipped as SOURCES — they are re-derived
-  by `wiki refresh`, so a stale entry there is `index-sync` drift — but remain valid
-  DESTINATIONS. A destination `Extent` does not cover is never reported.
+  WHOLE, and `wiki refresh` runs before `graph lint` in the pipeline, so a stale link in one is
+  repaired by the same run rather than reported — but they remain valid DESTINATIONS. A
+  destination `Extent` does not cover is never reported.
 - **Exit codes**: 0 = every claim the vault makes holds, 1 = it contradicts itself, 2 = runtime
   error. Non-zero is reserved for a claim that is FALSE and has a named repair — a link whose
   destination is absent, a catalog that disagrees with the disk, a category outside the
@@ -183,7 +184,12 @@ on-disk state, never from a cached snapshot.
   — ordered rather than hashed, so output order needs no final sort — which costs a log
   factor no vault will notice and replaces the O(n²) pair scan the similarity check needed.
   **A finding is therefore never a similarity guess**: the two names reduce to one identity
-  under a rule that folds only typography. What the lint CANNOT see is the defect that
+  under a rule with no score and no threshold. It is NOT true that the rule folds only
+  typography — `identity_key` inherits `slugify`, which deletes a symbol instead of
+  representing it, so `C` ~ `C++` ~ `C#` all fold to `c` and gate as duplicates. The same key
+  drives the alias index, so that is a real defect in concept identity rather than a lint bug,
+  and the fix (fold separators only, keep the numeral exception) changes which names dedup
+  together. What the lint CANNOT see is the defect that
   never becomes two pages — the router folding an extraction into an established page
   leaves nothing to compare — which is why the fold itself has to be narrow rather than
   the lint forgiving.

@@ -44,8 +44,11 @@ pub struct BrokenLink {
 /// every page the vault has.
 ///
 /// Reserved meta-pages (`lk_core::vault_path::RESERVED_WIKI_FILES`) are skipped as SOURCES:
-/// they catalog every page they can see and are re-derived from the vault by `wiki refresh`, so
-/// a stale entry in one is index drift, reported by `index-sync`. They are still valid
+/// they catalog every page they can see and are re-derived WHOLE from the vault, so a stale link
+/// in one is fixed by regenerating it, not by a human. `wiki refresh` runs before `graph lint` in
+/// the scheduled pipeline, so reporting them would flag a state the same run had just repaired.
+/// (`index-sync` additionally reports an index.md entry with no page on disk; `map.md`/`log.md`
+/// have no such check because nothing but regeneration writes them.) They are still valid
 /// DESTINATIONS — they are files, and a page linking the catalog is linking something real.
 ///
 /// A destination the scan never covered is not reported. Absence from the universe is only

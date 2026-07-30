@@ -217,6 +217,42 @@ fn a_link_to_a_page_that_does_not_exist_exits_one() {
     assert!(stdout.contains("ghost"), "{stdout}");
 }
 
+/// `--json` must carry every channel field even when the list is EMPTY, because a consumer
+/// indexes into it: `/lore-wiki audit` layer 1 reads these exact paths and surfaces each
+/// non-empty list. A `skip_serializing_if = "Vec::is_empty"` compiles clean and passes the unit
+/// tests — their fixtures populate every list — and would turn "no broken links" into a missing
+/// key, which reads as neither empty nor absent at the other end.
+#[test]
+fn the_json_report_carries_every_channel_field_on_a_clean_vault() {
+    let ws = sound_vault();
+    let raw = ws.stdout(&["graph", "--json", "lint"]);
+    let parsed: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
+    let data = &parsed["data"];
+
+    for path in [
+        "violations.broken",
+        "violations.invalid_categories",
+        "violations.duplicate_concepts",
+        "violations.index.missing_from_index",
+        "violations.index.missing_from_disk",
+        "observations.orphans",
+        "observations.hubs",
+        "observations.unresolved_conflicts",
+    ] {
+        let mut cursor = data;
+        for part in path.split('.') {
+            cursor = &cursor[part];
+        }
+        assert!(
+            cursor.is_array(),
+            "`{path}` must be an array even when empty — got {cursor:?}\n{raw}"
+        );
+    }
+    // The channels themselves, so a rename of either is not silently absorbed by the loop above.
+    assert!(data["violations"].is_object(), "{raw}");
+    assert!(data["observations"].is_object(), "{raw}");
+}
+
 #[test]
 fn a_broken_link_written_outside_the_analysis_scope_still_gates() {
     let ws = sound_vault();

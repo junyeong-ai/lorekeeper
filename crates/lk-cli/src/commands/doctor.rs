@@ -157,14 +157,17 @@ fn unanswered_sections(page: &lk_core::frontmatter::VaultPage) -> Vec<&'static s
     let inputs = page
         .frontmatter
         .get(lk_core::frontmatter::field::LLM_INPUTS);
-    let records = |key: &str| {
-        inputs
-            .and_then(|v| v.get(key))
-            .and_then(|v| v.as_str())
-            .is_some()
-    };
+    let recorded = |key: &str| inputs.and_then(|v| v.get(key)).and_then(|v| v.as_str());
+    // The marker must EQUAL the input hash, not merely exist. `llm_cache::lookup` is cached
+    // exactly on that equality, and the drain is told to copy the hash verbatim — so a marker
+    // left over from a superseded input marks the section answered for an input that is no
+    // longer the one on the page. Asking only whether a `_done` key is present read that as
+    // done and hid the outstanding work, which is the one thing this audit exists to find.
     let mut found: Vec<&'static str> = lk_queue::TargetKind::iter()
-        .filter(|kind| records(kind.llm_inputs_key()) && !records(&kind.completion_key()))
+        .filter(|kind| match recorded(kind.llm_inputs_key()) {
+            Some(hash) => recorded(&kind.completion_key()) != Some(hash),
+            None => false,
+        })
         .map(|kind| kind.llm_inputs_key())
         .collect();
     found.sort_unstable();
@@ -332,6 +335,35 @@ mod tests {
             "prose about the format is not a record: {:?}",
             unanswered(page)
         );
+    }
+
+    /// A marker left over from a superseded input is not an answer to the input on the page.
+    /// `llm_cache::lookup` caches on the two being EQUAL and the drain copies the hash verbatim,
+    /// so a mismatch is outstanding work — and asking only whether a `_done` key exists read it
+    /// as done, hiding exactly what this audit exists to find.
+    #[test]
+    fn a_marker_from_a_superseded_input_is_not_an_answer() {
+        let stale = "---\nid: a\nllm_inputs:\n  summary: \"new\"\n  summary_done: \"old\"\n---\n\n## Summary\n";
+        assert_eq!(unanswered(stale), vec!["summary"]);
+
+        let matching = "---\nid: a\nllm_inputs:\n  summary: \"new\"\n  summary_done: \"new\"\n---\n\n## Summary\n";
+        assert!(unanswered(matching).is_empty());
+    }
+
+    /// A key that merely LOOKS like a record is not one. A top-level `summary:` is a sibling of
+    /// `llm_inputs`, not an entry in it, and an `llm_inputs` that is a scalar records nothing —
+    /// both were misread by a line-oriented scan, in opposite directions.
+    #[test]
+    fn only_entries_inside_the_llm_inputs_mapping_count() {
+        let sibling = "---\nid: a\nsummary: \"h1\"\nllm_inputs:\n  concepts: \"h2\"\n  concepts_done: \"h2\"\n---\n\n## Summary\n";
+        assert!(
+            unanswered(sibling).is_empty(),
+            "a top-level key is not an llm_inputs entry: {:?}",
+            unanswered(sibling)
+        );
+
+        let scalar = "---\nid: a\nllm_inputs: \"summary: h1\"\n---\n\n## Summary\n";
+        assert!(unanswered(scalar).is_empty(), "a scalar records nothing");
     }
 
     /// A flow-style mapping is the same record written inline, and the page it describes is the
