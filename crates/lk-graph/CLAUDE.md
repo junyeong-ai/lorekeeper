@@ -22,30 +22,44 @@ on-disk state, never from a cached snapshot.
 - **Link resolution happens at scan time** (`scan::parse_file`): every internal inline
   markdown-link destination is resolved against its page's own location
   (`lk_core::link::resolve_dest`, `.md` destinations only — anchors stripped, images/
-  external schemes skipped) and normalized to a page id (`path_slug`), so
-  `ScannedPage::outgoing` already holds resolved ids. Every downstream consumer (graph
-  edges, `VaultExistence`, `backlinks`) is then a plain id lookup — there is no
-  name/alias resolution layer to disagree about. A destination that escapes the vault
-  root is kept as written; it matches no id, so `broken` reports it. Concept `aliases`
-  frontmatter is registry metadata for the LLM's dedup (and Obsidian display), never
-  link resolution — links address the slug path, and the display text is free-form.
-- **Integrity checks vs analysis scope**: `hubs`/`cluster`/`suggest-links`
-  operate on the `graph.scope.dirs` subgraph. But
-  `broken`/`orphans`/`index-sync` resolve against a full-vault *existence
-  universe* (`scan::VaultExistence`, built via `build_with_existence`): a `<wiki>/`
-  page linking a `<daily>/` page is not broken, and a concept linked only from
-  `<daily>/` is not an orphan. Reserved meta pages
+  external schemes skipped), and each resolved link carries BOTH of the things its consumers
+  ask for (`scan::Link`): the `dest` — the vault-relative path it names, NFC-normalized — and
+  the `id` that address belongs to. They are not interchangeable. Only a path can answer "is
+  there a file there", because slugifying is lossy: `Bad_Name.md` and `bad-name.md` share an
+  id while only one of them exists, so an id-based existence check reports a link to the other
+  one sound. Only an id can be a node key. The `id` is DERIVED from the `dest`, so the pair
+  cannot drift. A destination that escapes the vault root is kept verbatim; it names no file,
+  so `broken` reports it. Concept `aliases` frontmatter is registry metadata for the LLM's
+  dedup (and Obsidian display), never link resolution.
+- **One scan, three views** (`scan::VaultViews`): the walk is the vault ROOT, always, and the
+  narrowing is a filter over the result. `scanned` is every page — the existence universe, and
+  the view the mutators repoint links across. `link_sources` is `scope.dirs` ∪ every page
+  directory: the pages this tool writes, and a stray link in a user's own note is neither its
+  output nor its to repair. `pages` is the analysis scope — the graph's nodes, what
+  `hubs`/`cluster`/`suggest-links`/`normalize` read.
+  `scope.dirs` and `scope.exclude` narrow the last two, NEVER the first: an excluded page
+  still exists, still resolves a link, and still has its own links repointed by a rename. A
+  walk that had already dropped it cannot tell "not there" from "not looked at", in whichever
+  direction a caller resolves it — which is why the mutating commands read these same views
+  rather than building their own scan.
+  Scope membership is decided on the page ID, so a vault whose directory is spelled `Wiki`
+  while the config says `wiki` is still analysed; a raw prefix test answers no there while
+  `is_dir` passes on a case-insensitive volume, and every command reports an empty vault, green.
+  `scan_vault` skips dot-directories, so `.trash` — where Obsidian puts a DELETED page — never
+  resolves. `VaultExistence` answers two separate questions and they must not be conflated:
+  `is_resolvable` (a file exists at this ADDRESS, **catalogs included** — they are files, so a
+  page linking one links something real) and `is_knowledge` (…and it is not a generated catalog
+  — the orphan-connectivity question, where counting a link to `index.md` would exempt the very
+  pages detection looks for). Reserved meta pages
   (`lk_core::vault_path::RESERVED_WIKI_FILES`) are never orphans or index-drift.
-  The universe answers two separate questions, and they must not be conflated: `is_resolvable`
-  (a file exists at this id, **catalogs included** — they are files, so a page linking one links
-  something real) and `is_knowledge` (…and it is not a generated catalog — the
-  orphan-connectivity question, where counting a link to `index.md` would exempt the very pages
-  detection looks for). Built from a **vault-ROOT** scan, so "not in `ids`" means not in the
-  vault rather than not looked at; anything narrower makes those indistinguishable in whichever
-  direction it resolves them. `scan_vault` skips dot-directories, so `.trash` — where Obsidian
-  puts a DELETED page — never resolves. `graph.scope.exclude` narrows the ANALYSIS only: an
-  excluded page still exists, so integrity commands scan without the globs and apply them to the
-  node set.
+- **Index drift is asked of the catalog's own builder** (`index_drift::diff` →
+  `lk_vault::build_index`): `index.md` is a materialized view, so drift is the difference
+  between the catalog on disk and the one a re-derivation produces now. A second definition of
+  what belongs in the catalog disagrees with the builder's on any page the builder does not
+  catalog — drift reports it, `--fix` appends it, the next `wiki index` drops it, and the vault
+  stays permanently red with two repairs undoing each other. For the same reason the repair is
+  the whole catalog, resolving both directions at once, and no analysis-scope or
+  `orphan_exclude` filter reaches it: an observation-tuning knob must not decide a violation.
 - **`graph::broken_links` is a free function over (pages, existence), not a `WikiGraph`
   method** — a broken link involves no node, edge or community, so computing it inside the graph
   would scope it to `graph.scope.dirs` on the SOURCE side, and a link is broken wherever it was
@@ -57,12 +71,13 @@ on-disk state, never from a cached snapshot.
 - **Exit codes**: 0 = every claim the vault makes holds, 1 = it contradicts itself, 2 = runtime
   error. Non-zero is reserved for a claim that is FALSE and has a named repair — a link whose
   destination is absent, a catalog that disagrees with the disk, a category outside the
-  configured vocabulary, one name answering to two pages, a filename that disagrees with its
-  normalized slug, a `source_count` no sweep could write. What a vault in good standing
+  configured vocabulary, one name answering to two pages, two files answering to one address,
+  a filename that disagrees with its normalized slug, a `source_count` no sweep could write. What a vault in good standing
   legitimately carries is reported and exits 0: `lint`'s observation channel, `orphans`,
   `audit-candidates`, and `hubs`/`cluster`/`export`/`suggest-links`.
 - **`LintReport` is two channels, and the split IS the exit code**: `violations`
-  (broken/index-drift/invalid-categories/duplicate-concepts) decides it, `observations`
+  (broken/index-drift/invalid-categories/duplicate-concepts/address-collisions/unnormalized)
+  decides it, `observations`
   (orphans/hubs/unresolved-conflicts) never does. Every extraction mints concepts before
   anything cites them, so an orphan-counting exit code is permanently non-zero and therefore
   carries no information — which is what had callers wrapping the command in `|| true` and

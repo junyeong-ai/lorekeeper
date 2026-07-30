@@ -4,7 +4,9 @@ Surface findings for human review — never auto-resolve. Read AGENTS.md to
 resolve section headings before inspecting pages.
 
 1. **Structural** — run `lore graph --json lint`. ONE pass returns ALL of it, in two
-   channels: `violations` (`broken`, `invalid_categories`, `duplicate_concepts`, and index
+   channels: `violations` (`broken`, `invalid_categories`, `duplicate_concepts`,
+   `address_collisions` — two files whose paths slugify to one page id, so one of them silently
+   loses its node — `unnormalized` — a filename that is not its own slug — and index
    drift under `index.missing_from_index`/`_from_disk`) and `observations` (`orphans`,
    `hubs`, `unresolved_conflicts`). Surface every non-empty list from both — the split says
    which ones are FALSE (a violation names its own repair) versus true of a healthy vault
