@@ -2,14 +2,37 @@ use std::path::{Path, PathBuf};
 
 use crate::VaultError;
 
-/// The page format a rendered page declares, or `None` when it carries no frontmatter type.
-fn declared_type(content: &str) -> Option<String> {
-    lk_core::frontmatter::parse_page(content)
-        .ok()?
-        .frontmatter
-        .get("type")?
-        .as_str()
-        .map(str::to_owned)
+/// What a page's bytes say its format is. `Untyped` is a page that parses and carries no
+/// `type`; `Illegible` is one whose bytes do not yield an answer at all — unclosed or invalid
+/// frontmatter, a `type` that is not a string. The three are kept apart because they license
+/// different writes: an untyped page states no format to preserve, an illegible one states
+/// nothing we can rely on.
+enum Format {
+    Untyped,
+    Declared(String),
+    Illegible,
+}
+
+impl Format {
+    fn of(content: &str) -> Self {
+        let Ok(page) = lk_core::frontmatter::parse_page(content) else {
+            return Self::Illegible;
+        };
+        match page.frontmatter.get("type") {
+            None => Self::Untyped,
+            Some(value) => value
+                .as_str()
+                .map_or(Self::Illegible, |name| Self::Declared(name.to_owned())),
+        }
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            Self::Untyped => "a page with no `type`".to_string(),
+            Self::Declared(name) => format!("a '{name}' page"),
+            Self::Illegible => "a page whose `type` cannot be read".to_string(),
+        }
+    }
 }
 
 /// Refuse a write that would replace a page of one format with a page of another.
@@ -23,42 +46,62 @@ fn declared_type(content: &str) -> Option<String> {
 /// overwrite a curated concept page — hand-written synthesis, established category and
 /// citation count gone, `exit 0`, nothing in `lint` or `doctor` hinting at a loss.
 ///
-/// Judged from the frontmatter both sides declare, so it holds for any route to a collision
-/// rather than the one that exposed it — and the other reachable route is a hand-edited `type`,
-/// which locks the format that owns a page out of writing it. That is the safe direction and it
-/// is loud, so the refusal names both causes and how to get back from either; a failure a user
-/// cannot clear is not an improvement on a silent loss.
+/// A write proceeds only when the format it leaves behind is provably the format already there.
+/// The three licensed cases are: nothing is there yet; the page there declares no format, so
+/// there is none to contradict (which is what lets a page whose frontmatter was deleted be
+/// re-rendered, and what lets the untyped wiki catalog and timeline rewrite themselves); or both
+/// sides name the same format. Everything else is refused — a typed page about to be replaced by
+/// an untyped one is replaced just as wholesale, and a target whose bytes cannot be read or
+/// parsed states no format to check, so overwriting on the strength of not knowing is the loss
+/// itself.
 ///
-/// A target with no readable type, or content declaring none, is allowed — malformed
-/// frontmatter, a non-string `type`, bytes that are not UTF-8. That is a real bound: a
-/// hand-edited page with a YAML typo has LESS protection here than a well-formed one. Refusing
-/// instead would be worse, because a page whose frontmatter got corrupted could then never be
-/// repaired by the re-render that exists to reproduce it — self-healing is the property being
-/// preserved, and a file whose content cannot be interpreted cannot be reasoned about anyway.
+/// Judged from what the bytes declare, so it holds for any route to a collision rather than the
+/// one that exposed it — and the other reachable route is a hand-edited `type`, which locks the
+/// format that owns a page out of writing it. That is the safe direction and it is loud, so the
+/// refusal names both causes and how to get back from either; a failure a user cannot clear is
+/// not an improvement on a silent loss.
 ///
 /// Coverage bound: this guards writes routed through `VaultWriter`. `graph merge`,
 /// `graph normalize` and `index_drift` call `lk_core::fs::write_atomic` directly — each edits a
 /// page in place without changing its format, so none of them can be the write this refuses.
+/// The check and the publish are separate syscalls, so two concurrent processes writing
+/// different formats to one path can both pass it; the vault has no cross-process lock, and
+/// every writer in it is check-then-write.
 fn refuse_format_change(full: &Path, content: &str) -> Result<(), VaultError> {
-    let Some(writing) = declared_type(content) else {
-        return Ok(());
+    let existing = match std::fs::read_to_string(full) {
+        Ok(existing) => existing,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(VaultError::Io(std::io::Error::new(
+                error.kind(),
+                format!(
+                    "refusing to write {} over the page at {}: reading it back failed ({error}), \
+                     so this write cannot be shown to preserve its format. Move that page aside \
+                     and the next run writes it again.",
+                    Format::of(content).describe(),
+                    full.display()
+                ),
+            )));
+        }
     };
-    let Ok(existing) = std::fs::read_to_string(full) else {
-        return Ok(());
-    };
-    let Some(existing_type) = declared_type(&existing) else {
-        return Ok(());
-    };
-    if existing_type == writing {
-        return Ok(());
+    let writing = Format::of(content);
+    let present = Format::of(&existing);
+    match (&present, &writing) {
+        (Format::Untyped, _) => return Ok(()),
+        (Format::Declared(present), Format::Declared(writing)) if present == writing => {
+            return Ok(());
+        }
+        _ => {}
     }
     Err(VaultError::Io(std::io::Error::other(format!(
-        "refusing to write a '{writing}' page over the '{existing_type}' page at {} — two page \
-         formats cannot share one file, and this write replaces it wholesale. Either that \
-         page's `type` was edited by hand, in which case restore it to '{writing}' or move the \
-         page aside and the next run writes it again; or two directories the vault addresses \
-         separately are one directory on disk, which `lore validate` reports when the two are \
-         `vault.dirs` roots. This will keep failing until one of those is resolved.",
+        "refusing to write {} over {} at {} — two page formats cannot share one file, and this \
+         write replaces it wholesale. Either that page's `type` was edited by hand, in which case \
+         restore it or move the page aside and the next run writes it again; or two directories \
+         the vault addresses separately are one directory on disk, which `lore validate` reports \
+         when the two are `vault.dirs` roots. This will keep failing until one of those is \
+         resolved.",
+        writing.describe(),
+        present.describe(),
         full.display()
     ))))
 }
@@ -163,10 +206,15 @@ mod tests {
         writer
             .write_page_sync(rel, &page("daily", "## 요약"))
             .expect_err("the sync writer refuses too");
-        // A page with no declared type is not a contradiction either way.
+        // A page declaring no format states none to contradict, so the untyped catalog and
+        // timeline rewrite themselves, and a page whose frontmatter was deleted is re-rendered.
         let plain = Path::new("wiki/index.md");
         writer.write_page(plain, "# Index\n").await.unwrap();
         writer.write_page(plain, "# Index v2\n").await.unwrap();
+        writer
+            .write_page(plain, &page("concept", "## 핵심"))
+            .await
+            .unwrap();
 
         // The other reachable cause is a hand-edited `type`, which locks the format that owns
         // the page out of it — so the refusal has to say how to get back, and both routes back
@@ -178,6 +226,53 @@ mod tests {
             .write_page(rel, &page("daily", "## 요약"))
             .await
             .expect("moving the page aside clears the refusal");
+    }
+
+    /// The guard compares what each side of the write says its format is, so the cases where a
+    /// side says nothing decide as much as the cases where it says something else. An untyped
+    /// write over a typed page replaces it just as wholesale — `lore wiki index` and `lore wiki
+    /// log` render no `type` at all, and reaching a concept page through a folded directory is
+    /// how they would arrive at one. A target that cannot be parsed says nothing to check, and
+    /// proceeding because the answer is unavailable is the same loss with an extra step.
+    #[tokio::test]
+    async fn a_write_is_refused_unless_the_format_it_leaves_is_the_one_already_there() {
+        let (dir, writer) = setup().await;
+        let curated = page("concept", "## 핵심\n\nhand-written");
+
+        let typed = Path::new("concepts/index.md");
+        writer.write_page(typed, &curated).await.unwrap();
+        let err = writer
+            .write_page(typed, "# Index\n")
+            .await
+            .expect_err("an untyped catalog must not replace a concept page");
+        assert!(format!("{err}").contains("no `type`"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(typed)).unwrap(),
+            curated
+        );
+
+        for (name, bytes) in [
+            (
+                "unclosed.md",
+                "---\ntype: concept\n\n# no closing delimiter\n",
+            ),
+            (
+                "listed.md",
+                "---\ntype: [concept]\n---\n\n# a type that is not a name\n",
+            ),
+        ] {
+            let rel = Path::new("concepts").join(name);
+            std::fs::write(dir.path().join(&rel), bytes).unwrap();
+            let err = writer
+                .write_page(&rel, &page("daily", "## 요약"))
+                .await
+                .expect_err("a target whose format cannot be read must not be overwritten");
+            assert!(format!("{err}").contains("cannot be read"), "{err}");
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join(&rel)).unwrap(),
+                bytes
+            );
+        }
     }
 
     #[tokio::test]
