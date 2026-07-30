@@ -24,9 +24,14 @@ fn declared_type(content: &str) -> Option<String> {
 /// citation count gone, `exit 0`, nothing in `lint` or `doctor` hinting at a loss.
 ///
 /// Judged from the frontmatter both sides declare, so it holds for any route to a collision
-/// rather than the one that exposed it. A target with no readable type, or content declaring
-/// none, is not a contradiction and is allowed: an unparseable page is a different problem and
-/// this is not the place that reports it.
+/// rather than the one that exposed it — and the other reachable route is a hand-edited `type`,
+/// which locks the format that owns a page out of writing it. That is the safe direction and it
+/// is loud, so the refusal names both causes and how to get back from either; a failure a user
+/// cannot clear is not an improvement on a silent loss.
+///
+/// A target with no readable type, or content declaring none, is not a contradiction and is
+/// allowed: an unparseable page is a different problem and this is not the place that reports
+/// it.
 fn refuse_format_change(full: &Path, content: &str) -> Result<(), VaultError> {
     let Some(writing) = declared_type(content) else {
         return Ok(());
@@ -42,9 +47,10 @@ fn refuse_format_change(full: &Path, content: &str) -> Result<(), VaultError> {
     }
     Err(VaultError::Io(std::io::Error::other(format!(
         "refusing to write a '{writing}' page over the '{existing_type}' page at {} — two page \
-         formats cannot share one file, and this write would replace it wholesale. Two \
-         vault.dirs roots resolving to one directory is the usual cause; `lore validate` \
-         reports that.",
+         formats cannot share one file, and this write replaces it wholesale. Either that \
+         page's `type` was edited by hand, in which case restore it to '{writing}' or move the \
+         page aside and the next run writes it again; or two vault.dirs roots resolve to one \
+         directory, which `lore validate` reports.",
         full.display()
     ))))
 }
@@ -153,6 +159,17 @@ mod tests {
         let plain = Path::new("wiki/index.md");
         writer.write_page(plain, "# Index\n").await.unwrap();
         writer.write_page(plain, "# Index v2\n").await.unwrap();
+
+        // The other reachable cause is a hand-edited `type`, which locks the format that owns
+        // the page out of it — so the refusal has to say how to get back, and both routes back
+        // must work: restore the type, or move the page aside.
+        assert!(message.contains("edited by hand"), "{message}");
+        assert!(message.contains("move the page aside"), "{message}");
+        std::fs::remove_file(dir.path().join(rel)).unwrap();
+        writer
+            .write_page(rel, &page("daily", "## 요약"))
+            .await
+            .expect("moving the page aside clears the refusal");
     }
 
     #[tokio::test]
