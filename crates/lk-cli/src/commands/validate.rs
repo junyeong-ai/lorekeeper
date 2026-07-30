@@ -265,70 +265,77 @@ fn overlapping_vault_dirs(
 mod tests {
     use super::{case_variant_sibling, folded_vault_dirs, overlapping_vault_dirs};
 
-    /// Both halves of the condition, and the two shapes that must stay silent. An earlier
-    /// version scanned for a case-fold near-match and flagged a correct vault; the version
-    /// before that had no check at all and let a root publish links under a name the vault
-    /// does not hold.
+    /// Whether this filesystem folds case. It decides WHICH branch a misspelled root takes:
+    /// where case folds the name resolves and the fold branch answers, where it does not the
+    /// name is simply absent and the sibling branch does. Probed rather than assumed — CI runs
+    /// on both, and a test that writes down one platform's answer passes on it and fails on the
+    /// other, which is how these two tests were first written.
+    fn filesystem_folds_case(dir: &std::path::Path) -> bool {
+        let probe = dir.join("fold-probe");
+        std::fs::create_dir(&probe).unwrap();
+        let folds = dir.join("FOLD-PROBE").is_dir();
+        std::fs::remove_dir(&probe).unwrap();
+        folds
+    }
+
+    /// A root named differently from the directory it means is reported either way, and the two
+    /// ways are different findings: where case folds, the name resolves under a spelling the
+    /// vault does not hold, and every link crossing into it carries the configured one; where it
+    /// does not, the name is absent beside the real directory, and the next run creates it and
+    /// writes there while the pages already filed go unscanned.
     #[tokio::test]
-    async fn a_root_that_only_resolves_by_folding_is_reported() {
+    async fn a_root_named_differently_from_its_directory_is_reported_either_way() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("wiki");
+        std::fs::create_dir(&real).unwrap();
+        // A page of ours, so the sibling branch has its evidence on a case-sensitive volume.
+        std::fs::write(
+            real.join("rag.md"),
+            "---\nid: rag\ntype: concept\ntitle: RAG\n---\n",
+        )
+        .unwrap();
+
+        let found =
+            folded_vault_dirs(&write_config(tmp.path(), "    wiki: Wiki\n", "variant")).await;
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].1, "Wiki");
+        if filesystem_folds_case(tmp.path()) {
+            assert_eq!(found[0].2, None, "a fold names no sibling: {found:?}");
+        } else {
+            assert_eq!(
+                found[0].2.as_deref(),
+                Some("wiki"),
+                "an absence names the directory it differs from: {found:?}"
+            );
+        }
+    }
+
+    /// What must stay silent, on every filesystem: the name as given is real; nothing of that
+    /// name or near it exists yet; a deliberate symlink, whose own name is a real entry.
+    #[tokio::test]
+    async fn a_root_that_names_its_own_directory_is_not_reported() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir(tmp.path().join("wiki")).unwrap();
 
-        // Resolves (this filesystem folds case) but the vault lists no `Wiki`.
-        let found =
-            folded_vault_dirs(&write_config(tmp.path(), "    wiki: Wiki\n", "folded")).await;
-        assert_eq!(
-            found,
-            vec![("wiki", "Wiki".to_owned(), None)],
-            "a fold, not an absence: {found:?}"
-        );
-
-        // The name as given is a real entry — nothing is being folded.
         assert!(
             folded_vault_dirs(&write_config(tmp.path(), "    wiki: wiki\n", "exact"))
                 .await
                 .is_empty()
         );
-        // Nothing there yet: the first-run case, not a misspelling.
         assert!(
             folded_vault_dirs(&write_config(tmp.path(), "    wiki: absent\n", "absent"))
                 .await
-                .is_empty()
+                .is_empty(),
+            "a directory that does not exist yet is the first run"
         );
-        // A deliberate symlink keeps its own name in the listing, so it is not a fold.
         if std::os::unix::fs::symlink(tmp.path().join("wiki"), tmp.path().join("notes")).is_ok() {
             assert!(
                 folded_vault_dirs(&write_config(tmp.path(), "    wiki: notes\n", "link"))
                     .await
-                    .is_empty()
+                    .is_empty(),
+                "a symlink's own name is a real entry"
             );
         }
-    }
-
-    /// The other half of "the vault does not hold this name": on a filesystem that does not
-    /// fold case, the misspelled root simply does not exist, and the next run creates it beside
-    /// the real one and writes there while every page already filed goes unscanned. Absence
-    /// alone is the first run and must stay silent; absence beside the name it differs from
-    /// only in case is a typo about to cost the user their vault's visibility.
-    #[tokio::test]
-    async fn an_absent_root_beside_its_case_variant_is_reported() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir(tmp.path().join("wiki")).unwrap();
-
-        // `Wiki` is absent. On a case-FOLDING filesystem it resolves and the fold branch
-        // reports it; on a case-sensitive one this branch does. Either way it is reported, and
-        // the two are distinguished by whether a sibling was named.
-        let found =
-            folded_vault_dirs(&write_config(tmp.path(), "    wiki: Wiki\n", "variant")).await;
-        assert_eq!(found.len(), 1, "{found:?}");
-        assert_eq!(found[0].1, "Wiki");
-
-        // Nothing similar there: the first run, silent.
-        assert!(
-            folded_vault_dirs(&write_config(tmp.path(), "    wiki: notes\n", "fresh"))
-                .await
-                .is_empty()
-        );
     }
 
     /// A case fold alone is not evidence. This tool writes into an existing Obsidian vault,
