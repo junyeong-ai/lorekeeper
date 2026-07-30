@@ -205,28 +205,30 @@ async fn atlassian_instance(creds: &mut Credentials) -> miette::Result<()> {
             // The default follows the instance name because a wrong default here is not a
             // mild inconvenience: it sends the user through a browser round-trip that can
             // only fail. Naming an instance `confluence` is a clear statement of intent.
-            let lowered = name.to_lowercase();
-            let choices = [
-                lk_source::Products::Both,
-                lk_source::Products::Jira,
-                lk_source::Products::Confluence,
+            // Each label rides with the value it names, and the default is a VALUE whose
+            // position is looked up — so the offered order can change without silently
+            // re-pointing the default or the selection at a different product.
+            const PRODUCT_CHOICES: [(lk_source::Products, &str); 3] = [
+                (lk_source::Products::Both, "both"),
+                (lk_source::Products::Jira, "Jira only"),
+                (lk_source::Products::Confluence, "Confluence only"),
             ];
-            let default_products = match (lowered.contains("jira"), lowered.contains("confluence"))
-            {
-                (true, false) => 1,
-                (false, true) => 2,
-                _ => 0,
-            };
+            let default = default_products(&name);
+            let default_index = PRODUCT_CHOICES
+                .iter()
+                .position(|(candidate, _)| *candidate == default)
+                .expect("every Products default is an offered choice");
             eprintln!(
                 "  Pick ONLY the products this app actually has API access to — requesting a \
                  scope\n  the app lacks fails the whole authorization."
             );
-            let products = choices[dialoguer::Select::new()
+            let products = PRODUCT_CHOICES[dialoguer::Select::new()
                 .with_prompt("  which products does this app have API access to?")
-                .items(["both", "Jira only", "Confluence only"])
-                .default(default_products)
+                .items(PRODUCT_CHOICES.map(|(_, label)| label))
+                .default(default_index)
                 .interact()
-                .map_err(|e| miette::miette!("prompt: {e}"))?];
+                .map_err(|e| miette::miette!("prompt: {e}"))?]
+            .0;
 
             // The default is Lorekeeper's least-privilege read set, but it is only a
             // default: an app grants exactly the scopes registered on it, and some refuse a
@@ -413,5 +415,41 @@ fn secret(prompt: &str, existing: Option<&str>) -> miette::Result<String> {
             .with_prompt(prompt)
             .interact()
             .map_err(|e| miette::miette!("prompt: {e}"))
+    }
+}
+
+/// Which Atlassian products an instance named `name` most likely has API access to.
+///
+/// A wrong answer here is not a mild inconvenience: requesting a scope the app lacks fails the
+/// ENTIRE consent, so the user completes a browser round-trip that could only ever fail. Naming
+/// an instance `confluence` is a clear statement of intent, and naming it after both — or after
+/// neither — is not, so that case asks for everything and lets the prompt narrow it.
+fn default_products(name: &str) -> lk_source::Products {
+    let lowered = name.to_lowercase();
+    match (lowered.contains("jira"), lowered.contains("confluence")) {
+        (true, false) => lk_source::Products::Jira,
+        (false, true) => lk_source::Products::Confluence,
+        _ => lk_source::Products::Both,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lk_source::Products;
+
+    #[test]
+    fn an_instance_named_after_one_product_defaults_to_it() {
+        assert_eq!(default_products("jira"), Products::Jira);
+        assert_eq!(default_products("Company Confluence"), Products::Confluence);
+        assert_eq!(default_products("JIRA-PROD"), Products::Jira);
+    }
+
+    #[test]
+    fn a_name_that_settles_nothing_offers_everything() {
+        // Naming both, or neither, is not a statement about which one the app can reach.
+        assert_eq!(default_products("jira-and-confluence"), Products::Both);
+        assert_eq!(default_products("atlassian"), Products::Both);
+        assert_eq!(default_products(""), Products::Both);
     }
 }
