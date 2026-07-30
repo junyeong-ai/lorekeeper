@@ -185,9 +185,14 @@ async fn directory_lists(parent: &std::path::Path, name: &std::ffi::OsStr) -> Op
 /// string rule checks it, since a root inside another is the overlap that matters and equality
 /// is only its degenerate case.
 ///
-/// Reported, not refused: `scan_vault` no longer derives citations from a page reached twice,
-/// so nothing is corrupted — but it has to pick one classification for a page that has two,
-/// and which one it picks is not something the vault states.
+/// Reported, not refused — but do not read that as harmless, which an earlier version of this
+/// comment did. Two roots on one directory put two page formats on one path:
+/// `<daily>/{source-id}/{date}.md` and `<wiki>/concepts/{slug}.md` collide when a source is
+/// named `concepts`, and a daily render then replaces a curated concept page wholesale. The
+/// write itself is refused now (`VaultWriter` will not change a page's format), so the loss
+/// cannot happen — which is why this stays a warning and not a refusal. What remains is that a
+/// page under both roots is classified by whichever the scan reaches first, and which one that
+/// is is not something the vault states.
 fn overlapping_vault_dirs(
     config: &lk_core::config::Config,
 ) -> Vec<(&'static str, &'static str, String)> {
