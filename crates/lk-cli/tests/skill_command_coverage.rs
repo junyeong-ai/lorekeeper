@@ -49,6 +49,30 @@ fn subcommands() -> Vec<String> {
     names
 }
 
+/// Every markdown file the skills ship, by path — the corpus above concatenates them, which
+/// loses which file a line came from.
+fn skill_markdown() -> Vec<PathBuf> {
+    let skills_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.claude/skills");
+    let mut files = Vec::new();
+    let mut stack = vec![skills_dir];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
+            .flatten()
+        {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "md") {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    assert!(!files.is_empty(), "no skill markdown found");
+    files
+}
+
 fn skill_corpus() -> String {
     let skills_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.claude/skills");
     let mut corpus = String::new();
@@ -208,4 +232,61 @@ fn backticked_command_paths(corpus: &str) -> Vec<Vec<String>> {
     found.sort();
     found.dedup();
     found
+}
+
+/// Every `lore` line inside a FENCED BLOCK must parse whole — flags included.
+///
+/// The check above strips flags, deliberately: the command reference documents optional
+/// arguments as `lore health [--strict]`, and `[--strict]` is not a flag. So a flag renamed in
+/// production leaves the documented invocation invalid and nothing notices. A fenced block is
+/// different in kind — everything in one is code, verbatim, which is why the drain protocol's
+/// steps are written that way — so its lines can be put to clap as written.
+///
+/// `--help` short-circuits clap AFTER argument parsing, so an unknown flag is rejected (exit 2,
+/// `unexpected argument '--dryrun' found`) while a valid one prints help. Nothing executes.
+///
+/// Measured across the shipped skills when this was added: 12 fenced invocations, 0 rejected.
+/// The `[--flag]` table rows stay unchecked — validating those needs a table of which
+/// documentation notations to strip, and every notation-guessing gate in this suite's history
+/// has failed the build on ordinary prose instead.
+#[test]
+fn every_fenced_lore_invocation_parses_including_its_flags() {
+    let mut checked = 0;
+    for path in skill_markdown() {
+        let body = std::fs::read_to_string(&path).expect("read skill");
+        let mut fenced = false;
+        for line in body.lines() {
+            if line.trim_start().starts_with("```") {
+                fenced = !fenced;
+                continue;
+            }
+            if !fenced {
+                continue;
+            }
+            let command = line.trim().split('#').next().unwrap_or("").trim();
+            let Some(args) = command.strip_prefix("lore ") else {
+                continue;
+            };
+            checked += 1;
+            let out = Command::new(env!("CARGO_BIN_EXE_lore"))
+                .env("NO_COLOR", "1")
+                .args(args.split_whitespace())
+                .arg("--help")
+                .output()
+                .expect("run lore");
+            assert!(
+                out.status.success(),
+                "{} runs `{command}` in a fenced block, which the binary rejects: {}",
+                path.display(),
+                String::from_utf8_lossy(&out.stderr)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+            );
+        }
+    }
+    assert!(
+        checked > 5,
+        "found only {checked} fenced invocations — did the fences change?"
+    );
 }

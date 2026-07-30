@@ -68,6 +68,27 @@ pub fn slugify(name: &str) -> Option<String> {
 /// reports two pages owning one name. The lint only reports, but the index ACTS — it can
 /// fold an extraction into an established page — so the fold has to be one no reviewer
 /// would overturn.
+///
+/// KNOWN DEFECT, with the obstacle to fixing it, because it is not obvious from here. Because
+/// identity is derived from the ADDRESS, it inherits slugify mapping every non-alphanumeric to a
+/// separator and trimming the ends — so a symbol that IS the name is gone before the fold runs.
+/// `C`, `C++` and `C#` all reduce to `c`: the duplicate lint reports three distinct languages as
+/// one name on three pages and gates on it, and the index can route an extraction naming `C++`
+/// onto the `C` page.
+///
+/// The rule that fixes it is positional — a run of non-alphanumerics separates only with an
+/// alphanumeric on BOTH sides, so a trailing `++` is content — but it cannot be applied here.
+/// It requires reading the NAME, and `slugify_and_identity_key_are_idempotent` pins
+/// `identity_key(slugify(x)) == identity_key(x)` because the index writes with a name's key and
+/// reads with a slug's; any rule that preserves what slugify trims breaks that equality, and
+/// the index silently splits into a write key and a read key that never meet. Making slugify
+/// preserve the symbols instead is not available either: `#` in a slug makes
+/// `wiki/concepts/c#.md` parse as an anchor, so links to it would not resolve.
+///
+/// So the fix is to decouple identity from the address — register a page under every name's key
+/// AND its slug's key rather than requiring the two to coincide. That changes which names dedup
+/// together and, for a page whose current address folds two names, which page a citation lands
+/// on, so it is a decision about the vault's concept identity rather than an edit.
 pub fn identity_key(name: &str) -> Option<String> {
     let slug = slugify(name)?;
     let mut key = String::with_capacity(slug.len());
