@@ -383,11 +383,33 @@ mod tests {
             .expect_err("a concept page at this path is not this page damaged");
         assert!(format!("{err}").contains("refusing to write"), "{err}");
 
-        // The sync sibling shares the rule.
+        // Bytes that cannot be READ, not merely parsed: a `0200` file is replaceable by rename
+        // but unreadable, and refusing there is what stopped `lore schema` repairing its own
+        // output. Probed, because a privileged process reads it anyway.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let full = dir.path().join(generated);
+            std::fs::write(&full, "---\ntype: schema\n---\n\n# stale\n").unwrap();
+            std::fs::set_permissions(&full, std::fs::Permissions::from_mode(0o200)).unwrap();
+            let unreadable = std::fs::read_to_string(&full).is_err();
+            let outcome = writer.write_generated_page(generated, &rendered).await;
+            std::fs::set_permissions(&full, std::fs::Permissions::from_mode(0o644)).unwrap();
+            if unreadable {
+                outcome.expect("a generated page whose bytes cannot be read is still reproducible");
+                assert_eq!(std::fs::read_to_string(&full).unwrap(), rendered);
+            }
+        }
+
+        // The sync sibling shares the rule, and publishes.
         std::fs::write(dir.path().join(generated), "---\ntype: schema\n").unwrap();
         writer
             .write_generated_page_sync(generated, &rendered)
             .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(generated)).unwrap(),
+            rendered
+        );
     }
 
     #[tokio::test]

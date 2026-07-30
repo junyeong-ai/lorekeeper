@@ -129,10 +129,6 @@ impl VaultPath {
     pub fn exploration(dirs: &VaultDirs, slug: &str) -> Self {
         Self(explorations_dir(dirs).join(format!("{slug}.md")))
     }
-
-    pub fn resolve(&self, vault_root: &Path) -> PathBuf {
-        vault_root.join(&self.0)
-    }
 }
 
 /// Relative directory holding the work-log pages (`<personal>/work-log/`).

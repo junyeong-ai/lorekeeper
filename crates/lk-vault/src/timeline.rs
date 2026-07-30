@@ -352,6 +352,28 @@ mod tests {
         assert!(out.contains("0 entries"));
     }
 
+    /// The returned path is what `lore wiki log` prints as the file it wrote, so it has to be
+    /// that file: the timeline landing somewhere else while the command reported success is
+    /// indistinguishable from working, and the reserved name is what the graph excludes.
+    #[test]
+    fn the_timeline_is_written_where_the_returned_path_says() {
+        let tmp = TempDir::new().unwrap();
+        let dirs = VaultDirs::default();
+        concept(tmp.path(), "y", "Y", "2026-05-20");
+
+        let written = write_timeline(tmp.path(), Locale::Ko, &dirs).unwrap();
+        assert_eq!(
+            written,
+            tmp.path()
+                .join(&dirs.wiki)
+                .join(lk_core::vault_path::TIMELINE_FILE)
+        );
+        assert_eq!(
+            std::fs::read_to_string(&written).unwrap(),
+            build_timeline(tmp.path(), Locale::Ko, &dirs).unwrap()
+        );
+    }
+
     #[test]
     fn timeline_h1_is_localized() {
         let tmp = TempDir::new().unwrap();
