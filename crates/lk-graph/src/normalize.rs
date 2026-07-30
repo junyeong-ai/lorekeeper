@@ -145,6 +145,12 @@ pub fn apply(renames: &[Rename], pages: &[ScannedPage], root: &Path) -> Result<u
         // publish a page whose frontmatter names a file that no longer exists. The stem is
         // the identity every consumer resolves by, which is exactly why the stale copy is
         // worth removing rather than tolerating.
+        //
+        // Both `None`s here are the absence of anything to rewrite, not a dropped failure. A
+        // page's graph id comes from its PATH (`scan::path_slug`), so a page carrying no
+        // frontmatter at all is scanned and renamed like any other — and it has no `id` key to
+        // go stale, which is the only case `set_frontmatter_field` declines. Making either an
+        // error would fail `--fix` on a page it has nothing to do to.
         if renamed_paths.contains_key(page.path.as_path())
             && let Some(new_slug) = rel_path.file_stem().and_then(|s| s.to_str())
             && let Some(with_id) = lk_vault::set_frontmatter_field(

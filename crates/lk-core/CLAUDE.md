@@ -124,8 +124,10 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   empty labels, no duplicate ids. Empty list = no categorization (concepts get no
   `category` field). `ExtractedConcept` carries an optional `category` assigned by
   the LLM from this list; the pipeline drops unknown category IDs and `tracing::warn`s
-  the drop (observable parity with the queue-path `graph lint`). The categories also order
-  and label the `### {category}` groups in the single-file `lore wiki index` catalog.
+  the drop (observable parity with the queue-path `graph lint`). The catalog does NOT read this
+  list: `build_index` takes no config, so its `### {category}` groups come from each page's own
+  `category` frontmatter, printed verbatim and ordered alphabetically by the `BTreeMap` that
+  collects them — a `label` configured here never reaches a heading.
 - **`LlmConfig` defaults to `provider: queue`** (matches docs/example). Uses
   `deny_unknown_fields` so typos in config keys are caught at load time.
 - **`VaultDirs` field name == default directory value** for every time period:

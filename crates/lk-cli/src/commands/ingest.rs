@@ -418,12 +418,17 @@ pub async fn run(
         total_pages,
         all_personal.len(),
         if any_write_failed {
-            // Not "safe to re-run": re-running reproduces every page whose write failed for a
-            // transient reason, and reproduces the SAME failure for one that did not — a
-            // refused page-format change persists until the file or the config is dealt with.
-            // The per-write line above says which, so point at it rather than promising.
-            " (some writes failed — see the errors above; re-running reproduces every page \
-             whose cause has been dealt with)"
+            // Not "safe to re-run", and not "re-running reproduces the page" either. Two things
+            // stand between the two: the cause may persist (a refused page-format change does
+            // until the file or the config is dealt with), and a bare re-run refetches the
+            // CURRENT window rather than replaying a log — only the manual inbox and RSS keep
+            // the events on disk, so for every remote source a page for an earlier date is
+            // reproduced only by asking for that date. The per-write line above names the page,
+            // whose date is the one to pass.
+            " (some writes failed — see the errors above; once the cause is dealt with, \
+             re-running reproduces a page for the current window, and an earlier date needs \
+             `lore ingest <source> --date <date>` because remote sources are refetched rather \
+             than replayed)"
         } else {
             ""
         }

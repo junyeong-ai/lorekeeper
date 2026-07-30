@@ -55,7 +55,8 @@ knows about; provider choice is config-driven (`build_llm_client` in lk-cli).
   content keyed to an older input and the next ingest's cache lookup freezes
   the mismatch forever. The comparison is computed in tested Rust by
   **`lore queue status`** (`commands::queue::classify_task`), which reads each
-  pending task's target page and classifies it `current` / `stale` / `missing-target`;
+  pending task's target page and classifies it `current` / `done` / `stale` / `missing-target`
+  (`done` is what `queue count` and `queue prune` hinge on);
   `/lore-process` consults that classification and processes only `current` tasks
   rather than re-deriving the hash check in prose.
 - **`TargetKind::llm_inputs_key`** is the single source of truth mapping each task

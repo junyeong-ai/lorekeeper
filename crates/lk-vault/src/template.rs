@@ -129,7 +129,7 @@ impl TemplateEngine {
     /// `Ok(true)` only if `name` exists as a USER-provided override file (not an
     /// embedded default) and parses; `Ok(false)` if there is no such user file; `Err`
     /// if the user file exists but fails to parse. A per-source daily override must
-    /// come from the user dir — an embedded template basename (e.g. `manual.md.jinja`)
+    /// come from the user dir — an embedded template basename (e.g. `document.md.jinja`)
     /// is selected explicitly by type, never matched as a `{source_id}.md.jinja`
     /// override, so a source id colliding with a built-in name can't hijack rendering.
     pub fn has_user_override(&self, name: &str) -> Result<bool, VaultError> {
@@ -216,6 +216,13 @@ mod tests {
     /// child's `{% block %}` (or the base's `self.title()` wiring) only surfaces at render
     /// time. Render each with a representative context to catch inheritance breakage —
     /// the integration tests otherwise only exercise the Gmail and RSS templates.
+    ///
+    /// Which templates those are is derived by partitioning `EMBEDDED`, because a hand-written
+    /// list of the daily children silently omitted `confluence.md.jinja`: renaming its
+    /// `{% block title %}` left every Confluence page taking the base's generic summary title
+    /// in both its frontmatter and its heading, and the whole suite passed. [`NOT_DAILY`] is
+    /// the other half of the partition, so a template added to either side must be accounted
+    /// for in one of them.
     #[test]
     fn every_daily_template_renders_with_expected_frontmatter() {
         let engine = TemplateEngine::build(None).unwrap();
@@ -247,18 +254,16 @@ mod tests {
             "event_count:",
         ];
 
-        for tmpl in [
-            "gmail",
-            "jira",
-            "slack-channel",
-            "slack-search",
-            "google-calendar",
-            "google-drive",
-            "rss",
-        ] {
-            let name = format!("{tmpl}.md.jinja");
+        let mut rendered = 0;
+        for (name, _) in EMBEDDED {
+            // A partial is rendered only through its children, and the standalone page formats
+            // take a different context entirely.
+            if name.starts_with('_') || NOT_DAILY.contains(name) {
+                continue;
+            }
+            rendered += 1;
             let out = engine
-                .render(&name, &context)
+                .render(name, &context)
                 .unwrap_or_else(|e| panic!("{name} failed to render: {e}"));
 
             assert!(
@@ -271,6 +276,19 @@ mod tests {
                     "{name}: frontmatter missing `{key}`:\n{out}"
                 );
             }
+            // Each child names the page after its own source; the base's `{% block title %}`
+            // default is the generic summary word, which is what renders when a child's block
+            // is misspelled. The key is still present then, so only comparing against the
+            // default catches it — in the frontmatter and, through `self.title()`, the heading.
+            let generic = format!(
+                "title: \"{} 2026-06-14\"",
+                lk_core::i18n::Locale::En.strings().summary
+            );
+            assert!(
+                !out.contains(&generic),
+                "{name}: the child's `title` block did not apply, so the base default \
+                 rendered:\n{out}"
+            );
             assert!(
                 out.contains(&format!(
                     "## {}",
@@ -295,7 +313,31 @@ mod tests {
                 "{name}: event rendered the wrong number of times:\n{out}"
             );
         }
+        assert_eq!(
+            rendered,
+            EMBEDDED
+                .iter()
+                .filter(|(name, source)| !name.starts_with('_')
+                    && source.contains("_daily_base.md.jinja"))
+                .count(),
+            "the partition must select exactly the templates that extend the daily base"
+        );
     }
+
+    /// The embedded templates that are NOT daily children: each renders from its own context,
+    /// so the daily loop above would fail on them. Naming them rather than naming the daily
+    /// children means a new daily template joins that loop by default, and a new standalone
+    /// page format has to be admitted here deliberately.
+    const NOT_DAILY: [&str; 8] = [
+        "annual-review.md.jinja",
+        "concept.md.jinja",
+        "document.md.jinja",
+        "monthly-review.md.jinja",
+        "quarterly-review.md.jinja",
+        "weekly-review.md.jinja",
+        "weekly-synthesis.md.jinja",
+        "work-log.md.jinja",
+    ];
 
     /// A document page carries the same second-writer section as a daily page, through its own
     /// template rather than the shared base — so the daily loop above proves nothing about it,

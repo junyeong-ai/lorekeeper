@@ -1,8 +1,9 @@
 # lk-graph
 
-Link graph analysis. Pure deterministic — no HTTP, no LLM. The only vault
-writes are the gated mutations below (`index-sync`/`normalize` with `--fix`,
-`backlinks-sync` without `--dry-run`). Every check re-scans the vault — markdown
+Link graph analysis. Pure deterministic — no HTTP, no LLM. The vault writes are the mutations
+below: `index-sync`/`normalize` with `--fix`, `backlinks-sync` and `merge` without `--dry-run`,
+and `audit-mark`, which takes neither flag because recording that a concept was audited IS the
+command. Every check re-scans the vault — markdown
 parsing is rayon-parallel and cheap, so analysis is always computed from current
 on-disk state, never from a cached snapshot.
 
@@ -56,9 +57,11 @@ on-disk state, never from a cached snapshot.
   labelled a citation map. `map.md` is in
   `RESERVED_WIKI_FILES` (never an orphan/drift finding). This is the deterministic,
   embedding-free "navigate, don't retrieve" entry point AGENTS.md points agents to.
-- **Mutations gated**: `index_drift::fix()`, `normalize::apply()`, and
-  `backlinks::sync_concept_backlinks` touch the filesystem — the first two only
-  with `--fix`, backlinks only without `--dry-run`. All renames pre-checked.
+- **Mutations gated**: `index_drift::fix()`, `normalize::apply()`,
+  `backlinks::sync_concept_backlinks` and `merge::merge_concepts` touch the filesystem — the
+  first two only with `--fix`, the last two only without `--dry-run`. All renames pre-checked.
+  `audit::mark_audited` is the exception and is ungated: it writes one frontmatter marker on
+  one named concept, which is the whole of what the subcommand does.
 - **`normalize` reads two different page sets, and conflating them is a defect.** Rename
   candidates come from the ANALYSIS scope (`graph.scope.dirs`, the wiki): only the wiki's
   pages are addressed by slug, and slugifying a dated filename elsewhere (`2026-W30` →

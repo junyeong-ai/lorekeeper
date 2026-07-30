@@ -18,12 +18,15 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
 - **Daily templates inherit from `_daily_base.md.jinja`** (`{% extends %}`): the base owns
   the frontmatter (incl. the `llm_inputs` ladder, single-sourced) + summary, the generic
   `highlights` loop (any source with configured highlight sections), the events/concepts
-  skeleton. Each per-type child (gmail/jira/slack-*/google-*/rss) is a thin override of
-  only `{% block title %}`, `{% block items_heading %}` (events vs messages), and
+  skeleton. Each per-type child (gmail/jira/slack-*/google-*/rss/confluence) is a thin override
+  of only `{% block title %}`, `{% block items_heading %}` (events vs messages), and
   `{% block events %}` (item rendering). `_`-prefixed templates are partials — never a page
   `default_template`. `template::tests::every_daily_template_renders_with_expected_frontmatter`
-  renders every embedded daily template so a child block typo (or the `self.title()` wiring)
-  fails at test time, not in production.
+  selects the children by partitioning `EMBEDDED` against a list of the NON-daily templates, so
+  a new daily template joins it by default — a hand-list of the children omitted `confluence`,
+  and a renamed block there left every Confluence page taking the base's generic title with the
+  whole suite green. A missing block is caught by comparing the rendered title against that
+  default, not by the key being present, because the key is present either way.
 - **`concepts` entries arrive FULLY RENDERED, bullet included** — a template emits `{{ c }}`,
   never `- {{ c }}`. That section has a second writer, `lore queue apply`, which replaces it
   without going through any template, so a bullet stated in the template as well would be a
@@ -79,8 +82,10 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   `set_llm_input`, no block-style `llm_inputs:` line). That is the whole point of the shared
   range — a writer that cannot place a key writes NOTHING rather than falling through to the
   end of the document and appending it to the body, where `llm_cache` would never read it and
-  the task would re-enqueue forever, growing the page each round. Callers turn `None` into a
-  named error rather than a silent no-op.
+  the task would re-enqueue forever, growing the page each round. A caller turns `None` into a
+  named error wherever the key it could not place was needed; `graph normalize` is the one that
+  does not, because a page with no frontmatter has no stale `id` for it to rewrite — the graph
+  id comes from the path.
 - **What belongs to an entry is `continuation_span`'s answer**, and every defect found in
   these writers has been a wrong one. Each rule below fixed a page-corrupting bug, so change
   none of them casually: a continuation is a line indented DEEPER than the entry's own line

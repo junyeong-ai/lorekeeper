@@ -207,9 +207,9 @@ impl ConceptDrafts {
 
         let mut draft = match existing.as_ref() {
             Some(page) => {
-                // The persisted page stores these as `created`/`updated` (the keys the
-                // template and fallback write). Reading `first_seen`/`last_seen` would
-                // always miss and reset the origin date to today on every re-ingest.
+                // The persisted page stores these as `created`/`updated` (the keys the template
+                // writes). Reading `first_seen`/`last_seen` would always miss and reset the
+                // origin date to today on every re-ingest.
                 let first_seen = page
                     .frontmatter
                     .get("created")

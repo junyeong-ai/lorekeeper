@@ -125,8 +125,9 @@ domain-neutral engine — then no work-log, reviews, or `is_personal` are produc
   A candidate slug is claimed only when it is free in this batch AND its on-disk page (if any)
   is the SAME document — compared by the page's `source_file`/`source_url` identity. Otherwise
   a suffix from the document's own `EventId` trailing hash is appended and lengthened until the
-  candidate is genuinely free (the full hash is unique per document, guaranteeing termination
-  and collision-freedom — not a positional counter, and not merely improbable). This catches
+  candidate is genuinely free, and past the full hash a numeric tail keeps lengthening it. The
+  candidate therefore always changes, so termination rests on that rather than on the hash being
+  unique — collision-freedom is not assumed anywhere. This catches
   both intra-batch collisions and the cross-run case (a prior run's archived note's page still
   on disk). Re-ingesting the same document reuses its slug (identity match) → idempotent.
 - **Concept merge** reads existing `created`/`updated` frontmatter (the keys actually
@@ -136,8 +137,9 @@ domain-neutral engine — then no work-log, reviews, or `is_personal` are produc
   first alias). A re-extraction whose category DISAGREES with the established one is a
   genuine conflict — kept established, but `tracing::warn`ed so a possibly-wrong day-1
   assignment doesn't silently calcify. `merge` only widens the `first_seen`/`last_seen`
-  window (`observe`); it does NOT count citations. `source_count` is written as `0` by
-  the template and owned solely by `lore graph backlinks-sync`, which re-derives it
+  window (`observe`); it does NOT count citations. `source_count` starts at `0` on a page this
+  creates and is re-emitted verbatim from the existing page on a re-render, so ingest never
+  moves it; it is owned solely by `lore graph backlinks-sync`, which re-derives it
   exactly from the link graph — so a crash or an idempotent re-ingest can never inflate
   it. Duplicate concept creation is prevented skill-side: `/lore-process` loads the
   on-disk concept registry (`lore wiki concepts`) and reuses an established name instead
@@ -190,6 +192,6 @@ domain-neutral engine — then no work-log, reviews, or `is_personal` are produc
   while the numeric category table is computed separately from raw work-log over the exact
   date range so counts are never double-tallied. Raw daily work-log is never fed to a
   higher-level synthesis (each level reads only pre-summarized pages).
-- Fallback renderers must emit the same `##` anchors the templates use (so `/lore-process`
-  can find the section) and the same frontmatter keys synthesis reads (e.g. work-log
-  `categories`).
+- Every page renders through an embedded template; the ad-hoc fallback renderers that once
+  shadowed them are gone, which is why the `##` anchors `/lore-process` locates by and the
+  frontmatter keys synthesis reads (e.g. work-log `categories`) have exactly one source.

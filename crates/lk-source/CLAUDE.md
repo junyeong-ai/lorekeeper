@@ -45,10 +45,11 @@ map to `RawItem`.
   which is right until the text is not prose — and what the text IS, not where it came from,
   is the test: a `<style>` or `<script>` block out of an email or a feed is machine state on the
   same grounds as any `ac:` construct, and one real vault page carries an RSS feed's CSS rules
-  mid-article because it was not. (1) `ac:parameter` and a task's
-  `ac:task-id`/`-uuid`/`-status` carry MACHINE STATE, and degraded they weld onto the
-  surrounding words unseparated (`170e6f1a-9cincompleteShip the thing`); they are dropped,
-  at the documented cost that a body-less macro loses its visible label. (2) Some constructs
+  mid-article because it was not. (1) `ac:parameter`, a task's `ac:task-id`/`-uuid`, and
+  `ac:adf-attribute` carry MACHINE STATE, and degraded they weld onto the surrounding words
+  unseparated (`170e6f1a-9cincompleteShip the thing`); they are dropped, at the documented cost
+  that a body-less macro loses its visible label. `ac:task-status` is not among them — see
+  below: it is translated, not dropped. (2) Some constructs
   carry what the reader saw in an ATTRIBUTE, so degrading found nothing to degrade and the
   thing vanished silently — every Confluence→Confluence cross-reference, and the same for an
   external reference, an inline date and an emoji. `ATTRIBUTE_BORNE_TEXT` pairs each element
