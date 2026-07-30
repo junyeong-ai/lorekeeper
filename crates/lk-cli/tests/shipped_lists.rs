@@ -262,11 +262,24 @@ fn every_source_type_is_documented_and_exemplified() {
         );
         for (name, body) in &readmes {
             assert!(
-                body.contains(&wire),
-                "{name} never mentions the `{wire}` source, so a shipped adapter is undiscoverable"
+                source_table(body).contains(&wire),
+                "{name}'s source table has no `{wire}` row, so a shipped adapter is undiscoverable"
             );
         }
     }
+}
+
+/// The type names in the first column of a README's source table.
+///
+/// Read as a table rather than searched for as a substring: a name that appears anywhere in the
+/// prose satisfied the weaker check, so a table missing a row could pass on an unrelated mention
+/// elsewhere in the document — a gate that reads a whole file cannot say where it looked.
+fn source_table(body: &str) -> Vec<String> {
+    body.lines()
+        .filter_map(|line| line.trim().strip_prefix("| `"))
+        .filter_map(|rest| rest.split('`').next())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Every source in the shipped example must pass its own adapter's parameter validation. The
@@ -291,10 +304,12 @@ fn every_source_in_the_example_config_validates_against_its_adapter() {
     assert!(checked > 0, "the example config declares no sources");
 }
 
-/// `rust-version` is the one the toolchain enforces; the CI job name, the toolchain it pins, and
-/// both READMEs restate it. All of them are read by people deciding whether they can build this.
+/// `rust-version` is the one the toolchain enforces, and the READMEs are the only other place it
+/// belongs: they are what a person reads to decide whether they can build this. CI used to restate
+/// it in the job name and the toolchain pin as well — four copies of one number — and reads it out
+/// of the manifest now, so there is nothing left there to compare.
 #[test]
-fn every_stated_msrv_matches_the_manifest() {
+fn both_readmes_state_the_msrv_the_manifest_declares() {
     let root = repo_root();
     let manifest = read(&root.join("Cargo.toml"));
     let msrv = manifest
@@ -303,15 +318,6 @@ fn every_stated_msrv_matches_the_manifest() {
         .map(|value| value.trim().trim_matches('"').to_string())
         .expect("workspace.package must declare rust-version");
 
-    let ci = read(&root.join(".github/workflows/ci.yml"));
-    assert!(
-        ci.contains(&format!("MSRV ({msrv})")),
-        "the CI job name must state MSRV {msrv}"
-    );
-    assert!(
-        ci.contains(&format!("dtolnay/rust-toolchain@{msrv}.0")),
-        "the MSRV job must pin toolchain {msrv}.0"
-    );
     for readme in ["README.md", "README.en.md"] {
         let body = read(&root.join(readme));
         assert!(
@@ -319,4 +325,9 @@ fn every_stated_msrv_matches_the_manifest() {
             "{readme} must state MSRV {msrv} (badge and prose)"
         );
     }
+    let ci = read(&root.join(".github/workflows/ci.yml"));
+    assert!(
+        !ci.contains(&msrv),
+        "the CI workflow must not restate MSRV {msrv} — it reads `rust-version` from the manifest"
+    );
 }

@@ -147,14 +147,25 @@ jobs:
           shared-key: doc
       - run: cargo doc --workspace --no-deps --all-features
 
+  # The MSRV is read out of the manifest rather than restated here. It used to appear in the job
+  # name and in the toolchain pin as well, so the one number lived in four places and nothing
+  # compared them — and neither copy is read by a human deciding whether they can build this,
+  # which is what the two READMEs are for.
   msrv:
-    name: MSRV (1.97)
+    name: MSRV
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref }}
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - id: msrv
+        run: |
+          version=$(awk -F'"' '/^rust-version = /{print $2; exit}' Cargo.toml)
+          [ -n "$version" ] || { echo "Cargo.toml declares no rust-version" >&2; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: msrv
