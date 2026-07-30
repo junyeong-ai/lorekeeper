@@ -356,3 +356,46 @@ fn a_re_render_names_the_unanswered_section_it_is_about_to_empty() {
         "the body is gone — the point is that this was reported, not that it survived"
     );
 }
+
+/// The warning takes the mood of the write it describes.
+///
+/// Every other line a dry run prints says "would write"; a bare "emptying" among them reads as
+/// a loss that already happened, which is the one thing an operator runs `--dry-run` to avoid
+/// being told falsely.
+#[test]
+fn a_dry_run_says_it_would_empty_the_section_rather_than_that_it_did() {
+    let ws = Workspace::new("");
+    ws.drop_note("note.md", "# Rollback\n\nThe rollback decision.\n");
+    assert!(ws.run(&["ingest"]).status.success());
+
+    let page = ws.vault().join("wiki/documents/rollback.md");
+    let before = std::fs::read_to_string(&page).expect("page");
+    let heading = before
+        .lines()
+        .find(|line| line.starts_with("## "))
+        .expect("the page carries a section heading")
+        .to_owned();
+    std::fs::write(
+        &page,
+        before.replace(
+            &format!("{heading}\n"),
+            &format!("{heading}\n\nHAND WRITTEN: the only record of this decision.\n"),
+        ),
+    )
+    .expect("write");
+
+    ws.drop_note("note.md", "# Rollback\n\nThe rollback decision.\n");
+    let out = ws.run(&["ingest", "--dry-run"]);
+    let stderr = stderr_of(&out);
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("[dry-run] would empty an unanswered section"),
+        "a dry run warns in the conditional\n{stderr}"
+    );
+    assert!(
+        std::fs::read_to_string(&page)
+            .expect("page")
+            .contains("HAND WRITTEN"),
+        "and writes nothing, which is what makes the conditional the true mood"
+    );
+}
