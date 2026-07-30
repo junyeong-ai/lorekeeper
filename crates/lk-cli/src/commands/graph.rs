@@ -181,7 +181,7 @@ fn run_inner(
                     },
                     invalid_categories,
                     duplicate_concepts,
-                    address_collisions: scan::address_collisions(&views.scanned),
+                    address_collisions: scan::address_collisions(&views.link_sources),
                     unnormalized: rename_suggestions(&normalize::scan(&views.pages)),
                 },
                 observations: output::Observations {

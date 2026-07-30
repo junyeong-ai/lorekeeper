@@ -36,21 +36,34 @@ pub struct ScannedPage {
 /// One resolved link, carried as both of the things a consumer asks it for.
 ///
 /// The two are not interchangeable, and conflating them answers the wrong question. `dest` is
-/// an ADDRESS — the vault-relative path the link names — and only a path can answer "is there a
+/// an ADDRESS — the destination as the page named it — and only a path can answer "is there a
 /// file there". `id` is the page id that address belongs to, which is the graph's node key.
 /// Slugifying a path is lossy, so `Bad_Name.md` and `bad-name.md` share an id while only one of
 /// them is a file: checking existence by id reports a link to the other one sound.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Link {
     pub dest: String,
-    pub id: String,
+    /// `None` when the destination is not a vault address at all — it escapes the root. Such a
+    /// link addresses no page, so it must not carry one: `path_slug` DROPS `..` segments, so
+    /// `../../../wiki/concepts/kubernetes.md` would fold onto the real concept's id and be
+    /// credited as a citation of it, exempt it from orphan detection, and add a graph edge —
+    /// while `broken` reported the same link dead.
+    pub id: Option<String>,
 }
 
 impl Link {
     /// A link to a vault-relative address. The id is DERIVED, so the pair cannot drift.
     pub fn to(dest: &str) -> Self {
         Self {
-            id: path_slug(Path::new(dest)),
+            id: Some(path_slug(Path::new(dest))),
+            dest: dest.to_owned(),
+        }
+    }
+
+    /// A destination that leaves the vault: an address, and no page.
+    pub fn outside(dest: &str) -> Self {
+        Self {
+            id: None,
             dest: dest.to_owned(),
         }
     }
@@ -148,6 +161,16 @@ impl VaultViews {
     /// `scope.exclude` and `scope.dirs` narrow the last two views only: an excluded page still
     /// exists, so it still resolves a link and still has its own links repointed by a rename.
     pub fn resolve(root: &Path, graph: &GraphConfig, dirs: &VaultDirs) -> Result<Self, GraphError> {
+        // A configured scope directory that does not exist is a typo, not an empty analysis.
+        // Silently yielding nothing lets `wiki map` overwrite the map with an empty catalog and
+        // exit 0, and every analysis command agree that the vault has no pages.
+        for dir in &graph.scope.dirs {
+            let path = root.join(dir);
+            if !path.exists() {
+                return Err(GraphError::ScanDirNotFound(path));
+            }
+        }
+
         let scanned = scan_vault(root, graph.scope.follow_links)?;
         let existence = VaultExistence::build(&scanned, dirs);
         let excluded = Excludes::compile(&graph.scope.exclude)?;
@@ -176,11 +199,15 @@ impl VaultViews {
 
 /// Whether a page id sits under a configured vault-relative directory.
 ///
+/// THE definition, shared by the analysis scope and by every consumer that asks what kind of
+/// page a path is. Two of them comparing differently is how a vault gets analysed by one and
+/// ignored by the other.
+///
 /// Compared on the ID, not the raw path: an id is the address after normalization, so a vault
 /// whose directory on disk is spelled `Wiki` while the config says `wiki` still matches. A raw
 /// prefix test answers no there — `is_dir` passes on a case-insensitive volume, so the directory
 /// "exists", no page ever matches it, and every graph command reports an empty vault and exits 0.
-fn under(id: &str, dir: &Path) -> bool {
+pub(crate) fn under(id: &str, dir: &Path) -> bool {
     let prefix = path_slug(dir);
     if prefix.is_empty() {
         return true;
@@ -230,16 +257,16 @@ fn parse_file(path: &Path, root: &Path) -> Result<ScannedPage, String> {
         if !Path::new(&dest).extension().is_some_and(|ext| ext == "md") {
             continue;
         }
-        let address = match link::resolve_dest(rel, &dest) {
-            Some(resolved) => rel_str(&resolved),
-            // Escapes the vault root: keep the destination as written — it names no file in
-            // the vault, so it is reported broken rather than dropped.
-            None => dest,
+        // Escapes the vault root: keep the destination as written — it names no file in the
+        // vault, so it is reported broken rather than dropped, and it carries no page id.
+        let link = match link::resolve_dest(rel, &dest) {
+            Some(resolved) => Link::to(&rel_str(&resolved)),
+            None => Link::outside(&dest),
         };
         // Deduped by ADDRESS, not by id: two dead spellings of one id are two broken links,
         // and each names its own repair.
-        if !address.is_empty() && seen.insert(address.clone()) {
-            outgoing.push(Link::to(&address));
+        if !link.dest.is_empty() && seen.insert(link.dest.clone()) {
+            outgoing.push(link);
         }
     }
 
@@ -312,9 +339,9 @@ impl VaultExistence {
             if is_reserved(page.id.as_str()) {
                 continue;
             }
-            for link in &page.outgoing {
-                if link.id != page.id && knowledge.contains(&link.id) {
-                    linked.insert(link.id.clone());
+            for id in page.outgoing.iter().filter_map(|link| link.id.as_ref()) {
+                if *id != page.id && knowledge.contains(id) {
+                    linked.insert(id.clone());
                 }
             }
         }
@@ -348,9 +375,10 @@ impl VaultExistence {
 /// the configured `dirs.wiki` — never a hardcoded path segment — and shared by
 /// `backlinks` and the concept lints.
 pub(crate) fn is_concept_page(path: &Path, dirs: &VaultDirs) -> bool {
-    let s = path.to_string_lossy().replace('\\', "/");
-    s.starts_with(&format!("{}/{CONCEPTS_SUBDIR}/", dirs.wiki))
-        && path.extension().is_some_and(|ext| ext == "md")
+    under(
+        &path_slug(path),
+        &Path::new(&dirs.wiki).join(CONCEPTS_SUBDIR),
+    ) && path.extension().is_some_and(|ext| ext == "md")
 }
 
 /// True iff this vault-relative path can act as a citation *source* — an event,
@@ -360,12 +388,17 @@ pub(crate) fn is_concept_page(path: &Path, dirs: &VaultDirs) -> bool {
 /// Single-sourced here as THE definition of "a real source" — `backlinks` (what fills
 /// `## Sources`) resolves citations through it.
 pub(crate) fn is_valid_source(path: &Path, dirs: &VaultDirs) -> bool {
-    let s = path.to_string_lossy().replace('\\', "/");
-    s.starts_with(&format!("{}/", dirs.daily))
-        || s.starts_with(&format!("{}/", dirs.personal))
-        || s.starts_with(&format!("{}/", dirs.synthesis))
-        || s.starts_with(&format!("{}/{DOCUMENTS_SUBDIR}/", dirs.wiki))
-        || s.starts_with(&format!("{}/{EXPLORATIONS_SUBDIR}/", dirs.wiki))
+    let id = path_slug(path);
+    let wiki = Path::new(&dirs.wiki);
+    [
+        Path::new(&dirs.daily).to_path_buf(),
+        Path::new(&dirs.personal).to_path_buf(),
+        Path::new(&dirs.synthesis).to_path_buf(),
+        wiki.join(DOCUMENTS_SUBDIR),
+        wiki.join(EXPLORATIONS_SUBDIR),
+    ]
+    .iter()
+    .any(|dir| under(&id, dir))
 }
 
 /// Page ids of Lorekeeper's reserved wiki meta files (the index catalog, the time log,
@@ -577,6 +610,63 @@ mod tests {
             unparseable.outgoing.is_empty(),
             "a page whose body did not parse contributes no links"
         );
+    }
+
+    #[test]
+    fn a_link_that_leaves_the_vault_addresses_no_page() {
+        // `path_slug` DROPS `..` segments, so an escaping destination would fold onto whatever
+        // real page its tail names: credited as a citation of it, exempting it from orphan
+        // detection and adding a graph edge — while `broken` reported the same link dead.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let daily = tmp.path().join("daily/src");
+        std::fs::create_dir_all(&daily).unwrap();
+        std::fs::create_dir_all(tmp.path().join("wiki/concepts")).unwrap();
+        std::fs::write(tmp.path().join("wiki/concepts/kubernetes.md"), "# K8s\n").unwrap();
+        std::fs::write(
+            daily.join("2026-01-03.md"),
+            "# Day\n\n[K8s](../../../wiki/concepts/kubernetes.md)\n",
+        )
+        .unwrap();
+
+        let pages = scan_vault(tmp.path(), false).unwrap();
+        let citer = pages
+            .iter()
+            .find(|p| p.id == "daily/src/2026-01-03")
+            .unwrap();
+        assert_eq!(citer.outgoing.len(), 1);
+        assert_eq!(citer.outgoing[0].id, None, "it names no page in this vault");
+
+        let existence = VaultExistence::build(&pages, &VaultDirs::default());
+        assert!(!existence.is_resolvable(&citer.outgoing[0].dest));
+        assert!(
+            !existence.is_linked("wiki/concepts/kubernetes"),
+            "a link that leaves the vault is not a link to the page it happens to name"
+        );
+    }
+
+    #[test]
+    fn a_folded_directory_spelling_is_the_same_directory_to_every_consumer() {
+        // Scope membership folds the spelling; `is_concept_page`/`is_valid_source` must fold it
+        // the same way, or the vault is analysed by one and invisible to the other —
+        // `backlinks-sync` recognizing no concept page at all.
+        let dirs = VaultDirs::default();
+        assert!(is_concept_page(Path::new("Wiki/concepts/x.md"), &dirs));
+        assert!(is_concept_page(Path::new("wiki/concepts/x.md"), &dirs));
+        assert!(!is_concept_page(Path::new("wiki/documents/x.md"), &dirs));
+        assert!(is_valid_source(Path::new("Daily/src/2026-01-01.md"), &dirs));
+        assert!(is_valid_source(Path::new("Wiki/documents/x.md"), &dirs));
+        assert!(!is_valid_source(Path::new("wiki/concepts/x.md"), &dirs));
+    }
+
+    #[test]
+    fn a_configured_scope_directory_that_is_not_there_is_an_error() {
+        // Not an empty analysis: `wiki map` would overwrite the map with an empty catalog and
+        // exit 0, and every analysis command would agree the vault has no pages.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("wiki")).unwrap();
+        let mut config = GraphConfig::default();
+        config.scope.dirs = vec![PathBuf::from("wikii")];
+        assert!(VaultViews::resolve(tmp.path(), &config, &VaultDirs::default()).is_err());
     }
 
     #[test]

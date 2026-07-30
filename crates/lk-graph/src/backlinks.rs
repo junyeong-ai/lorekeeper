@@ -85,7 +85,7 @@ pub fn sync_concept_backlinks(
         if !is_valid_source(&page.path, dirs) {
             continue;
         }
-        for target in page.outgoing.iter().map(|link| &link.id) {
+        for target in page.outgoing.iter().filter_map(|link| link.id.as_ref()) {
             // Self-references are excluded for the same reason the graph excludes
             // self-edges.
             if *target != page.id && existence.is_knowledge(target) {

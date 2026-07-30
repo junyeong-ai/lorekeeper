@@ -497,6 +497,74 @@ fn the_configured_orphan_exclude_reaches_the_report() {
     );
 }
 
+/// Two files colliding on one address inside a folder the tool does NOT manage is not this
+/// tool's contradiction to report. It has no repair to name — no `--fix`, and `scope.exclude`
+/// cannot reach a set computed before the exclusion — so reporting it gates the scheduled
+/// pipeline forever on content the same series decided is not the pipeline's to lint.
+#[test]
+fn two_unmanaged_files_at_one_address_do_not_gate() {
+    let ws = sound_vault();
+    ws.write("clippings/Note A.md", "# Note A\n");
+    ws.write("clippings/note-a.md", "# Note a\n");
+
+    let out = ws.run(&["graph", "lint"]);
+    let stdout = String::from_utf8(out.stdout).expect("utf8");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a user's own folder is not the pipeline's to repair\n{stdout}"
+    );
+    assert!(!stdout.contains("One address"), "{stdout}");
+}
+
+/// `normalize --fix` renames the files and THEN repoints the citations. A page it cannot read
+/// has no links to repoint — the scan already resolved them all — so reading it anyway turns a
+/// foreign file in a user's folder into a run that aborts with the vault half-repointed, and
+/// every re-run aborts at the same file.
+#[test]
+fn a_file_the_tool_cannot_read_does_not_abort_a_rename_midway() {
+    let ws = sound_vault();
+    ws.write(
+        "wiki/concepts/Bad_Name.md",
+        &concept(
+            "bad-name",
+            "Bad Name",
+            "A page whose file is named otherwise.",
+        ),
+    );
+    ws.write(
+        "daily/notes/2026-05-24.md",
+        "---\nid: notes-2026-05-24\ntype: daily\ntitle: \"Notes\"\n\
+         created: 2026-05-24\nupdated: 2026-05-24\n---\n\n\
+         ## Related concepts\n\n- [Bad Name](../../wiki/concepts/Bad_Name.md)\n",
+    );
+    // Not UTF-8, in a folder the tool does not manage.
+    std::fs::write(
+        ws.root.path().join("vault/clippings/legacy.md"),
+        [0xff, 0xfe, 0x41],
+    )
+    .or_else(|_| {
+        std::fs::create_dir_all(ws.root.path().join("vault/clippings")).and_then(|_| {
+            std::fs::write(
+                ws.root.path().join("vault/clippings/legacy.md"),
+                [0xff, 0xfe, 0x41],
+            )
+        })
+    })
+    .expect("write non-utf8");
+
+    let out = ws.run(&["graph", "normalize", "--fix"]);
+    let stdout = String::from_utf8(out.stdout).expect("utf8");
+    let stderr = String::from_utf8(out.stderr).expect("utf8");
+    assert_eq!(out.status.code(), Some(0), "{stdout}{stderr}");
+    assert!(
+        ws.read("daily/notes/2026-05-24.md")
+            .contains("concepts/bad-name.md"),
+        "the citation must be repointed: {}",
+        ws.read("daily/notes/2026-05-24.md")
+    );
+}
+
 /// A citation on an excluded page is still a citation. The mutating commands read the same
 /// whole-vault view the read-only ones do, so a narrowing meant for `hubs`/`cluster` cannot make
 /// a page they REWRITE disappear. Applying the globs to their scan instead makes an excluded

@@ -4,19 +4,25 @@ use super::{build_llm_client, find_config, load_config, parse_date};
 
 /// The number of events the page states about itself, as ` (N events)`.
 ///
+///
 /// A daily page is a materialized view: a re-render REPLACES its event list with whatever the
 /// source returns now, and a source whose window has passed returns fewer. This count is the
 /// whole difference, so a dry run has to report it — otherwise "check with --dry-run first"
 /// names a comparison the output does not offer. Read from the page that would be written, so
 /// it is the number itself rather than a second count of the same events.
 fn event_count(content: &str) -> String {
-    lk_core::frontmatter::parse_page(content)
+    match lk_core::frontmatter::parse_page(content)
         .ok()
         .as_ref()
         .and_then(|page| page.frontmatter.get("event_count"))
         .and_then(|v| v.as_u64())
-        .map(|n| format!(" ({n} events)"))
-        .unwrap_or_default()
+    {
+        Some(n) => format!(" ({n} events)"),
+        // Said, not omitted. `doctor` tells a reader to compare this number before letting a
+        // re-render replace a page's event list, and a `--template-dir` that drops the field
+        // would otherwise print the same line as a page with no events to lose.
+        None => " (event count unavailable)".to_string(),
+    }
 }
 
 pub async fn run(

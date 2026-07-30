@@ -33,11 +33,11 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
     // is the only thing that knows which. Asking it is what separates "nobody is going to do
     // this" from "the drain has not run yet", and the remediation below is destructive if
     // followed for the second one.
-    let in_flight = super::queue::work_in_flight(&vault_root)?;
+    let in_flight = super::queue::work_in_flight(&vault_root);
     let report = audit(
         &managed_roots(&vault_root, &config.vault.dirs),
         &vault_root,
-        &in_flight,
+        &in_flight.keys,
     );
 
     for page in &report.pages {
@@ -90,34 +90,57 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
     }
     if report.pages.iter().any(|page| !page.unanswered.is_empty()) {
         eprintln!(
-            "\nThese sections record an input hash with no matching answer, and no pending task\n\
-             can fill them (checked against the queue). A section is enqueued again only when\n\
-             its page is RE-RENDERED, and a scheduled run re-renders the current date alone, so\n\
-             this does not come back on its own. Deleting the `_done` marker changes nothing —\n\
-             it is already absent, which is what makes this a finding.\n\
+            "\nThese sections record an input hash with no matching answer. A section is enqueued\n\
+             again only when its page is RE-RENDERED, and a scheduled run re-renders the current\n\
+             date alone, so this does not come back on its own.\n\
              \n\
-             Which command re-renders depends on the page:\n\
-             \x20 daily, document   `lore ingest <source> --date <date>`\n\
-             \x20 work-log          `lore ingest --date <date>` — a source-filtered run skips it\n\
-             \x20 synthesis, review `lore synthesis <period> --date <date>`\n\
+             Read the marker first — it decides the repair:\n\
+             \x20 `<key>_done` ABSENT       the answer was never recorded. If the section holds\n\
+             \x20                           content, it was answered before the record existed:\n\
+             \x20                           stamp `<key>_done` with the hash beside the input.\n\
+             \x20                           If it is empty, the answer has to be written first.\n\
+             \x20 `<key>_done` DIFFERENT    a later render superseded the answer. Deleting the\n\
+             \x20                           marker line is the whole fix: the next re-render\n\
+             \x20                           enqueues the section again.\n\
+             \x20 the input is not a string nothing can equal it. Only a re-render can restore the\n\
+             \x20                           pair; there is no hash to copy.\n\
              \n\
-             Each RE-FETCHES its source. A source whose window has passed returns fewer events\n\
-             than the page holds, and the re-render replaces the event list with what came back.\n\
-             `--dry-run` reports the event count it would write; compare it against the count\n\
-             the page states before running for real.\n\
+             Which command re-renders, and what it costs:\n\
+             \x20 daily, document   `lore ingest <source> --date <date>` — RE-FETCHES.\n\
+             \x20 work-log          `lore ingest --date <date>` — a source-filtered run skips it,\n\
+             \x20                   and a date whose sources return no personal events re-renders\n\
+             \x20                   nothing at all, silently.\n\
+             \x20 synthesis, review `lore synthesis <period>` (`--date`, or `--year` for annual)\n\
+             \x20                   — reads persisted pages, fetches nothing, so it is safe.\n\
              \n\
-             When the source can no longer reproduce the input, the page's own content is what\n\
-             remains: fill the section by hand and stamp `llm_inputs.<key>_done` with the hash\n\
-             recorded beside it.\n\
+             A re-fetch REPLACES the event list with what the source returns now. An RSS source\n\
+             renders from its per-date event log, so a date the log covers is restored intact —\n\
+             but a date older than the log has no such backing, and every other source type keeps\n\
+             no log at all. Measured on this author's vault: a date the log covers re-rendered\n\
+             8 of 8 events; one predating it, 6 of 18. `lore ingest … --dry-run` reports the\n\
+             event count it would write for each daily page — compare that with the count the\n\
+             page states, and note that `extracted: N items` above it is the whole fetch window,\n\
+             not this page. Synthesis has no `--dry-run` and needs none.\n\
              \n\
-             `concepts` is the exception, and it needs no re-fetch at all. Never stamp its\n\
-             marker by hand — that claims an empty section is answered and loses the extraction\n\
-             for good. Instead write the concepts to\n\
-             `<vault>/.lorekeeper/queue/results/<name>.json`, carrying the `cache_hash` the page\n\
-             already records, and run `lore queue apply`: it writes the concept pages, the\n\
-             links and the marker in one edit, through the same merge the pipeline uses. A\n\
-             result file needs no queue task behind it."
+             `concepts` is the exception, and it needs no re-fetch at all. Never stamp its marker\n\
+             by hand — that claims an empty section is answered and loses the extraction for\n\
+             good. Write a result file to `<vault>/.lorekeeper/queue/results/<name>.json` and run\n\
+             `lore queue apply`: it writes the concept pages, the links and the marker in one\n\
+             edit, and needs no queue task behind it. The file must be a COMPLETE result — the\n\
+             schema is `/lore-process`'s `references/processing-kinds.md`, under\n\
+             `kind: extract-concepts` — because a partial one is quarantined, and one whose\n\
+             `anchor` or `cache_hash` does not match the page is dropped as dead with exit 0."
         );
+    }
+    if !in_flight.unread.is_empty() {
+        // Said last, because it qualifies everything above: an unanswered section is only a
+        // finding if no pending task can fill it, and that is unknown for a queue not fully read.
+        eprintln!(
+            "\nThe queue could not be read in full, so `no pending task` is not established:"
+        );
+        for problem in &in_flight.unread {
+            eprintln!("  {problem}");
+        }
     }
     // Non-zero on a real defect OR on a page that could not be verified — "clean" must
     // never be claimed for content that was skipped.

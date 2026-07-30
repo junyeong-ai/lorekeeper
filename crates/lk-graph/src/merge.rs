@@ -117,10 +117,23 @@ pub fn merge_concepts(
         Some(compute_absorbed_aliases(vault_root, &from_rel, &into_rel)?)
     };
 
+    let from_id = crate::scan::path_slug(&from_rel);
     let mut rewritten = Vec::new();
     for page in pages {
         // The from page itself is about to be deleted — don't rewrite it.
         if page.path == from_rel {
+            continue;
+        }
+        // Only a page that CITES `from` has anything to rewrite. Reading the rest is not just
+        // wasted work: a page that cannot be read — a non-UTF-8 file in a user's own folder —
+        // would fail the merge midway, after part of the vault was already repointed, and every
+        // re-run would fail at the same file, leaving the half-merge permanent.
+        if !page
+            .outgoing
+            .iter()
+            .filter_map(|link| link.id.as_ref())
+            .any(|id| *id == from_id)
+        {
             continue;
         }
         let abs = vault_root.join(&page.path);

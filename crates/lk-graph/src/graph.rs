@@ -133,7 +133,7 @@ impl WikiGraph {
                 continue;
             }
             let source_idx = id_to_node[&page.id];
-            for target in page.outgoing.iter().map(|link| &link.id) {
+            for target in page.outgoing.iter().filter_map(|link| link.id.as_ref()) {
                 // Each link already carries the resolved page id (scan resolves every
                 // destination against its page's location), so an edge is a plain lookup.
                 if let Some(&target_idx) = id_to_node.get(target.as_str()) {

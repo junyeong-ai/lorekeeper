@@ -194,19 +194,40 @@ fn pending_queue_files(queue_dir: &Path) -> miette::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-/// Read every task in one queue file. An unparseable line is a hard error — the
-/// file is left intact for inspection rather than silently dropping work.
-fn read_tasks(file: &Path) -> miette::Result<Vec<QueueTask>> {
+/// What one queue file holds: the tasks that parsed, and how many lines did not.
+///
+/// An unparseable line is reported and COUNTED rather than failing the read. The whole queue
+/// used to fail on one bad line, which took `count`, `status` and `prune` down together — so a
+/// single malformed line stopped the nightly drain and left no janitor able to clear it.
+struct QueueFile {
+    tasks: Vec<QueueTask>,
+    unparseable: usize,
+}
+
+impl QueueFile {
+    /// Whether this file may be REWRITTEN. A line nobody could parse names work nobody can
+    /// classify, so rewriting the file would drop it silently; the file keeps every line and
+    /// only its own GC is suspended.
+    fn is_rewritable(&self) -> bool {
+        self.unparseable == 0
+    }
+}
+
+fn read_tasks(file: &Path) -> miette::Result<QueueFile> {
     let content = std::fs::read_to_string(file)
         .map_err(|e| miette::miette!("read {}: {e}", file.display()))?;
-    content
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|line| {
-            serde_json::from_str(line)
-                .map_err(|e| miette::miette!("parse task in {}: {e}", file.display()))
-        })
-        .collect()
+    let mut tasks = Vec::new();
+    let mut unparseable = 0usize;
+    for line in content.lines().filter(|l| !l.trim().is_empty()) {
+        match serde_json::from_str(line) {
+            Ok(task) => tasks.push(task),
+            Err(e) => {
+                unparseable += 1;
+                tracing::warn!(file = %file.display(), error = %e, "unparseable queue line");
+            }
+        }
+    }
+    Ok(QueueFile { tasks, unparseable })
 }
 
 async fn apply(
@@ -491,7 +512,7 @@ async fn count(opts: &super::GlobalOptions, root: Option<PathBuf>) -> miette::Re
     let queue_dir = vault_root.join(".lorekeeper").join("queue");
     let mut current = 0usize;
     for file in pending_queue_files(&queue_dir)? {
-        for task in read_tasks(&file)? {
+        for task in read_tasks(&file)?.tasks {
             if classify_task(&vault_root, &task)?.is_work() {
                 current += 1;
             }
@@ -510,8 +531,11 @@ async fn status(
     let queue_dir = vault_root.join(".lorekeeper").join("queue");
 
     let mut reports = Vec::new();
+    let mut unparseable = 0usize;
     for file in pending_queue_files(&queue_dir)? {
-        for task in read_tasks(&file)? {
+        let read = read_tasks(&file)?;
+        unparseable += read.unparseable;
+        for task in read.tasks {
             let status = classify_task(&vault_root, &task)?;
             reports.push(TaskReport {
                 task_id: task.task_id,
@@ -549,6 +573,7 @@ async fn status(
                 "stale": stale,
                 "missing_target": missing,
                 "unreadable": unreadable,
+                "unparseable_lines": unparseable,
                 "tasks": tasks,
             }
         });
@@ -565,8 +590,13 @@ async fn status(
         }
         eprintln!(
             "queue: {current} current, {done} done, {stale} stale, {missing} missing-target, \
-             {unreadable} unreadable across {} task(s)",
-            reports.len()
+             {unreadable} unreadable across {} task(s){}",
+            reports.len(),
+            if unparseable > 0 {
+                format!("; {unparseable} line(s) could not be parsed")
+            } else {
+                String::new()
+            }
         );
     }
     Ok(())
@@ -579,6 +609,8 @@ struct PruneSummary {
     kept_current: usize,
     /// Tasks whose target page could not be read. Retained: a repair of the page restores them.
     kept_unreadable: usize,
+    /// Lines nobody could parse. Their file is left whole — see [`QueueFile::is_rewritable`].
+    kept_unparseable: usize,
     retired_done: usize,
     files_rewritten: usize,
     files_deleted: usize,
@@ -610,11 +642,18 @@ fn prune_queue(vault_root: &Path, queue_dir: &Path, dry_run: bool) -> miette::Re
         // listing and here. That is the outcome prune wanted for it, and nothing is lost
         // (the drain read every task before moving it) — failing would abandon every OTHER
         // file in the directory over a race whose result is already correct.
-        let tasks = match read_tasks(&file) {
-            Ok(tasks) => tasks,
+        let read = match read_tasks(&file) {
+            Ok(read) => read,
             Err(_) if !file.exists() => continue,
             Err(e) => return Err(e),
         };
+        // A file holding a line nobody can parse keeps every line: rewriting it would drop
+        // work nothing could classify. Its own GC waits for a human; the rest proceeds.
+        if !read.is_rewritable() {
+            summary.kept_unparseable += read.unparseable;
+            continue;
+        }
+        let tasks = read.tasks;
         let mut retained = Vec::with_capacity(tasks.len());
         let (mut dropped, mut work_left) = (0usize, 0usize);
         for task in tasks {
@@ -727,6 +766,7 @@ async fn prune(
                 "pruned_missing_target": summary.pruned_missing_target,
                 "kept_current": summary.kept_current,
                 "kept_unreadable": summary.kept_unreadable,
+                "kept_unparseable": summary.kept_unparseable,
                 "retired_done": summary.retired_done,
                 "files_rewritten": summary.files_rewritten,
                 "files_deleted": summary.files_deleted,
@@ -741,12 +781,13 @@ async fn prune(
             "queue prune"
         };
         eprintln!(
-            "{label}: dropped {} stale + {} missing-target, kept {} current + {} unreadable, \
-             {} already done; {} file(s) rewritten, {} archived, {} deleted",
+            "{label}: dropped {} stale + {} missing-target, kept {} current + {} unreadable \
+             + {} unparseable, {} already done; {} file(s) rewritten, {} archived, {} deleted",
             summary.pruned_stale,
             summary.pruned_missing_target,
             summary.kept_current,
             summary.kept_unreadable,
+            summary.kept_unparseable,
             summary.retired_done,
             summary.files_rewritten,
             summary.files_archived,
@@ -763,35 +804,72 @@ async fn prune(
 /// already answered, a missing-target one has nowhere to land, and an unreadable target cannot
 /// be judged at all. Classified by the same rule `queue status` uses, so the two can never
 /// disagree about what is pending.
-pub(super) fn work_in_flight(
-    vault_root: &Path,
-) -> miette::Result<std::collections::HashSet<(PathBuf, &'static str)>> {
+pub(super) struct WorkInFlight {
+    pub keys: std::collections::HashSet<(PathBuf, &'static str)>,
+    /// Why the answer may be incomplete: a queue file that could not be read, or a line nobody
+    /// could parse. A caller that reports unanswered sections must say so rather than conclude
+    /// nothing is pending — "no task can fill this" is the claim that licenses a destructive
+    /// repair, and it cannot be made about a queue that was not fully read.
+    pub unread: Vec<String>,
+}
+
+pub(super) fn work_in_flight(vault_root: &Path) -> WorkInFlight {
     let queue_dir = vault_root.join(".lorekeeper").join("queue");
-    let mut in_flight = std::collections::HashSet::new();
-    for file in pending_queue_files(&queue_dir)? {
-        for task in read_tasks(&file)? {
-            if !classify_task(vault_root, &task)?.is_work() {
+    let mut flight = WorkInFlight {
+        keys: std::collections::HashSet::new(),
+        unread: Vec::new(),
+    };
+    let files = match pending_queue_files(&queue_dir) {
+        Ok(files) => files,
+        Err(e) => {
+            flight.unread.push(format!("{e}"));
+            return flight;
+        }
+    };
+    for file in files {
+        let read = match read_tasks(&file) {
+            Ok(read) => read,
+            Err(e) => {
+                flight.unread.push(format!("{e}"));
+                continue;
+            }
+        };
+        if read.unparseable > 0 {
+            flight.unread.push(format!(
+                "{}: {} unparseable line(s)",
+                file.display(),
+                read.unparseable
+            ));
+        }
+        for task in read.tasks {
+            let status = match classify_task(vault_root, &task) {
+                Ok(status) => status,
+                Err(e) => {
+                    flight.unread.push(format!("{e}"));
+                    continue;
+                }
+            };
+            if !status.is_work() {
                 continue;
             }
             if let Some(rel) = resolve_target_path(&task.target.vault_path) {
-                in_flight.insert((rel, task.target.kind.llm_inputs_key()));
+                flight.keys.insert((rel, task.target.kind.llm_inputs_key()));
             }
         }
     }
-    Ok(in_flight)
+    flight
 }
 
 /// Classify one task by comparing its `cache_hash` to the current input hash the
 /// pipeline stamped into the target page's `llm_inputs.<key>` frontmatter. This is
 /// the deterministic form of the stale-task guard `/lore-process` must honor.
 fn classify_task(vault_root: &Path, task: &QueueTask) -> miette::Result<TaskStatus> {
-    let rel_path = resolve_target_path(&task.target.vault_path).ok_or_else(|| {
-        miette::miette!(
-            "task {}: target `{}` escapes the vault root",
-            task.task_id,
-            task.target.vault_path
-        )
-    })?;
+    // A target outside the vault root is a task that can never land, which is exactly what
+    // `MissingTarget` means — and the answer has to be a status rather than an error, or one
+    // malformed task takes down every command that classifies the queue.
+    let Some(rel_path) = resolve_target_path(&task.target.vault_path) else {
+        return Ok(TaskStatus::MissingTarget);
+    };
     classify_against_page(
         vault_root,
         &rel_path,
@@ -897,6 +975,7 @@ mod tests {
 
         let mut statuses: Vec<&str> = read_tasks(&queue_dir.join("run-1.jsonl"))
             .unwrap()
+            .tasks
             .iter()
             .map(|t| classify_task(dir.path(), t).unwrap().as_str())
             .collect();
@@ -908,7 +987,10 @@ mod tests {
         assert_eq!(summary.kept_unreadable, 1);
         assert_eq!(summary.kept_current, 1);
         assert_eq!(
-            read_tasks(&queue_dir.join("run-1.jsonl")).unwrap().len(),
+            read_tasks(&queue_dir.join("run-1.jsonl"))
+                .unwrap()
+                .tasks
+                .len(),
             2,
             "neither task is dropped"
         );
@@ -1130,6 +1212,7 @@ mod tests {
                 pruned_missing_target: 1,
                 kept_current: 1,
                 kept_unreadable: 0,
+                kept_unparseable: 0,
                 retired_done: 0,
                 files_rewritten: 1,
                 files_deleted: 0,
@@ -1483,12 +1566,34 @@ mod tests {
     /// A read that fails for any OTHER reason is a real failure and must still surface —
     /// the guard asks whether the file is gone, not whether reading was inconvenient.
     #[test]
-    fn a_file_that_exists_but_cannot_be_parsed_still_fails_the_prune() {
+    fn a_line_nobody_can_parse_keeps_its_own_file_whole_and_blocks_nothing_else() {
+        // The old answer was to fail the prune, which took the only janitor down with it: one
+        // malformed line and no command could classify the queue again. The line still must not
+        // be dropped — nothing can tell what work it named — so its file keeps every line and
+        // only its own GC waits, while every other file is pruned as usual.
         let dir = TempDir::new().unwrap();
         let queue_dir = dir.path().join(".lorekeeper").join("queue");
         std::fs::create_dir_all(&queue_dir).unwrap();
         std::fs::write(queue_dir.join("run-1.jsonl"), "{not json\n").unwrap();
-        assert!(prune_queue(dir.path(), &queue_dir, false).is_err());
+        write_page(
+            dir.path(),
+            "daily/s/2026-05-23.md",
+            "llm_inputs:\n  summary: gone\n",
+        );
+        write_queue_file(
+            &queue_dir,
+            "run-2.jsonl",
+            &[task("daily/s/2026-05-23.md", "stale-hash")],
+        );
+
+        let summary = prune_queue(dir.path(), &queue_dir, false).unwrap();
+        assert_eq!(summary.kept_unparseable, 1);
+        assert_eq!(summary.pruned_stale, 1, "the healthy file is still pruned");
+        assert_eq!(
+            std::fs::read_to_string(queue_dir.join("run-1.jsonl")).unwrap(),
+            "{not json\n",
+            "the unparseable line is never dropped"
+        );
     }
 
     /// A file holding no tasks at all edited no page, so there is nothing to archive — and

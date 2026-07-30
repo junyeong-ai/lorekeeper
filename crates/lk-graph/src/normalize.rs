@@ -128,12 +128,25 @@ pub fn apply(renames: &[Rename], pages: &[ScannedPage], root: &Path) -> Result<u
     }
 
     for page in pages {
+        // Only a page that CITES a renamed one, or is itself renamed, has anything to rewrite.
+        // Skipping the rest is not an optimization: this loop runs AFTER the files have moved,
+        // so a page that cannot be read — a non-UTF-8 file in a user's own folder, or one
+        // spelling of a symlinked directory whose other spelling was just renamed — would abort
+        // the run with the vault half-repointed, and every re-run would abort identically.
+        // The scan already resolved every link, so a page with none of them has none to fix.
+        let renamed_self = renamed_paths.get(page.path.as_path()).copied();
+        let cites_renamed = page
+            .outgoing
+            .iter()
+            .filter_map(|link| link.id.as_ref())
+            .any(|id| renamed_ids.contains_key(id));
+        if renamed_self.is_none() && !cites_renamed {
+            continue;
+        }
+
         // A renamed page keeps its directory (only the filename changes), so links
         // inside it still resolve from the same base — read it at its new path.
-        let rel_path = renamed_paths
-            .get(page.path.as_path())
-            .copied()
-            .unwrap_or(&page.path);
+        let rel_path = renamed_self.unwrap_or(&page.path);
         let abs_path = root.join(rel_path);
 
         let content = std::fs::read_to_string(&abs_path)

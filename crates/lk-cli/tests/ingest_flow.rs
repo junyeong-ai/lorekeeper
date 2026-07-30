@@ -258,7 +258,7 @@ fn a_section_with_a_pending_task_is_work_in_flight_not_a_defect() {
         "the pending sections must still be reported, just not as defects\n{stderr}"
     );
     assert!(
-        !stderr.contains("no pending task"),
+        !stderr.contains("Read the marker first"),
         "the lost-work remediation must not print for work that is pending\n{stderr}"
     );
 
@@ -280,7 +280,7 @@ fn a_section_with_a_pending_task_is_work_in_flight_not_a_defect() {
         Some(1),
         "with nothing pending, an unanswered section is a defect\n{stderr}"
     );
-    assert!(stderr.contains("no pending task"), "{stderr}");
+    assert!(stderr.contains("Read the marker first"), "{stderr}");
     // The one marker a reader must never stamp by hand, named as the exception.
     assert!(stderr.contains("is the exception"), "{stderr}");
 }
