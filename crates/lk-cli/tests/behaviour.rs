@@ -60,6 +60,12 @@ const SWEEP: &[&[&str]] = &[
     &["graph", "suggest-links"],
     &["graph", "audit-candidates"],
     &["graph", "backlinks-sync"],
+    // Each period is named explicitly, so the pin describes the code rather than
+    // the calendar: the same argv targets the same period forever.
+    &["synthesis", "weekly", "--date", "2026-01-07"],
+    &["synthesis", "monthly", "--date", "2026-01-07"],
+    &["synthesis", "quarterly", "--date", "2026-01-07"],
+    &["synthesis", "annual", "--year", "2026"],
 ];
 
 /// Leaf commands the sweep does not cover, each with the reason its answer is
@@ -67,22 +73,6 @@ const SWEEP: &[&[&str]] = &[
 /// [`every_command_is_swept_or_exempt`], so an exemption is a written decision
 /// rather than an omission.
 const EXEMPT: &[(&[&str], &str)] = &[
-    (
-        &["synthesis", "weekly"],
-        "names the period it ran for from the wall clock (`week of 2026-07-30`, `for 2026-07`) and takes no `--date` override the way `ingest` does, so a pin of it goes red at the next period boundary rather than on a change to the code",
-    ),
-    (
-        &["synthesis", "monthly"],
-        "names the period it ran for from the wall clock (`week of 2026-07-30`, `for 2026-07`) and takes no `--date` override the way `ingest` does, so a pin of it goes red at the next period boundary rather than on a change to the code",
-    ),
-    (
-        &["synthesis", "quarterly"],
-        "names the period it ran for from the wall clock (`week of 2026-07-30`, `for 2026-07`) and takes no `--date` override the way `ingest` does, so a pin of it goes red at the next period boundary rather than on a change to the code",
-    ),
-    (
-        &["synthesis", "annual"],
-        "names the period it ran for from the wall clock (`week of 2026-07-30`, `for 2026-07`) and takes no `--date` override the way `ingest` does, so a pin of it goes red at the next period boundary rather than on a change to the code",
-    ),
     (
         &["ingest"],
         "reaches the configured sources, so its answer is a property of the network rather than of the vault",
@@ -137,6 +127,22 @@ const GUARD_ONLY: &[(&[&str], &str)] = &[
     (
         &["maintenance", "--dry-run"],
         "prunes the ingest log and drained queue files past retention; the corpus has no log and no processed/ directory",
+    ),
+    (
+        &["synthesis", "weekly", "--date", "2026-01-07"],
+        "renders cross-source themes and the personal weekly review from that week's daily pages; the corpus has none for the pinned week, so it stops at `No source data found`",
+    ),
+    (
+        &["synthesis", "monthly", "--date", "2026-01-07"],
+        "reads the work-log the pinned month's weekly reviews feed; the corpus vault carries no work-log page, so it stops at `No work-log data found`",
+    ),
+    (
+        &["synthesis", "quarterly", "--date", "2026-01-07"],
+        "aggregates the pinned quarter's monthly reviews; the corpus has none, so it stops at `No data found`",
+    ),
+    (
+        &["synthesis", "annual", "--year", "2026"],
+        "aggregates the pinned year's quarterly reviews; the corpus has none, so it stops at `No quarterly data found`",
     ),
 ];
 
@@ -257,13 +263,43 @@ fn every_fixture_file_is_tracked() {
     );
 }
 
+/// The snapshot an invocation is pinned under. Shared with
+/// [`no_snapshot_outlives_its_invocation`], so the two cannot disagree about
+/// which file belongs to which argv.
+fn snapshot_name(argv: &[&str]) -> String {
+    argv.join("_").replace('-', "_")
+}
+
 #[test]
 fn behaviour_sweep() {
     for argv in SWEEP {
         let staged = stage();
-        let name = argv.join("_").replace('-', "_");
-        insta::assert_snapshot!(name, observe(staged.path(), argv));
+        insta::assert_snapshot!(snapshot_name(argv), observe(staged.path(), argv));
     }
+}
+
+/// A snapshot file the sweep no longer writes reads as coverage of a command
+/// nothing runs: `synthesis weekly` moved to [`EXEMPT`] and its pin stayed on
+/// disk, so the directory listing claimed a leaf the sweep had stopped touching.
+#[test]
+fn no_snapshot_outlives_its_invocation() {
+    let pinned: Vec<String> = SWEEP
+        .iter()
+        .map(|argv| format!("behaviour__{}.snap", snapshot_name(argv)))
+        .collect();
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots");
+    let orphaned: Vec<String> = std::fs::read_dir(&dir)
+        .expect("read snapshot dir")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("behaviour__") && name.ends_with(".snap"))
+        .filter(|name| !pinned.contains(name))
+        .collect();
+    assert!(
+        orphaned.is_empty(),
+        "these snapshots belong to no swept invocation — delete them, or restore the \
+         invocation they pin: {orphaned:?}"
+    );
 }
 
 /// Every leaf of the real clap tree, as `["graph", "lint"]` style paths.

@@ -5,4 +5,4 @@ expression: "observe(staged.path(), argv)"
 exit: 0
 --- stdout ---
 --- stderr ---
-No source data found for week of 2026-07-30.
+No source data found for week of 2026-01-07.

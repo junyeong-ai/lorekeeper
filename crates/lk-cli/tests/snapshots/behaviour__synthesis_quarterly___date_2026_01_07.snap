@@ -1,0 +1,8 @@
+---
+source: crates/lk-cli/tests/behaviour.rs
+expression: "observe(staged.path(), argv)"
+---
+exit: 0
+--- stdout ---
+--- stderr ---
+No data found for 2026-Q1.
