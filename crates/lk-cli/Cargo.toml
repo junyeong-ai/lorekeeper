@@ -27,6 +27,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 dialoguer = { workspace = true }
 blake3 = { workspace = true }
+same-file = { workspace = true }
 walkdir = { workspace = true }
 
 [dev-dependencies]

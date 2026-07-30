@@ -80,6 +80,48 @@ fn write_to_temp_then_rename(
     Ok(())
 }
 
+/// Canonicalize the longest EXISTING ancestor of `path` (resolving symlinks there) and
+/// re-attach the not-yet-existent remainder, so two paths that share a real, possibly
+/// symlinked ancestor are compared on the same canonical basis even when neither fully
+/// exists. `Path::canonicalize` requires the whole path to exist; this degrades to that
+/// when it does, and to a coherent partial resolution when it doesn't — never mixing a
+/// resolved side with a lexical one. Falls back to the lexical path only when nothing
+/// in the chain exists (e.g. an empty or fully-synthetic path).
+pub fn canonical_prefix(path: &Path) -> std::path::PathBuf {
+    let mut ancestor = path.to_path_buf();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if let Ok(canon) = ancestor.canonicalize() {
+            let mut resolved = canon;
+            for segment in tail.iter().rev() {
+                resolved.push(segment);
+            }
+            return resolved;
+        }
+        let Some(name) = ancestor.file_name().map(|n| n.to_os_string()) else {
+            return path.to_path_buf();
+        };
+        tail.push(name);
+        if !ancestor.pop() {
+            return path.to_path_buf();
+        }
+    }
+}
+
+/// Whether two directory-entry names could be one file on some filesystem this ships to.
+///
+/// The filesystems differ on which names are distinct: ext4 keeps every byte sequence apart,
+/// APFS and NTFS fold case, APFS also folds Unicode normalization. So a name comparison that
+/// only lowercases ASCII answers for one of them — `Wiki`/`wiki` pairs, `Café`/`café` does not,
+/// and the NFC and NFD spellings of a Korean name do not, which is exactly the vocabulary this
+/// vault's directories are named in. Compared after Unicode case folding AND NFC, so the answer
+/// is the union of what any of them would collapse rather than one platform's.
+pub fn names_fold_together(a: &str, b: &str) -> bool {
+    use unicode_normalization::UnicodeNormalization;
+    let folded = |name: &str| name.to_lowercase().nfc().collect::<String>();
+    folded(a) == folded(b)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,5 +190,50 @@ mod tests {
             leftover.is_empty(),
             "temp must be cleaned up on rename failure"
         );
+    }
+    /// The three ways a filesystem this ships to collapses two names, and the one it does not.
+    /// Written as a table rather than one case because ASCII case folding alone is what the
+    /// caller used to do, and it is the pairs BEYOND ASCII that were being missed.
+    #[test]
+    fn names_that_some_shipped_filesystem_would_collapse_are_paired() {
+        for (a, b) in [
+            ("wiki", "Wiki"),
+            ("café", "Café"),
+            ("caf\u{e9}", "cafe\u{301}"),
+            (
+                "\u{d55c}\u{ad6d}\u{c5b4}",
+                "\u{1112}\u{1161}\u{11ab}\u{1100}\u{116e}\u{11a8}\u{110b}\u{1165}",
+            ),
+        ] {
+            assert!(names_fold_together(a, b), "{a:?} and {b:?} can be one file");
+        }
+        for (a, b) in [("wiki", "wiki-archive"), ("daily", "weekly"), ("me", "men")] {
+            assert!(
+                !names_fold_together(a, b),
+                "{a:?} and {b:?} are two files everywhere"
+            );
+        }
+    }
+
+    /// `canonicalize` needs the whole path to exist, and the paths this compares are frequently
+    /// about to be created. Resolving the longest existing ancestor keeps both sides on one
+    /// basis: a symlinked parent with an absent child still resolves through the symlink, which
+    /// is what makes an overlap visible BEFORE the first write creates it.
+    #[test]
+    fn a_missing_child_still_resolves_through_a_symlinked_parent() {
+        let dir = TempDir::new().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        #[cfg(unix)]
+        {
+            let alias = dir.path().join("alias");
+            if std::os::unix::fs::symlink(&real, &alias).is_ok() {
+                assert_eq!(
+                    canonical_prefix(&alias.join("new")),
+                    canonical_prefix(&real).join("new")
+                );
+            }
+        }
+        assert_eq!(canonical_prefix(&real), real.canonicalize().unwrap());
     }
 }

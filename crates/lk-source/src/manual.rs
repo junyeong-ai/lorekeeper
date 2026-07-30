@@ -125,34 +125,6 @@ fn validate_inbox_dir(inbox: &Path) -> Result<(), SourceError> {
     Ok(())
 }
 
-/// Canonicalize the longest EXISTING ancestor of `path` (resolving symlinks there) and
-/// re-attach the not-yet-existent remainder, so two paths that share a real, possibly
-/// symlinked ancestor are compared on the same canonical basis even when neither fully
-/// exists. `Path::canonicalize` requires the whole path to exist; this degrades to that
-/// when it does, and to a coherent partial resolution when it doesn't — never mixing a
-/// resolved side with a lexical one. Falls back to the lexical path only when nothing
-/// in the chain exists (e.g. an empty or fully-synthetic path).
-fn canonical_prefix(path: &Path) -> PathBuf {
-    let mut ancestor = path.to_path_buf();
-    let mut tail: Vec<std::ffi::OsString> = Vec::new();
-    loop {
-        if let Ok(canon) = ancestor.canonicalize() {
-            let mut resolved = canon;
-            for segment in tail.iter().rev() {
-                resolved.push(segment);
-            }
-            return resolved;
-        }
-        let Some(name) = ancestor.file_name().map(|n| n.to_os_string()) else {
-            return path.to_path_buf();
-        };
-        tail.push(name);
-        if !ancestor.pop() {
-            return path.to_path_buf();
-        }
-    }
-}
-
 /// Resolve the configured inbox path deterministically: `~`/`~/…` expands to the
 /// user's home (config values are written in a shell mindset, but nothing else
 /// expands them) and a relative path anchors at the vault root — never the
@@ -185,8 +157,8 @@ fn resolve_inbox_dir(configured: &Path, vault_root: &Path) -> Result<PathBuf, So
     // would pit a symlink-resolved inbox against a lexical vault root — e.g. `/tmp` →
     // `/private/tmp` vs lexical `/tmp/vault` — and silently miss that the inbox is the
     // vault's ancestor. Resolving the shared real prefix identically closes that.
-    let resolved_real = canonical_prefix(&resolved);
-    let vault_real = canonical_prefix(vault_root);
+    let resolved_real = lk_core::fs::canonical_prefix(&resolved);
+    let vault_real = lk_core::fs::canonical_prefix(vault_root);
     if resolved_real == vault_real || vault_real.starts_with(&resolved_real) {
         return Err(SourceError::InvalidParams(format!(
             "manual `inbox_dir` ('{}') resolves to the vault root or an ancestor of it \

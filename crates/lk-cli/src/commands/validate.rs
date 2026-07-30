@@ -19,20 +19,31 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
     eprintln!("  timezone: {:?}", config.vault.timezone);
     eprintln!("  sources ({}): {}", enabled.len(), enabled.join(", "));
 
-    for (label, value, sibling) in folded_vault_dirs(&config).await {
-        match sibling {
-            Some(sibling) => eprintln!(
-                "  warning: vault.dirs.{label} is '{value}' and does not exist, but the vault \
-                 holds '{sibling}'. This filesystem does not fold case, so the next run \
-                 creates '{value}' beside it and writes there — every page already under \
-                 '{sibling}' then goes unscanned, invisible to the index, the graph and \
-                 `doctor`"
-            ),
-            None => eprintln!(
+    for (label, value, finding) in inspect_vault_dirs(&config).await {
+        match finding {
+            RootFinding::Folded => eprintln!(
                 "  warning: vault.dirs.{label} is '{value}' but the vault holds no directory \
                  of that name — the filesystem is folding the spelling for you. Every link \
                  that crosses into it carries the configured spelling, so the vault resolves \
                  here and breaks the moment it is read where case is not folded"
+            ),
+            RootFinding::VariantSibling(sibling) => eprintln!(
+                "  warning: vault.dirs.{label} is '{value}' and does not exist, but the vault \
+                 holds '{sibling}', a name this filesystem keeps separate, holding pages that \
+                 declare Lorekeeper page formats. If those pages are this vault's, the next run \
+                 creates '{value}' beside them and writes there while they go unscanned — \
+                 invisible to the index, the graph and `doctor`; point vault.dirs.{label} at \
+                 '{sibling}'. If they are another tool's, the two are unrelated and only the \
+                 name is a coincidence"
+            ),
+            RootFinding::NotADirectory => eprintln!(
+                "  warning: vault.dirs.{label} is '{value}', which exists and is not a \
+                 directory — `lore ingest` fails when it tries to create pages under it"
+            ),
+            RootFinding::Unverifiable(parent) => eprintln!(
+                "  warning: vault.dirs.{label} is '{value}' and could not be verified: \
+                 '{parent}' cannot be listed, so whether the filesystem is folding the \
+                 spelling is unknown rather than answered no"
             ),
         }
     }
@@ -67,7 +78,22 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
     Ok(())
 }
 
-/// Configured vault roots that only resolve because the filesystem folds their spelling.
+/// What inspecting a configured vault root on disk found. Kept apart because the remedies
+/// differ and so does the certainty: two of these are defects, one is a config error, and one
+/// is the honest absence of an answer.
+enum RootFinding {
+    /// The path resolves, but not under the name given — the filesystem folds the spelling.
+    Folded,
+    /// The name is absent, and a name this filesystem keeps separate from it sits beside it
+    /// holding pages that declare Lorekeeper formats.
+    VariantSibling(String),
+    /// A segment exists and is not a directory.
+    NotADirectory,
+    /// A parent could not be listed, so neither of the first two could be decided.
+    Unverifiable(String),
+}
+
+/// Inspect each configured vault root against the directory it actually names.
 ///
 /// Every link a page writes into another root is built from the CONFIGURED name
 /// (`render::concepts_dir_dest`), so `wiki: Wiki` over a `wiki/` directory publishes
@@ -79,16 +105,15 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
 /// page already under the real one becomes invisible to the index and the graph, with nothing
 /// reporting a defect.
 ///
-/// The condition is "resolves, but not under the name given": the path canonicalizes AND some
-/// segment of it is absent from its parent's listing as a literal entry. Both halves are
-/// needed — a root that does not exist yet is the first-run case, and a case-sensitive volume
-/// may legitimately hold `Wiki` and `wiki` as two directories with the config naming one of
-/// them exactly, which is what an earlier version of this check flagged wrongly. Comparing
-/// literal entries rather than folding case also leaves a deliberate symlink alone: its own
-/// name is a real entry.
-async fn folded_vault_dirs(
+/// [`RootFinding::Folded`] is "resolves, but not under the name given": the segment exists AND
+/// is absent from its parent's listing as a literal entry. Both halves are needed — a root that
+/// does not exist yet is the first-run case, and a case-sensitive volume may legitimately hold
+/// `Wiki` and `wiki` as two directories with the config naming one of them exactly, which is
+/// what an earlier version of this check flagged wrongly. Comparing literal entries rather than
+/// folding names also leaves a deliberate symlink alone: its own name is a real entry.
+async fn inspect_vault_dirs(
     config: &lk_core::config::Config,
-) -> Vec<(&'static str, String, Option<String>)> {
+) -> Vec<(&'static str, String, RootFinding)> {
     let dirs = &config.vault.dirs;
     let mut found = Vec::new();
     for (label, value) in [
@@ -103,59 +128,68 @@ async fn folded_vault_dirs(
                 continue;
             };
             let child = parent.join(segment);
-            if !child.exists() {
-                // Absent is normally the first run. But on a filesystem that does NOT fold
-                // case, a misspelling is simply a different directory — and if the name it
-                // was meant to be is sitting right there, `lore ingest` will create the
-                // misspelled one beside it and write there, while every page under the real
-                // one goes unscanned: invisible to the index, to the graph, and to `doctor`,
-                // which reports no defect because it never sees them. Reproduced on a
-                // case-sensitive APFS volume. Absence alone is silent; absence next to the
-                // name it differs from only in case is not.
-                if let Some(sibling) = case_variant_sibling(&parent, segment).await {
-                    found.push((label, value.clone(), Some(sibling)));
+            let finding = if !child.is_dir() {
+                if std::fs::symlink_metadata(&child).is_ok() {
+                    // An entry that is not a directory: a file, a socket, a dangling symlink.
+                    // `lore ingest` fails on it, and it fails at the write rather than here.
+                    Some(RootFinding::NotADirectory)
+                } else {
+                    // Absent is normally the first run. But where names are kept apart, a
+                    // misspelling is simply a different directory — and if the name it was
+                    // meant to be is sitting right there, `lore ingest` creates the misspelled
+                    // one beside it and writes there, while every page under the other goes
+                    // unscanned: invisible to the index, to the graph, and to `doctor`, which
+                    // reports no defect because it never sees them. Reproduced on a
+                    // case-sensitive APFS volume. Absence alone is silent; absence next to a
+                    // name that folds onto it is not.
+                    variant_sibling(&parent, segment)
+                        .await
+                        .map(RootFinding::VariantSibling)
                 }
+            } else {
+                match directory_lists(&parent, segment).await {
+                    Some(false) => Some(RootFinding::Folded),
+                    None => Some(RootFinding::Unverifiable(parent.display().to_string())),
+                    Some(true) => {
+                        parent = child;
+                        None
+                    }
+                }
+            };
+            if let Some(finding) = finding {
+                found.push((label, value.clone(), finding));
                 break;
-            }
-            match directory_lists(&parent, segment).await {
-                Some(false) => {
-                    found.push((label, value.clone(), None));
-                    break;
-                }
-                // Unreadable: the listing is unknown, which is not evidence of a fold.
-                None => break,
-                Some(true) => parent = child,
             }
         }
     }
     found
 }
 
-/// A directory in `parent` that case-folds onto `name` AND holds pages this tool wrote — the
-/// name the configured one was probably meant to be.
+/// A directory in `parent` that another filesystem would fold onto `name` AND holds pages
+/// declaring Lorekeeper formats — the name the configured one was probably meant to be.
 ///
-/// The case fold alone is not evidence, and taking it as such was a false positive on the
-/// realistic case: this tool writes into an existing Obsidian vault, where `daily`, `wiki`,
-/// `me` and `synthesis` are all plausible folder names a person already used. A first run
-/// beside a pre-existing unrelated `Daily/` on a case-sensitive volume was told its own pages
-/// were about to go invisible, when there were no pages of its own at all.
+/// The fold alone is not evidence, and taking it as such was a false positive on the realistic
+/// case: this tool writes into an existing Obsidian vault, where `daily`, `wiki`, `me` and
+/// `synthesis` are all plausible folder names a person already used. A first run beside a
+/// pre-existing unrelated `Daily/` on a case-sensitive volume was told its own pages were about
+/// to go invisible, when there were no pages of its own at all.
 ///
-/// What separates the two is whether the sibling holds Lorekeeper's own output, and a page says
-/// so itself: the `type` frontmatter naming one of the formats this tool writes. A folder of
-/// someone's own notes does not carry those. Only asked when the configured name is ABSENT, so
-/// a vault legitimately holding both spellings is never examined.
+/// What narrows it is whether the sibling holds pages that declare one of this tool's formats.
+/// That is evidence and not proof — a note from another tool may carry `type: daily` — so the
+/// finding states what was seen and leaves the conclusion to the reader, rather than asserting
+/// that pages are about to go unscanned. Only asked when the configured name is ABSENT, so a
+/// vault legitimately holding both spellings is never examined.
 ///
-/// A bound worth stating: two names differing only by Unicode normalization are not compared,
-/// so a normalization-SENSITIVE filesystem could hide that pairing here. On the volumes this
-/// ships to, normalization is folded, so the configured name resolves and the fold check above
-/// sees it instead.
-async fn case_variant_sibling(parent: &std::path::Path, name: &std::ffi::OsStr) -> Option<String> {
+/// Pairing is [`lk_core::fs::names_fold_together`], not ASCII case: an accented or Hangul root
+/// differing only by Unicode normalization is exactly the pair a case-sensitive Linux volume
+/// keeps apart and an earlier ASCII-only comparison could not see.
+async fn variant_sibling(parent: &std::path::Path, name: &std::ffi::OsStr) -> Option<String> {
     let target = name.to_string_lossy();
     let mut entries = tokio::fs::read_dir(parent).await.ok()?;
     while let Ok(Some(entry)) = entries.next_entry().await {
         let found = entry.file_name();
         let found = found.to_string_lossy();
-        if found == target || !found.eq_ignore_ascii_case(&target) {
+        if found == target || !lk_core::fs::names_fold_together(&found, &target) {
             continue;
         }
         if holds_managed_pages(&parent.join(found.as_ref())) {
@@ -167,7 +201,9 @@ async fn case_variant_sibling(parent: &std::path::Path, name: &std::ffi::OsStr) 
 
 /// Whether any page under `dir` declares one of the formats this tool writes.
 ///
-/// The page states its own provenance, so this needs no registry and no guessing at content.
+/// The page states its own provenance, so this needs no registry and no guessing at content —
+/// though provenance is what the page CLAIMS, so this is evidence of Lorekeeper output rather
+/// than proof of it, which is why its caller reports what it saw instead of concluding.
 /// Bounded: it stops at the first page that answers yes.
 fn holds_managed_pages(dir: &std::path::Path) -> bool {
     walkdir::WalkDir::new(dir)
@@ -214,10 +250,16 @@ async fn directory_lists(parent: &std::path::Path, name: &std::ffi::OsStr) -> Op
 /// `VaultDirs::validate` rejects roots that overlap as path strings, which is all it can do
 /// without I/O, and the filesystem's notion of one directory is coarser than any string
 /// comparison: `Pages` and `pages` on a case-insensitive volume, the NFC and NFD spellings of
-/// a Korean name on APFS, a symlink. Canonicalizing first asks the filesystem its own
-/// question and answers all three at once; containment is then checked the same way the
-/// string rule checks it, since a root inside another is the overlap that matters and equality
-/// is only its degenerate case.
+/// a Korean name on APFS, a symlink, a bind mount.
+///
+/// Identity and containment are asked separately because no one comparison answers both.
+/// Identity is [`same_file::is_same_file`] — the filesystem's own answer (device and inode, file
+/// index on Windows), which is what sees a bind mount, where two paths name one directory
+/// without either being a link to the other. Containment needs paths, so it compares
+/// [`lk_core::fs::canonical_prefix`]: the longest existing ancestor resolved and the remainder
+/// re-attached, because a root whose leaf does not exist yet is the case where reporting the
+/// overlap BEFORE the first write is the whole point — plain `canonicalize` fails there and
+/// reported nothing until ingest had already created the ambiguity.
 ///
 /// Reported, not refused — but do not read that as harmless, which an earlier version of this
 /// comment did. Two roots on one directory put two page formats on one path:
@@ -238,23 +280,27 @@ fn overlapping_vault_dirs(
         ("synthesis", &dirs.synthesis),
         ("wiki", &dirs.wiki),
     ];
-    let resolve = |value: &str| std::fs::canonicalize(root.join(value)).ok();
-    let contains =
-        |outer: &std::path::Path, inner: &std::path::Path| inner.strip_prefix(outer).is_ok();
     let mut found = Vec::new();
     for (index, (a_label, a)) in roots.iter().enumerate() {
         for (b_label, b) in &roots[index + 1..] {
-            if let (Some(a_path), Some(b_path)) = (resolve(a), resolve(b)) {
-                let shared = if contains(&a_path, &b_path) {
-                    Some(&a_path)
-                } else if contains(&b_path, &a_path) {
-                    Some(&b_path)
-                } else {
-                    None
-                };
-                if let Some(shared) = shared {
-                    found.push((*a_label, *b_label, shared.display().to_string()));
-                }
+            let (a_path, b_path) = (root.join(a.as_str()), root.join(b.as_str()));
+            if same_file::is_same_file(&a_path, &b_path).unwrap_or(false) {
+                found.push((*a_label, *b_label, a_path.display().to_string()));
+                continue;
+            }
+            let (a_real, b_real) = (
+                lk_core::fs::canonical_prefix(&a_path),
+                lk_core::fs::canonical_prefix(&b_path),
+            );
+            let outer = if b_real.strip_prefix(&a_real).is_ok() {
+                Some(&a_real)
+            } else if a_real.strip_prefix(&b_real).is_ok() {
+                Some(&b_real)
+            } else {
+                None
+            };
+            if let Some(outer) = outer {
+                found.push((*a_label, *b_label, outer.display().to_string()));
             }
         }
     }
@@ -263,7 +309,7 @@ fn overlapping_vault_dirs(
 
 #[cfg(test)]
 mod tests {
-    use super::{case_variant_sibling, folded_vault_dirs, overlapping_vault_dirs};
+    use super::{RootFinding, inspect_vault_dirs, overlapping_vault_dirs, variant_sibling};
 
     /// Whether this filesystem folds case. It decides WHICH branch a misspelled root takes:
     /// where case folds the name resolves and the fold branch answers, where it does not the
@@ -296,17 +342,25 @@ mod tests {
         .unwrap();
 
         let found =
-            folded_vault_dirs(&write_config(tmp.path(), "    wiki: Wiki\n", "variant")).await;
-        assert_eq!(found.len(), 1, "{found:?}");
+            inspect_vault_dirs(&write_config(tmp.path(), "    wiki: Wiki\n", "variant")).await;
+        assert_eq!(found.len(), 1, "one finding for one root");
         assert_eq!(found[0].1, "Wiki");
-        if filesystem_folds_case(tmp.path()) {
-            assert_eq!(found[0].2, None, "a fold names no sibling: {found:?}");
-        } else {
-            assert_eq!(
-                found[0].2.as_deref(),
-                Some("wiki"),
-                "an absence names the directory it differs from: {found:?}"
-            );
+        match (&found[0].2, filesystem_folds_case(tmp.path())) {
+            (RootFinding::Folded, true) => {}
+            (RootFinding::VariantSibling(sibling), false) => assert_eq!(sibling, "wiki"),
+            (finding, folds) => panic!(
+                "a filesystem that folds={folds} must take the other branch: {}",
+                describe(finding)
+            ),
+        }
+    }
+
+    fn describe(finding: &RootFinding) -> String {
+        match finding {
+            RootFinding::Folded => "folded".into(),
+            RootFinding::VariantSibling(name) => format!("sibling {name}"),
+            RootFinding::NotADirectory => "not a directory".into(),
+            RootFinding::Unverifiable(parent) => format!("unverifiable under {parent}"),
         }
     }
 
@@ -318,22 +372,51 @@ mod tests {
         std::fs::create_dir(tmp.path().join("wiki")).unwrap();
 
         assert!(
-            folded_vault_dirs(&write_config(tmp.path(), "    wiki: wiki\n", "exact"))
+            inspect_vault_dirs(&write_config(tmp.path(), "    wiki: wiki\n", "exact"))
                 .await
                 .is_empty()
         );
         assert!(
-            folded_vault_dirs(&write_config(tmp.path(), "    wiki: absent\n", "absent"))
+            inspect_vault_dirs(&write_config(tmp.path(), "    wiki: absent\n", "absent"))
                 .await
                 .is_empty(),
             "a directory that does not exist yet is the first run"
         );
         if std::os::unix::fs::symlink(tmp.path().join("wiki"), tmp.path().join("notes")).is_ok() {
             assert!(
-                folded_vault_dirs(&write_config(tmp.path(), "    wiki: notes\n", "link"))
+                inspect_vault_dirs(&write_config(tmp.path(), "    wiki: notes\n", "link"))
                     .await
                     .is_empty(),
                 "a symlink's own name is a real entry"
+            );
+        }
+    }
+
+    /// A root that is not a directory passed validation and failed at the first write with a
+    /// bare `Not a directory (os error 20)` from somewhere inside the pipeline. It is the same
+    /// class as a misspelling — the config names something the vault cannot hold pages in — so
+    /// it belongs to the same check, and a dangling symlink is that condition too.
+    #[tokio::test]
+    async fn a_root_that_is_not_a_directory_is_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("wiki"), "not a directory\n").unwrap();
+        let found = inspect_vault_dirs(&write_config(tmp.path(), "    wiki: wiki\n", "file")).await;
+        assert_eq!(found.len(), 1, "{}", found.len());
+        assert!(
+            matches!(found[0].2, RootFinding::NotADirectory),
+            "{}",
+            describe(&found[0].2)
+        );
+
+        std::fs::remove_file(tmp.path().join("wiki")).unwrap();
+        if std::os::unix::fs::symlink(tmp.path().join("gone"), tmp.path().join("wiki")).is_ok() {
+            let found =
+                inspect_vault_dirs(&write_config(tmp.path(), "    wiki: wiki\n", "dangling")).await;
+            assert_eq!(found.len(), 1, "{}", found.len());
+            assert!(
+                matches!(found[0].2, RootFinding::NotADirectory),
+                "a dangling symlink is an entry that is not a directory: {}",
+                describe(&found[0].2)
             );
         }
     }
@@ -362,7 +445,7 @@ mod tests {
 
         let name = std::ffi::OsString::from("wiki");
         assert!(
-            case_variant_sibling(tmp.path(), &name).await.is_none(),
+            variant_sibling(tmp.path(), &name).await.is_none(),
             "someone's own folder is not this tool's misspelled output"
         );
 
@@ -373,17 +456,54 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            case_variant_sibling(tmp.path(), &name).await.as_deref(),
+            variant_sibling(tmp.path(), &name).await.as_deref(),
             Some("Wiki")
+        );
+    }
+
+    /// Case is one of three ways a filesystem folds a name, and pairing on ASCII case answered
+    /// for only the one this was written on. An accented or Hangul root spelled NFC in config
+    /// against an NFD directory on disk is the pair a case-sensitive Linux volume keeps apart —
+    /// verified there — and it is the vocabulary these vaults are actually named in.
+    #[tokio::test]
+    async fn a_sibling_differing_only_by_unicode_normalization_is_paired() {
+        let tmp = tempfile::tempdir().unwrap();
+        // `café` written NFD (e + U+0301) on disk, NFC (U+00E9) in config.
+        let nfd = tmp.path().join("cafe\u{301}");
+        if std::fs::create_dir(&nfd).is_err() {
+            return;
+        }
+        std::fs::write(
+            nfd.join("rag.md"),
+            "---\nid: rag\ntype: concept\ntitle: RAG\n---\n",
+        )
+        .unwrap();
+
+        // Asked directly, so the answer does not depend on whether THIS volume folds the
+        // spelling — the pairing rule is what is under test, and it must be the union of what
+        // any shipped filesystem collapses.
+        for spelling in ["caf\u{e9}", "CAF\u{c9}", "Cafe\u{301}"] {
+            assert_eq!(
+                variant_sibling(tmp.path(), &std::ffi::OsString::from(spelling)).await,
+                Some("cafe\u{301}".to_string()),
+                "{spelling:?} must pair with the NFD directory on disk"
+            );
+        }
+        assert!(
+            variant_sibling(tmp.path(), &std::ffi::OsString::from("cafe"))
+                .await
+                .is_none(),
+            "a name that no filesystem folds onto it is a different directory"
         );
     }
 
     /// A directory can be traversable without being listable, so `exists` on a child succeeds
     /// while `read_dir` on its parent fails. Reading that as "the name is not listed" reports
     /// a fold where nothing was folded — a warning that is not merely useless but says
-    /// something false about a correct config.
+    /// something false about a correct config. Saying nothing at all is also wrong, though:
+    /// silence reads as "checked, and fine" for a check that did not run.
     #[tokio::test]
-    async fn an_unlistable_parent_is_not_reported_as_a_fold() {
+    async fn an_unlistable_parent_is_reported_as_unverified_not_as_a_fold() {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = tempfile::tempdir().unwrap();
@@ -392,12 +512,26 @@ mod tests {
         let config = write_config_at(&root, tmp.path(), "    wiki: wiki\n", "perm");
 
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o111)).unwrap();
-        let found = folded_vault_dirs(&config).await;
+        let found = inspect_vault_dirs(&config).await;
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
 
+        // Running as root ignores directory permissions, so the listing succeeds and there is
+        // nothing to report — the probe decides, rather than the test assuming an unprivileged
+        // process.
+        let listable = std::fs::read_dir(root.join("wiki")).is_ok()
+            && std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o111))
+                .and_then(|()| std::fs::read_dir(&root).map(|_| ()))
+                .is_ok();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if listable {
+            assert!(found.is_empty(), "a listable parent has nothing to report");
+            return;
+        }
+        assert_eq!(found.len(), 1, "{}", found.len());
         assert!(
-            found.is_empty(),
-            "an unreadable listing is unknown, not evidence: {found:?}"
+            matches!(found[0].2, RootFinding::Unverifiable(_)),
+            "an unreadable listing is unknown, not evidence of a fold: {}",
+            describe(&found[0].2)
         );
     }
 
@@ -457,7 +591,17 @@ mod tests {
         ));
         assert_eq!(nested.len(), 1, "{nested:?}");
 
-        // Separate directories, and a root that does not exist yet, are both fine.
+        // A root whose leaf does not exist YET, reached through an alias, is the case worth
+        // reporting before the first write rather than after: `canonicalize` fails on the whole
+        // path and answered nothing until ingest had already created the ambiguity.
+        let future = overlapping_vault_dirs(&write_config(
+            tmp.path(),
+            "    wiki: wiki\n    daily: notes/later\n",
+            "future",
+        ));
+        assert_eq!(future.len(), 1, "{future:?}");
+
+        // Separate directories, and a root that does not exist yet under no alias, are fine.
         assert!(
             overlapping_vault_dirs(&write_config(
                 tmp.path(),

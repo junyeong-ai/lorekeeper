@@ -1473,6 +1473,7 @@ dependencies = [
  "lk-vault",
  "miette",
  "reqwest",
+ "same-file",
  "serde_json",
  "tempfile",
  "tokio",
