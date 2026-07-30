@@ -285,3 +285,57 @@ fn wiki_concepts_lists_every_concept_with_the_aliases_dedup_needs() {
     assert_eq!(embeddings["aliases"], serde_json::json!([]));
     assert_eq!(embeddings["source_count"], 0);
 }
+
+/// The same registry, refusing rather than under-reporting. A page it cannot parse is a concept
+/// the caller will not see, and `/lore-process` loads this as its dedup baseline — so an answer
+/// that silently omits one has the drain mint a second page for a concept the vault already
+/// holds, or overwrite the one it could not read. A `tracing::warn` left a JSON array that
+/// looked complete, which is the worst of the three outcomes.
+#[test]
+fn wiki_concepts_refuses_a_registry_it_could_not_read_completely() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let root = dir.path();
+    let concepts = root.join("vault/wiki/concepts");
+    std::fs::create_dir_all(&concepts).expect("concepts dir");
+    std::fs::create_dir_all(root.join("vault/inbox")).expect("inbox dir");
+    std::fs::write(
+        root.join("config.yaml"),
+        "vault:\n  root: vault\nidentity:\n  name: T\n  email: t@e.com\n\
+         sources:\n  notes:\n    type: manual\n    params:\n      inbox_dir: inbox\n",
+    )
+    .expect("config");
+    std::fs::write(
+        concepts.join("good.md"),
+        "---\nid: wiki/concepts/good\ntype: concept\ntitle: Good\n\
+         created: 2026-01-01\nupdated: 2026-01-01\nsource_count: 0\n---\n\n## Synthesis\n",
+    )
+    .expect("good");
+    // Unclosed frontmatter: parseable as text, not as a page.
+    std::fs::write(
+        concepts.join("broken.md"),
+        "---\nid: wiki/concepts/broken\ntype: concept\ntitle: Broken\n",
+    )
+    .expect("broken");
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lore"))
+        .arg("--config")
+        .arg(root.join("config.yaml"))
+        .args(["wiki", "concepts", "--json"])
+        .output()
+        .expect("spawn lore");
+
+    let stdout = String::from_utf8(out.stdout).expect("utf8");
+    let stderr = String::from_utf8(out.stderr).expect("utf8");
+    assert!(
+        !out.status.success(),
+        "an incomplete registry must not read as a complete one\nstdout: {stdout}"
+    );
+    assert!(
+        stderr.contains("broken.md"),
+        "the refusal must name the page that could not be read\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("wiki/concepts/good"),
+        "no partial array may be emitted alongside the refusal\n{stdout}"
+    );
+}

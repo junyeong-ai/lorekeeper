@@ -129,7 +129,7 @@ checks pass:
 ```bash
 lore graph backlinks-sync   # re-derive every concept's ## Sources + source_count
 lore wiki refresh           # re-derive the catalog, timeline and map this page joins
-lore graph lint             # must exit 0. Non-zero means this capture left the vault contradicting itself — a link to a page that is not there, a catalog that disagrees with the disk, a category outside the configured vocabulary, or a name another page already answers to. Orphans and open conflicts are reported as observations and never gate
+lore graph lint             # non-zero means the vault contradicts itself somewhere — a link to a page that is not there, a catalog that disagrees with the disk, a category outside the configured vocabulary, or a name answering to two pages. Resolve every violation naming a page THIS capture wrote; a violation elsewhere in the vault predates you, so report it rather than fixing it silently. Orphans and open conflicts are reported as observations and never gate
 ```
 
 ### 7. Report

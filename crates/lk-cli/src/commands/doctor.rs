@@ -334,6 +334,20 @@ mod tests {
         );
     }
 
+    /// A flow-style mapping is the same record written inline, and the page it describes is the
+    /// worst case to miss: `lk_vault::set_llm_input` REFUSES that shape rather than writing past
+    /// it, so such a page can never receive a `_done` marker and is unanswered by construction.
+    /// A line-oriented scan for `  <key>: ` could not see it; reading the parsed frontmatter can.
+    #[test]
+    fn an_inline_mapping_records_the_same_inputs_as_a_block_one() {
+        let flow = "---\nid: a\nllm_inputs: {summary: \"h1\"}\n---\n\n## Summary\n";
+        assert_eq!(unanswered(flow), vec!["summary"]);
+
+        let answered =
+            "---\nid: a\nllm_inputs: {summary: \"h1\", summary_done: \"h1\"}\n---\n\n## Summary\n";
+        assert!(unanswered(answered).is_empty());
+    }
+
     /// A page whose frontmatter will not parse is unverifiable, not clean — `doctor` must never
     /// report a page it could not read as having nothing outstanding.
     #[test]

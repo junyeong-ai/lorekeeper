@@ -53,7 +53,7 @@ lore ingest ai-news                # run a single source
 lore schema                        # generate <wiki>/AGENTS.md
 lore wiki concepts                 # list all concept pages
 lore graph lint                    # structural health check
-lore doctor                        # vault text-cleanliness audit (non-zero on defects)
+lore doctor                        # page contracts: text cleanliness + unanswered sections
 lore queue status                  # classify pending LLM tasks (current/stale/missing)
 lore queue count                   # bare integer: current tasks (machine contract for scripts)
 lore queue apply                   # materialize drained concept results into pages + links

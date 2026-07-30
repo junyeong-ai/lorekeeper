@@ -294,7 +294,7 @@ lore graph backlinks-sync     # re-derive each concept's ## Sources + citation c
 lore graph merge <from> <into># fold a duplicate concept into the canonical one
 lore graph normalize --fix    # normalize link spelling across the vault
 lore graph index-sync --fix   # repair missing/phantom entries in index.md
-lore doctor                   # vault text-cleanliness audit
+lore doctor                   # page contracts: text cleanliness + unanswered sections
 lore maintenance              # prune ingest logs and drained queue files past retention
 lore queue status / prune     # LLM task queue status / clear dead tasks
 lore queue apply              # materialize the concept extractions a drain produced

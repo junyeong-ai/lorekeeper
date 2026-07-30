@@ -61,11 +61,12 @@ each as an independent source, and report the aggregate results.
    `backlinks-sync` counts as the citation.
 5. **Finalize**: `lore graph backlinks-sync`, then `lore wiki refresh` (re-derive
    the catalog, the knowledge timeline and the citation-cluster map), then
-   `lore graph lint`, which must exit 0. A non-zero exit is the vault contradicting
-   itself, and every cause is something this add could have introduced — including a
-   `duplicate_concepts` entry, which means a page written here claims a name another
-   page already answers to; resolve it before reporting done. Observations (orphans,
-   open conflicts) are reported without gating.
+   `lore graph lint`. A non-zero exit is the vault contradicting itself somewhere, which
+   is not the same as this add having caused it: a broken link or an unknown category
+   elsewhere in the vault predates you. Resolve every violation naming a page this add
+   wrote — especially a `duplicate_concepts` entry, which means a new page claims a name
+   another page already answers to — and REPORT the rest rather than fixing them silently.
+   Observations (orphans, open conflicts) are reported without gating.
 6. Report what was created/updated, grouped by source file.
 
 ### `/lore-wiki query <question>`
