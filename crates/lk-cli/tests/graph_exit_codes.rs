@@ -16,38 +16,61 @@ use std::process::{Command, Output};
 
 /// A shipped caller that discards the exit code puts the vault back where this contract found
 /// it: every violation invisible. `|| true` was how the pipeline coped with a lint that could
-/// never be clean, and it is the one thing that must not come back now that a non-zero exit
-/// names a real contradiction — if a stage genuinely should not gate, the honest expression is
-/// not to run it as a stage.
+/// never be clean, and it is the thing that must not come back now that a non-zero exit names a
+/// real contradiction.
+///
+/// So the property is checked by RUNNING the shipped script, not by reading it. A grep for
+/// `|| true` on a line that also mentions `lore_cmd` was the first attempt, and it establishes
+/// almost nothing: it misses `|| true` without the space, `; true`, `|| log "…"`, a line
+/// continuation, a `soft() { "$@" || true; }` wrapper whose two halves are individually clean,
+/// a bare call that simply never goes through `run()`, and the same literal moved into a
+/// differently-named file. It also fails the build on a COMMENT containing the words. Executing
+/// `sync_graph` against a vault with one broken link is indifferent to all of that — any way of
+/// losing the code produces the same visible failure: a pipeline that reports success.
+#[cfg(unix)]
 #[test]
-fn no_shipped_pipeline_discards_a_lore_exit_code() {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../scripts");
-    let mut checked = 0;
-    for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read scripts: {e}")) {
-        let path = entry.expect("dir entry").path();
-        let name = path.file_name().expect("file name").to_string_lossy();
-        if !name.starts_with("lore-") || path.extension().is_none_or(|ext| ext != "sh") {
-            continue;
-        }
-        checked += 1;
-        let body = std::fs::read_to_string(&path).expect("read script");
-        for (n, line) in body.lines().enumerate() {
-            let call = line.contains("lore_cmd") || line.contains("\"$LORE\"");
-            let discarded = line.contains("|| true") || line.contains("|| :");
-            assert!(
-                !(call && discarded),
-                "{}:{} suppresses a `lore` exit code: {}",
-                name,
-                n + 1,
-                line.trim()
-            );
-        }
-    }
-    assert!(
-        checked > 0,
-        "no pipeline scripts found under {}",
-        dir.display()
+fn the_shipped_pipeline_fails_when_the_vault_contradicts_itself() {
+    let ws = sound_vault();
+    // One broken link on a daily page: a violation, and the pipeline's own output is where such
+    // a link comes from.
+    ws.write(
+        "daily/notes/2026-05-24.md",
+        "---\nid: notes-2026-05-24\ntype: daily\ntitle: \"Notes\"\n\
+         created: 2026-05-24\nupdated: 2026-05-24\n---\n\n\
+         ## Related concepts\n\n- [Ghost](../../wiki/concepts/ghost.md)\n",
     );
+
+    let clean = ws.run_pipeline();
+    assert!(
+        !clean.status.success(),
+        "a broken link must fail the pipeline, not just print\n{}",
+        String::from_utf8_lossy(&clean.stdout)
+    );
+    let log = String::from_utf8_lossy(&clean.stdout).to_string();
+    assert!(log.contains("✗ graph lint"), "stage not recorded\n{log}");
+    assert!(
+        log.contains("done with failures: graph lint"),
+        "failure not carried to the pipeline's own verdict\n{log}"
+    );
+}
+
+/// The other half, and the reason the first is worth having: a vault whose only findings are
+/// observations must leave the pipeline green. Every extraction mints concepts before anything
+/// cites them, so a pipeline that failed on those would be red every night and its exit code
+/// would go back to meaning nothing.
+#[cfg(unix)]
+#[test]
+fn the_shipped_pipeline_passes_on_a_vault_whose_findings_are_observations() {
+    let ws = sound_vault();
+    let out = ws.run_pipeline();
+    let log = String::from_utf8_lossy(&out.stdout).to_string();
+
+    assert!(
+        out.status.success(),
+        "an uncited concept and an open conflict must not fail the pipeline\n{log}"
+    );
+    assert!(log.contains("✓ graph lint"), "{log}");
+    assert!(log.contains("done — all stages ok"), "{log}");
 }
 
 struct Workspace {
@@ -94,6 +117,24 @@ impl Workspace {
 
     fn stdout(&self, args: &[&str]) -> String {
         String::from_utf8(self.run(args).stdout).expect("utf8")
+    }
+
+    /// Run the SHIPPED `sync_graph` — the real `scripts/lore-pipeline.sh`, sourced the way the
+    /// scheduled jobs source it — so what is under test is the file that actually ships.
+    #[cfg(unix)]
+    fn run_pipeline(&self) -> Output {
+        let script =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../scripts/lore-pipeline.sh");
+        Command::new("bash")
+            .arg("-c")
+            .arg(format!(
+                "source {}\npipeline_start\nsync_graph\npipeline_finish",
+                script.display()
+            ))
+            .env("LORE_BIN", env!("CARGO_BIN_EXE_lore"))
+            .env("LORE_CONFIG", self.root.path().join("config.yaml"))
+            .output()
+            .expect("spawn bash")
     }
 }
 

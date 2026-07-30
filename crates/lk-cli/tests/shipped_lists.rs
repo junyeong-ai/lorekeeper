@@ -219,22 +219,20 @@ fn everything_that_writes_pages_refreshes_the_pages_derived_from_the_vault() {
             if derivation != Derivation::VaultContents {
                 continue;
             }
-            // Both the full invocation and the bare view name: `lore wiki index` is one way to
-            // name a subset, and "`queue apply` + `backlinks-sync` + `index` + `map`" is another —
-            // that informal spelling survived in a report step, telling an agent to confirm
-            // commands the procedure no longer runs while still omitting the timeline.
-            let view = command
-                .rsplit(' ')
-                .next()
-                .expect("a command has a last word");
-            for named in [format!("lore {command}"), format!("`{view}`")] {
-                assert!(
-                    !body.contains(&named),
-                    "{} names `{named}` for {page} — say `lore wiki refresh` so no caller can \
-                     refresh or report on a subset",
-                    skill.display()
-                );
-            }
+            // The full invocation only. A bare `` `index` ``/`` `log` ``/`` `map` `` was also
+            // banned for a while, because "`queue apply` + `backlinks-sync` + `index` + `map`"
+            // had survived in a report step — but those are ordinary English words, and the ban
+            // failed the build on "write the reason to the run `log`" and "a `map` from slug to
+            // title", advising `lore wiki refresh` for neither. The informal spellings are gone
+            // from the skills; a check that cannot tell prose from a command list is not what
+            // keeps them gone.
+            let named = format!("lore {command}");
+            assert!(
+                !body.contains(&named),
+                "{} names `{named}` for {page} — say `lore wiki refresh` so no caller can \
+                 refresh or report on a subset",
+                skill.display()
+            );
         }
     }
     assert!(refreshing > 0, "no skill refreshes the vault-derived pages");
