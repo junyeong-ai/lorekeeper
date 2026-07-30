@@ -69,6 +69,35 @@ jobs:
       - run: cargo nextest run --workspace --all-targets
       - run: cargo test --workspace --doc
 
+  # The release builds `x86_64-pc-windows-msvc` and `install.ps1` installs it, but nothing here
+  # compiled it: `google/oauth.rs` and `atlassian/oauth.rs` carry `#[cfg(target_os = "windows")]`
+  # bodies that no job has ever type-checked. `--all-targets` covers the test code too, which is
+  # where the platform-specific `std::os` calls live. Compile-only for now: whether the suite
+  # PASSES on Windows is a separate question, and a `cargo check` that cannot be run from a
+  # macOS or Linux host (blake3 and aws-lc-sys need a Windows C toolchain) is the part that has
+  # to live in CI.
+  windows:
+    name: check (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows
+      - run: cargo check --workspace --all-targets --all-features
+
+  # `install.sh` is the documented entry point and the pipelines are what the scheduler runs, so
+  # ~1400 lines of shipped shell had no gate of any kind while every Rust line had several.
+  shell:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - run: bash -n scripts/*.sh
+      - run: shellcheck --severity=warning scripts/*.sh
+
   doc:
     name: doc
     runs-on: ubuntu-latest

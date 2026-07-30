@@ -263,14 +263,33 @@ compare_versions() {
     [ "$first" = "$a" ] && echo "older" || echo "newer"
 }
 
+# Content hash of a whole skill DIRECTORY: every file's path and bytes, in a stable order.
+# Hashing SKILL.md alone read three skills' `references/` as unchanged forever — a
+# references-only edit left SKILL.md byte-identical, so the installer reported "already
+# current" and the stale reference files survived.
 skill_sha256() {
-    local skill_md="$1"
-    [ -f "$skill_md" ] || { echo ""; return; }
+    local skill_dir="$1"
+    [ -d "$skill_dir" ] || { echo ""; return; }
+    local hash
     if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$skill_md" | awk '{print $1}'
+        hash=sha256sum
     else
-        shasum -a 256 "$skill_md" | awk '{print $1}'
+        hash="shasum -a 256"
     fi
+    # Paths are hashed with the bytes so a rename is a change, and relative to the skill dir so
+    # the answer does not depend on where the copy being compared happens to live.
+    (cd "$skill_dir" && find . -type f -print0 | LC_ALL=C sort -z | while IFS= read -r -d '' f; do
+        printf '%s\n' "$f"
+        $hash "$f" | awk '{print $1}'
+    done) | $hash | awk '{print $1}'
+}
+
+# The version a checkout declares. Single-sourced in `[workspace.package]`, so every crate
+# inherits it and this reads the one line — `crates/*/Cargo.toml` no longer carries a literal.
+repo_version() {
+    local repo="$1"
+    awk '/^\[workspace\.package\]/{f=1; next} /^\[/{f=0} f && /^version *=/{gsub(/[^0-9.]/, ""); print; exit}' \
+        "$repo/Cargo.toml" 2>/dev/null
 }
 
 download_skill_tarball() {
@@ -314,10 +333,11 @@ install_skill() {
     render_step "Installing skill → $target"
     if [ -d "$target" ]; then
         # SKILL.md carries a `version:` stamp (release provenance), but the content
-        # hash is the change signal — it catches every edit, stamped or not.
+        # hash is the change signal — it catches every edit, stamped or not, including one
+        # confined to `references/`.
         local existing new
-        existing="$(skill_sha256 "$target/SKILL.md")"
-        new="$(skill_sha256 "$src/SKILL.md")"
+        existing="$(skill_sha256 "$target")"
+        new="$(skill_sha256 "$src")"
         if [ -n "$existing" ] && [ "$existing" = "$new" ]; then
             if [ "$LORE_INSTALL_FORCE" != "1" ] && ! prompt_yesno "Skill is already current. Reinstall?" "N"; then
                 log_info "Skill kept"
@@ -542,17 +562,22 @@ main() {
         version="$(resolve_version)"
     else
         platform="$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)"
-        version="$(grep -m1 '^version' "${repo_dir:-.}/crates/lk-cli/Cargo.toml" 2>/dev/null | cut -d'"' -f2 || echo "dev")"
+        version="$(repo_version "${repo_dir:-.}")"
+        [ -n "$version" ] || version="dev"
     fi
 
     render_banner "$platform" "$version"
 
     if [ -n "$INPUT_FD" ] && [ "$EXPLICIT_INSTALL_DIR" != "1" ]; then
         local loc
+        # The `~` here is display text and, below, the label to match it against — neither is a
+        # path being resolved, so quoting it is correct and expanding it would break the match.
+        # shellcheck disable=SC2088
         loc="$(prompt_choice "Install location" 1 \
             "~/.local/bin          (recommended)" \
             "/usr/local/bin        (may need sudo)" \
             "Custom path…")"
+        # shellcheck disable=SC2088
         case "$loc" in
             "~/.local/bin"*)   INSTALL_DIR="$HOME/.local/bin" ;;
             "/usr/local/bin"*) INSTALL_DIR="/usr/local/bin" ;;
@@ -641,11 +666,22 @@ main() {
     fi
 
     if [ "$skill_level" != "none" ]; then
-        # Install all bundled skills.
+        # The skills that ship with THIS version. The checkout is used only when it is the same
+        # version being installed: preferring it unconditionally installed a downloaded release
+        # binary beside whatever skills the working tree happened to hold, so a clone parked on
+        # an old commit produced a new binary with old skills and nothing said so.
+        local repo_skills=""
+        if [ -n "$repo_dir" ] && [ "$(repo_version "$repo_dir")" = "$version" ]; then
+            repo_skills="$repo_dir/.claude/skills"
+        fi
+        # This list is pinned to `.claude/skills` by `install_scripts_list_every_skill`, because
+        # a skill added to the repo passed every gate and was then never packaged, published or
+        # installed — three separate literal lists each had to be remembered.
+        local skill
         for skill in "lore-ingest" "lore-process" "lore-setup" "lore-wiki" "lore-capture" "lore-extract"; do
             local skill_src=""
-            if [ -n "$repo_dir" ] && [ -d "$repo_dir/.claude/skills/$skill" ]; then
-                skill_src="$repo_dir/.claude/skills/$skill"
+            if [ -n "$repo_skills" ] && [ -d "$repo_skills/$skill" ]; then
+                skill_src="$repo_skills/$skill"
             else
                 skill_src="$(download_skill_tarball "$version" "$skill")"
             fi
@@ -653,9 +689,11 @@ main() {
                 SKILL_NAME="$skill" install_skill "$skill_level" "$skill_src"
             fi
         done
-        install_pipelines "$DATA_DIR"
         remove_legacy_scheduled_tasks
     fi
+    # Outside the skill branch: the review pane promises the pipelines unconditionally, and
+    # `--skill none` installed nothing while still printing that line.
+    install_pipelines "$DATA_DIR"
 
     printf '\n'
     check_path "$INSTALL_DIR"

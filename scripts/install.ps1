@@ -17,6 +17,8 @@ Set-StrictMode -Version Latest
 
 $Repo = 'junyeong-ai/lorekeeper'
 $BinaryName = 'lore'
+# Pinned to `.claude/skills` by `install_scripts_list_every_skill`, because a skill added to the
+# repo passed every gate and was then never packaged, published or installed.
 $SkillNames = @('lore-ingest', 'lore-process', 'lore-setup', 'lore-wiki', 'lore-capture', 'lore-extract')
 $ReleaseBase = "https://github.com/$Repo/releases/download"
 $LatestUrl = "https://github.com/$Repo/releases/latest"
@@ -143,8 +145,20 @@ function Download-Skill($version, $skillName) {
     return (Join-Path $tmpDir $skillName)
 }
 
+# Content hash of a whole skill DIRECTORY: every file's relative path and bytes, in a stable
+# order. Hashing SKILL.md alone read three skills' `references/` as unchanged forever — a
+# references-only edit leaves SKILL.md byte-identical, so the installer reported "already
+# current" and the stale reference files survived. Paths are included so a rename is a change,
+# and taken relative to the skill dir so the answer does not depend on where the copy lives.
 function Get-SkillHash($path) {
-    if (Test-Path $path) { (Get-FileHash -Algorithm SHA256 $path).Hash } else { $null }
+    if (-not (Test-Path $path -PathType Container)) { return $null }
+    $root = (Resolve-Path $path).Path
+    $lines = Get-ChildItem -Path $root -Recurse -File | Sort-Object FullName | ForEach-Object {
+        $rel = $_.FullName.Substring($root.Length).TrimStart('\', '/')
+        "$rel`n$((Get-FileHash -Algorithm SHA256 $_.FullName).Hash)"
+    }
+    $stream = [System.IO.MemoryStream]::new([System.Text.Encoding]::UTF8.GetBytes(($lines -join "`n")))
+    (Get-FileHash -Algorithm SHA256 -InputStream $stream).Hash
 }
 
 function Install-Skill($level, $src, $skillName) {
@@ -157,9 +171,10 @@ function Install-Skill($level, $src, $skillName) {
     Write-Step "Installing skill -> $target"
     if (Test-Path $target) {
         # SKILL.md carries a `version:` stamp (release provenance), but the content
-        # hash is the change signal — it catches every edit, stamped or not.
-        $existing = Get-SkillHash (Join-Path $target 'SKILL.md')
-        if ($existing -and $existing -eq (Get-SkillHash (Join-Path $src 'SKILL.md')) -and -not $Force) {
+        # hash is the change signal — it catches every edit, stamped or not, including one
+        # confined to `references/`.
+        $existing = Get-SkillHash $target
+        if ($existing -and $existing -eq (Get-SkillHash $src) -and -not $Force) {
             Write-Host "  Skill '$skillName' already current; kept" -ForegroundColor DarkGray
             return
         }
@@ -194,6 +209,18 @@ function Remove-LegacyScheduledTasks {
     }
 }
 
+# The version a checkout declares. Single-sourced in `[workspace.package]`, so every crate
+# inherits it and this reads the one line — `crates\*\Cargo.toml` no longer carries a literal.
+function Get-RepoVersion($repo) {
+    $inSection = $false
+    foreach ($line in Get-Content (Join-Path $repo 'Cargo.toml')) {
+        if ($line -match '^\[workspace\.package\]') { $inSection = $true; continue }
+        if ($line -match '^\[') { $inSection = $false; continue }
+        if ($inSection -and $line -match '^version\s*=\s*"(.+)"') { return $Matches[1] }
+    }
+    return 'dev'
+}
+
 # ── main ─────────────────────────────────────────────────────────────────
 
 $repoDir = $null
@@ -207,9 +234,7 @@ if ($scriptParent -and (Test-Path (Join-Path $scriptParent '..\Cargo.toml'))) {
 if ($FromSource -or $env:LORE_INSTALL_FROM_SOURCE -eq '1') {
     $method = 'source'
     $target = 'windows-x86_64'
-    $version = if ($repoDir) {
-        (Select-String -Path (Join-Path $repoDir 'crates\lk-cli\Cargo.toml') -Pattern '^version' | Select-Object -First 1).Line -replace '.*"(.+)".*', '$1'
-    } else { 'dev' }
+    $version = if ($repoDir) { Get-RepoVersion $repoDir } else { 'dev' }
 } else {
     $method = 'prebuilt'
     $target = Detect-Target
@@ -268,9 +293,16 @@ Install-Templates $templatesSrc $DataDir
 Install-ConfigExample $configExampleSrc
 
 if ($Skill -ne 'none') {
+    # The checkout is used only when it is the same version being installed: preferring it
+    # unconditionally installed a downloaded release binary beside whatever skills the working
+    # tree happened to hold, so a clone parked on an old commit produced a new binary with old
+    # skills and nothing said so.
+    $repoSkills = if ($repoDir -and (Get-RepoVersion $repoDir) -eq $version) {
+        Join-Path $repoDir '.claude\skills'
+    } else { $null }
     foreach ($skillName in $SkillNames) {
-        $skillSrc = if ($repoDir -and (Test-Path (Join-Path $repoDir ".claude\skills\$skillName"))) {
-            Join-Path $repoDir ".claude\skills\$skillName"
+        $skillSrc = if ($repoSkills -and (Test-Path (Join-Path $repoSkills $skillName))) {
+            Join-Path $repoSkills $skillName
         } else {
             Download-Skill $version $skillName
         }

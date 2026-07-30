@@ -1,4 +1,6 @@
-# Shared plumbing for the scheduled Lorekeeper pipelines. Sourced, never executed.
+# shellcheck shell=bash
+# Shared plumbing for the scheduled Lorekeeper pipelines. Sourced, never executed — so it
+# carries no shebang, and the shell it is written for is declared above instead.
 #
 # Every question about the vault is asked THROUGH `lore`, never answered by the shell — for
 # two independent reasons. macOS TCC protects ~/Documents per-binary and `/bin/bash` under
