@@ -31,4 +31,5 @@ same-file = { workspace = true }
 walkdir = { workspace = true }
 
 [dev-dependencies]
+strum = { workspace = true }
 tempfile = "3"

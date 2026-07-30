@@ -224,6 +224,11 @@ install_templates() {
     local dest_dir="$2/templates"
     [ -d "$src_dir" ] || { log_warn "Templates not found at $src_dir; skipping"; return; }
     render_step "Installing templates to ${dest_dir}"
+    # Retired templates are removed rather than left behind: `TemplateEngine` prefers a user
+    # directory's copy over the embedded one, so a template this version no longer ships kept
+    # overriding an embedded default that had replaced it — a copy-over-the-top install could
+    # never undo that, not even with `--force`.
+    rm -rf "$dest_dir"
     mkdir -p "$dest_dir"
     # Copy every *.md.jinja file
     find "$src_dir" -maxdepth 1 -name '*.md.jinja' -exec cp {} "$dest_dir/" \;
@@ -382,8 +387,16 @@ install_pipelines() {
     mkdir -p "$dest_dir"
     for name in $PIPELINES; do
         src=""
-        if [ -n "$checkout" ] && [ -f "$checkout/scripts/${name}" ]; then
-            src="$checkout/scripts/${name}"
+        if [ -n "$checkout" ]; then
+            # A source install takes everything from the checkout, so a missing file there is
+            # reported rather than fetched from a release: falling back would mix a downloaded
+            # pipeline in with a locally built binary, which is the provenance rule's whole point.
+            if [ -f "$checkout/scripts/${name}" ]; then
+                src="$checkout/scripts/${name}"
+            else
+                log_warn "Pipeline '${name}' missing from the checkout; skipping"
+                continue
+            fi
         elif curl -fsSL --retry 3 --retry-delay 2 \
             -o "${TMP_DIR}/${name}" "${RELEASE_BASE}/v${version}/${name}" 2>/dev/null; then
             src="${TMP_DIR}/${name}"
@@ -633,8 +646,12 @@ main() {
         log_info "Aborted by user"; exit 0
     fi
 
+    # A source install always publishes what it just built. Two commits share a version, so
+    # "v1.2.3 already installed" said nothing about whether the binary matches this checkout —
+    # and the skills and pipelines beside it are taken from the checkout unconditionally, which
+    # left an old binary running against new skills.
     local skip_binary=0
-    if [ -f "$bin_dest" ] && [ "$LORE_INSTALL_FORCE" != "1" ]; then
+    if [ -f "$bin_dest" ] && [ "$LORE_INSTALL_FORCE" != "1" ] && [ "$method" != "source" ]; then
         local existing; existing="$("$bin_dest" --version 2>/dev/null | awk '{print $2}' || echo "")"
         local cmp; cmp="$(compare_versions "$existing" "$version")"
         case "$cmp" in
@@ -695,8 +712,12 @@ main() {
         local skill
         for skill in "lore-ingest" "lore-process" "lore-setup" "lore-wiki" "lore-capture" "lore-extract"; do
             local skill_src=""
-            if [ -n "$checkout" ] && [ -d "$checkout/.claude/skills/$skill" ]; then
-                skill_src="$checkout/.claude/skills/$skill"
+            if [ -n "$checkout" ]; then
+                if [ -d "$checkout/.claude/skills/$skill" ]; then
+                    skill_src="$checkout/.claude/skills/$skill"
+                else
+                    log_warn "Skill '$skill' missing from the checkout; skipping"
+                fi
             else
                 skill_src="$(download_skill_tarball "$version" "$skill")"
             fi

@@ -251,6 +251,7 @@ flowchart LR
 | `slack-channel` | 채널 전체 = 팀 활동 (스레드·봇필터·watch_users) | Slack 토큰 |
 | `slack-search` | 키워드 트렌드 검색 | Slack user 토큰 |
 | `jira` | 그날 작업한 이슈 스냅샷 (ADF→Markdown) | Jira API |
+| `confluence` | CQL로 고른 스페이스·페이지 (스토리지 포맷→Markdown) | Atlassian OAuth 또는 API 토큰 |
 | `google-calendar` | 일정 + 회의록(Drive 링크 자동 추출) | Google OAuth |
 | `google-drive` | Drive 폴더의 큐레이션 문서 | Google OAuth |
 | `rss` | 벤더 블로그·뉴스 → 개념 (인증 불필요, 다중 피드) | 없음 |

@@ -604,7 +604,7 @@ pub async fn run(
     // replace a page of another format rather than around it.
     let agents_rel = std::path::Path::new(&dirs.wiki).join(lk_core::vault_path::SCHEMA_FILE);
     lk_vault::VaultWriter::new(&vault_root)
-        .write_generated_page(&agents_rel, &content)
+        .write_page(&agents_rel, &content)
         .await
         .map_err(|e| miette::miette!("write AGENTS.md: {e}"))?;
 

@@ -445,8 +445,14 @@ mod tests {
         assert_eq!(min.to_string(), "2026-11-01T04:00:00Z");
     }
 
+    /// Every adapter, not a subset that reads like every adapter. The list omitted `Confluence`
+    /// while claiming per-adapter coverage, so the one dispatch arm nothing exercised was
+    /// indistinguishable from the eight that were. Driven by `SourceType::iter()`, so adding a
+    /// source type forces a case rather than silently narrowing what "per adapter" means.
     #[test]
     fn validate_params_dispatch_accepts_valid_per_adapter() {
+        use strum::IntoEnumIterator;
+
         let cases = [
             (
                 SourceType::GoogleDrive,
@@ -474,9 +480,20 @@ mod tests {
                 SourceType::Manual,
                 serde_json::json!({"inbox_dir": "inbox", "extensions": ["md"]}),
             ),
+            (
+                SourceType::Confluence,
+                serde_json::json!({"cql": "space = ENG"}),
+            ),
         ];
-        for (st, params) in cases {
-            assert!(validate_params(st, &params).is_ok(), "valid {st} params");
+        for st in SourceType::iter() {
+            let params = cases
+                .iter()
+                .find(|(candidate, _)| *candidate == st)
+                .map(|(_, params)| params)
+                .unwrap_or_else(|| {
+                    panic!("{st} has no valid-params case, so its dispatch arm is unexercised")
+                });
+            assert!(validate_params(st, params).is_ok(), "valid {st} params");
         }
     }
 

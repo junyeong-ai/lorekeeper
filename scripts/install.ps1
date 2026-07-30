@@ -101,6 +101,11 @@ function Install-Templates($srcDir, $destBase) {
     if (-not (Test-Path $srcDir)) { Write-Warn "Templates not found at $srcDir; skipping"; return }
     $dest = Join-Path $destBase 'templates'
     Write-Step "Installing templates to $dest"
+    # Retired templates are removed rather than left behind: `TemplateEngine` prefers a user
+    # directory's copy over the embedded one, so a template this version no longer ships kept
+    # overriding an embedded default that had replaced it — a copy-over-the-top install could
+    # never undo that, not even with `-Force`.
+    if (Test-Path $dest) { Remove-Item -Path $dest -Recurse -Force }
     New-Item -ItemType Directory -Path $dest -Force | Out-Null
     Copy-Item -Path (Join-Path $srcDir '*.md.jinja') -Destination $dest -Force
     Write-Ok 'Templates installed'
@@ -308,8 +313,12 @@ if ($Skill -ne 'none') {
         Join-Path $repoDir '.claude\skills'
     } else { $null }
     foreach ($skillName in $SkillNames) {
-        $skillSrc = if ($repoSkills -and (Test-Path (Join-Path $repoSkills $skillName))) {
-            Join-Path $repoSkills $skillName
+        # A source install takes everything from the checkout, so a skill missing there is
+        # reported rather than fetched from a release: falling back would mix a downloaded skill
+        # in with a locally built binary, which is the provenance rule's whole point.
+        $skillSrc = if ($repoSkills) {
+            if (Test-Path (Join-Path $repoSkills $skillName)) { Join-Path $repoSkills $skillName }
+            else { Write-Warn "Skill '$skillName' missing from the checkout; skipping"; $null }
         } else {
             Download-Skill $version $skillName
         }

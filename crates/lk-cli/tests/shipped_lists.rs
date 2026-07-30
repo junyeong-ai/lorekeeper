@@ -147,34 +147,56 @@ fn glob_skill_markdown() -> Vec<PathBuf> {
     found
 }
 
-/// A page derived wholesale is only true while something re-derives it, and there are two
-/// automated paths: the shipped pipeline, which runs on a schedule and must refresh all of them
-/// because config can change between runs, and the drain skill's Finalize, which must refresh the
-/// ones derived from vault CONTENTS because a drain is what adds those contents.
+/// A page derived wholesale is only true while something re-derives it, and everything that adds
+/// pages to the vault has to. The shipped pipeline must refresh all four, because config can
+/// change between scheduled runs; every skill that writes pages must refresh the ones derived
+/// from vault CONTENTS, since writing pages is what makes them stale.
 ///
 /// The pipeline ran three of the four: `log.md` was refreshed by nothing, so the knowledge
 /// timeline stopped at whenever a person last typed `lore wiki log` — stale on a live vault while
-/// a module comment claimed it was regenerated each run.
+/// a module comment claimed it was regenerated each run. Checking only the drain skill then missed
+/// the same omission in three others, which is why the skills are DISCOVERED here: any skill that
+/// refreshes one vault-derived page is a skill that writes pages, and must refresh them all.
 #[test]
-fn the_pipeline_regenerates_every_generated_wiki_page() {
+fn everything_that_writes_pages_regenerates_every_generated_wiki_page() {
     use lk_core::vault_path::Derivation;
 
+    let vault_derived: Vec<&str> = lk_core::vault_path::GENERATED_WIKI_PAGES
+        .iter()
+        .filter(|(_, _, derivation)| *derivation == Derivation::VaultContents)
+        .map(|(_, command, _)| *command)
+        .collect();
+
     let pipeline = read(&repo_root().join("scripts/lore-pipeline.sh"));
-    let finalize = read(&repo_root().join(".claude/skills/lore-process/SKILL.md"));
-    for (page, command, derivation) in lk_core::vault_path::GENERATED_WIKI_PAGES {
+    for (page, command, _) in lk_core::vault_path::GENERATED_WIKI_PAGES {
         assert!(
             pipeline.contains(&format!("lore_cmd {command}")),
             "scripts/lore-pipeline.sh never runs `lore {command}`, so {page} is never refreshed \
              on a schedule"
         );
-        if derivation == Derivation::VaultContents {
-            assert!(
-                finalize.contains(&format!("lore {command}")),
-                "the drain skill's Finalize never runs `lore {command}`, so {page} goes stale \
-                 after a drain that created the pages it is derived from"
-            );
-        }
     }
+
+    let mut refreshing = 0;
+    for skill in glob_skill_markdown() {
+        let body = read(&skill);
+        let runs: Vec<&&str> = vault_derived
+            .iter()
+            .filter(|command| body.contains(&format!("lore {command}")))
+            .collect();
+        if runs.is_empty() {
+            continue;
+        }
+        refreshing += 1;
+        assert_eq!(
+            runs.len(),
+            vault_derived.len(),
+            "{} refreshes {runs:?} but not all of {vault_derived:?} — a skill that writes pages \
+             leaves the rest stale",
+            skill.display()
+        );
+    }
+    assert!(refreshing > 0, "no skill refreshes any generated wiki page");
+
     // And the two lists describe the same set of files.
     let mut named: Vec<&str> = lk_core::vault_path::GENERATED_WIKI_PAGES
         .iter()
@@ -187,6 +209,60 @@ fn the_pipeline_regenerates_every_generated_wiki_page() {
         named, reserved,
         "every reserved wiki filename must name the command that generates it"
     );
+}
+
+/// An adapter that ships and appears in no document is one nobody can configure. Both READMEs
+/// carried a source table naming eight of nine — `confluence` appeared in neither, so the only way
+/// to discover it was to read the enum. `config.example.yaml` is the file the installer copies and
+/// the READMEs call the reference for every source, so each type has to appear there too, with
+/// params its own adapter accepts: a sample that fails `lore validate` is worse than no sample.
+#[test]
+fn every_source_type_is_documented_and_exemplified() {
+    use strum::IntoEnumIterator;
+
+    let root = repo_root();
+    let example = read(&root.join("config.example.yaml"));
+    let readmes: Vec<(&str, String)> = ["README.md", "README.en.md"]
+        .into_iter()
+        .map(|name| (name, read(&root.join(name))))
+        .collect();
+
+    for source_type in lk_core::config::SourceType::iter() {
+        let wire = source_type.to_string();
+        assert!(
+            example.contains(&format!("type: {wire}")),
+            "config.example.yaml has no `{wire}` source, which the READMEs call the reference for \
+             every source"
+        );
+        for (name, body) in &readmes {
+            assert!(
+                body.contains(&wire),
+                "{name} never mentions the `{wire}` source, so a shipped adapter is undiscoverable"
+            );
+        }
+    }
+}
+
+/// Every source in the shipped example must pass its own adapter's parameter validation. The
+/// example is what `install.sh` copies and what a user edits, and `Config::load` alone checks only
+/// the core keys — a typo in an adapter's params sat in it until someone ran `lore validate`.
+#[test]
+fn every_source_in_the_example_config_validates_against_its_adapter() {
+    let path = repo_root().join("config.example.yaml");
+    let config = lk_core::config::Config::load(&path).expect("the shipped example must load");
+    let mut checked = 0;
+    // Disabled sources included: the example disables most of them, and a broken sample is
+    // exactly what a user hits when they enable one.
+    for (id, source) in &config.sources {
+        lk_source::validate_params(source.source_type, &source.params).unwrap_or_else(|e| {
+            panic!(
+                "config.example.yaml sources.{id} ({}): {e}",
+                source.source_type
+            )
+        });
+        checked += 1;
+    }
+    assert!(checked > 0, "the example config declares no sources");
 }
 
 /// `rust-version` is the one the toolchain enforces; the CI job name, the toolchain it pins, and

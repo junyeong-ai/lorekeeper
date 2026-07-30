@@ -238,7 +238,7 @@ pub async fn write_index(
     let wiki_dir = vault_root.join(&dirs.wiki);
     let main_rel = Path::new(&dirs.wiki).join(lk_core::vault_path::INDEX_FILE);
     VaultWriter::new(vault_root)
-        .write_generated_page(&main_rel, &content)
+        .write_page(&main_rel, &content)
         .await?;
     Ok(wiki_dir.join(lk_core::vault_path::INDEX_FILE))
 }

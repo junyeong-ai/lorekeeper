@@ -34,6 +34,7 @@ emojis = "0.9"
 # Bundled here rather than skipped, because the arithmetic is what those tests are for —
 # and only for tests: the shipped binary keeps reading the OS tzdb, which stays current.
 jiff = { workspace = true, features = ["tzdb-bundle-always"] }
+strum = { workspace = true }
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt"] }
 proptest = { workspace = true }

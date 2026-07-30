@@ -254,6 +254,7 @@ Each day's ingest grows the concept graph; synthesis summarizes it at ever-highe
 | `slack-channel` | Whole channel = team activity (threads, bot filter, watch_users) | Slack token |
 | `slack-search` | Keyword-trend search | Slack user token |
 | `jira` | Issues you worked on that day (ADF→Markdown) | Jira API |
+| `confluence` | Spaces and pages selected by CQL (storage format→Markdown) | Atlassian OAuth or API token |
 | `google-calendar` | Schedule + meeting notes (auto-extracted from Drive links) | Google OAuth |
 | `google-drive` | Curated docs in a Drive folder | Google OAuth |
 | `rss` | Vendor blogs / news → concepts (no auth, multi-feed) | none |
