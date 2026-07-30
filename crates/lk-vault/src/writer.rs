@@ -35,6 +35,19 @@ impl Format {
     }
 }
 
+/// Where a page's content comes from, which decides how much of it there is to protect.
+///
+/// [`Provenance::Authored`] pages carry material no renderer can reproduce — an LLM section, a
+/// hand-written synthesis, a curated category — so a write onto one that cannot be shown to
+/// preserve its format is refused. [`Provenance::Generated`] pages are re-derived wholesale from
+/// config and the vault on every run, so the only thing worth refusing is another format's page
+/// sitting at the same path.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Provenance {
+    Authored,
+    Generated,
+}
+
 /// Refuse a write that would replace a page of one format with a page of another.
 ///
 /// A page's format is decided by where it sits, so two page formats sharing a path is a
@@ -61,16 +74,28 @@ impl Format {
 /// refusal names both causes and how to get back from either; a failure a user cannot clear is
 /// not an improvement on a silent loss.
 ///
+/// [`Provenance::Generated`] narrows it to the type-against-type case. A page rendered wholesale
+/// from config holds nothing a user wrote, so "cannot read what is there" is not a reason to
+/// refuse — and refusing meant `lore schema` could not repair its own output once that output was
+/// truncated by hand or left write-only, which is a defect the guard introduced rather than
+/// prevented. A different DECLARED format still refuses, because that is a contradiction rather
+/// than damage.
+///
 /// Coverage bound: this guards writes routed through `VaultWriter`. `graph merge`,
 /// `graph normalize` and `index_drift` call `lk_core::fs::write_atomic` directly — each edits a
 /// page in place without changing its format, so none of them can be the write this refuses.
 /// The check and the publish are separate syscalls, so two concurrent processes writing
 /// different formats to one path can both pass it; the vault has no cross-process lock, and
 /// every writer in it is check-then-write.
-fn refuse_format_change(full: &Path, content: &str) -> Result<(), VaultError> {
+fn refuse_format_change(
+    full: &Path,
+    content: &str,
+    provenance: Provenance,
+) -> Result<(), VaultError> {
     let existing = match std::fs::read_to_string(full) {
         Ok(existing) => existing,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) if provenance == Provenance::Generated => return Ok(()),
         Err(error) => {
             return Err(VaultError::Io(std::io::Error::new(
                 error.kind(),
@@ -86,6 +111,9 @@ fn refuse_format_change(full: &Path, content: &str) -> Result<(), VaultError> {
     };
     let writing = Format::of(content);
     let present = Format::of(&existing);
+    if provenance == Provenance::Generated && matches!(present, Format::Illegible) {
+        return Ok(());
+    }
     match (&present, &writing) {
         (Format::Untyped, _) => return Ok(()),
         (Format::Declared(present), Format::Declared(writing)) if present == writing => {
@@ -120,22 +148,36 @@ impl VaultWriter {
         Self { root: root.into() }
     }
 
+    /// Write a page whose content includes material nothing can re-derive.
     pub async fn write_page(&self, rel_path: &Path, content: &str) -> Result<(), VaultError> {
+        self.write(rel_path, content, Provenance::Authored).await
+    }
+
+    /// Write a page rendered wholesale from config and the vault, like the wiki catalog, timeline,
+    /// map and page-format schema. Named separately rather than taking a flag so the four callers
+    /// that may claim it are the four the compiler can point at.
+    pub async fn write_generated_page(
+        &self,
+        rel_path: &Path,
+        content: &str,
+    ) -> Result<(), VaultError> {
+        self.write(rel_path, content, Provenance::Generated).await
+    }
+
+    async fn write(
+        &self,
+        rel_path: &Path,
+        content: &str,
+        provenance: Provenance,
+    ) -> Result<(), VaultError> {
         let full = self.root.join(rel_path);
         let content = content.to_owned();
         // File I/O is blocking and `write_atomic` fsyncs, so publish on the blocking pool
         // rather than reimplementing a non-fsyncing async variant (which is exactly the
         // duplicate that would let the durability guarantee drift).
-        tokio::task::spawn_blocking(move || -> Result<(), VaultError> {
-            refuse_format_change(&full, &content)?;
-            if let Some(parent) = full.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            lk_core::fs::write_atomic(&full, content.as_bytes(), None)?;
-            Ok(())
-        })
-        .await
-        .map_err(std::io::Error::other)??;
+        tokio::task::spawn_blocking(move || write_blocking(&full, &content, provenance))
+            .await
+            .map_err(std::io::Error::other)??;
         Ok(())
     }
 
@@ -143,14 +185,28 @@ impl VaultWriter {
     /// (e.g. `lk-graph`, which is purely sync). Routes through the same
     /// `lk_core::fs::write_atomic`, so it is not a second atomic-write implementation.
     pub fn write_page_sync(&self, rel_path: &Path, content: &str) -> Result<(), VaultError> {
-        let full = self.root.join(rel_path);
-        refuse_format_change(&full, content)?;
-        if let Some(parent) = full.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        lk_core::fs::write_atomic(&full, content.as_bytes(), None)?;
-        Ok(())
+        write_blocking(&self.root.join(rel_path), content, Provenance::Authored)
     }
+
+    /// Sync sibling of [`Self::write_generated_page`].
+    pub fn write_generated_page_sync(
+        &self,
+        rel_path: &Path,
+        content: &str,
+    ) -> Result<(), VaultError> {
+        write_blocking(&self.root.join(rel_path), content, Provenance::Generated)
+    }
+}
+
+/// The one place a vault page is guarded and published, so the async and sync paths cannot drift
+/// on either.
+fn write_blocking(full: &Path, content: &str, provenance: Provenance) -> Result<(), VaultError> {
+    refuse_format_change(full, content, provenance)?;
+    if let Some(parent) = full.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    lk_core::fs::write_atomic(full, content.as_bytes(), None)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -273,6 +329,65 @@ mod tests {
                 bytes
             );
         }
+
+        // Bytes that cannot be READ, as distinct from bytes that cannot be parsed. Only one read
+        // error means "nothing is there" — every other one means something is there that this
+        // could not look at, and proceeding on that is the same overwrite. A directory at the
+        // target path produces such an error on every platform.
+        let occupied = Path::new("concepts/occupied.md");
+        std::fs::create_dir(dir.path().join(occupied)).unwrap();
+        let err = writer
+            .write_page(occupied, &page("daily", "## 요약"))
+            .await
+            .expect_err("a target that cannot be read must not be overwritten");
+        let message = format!("{err}");
+        assert!(message.contains("reading it back failed"), "{message}");
+        assert!(
+            dir.path().join(occupied).is_dir(),
+            "what was there must be untouched"
+        );
+    }
+
+    /// A page rendered wholesale from config holds nothing a user wrote, so refusing to overwrite
+    /// one because its current bytes cannot be read is a defect the guard introduced: `lore
+    /// schema` could not repair its own output once that output was truncated by hand. What still
+    /// refuses is another DECLARED format at the same path — damage is recoverable, a
+    /// contradiction is not.
+    #[tokio::test]
+    async fn a_generated_page_repairs_itself_but_still_refuses_another_format() {
+        let (dir, writer) = setup().await;
+        let generated = Path::new("wiki/AGENTS.md");
+        let rendered = page("schema", "# Page Formats\n");
+
+        writer
+            .write_generated_page(generated, &rendered)
+            .await
+            .unwrap();
+
+        // Truncated by hand: the frontmatter no longer closes, so nothing can be read from it.
+        std::fs::write(dir.path().join(generated), "---\ntype: schema\n").unwrap();
+        writer
+            .write_generated_page(generated, &rendered)
+            .await
+            .expect("a generated page is reproducible, so damage to it is repairable");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(generated)).unwrap(),
+            rendered
+        );
+
+        // Two formats on one path is still a contradiction, generated or not.
+        std::fs::write(dir.path().join(generated), page("concept", "## 핵심")).unwrap();
+        let err = writer
+            .write_generated_page(generated, &rendered)
+            .await
+            .expect_err("a concept page at this path is not this page damaged");
+        assert!(format!("{err}").contains("refusing to write"), "{err}");
+
+        // The sync sibling shares the rule.
+        std::fs::write(dir.path().join(generated), "---\ntype: schema\n").unwrap();
+        writer
+            .write_generated_page_sync(generated, &rendered)
+            .unwrap();
     }
 
     #[tokio::test]

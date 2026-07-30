@@ -284,12 +284,24 @@ skill_sha256() {
     done) | $hash | awk '{print $1}'
 }
 
-# The version a checkout declares. Single-sourced in `[workspace.package]`, so every crate
-# inherits it and this reads the one line — `crates/*/Cargo.toml` no longer carries a literal.
+# The version a checkout declares, read from `[workspace.package]` — single-sourced there, so
+# every crate inherits it and `crates/*/Cargo.toml` no longer carries a literal.
+#
+# The quoted value is taken whole rather than filtered down to digits and dots: a prerelease or
+# build metadata (`1.2.3-beta.4+build.5`) is a valid version that filtering silently rewrote into
+# a different one. Leading whitespace is allowed because TOML allows it, and a key that only ever
+# matched at column zero returned nothing at all for an indented manifest — which reads as "no
+# version" and sends a source install downloading `dev` assets.
 repo_version() {
     local repo="$1"
-    awk '/^\[workspace\.package\]/{f=1; next} /^\[/{f=0} f && /^version *=/{gsub(/[^0-9.]/, ""); print; exit}' \
-        "$repo/Cargo.toml" 2>/dev/null
+    awk '/^[[:space:]]*\[workspace\.package\][[:space:]]*$/ { in_section = 1; next }
+         /^[[:space:]]*\[/                                 { in_section = 0 }
+         in_section && match($0, /^[[:space:]]*version[[:space:]]*=[[:space:]]*["'"'"']/) {
+             value = substr($0, RLENGTH + 1)
+             sub(/["'"'"'].*$/, "", value)
+             print value
+             exit
+         }' "$repo/Cargo.toml" 2>/dev/null
 }
 
 download_skill_tarball() {
@@ -365,13 +377,13 @@ install_skill() {
 PIPELINES="lore-pipeline.sh lore-daily.sh lore-weekly.sh"
 
 install_pipelines() {
-    local dest_dir="$1/pipelines"
+    local dest_dir="$1/pipelines" checkout="$2"
     local name src installed=0
     mkdir -p "$dest_dir"
     for name in $PIPELINES; do
         src=""
-        if [ -n "$repo_dir" ] && [ -f "$repo_dir/scripts/${name}" ]; then
-            src="$repo_dir/scripts/${name}"
+        if [ -n "$checkout" ] && [ -f "$checkout/scripts/${name}" ]; then
+            src="$checkout/scripts/${name}"
         elif curl -fsSL --retry 3 --retry-delay 2 \
             -o "${TMP_DIR}/${name}" "${RELEASE_BASE}/v${version}/${name}" 2>/dev/null; then
             src="${TMP_DIR}/${name}"
@@ -668,23 +680,23 @@ main() {
         install_config_example "$config_example_src"
     fi
 
+    # ONE provenance rule for every asset: a source install takes them all from the checkout it
+    # built from, a prebuilt install takes them all from the release it downloaded. The binary,
+    # templates and config example already worked this way; skills and pipelines each had their
+    # own rule, so `./scripts/install.sh` from a clone parked on an old commit installed a
+    # downloaded binary beside the working tree's skills and pipelines, with nothing saying so.
+    local checkout=""
+    [ "$method" = "source" ] && checkout="$repo_dir"
+
     if [ "$skill_level" != "none" ]; then
-        # The skills that ship with THIS version. The checkout is used only when it is the same
-        # version being installed: preferring it unconditionally installed a downloaded release
-        # binary beside whatever skills the working tree happened to hold, so a clone parked on
-        # an old commit produced a new binary with old skills and nothing said so.
-        local repo_skills=""
-        if [ -n "$repo_dir" ] && [ "$(repo_version "$repo_dir")" = "$version" ]; then
-            repo_skills="$repo_dir/.claude/skills"
-        fi
         # This list is pinned to `.claude/skills` by `install_scripts_list_every_skill`, because
         # a skill added to the repo passed every gate and was then never packaged, published or
         # installed — three separate literal lists each had to be remembered.
         local skill
         for skill in "lore-ingest" "lore-process" "lore-setup" "lore-wiki" "lore-capture" "lore-extract"; do
             local skill_src=""
-            if [ -n "$repo_skills" ] && [ -d "$repo_skills/$skill" ]; then
-                skill_src="$repo_skills/$skill"
+            if [ -n "$checkout" ] && [ -d "$checkout/.claude/skills/$skill" ]; then
+                skill_src="$checkout/.claude/skills/$skill"
             else
                 skill_src="$(download_skill_tarball "$version" "$skill")"
             fi
@@ -696,7 +708,7 @@ main() {
     fi
     # Outside the skill branch: the review pane promises the pipelines unconditionally, and
     # `--skill none` installed nothing while still printing that line.
-    install_pipelines "$DATA_DIR"
+    install_pipelines "$DATA_DIR" "$checkout"
 
     printf '\n'
     check_path "$INSTALL_DIR"

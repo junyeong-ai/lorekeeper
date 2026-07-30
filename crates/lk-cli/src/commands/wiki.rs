@@ -62,7 +62,7 @@ pub async fn run_map(
 
     let rel = std::path::Path::new(&dirs.wiki).join("map.md");
     lk_vault::VaultWriter::new(&vault_root)
-        .write_page(&rel, &content)
+        .write_generated_page(&rel, &content)
         .await
         .map_err(|e| miette::miette!("write map.md: {e}"))?;
 

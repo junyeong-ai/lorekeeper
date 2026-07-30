@@ -604,7 +604,7 @@ pub async fn run(
     // replace a page of another format rather than around it.
     let agents_rel = std::path::Path::new(&dirs.wiki).join("AGENTS.md");
     lk_vault::VaultWriter::new(&vault_root)
-        .write_page(&agents_rel, &content)
+        .write_generated_page(&agents_rel, &content)
         .await
         .map_err(|e| miette::miette!("write AGENTS.md: {e}"))?;
 
@@ -780,23 +780,39 @@ mod tests {
     #[test]
     fn agents_md_contains_all_page_types() {
         let content = render_agents_md(Locale::Ko, &lk_core::config::VaultDirs::default(), true);
-        for type_name in [
-            "concept",
-            "daily",
-            "work-log",
-            "document",
-            "exploration",
-            "weekly-synthesis",
-            "weekly-review",
-            "monthly-review",
-            "quarterly-review",
-            "annual-review",
-        ] {
+        for schema in page_schemas(&lk_core::config::VaultDirs::default(), true) {
             assert!(
-                content.contains(&format!("## {type_name}")),
-                "missing page type: {type_name}"
+                content.contains(&format!("## {}", schema.type_name)),
+                "missing page type: {}",
+                schema.type_name
             );
         }
+    }
+
+    /// `PAGE_FORMATS` is what `holds_managed_pages` asks when deciding whether a directory holds
+    /// Lorekeeper's output, and it lived in `lk-core` with nothing tying it to the registry those
+    /// formats are actually defined by. A `"document"` renamed to `"bogus"` in the array left all
+    /// 812 tests passing, because the schema tests assert their own literals. This is the join:
+    /// the formats this tool writes are the registry's, plus the two generated meta-pages, whose
+    /// `type` values are named in `vault_path` beside the array so the render sites cannot drift.
+    #[test]
+    fn every_page_format_is_a_format_the_schema_registry_defines() {
+        let mut declared: Vec<&str> = page_schemas(&lk_core::config::VaultDirs::default(), true)
+            .iter()
+            .map(|schema| schema.type_name)
+            .chain([
+                lk_core::vault_path::MAP_FORMAT,
+                lk_core::vault_path::SCHEMA_FORMAT,
+            ])
+            .collect();
+        declared.sort_unstable();
+        let mut admitted = lk_core::vault_path::PAGE_FORMATS.to_vec();
+        admitted.sort_unstable();
+        assert_eq!(
+            admitted, declared,
+            "PAGE_FORMATS must be exactly the formats `lore schema` publishes plus the generated \
+             meta-pages"
+        );
     }
 
     #[test]

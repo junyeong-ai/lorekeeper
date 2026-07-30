@@ -8,6 +8,11 @@ on:
   schedule:
     # Weekly security audit on Monday 05:00 UTC
     - cron: "0 5 * * 1"
+  # `release.yml` calls this so a tag cannot publish past a gate. Called rather than duplicated:
+  # the release used to restate fmt/clippy/test and therefore missed the Windows check and
+  # shellcheck the moment they were added here, which is the same defect as having no coupling at
+  # all, one step removed. Every gate added below now gates the release too, by construction.
+  workflow_call:
 
 permissions:
   contents: read

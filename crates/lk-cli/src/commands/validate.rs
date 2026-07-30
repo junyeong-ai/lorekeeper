@@ -56,19 +56,7 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
         );
     }
 
-    // Check AGENTS.md drift — warn if missing or out of date.
-    let locale = config.vault.locale();
-    let expected = render_agents_md(locale, &config.vault.dirs, config.personal.is_some());
-    let agents_path = config
-        .vault
-        .root_path()
-        .join(&config.vault.dirs.wiki)
-        .join("AGENTS.md");
-    let needs_regen = match tokio::fs::read_to_string(&agents_path).await {
-        Ok(on_disk) => on_disk != expected,
-        Err(_) => true,
-    };
-    if needs_regen {
+    if agents_md_needs_regen(&config).await {
         eprintln!(
             "  warning: {}/AGENTS.md is missing or out of date; run `lore schema` to regenerate",
             config.vault.dirs.wiki
@@ -76,6 +64,30 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
     }
 
     Ok(())
+}
+
+/// Whether `<wiki>/AGENTS.md` differs from what `lore schema` would write now.
+///
+/// The page states the vault's page formats and section ownership for the agents that read it,
+/// and it is generated — so a config change (a renamed vault dir, a locale, the personal module)
+/// silently invalidates it. Absent counts as out of date: the vault has no such statement at all.
+/// Byte comparison rather than a version marker, because the generator's output is the contract
+/// and nothing else records which inputs produced the copy on disk.
+async fn agents_md_needs_regen(config: &lk_core::config::Config) -> bool {
+    let expected = render_agents_md(
+        config.vault.locale(),
+        &config.vault.dirs,
+        config.personal.is_some(),
+    );
+    let path = config
+        .vault
+        .root_path()
+        .join(&config.vault.dirs.wiki)
+        .join("AGENTS.md");
+    match tokio::fs::read_to_string(&path).await {
+        Ok(on_disk) => on_disk != expected,
+        Err(_) => true,
+    }
 }
 
 /// What inspecting a configured vault root on disk found. Kept apart because the remedies
@@ -309,7 +321,10 @@ fn overlapping_vault_dirs(
 
 #[cfg(test)]
 mod tests {
-    use super::{RootFinding, inspect_vault_dirs, overlapping_vault_dirs, variant_sibling};
+    use super::{
+        RootFinding, agents_md_needs_regen, inspect_vault_dirs, overlapping_vault_dirs,
+        variant_sibling,
+    };
 
     /// Whether this filesystem folds case. It decides WHICH branch a misspelled root takes:
     /// where case folds the name resolves and the fold branch answers, where it does not the
@@ -545,6 +560,44 @@ mod tests {
             matches!(found[0].2, RootFinding::Unverifiable(_)),
             "an unreadable listing is unknown, not evidence of a fold: {}",
             describe(&found[0].2)
+        );
+    }
+
+    /// The generated page is the vault's statement of its own formats, so "absent" and "differs"
+    /// are one finding and "matches byte for byte" is the only clean answer. Asserted in all
+    /// three states because the middle one — present but stale — is the one a config change
+    /// produces silently, and it looks exactly like the clean case from the outside.
+    #[tokio::test]
+    async fn a_generated_agents_md_is_reported_when_absent_or_stale() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wiki = tmp.path().join("wiki");
+        std::fs::create_dir(&wiki).unwrap();
+        let config = write_config(tmp.path(), "    wiki: wiki\n", "agents");
+
+        assert!(
+            agents_md_needs_regen(&config).await,
+            "a vault with no AGENTS.md has not stated its formats"
+        );
+
+        let current = super::render_agents_md(
+            config.vault.locale(),
+            &config.vault.dirs,
+            config.personal.is_some(),
+        );
+        std::fs::write(wiki.join("AGENTS.md"), &current).unwrap();
+        assert!(
+            !agents_md_needs_regen(&config).await,
+            "the generator's own output is current"
+        );
+
+        std::fs::write(
+            wiki.join("AGENTS.md"),
+            format!("{current}\ntrailing edit\n"),
+        )
+        .unwrap();
+        assert!(
+            agents_md_needs_regen(&config).await,
+            "a page that differs from what the generator writes now is out of date"
         );
     }
 

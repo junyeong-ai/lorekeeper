@@ -108,7 +108,7 @@ pub fn write_timeline(
 ) -> Result<std::path::PathBuf, VaultError> {
     let content = build_timeline(vault_root, locale, dirs)?;
     let rel = Path::new(&dirs.wiki).join("log.md");
-    VaultWriter::new(vault_root).write_page_sync(&rel, &content)?;
+    VaultWriter::new(vault_root).write_generated_page_sync(&rel, &content)?;
     // Return the absolute path, matching `write_index`, so every `lore wiki` command
     // reports the file it wrote uniformly.
     Ok(vault_root.join(rel))

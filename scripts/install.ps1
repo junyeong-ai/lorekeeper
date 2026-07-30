@@ -153,7 +153,9 @@ function Download-Skill($version, $skillName) {
 function Get-SkillHash($path) {
     if (-not (Test-Path $path -PathType Container)) { return $null }
     $root = (Resolve-Path $path).Path
-    $lines = Get-ChildItem -Path $root -Recurse -File | Sort-Object FullName | ForEach-Object {
+    # `-Force` so hidden files count: `find` includes them, and a hash that skipped them would
+    # answer "already current" for a change the other installer sees.
+    $lines = Get-ChildItem -Path $root -Recurse -File -Force | Sort-Object FullName | ForEach-Object {
         $rel = $_.FullName.Substring($root.Length).TrimStart('\', '/')
         "$rel`n$((Get-FileHash -Algorithm SHA256 $_.FullName).Hash)"
     }
@@ -209,14 +211,18 @@ function Remove-LegacyScheduledTasks {
     }
 }
 
-# The version a checkout declares. Single-sourced in `[workspace.package]`, so every crate
-# inherits it and this reads the one line — `crates\*\Cargo.toml` no longer carries a literal.
+# The version a checkout declares, read from `[workspace.package]` — single-sourced there, so
+# every crate inherits it and `crates\*\Cargo.toml` no longer carries a literal. Leading
+# whitespace and either quote style are accepted because TOML allows both, and a reader that
+# required column zero and double quotes returned nothing for a manifest that is still valid.
 function Get-RepoVersion($repo) {
     $inSection = $false
     foreach ($line in Get-Content (Join-Path $repo 'Cargo.toml')) {
-        if ($line -match '^\[workspace\.package\]') { $inSection = $true; continue }
-        if ($line -match '^\[') { $inSection = $false; continue }
-        if ($inSection -and $line -match '^version\s*=\s*"(.+)"') { return $Matches[1] }
+        if ($line -match '^\s*\[workspace\.package\]\s*$') { $inSection = $true; continue }
+        if ($line -match '^\s*\[') { $inSection = $false; continue }
+        if ($inSection -and $line -match '^\s*version\s*=\s*["'']([^"'']+)["'']') {
+            return $Matches[1]
+        }
     }
     return 'dev'
 }
@@ -293,11 +299,12 @@ Install-Templates $templatesSrc $DataDir
 Install-ConfigExample $configExampleSrc
 
 if ($Skill -ne 'none') {
-    # The checkout is used only when it is the same version being installed: preferring it
-    # unconditionally installed a downloaded release binary beside whatever skills the working
-    # tree happened to hold, so a clone parked on an old commit produced a new binary with old
-    # skills and nothing said so.
-    $repoSkills = if ($repoDir -and (Get-RepoVersion $repoDir) -eq $version) {
+    # ONE provenance rule for every asset: a source install takes them all from the checkout it
+    # built from, a prebuilt install takes them all from the release it downloaded. The binary,
+    # templates and config example already worked this way; the skills had their own rule, so a
+    # clone parked on an old commit installed a downloaded binary beside the working tree's
+    # skills, with nothing saying so.
+    $repoSkills = if ($method -eq 'source' -and $repoDir) {
         Join-Path $repoDir '.claude\skills'
     } else { $null }
     foreach ($skillName in $SkillNames) {

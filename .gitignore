@@ -9,3 +9,7 @@ target/
 
 # Local tool store (symora)
 .symora/
+
+# `cargo mutants` run output — build artifacts, regenerated per run.
+mutants.out/
+mutants.out.old/

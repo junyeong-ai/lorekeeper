@@ -238,7 +238,7 @@ pub async fn write_index(
     let wiki_dir = vault_root.join(&dirs.wiki);
     let main_rel = Path::new(&dirs.wiki).join("index.md");
     VaultWriter::new(vault_root)
-        .write_page(&main_rel, &content)
+        .write_generated_page(&main_rel, &content)
         .await?;
     Ok(wiki_dir.join("index.md"))
 }

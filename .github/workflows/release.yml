@@ -18,39 +18,32 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # The gates live here rather than being read off CI. `ci.yml` triggers on pushes to `main`
-  # and never on a tag ref, so the two runs are independent and start together: v0.13.6 was
-  # published six minutes after its own CI failure was already recorded, because nothing
-  # connected them. Polling CI's conclusion for this SHA would race it — the release run
-  # routinely starts first — so the release runs the gates itself and cannot outrun them.
+  # `ci.yml` triggers on pushes to `main` and never on a tag ref, so the two runs used to be
+  # independent and start together: v0.13.6 was published six minutes after its own CI failure was
+  # already recorded, because nothing connected them. Polling CI's conclusion for this SHA would
+  # race it — the release run routinely starts first — so the release RUNS the gates.
+  #
+  # By calling `ci.yml` rather than restating its steps, every gate it has gates the release,
+  # including ones added later. Restating them is how the first attempt at this silently omitted
+  # the Windows compile check and shellcheck, which is the same defect one step removed.
   verify:
-    name: verify (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    uses: ./.github/workflows/ci.yml
+
+  # Release-specific, so it stays here: every version in the archives comes from the tag name and
+  # no step read a manifest. A tag pushed on an unbumped tree ships `lore-v0.13.8-*` holding a
+  # binary that prints 0.13.7, and `install.sh` compares the two and offers to reinstall on every
+  # run forever. The skill `version:` frontmatter is already pinned to this same crate version by
+  # `every_skill_version_matches_the_crate_version`, so agreeing with it here makes the tag, the
+  # binary and the skills one version by construction.
+  version:
+    name: tag names the declared version
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release-verify
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest
-
-      # Every version in the archives comes from the tag name; no step reads a manifest. A tag
-      # pushed on an unbumped tree therefore ships `lore-v0.13.8-*` holding a binary that
-      # prints 0.13.7, and `install.sh` compares the two and offers to reinstall on every run
-      # forever. The skill `version:` frontmatter is already pinned to this same crate version
-      # by `every_skill_version_matches_the_crate_version`, so agreeing with it here makes the
-      # tag, the binary and the skills one version by construction.
-      - name: Tag names the version the crate declares
+      - name: Compare
         shell: bash
         env:
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
@@ -63,14 +56,9 @@ jobs:
             exit 1
           fi
 
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - run: cargo nextest run --workspace --all-targets
-      - run: cargo test --workspace --doc
-
   build:
     name: build ${{ matrix.target }}
-    needs: [verify]
+    needs: [verify, version]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -172,7 +160,7 @@ jobs:
 
   skill:
     name: package skill
-    needs: [verify]
+    needs: [verify, version]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
