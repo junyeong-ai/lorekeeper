@@ -580,6 +580,50 @@ fn a_file_the_tool_cannot_read_does_not_abort_a_rename_midway() {
     );
 }
 
+/// One link, one answer. A destination that names no file is broken — and it must not also be
+/// an edge, a citation in the page it slugifies onto, and that page's exemption from orphan
+/// detection. `Bad_Name.md` beside a real `bad-name.md` is enough: the id matches while the
+/// address does not, and reading the id alone had the same vault answering three ways at once.
+#[test]
+fn a_link_whose_address_is_missing_is_not_a_citation_of_the_page_it_resembles() {
+    let ws = sound_vault();
+    ws.write(
+        "wiki/concepts/bad-name.md",
+        &concept("bad-name", "Bad Name", "Nothing reaches this."),
+    );
+    ws.write(
+        "daily/notes/2026-05-24.md",
+        "---\nid: notes-2026-05-24\ntype: daily\ntitle: \"Notes\"\n\
+         created: 2026-05-24\nupdated: 2026-05-24\n---\n\n\
+         ## Related concepts\n\n- [Bad Name](../../wiki/concepts/Bad_Name.md)\n",
+    );
+
+    let raw = ws.stdout(&["graph", "--json", "lint"]);
+    let parsed: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
+    assert_eq!(
+        parsed["data"]["violations"]["broken"]
+            .as_array()
+            .map(Vec::len),
+        Some(1),
+        "the address names no file\n{raw}"
+    );
+    assert!(
+        parsed["data"]["observations"]["orphans"]
+            .as_array()
+            .expect("orphans")
+            .iter()
+            .any(|o| o.as_str() == Some("wiki/concepts/bad-name")),
+        "nothing reaches it, so it is an orphan\n{raw}"
+    );
+
+    assert_eq!(ws.code(&["graph", "backlinks-sync"]), 0);
+    let page = ws.read("wiki/concepts/bad-name.md");
+    assert!(
+        !page.contains("2026-05-24"),
+        "a link that opens nothing is not provenance\n{page}"
+    );
+}
+
 /// A citation on an excluded page is still a citation. The mutating commands read the same
 /// whole-vault view the read-only ones do, so a narrowing meant for `hubs`/`cluster` cannot make
 /// a page they REWRITE disappear. Applying the globs to their scan instead makes an excluded

@@ -488,7 +488,7 @@ pub fn print_backlinks(r: &BacklinksSyncReport) {
 
     if !r.sync.skipped.is_empty() {
         println!(
-            "\nSkipped: {} concept page(s) with no frontmatter block — their sources section \
+            "\nSkipped: {} concept page(s) whose frontmatter cannot be read — their sources section \
              and source_count both stay stale until one is added",
             r.sync.skipped.len()
         );

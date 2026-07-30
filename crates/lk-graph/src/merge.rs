@@ -111,10 +111,25 @@ pub fn merge_concepts(
     // aborts the merge before a single link is repointed (validate-before-mutate). The list
     // is derived from names only, so it stays valid even though the rewrite loop below may
     // rewrite `into`'s own body links.
+    //
+    // Computing it is not enough: the WRITE can fail on its own, and `into` having nowhere to
+    // record aliases is exactly the case — a page hand-created in Obsidian with no frontmatter
+    // block. Failing at the write leaves every citation repointed to `into`, `from` still on
+    // disk and now cited by nothing, and no alias recorded; every re-run fails identically, so
+    // the half-merge is permanent. Refusing here costs nothing and names the repair.
     let absorbed_aliases = if dry_run {
         None
     } else {
-        Some(compute_absorbed_aliases(vault_root, &from_rel, &into_rel)?)
+        let aliases = compute_absorbed_aliases(vault_root, &from_rel, &into_rel)?;
+        let into_raw = std::fs::read_to_string(vault_root.join(&into_rel))
+            .map_err(|e| GraphError::Io(format!("read {}: {e}", into_rel.display())))?;
+        if lk_vault::set_frontmatter_field(&into_raw, "aliases", "[]").is_none() {
+            return Err(GraphError::Io(format!(
+                "'{into}' has no frontmatter block to record the merged aliases in — give it \
+                 one, then re-run"
+            )));
+        }
+        Some(aliases)
     };
 
     let from_id = crate::scan::path_slug(&from_rel);
@@ -365,6 +380,41 @@ mod tests {
                 .map(|s| Link::to(&format!("{s}.md")))
                 .collect(),
         }
+    }
+
+    #[test]
+    fn a_destination_that_cannot_record_aliases_is_refused_before_anything_moves() {
+        // The alias write is the last step; failing there leaves every citation repointed to
+        // `into`, `from` still on disk and cited by nothing, and no alias recorded — and every
+        // re-run fails at the same place, so the half-merge is permanent.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("wiki/concepts")).unwrap();
+        std::fs::create_dir_all(root.join("daily/x")).unwrap();
+        std::fs::write(
+            root.join("wiki/concepts/from.md"),
+            "---\nid: from\ntitle: \"From\"\n---\n\n## Sources\n",
+        )
+        .unwrap();
+        // No frontmatter block at all — a page hand-created in an editor.
+        std::fs::write(root.join("wiki/concepts/into.md"), "# Into\n\n## Sources\n").unwrap();
+        let daily = "---\nid: d\ntitle: \"D\"\n---\n\n- [From](../../wiki/concepts/from.md)\n";
+        std::fs::write(root.join("daily/x/d.md"), daily).unwrap();
+
+        let pages = vec![
+            page("wiki/concepts/from", "wiki/concepts/from.md", &[]),
+            page("wiki/concepts/into", "wiki/concepts/into.md", &[]),
+            page("daily/x/d", "daily/x/d.md", &["wiki/concepts/from"]),
+        ];
+        let result = merge_concepts(&pages, root, "wiki", "from", "into", false, false);
+
+        assert!(result.is_err(), "must refuse");
+        assert_eq!(
+            std::fs::read_to_string(root.join("daily/x/d.md")).unwrap(),
+            daily,
+            "no citation may be repointed by a merge that cannot finish"
+        );
+        assert!(root.join("wiki/concepts/from.md").exists());
     }
 
     #[test]

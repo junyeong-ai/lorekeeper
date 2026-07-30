@@ -511,12 +511,27 @@ async fn count(opts: &super::GlobalOptions, root: Option<PathBuf>) -> miette::Re
     let vault_root = resolve_vault_root(opts, root)?;
     let queue_dir = vault_root.join(".lorekeeper").join("queue");
     let mut current = 0usize;
+    let mut blocked = 0usize;
     for file in pending_queue_files(&queue_dir)? {
-        for task in read_tasks(&file)?.tasks {
-            if classify_task(&vault_root, &task)?.is_work() {
-                current += 1;
+        let read = read_tasks(&file)?;
+        blocked += read.unparseable;
+        for task in read.tasks {
+            match classify_task(&vault_root, &task)? {
+                s if s.is_work() => current += 1,
+                TaskStatus::Unreadable => blocked += 1,
+                _ => {}
             }
         }
+    }
+    // stdout stays the machine contract: how many tasks a drain can act on. A task nothing can
+    // classify is not one of them — spending a session on it would help nothing — but reporting
+    // only the number leaves a queue that is BLOCKED indistinguishable from one that is empty,
+    // and the scheduled drain reads exactly this number to decide whether to run.
+    if blocked > 0 {
+        eprintln!(
+            "warning: {blocked} task(s) cannot be classified — their target pages will not \
+             parse. `lore queue status` names them; they stay pending until a page is repaired."
+        );
     }
     println!("{current}");
     Ok(())
@@ -676,6 +691,11 @@ fn prune_queue(vault_root: &Path, queue_dir: &Path, dry_run: bool) -> miette::Re
                     dropped += 1;
                 }
                 TaskStatus::Unreadable => {
+                    // Counted as work LEFT, not merely retained. Retiring a run is for one whose
+                    // every remaining task is ANSWERED; an unreadable task is not answered, and
+                    // archiving it puts it where nothing will ever reclassify it — so the repair
+                    // this status exists to wait for could never bring it back.
+                    work_left += 1;
                     summary.kept_unreadable += 1;
                     retained.push(task);
                 }
@@ -793,6 +813,18 @@ async fn prune(
             summary.files_archived,
             summary.files_deleted
         );
+    }
+    // A retained-because-unclassifiable task is a defect with a named repair — the target page's
+    // frontmatter — and nothing else in a scheduled run reports it: `queue count` deliberately
+    // omits it from the drain decision so a session is never spent on work no session can do,
+    // which leaves the janitor as the only place it can surface.
+    if summary.kept_unreadable > 0 {
+        eprintln!(
+            "{} task(s) kept because their target page will not parse — repair the page and \
+             they become drainable again; `lore queue status` names them.",
+            summary.kept_unreadable
+        );
+        std::process::exit(1);
     }
     Ok(())
 }
@@ -1565,6 +1597,46 @@ mod tests {
 
     /// A read that fails for any OTHER reason is a real failure and must still surface —
     /// the guard asks whether the file is gone, not whether reading was inconvenient.
+    #[test]
+    fn a_run_holding_only_unclassifiable_work_is_not_retired() {
+        // Retiring is for a run whose every remaining task is ANSWERED. An unreadable task is
+        // not answered — it is waiting for a page repair — and `processed/` is where nothing
+        // reclassifies it, so archiving would make the repair this status exists for impossible.
+        let dir = TempDir::new().unwrap();
+        let queue_dir = dir.path().join(".lorekeeper").join("queue");
+        std::fs::create_dir_all(dir.path().join("daily/s")).unwrap();
+        std::fs::write(
+            dir.path().join("daily/s/2026-05-23.md"),
+            "---\nllm_inputs:\n  summary: live\ntitle: Notes: today\n---\n\n## 요약\n\nbody\n",
+        )
+        .unwrap();
+        write_queue_file(
+            &queue_dir,
+            "run-1.jsonl",
+            &[task("daily/s/2026-05-23.md", "live")],
+        );
+
+        let summary = prune_queue(dir.path(), &queue_dir, false).unwrap();
+        assert_eq!(summary.kept_unreadable, 1);
+        assert_eq!(summary.files_archived, 0, "not retired");
+        assert!(
+            queue_dir.join("run-1.jsonl").exists(),
+            "the file stays pending so a page repair can bring the task back"
+        );
+
+        // And the repair does bring it back.
+        std::fs::write(
+            dir.path().join("daily/s/2026-05-23.md"),
+            "---\nllm_inputs:\n  summary: live\ntitle: \"Notes: today\"\n---\n\n## 요약\n\nbody\n",
+        )
+        .unwrap();
+        let tasks = read_tasks(&queue_dir.join("run-1.jsonl")).unwrap().tasks;
+        assert_eq!(
+            classify_task(dir.path(), &tasks[0]).unwrap(),
+            TaskStatus::Current
+        );
+    }
+
     #[test]
     fn a_line_nobody_can_parse_keeps_its_own_file_whole_and_blocks_nothing_else() {
         // The old answer was to fail the prune, which took the only janitor down with it: one

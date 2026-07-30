@@ -133,10 +133,15 @@ impl WikiGraph {
                 continue;
             }
             let source_idx = id_to_node[&page.id];
-            for target in page.outgoing.iter().filter_map(|link| link.id.as_ref()) {
+            for target in page
+                .outgoing
+                .iter()
+                .filter_map(|link| existence.reached(link))
+            {
                 // Each link already carries the resolved page id (scan resolves every
-                // destination against its page's location), so an edge is a plain lookup.
-                if let Some(&target_idx) = id_to_node.get(target.as_str()) {
+                // destination against its page's location), so an edge is a plain lookup —
+                // asked of `reached`, so a link whose address is not a file is not an edge.
+                if let Some(&target_idx) = id_to_node.get(target) {
                     // `update_edge`, not `add_edge`: two spellings of one address are two
                     // links but one connection, and a parallel edge would double the degree.
                     if source_idx != target_idx {

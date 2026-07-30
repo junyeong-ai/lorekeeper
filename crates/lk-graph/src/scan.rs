@@ -380,7 +380,12 @@ impl VaultExistence {
             if is_reserved(page.id.as_str()) {
                 continue;
             }
-            for id in page.outgoing.iter().filter_map(|link| link.id.as_ref()) {
+            // Same rule as `reached`, inline because `paths` is what is being built: a link
+            // whose address is not a file reaches nothing, so it connects nothing.
+            for link in &page.outgoing {
+                let Some(id) = link.id.as_ref().filter(|_| paths.contains(&link.dest)) else {
+                    continue;
+                };
                 if *id != page.id && knowledge.contains(id) {
                     linked.insert(id.clone());
                 }
@@ -398,6 +403,20 @@ impl VaultExistence {
     /// catalog, both of which are files on disk.
     pub fn is_resolvable(&self, dest: &str) -> bool {
         self.paths.contains(dest)
+    }
+
+    /// The page a link actually REACHES: its id, and only when the address it names is a file.
+    ///
+    /// A link is one thing to a reader — it opens a page or it does not — so it has to be one
+    /// thing to the graph. Reading the id alone lets a dead spelling that slugifies onto a real
+    /// page become an edge, a citation in that page's `## Sources`, and an orphan exemption,
+    /// while `broken` reports the very same link missing: one vault, three answers. Every
+    /// consumer that turns a link into a graph fact goes through here.
+    pub fn reached<'a>(&self, link: &'a Link) -> Option<&'a str> {
+        if !self.is_resolvable(&link.dest) {
+            return None;
+        }
+        link.id.as_deref()
     }
 
     /// Whether a resolved link target addresses a KNOWLEDGE page — the question orphan

@@ -44,9 +44,11 @@ pub struct BacklinksSyncResult {
     pub updated: Vec<ConceptUpdate>,
     /// Count of concept pages whose existing sources section was already correct.
     pub unchanged: usize,
-    /// Concept pages that could not record `source_count` because they carry no frontmatter
-    /// block. Reported rather than silently skipped — their citation counts are stale until
-    /// a human gives them frontmatter — and the command exits non-zero while any remain.
+    /// Concept pages that could not record `source_count`: they carry no frontmatter block, or
+    /// one that will not parse. Reported rather than silently skipped — their citation counts
+    /// are stale until a human repairs the page — and the command exits non-zero while any
+    /// remain. Skipped rather than fatal, because aborting mid-sweep leaves every page already
+    /// written synced and every page after it not, and one corrupt page blocks it forever.
     ///
     /// Always serialized. This list IS the command's verdict, so omitting it when empty hides
     /// the field on exactly the clean runs a consumer sees most, where `undefined` reads as
@@ -85,12 +87,16 @@ pub fn sync_concept_backlinks(
         if !is_valid_source(&page.path, dirs) {
             continue;
         }
-        for target in page.outgoing.iter().filter_map(|link| link.id.as_ref()) {
+        for target in page
+            .outgoing
+            .iter()
+            .filter_map(|link| existence.reached(link))
+        {
             // Self-references are excluded for the same reason the graph excludes
             // self-edges.
-            if *target != page.id && existence.is_knowledge(target) {
+            if target != page.id && existence.is_knowledge(target) {
                 incoming
-                    .entry(target.clone())
+                    .entry(target.to_owned())
                     .or_default()
                     .insert(page.id.clone());
             }
@@ -140,20 +146,17 @@ pub fn sync_concept_backlinks(
         // `source_count` frontmatter is re-derived here too (ingest preserves the
         // on-disk value but never computes it): the authoritative count is the number
         // of incoming citations, the same set that drives the `## Sources` body.
-        // The page was read successfully above; a frontmatter that won't parse here is
-        // real corruption, and this branch is about to REWRITE the page — silently
-        // treating the count as 0 would reset a valid count from a transient parse glitch.
-        // A simply-absent `source_count` field is the legitimate new-page case → 0.
-        let existing_count = frontmatter::parse_page(&raw)
-            .map_err(|e| {
-                GraphError::Io(format!(
-                    "failed to parse frontmatter of {}: {e}",
-                    full_path.display()
-                ))
-            })?
-            .frontmatter
-            .source_count()
-            .unwrap_or(0);
+        // The page was read successfully above; a frontmatter that won't parse here is real
+        // corruption, and this branch is about to REWRITE the page — treating the count as 0
+        // would reset a valid one. It is recorded and skipped for the same reason the
+        // no-frontmatter case below is: aborting leaves every page already written synced and
+        // every page after it not, and one corrupt page blocks the sweep forever. A
+        // simply-absent `source_count` field is the legitimate new-page case → 0.
+        let Ok(parsed) = frontmatter::parse_page(&raw) else {
+            report.skipped.push(page.path.clone());
+            continue;
+        };
+        let existing_count = parsed.frontmatter.source_count().unwrap_or(0);
         let desired_count = sources.len() as u64;
 
         if existing_set == desired_set && existing_count == desired_count {
