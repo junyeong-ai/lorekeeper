@@ -471,6 +471,58 @@ fn with_status_header(
 mod tests {
     use super::*;
 
+    /// Jira returns only the fields asked for, and `IssueFields` deserializes with every named
+    /// field `Option`al — so a field dropped from the request arrives as `None` and the mapper
+    /// renders a page without it. No error, no warning, just an issue with no description or no
+    /// status, and the mapper's own tests never notice because they deserialize complete fixtures
+    /// they build themselves.
+    ///
+    /// Pinned by round-tripping a payload that carries ONLY the requested fields: anything
+    /// `IssueFields` names and the request omits comes back `None` and fails here.
+    #[test]
+    fn every_field_the_mapper_reads_is_a_field_the_request_asks_for() {
+        let requested = default_fields();
+        let sample = |name: &str| -> serde_json::Value {
+            match name {
+                "labels" => serde_json::json!(["a"]),
+                "status" | "priority" => serde_json::json!({"name": "n"}),
+                "assignee" => serde_json::json!({"displayName": "d", "accountId": "id"}),
+                "description" => serde_json::json!({"type": "doc", "content": []}),
+                _ => serde_json::json!("v"),
+            }
+        };
+        let payload: serde_json::Map<String, serde_json::Value> = requested
+            .iter()
+            .map(|name| (name.clone(), sample(name)))
+            .collect();
+        let fields: IssueFields = serde_json::from_value(serde_json::Value::Object(payload))
+            .expect("the requested fields must deserialize into IssueFields");
+
+        for (name, present) in [
+            ("summary", fields.summary.is_some()),
+            ("description", fields.description.is_some()),
+            ("status", fields.status.is_some()),
+            ("priority", fields.priority.is_some()),
+            ("labels", fields.labels.is_some()),
+            ("updated", fields.updated.is_some()),
+            ("duedate", fields.duedate.is_some()),
+            ("assignee", fields.assignee.is_some()),
+        ] {
+            assert!(
+                present,
+                "`{name}` is read from the issue but not requested from Jira, so it is always \
+                 absent — add it to `default_fields`"
+            );
+        }
+        // Requested-but-unread would land in `extra`, which exists for instance-specific custom
+        // fields; a static field there is a request nothing consumes.
+        assert!(
+            fields.extra.is_empty(),
+            "requested fields nothing reads: {:?}",
+            fields.extra.keys().collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn status_header_combines_status_and_period() {
         let s = lk_core::i18n::Locale::Ko.strings();

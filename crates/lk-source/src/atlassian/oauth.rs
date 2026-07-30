@@ -429,7 +429,44 @@ mod tests {
                 "{products:?}"
             );
         }
-        assert_eq!(Products::Both.default_scopes().len(), 6);
+        // Asserted as exact sets rather than by representative member: a scope dropped or
+        // narrowed still leaves the grant working, and only the API read fails — with a 403 at
+        // ingest time rather than anything the consent flow could show. Counting them was the
+        // whole check before, so any substitution of the same size passed.
+        assert_eq!(
+            Products::Jira.default_scopes(),
+            vec![OFFLINE_ACCESS, "read:jira-user", "read:jira-work"]
+        );
+        assert_eq!(
+            Products::Confluence.default_scopes(),
+            vec![
+                OFFLINE_ACCESS,
+                "read:confluence-content.all",
+                "read:confluence-space.summary",
+                "search:confluence",
+            ]
+        );
+        assert_eq!(
+            Products::Both.default_scopes(),
+            vec![
+                OFFLINE_ACCESS,
+                "read:jira-user",
+                "read:jira-work",
+                "read:confluence-content.all",
+                "read:confluence-space.summary",
+                "search:confluence",
+            ]
+        );
+        for products in [Products::Jira, Products::Confluence, Products::Both] {
+            for scope in products.default_scopes() {
+                assert!(
+                    scope == OFFLINE_ACCESS
+                        || scope.starts_with("read:")
+                        || scope.starts_with("search:"),
+                    "{scope} is not read-only, and Lorekeeper never issues an Atlassian write"
+                );
+            }
+        }
     }
 
     #[test]

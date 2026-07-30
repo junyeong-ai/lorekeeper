@@ -223,11 +223,13 @@ mod tests {
     /// in both its frontmatter and its heading, and the whole suite passed. [`NOT_DAILY`] is
     /// the other half of the partition, so a template added to either side must be accounted
     /// for in one of them.
-    #[test]
-    fn every_daily_template_renders_with_expected_frontmatter() {
-        let engine = TemplateEngine::build(None).unwrap();
-        let i18n = serde_json::to_value(lk_core::i18n::Locale::En.strings()).unwrap();
-        let context = serde_json::json!({
+    /// The template every daily child extends, named once so both tests below select by it.
+    const DAILY_BASE: &str = "_daily_base.md.jinja";
+
+    /// A representative render context for a daily page, with `i18n` supplied by the caller so a
+    /// locale-sensitive assertion can vary it.
+    fn daily_context(i18n: &serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
             "source_id": "s",
             "date": "2026-06-14",
             "labels": ["x"],
@@ -239,7 +241,14 @@ mod tests {
             "highlights": [{"label": "HL", "items": [{"subject": "Subj", "sender": "me"}]}],
             "i18n": i18n,
             "llm_inputs": {"summary": "h1", "refine_events": "h2"},
-        });
+        })
+    }
+
+    #[test]
+    fn every_daily_template_renders_with_expected_frontmatter() {
+        let engine = TemplateEngine::build(None).unwrap();
+        let i18n = serde_json::to_value(lk_core::i18n::Locale::En.strings()).unwrap();
+        let context = daily_context(&i18n);
 
         // The daily-page frontmatter contract — kept in lockstep with lk-cli schema.rs's
         // "daily" page type and lk-pipeline render.rs. A child that drifts the base
@@ -317,11 +326,47 @@ mod tests {
             rendered,
             EMBEDDED
                 .iter()
-                .filter(|(name, source)| !name.starts_with('_')
-                    && source.contains("_daily_base.md.jinja"))
+                .filter(|(name, source)| !name.starts_with('_') && source.contains(DAILY_BASE))
                 .count(),
             "the partition must select exactly the templates that extend the daily base"
         );
+    }
+
+    /// The heading a source's events land under is decided twice: the template renders
+    /// `{% block items_heading %}`, and the pipeline computes
+    /// `descriptor().item_kind.heading(strings)` to tell the drain which section to fill. Nothing
+    /// compared them, so misspelling the block name in `slack-channel.md.jinja` left the page
+    /// headed "Key Events" while the queued task named "Key Messages" — a section the page does
+    /// not have, which is semantic work dropped or re-enqueued forever, with the whole suite green.
+    ///
+    /// Driven by `SourceType`, so a new source type is covered by existing.
+    #[test]
+    fn every_source_renders_the_events_heading_its_pipeline_will_look_for() {
+        use strum::IntoEnumIterator;
+
+        let engine = TemplateEngine::build(None).unwrap();
+        for locale in lk_core::i18n::Locale::ALL {
+            let strings = locale.strings();
+            let context = daily_context(&serde_json::to_value(strings).unwrap());
+            for source_type in lk_core::config::SourceType::iter() {
+                let name = source_type.descriptor().default_template;
+                if !EMBEDDED
+                    .iter()
+                    .any(|(candidate, source)| *candidate == name && source.contains(DAILY_BASE))
+                {
+                    continue;
+                }
+                let out = engine
+                    .render(name, &context)
+                    .unwrap_or_else(|e| panic!("{name} failed to render: {e}"));
+                let expected = source_type.descriptor().item_kind.heading(strings);
+                assert!(
+                    out.contains(&format!("## {expected}")),
+                    "{source_type} renders no `## {expected}` heading, which is the section its \
+                     queued refine-events task names:\n{out}"
+                );
+            }
+        }
     }
 
     /// The embedded templates that are NOT daily children: each renders from its own context,

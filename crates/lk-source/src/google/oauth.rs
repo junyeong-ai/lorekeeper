@@ -214,6 +214,31 @@ fn open_in_browser(url: &str) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    /// One consent covers all three Google adapters, so a scope missing from this set fails at
+    /// the API call rather than at the grant — the token works and the reads return 403. Asserted
+    /// exactly, and by name: the test used to check Gmail and Calendar only, so narrowing Drive
+    /// to `drive.metadata.readonly` left it passing while file content and meeting notes lost
+    /// authorization. Drive is needed by two adapters, not one — `google-drive` reads the files,
+    /// and `google-calendar` follows the Drive links in invitations to fetch meeting notes.
+    #[test]
+    fn the_consent_requests_exactly_the_scopes_the_adapters_read_with() {
+        assert_eq!(
+            SCOPES,
+            [
+                "https://www.googleapis.com/auth/gmail.readonly",
+                "https://www.googleapis.com/auth/drive.readonly",
+                "https://www.googleapis.com/auth/calendar.readonly",
+            ],
+            "every Google adapter reads through this one grant"
+        );
+        for scope in SCOPES {
+            assert!(
+                scope.ends_with(".readonly"),
+                "{scope} is not read-only, and Lorekeeper never writes to Google"
+            );
+        }
+    }
+
     #[test]
     fn auth_url_has_offline_consent_and_scopes() {
         let url = build_auth_url("cid", "http://127.0.0.1:1234", &SCOPES, "st8");
@@ -223,8 +248,10 @@ mod tests {
         assert!(url.contains("response_type=code"));
         assert!(url.contains("client_id=cid"));
         assert!(url.contains("state=st8"));
-        assert!(url.contains("gmail.readonly"));
-        assert!(url.contains("calendar.readonly"));
+        for scope in SCOPES {
+            let leaf = scope.rsplit('/').next().unwrap();
+            assert!(url.contains(leaf), "consent URL omits {leaf}");
+        }
     }
 
     #[test]
