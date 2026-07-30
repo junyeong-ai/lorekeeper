@@ -291,6 +291,34 @@ fn leaf_commands() -> Vec<Vec<String>> {
     out
 }
 
+/// `--help` is a shipped surface, and a doc comment can only land on the wrong
+/// variant by leaving its own bare — so a subcommand or flag that describes
+/// nothing is also how a description ends up on the neighbour that does not own it.
+#[test]
+fn every_command_and_flag_describes_itself() {
+    fn walk(cmd: &clap::Command, prefix: &str, out: &mut Vec<String>) {
+        for arg in cmd.get_arguments() {
+            if arg.get_help().is_none() && arg.get_long_help().is_none() {
+                out.push(format!("{prefix} <{}>", arg.get_id()));
+            }
+        }
+        for sub in cmd.get_subcommands().filter(|s| s.get_name() != "help") {
+            let path = format!("{prefix} {}", sub.get_name());
+            if sub.get_about().is_none() && sub.get_long_about().is_none() {
+                out.push(path.clone());
+            }
+            walk(sub, &path, out);
+        }
+    }
+
+    let mut undocumented = Vec::new();
+    walk(&lore::Cli::command(), "lore", &mut undocumented);
+    assert!(
+        undocumented.is_empty(),
+        "these show up in `--help` with no description: {undocumented:?}"
+    );
+}
+
 #[test]
 fn every_guard_only_entry_is_still_swept() {
     let orphaned: Vec<String> = GUARD_ONLY

@@ -10,6 +10,7 @@ use super::{build_llm_client, find_config, load_config, parse_date};
 pub enum Period {
     /// Cross-source themes + personal weekly review
     Weekly {
+        /// Any date inside the target week, `YYYY-MM-DD` (default: this week)
         #[arg(long, conflicts_with = "previous")]
         date: Option<String>,
         /// Synthesize the just-completed period (last week)
@@ -18,6 +19,7 @@ pub enum Period {
     },
     /// Personal monthly performance review
     Monthly {
+        /// Any date inside the target month, `YYYY-MM-DD` (default: this month)
         #[arg(long, conflicts_with = "previous")]
         date: Option<String>,
         /// Synthesize the just-completed period (last month)
@@ -26,6 +28,7 @@ pub enum Period {
     },
     /// Personal quarterly performance review
     Quarterly {
+        /// Any date inside the target quarter, `YYYY-MM-DD` (default: this quarter)
         #[arg(long, conflicts_with = "previous")]
         date: Option<String>,
         /// Synthesize the just-completed period (last quarter)
@@ -34,6 +37,7 @@ pub enum Period {
     },
     /// Personal annual performance review
     Annual {
+        /// The target calendar year (default: this year)
         // `i16` matches `jiff::civil::Date::year()` and `try_annual_review`'s domain, so an
         // out-of-range `--year` is rejected by clap at parse time rather than silently
         // truncated by an `as i16` downcast.
