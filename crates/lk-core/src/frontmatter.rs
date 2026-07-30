@@ -66,23 +66,38 @@ pub fn is_delimiter_line(line: &str) -> bool {
     line == "---"
 }
 
-/// Parse a markdown page into its YAML frontmatter and body.
+/// A page split into its frontmatter block and its body — the recognition rule alone, with no
+/// judgment about whether the YAML parses.
 ///
-/// Frontmatter is recognized only when the document's FIRST line is exactly `---`
-/// and a later line is exactly `---` (delimiters must stand alone on their line).
-/// This avoids two false detections a substring scan would make: a body that merely
-/// begins with whitespace then `---`, and a `---` appearing inside a YAML value or a
-/// `---not-a-delimiter` line. CRLF is normalized to LF up front.
-pub fn parse_page(content: &str) -> Result<VaultPage, String> {
+/// Separate from [`parse_page`] because the two answer different questions. A page's LINKS live
+/// in its body, so a consumer asking what a page points at needs the body whether or not the
+/// YAML above it is valid; only the frontmatter's own fields depend on that.
+pub struct PageParts {
+    pub yaml: String,
+    pub body: String,
+    /// False when a block opens and never closes. There is no body then — every line is still
+    /// inside the frontmatter — so a link below an unterminated block is not a link.
+    pub closed: bool,
+}
+
+/// Split a markdown page on its frontmatter delimiters.
+///
+/// Frontmatter is recognized only when the document's FIRST line is exactly `---` and a later
+/// line is exactly `---` (delimiters must stand alone on their line). This avoids two false
+/// detections a substring scan would make: a body that merely begins with whitespace then
+/// `---`, and a `---` appearing inside a YAML value or a `---not-a-delimiter` line. CRLF is
+/// normalized to LF up front.
+pub fn split_page(content: &str) -> PageParts {
     // Strip a leading UTF-8 BOM so a BOM-prefixed file's frontmatter is still recognized.
     let content = content.strip_prefix('\u{feff}').unwrap_or(content);
     let normalized = content.replace("\r\n", "\n");
 
     let Some(rest) = normalized.strip_prefix("---\n") else {
-        return Ok(VaultPage {
-            frontmatter: Frontmatter::default(),
+        return PageParts {
+            yaml: String::new(),
             body: normalized,
-        });
+            closed: true,
+        };
     };
 
     // Locate the closing delimiter: a line equal to exactly "---".
@@ -96,23 +111,39 @@ pub fn parse_page(content: &str) -> Result<VaultPage, String> {
         offset += line.len();
     }
     let Some(closing) = closing else {
-        return Err("unclosed frontmatter block".to_string());
+        return PageParts {
+            yaml: rest.to_string(),
+            body: String::new(),
+            closed: false,
+        };
     };
 
-    let yaml_str = &rest[..closing];
     let after_delim = &rest[closing..];
     let body = after_delim
         .strip_prefix("---\n")
         .or_else(|| after_delim.strip_prefix("---"))
         .unwrap_or(after_delim);
-    let body = body.strip_prefix('\n').unwrap_or(body);
 
-    let fields: BTreeMap<String, serde_json::Value> =
-        serde_yaml_ng::from_str(yaml_str).map_err(|e| format!("invalid frontmatter YAML: {e}"))?;
+    PageParts {
+        yaml: rest[..closing].to_string(),
+        body: body.strip_prefix('\n').unwrap_or(body).to_string(),
+        closed: true,
+    }
+}
+
+/// Parse a markdown page into its YAML frontmatter and body.
+pub fn parse_page(content: &str) -> Result<VaultPage, String> {
+    let parts = split_page(content);
+    if !parts.closed {
+        return Err("unclosed frontmatter block".to_string());
+    }
+
+    let fields: BTreeMap<String, serde_json::Value> = serde_yaml_ng::from_str(&parts.yaml)
+        .map_err(|e| format!("invalid frontmatter YAML: {e}"))?;
 
     Ok(VaultPage {
         frontmatter: Frontmatter { fields },
-        body: body.to_string(),
+        body: parts.body,
     })
 }
 

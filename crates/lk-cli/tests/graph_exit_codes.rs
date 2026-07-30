@@ -296,6 +296,41 @@ fn a_broken_link_written_outside_the_analysis_scope_still_gates() {
     );
 }
 
+/// A page whose frontmatter will not parse still linked what it linked. Losing its links with
+/// its fields makes the vault read BETTER than it is, twice over: a genuinely broken link
+/// disappears, and every page that page cited reads as uncited. The likeliest author of such
+/// frontmatter is the drain itself, an agent editing a marker line into it.
+#[test]
+fn a_page_with_unparseable_frontmatter_still_reports_its_broken_link() {
+    let ws = sound_vault();
+    ws.write(
+        "daily/notes/2026-05-24.md",
+        "---\nid: notes-2026-05-24\ntype: daily\ntitle: Notes: today\n---\n\n\
+         ## Related concepts\n\n- [Cited](../../wiki/concepts/cited.md)\n\
+         - [Ghost](../../wiki/concepts/ghost.md)\n",
+    );
+
+    let raw = ws.stdout(&["graph", "--json", "lint"]);
+    let parsed: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
+    let broken = parsed["data"]["violations"]["broken"]
+        .as_array()
+        .expect("broken array");
+    assert_eq!(
+        broken.len(),
+        1,
+        "the ghost link must still be reported\n{raw}"
+    );
+    let orphans = parsed["data"]["observations"]["orphans"]
+        .as_array()
+        .expect("orphans array");
+    assert!(
+        !orphans
+            .iter()
+            .any(|o| o.as_str() == Some("wiki/concepts/cited")),
+        "a page this page cites is not an orphan\n{raw}"
+    );
+}
+
 /// Existence is a question about a FILE, so it is asked of the path a link names — not of the
 /// page id that path slugifies to. Slugifying is lossy: `Bad_Name.md`, `BAD-NAME.md` and
 /// `bad--name.md` all share `bad-name`, so answering by id reports a destination that is dead in

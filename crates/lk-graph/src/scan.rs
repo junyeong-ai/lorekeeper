@@ -100,15 +100,15 @@ pub fn scan_vault(root: &Path, follow_links: bool) -> Result<Vec<ScannedPage>, G
     }
     file_paths.sort();
 
-    // A page whose body will not parse still EXISTS, and its id comes from the path rather than
-    // from anything inside it — so it yields a page with no title and no links rather than
-    // vanishing. Dropping it would make a link to a real file on disk read as broken, and leave
-    // it out of every count of what the vault holds.
+    // A page that cannot be READ still EXISTS, and its id comes from the path rather than from
+    // anything inside it — so it yields a page with no title and no links rather than vanishing.
+    // Dropping it would make a link to a real file on disk read as broken, and leave it out of
+    // every count of what the vault holds.
     let mut pages: Vec<ScannedPage> = file_paths
         .par_iter()
         .map(|path| {
             parse_file(path, root).unwrap_or_else(|e| {
-                tracing::warn!(path = %path.display(), error = %e, "unparseable page: id only");
+                tracing::warn!(path = %path.display(), error = %e, "unreadable page: id only");
                 let rel = path.strip_prefix(root).unwrap_or(path);
                 ScannedPage {
                     id: path_slug(rel),
@@ -202,10 +202,17 @@ fn parse_file(path: &Path, root: &Path) -> Result<ScannedPage, String> {
     let raw = std::fs::read_to_string(path)
         .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
 
-    let parsed = frontmatter::parse_page(&raw)?;
-
-    let title = frontmatter_title(&parsed.frontmatter)
-        .or_else(|| extract_first_heading(&parsed.body))
+    // A page's links live in its BODY, so the body comes from the page's own delimiters and a
+    // frontmatter that does not parse costs only the title. Taking the whole page as unreadable
+    // instead loses every link it wrote: a broken one goes unreported, and each page it cited
+    // reads as an orphan. That the frontmatter is unparseable is a defect in its own right, and
+    // `lore doctor` is what reports it — the scan's question is what the page points at.
+    let parts = frontmatter::split_page(&raw);
+    let title = frontmatter::parse_page(&raw)
+        .ok()
+        .as_ref()
+        .and_then(|page| frontmatter_title(&page.frontmatter))
+        .or_else(|| extract_first_heading(&parts.body))
         .unwrap_or_else(|| {
             path.file_stem()
                 .and_then(|s| s.to_str())
@@ -214,11 +221,10 @@ fn parse_file(path: &Path, root: &Path) -> Result<ScannedPage, String> {
         });
 
     let rel = path.strip_prefix(root).unwrap_or(path);
-    let id = path_slug(rel);
 
     let mut outgoing = Vec::new();
     let mut seen = HashSet::new();
-    for dest in link::extract_dests(&parsed.body) {
+    for dest in link::extract_dests(&parts.body) {
         // Only `.md` destinations address knowledge pages; a link to any other file
         // (an attachment) is not a graph edge.
         if !Path::new(&dest).extension().is_some_and(|ext| ext == "md") {
@@ -238,7 +244,7 @@ fn parse_file(path: &Path, root: &Path) -> Result<ScannedPage, String> {
     }
 
     Ok(ScannedPage {
-        id,
+        id: path_slug(rel),
         path: rel.to_path_buf(),
         title,
         outgoing,
@@ -561,6 +567,32 @@ mod tests {
         assert!(
             unparseable.outgoing.is_empty(),
             "a page whose body did not parse contributes no links"
+        );
+    }
+
+    #[test]
+    fn a_page_whose_frontmatter_does_not_parse_still_links_what_it_links() {
+        // The frontmatter is a mapping `serde_yaml` refuses (`title: Notes: today`), which is
+        // exactly what an agent's `Edit` on a marker line produces. Dropping the body's links
+        // with it reports one broken link fewer and one orphan more, both silently.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let daily = tmp.path().join("daily/notes");
+        std::fs::create_dir_all(&daily).unwrap();
+        std::fs::write(
+            daily.join("2026-05-24.md"),
+            "---\nid: n\ntitle: Notes: today\n---\n\n# Notes\n\n[Cited](../../wiki/c.md)\n",
+        )
+        .unwrap();
+
+        let pages = scan_vault(tmp.path(), false).unwrap();
+        let page = pages
+            .iter()
+            .find(|p| p.id == "daily/notes/2026-05-24")
+            .unwrap();
+        assert_eq!(dests(page), vec!["wiki/c.md"]);
+        assert_eq!(
+            page.title, "Notes",
+            "the title falls back to the body heading"
         );
     }
 
