@@ -124,9 +124,12 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y shellcheck
       - run: bash -n scripts/*.sh
       - run: shellcheck --severity=warning scripts/*.sh
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: actionlint
+      # `actionlint` is a Go program, so it is not on crates.io and `install-action` has no recipe
+      # for it — its cargo-binstall fallback reports "actionlint is not found". Installed through
+      # Go instead, which the runner image ships and whose module proxy verifies the download
+      # against the public checksum database.
+      - run: go install github.com/rhysd/actionlint/cmd/actionlint@latest
+      - run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - run: actionlint
 
   doc:
