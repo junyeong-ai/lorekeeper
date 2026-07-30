@@ -11,6 +11,26 @@ use crate::config::VaultDirs;
 /// findings.
 pub const RESERVED_WIKI_FILES: [&str; 4] = ["index.md", "AGENTS.md", "log.md", "map.md"];
 
+/// Every value the `type` frontmatter key takes on a page this tool writes — the page-format
+/// ids `lore schema` publishes, and OKF's one required key.
+///
+/// A page therefore states its own provenance, which is what lets a directory be recognized as
+/// holding Lorekeeper's output rather than someone's own notes without guessing at content. The
+/// personal-module formats are included: whether they are PRODUCED depends on config, but a
+/// page carrying one was still written here.
+pub const PAGE_FORMATS: [&str; 10] = [
+    "concept",
+    "daily",
+    "document",
+    "exploration",
+    "weekly-synthesis",
+    "work-log",
+    "weekly-review",
+    "monthly-review",
+    "quarterly-review",
+    "annual-review",
+];
+
 /// Fixed subdirectory names within the configurable top-level vault dirs. The
 /// top-level dirs (`<daily>`, `<personal>`, `<synthesis>`, `<wiki>`) are user-set
 /// via `vault.dirs.*`; these leaf names are structural and single-sourced here so

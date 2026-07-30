@@ -131,27 +131,61 @@ async fn folded_vault_dirs(
     found
 }
 
-/// A directory in `parent` whose name equals `name` under ASCII case folding — the name the
-/// configured one was probably meant to be.
+/// A directory in `parent` that case-folds onto `name` AND holds pages this tool wrote — the
+/// name the configured one was probably meant to be.
 ///
-/// Only asked when the configured name is ABSENT, which is what keeps it from repeating the
-/// mistake of an earlier version of this check: that one scanned for a case-fold near-match
-/// unconditionally and so fired on a case-sensitive volume legitimately holding `Wiki` and
-/// `wiki` with the config naming one of them exactly. A bound worth stating: two names
-/// differing only by Unicode normalization are not compared, so a normalization-SENSITIVE
-/// filesystem could hide that pairing here. On the volumes this ships to, normalization is
-/// folded, which means the configured name resolves and the fold check above sees it instead.
+/// The case fold alone is not evidence, and taking it as such was a false positive on the
+/// realistic case: this tool writes into an existing Obsidian vault, where `daily`, `wiki`,
+/// `me` and `synthesis` are all plausible folder names a person already used. A first run
+/// beside a pre-existing unrelated `Daily/` on a case-sensitive volume was told its own pages
+/// were about to go invisible, when there were no pages of its own at all.
+///
+/// What separates the two is whether the sibling holds Lorekeeper's own output, and a page says
+/// so itself: the `type` frontmatter naming one of the formats this tool writes. A folder of
+/// someone's own notes does not carry those. Only asked when the configured name is ABSENT, so
+/// a vault legitimately holding both spellings is never examined.
+///
+/// A bound worth stating: two names differing only by Unicode normalization are not compared,
+/// so a normalization-SENSITIVE filesystem could hide that pairing here. On the volumes this
+/// ships to, normalization is folded, so the configured name resolves and the fold check above
+/// sees it instead.
 async fn case_variant_sibling(parent: &std::path::Path, name: &std::ffi::OsStr) -> Option<String> {
     let target = name.to_string_lossy();
     let mut entries = tokio::fs::read_dir(parent).await.ok()?;
     while let Ok(Some(entry)) = entries.next_entry().await {
         let found = entry.file_name();
         let found = found.to_string_lossy();
-        if found != target && found.eq_ignore_ascii_case(&target) {
+        if found == target || !found.eq_ignore_ascii_case(&target) {
+            continue;
+        }
+        if holds_managed_pages(&parent.join(found.as_ref())) {
             return Some(found.into_owned());
         }
     }
     None
+}
+
+/// Whether any page under `dir` declares one of the formats this tool writes.
+///
+/// The page states its own provenance, so this needs no registry and no guessing at content.
+/// Bounded: it stops at the first page that answers yes.
+fn holds_managed_pages(dir: &std::path::Path) -> bool {
+    walkdir::WalkDir::new(dir)
+        .follow_links(false)
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry.file_type().is_file())
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "md"))
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .filter_map(|raw| {
+            lk_core::frontmatter::parse_page(&raw)
+                .ok()?
+                .frontmatter
+                .get("type")?
+                .as_str()
+                .map(str::to_owned)
+        })
+        .any(|declared| lk_core::vault_path::PAGE_FORMATS.contains(&declared.as_str()))
 }
 
 /// Whether `parent`'s listing contains `name` byte for byte — the question `Path::exists`
@@ -229,7 +263,7 @@ fn overlapping_vault_dirs(
 
 #[cfg(test)]
 mod tests {
-    use super::{folded_vault_dirs, overlapping_vault_dirs};
+    use super::{case_variant_sibling, folded_vault_dirs, overlapping_vault_dirs};
 
     /// Both halves of the condition, and the two shapes that must stay silent. An earlier
     /// version scanned for a case-fold near-match and flagged a correct vault; the version
@@ -294,6 +328,46 @@ mod tests {
             folded_vault_dirs(&write_config(tmp.path(), "    wiki: notes\n", "fresh"))
                 .await
                 .is_empty()
+        );
+    }
+
+    /// A case fold alone is not evidence. This tool writes into an existing Obsidian vault,
+    /// where `daily`, `wiki`, `me` and `synthesis` are all names a person may already have
+    /// used — so a first run beside a pre-existing unrelated folder was told its own pages were
+    /// about to go invisible when it had none. What separates the two is whether the sibling
+    /// holds pages this tool wrote, which a page states itself.
+    ///
+    /// Exercised directly, because reaching it through `folded_vault_dirs` needs a
+    /// case-SENSITIVE filesystem: where case folds, the configured name resolves and the fold
+    /// branch answers first — correctly, since links would then carry a spelling the vault does
+    /// not hold.
+    #[tokio::test]
+    async fn a_case_variant_sibling_of_someone_elses_notes_is_not_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        let theirs = tmp.path().join("Wiki");
+        std::fs::create_dir(&theirs).unwrap();
+        std::fs::write(theirs.join("grocery list.md"), "# Milk\n").unwrap();
+        std::fs::write(
+            theirs.join("journal.md"),
+            "---\ntags: [personal]\n---\n\n# Tuesday\n",
+        )
+        .unwrap();
+
+        let name = std::ffi::OsString::from("wiki");
+        assert!(
+            case_variant_sibling(tmp.path(), &name).await.is_none(),
+            "someone's own folder is not this tool's misspelled output"
+        );
+
+        // One page declaring a format this tool writes, and it is our own data after all.
+        std::fs::write(
+            theirs.join("rag.md"),
+            "---\nid: rag\ntype: concept\ntitle: RAG\n---\n",
+        )
+        .unwrap();
+        assert_eq!(
+            case_variant_sibling(tmp.path(), &name).await.as_deref(),
+            Some("Wiki")
         );
     }
 
