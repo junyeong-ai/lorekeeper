@@ -1,8 +1,0 @@
----
-source: crates/lk-cli/tests/behaviour.rs
-expression: "observe(staged.path(), argv)"
----
-exit: 0
---- stdout ---
---- stderr ---
-Weekly synthesis produced nothing: include_sources is empty and there is no `personal:` section — nothing is configured to run.

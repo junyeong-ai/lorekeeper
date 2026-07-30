@@ -59,10 +59,6 @@ const SWEEP: &[&[&str]] = &[
     &["graph", "suggest-links"],
     &["graph", "audit-candidates"],
     &["graph", "backlinks-sync"],
-    &["synthesis", "weekly"],
-    &["synthesis", "monthly"],
-    &["synthesis", "quarterly"],
-    &["synthesis", "annual"],
 ];
 
 /// Leaf commands the sweep does not cover, each with the reason its answer is
@@ -70,6 +66,22 @@ const SWEEP: &[&[&str]] = &[
 /// [`every_command_is_swept_or_exempt`], so an exemption is a written decision
 /// rather than an omission.
 const EXEMPT: &[(&[&str], &str)] = &[
+    (
+        &["synthesis", "weekly"],
+        "names the period it ran for from the wall clock (`week of 2026-07-30`, `for 2026-07`) and takes no `--date` override the way `ingest` does, so a pin of it goes red at the next period boundary rather than on a change to the code",
+    ),
+    (
+        &["synthesis", "monthly"],
+        "names the period it ran for from the wall clock (`week of 2026-07-30`, `for 2026-07`) and takes no `--date` override the way `ingest` does, so a pin of it goes red at the next period boundary rather than on a change to the code",
+    ),
+    (
+        &["synthesis", "quarterly"],
+        "names the period it ran for from the wall clock (`week of 2026-07-30`, `for 2026-07`) and takes no `--date` override the way `ingest` does, so a pin of it goes red at the next period boundary rather than on a change to the code",
+    ),
+    (
+        &["synthesis", "annual"],
+        "names the period it ran for from the wall clock (`week of 2026-07-30`, `for 2026-07`) and takes no `--date` override the way `ingest` does, so a pin of it goes red at the next period boundary rather than on a change to the code",
+    ),
     (
         &["ingest"],
         "reaches the configured sources, so its answer is a property of the network rather than of the vault",
@@ -93,6 +105,37 @@ const EXEMPT: &[(&[&str], &str)] = &[
     (
         &["queue", "apply"],
         "materialises a drain's LLM results; the fixture has no drain to apply",
+    ),
+];
+
+/// Swept commands whose corpus verdict is a guard-clause answer rather than the
+/// command's own work, with what the corpus would have to carry to reach it.
+/// Each is a stated gap: the pin still catches a change to the guard's own
+/// wording or exit code, and states that it catches nothing past it.
+const GUARD_ONLY: &[(&[&str], &str)] = &[
+    (
+        &["status"],
+        "prints one line per enabled source; the corpus enables none, so a source's last-ingest line is never reached",
+    ),
+    (
+        &["health"],
+        "classifies each enabled source fresh/stale/never against the ingest log; the corpus has neither",
+    ),
+    (
+        &["performance"],
+        "reads `me/work-log`; the corpus vault carries no work-log page, so the category distribution is never computed",
+    ),
+    (
+        &["queue", "status"],
+        "classifies pending tasks against their target pages; the corpus queue is empty, so none of the five categories is exercised",
+    ),
+    (
+        &["queue", "prune"],
+        "drops, keeps, rewrites, archives, and deletes by category; an empty queue reaches none of those branches",
+    ),
+    (
+        &["maintenance", "--dry-run"],
+        "prunes the ingest log and drained queue files past retention; the corpus has no log and no processed/ directory",
     ),
 ];
 
@@ -245,6 +288,20 @@ fn leaf_commands() -> Vec<Vec<String>> {
     let mut out = Vec::new();
     walk(&lore::Cli::command(), &[], &mut out);
     out
+}
+
+#[test]
+fn every_guard_only_entry_is_still_swept() {
+    let orphaned: Vec<String> = GUARD_ONLY
+        .iter()
+        .filter(|(argv, _)| !SWEEP.iter().any(|swept| swept == argv))
+        .map(|(argv, _)| argv.join(" "))
+        .collect();
+    assert!(
+        orphaned.is_empty(),
+        "these GUARD_ONLY entries name invocations the sweep no longer runs — a corpus \
+         that grew past the guard drops the entry, and so does a dropped invocation: {orphaned:?}"
+    );
 }
 
 #[test]

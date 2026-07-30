@@ -1,8 +1,0 @@
----
-source: crates/lk-cli/tests/behaviour.rs
-expression: "observe(staged.path(), argv)"
----
-exit: 0
---- stdout ---
---- stderr ---
-Personal reviews need a `personal:` section in config.yaml.

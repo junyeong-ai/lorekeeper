@@ -30,3 +30,14 @@ sources:
     enabled: false
     labels: [fixture]
     extract_concepts: true
+
+# The personal module, so `performance` and every `synthesis` period reach their
+# own logic instead of the not-configured guard.
+personal:
+  tracked_sources: [inbox]
+  performance_categories:
+    - project-delivery
+    - team-contribution
+  uncategorized_label: "other"
+  source_type_category_map:
+    manual: project-delivery
