@@ -593,11 +593,6 @@ impl VaultDirs {
     }
 }
 
-/// Validate that `value` is a non-empty relative path confined to the vault — no `..`,
-/// absolute, or drive-prefixed segments. `label` is the full config-key prefix for error
-/// messages. The single source for the vault-relative-path guard, shared by `vault.dirs.*`
-/// and `graph.scope.dirs` so the two can't drift to different (e.g. substring-vs-component)
-/// `..` checks.
 /// Whether `outer`'s named segments are a prefix of `inner`'s, equal paths included.
 ///
 /// Compared as segments rather than strings, and before `normalize()` runs, so `./wiki` and
@@ -619,6 +614,11 @@ fn is_within(outer: &str, inner: &str) -> bool {
     outer.len() <= inner.len() && inner[..outer.len()] == outer[..]
 }
 
+/// Validate that `value` is a non-empty relative path confined to the vault — no `..`,
+/// absolute, or drive-prefixed segments. `label` is the full config-key prefix for error
+/// messages. The single source for the vault-relative-path guard, shared by `vault.dirs.*`
+/// and `graph.scope.dirs` so the two can't drift to different (e.g. substring-vs-component)
+/// `..` checks.
 fn validate_relative_vault_path(label: &str, value: &str) -> Result<(), ConfigError> {
     use std::path::{Component, Path};
 

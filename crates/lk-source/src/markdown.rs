@@ -955,14 +955,14 @@ fn rewrite_angle_tokens(text: &str, users: &HashMap<String, String>) -> String {
     out
 }
 
-/// `token` is the text between `<` and `>`. Forms: `@U123`/`@U123|name` (user),
-/// `#C123`/`#C123|name` (channel), `!here`/`!subteam^S1|@team` (special), or `url`/
-/// `url|label` (link).
 /// The label after a `|` in a Slack token (`U123|name` → `name`), if non-empty.
 fn label_after_pipe(s: &str) -> Option<&str> {
     s.split('|').nth(1).filter(|l| !l.is_empty())
 }
 
+/// `token` is the text between `<` and `>`. Forms: `@U123`/`@U123|name` (user),
+/// `#C123`/`#C123|name` (channel), `!here`/`!subteam^S1|@team` (special), or `url`/
+/// `url|label` (link).
 fn convert_slack_token(token: &str, users: &HashMap<String, String>) -> String {
     if let Some(rest) = token.strip_prefix('@') {
         // Prefer the pipe-label, then the resolved display name, then the raw user id.
