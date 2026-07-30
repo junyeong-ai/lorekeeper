@@ -234,6 +234,7 @@ The essentials: a visible `.jsonl` is fully written and every
    lore queue apply            # materialize reported concepts into pages + links
    lore graph backlinks-sync   # re-derive every concept's ## Sources + source_count
    lore wiki index             # refresh the catalog
+   lore wiki log               # refresh the knowledge timeline
    lore wiki map               # refresh the citation-cluster navigation map
    ```
    Run these on EVERY `/lore-process` invocation that processed at least one

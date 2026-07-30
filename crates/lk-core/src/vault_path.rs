@@ -22,6 +22,34 @@ pub const MAP_FILE: &str = "map.md";
 /// findings.
 pub const RESERVED_WIKI_FILES: [&str; 4] = [INDEX_FILE, SCHEMA_FILE, TIMELINE_FILE, MAP_FILE];
 
+/// What a generated page is derived FROM, which decides who has to re-derive it.
+///
+/// A page derived from the vault goes stale the moment pages are added, so the drain that adds
+/// them must refresh it. A page derived from config goes stale only when config changes, which
+/// no drain does — the scheduled pipeline is the one that has to refresh it, since config can be
+/// edited between runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Derivation {
+    VaultContents,
+    Config,
+}
+
+/// Each generated wiki page, the `lore` subcommand that regenerates it, and what it derives from.
+///
+/// A page derived wholesale is only true while something re-derives it, and the scheduled
+/// pipeline ran three of these four: `log.md` was refreshed by nothing, so the knowledge timeline
+/// stopped at whenever a person last typed the command — observed stale on a live vault, while a
+/// module comment claimed it was "regenerated wholesale each run like index.md and log.md".
+/// Naming the command and the derivation beside the file is what lets
+/// `the_pipeline_regenerates_every_generated_wiki_page` hold the shipped pipeline and the drain
+/// skill to it, so a fifth such page cannot be added without being scheduled.
+pub const GENERATED_WIKI_PAGES: [(&str, &str, Derivation); 4] = [
+    (INDEX_FILE, "wiki index", Derivation::VaultContents),
+    (SCHEMA_FILE, "schema", Derivation::Config),
+    (TIMELINE_FILE, "wiki log", Derivation::VaultContents),
+    (MAP_FILE, "wiki map", Derivation::VaultContents),
+];
+
 /// The `type` the citation-cluster navigation map and the page-format schema declare. Named
 /// here rather than written inline at the two render sites, so the value a page carries and the
 /// value [`PAGE_FORMATS`] admits cannot drift apart. The catalog and the timeline declare no

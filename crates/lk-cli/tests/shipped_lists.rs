@@ -147,6 +147,48 @@ fn glob_skill_markdown() -> Vec<PathBuf> {
     found
 }
 
+/// A page derived wholesale is only true while something re-derives it, and there are two
+/// automated paths: the shipped pipeline, which runs on a schedule and must refresh all of them
+/// because config can change between runs, and the drain skill's Finalize, which must refresh the
+/// ones derived from vault CONTENTS because a drain is what adds those contents.
+///
+/// The pipeline ran three of the four: `log.md` was refreshed by nothing, so the knowledge
+/// timeline stopped at whenever a person last typed `lore wiki log` — stale on a live vault while
+/// a module comment claimed it was regenerated each run.
+#[test]
+fn the_pipeline_regenerates_every_generated_wiki_page() {
+    use lk_core::vault_path::Derivation;
+
+    let pipeline = read(&repo_root().join("scripts/lore-pipeline.sh"));
+    let finalize = read(&repo_root().join(".claude/skills/lore-process/SKILL.md"));
+    for (page, command, derivation) in lk_core::vault_path::GENERATED_WIKI_PAGES {
+        assert!(
+            pipeline.contains(&format!("lore_cmd {command}")),
+            "scripts/lore-pipeline.sh never runs `lore {command}`, so {page} is never refreshed \
+             on a schedule"
+        );
+        if derivation == Derivation::VaultContents {
+            assert!(
+                finalize.contains(&format!("lore {command}")),
+                "the drain skill's Finalize never runs `lore {command}`, so {page} goes stale \
+                 after a drain that created the pages it is derived from"
+            );
+        }
+    }
+    // And the two lists describe the same set of files.
+    let mut named: Vec<&str> = lk_core::vault_path::GENERATED_WIKI_PAGES
+        .iter()
+        .map(|(page, _, _)| *page)
+        .collect();
+    named.sort_unstable();
+    let mut reserved = lk_core::vault_path::RESERVED_WIKI_FILES.to_vec();
+    reserved.sort_unstable();
+    assert_eq!(
+        named, reserved,
+        "every reserved wiki filename must name the command that generates it"
+    );
+}
+
 /// `rust-version` is the one the toolchain enforces; the CI job name, the toolchain it pins, and
 /// both READMEs restate it. All of them are read by people deciding whether they can build this.
 #[test]

@@ -130,6 +130,7 @@ sync_graph() {
     run "queue apply"    lore_cmd queue apply
     run "backlinks-sync" lore_cmd graph backlinks-sync
     run "wiki index"     lore_cmd wiki index
+    run "wiki log"       lore_cmd wiki log
     run "wiki map"       lore_cmd wiki map
 
     log "▸ graph lint"
