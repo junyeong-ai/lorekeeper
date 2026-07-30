@@ -45,11 +45,10 @@ pub fn scan_vault(root: &Path, config: &GraphConfig) -> Result<Vec<ScannedPage>,
             return Err(GraphError::ScanDirNotFound(scan_dir));
         }
 
-        // Dot-directories are never knowledge. `.obsidian` is the app's own config, `.trash` is
+        // Dot-directories are never knowledge: `.obsidian` is the app's own config, `.trash` is
         // where Obsidian puts a DELETED page — resolving a link to one would report a deleted
-        // page as present — and `.lorekeeper` is this tool's state. The filter lives here rather
-        // than at the call sites because it is a fact about a vault, and it is what makes
-        // scanning from the vault root (the existence universe) mean "every page there is".
+        // page as present — and `.lorekeeper` is this tool's state. A fact about a vault rather
+        // than about a caller, which is what makes the vault root safe to walk.
         let walker = WalkDir::new(&scan_dir)
             .follow_links(config.scope.follow_links)
             .into_iter()
@@ -179,19 +178,15 @@ fn extract_first_heading(body: &str) -> Option<String> {
     None
 }
 
-/// The vault-wide existence universe consulted by integrity checks
-/// (broken-link resolution and orphan detection) so they reason about *every*
-/// page on disk — not just the analysis scope (`graph.scope.dirs`).
+/// Every page on disk, for the integrity checks that must reason about the vault rather than
+/// the analysis scope (`graph.scope.dirs`): a `wiki/` concept linking a `daily/` page is not a
+/// broken link, and a concept linked only from `daily/` is not an orphan.
 ///
-/// Without it, a `wiki/` concept linking a `daily/` page would be reported as a
-/// broken link, and a `wiki/` concept linked only from `daily/` pages would be
-/// reported as an orphan — both false positives caused by the narrow analysis
-/// scope. Built from a full-vault scan ([`scan_vault`] with all page dirs).
+/// Built from a scan of the vault ROOT, so "absent from `ids`" means absent from the vault.
 #[derive(Debug, Clone)]
 pub struct VaultExistence {
-    /// Every page id the scan found, INCLUDING the generated catalogs — the question
-    /// "is a file addressed by this id" has one answer, and a catalog is a file a page may
-    /// legitimately link.
+    /// Every page id the scan found, INCLUDING the generated catalogs: "is a file addressed by
+    /// this id" has one answer, and a catalog is a file a page may legitimately link.
     ids: HashSet<String>,
     /// `ids` minus the generated catalogs: the connectivity question orphan detection asks.
     /// `index.md` links every page it catalogs, so counting a link to it as a connection would
@@ -208,9 +203,9 @@ impl VaultExistence {
     /// from `ids` is absent from the vault, not merely from somewhere nobody looked.
     pub fn build(pages: &[ScannedPage], dirs: &VaultDirs) -> Self {
         // Navigation/catalog meta-files (index.md, log.md, map.md, AGENTS.md) are generated
-        // artifacts, not knowledge nodes. They are real files, so they RESOLVE as link targets;
-        // what they must not do is count as connectivity, because index.md links every page it
-        // catalogs and would mark every concept "linked", defeating orphan detection.
+        // artifacts, not knowledge. They are real files, so they RESOLVE as link targets; what
+        // they must not do is count as connectivity, since index.md links every page it catalogs
+        // and would mark every concept "linked", defeating orphan detection.
         let is_reserved = reserved_page_predicate(Path::new(&dirs.wiki));
         let mut ids = HashSet::with_capacity(pages.len());
         let mut knowledge = HashSet::with_capacity(pages.len());
@@ -323,11 +318,8 @@ pub fn path_slug(rel: &Path) -> String {
 /// The `graph.scope.exclude` globs as a predicate over a vault-relative path.
 ///
 /// Exclusion narrows the ANALYSIS — which pages are graph nodes — not the vault. An excluded
-/// page still EXISTS, so a link to it resolves, and its existence was never the exclusion's
-/// business: building the existence universe with the globs applied reported
-/// `wiki/concepts/excluded.md` as a missing destination while the file sat on disk, the same
-/// defect as leaving a user's own folder unscanned. So integrity commands scan without them and
-/// apply this to the node set instead.
+/// page still exists, so a link to it resolves; its existence is not the exclusion's business.
+/// Integrity commands therefore scan without the globs and apply this to the node set.
 pub struct Excludes(GlobSet);
 
 impl Excludes {

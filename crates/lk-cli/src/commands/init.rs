@@ -206,8 +206,7 @@ async fn atlassian_instance(creds: &mut Credentials) -> miette::Result<()> {
             // mild inconvenience: it sends the user through a browser round-trip that can
             // only fail. Naming an instance `confluence` is a clear statement of intent.
             // Each label rides with the value it names, and the default is a VALUE whose
-            // position is looked up — so the offered order can change without silently
-            // re-pointing the default or the selection at a different product.
+            // position is looked up, so the offered order carries no meaning.
             const PRODUCT_CHOICES: [(lk_source::Products, &str); 3] = [
                 (lk_source::Products::Both, "both"),
                 (lk_source::Products::Jira, "Jira only"),
@@ -421,9 +420,9 @@ fn secret(prompt: &str, existing: Option<&str>) -> miette::Result<String> {
 /// Which Atlassian products an instance named `name` most likely has API access to.
 ///
 /// A wrong answer here is not a mild inconvenience: requesting a scope the app lacks fails the
-/// ENTIRE consent, so the user completes a browser round-trip that could only ever fail. Naming
-/// an instance `confluence` is a clear statement of intent, and naming it after both — or after
-/// neither — is not, so that case asks for everything and lets the prompt narrow it.
+/// ENTIRE consent, so the user completes a browser round-trip that could only fail. Naming an
+/// instance `confluence` is a clear statement of intent; naming it after both, or after neither,
+/// is not, so that case asks for everything and lets the prompt narrow it.
 fn default_products(name: &str) -> lk_source::Products {
     let lowered = name.to_lowercase();
     match (lowered.contains("jira"), lowered.contains("confluence")) {

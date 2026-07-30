@@ -33,32 +33,22 @@ pub struct BrokenLink {
 /// Every link in `pages` whose destination is not a page in the vault, deduped and ordered by
 /// (source, target).
 ///
-/// Deliberately not a graph property. A broken link is a fact about one page's destination and
-/// the set of pages on disk — no node, no edge, no community — and while it was computed
-/// inside `WikiGraph` it inherited the analysis scope, whose only job is choosing which
-/// subgraph `hubs`/`cluster`/`suggest-links` reason about. So a link written on a `daily/` page
-/// was never checked: measured on a 2,106-page vault, 43 concept links pointing at pages that
-/// do not exist, none of them reported, while the same vault's `lint` read clean. `queue apply`
-/// writes those links, which makes them the pipeline's own output. Taking the page set as a
-/// parameter is what makes the question unavoidable at each call site, and both callers pass
-/// every page the vault has.
+/// Not a graph property: a broken link involves no node, no edge and no community, only one
+/// page's destination and the set of pages on disk. Taking the page set as a parameter is what
+/// keeps the two questions apart — `graph.scope.dirs` chooses which subgraph
+/// `hubs`/`cluster`/`suggest-links` reason about, and has no say in where a link may be written.
+/// A link is broken wherever it appears, and `queue apply` writes concept links on daily pages.
 ///
-/// Reserved meta-pages (`lk_core::vault_path::RESERVED_WIKI_FILES`) are skipped as SOURCES:
-/// they catalog every page they can see and are re-derived WHOLE from the vault, so a stale link
-/// in one is fixed by regenerating it, not by a human. `wiki refresh` runs before `graph lint` in
-/// the scheduled pipeline, so reporting them would flag a state the same run had just repaired.
-/// (`index-sync` additionally reports an index.md entry with no page on disk; `map.md`/`log.md`
-/// have no such check because nothing but regeneration writes them.) They are still valid
-/// DESTINATIONS — they are files, and a page linking the catalog is linking something real.
+/// `existence` must be built from a VAULT-ROOT scan, which is what integrity commands do:
+/// "absent from the universe" means absent from the vault only if the universe looked
+/// everywhere. A vault holds user-authored folders outside the four page dirs, and links may
+/// point at them.
 ///
-/// `existence` must therefore be built from a VAULT-ROOT scan, which is what integrity commands
-/// do. Absence from the universe is evidence of absence only where the universe looked, and
-/// while it covered `scope.dirs` plus the four page dirs, an ordinary Obsidian note under a
-/// user's own folder was outside it — so a link to a file sitting right there on disk read as a
-/// violation and gated the scheduled pipeline. Refusing to judge unwalked destinations traded
-/// that for the opposite miss: a link to a nonexistent path in an unwalked folder went
-/// unreported, and so did a link pointing outside the vault entirely. Scanning the vault answers
-/// every case exactly and needs no rule about which ones to skip.
+/// Reserved meta-pages (`lk_core::vault_path::RESERVED_WIKI_FILES`) are skipped as SOURCES —
+/// they catalog every page they can see and are re-derived WHOLE, so a stale link in one is
+/// repaired by regenerating it, and `wiki refresh` runs before `graph lint` in the scheduled
+/// pipeline. They remain valid DESTINATIONS: they are files, and a page linking the catalog is
+/// linking something real.
 pub fn broken_links(
     pages: &[ScannedPage],
     existence: &VaultExistence,
@@ -152,10 +142,10 @@ impl WikiGraph {
                     }
                 } else if existence.is_knowledge(target) {
                     // Resolves to a knowledge page outside the analysis scope: a vault-wide
-                    // outbound connection for orphan purposes. No edge — the target node is
-                    // not in the scope graph. A link to a generated catalog is deliberately
-                    // NOT this: `index.md` lists every page, so letting a link to it count
-                    // would exempt the very pages orphan detection is looking for.
+                    // outbound connection for orphan purposes. No edge — the target node is not
+                    // in the scope graph. A generated catalog is deliberately not knowledge
+                    // here: `index.md` lists every page, so counting a link to it as a
+                    // connection would exempt the very pages orphan detection looks for.
                     cross_scope_connected.insert(page.id.clone());
                 }
             }
@@ -342,10 +332,8 @@ mod tests {
 
     #[test]
     fn a_link_written_outside_the_analysis_scope_is_still_checked() {
-        // The defect this function exists to remove: while broken links were computed inside
-        // `WikiGraph`, only pages in `graph.scope.dirs` (the wiki, by default) were checked as
-        // sources, so a concept link `queue apply` wrote on a daily page was outside the
-        // check. Measured on a 2,106-page vault: 43 of them, none reported.
+        // `graph.scope.dirs` chooses the analysis subgraph and nothing else, so a link written
+        // on a daily page — where `queue apply` writes concept links — is checked like any other.
         let pages = vec![
             build_page("daily/ai-news/2026-06-12", &["wiki/concepts/gone"]),
             build_page("wiki/concepts/here", &[]),
@@ -357,10 +345,8 @@ mod tests {
         assert_eq!(found[0].target, "wiki/concepts/gone");
     }
 
-    /// A destination outside the walked directories is UNKNOWN, not absent. A vault holds
-    /// user-authored folders the graph never scans, and a daily page citing one of those notes
-    /// was reported as a violation for a file sitting right there on disk — gating the
-    /// scheduled pipeline on a link that works.
+    /// A vault holds user-authored folders outside the four page dirs, and a page there is a
+    /// page: the universe covers the whole vault, so a link to one resolves.
     #[test]
     fn a_page_under_a_users_own_folder_resolves_like_any_other() {
         let dirs = VaultDirs::default();
@@ -369,8 +355,7 @@ mod tests {
                 "daily/notes/2026-05-23",
                 &["notes/hand-written", "wiki/concepts/gone"],
             ),
-            // Not under any of the four page dirs — an ordinary Obsidian note. The universe is
-            // built from a vault-ROOT scan, so it is here, and the link to it resolves.
+            // An ordinary Obsidian note, under none of the four page dirs.
             build_page("notes/hand-written", &[]),
         ];
         let found = broken_links(&pages, &VaultExistence::build(&pages, &dirs), &dirs);
@@ -379,9 +364,8 @@ mod tests {
         assert_eq!(found[0].target, "wiki/concepts/gone");
     }
 
-    /// Narrowing what is judged must not retire a finding. A destination that escaped the vault
-    /// root is kept as written rather than resolved to an id, and no vault page can ever be
-    /// addressed by it — so it is nowhere, not merely somewhere unscanned, and stays reported.
+    /// A destination that escapes the vault root is kept as written rather than resolved to an
+    /// id, and no vault page can be addressed by it — so it is nowhere, and reported.
     #[test]
     fn a_destination_that_escapes_the_vault_root_is_always_reported() {
         let dirs = VaultDirs::default();
@@ -399,9 +383,8 @@ mod tests {
         );
     }
 
-    /// The generated catalogs are files, so a page linking one is linking something real. They
-    /// are excluded from the analysis graph as NODES, and that exclusion once removed them from
-    /// the existence universe entirely — making every link to `wiki/index.md` broken.
+    /// The generated catalogs are files, so a page linking one is linking something real —
+    /// their exclusion from the analysis graph is about NODES, not about existing.
     #[test]
     fn a_link_to_the_generated_catalog_resolves() {
         let pages = vec![
@@ -411,9 +394,9 @@ mod tests {
         assert!(broken(&pages).is_empty());
     }
 
-    /// …but reaching the catalog is not reaching anything, for orphan purposes. `index.md`
-    /// lists every page it catalogs, so letting a link to it count as connectivity would exempt
-    /// the very pages orphan detection exists to find.
+    /// …but reaching the catalog is not reaching anything, for orphan purposes: `index.md`
+    /// lists every page it catalogs, so counting a link to it as connectivity would exempt the
+    /// very pages orphan detection exists to find.
     #[test]
     fn linking_only_the_catalog_does_not_exempt_a_page_from_being_an_orphan() {
         let dirs = VaultDirs::default();
@@ -430,9 +413,8 @@ mod tests {
 
     #[test]
     fn a_catalog_page_is_never_a_broken_link_source() {
-        // `index.md` lists every page it can see and `wiki refresh` re-derives it from the
-        // vault, so an entry for a page that is gone is index drift — `index-sync`'s
-        // `missing_from_disk` — and reporting it here too would double-count one defect.
+        // `index.md` lists every page it can see and is re-derived from the vault, so an entry
+        // for a page that is gone is index drift, reported by `index-sync` rather than twice.
         let pages = vec![
             build_page("wiki/index", &["wiki/concepts/gone"]),
             build_page("wiki/concepts/here", &[]),

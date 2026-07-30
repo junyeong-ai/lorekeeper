@@ -49,8 +49,8 @@ fn subcommands() -> Vec<String> {
     names
 }
 
-/// Every markdown file the skills ship, by path — the corpus above concatenates them, which
-/// loses which file a line came from.
+/// Every markdown file the skills ship, by path: the corpus concatenates them, which loses
+/// which file a line came from.
 fn skill_markdown() -> Vec<PathBuf> {
     let skills_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.claude/skills");
     let mut files = Vec::new();
@@ -234,21 +234,19 @@ fn backticked_command_paths(corpus: &str) -> Vec<Vec<String>> {
     found
 }
 
-/// Every `lore` line inside a FENCED BLOCK must parse whole — flags included.
+/// Every `lore` line inside a FENCED BLOCK parses whole — flags included.
 ///
-/// The check above strips flags, deliberately: the command reference documents optional
-/// arguments as `lore health [--strict]`, and `[--strict]` is not a flag. So a flag renamed in
-/// production leaves the documented invocation invalid and nothing notices. A fenced block is
-/// different in kind — everything in one is code, verbatim, which is why the drain protocol's
-/// steps are written that way — so its lines can be put to clap as written.
+/// The check above strips flags deliberately: the command reference documents optional arguments
+/// as `lore health [--strict]`, and `[--strict]` is not a flag. A fenced block is different in
+/// kind — everything in one is code, verbatim, which is why the drain protocol's steps are
+/// written that way — so its lines go to clap as written.
 ///
 /// `--help` short-circuits clap AFTER argument parsing, so an unknown flag is rejected (exit 2,
 /// `unexpected argument '--dryrun' found`) while a valid one prints help. Nothing executes.
 ///
-/// Measured across the shipped skills when this was added: 12 fenced invocations, 0 rejected.
-/// The `[--flag]` table rows stay unchecked — validating those needs a table of which
-/// documentation notations to strip, and every notation-guessing gate in this suite's history
-/// has failed the build on ordinary prose instead.
+/// The `[--flag]` table rows stay unchecked. Reaching them needs a table of which documentation
+/// notations to strip, and a check that cannot tell notation from a command fails the build on
+/// prose — which is the failure mode this whole file exists to avoid.
 #[test]
 fn every_fenced_lore_invocation_parses_including_its_flags() {
     let mut checked = 0;

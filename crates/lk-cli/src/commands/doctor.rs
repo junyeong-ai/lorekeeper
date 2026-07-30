@@ -118,39 +118,27 @@ struct PageDefects {
     unanswered: Vec<&'static str>,
 }
 
-/// The `llm_inputs` sections this page was told to have filled and never was.
+/// The `llm_inputs` sections this page records an input for and no answer to.
 ///
 /// The pipeline stamps `llm_inputs.<key>` when it enqueues the work and whoever does the work
-/// stamps `<key>_done`; a cache hit is the two being equal, and emptiness never signals either
-/// way. So a page carrying the input and not the answer has work that was enqueued and lost:
-/// `lore queue count` reports nothing pending, and nothing will re-enqueue it either, because
-/// `llm_cache::lookup` runs when a page is RE-RENDERED and only today's date gets re-rendered.
-/// `lore ingest --date <that day>` is what re-enqueues it — the lookup keys on the `_done`
-/// marker, so an absent one is a miss.
+/// stamps `<key>_done` with the same hash; a cache hit is the two being equal, and emptiness
+/// signals neither way. So a page carrying the input without a matching answer holds work that
+/// was enqueued and lost — `lore queue count` reports nothing pending, and nothing re-enqueues
+/// it on its own, because `llm_cache::lookup` runs when a page is RE-RENDERED and a scheduled
+/// run only re-renders the current date. `lore ingest --date <that day>` is the recovery: the
+/// lookup keys on the `_done` marker, so an absent or mismatched one is a miss.
 ///
-/// This detects residue, and the residue it was written for has a known cause. Measured on a
-/// 2,110-page vault: 38 pages, 75 sections, every one of them dated 2026-05-27 to 2026-06-05
-/// and none after — the window between the materialized-view LLM cache landing and the four
-/// commits that made completion uniformly marker-signalled. Every affected page lost ALL of its
-/// enqueued sections together, never one while another on the same page succeeded, which is a
-/// page's citations and markers never being written rather than a section-level miss. The same
-/// event is why concepts from those days sit uncited.
+/// Three states are outstanding, and each is a way the marker cannot answer the input: absent,
+/// carrying a different hash (an input the page no longer has), or an input recorded as anything
+/// but a string, which the pipeline never writes and nothing can equal.
 ///
-/// So this is not a check for a live bug; it is the check that was missing while one existed.
-/// Nothing else reports it — the one visible trace was indirect and only for concepts, which
-/// surface in `lore graph lint`'s observation channel as orphans, mixed in with concepts that
-/// simply have not been cited yet. `doctor` reported no defects and the queue reported no work
-/// for two months while the residue sat there.
+/// Read as frontmatter, never as text: the pair is a frontmatter record, so a body discussing the
+/// format is prose. `parse_page` owns that boundary — the first line is exactly `---`, a
+/// delimiter stands alone on its line, CRLF and a BOM are handled — and is the only reader of it.
 ///
-/// Read as frontmatter, never as text. The marker pair is a frontmatter record, so a body that
-/// merely discusses the format is prose — and `parse_page` is where "the first line is exactly
-/// `---`, and a delimiter stands alone on its line" is already decided, along with CRLF and a
-/// BOM. A substring scan for `llm_inputs:` reported a page whose Synthesis explained the
-/// contract as having an unanswered `summary`.
-///
-/// Both keys come from `TargetKind` — `llm_inputs_key` and the `completion_key` derived from it
-/// — so a new task kind is covered without being listed here, and the `_done` suffix rule is
-/// not restated where it could drift from the type that owns it.
+/// Both keys come from `TargetKind`: `llm_inputs_key` and the `completion_key` derived from it,
+/// so a new task kind is covered without being listed here and the `_done` suffix rule stays
+/// with the type that owns it.
 fn unanswered_sections(page: &lk_core::frontmatter::VaultPage) -> Vec<&'static str> {
     use strum::IntoEnumIterator;
 
@@ -158,16 +146,6 @@ fn unanswered_sections(page: &lk_core::frontmatter::VaultPage) -> Vec<&'static s
         .frontmatter
         .get(lk_core::frontmatter::field::LLM_INPUTS);
     let recorded = |key: &str| inputs.and_then(|v| v.get(key)).and_then(|v| v.as_str());
-    // The marker must EQUAL the input hash, not merely exist. `llm_cache::lookup` is cached
-    // exactly on that equality, and the drain is told to copy the hash verbatim — so a marker
-    // left over from a superseded input marks the section answered for an input that is no
-    // longer the one on the page. Asking only whether a `_done` key is present read that as
-    // done and hid the outstanding work, which is the one thing this audit exists to find.
-    //
-    // An input recorded as anything but a string is reported too. The pipeline writes a hex
-    // hash, so a sequence or a map there is malformed — and nothing can equal it, which makes
-    // the section unanswerable rather than answered. Reading it through `as_str()` alone made a
-    // malformed record indistinguishable from no record at all.
     let mut found: Vec<&'static str> = lk_queue::TargetKind::iter()
         .filter(|kind| {
             inputs
@@ -232,7 +210,7 @@ fn audit(roots: &[PathBuf]) -> AuditReport {
             };
             scanned += 1;
             // `scan_defects` reads the bytes as written — trailing whitespace and CRLF are the
-            // point there. The marker pair is a frontmatter record, so it is read as one, and a
+            // point there — while the marker pair is a frontmatter record and is read as one. A
             // page whose frontmatter will not parse is unverifiable rather than clean.
             let defects = scan_defects(&text);
             let unanswered = match lk_core::frontmatter::parse_page(&text) {
@@ -327,10 +305,8 @@ mod tests {
     }
 
     /// A page that WRITES ABOUT the contract is not a page that violates it. The marker pair is
-    /// a frontmatter record; prose is prose. A substring scan for `llm_inputs:` reported this
-    /// exact page as carrying an unanswered `summary` — a vault whose concepts include its own
-    /// tooling is the ordinary case, so the false positive was reachable in the place the check
-    /// is most likely to be read.
+    /// a frontmatter record; prose is prose. A vault whose concepts include its own tooling is
+    /// the ordinary case, so this shape is reachable wherever the contract is documented.
     #[test]
     fn a_page_whose_body_explains_the_marker_contract_is_not_a_defect() {
         let page = "---\nid: markers\ntype: concept\ntitle: \"Completion markers\"\n---\n\n\
@@ -347,10 +323,9 @@ mod tests {
         );
     }
 
-    /// A marker left over from a superseded input is not an answer to the input on the page.
+    /// A marker left over from a superseded input is not an answer to the input on the page:
     /// `llm_cache::lookup` caches on the two being EQUAL and the drain copies the hash verbatim,
-    /// so a mismatch is outstanding work — and asking only whether a `_done` key exists read it
-    /// as done, hiding exactly what this audit exists to find.
+    /// so a mismatch is outstanding work.
     #[test]
     fn a_marker_from_a_superseded_input_is_not_an_answer() {
         let stale = "---\nid: a\nllm_inputs:\n  summary: \"new\"\n  summary_done: \"old\"\n---\n\n## Summary\n";
@@ -360,9 +335,9 @@ mod tests {
         assert!(unanswered(matching).is_empty());
     }
 
-    /// A key that merely LOOKS like a record is not one. A top-level `summary:` is a sibling of
-    /// `llm_inputs`, not an entry in it, and an `llm_inputs` that is a scalar records nothing —
-    /// both were misread by a line-oriented scan, in opposite directions.
+    /// A key that merely LOOKS like a record is not one: a top-level `summary:` is a sibling of
+    /// `llm_inputs` rather than an entry in it, and an `llm_inputs` that is a scalar records
+    /// nothing at all.
     #[test]
     fn only_entries_inside_the_llm_inputs_mapping_count() {
         let sibling = "---\nid: a\nsummary: \"h1\"\nllm_inputs:\n  concepts: \"h2\"\n  concepts_done: \"h2\"\n---\n\n## Summary\n";
@@ -377,8 +352,7 @@ mod tests {
     }
 
     /// An input hash recorded as anything but a string is malformed — the pipeline writes hex —
-    /// and nothing can equal it, so the section is unanswerABLE rather than answered. Reading
-    /// only strings made that indistinguishable from no record at all.
+    /// and nothing can equal it, so the section is unanswerABLE rather than answered.
     #[test]
     fn an_input_recorded_as_a_non_string_can_never_be_answered() {
         for value in ["[\"h1\"]", "{a: 1}", "123", "true"] {
@@ -391,10 +365,9 @@ mod tests {
         }
     }
 
-    /// A flow-style mapping is the same record written inline, and the page it describes is the
+    /// A flow-style mapping is the same record written inline, and the page carrying one is the
     /// worst case to miss: `lk_vault::set_llm_input` REFUSES that shape rather than writing past
     /// it, so such a page can never receive a `_done` marker and is unanswered by construction.
-    /// A line-oriented scan for `  <key>: ` could not see it; reading the parsed frontmatter can.
     #[test]
     fn an_inline_mapping_records_the_same_inputs_as_a_block_one() {
         let flow = "---\nid: a\nllm_inputs: {summary: \"h1\"}\n---\n\n## Summary\n";

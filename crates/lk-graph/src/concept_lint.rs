@@ -115,11 +115,9 @@ pub fn scan_concept_pages(
         let mut names = vec![file_stem.clone()];
         let (category, body) = match frontmatter::parse_page(&raw) {
             Ok(page) => {
-                // A PRESENT field is reported as written, whatever its YAML type. Reading only
-                // strings made `category: 123` indistinguishable from no category at all, so a
-                // value that can match no configured id passed the check that exists to catch
-                // exactly that. `Value::to_string` renders a non-string faithfully, which is
-                // what the finding has to show for it to be actionable.
+                // A PRESENT field is reported as written, whatever its YAML type: a value that
+                // can match no configured id is exactly what this check is for, and reading only
+                // strings would make `category: 123` indistinguishable from no category.
                 let category = page.frontmatter.get("category").map(|v| match v.as_str() {
                     Some(s) => s.to_owned(),
                     None => v.to_string(),
@@ -172,11 +170,9 @@ pub fn find_invalid_categories(
     pages
         .iter()
         .filter_map(|page| {
-            // An EMPTY value is the uncategorised state, not an invalid category. That is what
-            // the rest of the vault already means by it: `templates/concept.md.jinja` renders
-            // the field under `{% if category %}`, and `wiki concepts` filters the empty string
-            // out of the registry. Flagging it here made this the one reader that disagreed,
-            // and the finding it produced read `category=` with nothing after it.
+            // An EMPTY value is the uncategorised state, not an invalid category — the reading
+            // the rest of the vault already takes: `templates/concept.md.jinja` renders the field
+            // under `{% if category %}`, and `wiki concepts` filters it out of the registry.
             let category = page.category.as_deref().filter(|c| !c.is_empty())?;
             if valid_ids.contains(category) {
                 return None;
@@ -215,15 +211,12 @@ pub struct DuplicateConcept {
 /// when `lk_core::concept::identity_key` reduces them to one identity — no similarity guess is
 /// ever made.
 ///
-/// KNOWN LIMITATION, and it is a false positive in a gating channel. `identity_key` builds on
-/// `slugify`, which DELETES a symbol rather than representing it, so a symbol that carries the
-/// name is gone before the fold runs: `C`, `C++` and `C#` all reduce to `c` and are reported as
-/// three pages answering to one name. The report is honest about the identity model — the same
-/// key drives the pipeline's alias index, so an extraction naming `C++` really can be routed
-/// onto the `C` page — but the two concepts are distinct and the finding gates. The fix belongs
-/// in `identity_key`: fold SEPARATORS only (keeping the numeral exception) instead of inheriting
-/// slugify's deletions. That changes which names dedup together, so it is a decision about the
-/// vault's concept identity rather than a lint tweak.
+/// One shape reaches this channel that is NOT a defect about the vault: `C`, `C++` and `C#` all
+/// reduce to `c`, because `identity_key` builds on `slugify`, which deletes a symbol rather than
+/// representing it. The report is honest about the identity model — the same key drives the
+/// pipeline's alias index, so an extraction naming `C++` really can be routed onto the `C` page —
+/// but the concepts are distinct and the finding gates. The boundary and what it would take to
+/// move it live on `identity_key`.
 ///
 /// A scored variant (Sørensen-Dice over slug character bigrams) preceded this and was
 /// measured on a 1,599-concept vault: 298 findings, of which one was a real duplicate. The
@@ -456,8 +449,7 @@ mod tests {
 
     #[test]
     fn a_category_that_is_not_a_string_is_still_a_category() {
-        // Reading only strings made `category: 123` indistinguishable from no category, so a
-        // value that can match no configured id passed the check that exists to catch it.
+        // A value that can match no configured id is what this check is for, whatever its type.
         let tmp = TempDir::new().unwrap();
         write_concept(tmp.path(), "x", "id: x\ncategory: 123");
         let found = find_invalid_categories(&scan(tmp.path()), &cats(&["ai-ml"]));
@@ -470,10 +462,8 @@ mod tests {
 
     #[test]
     fn an_empty_category_is_uncategorised_not_invalid() {
-        // The rest of the vault already means "uncategorised" by an empty value:
-        // `templates/concept.md.jinja` renders the field under `{% if category %}`, and
-        // `wiki concepts` filters the empty string out of the registry. This reader used to
-        // disagree, reporting a violation whose message read `category=` with nothing after it.
+        // The reading the rest of the vault takes: `templates/concept.md.jinja` renders the field
+        // under `{% if category %}`, and `wiki concepts` filters it out of the registry.
         let tmp = TempDir::new().unwrap();
         write_concept(tmp.path(), "x", "id: x\ncategory: \"\"");
         assert!(find_invalid_categories(&scan(tmp.path()), &cats(&["ai-ml"])).is_empty());

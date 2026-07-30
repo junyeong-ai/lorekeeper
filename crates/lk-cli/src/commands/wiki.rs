@@ -56,18 +56,15 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
 
 /// Regenerate every page derived from the vault's contents, in one call.
 ///
-/// Each of these is a materialized view, true only while something re-derives it — and every
-/// caller that adds pages has to re-derive all of them. Listing the commands at each call site is
-/// what left `log.md` refreshed by nothing while the catalog and the map were refreshed by five
-/// separate places: the scheduled pipeline and four skills. One command means a caller cannot
-/// name a subset, and a page added to the set reaches every caller without any of them changing.
+/// Each of these is a materialized view, true only while something re-derives it, and every
+/// caller that adds pages has to re-derive all of them. One command is what makes naming a subset
+/// impossible: a caller cannot refresh two of three, and a page added to the set reaches every
+/// caller without any of them changing.
 ///
 /// Every view is attempted even when an earlier one fails, and the failures are reported
 /// together. The views are independent — one failing says nothing about the others — and the
-/// scheduled pipeline is deliberately not `set -e` for exactly this reason: a stage that cannot
-/// run must not decide for the stages after it. Collapsing three of its stages into one command
-/// would otherwise have imported the fail-fast semantics that file rejects, leaving the later
-/// views stale on the run that reported the failure.
+/// scheduled pipeline is deliberately not `set -e` for the same reason: a stage that cannot run
+/// must not decide for the stages after it.
 ///
 /// `lore schema` stays separate: `AGENTS.md` derives from config, not from the vault, so a run
 /// that only added pages has nothing to refresh there.

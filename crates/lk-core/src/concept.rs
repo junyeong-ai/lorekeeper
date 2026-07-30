@@ -41,54 +41,50 @@ pub fn slugify(name: &str) -> Option<String> {
 
 /// The identity a name claims, as opposed to the ADDRESS [`slugify`] writes it at.
 ///
-/// The two answer different questions. A slug has to stay readable as a filename, so it
-/// keeps every separator; identity keeps only the separators that mean something. Every
-/// break is typography — `Vector DB`, `vector-db` and `vectordb` are one name written three
-/// ways, and so are `claude-35` and `claude35` — EXCEPT one between two numerals, which is
-/// the name itself: positional notation makes `3-5` two numerals and `35` one, so
-/// `Claude 3.5` and `Claude 35` are different names, as are `GPT-4.1`/`GPT-41` and
-/// `Web 2.0`/`web20`. Dropping every separator would fold those together, and
-/// version-numbered names are the single most common shape in a technology vault.
+/// The two answer different questions. A slug has to stay readable as a filename, so it keeps
+/// every separator; identity keeps only the separators that mean something. Every break is
+/// typography — `Vector DB`, `vector-db` and `vectordb` are one name written three ways, and so
+/// are `claude-35` and `claude35` — EXCEPT one between two numerals, which is the name itself:
+/// positional notation makes `3-5` two numerals and `35` one, so `Claude 3.5` and `Claude 35`
+/// are different names, as are `GPT-4.1`/`GPT-41` and `Web 2.0`/`web20`. Dropping every
+/// separator would fold those together, and version-numbered names are the single most common
+/// shape in a technology vault.
 ///
-/// Nothing else is folded. Word order and every character are identity, so `agent-harness`
-/// and `harness-agent`, `http` and `https`, `doc-hub` and `docs-hub` are all DIFFERENT
-/// names — whether they name the same concept is a question about meaning, which this
-/// cannot and must not answer.
+/// Nothing else is folded. Word order and every character are identity, so `agent-harness` and
+/// `harness-agent`, `http` and `https`, `doc-hub` and `docs-hub` are all DIFFERENT names —
+/// whether they name the same concept is a question about meaning, which this cannot and must
+/// not answer.
 ///
-/// Two boundaries this deliberately does not cross. A break between digits is kept even
-/// when it only GROUPS one number for reading, so `978-0-13-468599-1` and `9780134685991`
-/// are two names; that is the price of telling `Claude 3.5` from `Claude 35`, and version
-/// numbers are what a technology vault is full of while grouped identifiers are not. And
-/// separator TYPE is already gone before this runs — [`slugify`] maps `:`, `.`, `/` and
-/// space alike, so `16:9` and `16-9` share an identity. Recovering that would mean a slug
-/// that is no longer filename-safe, which is the one thing a slug must be.
+/// Single-sourced because two consumers must agree exactly: `lk_pipeline`'s alias index resolves
+/// an extracted name to the page that owns it, and `lk_graph`'s duplicate lint reports two pages
+/// owning one name. The lint only reports, but the index ACTS — it can fold an extraction into an
+/// established page — so the fold has to be one no reviewer would overturn.
 ///
-/// Single-sourced because two consumers must agree exactly: `lk_pipeline`'s alias index
-/// resolves an extracted name to the page that owns it, and `lk_graph`'s duplicate lint
-/// reports two pages owning one name. The lint only reports, but the index ACTS — it can
-/// fold an extraction into an established page — so the fold has to be one no reviewer
-/// would overturn.
+/// # Boundaries
 ///
-/// KNOWN DEFECT, with the obstacle to fixing it, because it is not obvious from here. Because
-/// identity is derived from the ADDRESS, it inherits slugify mapping every non-alphanumeric to a
-/// separator and trimming the ends — so a symbol that IS the name is gone before the fold runs.
-/// `C`, `C++` and `C#` all reduce to `c`: the duplicate lint reports three distinct languages as
-/// one name on three pages and gates on it, and the index can route an extraction naming `C++`
-/// onto the `C` page.
+/// **A break between digits is kept even when it only GROUPS one number for reading**, so
+/// `978-0-13-468599-1` and `9780134685991` are two names. That is the price of telling
+/// `Claude 3.5` from `Claude 35`, and version numbers are what a technology vault is full of
+/// while grouped identifiers are not.
 ///
-/// The rule that fixes it is positional — a run of non-alphanumerics separates only with an
-/// alphanumeric on BOTH sides, so a trailing `++` is content — but it cannot be applied here.
-/// It requires reading the NAME, and `slugify_and_identity_key_are_idempotent` pins
-/// `identity_key(slugify(x)) == identity_key(x)` because the index writes with a name's key and
-/// reads with a slug's; any rule that preserves what slugify trims breaks that equality, and
-/// the index silently splits into a write key and a read key that never meet. Making slugify
-/// preserve the symbols instead is not available either: `#` in a slug makes
-/// `wiki/concepts/c#.md` parse as an anchor, so links to it would not resolve.
+/// **Separator TYPE is not identity.** [`slugify`] maps `:`, `.`, `/` and space alike, so `16:9`
+/// and `16-9` share one. Distinguishing them would claim that punctuation CHOICE is the name,
+/// which is the typography claim this fold exists to deny.
 ///
-/// So the fix is to decouple identity from the address — register a page under every name's key
-/// AND its slug's key rather than requiring the two to coincide. That changes which names dedup
-/// together and, for a page whose current address folds two names, which page a citation lands
-/// on, so it is a decision about the vault's concept identity rather than an edit.
+/// **A symbol that IS the name is lost, and this one is a live defect.** Identity derives from
+/// the address, so it inherits slugify mapping every non-alphanumeric to a separator and trimming
+/// the ends: `C`, `C++` and `C#` all reduce to `c`. The duplicate lint reports that as three
+/// pages answering to one name, and the index can route an extraction naming `C++` onto the `C`
+/// page. Two apparent fixes are closed. Reading the NAME instead — a run of non-alphanumerics
+/// separates only with an alphanumeric on both sides, so a trailing `++` is content — breaks
+/// `identity_key(slugify(x)) == identity_key(x)`, which the index depends on because it writes
+/// with a name's key and reads with a slug's; without it the index splits into a write key and a
+/// read key that never meet. Teaching slugify to keep the symbols is closed too: `#` in a slug
+/// makes `wiki/concepts/c#.md` parse as an anchor. What remains is to decouple identity from the
+/// address — register a page under every name's key AND its slug's key rather than requiring the
+/// two to coincide — which changes which names dedup together, and for a page whose address folds
+/// two names changes where a citation lands. That is a decision about the vault's concept
+/// identity rather than a local repair.
 pub fn identity_key(name: &str) -> Option<String> {
     let slug = slugify(name)?;
     let mut key = String::with_capacity(slug.len());

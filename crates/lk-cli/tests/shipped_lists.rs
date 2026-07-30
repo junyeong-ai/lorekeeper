@@ -86,9 +86,9 @@ fn every_target_an_installer_asks_for_is_one_the_release_builds() {
 
     for script in ["scripts/install.sh", "scripts/install.ps1"] {
         let body = read(&repo_root().join(script));
-        // Anchored on the architecture prefix rather than on a well-formed suffix: a rule that
-        // only recognized `-musl`/`-darwin`/`-msvc` endings could not see a MISSPELLED target at
-        // all, so it passed vacuously on exactly the drift it was written for.
+        // Anchored on the architecture prefix, not on a well-formed suffix: recognizing only
+        // `-musl`/`-darwin`/`-msvc` endings would not see a MISSPELLED target at all, which is
+        // the drift this exists for.
         let named: Vec<&str> = body
             .split(['\'', '"'])
             .filter(|token| token.starts_with("x86_64-") || token.starts_with("aarch64-"))
@@ -105,11 +105,11 @@ fn every_target_an_installer_asks_for_is_one_the_release_builds() {
 
 /// No skill spells out a vocabulary `AGENTS.md` already generates.
 ///
-/// Three of them enumerated the `document_type` values in prose, which is a copy of a list the
-/// schema generator emits from `DOCUMENT_TYPES` into the very file those skills are told to read
-/// ("derive everything from AGENTS.md — never hardcode"). Detecting drift between the copies took
-/// a windowed word search, because `data` is an ordinary English word; deleting the copies takes
-/// nothing, and leaves the generated page as the only place the vocabulary appears.
+/// Enumerating the `document_type` values in a skill copies a list the schema generator emits
+/// from `DOCUMENT_TYPES` into the very file those skills are told to read ("derive everything
+/// from AGENTS.md — never hardcode"). The generated page is the only place the vocabulary
+/// belongs; a copy has to be deleted rather than kept in sync, since `data` is an ordinary
+/// English word and detecting drift between the copies takes a windowed search.
 #[test]
 fn no_skill_restates_a_vocabulary_agents_md_generates() {
     for skill in glob_skill_markdown() {
@@ -219,13 +219,10 @@ fn everything_that_writes_pages_refreshes_the_pages_derived_from_the_vault() {
             if derivation != Derivation::VaultContents {
                 continue;
             }
-            // The full invocation only. A bare `` `index` ``/`` `log` ``/`` `map` `` was also
-            // banned for a while, because "`queue apply` + `backlinks-sync` + `index` + `map`"
-            // had survived in a report step — but those are ordinary English words, and the ban
-            // failed the build on "write the reason to the run `log`" and "a `map` from slug to
-            // title", advising `lore wiki refresh` for neither. The informal spellings are gone
-            // from the skills; a check that cannot tell prose from a command list is not what
-            // keeps them gone.
+            // The full invocation only. `index`, `log` and `map` are also ordinary English
+            // words, so banning the bare form fails the build on "write the reason to the run
+            // `log`" — a check that cannot tell prose from a command list is worse than the
+            // drift it looks for.
             let named = format!("lore {command}");
             assert!(
                 !body.contains(&named),
@@ -332,9 +329,9 @@ fn every_source_in_the_example_config_validates_against_its_adapter() {
 }
 
 /// `rust-version` is the one the toolchain enforces, and the READMEs are the only other place it
-/// belongs: they are what a person reads to decide whether they can build this. CI used to restate
-/// it in the job name and the toolchain pin as well — four copies of one number — and reads it out
-/// of the manifest now, so there is nothing left there to compare.
+/// belongs: they are what a person reads to decide whether they can build this. CI reads it out of
+/// the manifest, so a restatement there would be a fourth copy of one number and there is nothing
+/// in the workflow to compare.
 #[test]
 fn both_readmes_state_the_msrv_the_manifest_declares() {
     let root = repo_root();

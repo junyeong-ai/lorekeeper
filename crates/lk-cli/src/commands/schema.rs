@@ -657,10 +657,10 @@ mod tests {
 
     #[test]
     fn agents_md_defines_the_ownership_column() {
-        // The Owner column decides whether an agent writes a section, so a reader who does
-        // not already know the vocabulary cannot act on the tables. Every authoring skill
-        // used to restate the rule in its own prose — three copies to drift, and the one
-        // skill that lacked it was the one creating the page format with no pipeline at all.
+        // The Owner column decides whether an agent writes a section, so a reader who does not
+        // already know the vocabulary cannot act on the tables. Stating it here rather than in
+        // each authoring skill is what keeps one definition: a skill that restates it is a copy
+        // to drift, and a skill that omits it leaves its reader unable to act at all.
         //
         // `machine` cannot be equated with any ONE command: `lore ingest` writes only the
         // daily/document/work-log rows, while `lore synthesis` writes every machine row on
@@ -789,8 +789,8 @@ mod tests {
     }
 
     /// The generated page carries the `document_type` vocabulary, which is what lets every skill
-    /// point at it instead of restating the values — three of them used to, and the copies were
-    /// only detectable by a windowed word search, because `data` is an ordinary English word.
+    /// point at it instead of restating the values. A restatement is only detectable by a
+    /// windowed word search, since `data` is an ordinary English word.
     #[test]
     fn agents_md_states_the_document_type_vocabulary() {
         let content = render_agents_md(Locale::Ko, &lk_core::config::VaultDirs::default(), true);

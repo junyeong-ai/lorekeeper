@@ -105,11 +105,10 @@ pub enum GraphCommand {
 /// destination does not exist, a catalog that disagrees with the disk, a category outside the
 /// configured vocabulary, one name answering to two pages, a filename that disagrees with its
 /// own normalized slug, a derived count no sweep could write. What a vault in good standing
-/// legitimately carries exits 0 even though it is reported — the concepts nothing cites yet,
-/// the hubs, a disagreement between sources an audit recorded, a concept whose evidence changed
-/// since its last audit. Those are never empty in a living vault, so counting them makes the
-/// exit code permanently non-zero and therefore uninformative, which is what forced every
-/// caller to wrap the command in `|| true` and every skill to name the lists to ignore.
+/// legitimately carries is reported and exits 0 — the concepts nothing cites yet, the hubs, a
+/// disagreement between sources an audit recorded, a concept whose evidence changed since its
+/// last audit. Those are never empty in a living vault, so counting them would make the exit
+/// code permanently non-zero, and a verdict that is never clean carries no information.
 pub fn run(
     opts: &GlobalOptions,
     cmd: GraphCommand,
@@ -173,16 +172,14 @@ fn run_inner(
     );
     let scan_dirs = command_scan_dirs(integrity, &rc.graph.scope.dirs);
 
-    // One scan over `scan_dirs`, kept whole: it is the existence universe, and it is the page
-    // set link integrity asks about — a link is broken wherever it was written. `pages` narrows
-    // it to the analysis scope for the graph's nodes and edges, which is a no-op for the
-    // analysis commands (their `scan_dirs` IS `scope.dirs`) and the intended subset for the
-    // integrity ones.
+    // One scan, kept whole: it is both the existence universe and the page set link integrity
+    // asks about, since a link is broken wherever it was written. `pages` narrows it to the
+    // analysis scope for the graph's nodes and edges — a no-op for the analysis commands, whose
+    // scan IS their scope.
     let mut scan_cfg = rc.graph.clone();
     scan_cfg.scope.dirs = scan_dirs;
     // The universe is the vault, so `scope.exclude` has no say in it: an excluded page still
-    // exists, and applying the globs here reported a link to one as broken while the file sat on
-    // disk. The globs narrow the analysis, and are applied to the node set below.
+    // exists. The globs narrow the analysis and are applied to the node set below.
     if integrity {
         scan_cfg.scope.exclude = Vec::new();
     }
@@ -443,8 +440,7 @@ fn run_audit_candidates(
         output::print_audit_candidates(&report);
     }
     // A worklist, not a defect: a concept whose evidence changed since its last audit says
-    // nothing false about the vault. Exit 0 so `/lore-wiki audit` can read the list under
-    // `set -e` instead of being told to ignore the exit code.
+    // nothing false about the vault, so the list can be read under `set -e`.
     Ok(false)
 }
 
@@ -532,17 +528,12 @@ fn run_merge(
     Ok(false)
 }
 
-/// The directories a graph command reads. Analysis commands (hubs/cluster/…) read
-/// `scope.dirs` only — that narrowing is the whole point of the setting. Integrity commands
+/// The directories a graph command reads. Analysis commands (hubs/cluster/…) read `scope.dirs`
+/// only — that narrowing is the whole point of the setting. Integrity commands
 /// (lint/broken/orphans/index-sync) read the VAULT ROOT, because they answer "does a page exist
-/// at this id", and that question has an exact answer only if every page was looked at.
-///
-/// Reading `scope.dirs` ∪ the four page dirs was the earlier answer, and it made "not scanned"
-/// indistinguishable from "not there": a link to an ordinary Obsidian note under a user's own
-/// folder was reported broken for a file sitting on disk. Ruling those out by refusing to judge
-/// them traded that for the opposite miss — a link to a nonexistent path in an unwalked folder
-/// went unreported. Scanning the vault answers both exactly, and `scan_vault` skips
-/// dot-directories so `.trash` (a DELETED page) never resolves.
+/// at this id", and that question is exact only over every page there is. Anything narrower
+/// makes "not scanned" indistinguishable from "not there", in whichever direction the narrowing
+/// resolves it. `scan_vault` skips dot-directories, so `.trash` never resolves.
 fn command_scan_dirs(integrity: bool, scope_dirs: &[PathBuf]) -> Vec<PathBuf> {
     if integrity {
         // The vault root: an empty relative path joins to `root` itself.
@@ -619,7 +610,6 @@ mod tests {
 
     #[test]
     fn integrity_commands_read_the_whole_vault_whatever_the_scope() {
-        // "Does a page exist at this id" has an exact answer only if every page was looked at.
         // An empty relative path joins to the vault root.
         for scope in [vec![p("wiki")], vec![p("wiki/concepts")], vec![]] {
             assert_eq!(command_scan_dirs(true, &scope), vec![PathBuf::new()]);

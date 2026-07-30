@@ -36,25 +36,24 @@ on-disk state, never from a cached snapshot.
   page linking a `<daily>/` page is not broken, and a concept linked only from
   `<daily>/` is not an orphan. Reserved meta pages
   (`lk_core::vault_path::RESERVED_WIKI_FILES`) are never orphans or index-drift.
-  The universe answers two separate questions and conflating them produced a false positive:
-  `is_resolvable` (a file exists at this id, **catalogs included** — they are files, and
-  excluding them made every link to `wiki/index.md` broken) and `is_knowledge` (…and it is not
-  a generated catalog — the orphan-connectivity question, where letting a link to `index.md`
-  count would exempt the very pages detection looks for). It is built from a **vault-ROOT**
-  scan, so "not in `ids`" means not in the vault rather than not looked at: covering only
-  `scope.dirs` ∪ page dirs reported a user's own Obsidian note as a broken destination, and
-  refusing to judge unwalked destinations instead silenced both a link to a nonexistent path
-  in an unwalked folder and a link pointing outside the vault. `scan_vault` skips
-  dot-directories, so `.trash` — where Obsidian puts a DELETED page — never resolves.
+  The universe answers two separate questions, and they must not be conflated: `is_resolvable`
+  (a file exists at this id, **catalogs included** — they are files, so a page linking one links
+  something real) and `is_knowledge` (…and it is not a generated catalog — the
+  orphan-connectivity question, where counting a link to `index.md` would exempt the very pages
+  detection looks for). Built from a **vault-ROOT** scan, so "not in `ids`" means not in the
+  vault rather than not looked at; anything narrower makes those indistinguishable in whichever
+  direction it resolves them. `scan_vault` skips dot-directories, so `.trash` — where Obsidian
+  puts a DELETED page — never resolves. `graph.scope.exclude` narrows the ANALYSIS only: an
+  excluded page still exists, so integrity commands scan without the globs and apply them to the
+  node set.
 - **`graph::broken_links` is a free function over (pages, existence), not a `WikiGraph`
-  method** — a broken link involves no node, edge or community, and computing it inside the
-  graph is what silently scoped it to `graph.scope.dirs` on the SOURCE side as well: only wiki
-  pages were checked, so the concept links `queue apply` writes on daily pages were not.
-  Measured on a 2,106-page vault: 43 links pointing at pages that do not exist while `lint`
-  read clean. Both `lint` and `broken` pass every scanned page; the scope narrowing applies
-  only to the graph's nodes. Reserved meta pages are skipped as SOURCES — they are re-derived
-  WHOLE, and `wiki refresh` runs before `graph lint` in the pipeline, so a stale link in one is
-  repaired by the same run rather than reported — but they remain valid DESTINATIONS.
+  method** — a broken link involves no node, edge or community, so computing it inside the graph
+  would scope it to `graph.scope.dirs` on the SOURCE side, and a link is broken wherever it was
+  written (`queue apply` writes concept links on daily pages). Both `lint` and `broken` pass
+  every scanned page; the scope narrowing applies only to the graph's nodes. Reserved meta pages
+  are skipped as SOURCES — they are re-derived WHOLE, and `wiki refresh` runs before `graph lint`
+  in the pipeline, so a stale link in one is repaired by the same run rather than reported — but
+  they remain valid DESTINATIONS.
 - **Exit codes**: 0 = every claim the vault makes holds, 1 = it contradicts itself, 2 = runtime
   error. Non-zero is reserved for a claim that is FALSE and has a named repair — a link whose
   destination is absent, a catalog that disagrees with the disk, a category outside the
@@ -69,12 +68,11 @@ on-disk state, never from a cached snapshot.
   carries no information — which is what had callers wrapping the command in `|| true` and
   skills naming the lists to ignore, and a broken link got ignored along with them.
   `Violations::count`/`Observations::count` are what the exit code and the summary line read,
-  and each DESTRUCTURES its own struct, so adding a field to a channel does not compile until
-  it is counted. A test asserting the sum against a hand-built fixture was tried first and
-  established almost nothing — a new field satisfies the compiler as `Vec::new()`, the suite
-  stays green, and `lint` exits 0 on a vault whose own JSON reports the violation. The serde
-  test remains for the other half: that the fields are counted correctly, one `.len()` per
-  list, none doubled.
+  and each DESTRUCTURES its own struct — including the nested `IndexSyncReport`, which counts
+  what it holds — so adding a field to a channel does not compile until it is counted. A test
+  over a hand-built fixture cannot establish that, since a new field satisfies the compiler as
+  `Vec::new()`; the serde test covers the other half, that the fields are counted correctly, one
+  `.len()` per list, none doubled.
 - **`suggest_links`**: pairs in the same Louvain community with no edge that share at
   least `graph.cluster.suggest_min_shared_neighbors` neighbors, ranked by their
   **Adamic–Adar index** (Σ 1/ln|N(z)| over shared neighbors z), descending. It runs on the
@@ -186,12 +184,11 @@ on-disk state, never from a cached snapshot.
   — ordered rather than hashed, so output order needs no final sort — which costs a log
   factor no vault will notice and replaces the O(n²) pair scan the similarity check needed.
   **A finding is therefore never a similarity guess**: the two names reduce to one identity
-  under a rule with no score and no threshold. It is NOT true that the rule folds only
-  typography — `identity_key` inherits `slugify`, which deletes a symbol instead of
-  representing it, so `C` ~ `C++` ~ `C#` all fold to `c` and gate as duplicates. The same key
-  drives the alias index, so that is a real defect in concept identity rather than a lint bug,
-  and the fix (fold separators only, keep the numeral exception) changes which names dedup
-  together. What the lint CANNOT see is the defect that
+  under a rule with no score and no threshold. The rule does NOT fold only typography:
+  `identity_key` inherits `slugify`, which deletes a symbol instead of representing it, so
+  `C` ~ `C++` ~ `C#` fold to `c` and gate as duplicates. The same key drives the alias index, so
+  that is a defect in concept identity rather than in the lint — its boundary and what moving it
+  would cost are recorded on `identity_key`. What the lint CANNOT see is the defect that
   never becomes two pages — the router folding an extraction into an established page
   leaves nothing to compare — which is why the fold itself has to be narrow rather than
   the lint forgiving.

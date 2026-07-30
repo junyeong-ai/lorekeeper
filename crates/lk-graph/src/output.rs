@@ -67,10 +67,9 @@ pub struct Violations {
 /// decision rather than because anything is wrong: the concepts nothing cites yet, the pages
 /// everything cites, a disagreement between sources that an audit deliberately recorded.
 ///
-/// Kept out of the exit code on purpose. A living vault always holds some of these — every
-/// extraction mints concepts before anything cites them — so counting them makes the exit code
-/// permanently non-zero, which is how it came to mean nothing: every caller wrapped the command
-/// in `|| true` and every skill had to name the lists its reader should ignore.
+/// Deliberately out of the exit code. A living vault always holds some of these — every
+/// extraction mints concepts before anything cites them — so counting them would make the exit
+/// code permanently non-zero, and a verdict that is never clean carries no information.
 #[derive(Debug, Serialize)]
 pub struct Observations {
     pub hubs: Vec<HubPageReference>,
@@ -88,15 +87,11 @@ pub struct LintReport {
 }
 
 impl Violations {
-    /// Destructured deliberately, so adding a field to this channel does not compile until it
-    /// is counted. This number is what the exit code is derived from, and a test asserting the
-    /// sum against a hand-built fixture does not establish that: a new field satisfies the
-    /// compiler as `Vec::new()`, the whole suite stays green, and `graph lint` exits 0 on a
-    /// vault that violates the new rule while its own JSON reports the violation.
-    ///
-    /// A `..` added to the pattern would silence that error, and no type system prevents it —
-    /// but writing one is choosing not to count the field, which is the difference between this
-    /// and forgetting. What the guard removes is the silent case.
+    /// Destructured, so adding a field to this channel does not compile until it is counted.
+    /// This number is what the exit code is derived from, and a test over a hand-built fixture
+    /// cannot establish that — a new field satisfies the compiler as `Vec::new()` — so the guard
+    /// has to be the pattern itself. A `..` would silence the error, which no type system
+    /// prevents; what the pattern removes is the silent omission, not the deliberate one.
     pub fn count(&self) -> usize {
         let Self {
             broken,
@@ -109,11 +104,9 @@ impl Violations {
 }
 
 impl IndexSyncReport {
-    /// Destructured for the same reason as [`Violations::count`], and it has to be its OWN
-    /// method: while `Violations::count` reached in and summed `index.missing_from_*` itself, a
-    /// list added HERE compiled fine — the pattern one level up never mentions it — and went
-    /// uncounted, so `lint` exited 0 while its own JSON reported the drift. Each struct counts
-    /// what it holds, so the guard reaches every level.
+    /// Its own method for the same reason [`Violations::count`] destructures: a pattern one
+    /// level up never mentions a field added here, so each struct counts what it holds and the
+    /// guard reaches every level.
     pub fn count(&self) -> usize {
         let Self {
             missing_from_index,
@@ -491,10 +484,9 @@ mod tests {
         }
     }
 
-    /// The compile-time half of the invariant is `count`'s destructuring, which refuses a new
-    /// field until it is mentioned. This is the other half: that the fields are counted
-    /// CORRECTLY — one `.len()` per list, none doubled, none read off the wrong field — checked
-    /// against the entries serde can actually see in a fully-populated channel.
+    /// `count`'s destructuring refuses a new field until it is mentioned; this is the other
+    /// half, that the fields are counted CORRECTLY — one `.len()` per list, none doubled, none
+    /// read off the wrong field — against the entries serde can see in a full channel.
     #[test]
     fn the_violation_channel_counts_every_list_it_carries() {
         let v = Violations {

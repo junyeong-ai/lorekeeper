@@ -1,38 +1,31 @@
-//! `lore graph`'s exit code answers exactly one question: does every claim the vault makes
-//! hold?
+//! `lore graph`'s exit code answers exactly one question: does every claim the vault makes hold?
 //!
-//! It is the only machine-readable verdict the command family offers, and the scheduled
-//! pipeline records it as a stage outcome — so a red night has to mean something a caller can
-//! act on. A concept nothing cites yet, and a contradiction between sources that an audit
-//! deliberately recorded, are both TRUE statements about a healthy vault: every extraction
-//! mints concepts before anything cites them, so counting those makes the exit code
-//! permanently non-zero and it stops carrying information. That is what it used to do, and it
-//! is why every caller wrapped the command in `|| true` and every skill had to name the lists
-//! its reader should ignore — at which point a link pointing at nothing was ignored along with
+//! It is the only machine-readable verdict the command family offers, and the scheduled pipeline
+//! records it as a stage outcome, so a red night has to mean something a caller can act on. A
+//! concept nothing cites yet, and a contradiction between sources that an audit deliberately
+//! recorded, are both TRUE statements about a healthy vault: every extraction mints concepts
+//! before anything cites them, so a verdict that counted those would never be clean and would
+//! carry no information at all — at which point a link pointing at nothing is ignored along with
 //! them.
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
-/// A shipped caller that discards the exit code puts the vault back where this contract found
-/// it: every violation invisible. `|| true` was how the pipeline coped with a lint that could
-/// never be clean, and it is the thing that must not come back now that a non-zero exit names a
-/// real contradiction.
+/// A shipped caller that discards the exit code makes every violation invisible again, so the
+/// property is checked by RUNNING the shipped script rather than by reading it.
 ///
-/// So the property is checked by RUNNING the shipped script, not by reading it. A grep for
-/// `|| true` on a line that also mentions `lore_cmd` was the first attempt, and it establishes
-/// almost nothing: it misses `|| true` without the space, `; true`, `|| log "…"`, a line
-/// continuation, a `soft() { "$@" || true; }` wrapper whose two halves are individually clean,
-/// a bare call that simply never goes through `run()`, and the same literal moved into a
-/// differently-named file. It also fails the build on a COMMENT containing the words. Executing
-/// `sync_graph` against a vault with one broken link is indifferent to all of that — any way of
-/// losing the code produces the same visible failure: a pipeline that reports success.
+/// Reading it cannot establish this. A grep for `|| true` beside a `lore` call misses the same
+/// thing spelled without the space, `; true`, `|| log "…"`, a line continuation, a
+/// `soft() { "$@" || true; }` wrapper whose two halves are individually clean, a bare call that
+/// never goes through `run()`, and the literal moved to another file — while failing the build on
+/// a COMMENT containing the words. Executing `sync_graph` against a vault with one broken link is
+/// indifferent to spelling: every way of losing the code produces one visible symptom, a pipeline
+/// that reports success.
 #[cfg(unix)]
 #[test]
 fn the_shipped_pipeline_fails_when_the_vault_contradicts_itself() {
     let ws = sound_vault();
-    // One broken link on a daily page: a violation, and the pipeline's own output is where such
-    // a link comes from.
+    // One broken link on a daily page, which is where the pipeline's own output puts them.
     ws.write(
         "daily/notes/2026-05-24.md",
         "---\nid: notes-2026-05-24\ntype: daily\ntitle: \"Notes\"\n\
@@ -54,10 +47,9 @@ fn the_shipped_pipeline_fails_when_the_vault_contradicts_itself() {
     );
 }
 
-/// The other half, and the reason the first is worth having: a vault whose only findings are
-/// observations must leave the pipeline green. Every extraction mints concepts before anything
-/// cites them, so a pipeline that failed on those would be red every night and its exit code
-/// would go back to meaning nothing.
+/// The other half: a vault whose only findings are observations must leave the pipeline green.
+/// Every extraction mints concepts before anything cites them, so a pipeline that failed on those
+/// would be red every night and its verdict would mean nothing.
 #[cfg(unix)]
 #[test]
 fn the_shipped_pipeline_passes_on_a_vault_whose_findings_are_observations() {
@@ -119,8 +111,8 @@ impl Workspace {
         String::from_utf8(self.run(args).stdout).expect("utf8")
     }
 
-    /// Run the SHIPPED `sync_graph` — the real `scripts/lore-pipeline.sh`, sourced the way the
-    /// scheduled jobs source it — so what is under test is the file that actually ships.
+    /// The SHIPPED `sync_graph`: the real `scripts/lore-pipeline.sh`, sourced the way the
+    /// scheduled jobs source it, so what is under test is the file that ships.
     #[cfg(unix)]
     fn run_pipeline(&self) -> Output {
         let script =
@@ -183,7 +175,7 @@ fn an_uncited_concept_and_an_open_conflict_are_reported_and_exit_zero() {
         Some(0),
         "an uncited concept and a recorded disagreement are both true of a healthy vault\n{stdout}"
     );
-    // Reported, not suppressed — the exit code is the only thing that changed.
+    // Reported, not suppressed: only the verdict differs.
     assert!(stdout.contains("uncited"), "orphan not listed\n{stdout}");
     assert!(
         stdout.contains("two sources disagree about the default"),
@@ -195,8 +187,8 @@ fn an_uncited_concept_and_an_open_conflict_are_reported_and_exit_zero() {
 #[test]
 fn a_link_to_a_page_that_does_not_exist_exits_one() {
     let ws = sound_vault();
-    // Edited in place rather than added as a new page: a page the catalog has not seen yet is
-    // its own violation, and this test must fail for the broken link alone.
+    // Edited in place: a page the catalog has not seen yet is its own violation, and this must
+    // fail for the broken link alone.
     ws.write(
         "wiki/concepts/uncited.md",
         &concept(
@@ -217,11 +209,11 @@ fn a_link_to_a_page_that_does_not_exist_exits_one() {
     assert!(stdout.contains("ghost"), "{stdout}");
 }
 
-/// `--json` must carry every channel field even when the list is EMPTY, because a consumer
-/// indexes into it: `/lore-wiki audit` layer 1 reads these exact paths and surfaces each
-/// non-empty list. A `skip_serializing_if = "Vec::is_empty"` compiles clean and passes the unit
-/// tests — their fixtures populate every list — and would turn "no broken links" into a missing
-/// key, which reads as neither empty nor absent at the other end.
+/// `--json` carries every channel field even when the list is EMPTY, because a consumer indexes
+/// into it: `/lore-wiki audit` layer 1 reads these exact paths and surfaces each non-empty list.
+/// A `skip_serializing_if` would turn "no broken links" into a missing key, which reads as
+/// neither empty nor absent at the other end, and the unit tests cannot see it — their fixtures
+/// populate every list.
 #[test]
 fn the_json_report_carries_every_channel_field_on_a_clean_vault() {
     let ws = sound_vault();
@@ -256,10 +248,9 @@ fn the_json_report_carries_every_channel_field_on_a_clean_vault() {
 #[test]
 fn a_broken_link_written_outside_the_analysis_scope_still_gates() {
     let ws = sound_vault();
-    // `graph.scope.dirs` defaults to the wiki, and while broken links were a `WikiGraph`
-    // property they were only looked for there — so the concept links `queue apply` writes on
-    // daily pages, the pipeline's own output, were never checked. A new daily page brings no
-    // index drift of its own (the catalog covers the wiki), so this gates on the link alone.
+    // `graph.scope.dirs` defaults to the wiki and chooses the analysis subgraph only, so a link
+    // written on a daily page — where `queue apply` writes concept links — is checked like any
+    // other. A new daily page brings no index drift of its own, so this gates on the link alone.
     ws.write(
         "daily/notes/2026-05-24.md",
         "---\nid: notes-2026-05-24\ntype: daily\ntitle: \"Notes\"\n\
@@ -280,10 +271,10 @@ fn a_broken_link_written_outside_the_analysis_scope_still_gates() {
     );
 }
 
-/// `graph.scope.exclude` narrows the ANALYSIS, not the vault. An excluded page still exists, so
-/// a link to it resolves — building the existence universe with the globs applied reported one as
-/// a missing destination while the file sat on disk. Both halves are asserted, because dropping
-/// the globs from the node set instead would silently un-exclude the page.
+/// `graph.scope.exclude` narrows the ANALYSIS, not the vault: an excluded page still exists, so
+/// a link to it resolves. Both halves are asserted, because applying the globs to the universe
+/// instead reports a link to the page as broken, and dropping them from the node set instead
+/// silently un-excludes it.
 #[test]
 fn an_excluded_page_still_exists_but_is_not_analysed() {
     let ws = Workspace::new();
@@ -379,8 +370,7 @@ fn one_name_answering_to_two_pages_exits_one() {
         "wiki/concepts/vectordb.md",
         &concept("vectordb", "VectorDB", "The other."),
     );
-    // Re-catalog first: the drift from two new pages is its own violation, and this test must
-    // fail for the name collision alone.
+    // Re-catalog first, so this fails for the name collision alone.
     assert_eq!(ws.code(&["wiki", "index"]), 0);
 
     let out = ws.run(&["graph", "lint"]);
@@ -397,7 +387,7 @@ fn one_name_answering_to_two_pages_exits_one() {
 fn the_single_check_commands_agree_with_lint_about_their_own_channel() {
     let ws = sound_vault();
     // `orphans` reports the same list `lint` puts in its observation channel, so it reaches the
-    // same verdict about it: asking for the list is not discovering a defect.
+    // same verdict: asking for a list is not discovering a defect.
     let stdout = ws.stdout(&["graph", "orphans"]);
     assert!(stdout.contains("uncited"), "{stdout}");
     assert_eq!(ws.code(&["graph", "orphans"]), 0, "{stdout}");
@@ -408,8 +398,7 @@ fn the_single_check_commands_agree_with_lint_about_their_own_channel() {
 fn a_concept_due_for_re_audit_is_a_worklist_and_exits_zero() {
     let ws = sound_vault();
     // Multiply cited, never audited (no `audited_sources_hash`) — the worklist's whole
-    // population. `/lore-wiki audit` reads the JSON, so a non-zero exit would only mean it
-    // cannot run the command under `set -e`.
+    // population. It is read as JSON, so a non-zero exit would only stop `set -e` callers.
     ws.write(
         "wiki/concepts/cited.md",
         &concept("cited", "Cited", "A concept.").replace("source_count: 1", "source_count: 2"),
