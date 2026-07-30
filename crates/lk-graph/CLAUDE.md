@@ -36,6 +36,14 @@ on-disk state, never from a cached snapshot.
   page linking a `<daily>/` page is not broken, and a concept linked only from
   `<daily>/` is not an orphan. Reserved meta pages
   (`lk_core::vault_path::RESERVED_WIKI_FILES`) are never orphans or index-drift.
+- **`graph::broken_links` is a free function over (pages, existence), not a `WikiGraph`
+  method** — a broken link involves no node, edge or community, and computing it inside the
+  graph is what silently scoped it to `graph.scope.dirs` on the SOURCE side as well: only wiki
+  pages were checked, so the concept links `queue apply` writes on daily pages were not.
+  Measured on a 2,106-page vault: 43 links pointing at pages that do not exist while `lint`
+  read clean. Both `lint` and `broken` pass every scanned page; the scope narrowing applies
+  only to the graph's nodes. Reserved meta pages are skipped as sources — `index.md`/`map.md`/
+  `log.md` are re-derived by `wiki refresh`, so a stale entry there is `index-sync` drift.
 - **Exit codes**: 0 = every claim the vault makes holds, 1 = it contradicts itself, 2 = runtime
   error. Non-zero is reserved for a claim that is FALSE and has a named repair — a link whose
   destination is absent, a catalog that disagrees with the disk, a category outside the

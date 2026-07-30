@@ -12,7 +12,6 @@ use crate::scan::{ScannedPage, VaultExistence};
 pub struct WikiGraph {
     graph: DiGraph<NodeData, ()>,
     id_to_node: HashMap<String, NodeIndex>,
-    broken: Vec<BrokenLink>,
     /// Scope node ids connected to pages outside the analysis scope (linked from,
     /// or linking out to, a page that exists in the vault but is not in scope)
     /// and so are never orphans even with zero in-scope edges. Derived from the
@@ -31,6 +30,47 @@ pub struct BrokenLink {
     pub target: String,
 }
 
+/// Every link in `pages` whose destination is not a page in the vault, deduped and ordered by
+/// (source, target).
+///
+/// Deliberately not a graph property. A broken link is a fact about one page's destination and
+/// the set of pages on disk — no node, no edge, no community — and while it was computed
+/// inside `WikiGraph` it inherited the analysis scope, whose only job is choosing which
+/// subgraph `hubs`/`cluster`/`suggest-links` reason about. So a link written on a `daily/` page
+/// was never checked: measured on a 2,106-page vault, 43 concept links pointing at pages that
+/// do not exist, none of them reported, while the same vault's `lint` read clean. `queue apply`
+/// writes those links, which makes them the pipeline's own output. Taking the page set as a
+/// parameter is what makes the question unavoidable at each call site, and both callers pass
+/// every page the vault has.
+///
+/// Reserved meta-pages are skipped as sources, matching [`VaultExistence`]: `index.md`,
+/// `map.md` and `log.md` catalog every page they can see and are re-derived from the vault by
+/// `wiki refresh`, so a stale entry in one is index drift, reported by `index-sync`.
+pub fn broken_links(
+    pages: &[ScannedPage],
+    existence: &VaultExistence,
+    dirs: &VaultDirs,
+) -> Vec<BrokenLink> {
+    let is_reserved = crate::scan::reserved_page_predicate(Path::new(&dirs.wiki));
+    let mut broken: Vec<BrokenLink> = pages
+        .iter()
+        .filter(|page| !is_reserved(page.id.as_str()))
+        .flat_map(|page| {
+            page.outgoing
+                .iter()
+                .filter(|target| !existence.is_resolvable(target))
+                .map(|target| BrokenLink {
+                    source: page.id.clone(),
+                    target: target.clone(),
+                })
+        })
+        .collect();
+
+    broken.sort_by(|a, b| (&a.source, &a.target).cmp(&(&b.source, &b.target)));
+    broken.dedup_by(|a, b| a.source == b.source && a.target == b.target);
+    broken
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct HubPageReference {
     pub id: String,
@@ -42,24 +82,21 @@ pub struct HubPageReference {
 
 impl WikiGraph {
     /// Build the analysis graph over `pages`, treating that set as the whole
-    /// universe: a link with no resolvable target is broken, and a page with
-    /// no edges is an orphan. The right model when the scope *is* the vault (and
-    /// the convenient default for tests); for a narrowed scope whose links reach
-    /// pages outside it, use [`Self::build_with_existence`].
+    /// universe: a page with no edges is an orphan. The right model when the scope
+    /// *is* the vault (and the convenient default for tests); for a narrowed scope
+    /// whose links reach pages outside it, use [`Self::build_with_existence`].
     pub fn build(pages: &[ScannedPage], dirs: &VaultDirs) -> Self {
         Self::build_with_existence(pages, &VaultExistence::build(pages, dirs), dirs)
     }
 
     /// Build the analysis graph over `pages` (the scope) while resolving
-    /// integrity checks against the full-vault `existence` universe.
+    /// orphan detection against the full-vault `existence` universe.
     ///
     /// The graph itself — nodes and edges — stays scope-internal, so `hubs`,
-    /// `cluster`, and `suggest_links` are unaffected. Only the two integrity
-    /// checks consult `existence`:
-    /// - **broken links**: a link leaving the scope is broken *only* if its
-    ///   target does not exist anywhere in the vault.
-    /// - **orphans**: a scope page is exempt when it links to, or is linked from,
-    ///   any page in the vault (tracked in `cross_scope_connected`).
+    /// `cluster`, and `suggest_links` are unaffected. A scope page is exempt from
+    /// `orphans` when it links to, or is linked from, any page in the vault
+    /// (tracked in `cross_scope_connected`). Broken links are not a graph
+    /// property at all — see [`broken_links`].
     pub fn build_with_existence(
         pages: &[ScannedPage],
         existence: &VaultExistence,
@@ -86,7 +123,6 @@ impl WikiGraph {
             id_to_node.insert(page.id.clone(), node);
         }
 
-        let mut broken = Vec::new();
         let mut cross_scope_connected = HashSet::new();
 
         for page in pages {
@@ -102,15 +138,10 @@ impl WikiGraph {
                         graph.add_edge(source_idx, target_idx, ());
                     }
                 } else if existence.is_resolvable(target) {
-                    // Resolves to a page outside the analysis scope: not broken,
-                    // and a vault-wide outbound connection for orphan purposes.
-                    // No edge — the target node is not in the scope graph.
+                    // Resolves to a page outside the analysis scope: a vault-wide outbound
+                    // connection for orphan purposes. No edge — the target node is not in
+                    // the scope graph.
                     cross_scope_connected.insert(page.id.clone());
-                } else {
-                    broken.push(BrokenLink {
-                        source: page.id.clone(),
-                        target: target.clone(),
-                    });
                 }
             }
 
@@ -122,13 +153,9 @@ impl WikiGraph {
             }
         }
 
-        broken.sort_by(|a, b| (&a.source, &a.target).cmp(&(&b.source, &b.target)));
-        broken.dedup_by(|a, b| a.source == b.source && a.target == b.target);
-
         WikiGraph {
             graph,
             id_to_node,
-            broken,
             cross_scope_connected,
         }
     }
@@ -195,10 +222,6 @@ impl WikiGraph {
 
         result.sort();
         result
-    }
-
-    pub fn broken_links(&self) -> &[BrokenLink] {
-        &self.broken
     }
 
     pub fn node_ids(&self) -> impl Iterator<Item = &str> {
@@ -284,17 +307,51 @@ mod tests {
         assert_eq!(g.component_count(), 2);
     }
 
+    fn broken(pages: &[ScannedPage]) -> Vec<BrokenLink> {
+        let dirs = VaultDirs::default();
+        broken_links(pages, &VaultExistence::build(pages, &dirs), &dirs)
+    }
+
     #[test]
     fn broken_links_detected() {
         let pages = vec![
             build_page("wiki/alpha", &["wiki/nonexistent"]),
             build_page("wiki/beta", &[]),
         ];
-        let g = WikiGraph::build(&pages, &VaultDirs::default());
+        let found = broken(&pages);
 
-        assert_eq!(g.broken_links().len(), 1);
-        assert_eq!(g.broken_links()[0].source, "wiki/alpha");
-        assert_eq!(g.broken_links()[0].target, "wiki/nonexistent");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].source, "wiki/alpha");
+        assert_eq!(found[0].target, "wiki/nonexistent");
+    }
+
+    #[test]
+    fn a_link_written_outside_the_analysis_scope_is_still_checked() {
+        // The defect this function exists to remove: while broken links were computed inside
+        // `WikiGraph`, only pages in `graph.scope.dirs` (the wiki, by default) were checked as
+        // sources, so a concept link `queue apply` wrote on a daily page was outside the
+        // check. Measured on a 2,106-page vault: 43 of them, none reported.
+        let pages = vec![
+            build_page("daily/ai-news/2026-06-12", &["wiki/concepts/gone"]),
+            build_page("wiki/concepts/here", &[]),
+        ];
+        let found = broken(&pages);
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].source, "daily/ai-news/2026-06-12");
+        assert_eq!(found[0].target, "wiki/concepts/gone");
+    }
+
+    #[test]
+    fn a_catalog_page_is_never_a_broken_link_source() {
+        // `index.md` lists every page it can see and `wiki refresh` re-derives it from the
+        // vault, so an entry for a page that is gone is index drift — `index-sync`'s
+        // `missing_from_disk` — and reporting it here too would double-count one defect.
+        let pages = vec![
+            build_page("wiki/index", &["wiki/concepts/gone"]),
+            build_page("wiki/concepts/here", &[]),
+        ];
+        assert!(broken(&pages).is_empty());
     }
 
     #[test]
@@ -371,29 +428,22 @@ mod tests {
             edges,
             vec![("wiki/linker".to_owned(), "docs/alpha".to_owned())]
         );
-        assert!(g.broken_links().is_empty());
+        assert!(broken(&pages).is_empty());
     }
 
     #[test]
-    fn cross_scope_link_not_broken_with_existence() {
-        // A `wiki/` concept links a `daily/` page (out of the analysis scope).
-        // Without the existence universe it reads as broken (legacy); with it,
-        // the link resolves to an existing vault page and is exempt.
-        let scope = vec![build_page(
-            "wiki/concepts/foo",
-            &["daily/team-slack/2026-05-22"],
-        )];
+    fn a_link_that_leaves_the_analysis_scope_resolves_against_the_whole_vault() {
+        // A `wiki/` concept links a `daily/` page, which is outside the analysis scope but on
+        // disk. It is the existence universe — not the scope — that decides.
         let full = vec![
             build_page("wiki/concepts/foo", &["daily/team-slack/2026-05-22"]),
             build_page("daily/team-slack/2026-05-22", &[]),
         ];
+        assert!(broken(&full).is_empty());
 
-        let legacy = WikiGraph::build(&scope, &VaultDirs::default());
-        assert_eq!(legacy.broken_links().len(), 1);
-
-        let existence = VaultExistence::build(&full, &VaultDirs::default());
-        let g = WikiGraph::build_with_existence(&scope, &existence, &VaultDirs::default());
-        assert!(g.broken_links().is_empty());
+        let dirs = VaultDirs::default();
+        let narrow = VaultExistence::build(&full[..1], &dirs);
+        assert_eq!(broken_links(&full[..1], &narrow, &dirs).len(), 1);
     }
 
     #[test]

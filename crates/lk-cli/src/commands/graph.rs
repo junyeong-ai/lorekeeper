@@ -178,28 +178,27 @@ fn run_inner(
         vault_page_dirs(&rc.root, &rc.vault_dirs),
     );
 
-    // One scan over `scan_dirs`. Integrity commands derive the full-vault existence
-    // universe from it and the scope-subset graph nodes by filtering (no second walk);
-    // analysis commands use the scan as-is.
+    // One scan over `scan_dirs`, kept whole: it is the existence universe, and it is the page
+    // set link integrity asks about — a link is broken wherever it was written. `pages` narrows
+    // it to the analysis scope for the graph's nodes and edges, which is a no-op for the
+    // analysis commands (their `scan_dirs` IS `scope.dirs`) and the intended subset for the
+    // integrity ones.
     let mut scan_cfg = rc.graph.clone();
     scan_cfg.scope.dirs = scan_dirs.clone();
     let scanned = scan::scan_vault(&rc.root, &scan_cfg).map_err(|e| format!("{e}"))?;
     let existence = scan::VaultExistence::build(&scanned, &rc.vault_dirs);
-    let pages: Vec<scan::ScannedPage> = if integrity {
-        scanned
-            .into_iter()
-            .filter(|p| rc.graph.scope.dirs.iter().any(|d| p.path.starts_with(d)))
-            .collect()
-    } else {
-        scanned
-    };
+    let pages: Vec<scan::ScannedPage> = scanned
+        .iter()
+        .filter(|p| rc.graph.scope.dirs.iter().any(|d| p.path.starts_with(d)))
+        .cloned()
+        .collect();
     let g = graph::WikiGraph::build_with_existence(&pages, &existence, &rc.vault_dirs);
 
     let violated = match cmd {
         GraphCommand::Lint => {
             let hubs = g.hubs(10, rc.graph.metrics.min_hub_degree);
             let orphans = g.orphans(&rc.graph.metrics.orphan_exclude);
-            let broken = g.broken_links().to_vec();
+            let broken = graph::broken_links(&scanned, &existence, &rc.vault_dirs);
             let drift = index_drift::diff(
                 &g,
                 &existence,
@@ -268,7 +267,7 @@ fn run_inner(
             false
         }
         GraphCommand::Broken => {
-            let broken = g.broken_links().to_vec();
+            let broken = graph::broken_links(&scanned, &existence, &rc.vault_dirs);
             let count = broken.len();
             let report = output::BrokenReport { broken, count };
             let has = report.count > 0;

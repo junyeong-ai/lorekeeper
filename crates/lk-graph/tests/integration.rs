@@ -79,13 +79,19 @@ fn orphans_detected() {
 
 // --- Broken links ---
 
+/// Link integrity is a whole-vault question, so it takes the page set rather than the graph:
+/// the fixture is its own vault here, and the existence universe is built from all of it.
+fn fixture_broken_links(pages: &[scan::ScannedPage]) -> Vec<graph::BrokenLink> {
+    let dirs = VaultDirs::default();
+    graph::broken_links(pages, &scan::VaultExistence::build(pages, &dirs), &dirs)
+}
+
 #[test]
 fn broken_links_detected() {
     let root = fixture_root();
     let config = default_config();
     let pages = scan::scan_vault(&root, &config).unwrap();
-    let g = graph::WikiGraph::build(&pages, &VaultDirs::default());
-    let broken = g.broken_links();
+    let broken = fixture_broken_links(&pages);
     assert!(!broken.is_empty(), "fixture has nonexistent-page link");
     assert!(broken.iter().any(|b| b.target.contains("nonexistent")));
 }
@@ -95,10 +101,10 @@ fn broken_json_has_count() {
     let root = fixture_root();
     let config = default_config();
     let pages = scan::scan_vault(&root, &config).unwrap();
-    let g = graph::WikiGraph::build(&pages, &VaultDirs::default());
+    let broken = fixture_broken_links(&pages);
     let report = output::BrokenReport {
-        broken: g.broken_links().to_vec(),
-        count: g.broken_links().len(),
+        count: broken.len(),
+        broken,
     };
     let json = serde_json::to_value(&report).unwrap();
     assert!(json["count"].as_u64().unwrap() >= 1);
@@ -237,7 +243,7 @@ fn lint_combined_report() {
 
     let hubs = g.hubs(10, config.metrics.min_hub_degree);
     let orphans = g.orphans(&config.metrics.orphan_exclude);
-    let broken = g.broken_links().to_vec();
+    let broken = fixture_broken_links(&pages);
     let existence = scan::VaultExistence::build(&pages, &VaultDirs::default());
     let drift = index_drift::diff(&g, &existence, &root, Path::new("wiki"), &[]).unwrap();
 

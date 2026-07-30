@@ -177,6 +177,33 @@ fn a_link_to_a_page_that_does_not_exist_exits_one() {
 }
 
 #[test]
+fn a_broken_link_written_outside_the_analysis_scope_still_gates() {
+    let ws = sound_vault();
+    // `graph.scope.dirs` defaults to the wiki, and while broken links were a `WikiGraph`
+    // property they were only looked for there — so the concept links `queue apply` writes on
+    // daily pages, the pipeline's own output, were never checked. A new daily page brings no
+    // index drift of its own (the catalog covers the wiki), so this gates on the link alone.
+    ws.write(
+        "daily/notes/2026-05-24.md",
+        "---\nid: notes-2026-05-24\ntype: daily\ntitle: \"Notes\"\n\
+         created: 2026-05-24\nupdated: 2026-05-24\n---\n\n\
+         ## Related concepts\n\n- [Ghost](../../wiki/concepts/ghost.md)\n",
+    );
+
+    let out = ws.run(&["graph", "lint"]);
+    let stdout = String::from_utf8(out.stdout).expect("utf8");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a link is broken wherever it was written\n{stdout}"
+    );
+    assert!(
+        stdout.contains("daily/notes/2026-05-24 -> wiki/concepts/ghost"),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn a_category_outside_the_configured_vocabulary_exits_one() {
     let ws = sound_vault();
     std::fs::write(
