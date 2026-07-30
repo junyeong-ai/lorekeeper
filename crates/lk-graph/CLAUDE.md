@@ -184,11 +184,11 @@ on-disk state, never from a cached snapshot.
   — ordered rather than hashed, so output order needs no final sort — which costs a log
   factor no vault will notice and replaces the O(n²) pair scan the similarity check needed.
   **A finding is therefore never a similarity guess**: the two names reduce to one identity
-  under a rule with no score and no threshold. The rule does NOT fold only typography:
-  `identity_key` inherits `slugify`, which deletes a symbol instead of representing it, so
-  `C` ~ `C++` ~ `C#` fold to `c` and gate as duplicates. The same key drives the alias index, so
-  that is a defect in concept identity rather than in the lint — its boundary and what moving it
-  would cost are recorded on `identity_key`. What the lint CANNOT see is the defect that
+  under a rule with no score and no threshold. The rule does NOT fold only typography: `C`,
+  `C++` and `C#` all slugify to `c`, so they claim one ADDRESS and the pair is genuinely
+  reportable — whichever page owns `c` is where every extraction naming any of them lands. The
+  remedy is to disambiguate the name, and `identity_key` records why the addressing cannot do it
+  for you. What the lint CANNOT see is the defect that
   never becomes two pages — the router folding an extraction into an established page
   leaves nothing to compare — which is why the fold itself has to be narrow rather than
   the lint forgiving.

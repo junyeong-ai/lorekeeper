@@ -71,20 +71,21 @@ pub fn slugify(name: &str) -> Option<String> {
 /// and `16-9` share one. Distinguishing them would claim that punctuation CHOICE is the name,
 /// which is the typography claim this fold exists to deny.
 ///
-/// **A symbol that IS the name is lost, and this one is a live defect.** Identity derives from
-/// the address, so it inherits slugify mapping every non-alphanumeric to a separator and trimming
-/// the ends: `C`, `C++` and `C#` all reduce to `c`. The duplicate lint reports that as three
-/// pages answering to one name, and the index can route an extraction naming `C++` onto the `C`
-/// page. Two apparent fixes are closed. Reading the NAME instead — a run of non-alphanumerics
-/// separates only with an alphanumeric on both sides, so a trailing `++` is content — breaks
-/// `identity_key(slugify(x)) == identity_key(x)`, which the index depends on because it writes
-/// with a name's key and reads with a slug's; without it the index splits into a write key and a
-/// read key that never meet. Teaching slugify to keep the symbols is closed too: `#` in a slug
-/// makes `wiki/concepts/c#.md` parse as an anchor. What remains is to decouple identity from the
-/// address — register a page under every name's key AND its slug's key rather than requiring the
-/// two to coincide — which changes which names dedup together, and for a page whose address folds
-/// two names changes where a citation lands. That is a decision about the vault's concept
-/// identity rather than a local repair.
+/// **A symbol that is the whole difference between two names is lost, and it is lost in the
+/// ADDRESS, not here.** [`slugify`] maps every non-alphanumeric to a separator and trims the
+/// ends, so `C`, `C++` and `C#` all slugify to `c` — one address for three names. This fold
+/// inherits that, and cannot undo it: `ConceptDrafts::resolve_identity` looks a name up by
+/// `identity_key(slugify(name))`, so all three arrive at the same key however this function
+/// behaves. Teaching it to read the NAME would only move the collision — the three would resolve
+/// to different keys, miss each other in the index, and each mint a page addressed `c`,
+/// overwriting rather than mis-routing.
+///
+/// The address cannot represent them either: `#` in a slug makes `wiki/concepts/c#.md` parse as
+/// an anchor, so a link to it would not resolve, and a content-derived suffix would put a hash in
+/// a slug humans read and cite. So two names that slugify alike cannot both be pages. That is a
+/// property of the vault's addressing, the duplicate lint reports the pair, and the remedy is the
+/// one `/lore-wiki audit` already prescribes — disambiguate the NAME (`Go (programming language)`
+/// beside `Go (board game)`), which is a human's call about what the concepts are called.
 pub fn identity_key(name: &str) -> Option<String> {
     let slug = slugify(name)?;
     let mut key = String::with_capacity(slug.len());

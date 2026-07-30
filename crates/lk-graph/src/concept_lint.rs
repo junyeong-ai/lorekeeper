@@ -211,12 +211,11 @@ pub struct DuplicateConcept {
 /// when `lk_core::concept::identity_key` reduces them to one identity — no similarity guess is
 /// ever made.
 ///
-/// One shape reaches this channel that is NOT a defect about the vault: `C`, `C++` and `C#` all
-/// reduce to `c`, because `identity_key` builds on `slugify`, which deletes a symbol rather than
-/// representing it. The report is honest about the identity model — the same key drives the
-/// pipeline's alias index, so an extraction naming `C++` really can be routed onto the `C` page —
-/// but the concepts are distinct and the finding gates. The boundary and what it would take to
-/// move it live on `identity_key`.
+/// `C`, `C++` and `C#` are reported as one name on three pages, and that IS a fact about the
+/// vault: all three slugify to `c`, so they claim one address, and whichever page owns it is
+/// where every extraction naming any of them lands. Reporting the pair is right, and the remedy
+/// is the one `/lore-wiki audit` prescribes for a genuine collision — disambiguate the name.
+/// `identity_key` records why the addressing cannot separate them.
 ///
 /// A scored variant (Sørensen-Dice over slug character bigrams) preceded this and was
 /// measured on a 1,599-concept vault: 298 findings, of which one was a real duplicate. The
