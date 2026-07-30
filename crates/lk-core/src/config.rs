@@ -63,7 +63,6 @@ impl Config {
         let content = std::fs::read_to_string(path)?;
         let mut config: Self = serde_yaml_ng::from_str(&content)?;
         config.validate()?;
-        config.vault.dirs.normalize();
         config.graph.apply_vault_defaults(&config.vault.dirs);
         if let Some(parent) = path.parent() {
             config.vault.resolve_relative_to(parent);
@@ -78,7 +77,7 @@ impl Config {
             .map(|(id, c)| (id.as_str(), c))
     }
 
-    fn validate(&self) -> Result<(), ConfigError> {
+    fn validate(&mut self) -> Result<(), ConfigError> {
         if self.vault.root.trim().is_empty() {
             return Err(ConfigError::Validation(
                 "vault.root must not be empty or whitespace-only".into(),
@@ -367,8 +366,10 @@ impl Config {
             }
         }
 
-        for dir in &self.graph.scope.dirs {
-            validate_relative_vault_path("graph.scope.dirs entry", &dir.to_string_lossy())?;
+        for dir in &mut self.graph.scope.dirs {
+            let normalized =
+                normalize_vault_relative("graph.scope.dirs entry", &dir.to_string_lossy())?;
+            *dir = PathBuf::from(normalized);
         }
 
         Ok(())
@@ -522,19 +523,19 @@ impl Default for VaultDirs {
 }
 
 impl VaultDirs {
-    fn validate(&self) -> Result<(), ConfigError> {
-        let fields = [
-            ("daily", &self.daily),
-            ("weekly", &self.weekly),
-            ("monthly", &self.monthly),
-            ("quarterly", &self.quarterly),
-            ("annual", &self.annual),
-            ("personal", &self.personal),
-            ("synthesis", &self.synthesis),
-            ("wiki", &self.wiki),
+    fn validate(&mut self) -> Result<(), ConfigError> {
+        let fields: [(&str, &mut String); 8] = [
+            ("daily", &mut self.daily),
+            ("weekly", &mut self.weekly),
+            ("monthly", &mut self.monthly),
+            ("quarterly", &mut self.quarterly),
+            ("annual", &mut self.annual),
+            ("personal", &mut self.personal),
+            ("synthesis", &mut self.synthesis),
+            ("wiki", &mut self.wiki),
         ];
         for (name, value) in fields {
-            validate_relative_vault_path(&format!("vault.dirs.{name}"), value)?;
+            *value = normalize_vault_relative(&format!("vault.dirs.{name}"), value)?;
         }
 
         // `daily`, `personal`, `synthesis` and `wiki` each ROOT a path, and every consumer
@@ -565,39 +566,12 @@ impl VaultDirs {
         }
         Ok(())
     }
-
-    pub fn normalize(&mut self) {
-        use std::path::{Component, Path as StdPath};
-        for field in [
-            &mut self.daily,
-            &mut self.weekly,
-            &mut self.monthly,
-            &mut self.quarterly,
-            &mut self.annual,
-            &mut self.personal,
-            &mut self.synthesis,
-            &mut self.wiki,
-        ] {
-            let normalized: String = StdPath::new(field.as_str())
-                .components()
-                .filter_map(|c| match c {
-                    Component::Normal(s) => Some(s.to_string_lossy()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("/");
-            if normalized != *field {
-                *field = normalized;
-            }
-        }
-    }
 }
 
 /// Whether `outer`'s named segments are a prefix of `inner`'s, equal paths included.
 ///
-/// Compared as segments rather than strings, and before `normalize()` runs, so `./wiki` and
-/// `wiki` are one directory here as they will be on disk — and `wiki` is not read as
-/// containing `wiki-archive`.
+/// Compared as segments rather than strings, so `wiki` is not read as containing
+/// `wiki-archive`.
 fn is_within(outer: &str, inner: &str) -> bool {
     use std::path::{Component, Path};
 
@@ -614,12 +588,17 @@ fn is_within(outer: &str, inner: &str) -> bool {
     outer.len() <= inner.len() && inner[..outer.len()] == outer[..]
 }
 
-/// Validate that `value` is a non-empty relative path confined to the vault — no `..`,
-/// absolute, or drive-prefixed segments. `label` is the full config-key prefix for error
-/// messages. The single source for the vault-relative-path guard, shared by `vault.dirs.*`
-/// and `graph.scope.dirs` so the two can't drift to different (e.g. substring-vs-component)
-/// `..` checks.
-fn validate_relative_vault_path(label: &str, value: &str) -> Result<(), ConfigError> {
+/// The single boundary every vault-relative config value passes through: `value` is checked
+/// to be a non-empty relative path confined to the vault — no `..`, absolute, or
+/// drive-prefixed segments — and returned as its named segments joined by `/`. `label` is the
+/// full config-key prefix for error messages.
+///
+/// Checking and normalizing are one call because they are one decision. `Path` keeps a leading
+/// `CurDir` (`./wiki` and `wiki` are unequal paths with unequal segment sequences), so a key
+/// that were checked here but normalized elsewhere would hand consumers two spellings of one
+/// directory, and every comparison against another key — `Path::starts_with`, a string prefix,
+/// set membership — would answer no.
+fn normalize_vault_relative(label: &str, value: &str) -> Result<String, ConfigError> {
     use std::path::{Component, Path};
 
     if value.is_empty() {
@@ -627,15 +606,13 @@ fn validate_relative_vault_path(label: &str, value: &str) -> Result<(), ConfigEr
             "{label} must not be empty"
         )));
     }
-    // A `CurDir` segment (`.`/`./`) is tolerated only as noise around real segments
-    // (`./wiki` → `wiki`), because `normalize()` strips it. But a value that is ALL
-    // `CurDir` (`.`, `./`) would normalize to an empty string AFTER this check passes,
-    // silently aliasing the directory to the vault root. Require at least one real
-    // segment so the normalized path can never collapse to empty.
-    let mut has_named_segment = false;
+    // A `CurDir` segment (`.`/`./`) is noise around real segments and is dropped. A value that
+    // is ALL `CurDir` (`.`, `./`) would leave nothing behind, silently aliasing the directory
+    // to the vault root, so at least one named segment is required.
+    let mut segments = Vec::new();
     for component in Path::new(value).components() {
         match component {
-            Component::Normal(_) => has_named_segment = true,
+            Component::Normal(segment) => segments.push(segment.to_string_lossy().into_owned()),
             Component::CurDir => {}
             _ => {
                 return Err(ConfigError::Validation(format!(
@@ -645,12 +622,12 @@ fn validate_relative_vault_path(label: &str, value: &str) -> Result<(), ConfigEr
             }
         }
     }
-    if !has_named_segment {
+    if segments.is_empty() {
         return Err(ConfigError::Validation(format!(
             "{label} ('{value}') must name at least one directory segment, not just '.'"
         )));
     }
-    Ok(())
+    Ok(segments.join("/"))
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1272,7 +1249,7 @@ sources:
   bad/id:
     type: gmail
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(config.validate().is_err());
     }
 
@@ -1303,7 +1280,7 @@ sources:
   s1:
     type: gmail
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(config.validate().is_err(), "'..' segment must be rejected");
     }
 
@@ -1363,21 +1340,42 @@ sources:
                  sources:\n  s1:\n    type: gmail\ngraph:\n  scope:\n    dirs: [{scope}]\n"
             )
         };
-        let bad: Config = serde_yaml_ng::from_str(&base("\"../escape\"")).unwrap();
+        let mut bad: Config = serde_yaml_ng::from_str(&base("\"../escape\"")).unwrap();
         assert!(bad.validate().is_err(), "'..' segment must be rejected");
-        let ok: Config = serde_yaml_ng::from_str(&base("\"notes..old\"")).unwrap();
+        let mut ok: Config = serde_yaml_ng::from_str(&base("\"notes..old\"")).unwrap();
         assert!(
             ok.validate().is_ok(),
             "a name merely containing '..' (no parent segment) must be allowed"
         );
     }
 
+    /// The guard normalizes as it checks, so every key that uses it yields ONE spelling of a
+    /// directory. Two keys that agreed on the directory but not the spelling would disagree in
+    /// every consumer: `Path` keeps a leading `CurDir`, so `./wiki` and `wiki` are unequal, and
+    /// `lore graph lint` scoped to `./wiki` scanned zero pages of the vault it was pointed at
+    /// and reported the vault clean.
+    #[test]
+    fn a_curdir_prefixed_scope_dir_names_the_same_directory_as_the_vault_dir() {
+        let yaml = "vault:\n  root: /tmp/vault\n  dirs:\n    wiki: wiki\nidentity:\n  name: t\n  \
+                    email: t@t.com\nsources:\n  s1:\n    type: gmail\ngraph:\n  scope:\n    \
+                    dirs: [\"./wiki/\"]\n";
+        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        config.validate().unwrap();
+        assert_eq!(
+            config.graph.scope.dirs,
+            vec![PathBuf::from(&config.vault.dirs.wiki)]
+        );
+        assert!(
+            Path::new("wiki/concepts/rag.md").starts_with(&config.graph.scope.dirs[0]),
+            "a page under the vault's wiki dir must fall inside the scope dir"
+        );
+    }
+
     #[test]
     fn validate_rejects_curdir_only_vault_dir() {
-        // "." survives the per-component check (CurDir is tolerated as noise around real
-        // segments, e.g. "./wiki"), but `normalize()` strips it to "", which would alias the
-        // directory to the vault root AFTER validation passed. Reject an all-CurDir value here
-        // so the normalized path can never collapse to empty.
+        // "." survives the per-component check (CurDir is noise around real segments, e.g.
+        // "./wiki") but leaves nothing behind once dropped, which would alias the directory to
+        // the vault root. Reject an all-CurDir value so the normalized path can never be empty.
         let yaml = r#"
 vault:
   root: /tmp/vault
@@ -1390,7 +1388,7 @@ sources:
   s1:
     type: gmail
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(
             config.validate().is_err(),
             "'.' must be rejected (it normalizes to an empty path)"
@@ -1399,7 +1397,7 @@ sources:
 
     #[test]
     fn validate_accepts_curdir_prefixed_vault_dir() {
-        // "./wiki" is fine: the CurDir is noise, normalize() yields "wiki", and a real segment
+        // "./wiki" is fine: the CurDir is noise, the guard yields "wiki", and a real segment
         // remains. Only an ALL-CurDir value is rejected.
         let yaml = r#"
 vault:
@@ -1415,7 +1413,6 @@ sources:
 "#;
         let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(config.validate().is_ok());
-        config.vault.dirs.normalize();
         assert_eq!(config.vault.dirs.wiki, "wiki");
     }
 
@@ -1433,7 +1430,7 @@ sources:
   s1:
     type: gmail
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(config.validate().is_err(), "absolute path must be rejected");
     }
 
@@ -1451,7 +1448,7 @@ sources:
   s1:
     type: gmail
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(
             config.validate().is_ok(),
             "a normal nested relative path must be allowed"
@@ -1482,9 +1479,9 @@ maintenance:
             )
         };
         assert_eq!(MaintenanceConfig::default().retention_days, 90);
-        let ok: Config = serde_yaml_ng::from_str(&base("120")).unwrap();
+        let mut ok: Config = serde_yaml_ng::from_str(&base("120")).unwrap();
         assert!(ok.validate().is_ok());
-        let bad: Config = serde_yaml_ng::from_str(&base("0")).unwrap();
+        let mut bad: Config = serde_yaml_ng::from_str(&base("0")).unwrap();
         assert!(
             bad.validate().is_err(),
             "retention_days=0 should be rejected"
@@ -1504,7 +1501,7 @@ sources:
   s1:
     type: gmail
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(config.validate().is_err());
     }
 
@@ -1521,7 +1518,7 @@ sources:
   s1:
     type: gmail
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("vault.locale"));
     }
@@ -1540,7 +1537,7 @@ sources:
 ingest:
   schedule: "0 7 *"
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(config.validate().is_err());
     }
 
@@ -1558,7 +1555,7 @@ sources:
 ingest:
   schedule: "0 25 * * *"
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(config.validate().is_err(), "hour=25 should be rejected");
     }
 
@@ -1576,7 +1573,7 @@ sources:
 ingest:
   schedule: "*/0 * * * *"
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(config.validate().is_err());
     }
 
@@ -1594,7 +1591,7 @@ sources:
 ingest:
   schedule: "0-29/foo * * * *"
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(config.validate().is_err());
     }
 
@@ -1617,7 +1614,7 @@ personal:
     enabled: false
     schedule: "0 8 1 1 *"
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         config.validate().unwrap();
         let personal = config.personal.as_ref().unwrap();
         let names: Vec<_> = personal.review_schedules().map(|(n, _)| n).collect();
@@ -1671,7 +1668,7 @@ sources:
 ingest:
   schedule: "0 7 * * 1-5"
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(config.validate().is_ok());
     }
 
@@ -1703,7 +1700,7 @@ synthesis:
   weekly:
     include_sources: [nonexistent]
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(config.validate().is_err());
     }
 
@@ -1725,7 +1722,7 @@ sources:
         keywords: ["deployed"]
         performance_category: project-delivery
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(
             config.validate().is_err(),
             "a performance_category bridge with no `personal:` section must be rejected"
@@ -1747,7 +1744,7 @@ personal:
   source_category_map:
     s1: nonexistent-category
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(config.validate().is_err());
     }
 
@@ -1771,7 +1768,7 @@ sources:
     highlights:
       - { category: never_classified, label: "Oops" }
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(
             config.validate().is_err(),
             "a highlight category with no classify rule must be rejected"
@@ -1795,7 +1792,7 @@ sources:
     highlights:
       - { category: action_required, label: "Action Required" }
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(config.validate().is_ok());
     }
 
@@ -1907,7 +1904,7 @@ graph:
   cluster:
     resolution: 10.0
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(
             config.validate().is_err(),
             "resolution=10.0 should be rejected"
@@ -1926,7 +1923,7 @@ graph:
   cluster:
     resolution: 0.05
 "#;
-        let config_low: Config = serde_yaml_ng::from_str(yaml_low).unwrap();
+        let mut config_low: Config = serde_yaml_ng::from_str(yaml_low).unwrap();
         assert!(
             config_low.validate().is_err(),
             "resolution=0.05 should be rejected"
@@ -1948,7 +1945,7 @@ sources:
       - category: action_required
         keywords: []
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(
             config.validate().is_err(),
             "classify rule with empty keywords must be rejected"
@@ -1975,7 +1972,7 @@ sources:
       - category: ethics
         keywords: ["AI ethics"]
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         let err = config.validate().unwrap_err().to_string();
         assert!(
             err.contains("unreachable") && err.contains("ethics"),
@@ -2002,7 +1999,7 @@ sources:
       - category: ai_topic
         keywords: ["ai"]
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(
             config.validate().is_ok(),
             "specific-before-general ordering must be accepted"
@@ -2029,7 +2026,7 @@ sources:
       - category: ethics
         keywords: ["ai ethics", "fairness"]
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(
             config.validate().is_ok(),
             "a rule with at least one unshadowed keyword is reachable"
@@ -2055,7 +2052,7 @@ sources:
       - category: review_request
         keywords: ["검토"]
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(
             config.validate().is_err(),
             "a later rule whose only keyword duplicates an earlier rule's must be rejected"
@@ -2080,7 +2077,7 @@ concepts:
     - id: ai-ml
       label: "Duplicate"
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(
             config.validate().is_err(),
             "duplicate concept category id must be rejected"
@@ -2103,7 +2100,7 @@ concepts:
     - id: "ai/ml"
       label: "AI/ML"
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(
             config.validate().is_err(),
             "category id with '/' must be rejected"
@@ -2122,7 +2119,7 @@ sources:
   s1:
     type: gmail
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(config.validate().is_ok());
         assert!(config.concepts.categories.is_empty());
     }
@@ -2156,7 +2153,7 @@ graph:
             weekly: "././weekly//".into(),
             ..Default::default()
         };
-        dirs.normalize();
+        dirs.validate().unwrap();
         assert_eq!(dirs.wiki, "wiki");
         assert_eq!(dirs.daily, "daily");
         assert_eq!(dirs.personal, "me");
