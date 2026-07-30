@@ -35,6 +35,9 @@ pub struct BrokenReport {
 pub struct IndexSyncReport {
     pub missing_from_index: Vec<String>,
     pub missing_from_disk: Vec<String>,
+    /// The catalog differs from a re-derivation in a way the two lists do not name — a title or
+    /// a summary that changed while the page set did not.
+    pub stale: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fixed: Option<usize>,
 }
@@ -123,11 +126,14 @@ impl IndexSyncReport {
         let Self {
             missing_from_index,
             missing_from_disk,
+            stale,
             // Not a finding: how many entries `index-sync --fix` ADDED. `lint` never fixes, and
             // the standalone command reports it separately.
             fixed: _,
         } = self;
-        missing_from_index.len() + missing_from_disk.len()
+        // `stale` is the verdict and the lists are its explanation, so a catalog stale in a way
+        // neither list names still counts once.
+        missing_from_index.len().max(usize::from(*stale)) + missing_from_disk.len()
     }
 }
 
@@ -192,7 +198,7 @@ pub fn print_broken(r: &BrokenReport) {
 }
 
 pub fn print_index_sync(r: &IndexSyncReport) {
-    if r.missing_from_index.is_empty() && r.missing_from_disk.is_empty() {
+    if r.count() == 0 {
         println!("index.md is in sync");
         return;
     }
@@ -202,8 +208,15 @@ pub fn print_index_sync(r: &IndexSyncReport) {
     for p in &r.missing_from_disk {
         println!("  -disk   {p}");
     }
-    if let Some(n) = r.fixed {
-        println!("{n} page(s) added to index.md");
+    // A catalog holding every page can still state a title or a summary no page does, and then
+    // neither list names anything — saying "in sync" there is the report contradicting its own
+    // exit code.
+    if r.missing_from_index.is_empty() && r.missing_from_disk.is_empty() {
+        println!("  the catalog holds every page, but states something no page does");
+    }
+    match r.fixed {
+        Some(n) => println!("index.md rewritten ({n} page(s) settled)"),
+        None => println!("  repair: `lore wiki index` (or re-run with --fix)"),
     }
 }
 
@@ -297,7 +310,7 @@ fn print_violations(v: &Violations) {
         }
     }
 
-    if !index.missing_from_index.is_empty() || !index.missing_from_disk.is_empty() {
+    if index.count() > 0 {
         println!("\nIndex drift:");
         for p in &index.missing_from_index {
             println!("  +index  {p}");
@@ -305,6 +318,10 @@ fn print_violations(v: &Violations) {
         for p in &index.missing_from_disk {
             println!("  -disk   {p}");
         }
+        if index.missing_from_index.is_empty() && index.missing_from_disk.is_empty() {
+            println!("  the catalog holds every page, but states something no page does");
+        }
+        println!("  repair: `lore wiki index` (or `lore graph index-sync --fix`)");
     }
 
     if !invalid_categories.is_empty() {
@@ -541,6 +558,7 @@ mod tests {
                 target: "b".into(),
             }],
             index: IndexSyncReport {
+                stale: false,
                 missing_from_index: vec!["c".into()],
                 missing_from_disk: vec!["d".into()],
                 fixed: None,

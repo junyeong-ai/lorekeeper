@@ -8,4 +8,5 @@ exit: 1
   +index  wiki/concepts/deterministic-clock
   +index  wiki/concepts/guard-population
   +index  wiki/concepts/unlinked-note
+  repair: `lore wiki index` (or re-run with --fix)
 --- stderr ---

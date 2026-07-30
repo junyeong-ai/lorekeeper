@@ -17,6 +17,7 @@ Index drift:
   +index  wiki/concepts/deterministic-clock
   +index  wiki/concepts/guard-population
   +index  wiki/concepts/unlinked-note
+  repair: `lore wiki index` (or `lore graph index-sync --fix`)
 
 --- Observations (do not affect the exit code) ---
 

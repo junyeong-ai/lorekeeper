@@ -8,18 +8,27 @@ use lk_core::link;
 use crate::GraphError;
 use crate::scan;
 
-/// A page the catalog does not carry, and an entry no page justifies.
+/// A page the catalog does not carry, an entry no page justifies, and whether the catalog
+/// differs from a re-derivation at all.
 #[derive(Debug)]
 pub struct IndexDrift {
     pub missing_from_index: Vec<String>,
     pub missing_from_disk: Vec<String>,
+    /// Whether the file differs from what re-deriving it produces, in ANY way.
+    ///
+    /// The two lists above name which PAGES differ, which is what a reader needs — but they are
+    /// not the verdict. A catalog carries each entry's title and one-line summary as well as its
+    /// link, so renaming a page leaves the catalog stating a title no page has while the page
+    /// set is unchanged and both lists are empty. Drift is the file disagreeing with its own
+    /// derivation; the lists explain it.
+    stale: bool,
     /// The catalog a re-derivation produces right now — what [`fix`] writes.
     rebuilt: String,
 }
 
 impl IndexDrift {
     pub fn is_in_sync(&self) -> bool {
-        self.missing_from_index.is_empty() && self.missing_from_disk.is_empty()
+        !self.stale
     }
 }
 
@@ -75,6 +84,7 @@ pub fn diff(root: &Path, locale: Locale, dirs: &VaultDirs) -> Result<IndexDrift,
     Ok(IndexDrift {
         missing_from_index,
         missing_from_disk,
+        stale: rebuilt != on_disk,
         rebuilt,
     })
 }
@@ -82,10 +92,13 @@ pub fn diff(root: &Path, locale: Locale, dirs: &VaultDirs) -> Result<IndexDrift,
 /// Write the re-derived catalog, repairing drift in both directions at once. Returns the
 /// number of drifted entries the write resolves.
 pub fn fix(drift: &IndexDrift, root: &Path, dirs: &VaultDirs) -> Result<usize, GraphError> {
-    let repaired = drift.missing_from_index.len() + drift.missing_from_disk.len();
-    if repaired == 0 {
+    if drift.is_in_sync() {
         return Ok(0);
     }
+    // The write is the whole catalog either way; the number reported is how many PAGES the
+    // repair settles. A catalog stale only in an entry's title settles none of them by that
+    // count and is still rewritten — reporting 0 while writing would be the lie.
+    let repaired = (drift.missing_from_index.len() + drift.missing_from_disk.len()).max(1);
 
     let index_path = root.join(&dirs.wiki).join(lk_core::vault_path::INDEX_FILE);
     if let Some(parent) = index_path.parent() {
@@ -165,13 +178,40 @@ mod tests {
         // that no repair can clear, from two definitions of the same rule.
         let tmp = TempDir::new().unwrap();
         concept(tmp.path(), "alpha");
+        // The catalog as the builder writes it, so the only question left is the extra page.
+        let built =
+            lk_vault::build_index(tmp.path(), Locale::default(), &VaultDirs::default()).unwrap();
+        write(tmp.path(), "wiki/index.md", &built);
         write(
             tmp.path(),
             "wiki/scratch/note.md",
             "---\nid: note\ntype: document\ntitle: \"Note\"\n---\n\n# Note\n",
         );
-        index(tmp.path(), "- [alpha](concepts/alpha.md)\n");
 
+        let drift = drift_of(tmp.path());
+        assert!(drift.missing_from_index.is_empty(), "{drift:?}");
+        assert!(drift.is_in_sync(), "{drift:?}");
+    }
+
+    #[test]
+    fn a_catalog_stating_a_title_no_page_has_is_drift() {
+        // The page set is unchanged, so neither list names anything — and the catalog still
+        // says something no page does. Drift is the file disagreeing with its own derivation.
+        let tmp = TempDir::new().unwrap();
+        concept(tmp.path(), "alpha");
+        let built =
+            lk_vault::build_index(tmp.path(), Locale::default(), &VaultDirs::default()).unwrap();
+        // Only the display text — the link, and so the page set, is untouched.
+        write(
+            tmp.path(),
+            "wiki/index.md",
+            &built.replace("[alpha]", "[Renamed]"),
+        );
+
+        let drift = drift_of(tmp.path());
+        assert!(drift.missing_from_index.is_empty());
+        assert!(!drift.is_in_sync(), "a stale title is drift");
+        assert_eq!(fix(&drift, tmp.path(), &VaultDirs::default()).unwrap(), 1);
         assert!(drift_of(tmp.path()).is_in_sync());
     }
 
