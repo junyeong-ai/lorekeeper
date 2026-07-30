@@ -26,6 +26,15 @@ pub enum GraphError {
     ScanDirNotFound(PathBuf),
     #[error("invalid exclude pattern '{0}': {1}")]
     InvalidExclude(String, String),
+    #[error(
+        "vault directory '{configured}' is spelled '{on_disk}' on disk, and this filesystem \
+         keeps the two apart — the pages under one and the catalog written to the other would \
+         be different directories. Rename it, or point the config at '{on_disk}'"
+    )]
+    DirSpelling {
+        configured: PathBuf,
+        on_disk: PathBuf,
+    },
     #[error("I/O error: {0}")]
     Io(String),
 }

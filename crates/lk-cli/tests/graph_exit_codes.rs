@@ -397,11 +397,14 @@ fn two_files_at_one_address_exit_one() {
 }
 
 /// A vault directory whose spelling on disk differs from the configured one — the case a
-/// case-insensitive filesystem folds for you. `is_dir` passes, so the directory "exists" while a
-/// raw prefix test matches no page: every graph command then reports an empty vault and exits 0,
-/// and the scheduled pipeline stays green over a vault nothing is checking.
+/// case-insensitive filesystem folds for you. Both outcomes are correct and which one applies is
+/// a property of the FILESYSTEM, so the test asks it rather than assuming: where the two names
+/// reach one directory the vault works and its pages must be analysed (a raw prefix test matched
+/// none of them, so every command reported an empty vault and exited 0); where they are kept
+/// apart the vault is split in half — pages under one name, the catalog written under the other
+/// — and running is worse than refusing.
 #[test]
-fn a_vault_directory_the_filesystem_folded_is_still_analysed() {
+fn a_vault_directory_spelled_differently_on_disk() {
     let ws = Workspace::new();
     ws.write(
         "Wiki/concepts/folded.md",
@@ -411,16 +414,28 @@ fn a_vault_directory_the_filesystem_folded_is_still_analysed() {
             "Links nothing that exists: [Ghost](ghost.md)",
         ),
     );
+    let folds = ws.root.path().join("vault/wiki").is_dir();
 
     let out = ws.run(&["graph", "lint"]);
     let stdout = String::from_utf8(out.stdout).expect("utf8");
-    assert_eq!(
-        out.status.code(),
-        Some(1),
-        "a page under the folded spelling is still the tool's to check\n{stdout}"
-    );
-    assert!(stdout.contains("pages: 1"), "{stdout}");
-    assert!(stdout.contains("ghost.md"), "{stdout}");
+    let stderr = String::from_utf8(out.stderr).expect("utf8");
+
+    if folds {
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "one directory, two spellings: its pages are the tool's to check\n{stdout}{stderr}"
+        );
+        assert!(stdout.contains("pages: 1"), "{stdout}");
+        assert!(stdout.contains("ghost.md"), "{stdout}");
+    } else {
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "two directories: refuse rather than analyse one and write to the other\n{stdout}{stderr}"
+        );
+        assert!(stderr.contains("keeps the two apart"), "{stderr}");
+    }
 }
 
 /// A filename that disagrees with its own normalized slug is a violation both CLAUDE.md files

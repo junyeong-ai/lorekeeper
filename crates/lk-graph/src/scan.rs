@@ -6,7 +6,7 @@
 //! rayon) and assembling [`ScannedPage`]s.
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use lk_core::concept::slugify;
@@ -161,13 +161,30 @@ impl VaultViews {
     /// `scope.exclude` and `scope.dirs` narrow the last two views only: an excluded page still
     /// exists, so it still resolves a link and still has its own links repointed by a rename.
     pub fn resolve(root: &Path, graph: &GraphConfig, dirs: &VaultDirs) -> Result<Self, GraphError> {
-        // A configured scope directory that does not exist is a typo, not an empty analysis.
-        // Silently yielding nothing lets `wiki map` overwrite the map with an empty catalog and
-        // exit 0, and every analysis command agree that the vault has no pages.
+        // A configured scope directory that names nothing on disk is a typo, not an empty
+        // analysis: silently yielding nothing lets `wiki map` overwrite the map with an empty
+        // catalog and exit 0, and every analysis command agree the vault has no pages. Resolved
+        // under the SAME folding that decides membership, so a vault whose directory is spelled
+        // `Wiki` while the config says `wiki` — the case the fold exists for — is present here
+        // too, on a filesystem that keeps the spellings apart as much as on one that folds them.
         for dir in &graph.scope.dirs {
-            let path = root.join(dir);
-            if !path.exists() {
-                return Err(GraphError::ScanDirNotFound(path));
+            let configured = root.join(dir);
+            match resolve_dir(root, dir) {
+                None => return Err(GraphError::ScanDirNotFound(configured)),
+                // A different spelling on a filesystem that does NOT fold the two is a vault
+                // split in half: this tool would analyse the pages under the on-disk name while
+                // `wiki index` writes its catalog under the configured one, and `index-sync
+                // --fix` would fill that catalog with links to a directory the pages are not in.
+                // Where the filesystem DOES fold them, both names reach one directory and the
+                // vault genuinely works — `configured.is_dir()` is the filesystem answering
+                // that question about itself.
+                Some(found) if found != configured && !configured.is_dir() => {
+                    return Err(GraphError::DirSpelling {
+                        configured: dir.clone(),
+                        on_disk: found.strip_prefix(root).unwrap_or(&found).to_path_buf(),
+                    });
+                }
+                Some(_) => {}
             }
         }
 
@@ -215,12 +232,36 @@ pub(crate) fn under(id: &str, dir: &Path) -> bool {
     id == prefix || id.starts_with(&format!("{prefix}/"))
 }
 
+/// The directory a configured vault-relative path names, matched segment by segment under the
+/// same folding that decides scope membership — so a configured `wiki` finds a `Wiki/` on disk
+/// whether or not the filesystem folds the spelling for us.
+fn resolve_dir(root: &Path, dir: &Path) -> Option<PathBuf> {
+    let mut at = root.to_path_buf();
+    for segment in dir.components() {
+        let Component::Normal(segment) = segment else {
+            continue;
+        };
+        let wanted = slugify(&segment.to_string_lossy())?;
+        let exact = at.join(segment);
+        if exact.is_dir() {
+            at = exact;
+            continue;
+        }
+        let folded = std::fs::read_dir(&at).ok()?.flatten().find(|entry| {
+            entry.path().is_dir()
+                && slugify(&entry.file_name().to_string_lossy()).as_deref() == Some(&wanted)
+        })?;
+        at = folded.path();
+    }
+    Some(at)
+}
+
 /// Every vault-relative page directory that exists on disk — anything this tool writes a page
 /// into. Missing directories are skipped so a partially-populated vault doesn't error out.
 fn page_dirs(root: &Path, dirs: &VaultDirs) -> Vec<PathBuf> {
     [&dirs.wiki, &dirs.daily, &dirs.personal, &dirs.synthesis]
         .iter()
-        .filter(|name| root.join(name).is_dir())
+        .filter(|name| resolve_dir(root, Path::new(name.as_str())).is_some())
         .map(|s| PathBuf::from(s.as_str()))
         .collect()
 }
@@ -656,6 +697,28 @@ mod tests {
         assert!(is_valid_source(Path::new("Daily/src/2026-01-01.md"), &dirs));
         assert!(is_valid_source(Path::new("Wiki/documents/x.md"), &dirs));
         assert!(!is_valid_source(Path::new("wiki/concepts/x.md"), &dirs));
+    }
+
+    #[test]
+    fn a_configured_directory_is_found_under_the_spelling_the_disk_uses() {
+        // The guard and the membership rule have to agree, or a vault whose directory is
+        // spelled `Wiki` errors on a case-sensitive filesystem and is analysed on one that
+        // folds — the same vault, two verdicts.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("Wiki/concepts")).unwrap();
+        std::fs::write(tmp.path().join("Wiki/concepts/x.md"), "# X\n").unwrap();
+
+        let mut config = GraphConfig::default();
+        config.scope.dirs = vec![PathBuf::from("wiki")];
+        let views = VaultViews::resolve(tmp.path(), &config, &VaultDirs::default()).unwrap();
+        assert_eq!(
+            views
+                .pages
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["wiki/concepts/x"]
+        );
     }
 
     #[test]
