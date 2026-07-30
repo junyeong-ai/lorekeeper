@@ -94,33 +94,32 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
              again only when its page is RE-RENDERED, and a scheduled run re-renders the current\n\
              date alone, so this does not come back on its own.\n\
              \n\
-             Read the marker first — it decides the repair:\n\
-             \x20 `<key>_done` ABSENT       the answer was never recorded. If the section holds\n\
-             \x20                           content, it was answered before the record existed:\n\
-             \x20                           stamp `<key>_done` with the hash beside the input.\n\
-             \x20                           If it is empty, the answer has to be written first.\n\
-             \x20 `<key>_done` DIFFERENT    a later render superseded the answer. Deleting the\n\
-             \x20                           marker line is the whole fix: the next re-render\n\
-             \x20                           enqueues the section again.\n\
-             \x20 the input is not a string nothing can equal it. Only a re-render can restore the\n\
-             \x20                           pair; there is no hash to copy.\n\
+             Read the marker before choosing a repair:\n\
+             \x20 `<key>_done` DIFFERENT   a later render superseded the answer. Deleting that one\n\
+             \x20                          line is the whole fix — the next re-render enqueues it.\n\
+             \x20 `<key>_done` ABSENT      nothing recorded an answer. Whether one EXISTS is the\n\
+             \x20                          question: stamping the hash beside it claims the\n\
+             \x20                          section's content was produced from THIS input, and a\n\
+             \x20                          filled body never establishes that — which is the whole\n\
+             \x20                          reason the marker exists. Stamp only what you can show.\n\
+             \x20 the input is not a string  nothing can equal it; only a re-render restores the pair.\n\
              \n\
-             Which command re-renders, and what it costs:\n\
-             \x20 daily, document   `lore ingest <source> --date <date>` — RE-FETCHES.\n\
-             \x20 work-log          `lore ingest --date <date>` — a source-filtered run skips it,\n\
-             \x20                   and a date whose sources return no personal events re-renders\n\
-             \x20                   nothing at all, silently.\n\
+             Re-rendering costs more than it looks. `lore ingest --date <date>` re-renders EVERY\n\
+             daily page for that date from a fresh fetch BEFORE it reaches the work-log, and a\n\
+             source whose window has passed returns fewer events than the page holds — so\n\
+             repairing a work-log truncates the daily pages it aggregates. Measured on this\n\
+             author's vault: a date the RSS event log covers came back 8 of 8 events; one older\n\
+             than the log, 6 of 18. `--dry-run` reports the event count it would write for each\n\
+             daily page — compare it with the count the page states, and read `extracted: N\n\
+             items` above it as the whole fetch window rather than that page.\n\
+             \x20 daily, document   `lore ingest <source> --date <date>`. A manual document whose\n\
+             \x20                   inbox file was archived after ingest has no input left to\n\
+             \x20                   re-read, so it is only ever filled in place.\n\
+             \x20 work-log          `lore ingest --date <date>` — every source, hence the cost\n\
+             \x20                   above; and a date whose sources return no personal events\n\
+             \x20                   re-renders nothing at all, silently.\n\
              \x20 synthesis, review `lore synthesis <period>` (`--date`, or `--year` for annual)\n\
              \x20                   — reads persisted pages, fetches nothing, so it is safe.\n\
-             \n\
-             A re-fetch REPLACES the event list with what the source returns now. An RSS source\n\
-             renders from its per-date event log, so a date the log covers is restored intact —\n\
-             but a date older than the log has no such backing, and every other source type keeps\n\
-             no log at all. Measured on this author's vault: a date the log covers re-rendered\n\
-             8 of 8 events; one predating it, 6 of 18. `lore ingest … --dry-run` reports the\n\
-             event count it would write for each daily page — compare that with the count the\n\
-             page states, and note that `extracted: N items` above it is the whole fetch window,\n\
-             not this page. Synthesis has no `--dry-run` and needs none.\n\
              \n\
              `concepts` is the exception, and it needs no re-fetch at all. Never stamp its marker\n\
              by hand — that claims an empty section is answered and loses the extraction for\n\

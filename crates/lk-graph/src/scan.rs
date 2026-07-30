@@ -161,31 +161,14 @@ impl VaultViews {
     /// `scope.exclude` and `scope.dirs` narrow the last two views only: an excluded page still
     /// exists, so it still resolves a link and still has its own links repointed by a rename.
     pub fn resolve(root: &Path, graph: &GraphConfig, dirs: &VaultDirs) -> Result<Self, GraphError> {
-        // A configured scope directory that names nothing on disk is a typo, not an empty
-        // analysis: silently yielding nothing lets `wiki map` overwrite the map with an empty
-        // catalog and exit 0, and every analysis command agree the vault has no pages. Resolved
-        // under the SAME folding that decides membership, so a vault whose directory is spelled
-        // `Wiki` while the config says `wiki` — the case the fold exists for — is present here
-        // too, on a filesystem that keeps the spellings apart as much as on one that folds them.
+        // A configured directory must name exactly one directory on disk. Absent is a typo —
+        // silently yielding nothing lets `wiki map` overwrite the map with an empty catalog and
+        // exit 0, and every analysis command agree the vault has no pages. Two spellings
+        // answering to it is a vault split in half: the pages under one would be analysed while
+        // `wiki index` writes its catalog under the other. Where the filesystem folds the
+        // spellings, both names reach one directory and the vault genuinely works.
         for dir in &graph.scope.dirs {
-            let configured = root.join(dir);
-            match resolve_dir(root, dir) {
-                None => return Err(GraphError::ScanDirNotFound(configured)),
-                // A different spelling on a filesystem that does NOT fold the two is a vault
-                // split in half: this tool would analyse the pages under the on-disk name while
-                // `wiki index` writes its catalog under the configured one, and `index-sync
-                // --fix` would fill that catalog with links to a directory the pages are not in.
-                // Where the filesystem DOES fold them, both names reach one directory and the
-                // vault genuinely works — `configured.is_dir()` is the filesystem answering
-                // that question about itself.
-                Some(found) if found != configured && !configured.is_dir() => {
-                    return Err(GraphError::DirSpelling {
-                        configured: dir.clone(),
-                        on_disk: found.strip_prefix(root).unwrap_or(&found).to_path_buf(),
-                    });
-                }
-                Some(_) => {}
-            }
+            resolve_dir(root, dir)?;
         }
 
         let scanned = scan_vault(root, graph.scope.follow_links)?;
@@ -235,25 +218,80 @@ pub(crate) fn under(id: &str, dir: &Path) -> bool {
 /// The directory a configured vault-relative path names, matched segment by segment under the
 /// same folding that decides scope membership — so a configured `wiki` finds a `Wiki/` on disk
 /// whether or not the filesystem folds the spelling for us.
-fn resolve_dir(root: &Path, dir: &Path) -> Option<PathBuf> {
+fn resolve_dir(root: &Path, dir: &Path) -> Result<PathBuf, GraphError> {
     let mut at = root.to_path_buf();
     for segment in dir.components() {
         let Component::Normal(segment) = segment else {
             continue;
         };
-        let wanted = slugify(&segment.to_string_lossy())?;
-        let exact = at.join(segment);
-        if exact.is_dir() {
-            at = exact;
-            continue;
+        let name = segment.to_string_lossy();
+        let siblings: Vec<String> = std::fs::read_dir(&at)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|entry| entry.path().is_dir())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        match match_segment(&siblings, &name) {
+            SegmentMatch::None => return Err(GraphError::ScanDirNotFound(root.join(dir))),
+            SegmentMatch::Ambiguous(a, b) => {
+                return Err(GraphError::DirSpelling {
+                    configured: dir.to_path_buf(),
+                    on_disk: PathBuf::from(format!("{a} / {b}")),
+                });
+            }
+            SegmentMatch::One(found) => {
+                if found != name && !at.join(&*name).is_dir() {
+                    return Err(GraphError::DirSpelling {
+                        configured: dir.to_path_buf(),
+                        on_disk: PathBuf::from(found),
+                    });
+                }
+                at = at.join(found);
+            }
         }
-        let folded = std::fs::read_dir(&at).ok()?.flatten().find(|entry| {
-            entry.path().is_dir()
-                && slugify(&entry.file_name().to_string_lossy()).as_deref() == Some(&wanted)
-        })?;
-        at = folded.path();
     }
-    Some(at)
+    Ok(at)
+}
+
+/// Which directory a configured name reaches, given the directory names beside it.
+///
+/// Pure so the RULE can be tested where the filesystem cannot be: the interesting cases only
+/// arise where two spellings stay apart, which the development machine folds.
+#[derive(Debug, PartialEq, Eq)]
+enum SegmentMatch {
+    None,
+    /// Exactly one directory answers to the name — under folding, so it may be spelled
+    /// differently from the configured one.
+    One(String),
+    /// Two directories answer to it. Nothing can choose between them: the pages under one would
+    /// be analysed while a catalog is written under the other.
+    Ambiguous(String, String),
+}
+
+fn match_segment(siblings: &[String], want: &str) -> SegmentMatch {
+    if siblings.iter().any(|s| s == want) {
+        // An exact match still loses to a second folded spelling: `wiki/` beside `Wiki/` on a
+        // filesystem that keeps them apart is two directories answering to one configured name.
+        if let Some(other) = siblings
+            .iter()
+            .find(|s| *s != want && slugify(s) == slugify(want))
+        {
+            return SegmentMatch::Ambiguous(want.to_owned(), other.clone());
+        }
+        return SegmentMatch::One(want.to_owned());
+    }
+    let Some(wanted) = slugify(want) else {
+        return SegmentMatch::None;
+    };
+    let mut folded = siblings
+        .iter()
+        .filter(|s| slugify(s).as_deref() == Some(&wanted));
+    match (folded.next(), folded.next()) {
+        (None, _) => SegmentMatch::None,
+        (Some(one), None) => SegmentMatch::One(one.clone()),
+        (Some(a), Some(b)) => SegmentMatch::Ambiguous(a.clone(), b.clone()),
+    }
 }
 
 /// Every vault-relative page directory that exists on disk — anything this tool writes a page
@@ -261,7 +299,7 @@ fn resolve_dir(root: &Path, dir: &Path) -> Option<PathBuf> {
 fn page_dirs(root: &Path, dirs: &VaultDirs) -> Vec<PathBuf> {
     [&dirs.wiki, &dirs.daily, &dirs.personal, &dirs.synthesis]
         .iter()
-        .filter(|name| resolve_dir(root, Path::new(name.as_str())).is_some())
+        .filter(|name| resolve_dir(root, Path::new(name.as_str())).is_ok())
         .map(|s| PathBuf::from(s.as_str()))
         .collect()
 }
@@ -719,6 +757,39 @@ mod tests {
     }
 
     #[test]
+    fn one_configured_name_must_reach_one_directory() {
+        // The rule, tested where the filesystem cannot say it: this machine folds `wiki` onto
+        // `Wiki`, so a vault holding both as SEPARATE directories cannot be built here — and
+        // that is exactly the vault the verdict is about.
+        let dirs = |v: &[&str]| v.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+
+        assert_eq!(
+            match_segment(&dirs(&["wiki", "daily"]), "wiki"),
+            SegmentMatch::One("wiki".into())
+        );
+        assert_eq!(
+            match_segment(&dirs(&["Wiki", "daily"]), "wiki"),
+            SegmentMatch::One("Wiki".into()),
+            "one directory under a spelling the config folds onto"
+        );
+        assert_eq!(match_segment(&dirs(&["daily"]), "wiki"), SegmentMatch::None);
+        assert_eq!(
+            match_segment(&dirs(&["wiki", "Wiki"]), "wiki"),
+            SegmentMatch::Ambiguous("wiki".into(), "Wiki".into()),
+            "an exact match does not settle it while a second spelling also answers"
+        );
+        assert_eq!(
+            match_segment(&dirs(&["Wiki", "WIKI"]), "wiki"),
+            SegmentMatch::Ambiguous("Wiki".into(), "WIKI".into())
+        );
+        assert_eq!(
+            match_segment(&dirs(&["wikipedia"]), "wiki"),
+            SegmentMatch::None,
+            "folding is not prefix matching"
+        );
+    }
+
+    #[test]
     fn a_configured_directory_is_resolved_the_way_the_filesystem_answers() {
         // Which outcome is right is a property of the FILESYSTEM, so ask it. Where both
         // spellings reach one directory the vault works and its pages are analysed; where they
@@ -760,6 +831,34 @@ mod tests {
         let mut config = GraphConfig::default();
         config.scope.dirs = vec![PathBuf::from("wikii")];
         assert!(VaultViews::resolve(tmp.path(), &config, &VaultDirs::default()).is_err());
+    }
+
+    #[test]
+    fn two_files_whose_names_differ_only_by_normalization_are_an_address_collision() {
+        // Comparing addresses under NFC is what makes a composed link reach a decomposed file.
+        // The price is that a vault holding BOTH spellings as separate files — possible only
+        // where the filesystem preserves and distinguishes them — has two files at one address.
+        // That is reported, by the channel whose subject it is, rather than silently resolved.
+        use unicode_normalization::UnicodeNormalization;
+        let composed = "wiki/concepts/개념.md".to_string();
+        let decomposed: String = composed.nfd().collect();
+        assert_ne!(composed, decomposed, "the two spellings differ as bytes");
+
+        let pages = vec![
+            ScannedPage {
+                id: path_slug(Path::new(&composed)),
+                path: PathBuf::from(&composed),
+                ..ScannedPage::default()
+            },
+            ScannedPage {
+                id: path_slug(Path::new(&decomposed)),
+                path: PathBuf::from(&decomposed),
+                ..ScannedPage::default()
+            },
+        ];
+        let collisions = address_collisions(&pages);
+        assert_eq!(collisions.len(), 1, "one address, two files");
+        assert_eq!(collisions[0].paths.len(), 2);
     }
 
     #[test]
