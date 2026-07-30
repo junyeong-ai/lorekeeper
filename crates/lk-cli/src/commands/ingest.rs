@@ -418,7 +418,12 @@ pub async fn run(
         total_pages,
         all_personal.len(),
         if any_write_failed {
-            " (some writes failed — safe to re-run)"
+            // Not "safe to re-run": re-running reproduces every page whose write failed for a
+            // transient reason, and reproduces the SAME failure for one that did not — a
+            // refused page-format change persists until the file or the config is dealt with.
+            // The per-write line above says which, so point at it rather than promising.
+            " (some writes failed — see the errors above; re-running reproduces every page \
+             whose cause has been dealt with)"
         } else {
             ""
         }
