@@ -119,3 +119,93 @@ fn a_command_name_is_matched_whole_not_as_a_prefix() {
     assert!(names_command("`lore queue prune`", "queue"));
     assert!(!names_command("`lore maintenance`", "maintain"));
 }
+
+/// And the reverse: every command a skill instructs the agent to RUN must exist.
+///
+/// The other direction is checked above — a command no skill names is one no agent reaches. This
+/// one is the failure the agent actually experiences: a skill step naming a command the binary
+/// does not accept stops the procedure mid-run, with an agent that has already written pages.
+/// `lore wiki index`/`log`/`map` were replaced by `lore wiki refresh` across four skills in one
+/// edit; nothing would have caught a fifth mention left behind.
+///
+/// Each invocation is put to the BINARY rather than compared against parsed help text. A first
+/// version compared only the leading subcommand, so `lore wiki rebuild` passed on the strength of
+/// `wiki` being real — which is the drift least likely to happen and the only one it could see.
+/// `--help` short-circuits clap before argument validation, so a documented invocation's
+/// placeholders and flags do not have to be satisfiable to ask whether the command path exists.
+///
+/// Only backticked invocations count. `when_to_use` carries natural-language triggers — "lore
+/// capture", "lore extract" — which are the skill's own name in prose, not commands.
+#[test]
+fn every_command_a_skill_tells_an_agent_to_run_exists() {
+    let corpus = skill_corpus();
+    let paths = backticked_command_paths(&corpus);
+    assert!(
+        paths.len() > 5,
+        "found only {} invocations — did the fences change?",
+        paths.len()
+    );
+    for path in paths {
+        let out = Command::new(env!("CARGO_BIN_EXE_lore"))
+            .env("NO_COLOR", "1")
+            .args(&path)
+            .arg("--help")
+            .output()
+            .expect("run lore");
+        assert!(
+            out.status.success(),
+            "a skill tells an agent to run `lore {}`, which the binary rejects: {}",
+            path.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .next()
+                .unwrap_or("")
+        );
+    }
+}
+
+/// The subcommand path of every `` `lore …` `` span in the corpus, and of every `lore …` line
+/// inside a fenced block — a skill gives commands both ways, and both are instructions.
+///
+/// Flags, placeholders and arguments are dropped: what is being asked is whether the command PATH
+/// exists, and `--help` answers that without the arguments having to be valid.
+fn backticked_command_paths(corpus: &str) -> Vec<Vec<String>> {
+    fn path_of(rest: &str) -> Option<Vec<String>> {
+        let path: Vec<String> = rest
+            .split_whitespace()
+            .take_while(|token| {
+                token
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+                    && !token.starts_with('-')
+            })
+            .map(str::to_owned)
+            .collect();
+        (!path.is_empty()).then_some(path)
+    }
+
+    let mut found: Vec<Vec<String>> = Vec::new();
+    for span in corpus.split('`').skip(1).step_by(2) {
+        if let Some(rest) = span.strip_prefix("lore ")
+            && let Some(path) = path_of(rest)
+        {
+            found.push(path);
+        }
+    }
+    let mut in_fence = false;
+    for line in corpus.lines() {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence
+            && let Some(rest) = line.trim_start().strip_prefix("lore ")
+            && let Some(path) = path_of(rest)
+        {
+            found.push(path);
+        }
+    }
+    found.sort();
+    found.dedup();
+    found
+}
