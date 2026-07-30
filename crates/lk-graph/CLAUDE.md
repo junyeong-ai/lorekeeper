@@ -36,8 +36,22 @@ on-disk state, never from a cached snapshot.
   page linking a `<daily>/` page is not broken, and a concept linked only from
   `<daily>/` is not an orphan. Reserved meta pages
   (`lk_core::vault_path::RESERVED_WIKI_FILES`) are never orphans or index-drift.
-- **Exit codes**: 0 = ok/no findings, 1 = findings, 2 = runtime error.
-  `hubs`/`cluster`/`export`/`suggest-links` never exit 1.
+- **Exit codes**: 0 = every claim the vault makes holds, 1 = it contradicts itself, 2 = runtime
+  error. Non-zero is reserved for a claim that is FALSE and has a named repair — a link whose
+  destination is absent, a catalog that disagrees with the disk, a category outside the
+  configured vocabulary, one name answering to two pages, a filename that disagrees with its
+  normalized slug, a `source_count` no sweep could write. What a vault in good standing
+  legitimately carries is reported and exits 0: `lint`'s observation channel, `orphans`,
+  `audit-candidates`, and `hubs`/`cluster`/`export`/`suggest-links`.
+- **`LintReport` is two channels, and the split IS the exit code**: `violations`
+  (broken/index-drift/invalid-categories/duplicate-concepts) decides it, `observations`
+  (orphans/hubs/unresolved-conflicts) never does. Every extraction mints concepts before
+  anything cites them, so an orphan-counting exit code is permanently non-zero and therefore
+  carries no information — which is what had callers wrapping the command in `|| true` and
+  skills naming the lists to ignore, and a broken link got ignored along with them.
+  `Violations::count`/`Observations::count` are what the code and the summary line read, and
+  a unit test asserts each covers every list serde can see in its channel, so a lint added to
+  a channel cannot be left out of its count.
 - **`suggest_links`**: pairs in the same Louvain community with no edge that share at
   least `graph.cluster.suggest_min_shared_neighbors` neighbors, ranked by their
   **Adamic–Adar index** (Σ 1/ln|N(z)| over shared neighbors z), descending. It runs on the

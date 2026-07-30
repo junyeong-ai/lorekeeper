@@ -126,9 +126,10 @@ struct PageDefects {
 /// nothing pending, and the section stays empty for good.
 ///
 /// Nothing else reports this. The one visible trace is indirect and only for concepts: a
-/// concept page whose origin never completed its extraction has no citation, so it surfaces
-/// among `lore graph lint`'s orphans — mixed in with concepts that simply have not been cited
-/// yet, which is not a defect at all. On the vault this was measured against, 38 pages carried
+/// concept page whose origin never completed its extraction has no citation, so it surfaces in
+/// `lore graph lint`'s observation channel as an orphan — mixed in with concepts that simply
+/// have not been cited yet, which is not a defect at all and is why that channel does not gate.
+/// On the vault this was measured against, 38 pages carried
 /// unanswered sections while `doctor` reported no defects and the queue reported nothing to do.
 ///
 /// The keys come from `TargetKind`, so a new task kind is covered without being listed here.

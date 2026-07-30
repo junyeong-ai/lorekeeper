@@ -61,11 +61,11 @@ each as an independent source, and report the aggregate results.
    `backlinks-sync` counts as the citation.
 5. **Finalize**: `lore graph backlinks-sync`, then `lore wiki refresh` (re-derive
    the catalog, the knowledge timeline and the citation-cluster map), then
-   `lore graph lint` to confirm no structural drift (index/broken links).
-   Pre-existing review items (uncategorized, open conflicts) may legitimately
-   remain — they are not introduced by this add. A `duplicate_concepts` entry
-   naming a page this add touched is different: it means the new page claims a
-   name another page already answers to, so resolve it before reporting done.
+   `lore graph lint`, which must exit 0. A non-zero exit is the vault contradicting
+   itself, and every cause is something this add could have introduced — including a
+   `duplicate_concepts` entry, which means a page written here claims a name another
+   page already answers to; resolve it before reporting done. Observations (orphans,
+   open conflicts) are reported without gating.
 6. Report what was created/updated, grouped by source file.
 
 ### `/lore-wiki query <question>`

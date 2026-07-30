@@ -145,7 +145,7 @@ async fn main() -> miette::Result<()> {
         template_dir: cli.template_dir,
     };
 
-    // `lore graph` has its own exit-code convention (0=ok, 1=findings, 2=error) so
+    // `lore graph` has its own exit-code convention (0=sound, 1=contradicted, 2=error) so
     // it returns ExitCode directly instead of going through miette.
     if let Command::Graph {
         root,

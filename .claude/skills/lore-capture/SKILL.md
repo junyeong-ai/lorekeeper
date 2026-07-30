@@ -129,7 +129,7 @@ checks pass:
 ```bash
 lore graph backlinks-sync   # re-derive every concept's ## Sources + source_count
 lore wiki refresh           # re-derive the catalog, timeline and map this page joins
-lore graph lint             # confirm no structural drift (index/broken links). Pre-existing orphans and open conflicts may legitimately remain; a duplicate-concept entry naming a page you just wrote does NOT — it means this capture claimed a name another page already answers to
+lore graph lint             # must exit 0. Non-zero means this capture left the vault contradicting itself — a link to a page that is not there, a catalog that disagrees with the disk, a category outside the configured vocabulary, or a name another page already answers to. Orphans and open conflicts are reported as observations and never gate
 ```
 
 ### 7. Report

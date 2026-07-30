@@ -128,14 +128,15 @@ drain_queue() {
 # pages, and rewriting each origin page's related-concepts links — and the rest derive from
 # the result. All idempotent: with nothing pending, every step is a no-op.
 #
-# `graph lint` exits non-zero when it FINDS things, which is a report rather than a failure,
-# so it runs outside `run` and its exit code is deliberately not collected.
+# `graph lint` is a stage like any other: it exits non-zero only when the vault contradicts
+# itself — a link to a page that is not there, a catalog that disagrees with the disk, an
+# unknown category, one name on two pages — and every one of those is caused by a run of this
+# pipeline. What a healthy vault carries (uncited concepts, hubs, open conflicts) it reports
+# without gating, so its exit code belongs in `failed` rather than being discarded.
 sync_graph() {
     run "schema"         lore_cmd schema
     run "queue apply"    lore_cmd queue apply
     run "backlinks-sync" lore_cmd graph backlinks-sync
     run "wiki refresh"   lore_cmd wiki refresh
-
-    log "▸ graph lint"
-    lore_cmd graph lint || true
+    run "graph lint"     lore_cmd graph lint
 }

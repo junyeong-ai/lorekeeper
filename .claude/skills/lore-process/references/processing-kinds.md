@@ -109,8 +109,8 @@ context — the queue task carries no concept registry of its own.
 the IDs in `input.categories` (verbatim string match) or the field MUST be
 omitted entirely. Never invent a new category, never substitute a synonym,
 never abbreviate. If no listed category fits the concept, leave the
-`category` field off — `lore graph lint` surfaces unknown categories as
-findings, so an invented category is observable drift that breaks the index.
+`category` field off — `lore graph lint` counts an unknown category as a
+violation, so an invented one makes it exit non-zero and breaks the index.
 When `input.categories` is absent or empty, omit the field unconditionally.
 
 

@@ -51,19 +51,56 @@ pub struct RenameSuggestion {
     pub to: String,
 }
 
+/// A claim the vault makes about itself that does not hold: a link whose destination is not
+/// there, a catalog that disagrees with the disk, a category outside the configured
+/// vocabulary, one name answering to two pages. Each entry names its own repair, so this
+/// channel — and only this channel — decides the exit code.
+#[derive(Debug, Serialize)]
+pub struct Violations {
+    pub broken: Vec<BrokenLink>,
+    pub index: IndexSyncReport,
+    pub invalid_categories: Vec<InvalidCategoryConcept>,
+    pub duplicate_concepts: Vec<DuplicateConcept>,
+}
+
+/// True statements about a vault in good standing, reported because they guide a human's next
+/// decision rather than because anything is wrong: the concepts nothing cites yet, the pages
+/// everything cites, a disagreement between sources that an audit deliberately recorded.
+///
+/// Kept out of the exit code on purpose. A living vault always holds some of these — every
+/// extraction mints concepts before anything cites them — so counting them makes the exit code
+/// permanently non-zero, which is how it came to mean nothing: every caller wrapped the command
+/// in `|| true` and every skill had to name the lists its reader should ignore.
+#[derive(Debug, Serialize)]
+pub struct Observations {
+    pub hubs: Vec<HubPageReference>,
+    pub orphans: Vec<String>,
+    pub unresolved_conflicts: Vec<UnresolvedConflict>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct LintReport {
     pub pages: usize,
     pub links: usize,
     pub components: usize,
-    pub hubs: Vec<HubPageReference>,
-    pub orphans: Vec<String>,
-    pub broken: Vec<BrokenLink>,
-    pub index: IndexSyncReport,
-    pub invalid_categories: Vec<InvalidCategoryConcept>,
-    pub duplicate_concepts: Vec<DuplicateConcept>,
-    pub unresolved_conflicts: Vec<UnresolvedConflict>,
-    pub findings: usize,
+    pub violations: Violations,
+    pub observations: Observations,
+}
+
+impl Violations {
+    pub fn count(&self) -> usize {
+        self.broken.len()
+            + self.index.missing_from_index.len()
+            + self.index.missing_from_disk.len()
+            + self.invalid_categories.len()
+            + self.duplicate_concepts.len()
+    }
+}
+
+impl Observations {
+    pub fn count(&self) -> usize {
+        self.hubs.len() + self.orphans.len() + self.unresolved_conflicts.len()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -185,43 +222,47 @@ pub fn print_lint(r: &LintReport) {
         r.pages, r.links, r.components
     );
 
-    if !r.hubs.is_empty() {
-        println!("\nHub pages:");
-        for hub in &r.hubs {
-            println!("  {:>4} links  {}", hub.degree, hub.id);
-        }
-    }
+    print_violations(&r.violations);
+    print_observations(&r.observations);
 
-    if !r.orphans.is_empty() {
-        println!("\nOrphans ({}):", r.orphans.len());
-        for id in &r.orphans {
-            println!("  {id}");
-        }
+    let violations = r.violations.count();
+    let observations = r.observations.count();
+    if violations == 0 {
+        println!("\nNo violations ({observations} observation(s))");
+    } else {
+        println!("\n{violations} violation(s), {observations} observation(s)");
     }
+}
 
-    if !r.broken.is_empty() {
-        println!("\nBroken links ({}):", r.broken.len());
-        for link in &r.broken {
+fn print_violations(v: &Violations) {
+    if v.count() == 0 {
+        return;
+    }
+    println!("\n--- Violations ---");
+
+    if !v.broken.is_empty() {
+        println!("\nBroken links ({}):", v.broken.len());
+        for link in &v.broken {
             println!("  {} -> {}", link.source, link.target);
         }
     }
 
-    if !r.index.missing_from_index.is_empty() || !r.index.missing_from_disk.is_empty() {
+    if !v.index.missing_from_index.is_empty() || !v.index.missing_from_disk.is_empty() {
         println!("\nIndex drift:");
-        for p in &r.index.missing_from_index {
+        for p in &v.index.missing_from_index {
             println!("  +index  {p}");
         }
-        for p in &r.index.missing_from_disk {
+        for p in &v.index.missing_from_disk {
             println!("  -disk   {p}");
         }
     }
 
-    if !r.invalid_categories.is_empty() {
+    if !v.invalid_categories.is_empty() {
         println!(
             "\nInvalid concept categories ({}):",
-            r.invalid_categories.len()
+            v.invalid_categories.len()
         );
-        for c in &r.invalid_categories {
+        for c in &v.invalid_categories {
             println!(
                 "  {}  category={}  ({})",
                 c.slug,
@@ -231,31 +272,46 @@ pub fn print_lint(r: &LintReport) {
         }
     }
 
-    if !r.duplicate_concepts.is_empty() {
-        println!("\nDuplicate concepts ({}):", r.duplicate_concepts.len());
-        for d in &r.duplicate_concepts {
+    if !v.duplicate_concepts.is_empty() {
+        println!("\nDuplicate concepts ({}):", v.duplicate_concepts.len());
+        for d in &v.duplicate_concepts {
             println!("  {} ~ {}  (\"{}\" = \"{}\")", d.a, d.b, d.a_name, d.b_name);
         }
     }
+}
 
-    if !r.unresolved_conflicts.is_empty() {
+fn print_observations(o: &Observations) {
+    if o.count() == 0 {
+        return;
+    }
+    println!("\n--- Observations (do not affect the exit code) ---");
+
+    if !o.hubs.is_empty() {
+        println!("\nHub pages:");
+        for hub in &o.hubs {
+            println!("  {:>4} links  {}", hub.degree, hub.id);
+        }
+    }
+
+    if !o.orphans.is_empty() {
+        println!("\nOrphans ({}):", o.orphans.len());
+        for id in &o.orphans {
+            println!("  {id}");
+        }
+    }
+
+    if !o.unresolved_conflicts.is_empty() {
         println!(
             "\nUnresolved concept conflicts ({}):",
-            r.unresolved_conflicts.len()
+            o.unresolved_conflicts.len()
         );
-        for c in &r.unresolved_conflicts {
+        for c in &o.unresolved_conflicts {
             if c.note.is_empty() {
                 println!("  {}  ({})", c.slug, c.path.display());
             } else {
                 println!("  {}  {}  ({})", c.slug, c.note, c.path.display());
             }
         }
-    }
-
-    if r.findings == 0 {
-        println!("\nNo issues found");
-    } else {
-        println!("\n{} finding(s)", r.findings);
     }
 }
 
@@ -382,5 +438,71 @@ fn format_diff(update: &ConceptUpdate) -> String {
         String::new()
     } else {
         format!("  ({})", parts.join(", "))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// How many entries a serialized channel actually lists: every array, counted where it
+    /// sits, without descending into the entries themselves — one finding is one entry in one
+    /// list, and a list inside an entry belongs to that finding rather than being another one.
+    fn listed(value: &serde_json::Value) -> usize {
+        match value {
+            serde_json::Value::Array(items) => items.len(),
+            serde_json::Value::Object(fields) => fields.values().map(listed).sum(),
+            _ => 0,
+        }
+    }
+
+    /// `count()` is what the exit code is derived from, so a list added to the struct and left
+    /// out of the sum makes `lore graph lint` report a violation and exit 0. Asserting against
+    /// what serde can see puts the invariant on the type rather than on whoever edits it.
+    #[test]
+    fn the_violation_channel_counts_every_list_it_carries() {
+        let v = Violations {
+            broken: vec![BrokenLink {
+                source: "a".into(),
+                target: "b".into(),
+            }],
+            index: IndexSyncReport {
+                missing_from_index: vec!["c".into()],
+                missing_from_disk: vec!["d".into()],
+                fixed: None,
+            },
+            invalid_categories: vec![InvalidCategoryConcept {
+                path: "wiki/concepts/e.md".into(),
+                slug: "e".into(),
+                category: "nope".into(),
+            }],
+            duplicate_concepts: vec![DuplicateConcept {
+                a: "f".into(),
+                b: "g".into(),
+                a_name: "F".into(),
+                b_name: "F".into(),
+            }],
+        };
+        assert_eq!(v.count(), listed(&serde_json::to_value(&v).unwrap()));
+    }
+
+    #[test]
+    fn the_observation_channel_counts_every_list_it_carries() {
+        let o = Observations {
+            hubs: vec![HubPageReference {
+                id: "a".into(),
+                title: "A".into(),
+                degree: 3,
+                outgoing: 1,
+                incoming: 2,
+            }],
+            orphans: vec!["b".into()],
+            unresolved_conflicts: vec![UnresolvedConflict {
+                path: "wiki/concepts/c.md".into(),
+                slug: "c".into(),
+                note: "sources disagree".into(),
+            }],
+        };
+        assert_eq!(o.count(), listed(&serde_json::to_value(&o).unwrap()));
     }
 }

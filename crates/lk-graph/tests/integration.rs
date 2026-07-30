@@ -241,39 +241,37 @@ fn lint_combined_report() {
     let existence = scan::VaultExistence::build(&pages, &VaultDirs::default());
     let drift = index_drift::diff(&g, &existence, &root, Path::new("wiki"), &[]).unwrap();
 
-    let findings = orphans.len()
-        + broken.len()
-        + drift.missing_from_index.len()
-        + drift.missing_from_disk.len();
-
     let report = output::LintReport {
         pages: g.node_count(),
         links: g.edge_count(),
         components: g.component_count(),
-        hubs,
-        orphans,
-        broken,
-        index: output::IndexSyncReport {
-            missing_from_index: drift.missing_from_index,
-            missing_from_disk: drift.missing_from_disk,
-            fixed: None,
+        violations: output::Violations {
+            broken,
+            index: output::IndexSyncReport {
+                missing_from_index: drift.missing_from_index,
+                missing_from_disk: drift.missing_from_disk,
+                fixed: None,
+            },
+            invalid_categories: Vec::new(),
+            duplicate_concepts: Vec::new(),
         },
-        invalid_categories: Vec::new(),
-        duplicate_concepts: Vec::new(),
-        unresolved_conflicts: Vec::new(),
-        findings,
+        observations: output::Observations {
+            hubs,
+            orphans,
+            unresolved_conflicts: Vec::new(),
+        },
     };
 
-    assert!(report.findings > 0);
+    assert!(report.observations.count() > 0);
     // 4 knowledge nodes: index.md (reserved meta-file) is excluded from the graph.
     assert_eq!(report.pages, 4);
 
     let json = serde_json::to_value(&report).unwrap();
     assert!(json["pages"].is_u64());
-    assert!(json["orphans"].is_array());
-    assert!(json["broken"].is_array());
-    assert!(json["findings"].as_u64().unwrap() > 0);
-    assert!(json["invalid_categories"].is_array());
+    assert!(json["observations"]["orphans"].is_array());
+    assert!(json["violations"]["broken"].is_array());
+    assert!(json["violations"]["invalid_categories"].is_array());
+    assert!(json["violations"]["index"]["missing_from_index"].is_array());
 }
 
 // --- Suggest links ---

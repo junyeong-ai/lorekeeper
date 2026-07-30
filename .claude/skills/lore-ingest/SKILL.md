@@ -77,7 +77,11 @@ Every emitted path must be absolute (`--bin`, `--pipeline-dir`): launchd searche
 - Data (cron lines) → **stdout**
 - Exit codes: `0` success, non-zero on any failure. Findings-style commands
   have their own conventions: `lore health` exits `1` when a source is overdue,
-  `lore graph *` uses `0` clean / `1` findings / `2` runtime error.
+  `lore graph *` uses `0` no contradiction / `1` the vault contradicts itself
+  (broken link, index drift, unknown category, one name on two pages, an
+  unnormalized slug) / `2` runtime error. A report about a healthy vault exits
+  `0` even when it lists things — orphans, hubs, open conflicts, the audit
+  worklist — so no `lore graph` call needs its exit code suppressed.
 
 ## Configuration
 

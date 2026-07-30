@@ -98,7 +98,18 @@ pub enum GraphCommand {
     },
 }
 
-/// Returns exit code: 0 = ok/no findings, 1 = findings, 2 = runtime error.
+/// Returns exit code: 0 = every claim the vault makes holds, 1 = it contradicts itself,
+/// 2 = runtime error.
+///
+/// A non-zero exit is reserved for a claim that is FALSE and has a named repair: a link whose
+/// destination does not exist, a catalog that disagrees with the disk, a category outside the
+/// configured vocabulary, one name answering to two pages, a filename that disagrees with its
+/// own normalized slug, a derived count no sweep could write. What a vault in good standing
+/// legitimately carries exits 0 even though it is reported — the concepts nothing cites yet,
+/// the hubs, a disagreement between sources an audit recorded, a concept whose evidence changed
+/// since its last audit. Those are never empty in a living vault, so counting them makes the
+/// exit code permanently non-zero and therefore uninformative, which is what forced every
+/// caller to wrap the command in `|| true` and every skill to name the lists to ignore.
 pub fn run(
     opts: &GlobalOptions,
     cmd: GraphCommand,
@@ -106,8 +117,8 @@ pub fn run(
     root_override: Option<PathBuf>,
 ) -> i32 {
     match run_inner(opts, cmd, json, root_override) {
-        Ok(has_findings) => {
-            if has_findings {
+        Ok(violated) => {
+            if violated {
                 1
             } else {
                 0
@@ -184,7 +195,7 @@ fn run_inner(
     };
     let g = graph::WikiGraph::build_with_existence(&pages, &existence, &rc.vault_dirs);
 
-    let has_findings = match cmd {
+    let violated = match cmd {
         GraphCommand::Lint => {
             let hubs = g.hubs(10, rc.graph.metrics.min_hub_degree);
             let orphans = g.orphans(&rc.graph.metrics.orphan_exclude);
@@ -206,37 +217,33 @@ fn run_inner(
             let duplicate_concepts = concept_lint::find_duplicate_concepts(&concept_pages);
             let unresolved_conflicts = concept_lint::find_unresolved_conflicts(&concept_pages);
 
-            let findings = orphans.len()
-                + broken.len()
-                + drift.missing_from_index.len()
-                + drift.missing_from_disk.len()
-                + invalid_categories.len()
-                + duplicate_concepts.len()
-                + unresolved_conflicts.len();
-
             let report = output::LintReport {
                 pages: g.node_count(),
                 links: g.edge_count(),
                 components: g.component_count(),
-                hubs,
-                orphans,
-                broken,
-                index: output::IndexSyncReport {
-                    missing_from_index: drift.missing_from_index,
-                    missing_from_disk: drift.missing_from_disk,
-                    fixed: None,
+                violations: output::Violations {
+                    broken,
+                    index: output::IndexSyncReport {
+                        missing_from_index: drift.missing_from_index,
+                        missing_from_disk: drift.missing_from_disk,
+                        fixed: None,
+                    },
+                    invalid_categories,
+                    duplicate_concepts,
                 },
-                invalid_categories,
-                duplicate_concepts,
-                unresolved_conflicts,
-                findings,
+                observations: output::Observations {
+                    hubs,
+                    orphans,
+                    unresolved_conflicts,
+                },
             };
+            let violated = report.violations.count() > 0;
             if json {
                 output::print_json(&report)?;
             } else {
                 output::print_lint(&report);
             }
-            findings > 0
+            violated
         }
         GraphCommand::Hubs { top } => {
             let report = output::HubsReport {
@@ -253,13 +260,12 @@ fn run_inner(
             let orphans = g.orphans(&rc.graph.metrics.orphan_exclude);
             let count = orphans.len();
             let report = output::OrphansReport { orphans, count };
-            let has = report.count > 0;
             if json {
                 output::print_json(&report)?;
             } else {
                 output::print_orphans(&report);
             }
-            has
+            false
         }
         GraphCommand::Broken => {
             let broken = g.broken_links().to_vec();
@@ -416,7 +422,7 @@ fn run_inner(
         }
     };
 
-    Ok(has_findings)
+    Ok(violated)
 }
 
 fn run_audit_candidates(
@@ -434,7 +440,10 @@ fn run_audit_candidates(
     } else {
         output::print_audit_candidates(&report);
     }
-    Ok(count > 0)
+    // A worklist, not a defect: a concept whose evidence changed since its last audit says
+    // nothing false about the vault. Exit 0 so `/lore-wiki audit` can read the list under
+    // `set -e` instead of being told to ignore the exit code.
+    Ok(false)
 }
 
 fn run_audit_mark(
@@ -472,9 +481,9 @@ fn run_backlinks(
         backlinks::sync_concept_backlinks(&pages, &rc.root, rc.locale, dry_run, &rc.vault_dirs)
             .map_err(|e| format!("{e}"))?;
     let changed = sync.updated.len();
-    // A page the sweep could not record a count on is a finding: it is left with a stale
-    // count, and only a human adding frontmatter fixes it.
-    let has_findings = !sync.skipped.is_empty();
+    // A page the sweep could not record a count on keeps a `source_count` the graph
+    // contradicts, and only a human adding frontmatter fixes it.
+    let violated = !sync.skipped.is_empty();
     let report = output::BacklinksSyncReport { sync, changed };
 
     if json {
@@ -483,7 +492,7 @@ fn run_backlinks(
         output::print_backlinks(&report);
     }
 
-    Ok(has_findings)
+    Ok(violated)
 }
 
 fn run_merge(
@@ -517,7 +526,7 @@ fn run_merge(
     } else {
         output::print_merge(&result);
     }
-    // Never a "findings" exit — a successful merge is exit 0.
+    // A successful merge leaves nothing contradicted — exit 0.
     Ok(false)
 }
 

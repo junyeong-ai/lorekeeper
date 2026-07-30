@@ -255,7 +255,7 @@ Extract knowledge using the manifest. Requires a prior scan.
    ```bash
    lore graph backlinks-sync   # re-derive every concept's ## Sources + source_count
    lore wiki refresh           # re-derive the catalog, timeline and map these pages join
-   lore graph lint             # confirm no structural drift; pre-existing review items may remain
+   lore graph lint             # must exit 0; observations (orphans, open conflicts) are reported without gating
    ```
 8. Report created/merged/skipped counts.
 

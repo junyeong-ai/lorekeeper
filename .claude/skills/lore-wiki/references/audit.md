@@ -3,31 +3,31 @@
 Surface findings for human review — never auto-resolve. Read AGENTS.md to
 resolve section headings before inspecting pages.
 
-1. **Structural** — run `lore graph --json lint`. ONE pass returns ALL of:
-   `orphans`, `broken`, `hubs`, `invalid_categories`, `duplicate_concepts`,
-   `unresolved_conflicts`, and index drift
-   (`missing_from_index`/`_from_disk`).
-   Surface every non-empty list. NOTE: a clean lint (`findings: 0`) means no
-   structural FAULTS — it does NOT mean the wiki is well-connected. Empty
-   related-concepts sections are never a lint finding; only `suggest-links` (layer 2)
-   reveals that gap, so never equate "lint clean" with "healthy".
+1. **Structural** — run `lore graph --json lint`. ONE pass returns ALL of it, in two
+   channels: `violations` (`broken`, `invalid_categories`, `duplicate_concepts`, and index
+   drift under `index.missing_from_index`/`_from_disk`) and `observations` (`orphans`,
+   `hubs`, `unresolved_conflicts`). Surface every non-empty list from both — the split says
+   which ones are FALSE (a violation names its own repair) versus true of a healthy vault
+   (an observation), not which ones to read. NOTE: an empty `violations` means no structural
+   faults — it does NOT mean the wiki is well-connected. Empty related-concepts sections are
+   never a lint finding; only `suggest-links` (layer 2) reveals that gap, so never equate
+   "no violations" with "healthy".
 2. **Missing cross-references** — run `lore graph --json suggest-links` (never
    exits non-zero — always inspect the pairs), then confirm topical relatedness
    before proposing a link. Community grounding + LLM confirmation = double gate
    against false positives.
 3. **Contradictions** — run `lore graph --json audit-candidates` for the
    worklist: concepts with 2+ sources AND a source set that changed since their last
-   audit (the `audited_sources_hash` marker). It exits non-zero when the worklist is
-   non-empty — read the JSON `data`, not the exit code (don't wrap it in `set -e`).
-   Work it one page at a time
+   audit (the `audited_sources_hash` marker). Work it one page at a time
    (avoids combinatorial blow-up). For each, read its cited sources and only flag
    a genuine, unambiguous contradiction (two sources asserting incompatible facts)
    — never a difference in emphasis or a gap; uncertainty means do not flag. When
    one is found, add a callout under the Synthesis section stating both sides and
    citing each source: `> [!conflict] <one-line summary of the disagreement>`.
    Never choose a side. The callout lives in the LLM-owned Synthesis body, so
-   ingest re-render preserves it, and `lore graph lint` reports it as an
-   unresolved conflict until a human resolves it and deletes the callout.
+   ingest re-render preserves it, and `lore graph lint` reports it under
+   `observations.unresolved_conflicts` until a human resolves it and deletes the
+   callout — a recorded disagreement is true of the vault, so it never gates.
    AFTER reviewing a candidate — whether or not you flagged a conflict — run
    `lore graph audit-mark <slug>` to record its current source set, so it leaves
    the worklist until its sources change again. This is what keeps the list
@@ -43,7 +43,7 @@ resolve section headings before inspecting pages.
    for human review, never auto-create pages.
 5. **Concept convergence** — two parts:
    The two halves split on what is DECIDABLE. Layer 1 owns spelling; you own meaning.
-   - **Duplicates** from layer 1's `duplicate_concepts`: two pages answering to one
+   - **Duplicates** from layer 1's `violations.duplicate_concepts`: two pages answering to one
      name (`vector-db` ~ `vectordb`, or an alias on one page that is another page's
      title). Layer 1 folds only typography — case, punctuation, and every break except
      one between two numerals (so `claude-35` ~ `claude35` IS a finding, `claude-3-5` ~
