@@ -28,6 +28,8 @@ jobs:
   # the Windows compile check and shellcheck, which is the same defect one step removed.
   verify:
     uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ github.event.inputs.tag || github.ref }}
 
   # Release-specific, so it stays here: every version in the archives comes from the tag name and
   # no step read a manifest. A tag pushed on an unbumped tree ships `lore-v0.13.8-*` holding a
