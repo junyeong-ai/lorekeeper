@@ -168,7 +168,12 @@ pub fn find_invalid_categories(
     pages
         .iter()
         .filter_map(|page| {
-            let category = page.category.as_deref()?;
+            // An EMPTY value is the uncategorised state, not an invalid category. That is what
+            // the rest of the vault already means by it: `templates/concept.md.jinja` renders
+            // the field under `{% if category %}`, and `wiki concepts` filters the empty string
+            // out of the registry. Flagging it here made this the one reader that disagreed,
+            // and the finding it produced read `category=` with nothing after it.
+            let category = page.category.as_deref().filter(|c| !c.is_empty())?;
             if valid_ids.contains(category) {
                 return None;
             }
@@ -433,6 +438,17 @@ mod tests {
         // Omitting the field is the documented way to mark a concept as uncategorised.
         let tmp = TempDir::new().unwrap();
         write_concept(tmp.path(), "x", "id: x");
+        assert!(find_invalid_categories(&scan(tmp.path()), &cats(&["ai-ml"])).is_empty());
+    }
+
+    #[test]
+    fn an_empty_category_is_uncategorised_not_invalid() {
+        // The rest of the vault already means "uncategorised" by an empty value:
+        // `templates/concept.md.jinja` renders the field under `{% if category %}`, and
+        // `wiki concepts` filters the empty string out of the registry. This reader used to
+        // disagree, reporting a violation whose message read `category=` with nothing after it.
+        let tmp = TempDir::new().unwrap();
+        write_concept(tmp.path(), "x", "id: x\ncategory: \"\"");
         assert!(find_invalid_categories(&scan(tmp.path()), &cats(&["ai-ml"])).is_empty());
     }
 

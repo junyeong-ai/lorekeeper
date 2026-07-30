@@ -36,14 +36,22 @@ on-disk state, never from a cached snapshot.
   page linking a `<daily>/` page is not broken, and a concept linked only from
   `<daily>/` is not an orphan. Reserved meta pages
   (`lk_core::vault_path::RESERVED_WIKI_FILES`) are never orphans or index-drift.
+  The universe answers three separate questions and conflating any two of them produced a
+  false positive: `is_resolvable` (a file exists at this id, **catalogs included** — they are
+  files, and excluding them made every link to `wiki/index.md` broken), `is_knowledge` (…and it
+  is not a generated catalog — the orphan-connectivity question, where letting a link to
+  `index.md` count would exempt the very pages detection looks for), and `covers` (the scan
+  walked there at all). `Extent` carries the last one: a vault holds user-authored folders
+  nothing scans, so a destination outside the walked dirs is UNKNOWN, never absent.
 - **`graph::broken_links` is a free function over (pages, existence), not a `WikiGraph`
   method** — a broken link involves no node, edge or community, and computing it inside the
   graph is what silently scoped it to `graph.scope.dirs` on the SOURCE side as well: only wiki
   pages were checked, so the concept links `queue apply` writes on daily pages were not.
   Measured on a 2,106-page vault: 43 links pointing at pages that do not exist while `lint`
   read clean. Both `lint` and `broken` pass every scanned page; the scope narrowing applies
-  only to the graph's nodes. Reserved meta pages are skipped as sources — `index.md`/`map.md`/
-  `log.md` are re-derived by `wiki refresh`, so a stale entry there is `index-sync` drift.
+  only to the graph's nodes. Reserved meta pages are skipped as SOURCES — they are re-derived
+  by `wiki refresh`, so a stale entry there is `index-sync` drift — but remain valid
+  DESTINATIONS. A destination `Extent` does not cover is never reported.
 - **Exit codes**: 0 = every claim the vault makes holds, 1 = it contradicts itself, 2 = runtime
   error. Non-zero is reserved for a claim that is FALSE and has a named repair — a link whose
   destination is absent, a catalog that disagrees with the disk, a category outside the
@@ -157,9 +165,10 @@ on-disk state, never from a cached snapshot.
   page creation is done by `/lore-process` which can emit a category the
   skill invented. Lint reports them so `graph lint` exits non-zero and the
   drift is observable; nothing is mutated automatically. Empty configured
-  list (categorisation off) suppresses every finding. Pages without a
-  `category` field are not flagged — that is the documented uncategorised
-  state.
+  list (categorisation off) suppresses every finding. A page with no `category` field —
+  or an EMPTY one — is not flagged: that is the uncategorised state, and it is what the
+  rest of the vault already means by an empty value (`templates/concept.md.jinja` renders
+  the field under `{% if category %}`, `wiki concepts` filters it out of the registry).
 - **`concept_lint::find_duplicate_concepts` reports NAME COLLISIONS, not similarity.**
   Each page claims a set of names — its slug, `title`, and every `aliases` entry — and a
   finding is two pages claiming one name. `lk_core::concept::identity_key` is that rule —

@@ -21,7 +21,9 @@ use lk_vault::{VaultWriter, replace_section, section_body, set_frontmatter_field
 use serde::Serialize;
 
 use crate::GraphError;
-use crate::scan::{ScannedPage, VaultExistence, is_concept_page, is_valid_source, path_slug};
+use crate::scan::{
+    Extent, ScannedPage, VaultExistence, is_concept_page, is_valid_source, path_slug,
+};
 
 /// Outcome of one concept page's reconciliation.
 #[derive(Debug, Clone, Serialize)]
@@ -74,7 +76,8 @@ pub fn sync_concept_backlinks(
     // pages count as sources (`is_valid_source`); a concept→concept link belongs in
     // `## Related`, and navigation pages aren't sources. BTreeMap/BTreeSet keep the
     // rendered body deterministic.
-    let existence = VaultExistence::build(pages, dirs);
+    // `pages` here is a full-vault scan of every page dir, so it IS the vault.
+    let existence = VaultExistence::build(pages, dirs, Extent::WholeVault);
     let by_id: HashMap<&str, &ScannedPage> = pages.iter().map(|p| (p.id.as_str(), p)).collect();
     let mut incoming: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for page in pages {
@@ -84,7 +87,7 @@ pub fn sync_concept_backlinks(
         for target in &page.outgoing {
             // Self-references are excluded for the same reason the graph excludes
             // self-edges.
-            if *target != page.id && existence.is_resolvable(target) {
+            if *target != page.id && existence.is_knowledge(target) {
                 incoming
                     .entry(target.clone())
                     .or_default()

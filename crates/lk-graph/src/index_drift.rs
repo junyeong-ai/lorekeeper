@@ -92,7 +92,7 @@ pub fn diff(
     // aren't false-flagged.
     let mut missing_from_disk: Vec<String> = index_links
         .iter()
-        .filter(|slug| !existence.is_resolvable(slug))
+        .filter(|slug| existence.covers(slug) && !existence.is_resolvable(slug))
         .cloned()
         .collect();
     missing_from_disk.sort();
@@ -160,6 +160,7 @@ pub fn fix(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scan::Extent;
     use crate::scan::ScannedPage;
     use lk_core::config::VaultDirs;
     use std::path::PathBuf;
@@ -197,7 +198,7 @@ mod tests {
         ];
 
         let graph = WikiGraph::build(&pages, &VaultDirs::default());
-        let existence = VaultExistence::build(&pages, &VaultDirs::default());
+        let existence = VaultExistence::build(&pages, &VaultDirs::default(), Extent::WholeVault);
         let drift = diff(&graph, &existence, tmp.path(), Path::new("wiki"), &[]).unwrap();
 
         assert!(drift.missing_from_index.contains(&"wiki/gamma".to_owned()));
@@ -221,7 +222,7 @@ mod tests {
         ];
 
         let graph = WikiGraph::build(&pages, &VaultDirs::default());
-        let existence = VaultExistence::build(&pages, &VaultDirs::default());
+        let existence = VaultExistence::build(&pages, &VaultDirs::default(), Extent::WholeVault);
         let drift = diff(&graph, &existence, tmp.path(), Path::new("wiki"), &[]).unwrap();
 
         assert!(
@@ -284,7 +285,7 @@ mod tests {
         let pages = vec![build_page("wiki/alpha", &[]), build_page("wiki/beta", &[])];
 
         let graph = WikiGraph::build(&pages, &VaultDirs::default());
-        let existence = VaultExistence::build(&pages, &VaultDirs::default());
+        let existence = VaultExistence::build(&pages, &VaultDirs::default(), Extent::WholeVault);
         let drift = diff(&graph, &existence, tmp.path(), Path::new("wiki"), &[]).unwrap();
 
         assert!(!drift.is_in_sync());

@@ -186,7 +186,11 @@ fn run_inner(
     let mut scan_cfg = rc.graph.clone();
     scan_cfg.scope.dirs = scan_dirs.clone();
     let scanned = scan::scan_vault(&rc.root, &scan_cfg).map_err(|e| format!("{e}"))?;
-    let existence = scan::VaultExistence::build(&scanned, &rc.vault_dirs);
+    // The universe knows its own extent: a vault holds user-authored content outside these
+    // dirs, and a link to one of those files must not read as broken just because nothing
+    // walked there.
+    let existence =
+        scan::VaultExistence::build(&scanned, &rc.vault_dirs, scan::Extent::Dirs(scan_dirs));
     let pages: Vec<scan::ScannedPage> = scanned
         .iter()
         .filter(|p| rc.graph.scope.dirs.iter().any(|d| p.path.starts_with(d)))
