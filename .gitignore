@@ -1,5 +1,8 @@
-config.yaml
-credentials.json
+# A real config and its credentials live at the repo root, which is where `lore` discovers
+# them. Anchored: unanchored, these matched at every depth and silently excluded a test
+# fixture's own config, leaving CI with a corpus the binary could not read.
+/config.yaml
+/credentials.json
 .lorekeeper/
 .DS_Store
 target/

@@ -166,6 +166,52 @@ fn normalise(body: &str, dir: &Path) -> String {
     out
 }
 
+/// Every file the fixture is made of must be in the REPOSITORY.
+///
+/// The sweep compares against snapshots recorded from whatever is on the author's disk, so a
+/// fixture file git does not have makes CI stage a different corpus and fail on a diff that
+/// describes the fixture rather than the behaviour. `.gitignore` carried an unanchored
+/// `config.yaml` — meant for a real config at the repo root — which silently excluded this
+/// corpus's own, leaving CI with a vault the binary could not read.
+#[test]
+fn every_fixture_file_is_tracked() {
+    let corpus = corpus();
+    // Run from the repository root and take `--full-name`, so a path is repo-relative rather
+    // than relative to wherever this happened to run.
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let listed = std::process::Command::new("git")
+        .args(["ls-files", "--full-name", "--", &corpus.to_string_lossy()])
+        .current_dir(&root)
+        .output()
+        .expect("git ls-files");
+    assert!(listed.status.success(), "git ls-files failed: {listed:?}");
+    let tracked: Vec<PathBuf> = String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .map(|line| root.join(line))
+        .filter_map(|p| p.canonicalize().ok())
+        .collect();
+
+    let mut on_disk = Vec::new();
+    let mut stack = vec![corpus.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read fixture dir").flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                on_disk.push(path.canonicalize().expect("canonicalize fixture file"));
+            }
+        }
+    }
+    assert!(!on_disk.is_empty(), "the fixture corpus is empty");
+
+    let untracked: Vec<&PathBuf> = on_disk.iter().filter(|p| !tracked.contains(p)).collect();
+    assert!(
+        untracked.is_empty(),
+        "fixture files git does not have, so CI stages a different corpus: {untracked:?}"
+    );
+}
+
 #[test]
 fn behaviour_sweep() {
     for argv in SWEEP {

@@ -1,0 +1,32 @@
+# Fixture configuration for the behavioural sweep.
+#
+# Every source is disabled: the sweep observes what the CLI reports about a
+# vault that already exists, and a source that reaches the network would make
+# the answer a property of the network instead of the corpus.
+vault:
+  root: ./vault
+  timezone: UTC
+  locale: en
+  dirs:
+    daily: daily
+    weekly: weekly
+    monthly: monthly
+    quarterly: quarterly
+    annual: annual
+    personal: me
+    synthesis: synthesis
+    wiki: wiki
+
+identity:
+  name: "Fixture Author"
+  email: "author@example.com"
+
+ingest:
+  schedule: "0 7 * * *"
+
+sources:
+  inbox:
+    type: manual
+    enabled: false
+    labels: [fixture]
+    extract_concepts: true

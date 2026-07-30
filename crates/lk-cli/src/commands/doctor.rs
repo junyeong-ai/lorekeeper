@@ -72,8 +72,15 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
             "\nAn unanswered section's work was enqueued and lost: the queue file it belonged\n\
              to has been archived or pruned, so nothing pending remains to fill it. A section\n\
              is re-enqueued when its page is re-rendered and a scheduled run only re-renders\n\
-             the current date, so this will not come back on its own. Re-ingest that page's\n\
-             date (`lore ingest <source> --date <date>`), then drain with /lore-process."
+             the current date, so this will not come back on its own.\n\
+             \n\
+             `lore ingest <source> --date <date>` re-enqueues it, but it also RE-FETCHES: a\n\
+             source whose window has passed returns fewer events than the page holds, and the\n\
+             re-render replaces the event list with them. Check with `--dry-run` first and\n\
+             compare the count against the page. When the source can no longer reproduce it,\n\
+             the page's own content is the input — fill the section and stamp its\n\
+             `llm_inputs.<key>_done` with the hash already recorded beside it (the\n\
+             /lore-process protocol, without the queue file)."
         );
     }
     // Non-zero on a real defect OR on a page that could not be verified — "clean" must
