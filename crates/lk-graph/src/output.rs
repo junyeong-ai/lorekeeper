@@ -93,6 +93,10 @@ impl Violations {
     /// sum against a hand-built fixture does not establish that: a new field satisfies the
     /// compiler as `Vec::new()`, the whole suite stays green, and `graph lint` exits 0 on a
     /// vault that violates the new rule while its own JSON reports the violation.
+    ///
+    /// A `..` added to the pattern would silence that error, and no type system prevents it —
+    /// but writing one is choosing not to count the field, which is the difference between this
+    /// and forgetting. What the guard removes is the silent case.
     pub fn count(&self) -> usize {
         let Self {
             broken,
@@ -100,11 +104,25 @@ impl Violations {
             invalid_categories,
             duplicate_concepts,
         } = self;
-        broken.len()
-            + index.missing_from_index.len()
-            + index.missing_from_disk.len()
-            + invalid_categories.len()
-            + duplicate_concepts.len()
+        broken.len() + index.count() + invalid_categories.len() + duplicate_concepts.len()
+    }
+}
+
+impl IndexSyncReport {
+    /// Destructured for the same reason as [`Violations::count`], and it has to be its OWN
+    /// method: while `Violations::count` reached in and summed `index.missing_from_*` itself, a
+    /// list added HERE compiled fine — the pattern one level up never mentions it — and went
+    /// uncounted, so `lint` exited 0 while its own JSON reported the drift. Each struct counts
+    /// what it holds, so the guard reaches every level.
+    pub fn count(&self) -> usize {
+        let Self {
+            missing_from_index,
+            missing_from_disk,
+            // Not a finding: how many entries `index-sync --fix` ADDED. `lint` never fixes, and
+            // the standalone command reports it separately.
+            fixed: _,
+        } = self;
+        missing_from_index.len() + missing_from_disk.len()
     }
 }
 

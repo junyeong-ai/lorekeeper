@@ -280,6 +280,45 @@ fn a_broken_link_written_outside_the_analysis_scope_still_gates() {
     );
 }
 
+/// `graph.scope.exclude` narrows the ANALYSIS, not the vault. An excluded page still exists, so
+/// a link to it resolves — building the existence universe with the globs applied reported one as
+/// a missing destination while the file sat on disk. Both halves are asserted, because dropping
+/// the globs from the node set instead would silently un-exclude the page.
+#[test]
+fn an_excluded_page_still_exists_but_is_not_analysed() {
+    let ws = Workspace::new();
+    std::fs::write(
+        ws.root.path().join("config.yaml"),
+        "vault:\n  root: vault\n  locale: en\n\
+         identity:\n  name: Tester\n  email: tester@example.com\n\
+         sources:\n  notes:\n    type: manual\n    params:\n      inbox_dir: inbox\n\
+         graph:\n  scope:\n    exclude: [\"wiki/concepts/excluded.md\"]\n",
+    )
+    .expect("config");
+    ws.write(
+        "wiki/concepts/cites.md",
+        &concept("cites", "Cites", "Links it: [Excluded](excluded.md)"),
+    );
+    ws.write(
+        "wiki/concepts/excluded.md",
+        &concept("excluded", "Excluded", "Out of the analysis."),
+    );
+    assert_eq!(ws.code(&["wiki", "index"]), 0);
+
+    let raw = ws.stdout(&["graph", "--json", "lint"]);
+    let parsed: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
+    let data = &parsed["data"];
+    assert_eq!(
+        data["violations"]["broken"],
+        serde_json::json!([]),
+        "the excluded page is on disk, so the link to it resolves\n{raw}"
+    );
+    assert_eq!(
+        data["pages"], 1,
+        "the excluded page must still be out of the graph\n{raw}"
+    );
+}
+
 #[test]
 fn a_category_outside_the_configured_vocabulary_exits_one() {
     let ws = sound_vault();

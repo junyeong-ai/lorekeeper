@@ -180,11 +180,19 @@ fn run_inner(
     // integrity ones.
     let mut scan_cfg = rc.graph.clone();
     scan_cfg.scope.dirs = scan_dirs;
+    // The universe is the vault, so `scope.exclude` has no say in it: an excluded page still
+    // exists, and applying the globs here reported a link to one as broken while the file sat on
+    // disk. The globs narrow the analysis, and are applied to the node set below.
+    if integrity {
+        scan_cfg.scope.exclude = Vec::new();
+    }
     let scanned = scan::scan_vault(&rc.root, &scan_cfg).map_err(|e| format!("{e}"))?;
     let existence = scan::VaultExistence::build(&scanned, &rc.vault_dirs);
+    let excluded = scan::Excludes::compile(&rc.graph.scope.exclude).map_err(|e| format!("{e}"))?;
     let pages: Vec<scan::ScannedPage> = scanned
         .iter()
         .filter(|p| rc.graph.scope.dirs.iter().any(|d| p.path.starts_with(d)))
+        .filter(|p| !excluded.matches(&p.path))
         .cloned()
         .collect();
     let g = graph::WikiGraph::build_with_existence(&pages, &existence, &rc.vault_dirs);

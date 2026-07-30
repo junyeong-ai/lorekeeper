@@ -163,10 +163,20 @@ fn unanswered_sections(page: &lk_core::frontmatter::VaultPage) -> Vec<&'static s
     // left over from a superseded input marks the section answered for an input that is no
     // longer the one on the page. Asking only whether a `_done` key is present read that as
     // done and hid the outstanding work, which is the one thing this audit exists to find.
+    //
+    // An input recorded as anything but a string is reported too. The pipeline writes a hex
+    // hash, so a sequence or a map there is malformed — and nothing can equal it, which makes
+    // the section unanswerable rather than answered. Reading it through `as_str()` alone made a
+    // malformed record indistinguishable from no record at all.
     let mut found: Vec<&'static str> = lk_queue::TargetKind::iter()
-        .filter(|kind| match recorded(kind.llm_inputs_key()) {
-            Some(hash) => recorded(&kind.completion_key()) != Some(hash),
-            None => false,
+        .filter(|kind| {
+            inputs
+                .and_then(|v| v.get(kind.llm_inputs_key()))
+                .is_some_and(|input| {
+                    input
+                        .as_str()
+                        .is_none_or(|hash| recorded(&kind.completion_key()) != Some(hash))
+                })
         })
         .map(|kind| kind.llm_inputs_key())
         .collect();
@@ -364,6 +374,21 @@ mod tests {
 
         let scalar = "---\nid: a\nllm_inputs: \"summary: h1\"\n---\n\n## Summary\n";
         assert!(unanswered(scalar).is_empty(), "a scalar records nothing");
+    }
+
+    /// An input hash recorded as anything but a string is malformed — the pipeline writes hex —
+    /// and nothing can equal it, so the section is unanswerABLE rather than answered. Reading
+    /// only strings made that indistinguishable from no record at all.
+    #[test]
+    fn an_input_recorded_as_a_non_string_can_never_be_answered() {
+        for value in ["[\"h1\"]", "{a: 1}", "123", "true"] {
+            let page = format!("---\nid: a\nllm_inputs:\n  summary: {value}\n---\n\n## Summary\n");
+            assert_eq!(
+                unanswered(&page),
+                vec!["summary"],
+                "`summary: {value}` records an input nothing can answer"
+            );
+        }
     }
 
     /// A flow-style mapping is the same record written inline, and the page it describes is the

@@ -320,6 +320,28 @@ pub fn path_slug(rel: &Path) -> String {
         .join("/")
 }
 
+/// The `graph.scope.exclude` globs as a predicate over a vault-relative path.
+///
+/// Exclusion narrows the ANALYSIS — which pages are graph nodes — not the vault. An excluded
+/// page still EXISTS, so a link to it resolves, and its existence was never the exclusion's
+/// business: building the existence universe with the globs applied reported
+/// `wiki/concepts/excluded.md` as a missing destination while the file sat on disk, the same
+/// defect as leaving a user's own folder unscanned. So integrity commands scan without them and
+/// apply this to the node set instead.
+pub struct Excludes(GlobSet);
+
+impl Excludes {
+    pub fn compile(patterns: &[String]) -> Result<Self, GraphError> {
+        build_exclude_set(patterns).map(Self)
+    }
+
+    /// Matched against the same form the scan uses: vault-relative, `/`-separated.
+    pub fn matches(&self, rel: &Path) -> bool {
+        self.0
+            .is_match(rel.to_string_lossy().replace('\\', "/").as_str())
+    }
+}
+
 fn build_exclude_set(patterns: &[String]) -> Result<GlobSet, GraphError> {
     let mut builder = GlobSetBuilder::new();
     for pattern in patterns {
