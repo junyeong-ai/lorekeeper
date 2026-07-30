@@ -51,18 +51,55 @@ fn declared_skills(script: &str, anchor: &str) -> Vec<String> {
     names
 }
 
+/// The uninstallers are held to the same list as the installers: a skill missing from them stays
+/// on disk after an uninstall, and stale skill instructions an agent still loads are worse than a
+/// leftover file — they describe a binary that is no longer there.
 #[test]
-fn install_scripts_list_every_skill() {
+fn install_and_uninstall_scripts_list_every_skill() {
     let skills = shipped_skills();
     for (script, anchor) in [
         ("scripts/install.sh", "for skill in "),
         ("scripts/install.ps1", "$SkillNames = @("),
+        ("scripts/uninstall.sh", "SKILL_NAMES=("),
+        ("scripts/uninstall.ps1", "$SkillNames = @("),
     ] {
         assert_eq!(
             declared_skills(script, anchor),
             skills,
             "{script}'s skill list must be exactly the directories under .claude/skills"
         );
+    }
+}
+
+/// The archive an installer asks for has to be one the release builds. They are separate lists in
+/// separate languages, so a target renamed on either side is a 404 at install time — the first
+/// thing a new user sees, and the one failure they cannot work around.
+#[test]
+fn every_target_an_installer_asks_for_is_one_the_release_builds() {
+    let release = read(&repo_root().join(".github/workflows/release.yml"));
+    let built: Vec<&str> = release
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("- target: "))
+        .map(str::trim)
+        .collect();
+    assert!(!built.is_empty(), "release.yml declares no build targets");
+
+    for script in ["scripts/install.sh", "scripts/install.ps1"] {
+        let body = read(&repo_root().join(script));
+        // Anchored on the architecture prefix rather than on a well-formed suffix: a rule that
+        // only recognized `-musl`/`-darwin`/`-msvc` endings could not see a MISSPELLED target at
+        // all, so it passed vacuously on exactly the drift it was written for.
+        let named: Vec<&str> = body
+            .split(['\'', '"'])
+            .filter(|token| token.starts_with("x86_64-") || token.starts_with("aarch64-"))
+            .collect();
+        assert!(!named.is_empty(), "{script} names no build target");
+        for target in named {
+            assert!(
+                built.contains(&target),
+                "{script} can ask for `{target}`, which the release does not build"
+            );
+        }
     }
 }
 
