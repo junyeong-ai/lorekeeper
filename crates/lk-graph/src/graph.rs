@@ -384,6 +384,27 @@ mod tests {
         assert_eq!(found[0].target, "wiki/concepts/gone");
     }
 
+    /// Narrowing what is judged must not retire a finding. A destination that escaped the vault
+    /// root is kept as written rather than resolved to an id, and no vault page can ever be
+    /// addressed by it — so it is nowhere, not merely somewhere unscanned, and stays reported.
+    #[test]
+    fn a_destination_that_escapes_the_vault_root_is_always_reported() {
+        let dirs = VaultDirs::default();
+        let pages = vec![build_page(
+            "wiki/concepts/a",
+            &["../../../outside.md", "/etc/passwd.md"],
+        )];
+        let existence =
+            VaultExistence::build(&pages, &dirs, Extent::Dirs(vec![PathBuf::from("wiki")]));
+        let found = broken_links(&pages, &existence, &dirs);
+
+        assert_eq!(
+            found.len(),
+            2,
+            "an escaping destination is nowhere, not unscanned: {found:?}"
+        );
+    }
+
     /// The generated catalogs are files, so a page linking one is linking something real. They
     /// are excluded from the analysis graph as NODES, and that exclusion once removed them from
     /// the existence universe entirely — making every link to `wiki/index.md` broken.

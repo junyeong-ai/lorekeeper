@@ -261,6 +261,20 @@ impl VaultExistence {
     /// Compared after `path_slug`, the same normalization that produced every id, so a
     /// capitalized or spaced directory name in the config matches the ids derived under it.
     pub fn covers(&self, target: &str) -> bool {
+        // A destination that escaped the vault root is kept as WRITTEN by `parse_file` (it is
+        // not a page id at all), and no vault page can ever be addressed by it — so it is not
+        // "somewhere the scan did not look", it is nowhere. Judged always, or narrowing the
+        // extent would silently retire the reporting of a link pointing outside the vault.
+        if Path::new(target).components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        }) {
+            return true;
+        }
         match &self.extent {
             Extent::WholeVault => true,
             Extent::Dirs(dirs) => dirs
