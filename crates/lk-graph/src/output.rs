@@ -88,18 +88,35 @@ pub struct LintReport {
 }
 
 impl Violations {
+    /// Destructured deliberately, so adding a field to this channel does not compile until it
+    /// is counted. This number is what the exit code is derived from, and a test asserting the
+    /// sum against a hand-built fixture does not establish that: a new field satisfies the
+    /// compiler as `Vec::new()`, the whole suite stays green, and `graph lint` exits 0 on a
+    /// vault that violates the new rule while its own JSON reports the violation.
     pub fn count(&self) -> usize {
-        self.broken.len()
-            + self.index.missing_from_index.len()
-            + self.index.missing_from_disk.len()
-            + self.invalid_categories.len()
-            + self.duplicate_concepts.len()
+        let Self {
+            broken,
+            index,
+            invalid_categories,
+            duplicate_concepts,
+        } = self;
+        broken.len()
+            + index.missing_from_index.len()
+            + index.missing_from_disk.len()
+            + invalid_categories.len()
+            + duplicate_concepts.len()
     }
 }
 
 impl Observations {
+    /// Destructured for the same reason as [`Violations::count`] — see there.
     pub fn count(&self) -> usize {
-        self.hubs.len() + self.orphans.len() + self.unresolved_conflicts.len()
+        let Self {
+            hubs,
+            orphans,
+            unresolved_conflicts,
+        } = self;
+        hubs.len() + orphans.len() + unresolved_conflicts.len()
     }
 }
 
@@ -456,9 +473,10 @@ mod tests {
         }
     }
 
-    /// `count()` is what the exit code is derived from, so a list added to the struct and left
-    /// out of the sum makes `lore graph lint` report a violation and exit 0. Asserting against
-    /// what serde can see puts the invariant on the type rather than on whoever edits it.
+    /// The compile-time half of the invariant is `count`'s destructuring, which refuses a new
+    /// field until it is mentioned. This is the other half: that the fields are counted
+    /// CORRECTLY — one `.len()` per list, none doubled, none read off the wrong field — checked
+    /// against the entries serde can actually see in a fully-populated channel.
     #[test]
     fn the_violation_channel_counts_every_list_it_carries() {
         let v = Violations {

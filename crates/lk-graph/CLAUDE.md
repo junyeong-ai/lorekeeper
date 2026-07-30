@@ -65,9 +65,13 @@ on-disk state, never from a cached snapshot.
   anything cites them, so an orphan-counting exit code is permanently non-zero and therefore
   carries no information — which is what had callers wrapping the command in `|| true` and
   skills naming the lists to ignore, and a broken link got ignored along with them.
-  `Violations::count`/`Observations::count` are what the code and the summary line read, and
-  a unit test asserts each covers every list serde can see in its channel, so a lint added to
-  a channel cannot be left out of its count.
+  `Violations::count`/`Observations::count` are what the exit code and the summary line read,
+  and each DESTRUCTURES its own struct, so adding a field to a channel does not compile until
+  it is counted. A test asserting the sum against a hand-built fixture was tried first and
+  established almost nothing — a new field satisfies the compiler as `Vec::new()`, the suite
+  stays green, and `lint` exits 0 on a vault whose own JSON reports the violation. The serde
+  test remains for the other half: that the fields are counted correctly, one `.len()` per
+  list, none doubled.
 - **`suggest_links`**: pairs in the same Louvain community with no edge that share at
   least `graph.cluster.suggest_min_shared_neighbors` neighbors, ranked by their
   **Adamic–Adar index** (Σ 1/ln|N(z)| over shared neighbors z), descending. It runs on the
