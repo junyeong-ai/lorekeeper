@@ -361,3 +361,40 @@ fn re_applying_preserves_everything_an_established_concept_page_accumulated() {
         "authored prose preserved:\n{after}"
     );
 }
+
+/// The recovery `lore doctor` names for a `concepts` section whose work was lost: a result file
+/// alone, with no queue task behind it. That is what makes the recovery non-destructive — the
+/// alternative, a re-render to re-enqueue the task, RE-FETCHES the source and replaces the
+/// page's event list with whatever a passed window still returns.
+///
+/// The marker is stamped by the applier in the same edit that writes the links, so the recovery
+/// never asks anyone to stamp `concepts_done` by hand — which would claim an empty section is
+/// answered and lose the extraction permanently.
+#[test]
+fn a_result_file_with_no_task_behind_it_recovers_a_lost_section() {
+    let ws = Workspace::new();
+    ws.write(PAGE, &daily_page("recorded-hash"));
+    assert!(
+        !ws.read(PAGE).contains("concepts_done"),
+        "the fixture starts unanswered"
+    );
+
+    // Nothing was ever enqueued for this page in this vault.
+    ws.drop_result("recovered", PAGE, "recorded-hash", "Recovered Concept");
+    let out = ws.run(&["queue", "apply"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let page = ws.read(PAGE);
+    assert!(
+        page.contains("wiki/concepts/recovered-concept.md"),
+        "{page}"
+    );
+    assert!(
+        page.contains("concepts_done: \"recorded-hash\""),
+        "the applier stamps the marker it owns\n{page}"
+    );
+}

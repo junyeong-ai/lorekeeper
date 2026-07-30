@@ -108,9 +108,15 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
              \n\
              When the source can no longer reproduce the input, the page's own content is what\n\
              remains: fill the section by hand and stamp `llm_inputs.<key>_done` with the hash\n\
-             recorded beside it. `concepts` is the exception — that section and its marker are\n\
-             both written by `lore queue apply` from a drained extraction, so stamping it by\n\
-             hand claims an empty section is answered and loses the extraction for good."
+             recorded beside it.\n\
+             \n\
+             `concepts` is the exception, and it needs no re-fetch at all. Never stamp its\n\
+             marker by hand — that claims an empty section is answered and loses the extraction\n\
+             for good. Instead write the concepts to\n\
+             `<vault>/.lorekeeper/queue/results/<name>.json`, carrying the `cache_hash` the page\n\
+             already records, and run `lore queue apply`: it writes the concept pages, the\n\
+             links and the marker in one edit, through the same merge the pipeline uses. A\n\
+             result file needs no queue task behind it."
         );
     }
     // Non-zero on a real defect OR on a page that could not be verified — "clean" must
