@@ -63,6 +63,9 @@ pub struct Violations {
     pub invalid_categories: Vec<InvalidCategoryConcept>,
     pub duplicate_concepts: Vec<DuplicateConcept>,
     pub address_collisions: Vec<AddressCollision>,
+    /// Filenames that disagree with their own normalized slug. A link is written from the slug,
+    /// so the page is addressed by a name its file does not have.
+    pub unnormalized: Vec<RenameSuggestion>,
 }
 
 /// True statements about a vault in good standing, reported because they guide a human's next
@@ -101,12 +104,14 @@ impl Violations {
             invalid_categories,
             duplicate_concepts,
             address_collisions,
+            unnormalized,
         } = self;
         broken.len()
             + index.count()
             + invalid_categories.len()
             + duplicate_concepts.len()
             + address_collisions.len()
+            + unnormalized.len()
     }
 }
 
@@ -278,6 +283,7 @@ fn print_violations(v: &Violations) {
         invalid_categories,
         duplicate_concepts,
         address_collisions,
+        unnormalized,
     } = v;
     if v.count() == 0 {
         return;
@@ -327,6 +333,16 @@ fn print_violations(v: &Violations) {
         println!("\nOne address, two files ({}):", address_collisions.len());
         for c in address_collisions {
             println!("  {}  <-  {}", c.id, c.paths.join(", "));
+        }
+    }
+
+    if !unnormalized.is_empty() {
+        println!(
+            "\nFilenames that are not their own slug ({}):",
+            unnormalized.len()
+        );
+        for r in unnormalized {
+            println!("  {} -> {}", r.from, r.to);
         }
     }
 }
@@ -519,6 +535,7 @@ mod tests {
     fn the_violation_channel_counts_every_list_it_carries() {
         let v = Violations {
             address_collisions: Vec::new(),
+            unnormalized: Vec::new(),
             broken: vec![BrokenLink {
                 source: "a".into(),
                 target: "b".into(),

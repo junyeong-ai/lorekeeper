@@ -182,6 +182,7 @@ fn run_inner(
                     invalid_categories,
                     duplicate_concepts,
                     address_collisions: scan::address_collisions(&views.scanned),
+                    unnormalized: rename_suggestions(&normalize::scan(&views.pages)),
                 },
                 observations: output::Observations {
                     hubs,
@@ -302,13 +303,7 @@ fn run_inner(
                 None
             };
             let report = output::NormalizeReport {
-                renames: renames
-                    .iter()
-                    .map(|r| output::RenameSuggestion {
-                        from: r.old_slug.clone(),
-                        to: r.new_slug.clone(),
-                    })
-                    .collect(),
+                renames: rename_suggestions(&renames),
                 applied,
             };
             if json {
@@ -429,6 +424,18 @@ fn run_audit_mark(
         println!("'{slug}' was already up to date.");
     }
     Ok(false)
+}
+
+/// A rename candidate as the report carries it: the slug a file has and the one its own name
+/// normalizes to. `lint` and `normalize` present the same finding, so both read it from here.
+fn rename_suggestions(renames: &[normalize::Rename]) -> Vec<output::RenameSuggestion> {
+    renames
+        .iter()
+        .map(|r| output::RenameSuggestion {
+            from: r.old_slug.clone(),
+            to: r.new_slug.clone(),
+        })
+        .collect()
 }
 
 fn resolve_config_full(

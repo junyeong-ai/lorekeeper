@@ -285,6 +285,7 @@ fn lint_combined_report() {
             invalid_categories: Vec::new(),
             duplicate_concepts: Vec::new(),
             address_collisions: Vec::new(),
+            unnormalized: Vec::new(),
         },
         observations: output::Observations {
             hubs,

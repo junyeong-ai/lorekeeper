@@ -239,9 +239,25 @@ fn a_link_to_a_page_that_does_not_exist_exits_one() {
 /// A `skip_serializing_if` would turn "no broken links" into a missing key, which reads as
 /// neither empty nor absent at the other end, and the unit tests cannot see it — their fixtures
 /// populate every list.
+///
+/// The vault here is clean in EVERY channel, and each is asserted equal to `[]` rather than
+/// merely being an array. On a fixture that populates a list, `is_array()` holds under any
+/// serialization — including one that omits the field when empty, which is the regression.
 #[test]
 fn the_json_report_carries_every_channel_field_on_a_clean_vault() {
-    let ws = sound_vault();
+    let ws = Workspace::new();
+    ws.write(
+        "wiki/concepts/cited.md",
+        &concept("cited", "Cited", "A concept, cited and uncontested."),
+    );
+    ws.write(
+        "daily/notes/2026-05-23.md",
+        "---\nid: notes-2026-05-23\ntype: daily\ntitle: \"Notes\"\n\
+         created: 2026-05-23\nupdated: 2026-05-23\n---\n\n\
+         ## Related concepts\n\n- [Cited](../../wiki/concepts/cited.md)\n",
+    );
+    assert_eq!(ws.code(&["wiki", "index"]), 0);
+    assert_eq!(ws.code(&["graph", "lint"]), 0, "the fixture must be clean");
     let raw = ws.stdout(&["graph", "--json", "lint"]);
     let parsed: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
     let data = &parsed["data"];
@@ -250,6 +266,8 @@ fn the_json_report_carries_every_channel_field_on_a_clean_vault() {
         "violations.broken",
         "violations.invalid_categories",
         "violations.duplicate_concepts",
+        "violations.address_collisions",
+        "violations.unnormalized",
         "violations.index.missing_from_index",
         "violations.index.missing_from_disk",
         "observations.orphans",
@@ -260,9 +278,10 @@ fn the_json_report_carries_every_channel_field_on_a_clean_vault() {
         for part in path.split('.') {
             cursor = &cursor[part];
         }
-        assert!(
-            cursor.is_array(),
-            "`{path}` must be an array even when empty — got {cursor:?}\n{raw}"
+        assert_eq!(
+            cursor,
+            &serde_json::json!([]),
+            "`{path}` must be an empty array, present — got {cursor:?}\n{raw}"
         );
     }
     // The channels themselves, so a rename of either is not silently absorbed by the loop above.
@@ -402,6 +421,80 @@ fn a_vault_directory_the_filesystem_folded_is_still_analysed() {
     );
     assert!(stdout.contains("pages: 1"), "{stdout}");
     assert!(stdout.contains("ghost.md"), "{stdout}");
+}
+
+/// A filename that disagrees with its own normalized slug is a violation both CLAUDE.md files
+/// name, and `graph normalize` exits 1 on it — but `graph lint`, which the shipped pipeline uses
+/// as its only verdict stage, carried no such channel, so the pipeline stayed green on it.
+#[test]
+fn a_filename_that_is_not_its_own_slug_exits_one_from_lint_too() {
+    let ws = sound_vault();
+    ws.write(
+        "wiki/concepts/Not A Slug.md",
+        &concept(
+            "not-a-slug",
+            "Not A Slug",
+            "A page whose file is named otherwise.",
+        ),
+    );
+    assert_eq!(ws.code(&["wiki", "index"]), 0);
+
+    assert_eq!(
+        ws.code(&["graph", "normalize"]),
+        1,
+        "the single check must report it"
+    );
+    let out = ws.run(&["graph", "lint"]);
+    let stdout = String::from_utf8(out.stdout).expect("utf8");
+    assert_eq!(out.status.code(), Some(1), "and so must lint\n{stdout}");
+    assert!(stdout.contains("not their own slug"), "{stdout}");
+}
+
+/// A link to a page the user DELETED must not resolve. Obsidian moves a deleted page into
+/// `.trash`, so a scan that walked dot-directories would find the file and report the link sound
+/// — the one case `lk-graph/CLAUDE.md` names for the rule.
+#[test]
+fn a_link_into_a_dot_directory_does_not_resolve() {
+    let ws = sound_vault();
+    ws.write(
+        ".trash/deleted.md",
+        &concept("deleted", "Deleted", "Moved here by the editor."),
+    );
+    ws.write(
+        "daily/notes/2026-05-24.md",
+        "---\nid: notes-2026-05-24\ntype: daily\ntitle: \"Notes\"\n\
+         created: 2026-05-24\nupdated: 2026-05-24\n---\n\n\
+         ## Related concepts\n\n- [Deleted](../../.trash/deleted.md)\n",
+    );
+
+    let out = ws.run(&["graph", "broken"]);
+    let stdout = String::from_utf8(out.stdout).expect("utf8");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a deleted page is not a destination\n{stdout}"
+    );
+    assert!(stdout.contains(".trash/deleted.md"), "{stdout}");
+}
+
+/// `metrics.orphan_exclude` is a documented setting, and the CLI has to actually pass it: the
+/// library function's own test cannot see the command dropping it on the way in.
+#[test]
+fn the_configured_orphan_exclude_reaches_the_report() {
+    let ws = excluding_from_orphans("wiki/concepts/uncited");
+    ws.write(
+        "wiki/concepts/uncited.md",
+        &concept("uncited", "Uncited", "Nothing points here yet."),
+    );
+    assert_eq!(ws.code(&["wiki", "index"]), 0);
+
+    let raw = ws.stdout(&["graph", "--json", "lint"]);
+    let parsed: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
+    assert_eq!(
+        parsed["data"]["observations"]["orphans"],
+        serde_json::json!([]),
+        "the excluded id must not be reported as an orphan\n{raw}"
+    );
 }
 
 /// A citation on an excluded page is still a citation. The mutating commands read the same
