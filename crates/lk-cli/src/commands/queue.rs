@@ -88,6 +88,16 @@ enum TaskStatus {
     /// The page was re-rendered with a different input after this task was queued —
     /// drop it; a newer task carries the current hash.
     Stale,
+    /// The target page cannot be read as a page — unreadable bytes, or frontmatter that will
+    /// not parse. Nothing can be decided about the task, so it is neither work nor dead.
+    ///
+    /// Reported and RETAINED. A repair of the page brings it back, which is what separates
+    /// this from `MissingTarget`; dropping it would discard work a one-line fix restores.
+    /// Per task rather than per run, because the likeliest author of unparseable frontmatter is
+    /// the drain itself stamping a marker — and one mangled page must not make `count`,
+    /// `status` and `prune` all fail, which leaves the scheduled drain skipping every night
+    /// with no janitor able to clear it.
+    Unreadable,
     /// There is nowhere to land: the target page is gone, OR it no longer carries the
     /// section this task names.
     ///
@@ -127,6 +137,7 @@ impl TaskStatus {
             TaskStatus::Done => "done",
             TaskStatus::Stale => "stale",
             TaskStatus::MissingTarget => "missing-target",
+            TaskStatus::Unreadable => "unreadable",
         }
     }
 
@@ -516,6 +527,7 @@ async fn status(
     let done = tally(TaskStatus::Done);
     let stale = tally(TaskStatus::Stale);
     let missing = tally(TaskStatus::MissingTarget);
+    let unreadable = tally(TaskStatus::Unreadable);
 
     if json {
         let tasks: Vec<serde_json::Value> = reports
@@ -536,6 +548,7 @@ async fn status(
                 "done": done,
                 "stale": stale,
                 "missing_target": missing,
+                "unreadable": unreadable,
                 "tasks": tasks,
             }
         });
@@ -551,8 +564,8 @@ async fn status(
             );
         }
         eprintln!(
-            "queue: {current} current, {done} done, {stale} stale, {missing} missing-target \
-             across {} task(s)",
+            "queue: {current} current, {done} done, {stale} stale, {missing} missing-target, \
+             {unreadable} unreadable across {} task(s)",
             reports.len()
         );
     }
@@ -564,6 +577,8 @@ struct PruneSummary {
     pruned_stale: usize,
     pruned_missing_target: usize,
     kept_current: usize,
+    /// Tasks whose target page could not be read. Retained: a repair of the page restores them.
+    kept_unreadable: usize,
     retired_done: usize,
     files_rewritten: usize,
     files_deleted: usize,
@@ -620,6 +635,10 @@ fn prune_queue(vault_root: &Path, queue_dir: &Path, dry_run: bool) -> miette::Re
                 TaskStatus::MissingTarget => {
                     summary.pruned_missing_target += 1;
                     dropped += 1;
+                }
+                TaskStatus::Unreadable => {
+                    summary.kept_unreadable += 1;
+                    retained.push(task);
                 }
             }
         }
@@ -707,6 +726,7 @@ async fn prune(
                 "pruned_stale": summary.pruned_stale,
                 "pruned_missing_target": summary.pruned_missing_target,
                 "kept_current": summary.kept_current,
+                "kept_unreadable": summary.kept_unreadable,
                 "retired_done": summary.retired_done,
                 "files_rewritten": summary.files_rewritten,
                 "files_deleted": summary.files_deleted,
@@ -721,11 +741,12 @@ async fn prune(
             "queue prune"
         };
         eprintln!(
-            "{label}: dropped {} stale + {} missing-target, kept {} current, \
+            "{label}: dropped {} stale + {} missing-target, kept {} current + {} unreadable, \
              {} already done; {} file(s) rewritten, {} archived, {} deleted",
             summary.pruned_stale,
             summary.pruned_missing_target,
             summary.kept_current,
+            summary.kept_unreadable,
             summary.retired_done,
             summary.files_rewritten,
             summary.files_archived,
@@ -733,6 +754,31 @@ async fn prune(
         );
     }
     Ok(())
+}
+
+/// The (page, `llm_inputs` key) pairs a pending task can still fill.
+///
+/// The question a report about an unanswered section has to ask before calling the work lost.
+/// `Current` is the only status that answers yes: a stale task was superseded, a done one has
+/// already answered, a missing-target one has nowhere to land, and an unreadable target cannot
+/// be judged at all. Classified by the same rule `queue status` uses, so the two can never
+/// disagree about what is pending.
+pub(super) fn work_in_flight(
+    vault_root: &Path,
+) -> miette::Result<std::collections::HashSet<(PathBuf, &'static str)>> {
+    let queue_dir = vault_root.join(".lorekeeper").join("queue");
+    let mut in_flight = std::collections::HashSet::new();
+    for file in pending_queue_files(&queue_dir)? {
+        for task in read_tasks(&file)? {
+            if !classify_task(vault_root, &task)?.is_work() {
+                continue;
+            }
+            if let Some(rel) = resolve_target_path(&task.target.vault_path) {
+                in_flight.insert((rel, task.target.kind.llm_inputs_key()));
+            }
+        }
+    }
+    Ok(in_flight)
 }
 
 /// Classify one task by comparing its `cache_hash` to the current input hash the
@@ -783,10 +829,11 @@ fn classify_against_page(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Ok(TaskStatus::MissingTarget);
         }
-        Err(e) => return Err(miette::miette!("read {}: {e}", page_path.display())),
+        Err(_) => return Ok(TaskStatus::Unreadable),
     };
-    let page = lk_core::frontmatter::parse_page(&content)
-        .map_err(|e| miette::miette!("parse {}: {e}", page_path.display()))?;
+    let Ok(page) = lk_core::frontmatter::parse_page(&content) else {
+        return Ok(TaskStatus::Unreadable);
+    };
     let llm_inputs = page
         .frontmatter
         .get(lk_core::frontmatter::field::LLM_INPUTS);
@@ -820,6 +867,52 @@ mod tests {
     use super::*;
     use lk_queue::{TargetKind, TaskKind, TaskTarget};
     use tempfile::TempDir;
+
+    #[test]
+    fn a_target_page_that_will_not_parse_strands_only_its_own_task() {
+        // The likeliest author of unparseable frontmatter is the drain, editing a marker line
+        // into it. Failing the classification instead makes `count`, `status` and `prune` all
+        // error, so the scheduled drain skips every night and no janitor can clear it.
+        let dir = TempDir::new().unwrap();
+        let queue_dir = dir.path().join(".lorekeeper/queue");
+        std::fs::create_dir_all(dir.path().join("daily/s")).unwrap();
+        std::fs::write(
+            dir.path().join("daily/s/2026-05-23.md"),
+            "---\nllm_inputs:\n  summary: live\ntitle: Notes: today\n---\n\n## 요약\n\nbody\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("daily/s/2026-05-24.md"),
+            "---\nllm_inputs:\n  summary: live\n---\n\n## 요약\n\nbody\n",
+        )
+        .unwrap();
+        write_queue_file(
+            &queue_dir,
+            "run-1.jsonl",
+            &[
+                task("daily/s/2026-05-23.md", "live"),
+                task("daily/s/2026-05-24.md", "live"),
+            ],
+        );
+
+        let mut statuses: Vec<&str> = read_tasks(&queue_dir.join("run-1.jsonl"))
+            .unwrap()
+            .iter()
+            .map(|t| classify_task(dir.path(), t).unwrap().as_str())
+            .collect();
+        statuses.sort_unstable();
+        assert_eq!(statuses, vec!["current", "unreadable"]);
+
+        // Retained, not pruned: repairing the page brings the task back.
+        let summary = prune_queue(dir.path(), &queue_dir, false).unwrap();
+        assert_eq!(summary.kept_unreadable, 1);
+        assert_eq!(summary.kept_current, 1);
+        assert_eq!(
+            read_tasks(&queue_dir.join("run-1.jsonl")).unwrap().len(),
+            2,
+            "neither task is dropped"
+        );
+    }
 
     #[test]
     fn a_quarantine_that_cannot_run_leaves_the_files_and_reports_none_moved() {
@@ -1036,6 +1129,7 @@ mod tests {
                 pruned_stale: 1,
                 pruned_missing_target: 1,
                 kept_current: 1,
+                kept_unreadable: 0,
                 retired_done: 0,
                 files_rewritten: 1,
                 files_deleted: 0,

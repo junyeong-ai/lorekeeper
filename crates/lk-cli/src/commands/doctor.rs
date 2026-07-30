@@ -29,7 +29,16 @@ use super::{find_config, load_config};
 pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
     let config = load_config(&find_config(opts)?)?;
     let vault_root = config.vault.root_path();
-    let report = audit(&managed_roots(&vault_root, &config.vault.dirs));
+    // A section a pending task can still fill is work in flight, not a defect — and the queue
+    // is the only thing that knows which. Asking it is what separates "nobody is going to do
+    // this" from "the drain has not run yet", and the remediation below is destructive if
+    // followed for the second one.
+    let in_flight = super::queue::work_in_flight(&vault_root)?;
+    let report = audit(
+        &managed_roots(&vault_root, &config.vault.dirs),
+        &vault_root,
+        &in_flight,
+    );
 
     for page in &report.pages {
         eprintln!("✗ {}", rel(&page.path, &vault_root));
@@ -37,7 +46,7 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
             eprintln!("    L{line}: {}", defect.description());
         }
         for section in &page.unanswered {
-            eprintln!("    `{section}` was enqueued and never answered");
+            eprintln!("    `{section}` records an input nothing has answered");
         }
     }
     let total: usize = report
@@ -60,27 +69,48 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
             "\nNo pages found under the configured vault.dirs — check the config if unexpected."
         );
     }
+    if report.in_flight > 0 {
+        eprintln!(
+            "\n{} section(s) are queued for a drain and not counted above — run `/lore-process`.",
+            report.in_flight
+        );
+    }
     if report.pages.iter().any(|page| !page.defects.is_empty()) {
         eprintln!(
-            "\nPages with a cleanliness defect predate a tightened contract. Re-ingest the\n\
-             affected page's source with the current binary — the contract is upheld at\n\
-             conversion, so a fresh ingest reproduces each page clean."
+            "\nA cleanliness defect predates a tightened contract, and WHERE the line sits\n\
+             decides the repair. In a section the pipeline renders — frontmatter, headings, the\n\
+             event list — re-ingesting that page's source reproduces it clean, because the\n\
+             contract is upheld at conversion. In a section an LLM or a human wrote, a\n\
+             re-render splices the existing body through unchanged and the defect survives: fix\n\
+             the line in place, or delete that section's `llm_inputs.<key>_done` marker so the\n\
+             next re-render enqueues it to be written again. A page with no ingestible source\n\
+             behind it at all — a concept, an exploration, a review narrative — is only ever\n\
+             fixed in place."
         );
     }
     if report.pages.iter().any(|page| !page.unanswered.is_empty()) {
         eprintln!(
-            "\nAn unanswered section's work was enqueued and lost: the queue file it belonged\n\
-             to has been archived or pruned, so nothing pending remains to fill it. A section\n\
-             is re-enqueued when its page is re-rendered and a scheduled run only re-renders\n\
-             the current date, so this will not come back on its own.\n\
+            "\nThese sections record an input hash with no matching answer, and no pending task\n\
+             can fill them (checked against the queue). A section is enqueued again only when\n\
+             its page is RE-RENDERED, and a scheduled run re-renders the current date alone, so\n\
+             this does not come back on its own. Deleting the `_done` marker changes nothing —\n\
+             it is already absent, which is what makes this a finding.\n\
              \n\
-             `lore ingest <source> --date <date>` re-enqueues it, but it also RE-FETCHES: a\n\
-             source whose window has passed returns fewer events than the page holds, and the\n\
-             re-render replaces the event list with them. Check with `--dry-run` first and\n\
-             compare the count against the page. When the source can no longer reproduce it,\n\
-             the page's own content is the input — fill the section and stamp its\n\
-             `llm_inputs.<key>_done` with the hash already recorded beside it (the\n\
-             /lore-process protocol, without the queue file)."
+             Which command re-renders depends on the page:\n\
+             \x20 daily, document   `lore ingest <source> --date <date>`\n\
+             \x20 work-log          `lore ingest --date <date>` — a source-filtered run skips it\n\
+             \x20 synthesis, review `lore synthesis <period> --date <date>`\n\
+             \n\
+             Each RE-FETCHES its source. A source whose window has passed returns fewer events\n\
+             than the page holds, and the re-render replaces the event list with what came back.\n\
+             `--dry-run` reports the event count it would write; compare it against the count\n\
+             the page states before running for real.\n\
+             \n\
+             When the source can no longer reproduce the input, the page's own content is what\n\
+             remains: fill the section by hand and stamp `llm_inputs.<key>_done` with the hash\n\
+             recorded beside it. `concepts` is the exception — that section and its marker are\n\
+             both written by `lore queue apply` from a drained extraction, so stamping it by\n\
+             hand claims an empty section is answered and loses the extraction for good."
         );
     }
     // Non-zero on a real defect OR on a page that could not be verified — "clean" must
@@ -176,6 +206,9 @@ struct AuditReport {
     scanned: u32,
     errors: u32,
     pages: Vec<PageDefects>,
+    /// Sections a pending task can still fill. Reported, never counted as a defect: the work
+    /// is queued and the drain has simply not run yet.
+    in_flight: u32,
 }
 
 /// Walk `roots`, scanning every `.md` against the cleanliness contract. Pure with
@@ -185,9 +218,14 @@ struct AuditReport {
 /// skipped (a vault may not have produced a synthesis yet); an unreadable or non-UTF-8
 /// file is counted as an error (not as clean), since pipeline output is always valid
 /// UTF-8 — this only ever fires on a foreign file a user dropped under a managed root.
-fn audit(roots: &[PathBuf]) -> AuditReport {
+fn audit(
+    roots: &[PathBuf],
+    vault_root: &Path,
+    in_flight_keys: &std::collections::HashSet<(PathBuf, &'static str)>,
+) -> AuditReport {
     let mut scanned = 0u32;
     let mut errors = 0u32;
+    let mut in_flight = 0u32;
     let mut pages = Vec::new();
 
     for root in roots {
@@ -221,7 +259,14 @@ fn audit(roots: &[PathBuf]) -> AuditReport {
             // page whose frontmatter will not parse is unverifiable rather than clean.
             let defects = scan_defects(&text);
             let unanswered = match lk_core::frontmatter::parse_page(&text) {
-                Ok(page) => unanswered_sections(&page),
+                Ok(page) => {
+                    let rel = path.strip_prefix(vault_root).unwrap_or(path).to_path_buf();
+                    let (queued, outstanding): (Vec<_>, Vec<_>) = unanswered_sections(&page)
+                        .into_iter()
+                        .partition(|key| in_flight_keys.contains(&(rel.clone(), *key)));
+                    in_flight += queued.len() as u32;
+                    outstanding
+                }
                 Err(e) => {
                     eprintln!("⚠ {}: frontmatter: {e}", path.display());
                     errors += 1;
@@ -242,6 +287,7 @@ fn audit(roots: &[PathBuf]) -> AuditReport {
         scanned,
         errors,
         pages,
+        in_flight,
     }
 }
 
@@ -253,6 +299,12 @@ fn rel<'a>(path: &'a Path, root: &Path) -> std::borrow::Cow<'a, str> {
 
 #[cfg(test)]
 mod tests {
+    /// Most cases are about a page's own contents, with no queue behind them: an empty in-flight
+    /// set is "no task can fill this", which is what makes an unanswered section a finding.
+    fn audit_with_empty_queue(roots: &[PathBuf]) -> AuditReport {
+        audit(roots, Path::new(""), &std::collections::HashSet::new())
+    }
+
     use super::*;
     use std::fs;
 
@@ -297,7 +349,7 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("answered.md"), answered).unwrap();
         fs::write(root.join("pending.md"), pending).unwrap();
-        let report = audit(&[root]);
+        let report = audit_with_empty_queue(&[root]);
         assert_eq!(report.scanned, 2);
         assert_eq!(
             report.pages.len(),
@@ -398,7 +450,7 @@ mod tests {
         )
         .unwrap();
 
-        let report = audit(&[root]);
+        let report = audit_with_empty_queue(&[root]);
         assert_eq!(
             report.errors, 1,
             "an unclosed frontmatter block is an error"
@@ -438,7 +490,7 @@ mod tests {
         )
         .unwrap();
 
-        let report = audit(&[root]);
+        let report = audit_with_empty_queue(&[root]);
         assert_eq!(report.scanned, 2, "both .md files are scanned");
         assert_eq!(report.pages.len(), 1, "only the defective page is reported");
         assert!(report.pages[0].path.ends_with("dirty.md"));
@@ -461,7 +513,7 @@ mod tests {
         fs::write(managed.join("concept.md"), "# clean\n").unwrap();
         fs::write(user.join("drawing.md"), "![](data:image/png;base64,ZZZZ)\n").unwrap();
 
-        let report = audit(&[managed]);
+        let report = audit_with_empty_queue(&[managed]);
         assert_eq!(report.scanned, 1);
         assert!(
             report.pages.is_empty(),
@@ -472,7 +524,7 @@ mod tests {
     #[test]
     fn audit_skips_a_missing_root_without_error() {
         let dir = tempfile::tempdir().unwrap();
-        let report = audit(&[dir.path().join("synthesis-that-does-not-exist")]);
+        let report = audit_with_empty_queue(&[dir.path().join("synthesis-that-does-not-exist")]);
         assert_eq!(report.scanned, 0);
         assert!(report.pages.is_empty());
     }

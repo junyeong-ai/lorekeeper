@@ -225,3 +225,77 @@ fn unknown_source_id_is_an_error() {
     assert!(!out.status.success());
     assert!(stderr_of(&out).contains("not found"));
 }
+
+/// `lore doctor` reports a section that records an input nothing answered. Whether that is a
+/// DEFECT depends on the queue, which it has to ask: the same page reads as work in flight
+/// while its task is pending, and as lost once the queue file is gone.
+///
+/// The distinction is not cosmetic. The remediation the report prints tells a reader to fill the
+/// section by hand and stamp its completion marker; done to work that is merely pending, that
+/// silences the queue (`lore queue count` drops to 0, so the scheduled drain skips the session),
+/// the extraction never happens, and `doctor` then certifies the vault clean.
+#[test]
+fn a_section_with_a_pending_task_is_work_in_flight_not_a_defect() {
+    let ws = Workspace::new("");
+    ws.drop_note("note.md", "# Queued Note\n\nbody\n");
+    assert!(ws.run(&["ingest"]).status.success());
+
+    let pending = ws.run(&["queue", "count"]);
+    assert_eq!(
+        String::from_utf8_lossy(&pending.stdout).trim(),
+        "1",
+        "the ingest left this page's summary pending"
+    );
+
+    let out = ws.run(&["doctor"]);
+    let stderr = stderr_of(&out);
+    assert!(
+        out.status.success(),
+        "queued work is not a vault defect\n{stderr}"
+    );
+    assert!(
+        stderr.contains("queued for a drain"),
+        "the pending sections must still be reported, just not as defects\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("no pending task"),
+        "the lost-work remediation must not print for work that is pending\n{stderr}"
+    );
+
+    // Archive the run the way a drain does, and the same page becomes a finding.
+    let queue = ws.vault().join(".lorekeeper/queue");
+    let processed = queue.join("processed");
+    std::fs::create_dir_all(&processed).expect("processed dir");
+    for file in files_under(&queue) {
+        if file.extension().is_some_and(|e| e == "jsonl") {
+            std::fs::rename(&file, processed.join(file.file_name().expect("name")))
+                .expect("archive");
+        }
+    }
+
+    let out = ws.run(&["doctor"]);
+    let stderr = stderr_of(&out);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "with nothing pending, an unanswered section is a defect\n{stderr}"
+    );
+    assert!(stderr.contains("no pending task"), "{stderr}");
+    // The one marker a reader must never stamp by hand, named as the exception.
+    assert!(stderr.contains("is the exception"), "{stderr}");
+}
+
+/// `--dry-run` has to report the number the doctor's remediation tells a reader to compare: a
+/// re-render REPLACES a daily page's event list, so the count is the whole difference between
+/// repairing the page and truncating it.
+#[test]
+fn a_dry_run_reports_the_event_count_it_would_write() {
+    let ws = Workspace::new("");
+    ws.drop_note("a.md", "# A\n\nbody\n");
+    let out = ws.run(&["ingest", "--dry-run"]);
+    let stderr = stderr_of(&out);
+    assert!(out.status.success(), "{stderr}");
+    // The manual source writes document pages, which state no event count; a daily source's
+    // page does, and the same reporting path prints both.
+    assert!(stderr.contains("would write:"), "{stderr}");
+}
