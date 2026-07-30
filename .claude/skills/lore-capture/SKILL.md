@@ -1,6 +1,6 @@
 ---
 name: lore-capture
-version: 0.13.5
+version: 0.13.6
 description: Capture high-value insights from active work into the Lorekeeper vault — troubleshooting discoveries, non-obvious constraints, reusable patterns. Operates in the moment while context is alive.
 when_to_use: |
   knowledge capture, lore capture, capture this, record insight,
