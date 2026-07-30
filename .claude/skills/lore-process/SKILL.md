@@ -114,9 +114,9 @@ The essentials: a visible `.jsonl` is fully written and every
    `config.yaml` yourself: a relative value there resolves against the config
    file's directory (not the CWD), and the config file itself is auto-discovered
    (`./config.yaml` → `~/.config/lorekeeper/config.yaml`), so parsing the YAML
-   reproduces two resolution rules that already exist in the binary. The wiki dir is
-   `vault.dirs.wiki` (default `wiki`); its `AGENTS.md` carries the page formats
-   and the Concept convergence contract. Then load the concept registry
+   reproduces two resolution rules that already exist in the binary. `lore config schema-path` prints the
+   absolute path of the vault's `AGENTS.md`, which carries the page formats and the Concept
+   convergence contract — the wiki dir is configurable, so never assume `wiki/`. Then load the concept registry
    for this run: `lore wiki concepts` (slugs, names, aliases) — the queue task
    carries no concept registry, so this on-disk snapshot plus a created-this-run
    set is the full dedup baseline (see the vault AGENTS.md § Concept convergence).
@@ -138,11 +138,18 @@ The essentials: a visible `.jsonl` is fully written and every
       lore queue status --json
       ```
 
-      It classifies every pending task as `current`, `done`, `stale`, or
-      `missing-target` from its target page's `llm_inputs.<key>` and
+      It classifies every pending task as `current`, `done`, `stale`,
+      `missing-target`, or `unreadable` from its target page's `llm_inputs.<key>` and
       `llm_inputs.<key>_done` — computed in tested Rust. **Process only
       `current` tasks; skip the rest without editing their pages.** Match tasks
       by `task_id`.
+
+      An `unreadable` task is one whose target page will not parse — most often frontmatter an
+      earlier drain mangled while stamping a marker. It is neither work nor dead: it neither
+      succeeded nor failed, so it does NOT block archiving the file (rule 4 is about tasks that
+      failed while being processed), and it is not dropped either — repairing the page brings it
+      back. Report it so a human can fix the page; never edit that page to make the task
+      classify.
 
    c. **For each `current` task** (in file order), resolve its state from the
       page's frontmatter. Completion is **uniformly marker-signalled**: every kind
@@ -289,3 +296,10 @@ delete the section's `llm_inputs.<key>_done` marker line (e.g. `summary_done`,
 `concepts_done`, `narrative_done` — the per-kind key is in the step 3c table).
 Emptying the body does NOT force a re-run: completion is tracked only by the
 marker, so an empty-but-done result stays cached.
+
+`--date` on a PAST day RE-FETCHES it, and the re-render replaces the page's event list with
+what the source returns now. An RSS source renders from its per-date event log, so a date the
+log covers comes back intact; a date older than the log does not, and no other source type
+keeps a log at all. Check first: `lore ingest <source> --date <day> --dry-run` reports the
+event count it would write for each daily page — compare it with the count the page states.
+Regenerating a summary is not worth truncating the events it summarizes.

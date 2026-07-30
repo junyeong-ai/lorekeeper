@@ -17,7 +17,12 @@ pub enum ConfigCommand {
     /// location and the config file is itself auto-discovered. Without this they assume the
     /// default `wiki`, and on a vault configured otherwise they look in the wrong place, find
     /// nothing, run `lore schema`, and look in the wrong place again.
-    SchemaPath,
+    SchemaPath {
+        /// Vault root override, like `lore schema --root` — so the two agree about where
+        /// AGENTS.md is for the vault the caller means, not only for the configured one.
+        #[arg(long)]
+        root: Option<std::path::PathBuf>,
+    },
 }
 
 pub async fn run(opts: &super::GlobalOptions, cmd: ConfigCommand) -> miette::Result<()> {
@@ -27,14 +32,17 @@ pub async fn run(opts: &super::GlobalOptions, cmd: ConfigCommand) -> miette::Res
             println!("{}", config.vault.root_path().display());
             Ok(())
         }
-        ConfigCommand::SchemaPath => {
-            let config = load_config(&find_config(opts)?)?;
+        ConfigCommand::SchemaPath { root } => {
+            // Same resolution `lore schema` writes through, so the path this prints is the path
+            // that command creates — including under `--root`, where only the root is overridden
+            // and the configured wiki dir still applies.
+            let super::RootConfig { root, config } = super::resolve_root_config(opts, root)?;
+            let wiki = config
+                .map(|c| c.vault.dirs.wiki)
+                .unwrap_or_else(|| lk_core::config::VaultDirs::default().wiki);
             println!(
                 "{}",
-                config
-                    .vault
-                    .root_path()
-                    .join(&config.vault.dirs.wiki)
+                root.join(wiki)
                     .join(lk_core::vault_path::SCHEMA_FILE)
                     .display()
             );

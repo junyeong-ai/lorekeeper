@@ -23,7 +23,7 @@ an Obsidian vault. All commands accept `--config <path>` to override.
 | `lore ingest` | Collect ALL enabled sources, write pages; render the cross-source work-log when a `personal:` module is configured |
 | `lore ingest <source>` | Refresh one source's pages only — never rewrites the work-log (it sees a subset) |
 | `lore ingest --dry-run` | Preview without vault writes |
-| `lore ingest --date YYYY-MM-DD` | Re-materialize a specific day (backfill / repair) |
+| `lore ingest --date YYYY-MM-DD` | Re-materialize a specific day — RE-FETCHES it; see Safety notes before using it on a past date |
 | `lore synthesis weekly [--previous]` | Weekly synthesis + personal review |
 | `lore synthesis monthly [--previous]` | Monthly performance review |
 | `lore synthesis quarterly [--previous]` | Quarterly review with category stats |

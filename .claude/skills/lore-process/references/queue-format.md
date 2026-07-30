@@ -19,8 +19,8 @@ maintenance run cannot race an active flush. Only `.jsonl` files matter to this 
 **Known limitation:** the tmp sweep is mtime-based, not PID-aware. If an ingest process
 is paused (SIGSTOP) for more than 1 hour, a later-starting ingest could delete its tmp;
 the paused ingest's flush then fails with ENOENT and that run's LLM tasks are lost.
-Ingest is idempotent (pages are materialized views re-rendered from the source window),
-so recovery is simply re-running it:
+Ingest is idempotent for the CURRENT day — the same window returns the same events — so
+recovery is re-running it:
 
 ```bash
 lore ingest              # re-renders the same pages, re-queues their tasks

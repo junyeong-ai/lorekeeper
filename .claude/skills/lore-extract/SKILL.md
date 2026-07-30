@@ -86,7 +86,7 @@ concept_mapping:         # project tag → vault category id
 
 extracted:               # per-document tracking (written by run)
   - source: "docs/adr/some-adr.md"
-    vault_page: "wiki/documents/proj-some-adr.md"   # vault-relative (configured wiki dir)
+    vault_page: "<wiki>/documents/proj-some-adr.md"  # vault-relative; <wiki> is the configured wiki dir
     domain: cloud-platform
     extracted_at: <ISO-date>
     transferability: T1

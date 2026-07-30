@@ -12,7 +12,7 @@
 # Deliberately NOT `set -e`: a failing stage must not skip the ones after it. Ingest failing
 # for one source is exactly when draining the queue and refreshing the graph still matter.
 # Every stage's status is recorded and `pipeline_finish` exits non-zero if any of them
-# failed, so a scheduler (and `lore health`) still sees the failure.
+# failed, so a scheduler still sees the failure (`lore health` cannot: it reads per-source collection freshness, not stage outcomes).
 
 set -uo pipefail
 
@@ -92,7 +92,8 @@ claude_skill() {
         --append-system-prompt "$AUTONOMOUS_PREAMBLE" \
         --permission-mode acceptEdits \
         --allowedTools "Bash(lore:*)" "Bash(ls:*)" "Bash(cat:*)" "Bash(jq:*)" \
-        "Bash(mkdir:*)" "Bash(mv:*)" \
+        "Bash(mkdir:*)" "Bash(mv:*)" "Bash(basename:*)" "Bash(test:*)" "Bash([:*)" \
+        "Bash(find:*)" "Bash(wc:*)" \
         "Read" "Edit" "Write" "Glob" "Grep" \
         --add-dir "$skill_dir" \
         --output-format text

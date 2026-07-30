@@ -1117,7 +1117,11 @@ pub struct GraphScopeConfig {
     /// absent. Integrity checks (`broken`/`orphans`/`index-sync`) resolve against
     /// the full vault regardless.
     pub dirs: Vec<PathBuf>,
-    /// Glob patterns (matched against vault-relative paths) to exclude from the scan.
+    /// Glob patterns (matched against vault-relative paths) narrowing the ANALYSIS: an excluded
+    /// page is not a graph node and its own links are not checked. It still EXISTS — a link to
+    /// it resolves, its citations still count, and a rename still repoints the links it wrote —
+    /// because a page that ceased to exist for the sweeps that rewrite the vault would have its
+    /// citation records deleted as unjustified.
     pub exclude: Vec<String>,
     /// Whether the walker follows symlinks.
     pub follow_links: bool,
