@@ -32,6 +32,7 @@ use tempfile::TempDir;
 const SWEEP: &[&[&str]] = &[
     &["validate"],
     &["config", "vault-root"],
+    &["config", "schema-path"],
     &["status"],
     &["health"],
     &["doctor"],

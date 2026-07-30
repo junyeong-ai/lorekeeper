@@ -139,8 +139,16 @@ stale. A daily run is `lore ingest` → `/lore-process`, not `lore ingest` alone
 
 ## Safety notes
 
-- Re-running is always safe — ingest is idempotent (pages are materialized views
-  re-rendered in full from the source window), so a duplicate run just reproduces
-  the same bytes. It's only wasteful, never corrupting.
-- `lore ingest --date <past>` re-materializes a specific day — the way to repair or
-  backfill a missing/edited daily page.
+- Re-running for TODAY is safe: a daily page is a materialized view re-rendered in full
+  from the source window, and the same window returns the same events, so a duplicate run
+  reproduces the same bytes. Only wasteful, never corrupting.
+- `lore ingest --date <past>` re-materializes that day — and RE-FETCHES it. A source whose
+  window has passed returns fewer events than the page already holds (an RSS feed drops
+  older items; a Gmail `newer_than:` query stops matching), and the re-render replaces the
+  event list with what came back. Measured: a page holding 25 events, re-ingested two months
+  later, kept 10. So it repairs a page whose source can still reproduce it, and truncates one
+  whose source cannot. `--dry-run` reports the event count it would write; compare that
+  against the count the page states before running it for real.
+- The LLM-owned sections (a summary, refined events, concept links) survive a re-render —
+  they are spliced through from the page on disk — so what a re-ingest can lose is the
+  structural half: the event list.

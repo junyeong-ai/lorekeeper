@@ -36,8 +36,8 @@ scan (discover → manifest) → run (manifest → vault pages) → audit (verif
 
 Run `lore config vault-root` for the resolved vault path — a bare line, never
 parsed out of prose or read from `config.yaml` (a relative `vault.root` resolves
-against the config file's own directory). AGENTS.md sits under the wiki dir
-(`vault.dirs.wiki`, default `wiki`).
+against the config file's own directory). `lore config schema-path` prints the absolute
+path of the vault's AGENTS.md; the wiki dir is configurable, so never assume `wiki/`.
 Read it before creating pages — it defines path patterns,
 frontmatter, and section headings. If missing, run `lore schema`.
 

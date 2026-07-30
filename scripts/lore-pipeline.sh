@@ -81,17 +81,18 @@ so plainly with the evidence; state finished work plainly without hedging.'
 # Run from the vault so the sandbox covers the pages being edited; the skill's own reference
 # files live outside it and are added explicitly. Tool access is whitelisted rather than
 # bypassed: this job edits a knowledge vault unattended, so it gets file edits, the `lore`
-# binary, and the two commands the drain protocol's own steps require — `mkdir -p` and `mv`
-# archive the finished queue file, and a drain that cannot archive reports failure every night
-# for work it has already committed. The list is a superset of what the protocol asks for, so
-# whether a skill's `allowed-tools:` frontmatter widens this set is not something the schedule
-# has to depend on.
+# binary, and the commands the drain protocol's own fenced steps run — `ls` lists the queue
+# directory, `cat`/`jq` read the tasks, and `mkdir -p`/`mv` archive the finished file, without
+# which a drain reports failure every night for work it has already committed. Nothing in `-p`
+# mode can prompt, so a command the protocol spells and this list omits is simply denied: the
+# list has to cover the protocol exactly rather than approximately.
 claude_skill() {
     local prompt="$1" skill_dir="$2"
     env -C "$VAULT" "$CLAUDE" -p "$prompt" \
         --append-system-prompt "$AUTONOMOUS_PREAMBLE" \
         --permission-mode acceptEdits \
-        --allowedTools "Bash(lore:*)" "Bash(mkdir:*)" "Bash(mv:*)" \
+        --allowedTools "Bash(lore:*)" "Bash(ls:*)" "Bash(cat:*)" "Bash(jq:*)" \
+        "Bash(mkdir:*)" "Bash(mv:*)" \
         "Read" "Edit" "Write" "Glob" "Grep" \
         --add-dir "$skill_dir" \
         --output-format text
