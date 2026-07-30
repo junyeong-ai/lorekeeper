@@ -7,7 +7,7 @@ use std::path::Path;
 
 use lk_core::config::VaultDirs;
 
-use crate::scan::{Extent, ScannedPage, VaultExistence};
+use crate::scan::{ScannedPage, VaultExistence};
 
 pub struct WikiGraph {
     graph: DiGraph<NodeData, ()>,
@@ -51,11 +51,14 @@ pub struct BrokenLink {
 /// have no such check because nothing but regeneration writes them.) They are still valid
 /// DESTINATIONS — they are files, and a page linking the catalog is linking something real.
 ///
-/// A destination the scan never covered is not reported. Absence from the universe is only
-/// evidence of absence where the universe looked: with `graph.scope.dirs` defaulting to the
-/// wiki, the walked set is that plus the four page dirs, and an ordinary Obsidian note under a
-/// user's own folder is outside it. Reporting those made a link to a file sitting right there
-/// on disk a violation that gates the scheduled pipeline.
+/// `existence` must therefore be built from a VAULT-ROOT scan, which is what integrity commands
+/// do. Absence from the universe is evidence of absence only where the universe looked, and
+/// while it covered `scope.dirs` plus the four page dirs, an ordinary Obsidian note under a
+/// user's own folder was outside it — so a link to a file sitting right there on disk read as a
+/// violation and gated the scheduled pipeline. Refusing to judge unwalked destinations traded
+/// that for the opposite miss: a link to a nonexistent path in an unwalked folder went
+/// unreported, and so did a link pointing outside the vault entirely. Scanning the vault answers
+/// every case exactly and needs no rule about which ones to skip.
 pub fn broken_links(
     pages: &[ScannedPage],
     existence: &VaultExistence,
@@ -68,7 +71,7 @@ pub fn broken_links(
         .flat_map(|page| {
             page.outgoing
                 .iter()
-                .filter(|target| existence.covers(target) && !existence.is_resolvable(target))
+                .filter(|target| !existence.is_resolvable(target))
                 .map(|target| BrokenLink {
                     source: page.id.clone(),
                     target: target.clone(),
@@ -96,11 +99,7 @@ impl WikiGraph {
     /// *is* the vault (and the convenient default for tests); for a narrowed scope
     /// whose links reach pages outside it, use [`Self::build_with_existence`].
     pub fn build(pages: &[ScannedPage], dirs: &VaultDirs) -> Self {
-        Self::build_with_existence(
-            pages,
-            &VaultExistence::build(pages, dirs, Extent::WholeVault),
-            dirs,
-        )
+        Self::build_with_existence(pages, &VaultExistence::build(pages, dirs), dirs)
     }
 
     /// Build the analysis graph over `pages` (the scope) while resolving
@@ -295,7 +294,7 @@ impl WikiGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scan::{Extent, ScannedPage, VaultExistence};
+    use crate::scan::{ScannedPage, VaultExistence};
     use lk_core::config::GraphConfig;
     use std::path::PathBuf;
 
@@ -325,11 +324,7 @@ mod tests {
 
     fn broken(pages: &[ScannedPage]) -> Vec<BrokenLink> {
         let dirs = VaultDirs::default();
-        broken_links(
-            pages,
-            &VaultExistence::build(pages, &dirs, Extent::WholeVault),
-            &dirs,
-        )
+        broken_links(pages, &VaultExistence::build(pages, &dirs), &dirs)
     }
 
     #[test]
@@ -367,20 +362,20 @@ mod tests {
     /// was reported as a violation for a file sitting right there on disk — gating the
     /// scheduled pipeline on a link that works.
     #[test]
-    fn a_destination_the_scan_never_covered_is_not_reported() {
+    fn a_page_under_a_users_own_folder_resolves_like_any_other() {
         let dirs = VaultDirs::default();
-        let pages = vec![build_page(
-            "daily/notes/2026-05-23",
-            &["notes/hand-written", "wiki/concepts/gone"],
-        )];
-        let existence = VaultExistence::build(
-            &pages,
-            &dirs,
-            Extent::Dirs(vec![PathBuf::from("wiki"), PathBuf::from("daily")]),
-        );
-        let found = broken_links(&pages, &existence, &dirs);
+        let pages = vec![
+            build_page(
+                "daily/notes/2026-05-23",
+                &["notes/hand-written", "wiki/concepts/gone"],
+            ),
+            // Not under any of the four page dirs — an ordinary Obsidian note. The universe is
+            // built from a vault-ROOT scan, so it is here, and the link to it resolves.
+            build_page("notes/hand-written", &[]),
+        ];
+        let found = broken_links(&pages, &VaultExistence::build(&pages, &dirs), &dirs);
 
-        assert_eq!(found.len(), 1, "only the covered destination is judged");
+        assert_eq!(found.len(), 1, "the note exists, so only `gone` is broken");
         assert_eq!(found[0].target, "wiki/concepts/gone");
     }
 
@@ -394,8 +389,7 @@ mod tests {
             "wiki/concepts/a",
             &["../../../outside.md", "/etc/passwd.md"],
         )];
-        let existence =
-            VaultExistence::build(&pages, &dirs, Extent::Dirs(vec![PathBuf::from("wiki")]));
+        let existence = VaultExistence::build(&pages, &dirs);
         let found = broken_links(&pages, &existence, &dirs);
 
         assert_eq!(
@@ -428,7 +422,7 @@ mod tests {
             build_page("wiki/concepts/lonely", &["wiki/index"]),
             build_page("wiki/index", &["wiki/concepts/lonely"]),
         ];
-        let existence = VaultExistence::build(&full, &dirs, Extent::WholeVault);
+        let existence = VaultExistence::build(&full, &dirs);
         let g = WikiGraph::build_with_existence(&scope, &existence, &dirs);
 
         assert_eq!(g.orphans(&[]), vec!["wiki/concepts/lonely"]);
@@ -534,7 +528,7 @@ mod tests {
         assert!(broken(&full).is_empty());
 
         let dirs = VaultDirs::default();
-        let narrow = VaultExistence::build(&full[..1], &dirs, Extent::WholeVault);
+        let narrow = VaultExistence::build(&full[..1], &dirs);
         assert_eq!(broken_links(&full[..1], &narrow, &dirs).len(), 1);
     }
 
@@ -555,7 +549,7 @@ mod tests {
             vec!["wiki/concepts/bar"]
         );
 
-        let existence = VaultExistence::build(&full, &VaultDirs::default(), Extent::WholeVault);
+        let existence = VaultExistence::build(&full, &VaultDirs::default());
         let g = WikiGraph::build_with_existence(&scope, &existence, &VaultDirs::default());
         assert!(g.orphans(&config.metrics.orphan_exclude).is_empty());
     }
@@ -574,7 +568,7 @@ mod tests {
             build_page("daily/team-slack/2026-05-22", &[]),
         ];
 
-        let existence = VaultExistence::build(&full, &VaultDirs::default(), Extent::WholeVault);
+        let existence = VaultExistence::build(&full, &VaultDirs::default());
         let g = WikiGraph::build_with_existence(&scope, &existence, &VaultDirs::default());
         assert!(g.orphans(&config.metrics.orphan_exclude).is_empty());
     }
@@ -603,7 +597,7 @@ mod tests {
             build_page("wiki/other", &[]),
             build_page("wiki/lonely", &[]),
         ];
-        let existence = VaultExistence::build(&scope, &VaultDirs::default(), Extent::WholeVault);
+        let existence = VaultExistence::build(&scope, &VaultDirs::default());
         let g = WikiGraph::build_with_existence(&scope, &existence, &VaultDirs::default());
 
         assert_eq!(

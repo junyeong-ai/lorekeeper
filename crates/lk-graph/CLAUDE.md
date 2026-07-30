@@ -36,13 +36,16 @@ on-disk state, never from a cached snapshot.
   page linking a `<daily>/` page is not broken, and a concept linked only from
   `<daily>/` is not an orphan. Reserved meta pages
   (`lk_core::vault_path::RESERVED_WIKI_FILES`) are never orphans or index-drift.
-  The universe answers three separate questions and conflating any two of them produced a
-  false positive: `is_resolvable` (a file exists at this id, **catalogs included** — they are
-  files, and excluding them made every link to `wiki/index.md` broken), `is_knowledge` (…and it
-  is not a generated catalog — the orphan-connectivity question, where letting a link to
-  `index.md` count would exempt the very pages detection looks for), and `covers` (the scan
-  walked there at all). `Extent` carries the last one: a vault holds user-authored folders
-  nothing scans, so a destination outside the walked dirs is UNKNOWN, never absent.
+  The universe answers two separate questions and conflating them produced a false positive:
+  `is_resolvable` (a file exists at this id, **catalogs included** — they are files, and
+  excluding them made every link to `wiki/index.md` broken) and `is_knowledge` (…and it is not
+  a generated catalog — the orphan-connectivity question, where letting a link to `index.md`
+  count would exempt the very pages detection looks for). It is built from a **vault-ROOT**
+  scan, so "not in `ids`" means not in the vault rather than not looked at: covering only
+  `scope.dirs` ∪ page dirs reported a user's own Obsidian note as a broken destination, and
+  refusing to judge unwalked destinations instead silenced both a link to a nonexistent path
+  in an unwalked folder and a link pointing outside the vault. `scan_vault` skips
+  dot-directories, so `.trash` — where Obsidian puts a DELETED page — never resolves.
 - **`graph::broken_links` is a free function over (pages, existence), not a `WikiGraph`
   method** — a broken link involves no node, edge or community, and computing it inside the
   graph is what silently scoped it to `graph.scope.dirs` on the SOURCE side as well: only wiki
@@ -51,8 +54,7 @@ on-disk state, never from a cached snapshot.
   read clean. Both `lint` and `broken` pass every scanned page; the scope narrowing applies
   only to the graph's nodes. Reserved meta pages are skipped as SOURCES — they are re-derived
   WHOLE, and `wiki refresh` runs before `graph lint` in the pipeline, so a stale link in one is
-  repaired by the same run rather than reported — but they remain valid DESTINATIONS. A
-  destination `Extent` does not cover is never reported.
+  repaired by the same run rather than reported — but they remain valid DESTINATIONS.
 - **Exit codes**: 0 = every claim the vault makes holds, 1 = it contradicts itself, 2 = runtime
   error. Non-zero is reserved for a claim that is FALSE and has a named repair — a link whose
   destination is absent, a catalog that disagrees with the disk, a category outside the

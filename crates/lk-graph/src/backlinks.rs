@@ -21,9 +21,7 @@ use lk_vault::{VaultWriter, replace_section, section_body, set_frontmatter_field
 use serde::Serialize;
 
 use crate::GraphError;
-use crate::scan::{
-    Extent, ScannedPage, VaultExistence, is_concept_page, is_valid_source, path_slug,
-};
+use crate::scan::{ScannedPage, VaultExistence, is_concept_page, is_valid_source, path_slug};
 
 /// Outcome of one concept page's reconciliation.
 #[derive(Debug, Clone, Serialize)]
@@ -77,7 +75,7 @@ pub fn sync_concept_backlinks(
     // `## Related`, and navigation pages aren't sources. BTreeMap/BTreeSet keep the
     // rendered body deterministic.
     // `pages` here is a full-vault scan of every page dir, so it IS the vault.
-    let existence = VaultExistence::build(pages, dirs, Extent::WholeVault);
+    let existence = VaultExistence::build(pages, dirs);
     let by_id: HashMap<&str, &ScannedPage> = pages.iter().map(|p| (p.id.as_str(), p)).collect();
     let mut incoming: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for page in pages {

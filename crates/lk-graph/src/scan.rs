@@ -45,7 +45,21 @@ pub fn scan_vault(root: &Path, config: &GraphConfig) -> Result<Vec<ScannedPage>,
             return Err(GraphError::ScanDirNotFound(scan_dir));
         }
 
-        let walker = WalkDir::new(&scan_dir).follow_links(config.scope.follow_links);
+        // Dot-directories are never knowledge. `.obsidian` is the app's own config, `.trash` is
+        // where Obsidian puts a DELETED page — resolving a link to one would report a deleted
+        // page as present — and `.lorekeeper` is this tool's state. The filter lives here rather
+        // than at the call sites because it is a fact about a vault, and it is what makes
+        // scanning from the vault root (the existence universe) mean "every page there is".
+        let walker = WalkDir::new(&scan_dir)
+            .follow_links(config.scope.follow_links)
+            .into_iter()
+            .filter_entry(|entry| {
+                entry.depth() == 0
+                    || !entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.starts_with('.'))
+            });
         for entry in walker {
             let entry = match entry {
                 Ok(e) => e,
@@ -165,21 +179,6 @@ fn extract_first_heading(body: &str) -> Option<String> {
     None
 }
 
-/// How much of the vault the scan behind a [`VaultExistence`] actually walked.
-///
-/// The distinction is between a destination that is ABSENT and one that was never LOOKED FOR.
-/// Reporting the second as broken made every link to a page outside the walked directories —
-/// an ordinary Obsidian note under a user's own folder — a violation that gates the scheduled
-/// pipeline, for a file sitting right there on disk.
-#[derive(Debug, Clone)]
-pub enum Extent {
-    /// The pages given ARE the vault: every id absent from them is genuinely absent.
-    WholeVault,
-    /// The scan covered only these vault-relative directories. A destination outside them was
-    /// never looked for, so nothing is known about whether it exists.
-    Dirs(Vec<PathBuf>),
-}
-
 /// The vault-wide existence universe consulted by integrity checks
 /// (broken-link resolution and orphan detection) so they reason about *every*
 /// page on disk — not just the analysis scope (`graph.scope.dirs`).
@@ -201,13 +200,13 @@ pub struct VaultExistence {
     /// Page ids that are the resolved target of a link from *another* page
     /// (self-links excluded). Drives orphan inbound exemption.
     linked: HashSet<String>,
-    /// What the scan behind `ids` covered — see [`Extent`].
-    extent: Extent,
 }
 
 impl VaultExistence {
-    /// Derive the universe from a page scan covering `extent`.
-    pub fn build(pages: &[ScannedPage], dirs: &VaultDirs, extent: Extent) -> Self {
+    /// Derive the universe from a page scan. The caller passes every page the vault has —
+    /// integrity commands scan from the vault ROOT for exactly this reason — so an id absent
+    /// from `ids` is absent from the vault, not merely from somewhere nobody looked.
+    pub fn build(pages: &[ScannedPage], dirs: &VaultDirs) -> Self {
         // Navigation/catalog meta-files (index.md, log.md, map.md, AGENTS.md) are generated
         // artifacts, not knowledge nodes. They are real files, so they RESOLVE as link targets;
         // what they must not do is count as connectivity, because index.md links every page it
@@ -238,7 +237,6 @@ impl VaultExistence {
             ids,
             knowledge,
             linked,
-            extent,
         }
     }
 
@@ -252,35 +250,6 @@ impl VaultExistence {
     /// connectivity asks, where reaching a generated catalog is not reaching anything.
     pub fn is_knowledge(&self, target: &str) -> bool {
         self.knowledge.contains(target)
-    }
-
-    /// Whether the scan behind this universe would have found `target` had it existed. A
-    /// destination outside the walked directories is unknown, never absent — so a check that
-    /// reports absence must ask this first.
-    ///
-    /// Compared after `path_slug`, the same normalization that produced every id, so a
-    /// capitalized or spaced directory name in the config matches the ids derived under it.
-    pub fn covers(&self, target: &str) -> bool {
-        // A destination that escaped the vault root is kept as WRITTEN by `parse_file` (it is
-        // not a page id at all), and no vault page can ever be addressed by it — so it is not
-        // "somewhere the scan did not look", it is nowhere. Judged always, or narrowing the
-        // extent would silently retire the reporting of a link pointing outside the vault.
-        if Path::new(target).components().any(|c| {
-            matches!(
-                c,
-                std::path::Component::ParentDir
-                    | std::path::Component::RootDir
-                    | std::path::Component::Prefix(_)
-            )
-        }) {
-            return true;
-        }
-        match &self.extent {
-            Extent::WholeVault => true,
-            Extent::Dirs(dirs) => dirs
-                .iter()
-                .any(|dir| Path::new(target).starts_with(path_slug(dir))),
-        }
     }
 
     /// Whether `page_id` is the resolved target of a link from another page.
@@ -445,7 +414,7 @@ mod tests {
                 outgoing: vec![],
             },
         ];
-        let ex = VaultExistence::build(&pages, &VaultDirs::default(), Extent::WholeVault);
+        let ex = VaultExistence::build(&pages, &VaultDirs::default());
         assert!(ex.is_resolvable("daily/team-slack/2026-05-22"));
         assert!(ex.is_resolvable("wiki/concepts/confluence-cloud"));
         assert!(!ex.is_resolvable("nope"));

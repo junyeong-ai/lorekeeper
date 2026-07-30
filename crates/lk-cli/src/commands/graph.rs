@@ -162,9 +162,8 @@ fn run_inner(
 
     let mut rc = resolve_config_full(opts, root_override)?;
 
-    // The SINGLE definition of what this command reads. Integrity commands resolve
-    // links against the full-vault existence universe (`scope.dirs` ∪ every page dir);
-    // analysis commands read `scope.dirs` only.
+    // The SINGLE definition of what this command reads. Integrity commands resolve links
+    // against a whole-vault existence universe; analysis commands read `scope.dirs` only.
     let integrity = matches!(
         cmd,
         GraphCommand::Lint
@@ -172,11 +171,7 @@ fn run_inner(
             | GraphCommand::Orphans
             | GraphCommand::IndexSync { .. }
     );
-    let scan_dirs = command_scan_dirs(
-        integrity,
-        &rc.graph.scope.dirs,
-        vault_page_dirs(&rc.root, &rc.vault_dirs),
-    );
+    let scan_dirs = command_scan_dirs(integrity, &rc.graph.scope.dirs);
 
     // One scan over `scan_dirs`, kept whole: it is the existence universe, and it is the page
     // set link integrity asks about — a link is broken wherever it was written. `pages` narrows
@@ -184,13 +179,9 @@ fn run_inner(
     // analysis commands (their `scan_dirs` IS `scope.dirs`) and the intended subset for the
     // integrity ones.
     let mut scan_cfg = rc.graph.clone();
-    scan_cfg.scope.dirs = scan_dirs.clone();
+    scan_cfg.scope.dirs = scan_dirs;
     let scanned = scan::scan_vault(&rc.root, &scan_cfg).map_err(|e| format!("{e}"))?;
-    // The universe knows its own extent: a vault holds user-authored content outside these
-    // dirs, and a link to one of those files must not read as broken just because nothing
-    // walked there.
-    let existence =
-        scan::VaultExistence::build(&scanned, &rc.vault_dirs, scan::Extent::Dirs(scan_dirs));
+    let existence = scan::VaultExistence::build(&scanned, &rc.vault_dirs);
     let pages: Vec<scan::ScannedPage> = scanned
         .iter()
         .filter(|p| rc.graph.scope.dirs.iter().any(|d| p.path.starts_with(d)))
@@ -533,25 +524,23 @@ fn run_merge(
     Ok(false)
 }
 
-/// The directories a graph command reads. Integrity commands
-/// (lint/broken/orphans/index-sync) resolve links against the full-vault
-/// existence universe, so they read `scope.dirs` ∪ every page dir; analysis commands
-/// (hubs/cluster/…) read `scope.dirs` only. `page_dirs` already in scope are not
-/// duplicated, preserving scope-first order.
-fn command_scan_dirs(
-    integrity: bool,
-    scope_dirs: &[PathBuf],
-    page_dirs: Vec<PathBuf>,
-) -> Vec<PathBuf> {
-    let mut dirs = scope_dirs.to_vec();
+/// The directories a graph command reads. Analysis commands (hubs/cluster/…) read
+/// `scope.dirs` only — that narrowing is the whole point of the setting. Integrity commands
+/// (lint/broken/orphans/index-sync) read the VAULT ROOT, because they answer "does a page exist
+/// at this id", and that question has an exact answer only if every page was looked at.
+///
+/// Reading `scope.dirs` ∪ the four page dirs was the earlier answer, and it made "not scanned"
+/// indistinguishable from "not there": a link to an ordinary Obsidian note under a user's own
+/// folder was reported broken for a file sitting on disk. Ruling those out by refusing to judge
+/// them traded that for the opposite miss — a link to a nonexistent path in an unwalked folder
+/// went unreported. Scanning the vault answers both exactly, and `scan_vault` skips
+/// dot-directories so `.trash` (a DELETED page) never resolves.
+fn command_scan_dirs(integrity: bool, scope_dirs: &[PathBuf]) -> Vec<PathBuf> {
     if integrity {
-        for d in page_dirs {
-            if !dirs.contains(&d) {
-                dirs.push(d);
-            }
-        }
+        // The vault root: an empty relative path joins to `root` itself.
+        return vec![PathBuf::new()];
     }
-    dirs
+    scope_dirs.to_vec()
 }
 
 /// Every vault-relative page directory that exists on disk — anything that can
@@ -612,26 +601,20 @@ mod tests {
 
     #[test]
     fn analysis_commands_read_scope_only() {
-        // Non-integrity commands ignore page dirs entirely.
-        let dirs = command_scan_dirs(false, &[p("wiki")], vec![p("wiki"), p("daily"), p("me")]);
-        assert_eq!(dirs, vec![p("wiki")]);
-    }
-
-    #[test]
-    fn integrity_commands_union_scope_with_page_dirs_scope_first() {
-        // Integrity commands add every page dir not already in scope, scope-first.
-        let dirs = command_scan_dirs(
-            true,
-            &[p("wiki")],
-            vec![p("wiki"), p("daily"), p("me"), p("syn")],
+        // The narrowing is the whole point of `graph.scope.dirs` for hubs/cluster/suggest-links.
+        assert_eq!(command_scan_dirs(false, &[p("wiki")]), vec![p("wiki")]);
+        assert_eq!(
+            command_scan_dirs(false, &[p("wiki"), p("docs")]),
+            vec![p("wiki"), p("docs")]
         );
-        assert_eq!(dirs, vec![p("wiki"), p("daily"), p("me"), p("syn")]);
     }
 
     #[test]
-    fn integrity_does_not_duplicate_scope_dirs_already_listed() {
-        // A page dir already in scope is not appended twice.
-        let dirs = command_scan_dirs(true, &[p("daily"), p("wiki")], vec![p("wiki"), p("daily")]);
-        assert_eq!(dirs, vec![p("daily"), p("wiki")]);
+    fn integrity_commands_read_the_whole_vault_whatever_the_scope() {
+        // "Does a page exist at this id" has an exact answer only if every page was looked at.
+        // An empty relative path joins to the vault root.
+        for scope in [vec![p("wiki")], vec![p("wiki/concepts")], vec![]] {
+            assert_eq!(command_scan_dirs(true, &scope), vec![PathBuf::new()]);
+        }
     }
 }
