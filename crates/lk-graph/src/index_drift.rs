@@ -27,7 +27,7 @@ pub fn diff(
     wiki_dir: &Path,
     orphan_exclude: &[String],
 ) -> Result<IndexDrift, GraphError> {
-    let index_path = root.join(wiki_dir).join("index.md");
+    let index_path = root.join(wiki_dir).join(lk_core::vault_path::INDEX_FILE);
 
     // A MISSING index is a legitimate "not built yet" state → treat as empty so every
     // page reports missing-from-index (prompting `lore wiki index`). A real read error
@@ -49,7 +49,7 @@ pub fn diff(
     // catalog entry, never a link embedded in summary prose. Drift is checked against the
     // graph's `node_ids()` (the analysis scope, i.e. `<wiki>/`); daily/synthesis pages are
     // catalogued too but live outside that scope, so they are not drift-tracked here.
-    let index_rel = wiki_dir.join("index.md");
+    let index_rel = wiki_dir.join(lk_core::vault_path::INDEX_FILE);
     let mut index_links = HashSet::new();
     for dest in link::extract_dests(&content) {
         if let Some(resolved) = link::resolve_dest(&index_rel, &dest) {
@@ -113,7 +113,7 @@ pub fn fix(
         return Ok(0);
     }
 
-    let index_path = root.join(wiki_dir).join("index.md");
+    let index_path = root.join(wiki_dir).join(lk_core::vault_path::INDEX_FILE);
     // A missing index.md is treated as empty (consistent with `diff`): `--fix` then
     // writes a fresh index containing every drifted entry. "Fix" means "make it
     // correct" whether the catalog exists yet or not.
@@ -130,7 +130,7 @@ pub fn fix(
 
     // Each appended entry needs the drifted page's real path (for the relative
     // destination) and title (for the display text) — looked up from the scan.
-    let index_rel = wiki_dir.join("index.md");
+    let index_rel = wiki_dir.join(lk_core::vault_path::INDEX_FILE);
     let mut added = 0;
     for page_id in &drift.missing_from_index {
         let Some(page) = pages.iter().find(|p| &p.id == page_id) else {
@@ -178,7 +178,7 @@ mod tests {
         let wiki = dir.join("wiki");
         std::fs::create_dir_all(&wiki).unwrap();
         std::fs::write(
-            wiki.join("index.md"),
+            wiki.join(lk_core::vault_path::INDEX_FILE),
             "# Index\n\n- [alpha](alpha.md)\n- [beta](beta.md)\n",
         )
         .unwrap();
@@ -210,7 +210,7 @@ mod tests {
         let wiki = tmp.path().join("wiki");
         std::fs::create_dir_all(&wiki).unwrap();
         std::fs::write(
-            wiki.join("index.md"),
+            wiki.join(lk_core::vault_path::INDEX_FILE),
             "# Index\n\n- [alpha](alpha.md)\n- [nonexistent](nonexistent.md)\n",
         )
         .unwrap();

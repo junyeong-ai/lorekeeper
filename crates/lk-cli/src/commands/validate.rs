@@ -83,7 +83,7 @@ async fn agents_md_needs_regen(config: &lk_core::config::Config) -> bool {
         .vault
         .root_path()
         .join(&config.vault.dirs.wiki)
-        .join("AGENTS.md");
+        .join(lk_core::vault_path::SCHEMA_FILE);
     match tokio::fs::read_to_string(&path).await {
         Ok(on_disk) => on_disk != expected,
         Err(_) => true,

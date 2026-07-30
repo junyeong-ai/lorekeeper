@@ -50,7 +50,7 @@ pub fn build_map(
     // Destinations are relative to the map's own location (`{wiki}/map.md`). A concept
     // page's path is its id plus `.md` — machine-created pages are slug-addressed by
     // construction (`graph normalize` repairs any hand-made exception).
-    let map_rel = Path::new(&dirs.wiki).join("map.md");
+    let map_rel = Path::new(&dirs.wiki).join(lk_core::vault_path::MAP_FILE);
     let dest_of = |id: &str| link::relative_dest(&map_rel, &PathBuf::from(format!("{id}.md")));
 
     let mut out = String::new();

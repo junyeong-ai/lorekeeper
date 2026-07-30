@@ -111,9 +111,11 @@ jobs:
       - run: cargo check --workspace --all-targets --all-features
 
   # `install.sh` is the documented entry point and the pipelines are what the scheduler runs, so
-  # ~1400 lines of shipped shell had no gate of any kind while every Rust line had several.
+  # ~1400 lines of shipped shell had no gate of any kind while every Rust line had several. The
+  # workflows are the same shape — `actionlint` was run by hand while reviewing them, which means
+  # it was run when someone remembered to, and these files now gate the release itself.
   shell:
-    name: shellcheck
+    name: shellcheck + actionlint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -122,6 +124,10 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y shellcheck
       - run: bash -n scripts/*.sh
       - run: shellcheck --severity=warning scripts/*.sh
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: actionlint
+      - run: actionlint
 
   doc:
     name: doc

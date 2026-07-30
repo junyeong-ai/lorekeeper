@@ -76,7 +76,7 @@ pub fn build_timeline(
     }
 
     // Every entry destination is relative to the timeline's own location.
-    let log_rel = Path::new(&dirs.wiki).join("log.md");
+    let log_rel = Path::new(&dirs.wiki).join(lk_core::vault_path::TIMELINE_FILE);
 
     let mut out = String::new();
     writeln!(out, "# {}", locale.strings().log_title).unwrap();
@@ -107,12 +107,17 @@ pub fn write_timeline(
     dirs: &VaultDirs,
 ) -> Result<std::path::PathBuf, VaultError> {
     let content = build_timeline(vault_root, locale, dirs)?;
-    let rel = Path::new(&dirs.wiki).join("log.md");
+    let rel = Path::new(&dirs.wiki).join(lk_core::vault_path::TIMELINE_FILE);
     VaultWriter::new(vault_root).write_generated_page_sync(&rel, &content)?;
     // Return the absolute path, matching `write_index`, so every `lore wiki` command
     // reports the file it wrote uniformly.
     Ok(vault_root.join(rel))
 }
+
+/// The page formats this timeline is a timeline OF — one per directory it walks. A subset of
+/// [`lk_core::vault_path::PAGE_FORMATS`], asserted so a typo here cannot silently drop a whole
+/// format off the timeline.
+const KNOWLEDGE_FORMATS: &[&str] = &["concept", "document", "exploration"];
 
 /// Walk one knowledge directory, parsing each page's `created`/`title` into a [`TimelineEntry`].
 /// Unreadable or undated pages are skipped — never guessed onto the timeline.
@@ -122,9 +127,6 @@ pub fn write_timeline(
 /// puts a daily page inside one of them, and the timeline promises durable knowledge nodes
 /// only. It was reached that way: a daily digest became a permanent entry in the knowledge
 /// timeline, which is the one thing this file says it will not do.
-/// The page formats this timeline is a timeline OF — one per directory it walks.
-const KNOWLEDGE_FORMATS: &[&str] = &["concept", "document", "exploration"];
-
 fn collect_into(
     entries: &mut Vec<TimelineEntry>,
     vault_root: &Path,
@@ -202,6 +204,20 @@ fn fm_date(page: &lk_core::frontmatter::VaultPage, key: &str) -> Option<jiff::ci
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// Which formats are durable knowledge is a judgement this file makes, but that they are
+    /// formats this tool writes at all is not — and a typo here does not fail anything on its
+    /// own. It reads as "no page of that format is a knowledge node", so the whole format drops
+    /// off the timeline silently.
+    #[test]
+    fn every_knowledge_format_is_a_format_this_tool_writes() {
+        for format in KNOWLEDGE_FORMATS {
+            assert!(
+                lk_core::vault_path::PAGE_FORMATS.contains(format),
+                "{format:?} is not a page format Lorekeeper writes"
+            );
+        }
+    }
 
     fn write(root: &Path, rel: &str, body: &str) {
         let p = root.join(rel);

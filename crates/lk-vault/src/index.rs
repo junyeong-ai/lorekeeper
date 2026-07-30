@@ -98,7 +98,7 @@ pub fn build_index(
         + synthesis.len();
 
     // Every entry destination is relative to the index's own location.
-    let index_rel = Path::new(&dirs.wiki).join("index.md");
+    let index_rel = Path::new(&dirs.wiki).join(lk_core::vault_path::INDEX_FILE);
 
     let mut out = String::new();
     writeln!(out, "# {}", strings.index_title).unwrap();
@@ -236,11 +236,11 @@ pub async fn write_index(
 ) -> Result<PathBuf, VaultError> {
     let content = build_index(vault_root, locale, dirs)?;
     let wiki_dir = vault_root.join(&dirs.wiki);
-    let main_rel = Path::new(&dirs.wiki).join("index.md");
+    let main_rel = Path::new(&dirs.wiki).join(lk_core::vault_path::INDEX_FILE);
     VaultWriter::new(vault_root)
         .write_generated_page(&main_rel, &content)
         .await?;
-    Ok(wiki_dir.join("index.md"))
+    Ok(wiki_dir.join(lk_core::vault_path::INDEX_FILE))
 }
 
 /// A single catalog entry: vault-relative path, the display title of the entry link,

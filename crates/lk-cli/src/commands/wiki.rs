@@ -60,7 +60,7 @@ pub async fn run_map(
     let graph = lk_graph::graph::WikiGraph::build(&pages, &dirs);
     let content = lk_graph::map::build_map(&graph, &graph_config, &dirs, locale);
 
-    let rel = std::path::Path::new(&dirs.wiki).join("map.md");
+    let rel = std::path::Path::new(&dirs.wiki).join(lk_core::vault_path::MAP_FILE);
     lk_vault::VaultWriter::new(&vault_root)
         .write_generated_page(&rel, &content)
         .await
