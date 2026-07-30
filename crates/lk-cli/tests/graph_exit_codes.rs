@@ -310,6 +310,49 @@ fn an_excluded_page_still_exists_but_is_not_analysed() {
     );
 }
 
+/// A stray link in the user's OWN note is not a violation of the vault's contract. The pipeline
+/// neither wrote that page nor can repair it, so gating the scheduled run on it would report
+/// content this tool does not manage. The note still EXISTS, so a managed page linking it
+/// resolves — and a file whose frontmatter will not parse is a file, so that resolves too.
+#[test]
+fn a_page_this_tool_does_not_manage_is_not_a_link_source() {
+    let ws = Workspace::new();
+    ws.write(
+        "wiki/concepts/a.md",
+        &concept(
+            "a",
+            "A",
+            "Links a real note and a real malformed file: \
+             [note](../../Archive/note.md) [m](../../Archive/malformed.md)",
+        ),
+    );
+    ws.write(
+        "Archive/note.md",
+        "# My note\n\nA stray link: [gone](./nope.md)\n",
+    );
+    ws.write(
+        "Archive/malformed.md",
+        "---\nid: malformed\ntitle: unclosed\n",
+    );
+    assert_eq!(ws.code(&["wiki", "index"]), 0);
+
+    let out = ws.run(&["graph", "lint"]);
+    let stdout = String::from_utf8(out.stdout).expect("utf8");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "neither the user's stray link nor a real file's parse failure is a violation\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("nope"),
+        "the user's own note must not be linted as a source\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("malformed"),
+        "a file that exists must resolve, whatever its frontmatter\n{stdout}"
+    );
+}
+
 #[test]
 fn a_category_outside_the_configured_vocabulary_exits_one() {
     let ws = sound_vault();

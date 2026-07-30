@@ -172,24 +172,37 @@ fn run_inner(
     );
     let scan_dirs = command_scan_dirs(integrity, &rc.graph.scope.dirs);
 
-    // One scan, kept whole: it is both the existence universe and the page set link integrity
-    // asks about, since a link is broken wherever it was written. `pages` narrows it to the
-    // analysis scope for the graph's nodes and edges — a no-op for the analysis commands, whose
-    // scan IS their scope.
+    // ONE scan, partitioned into three views that answer three different questions. Conflating
+    // any two of them reports something false:
+    //
+    // - `scanned` — every page in the vault. The existence universe: "is a file addressed by
+    //   this id" is exact only over all of them.
+    // - `link_sources` — the pages this tool writes and manages, `scope.dirs` ∪ the page dirs.
+    //   A user's own note is not the pipeline's output and not its to repair, so a stray link
+    //   inside one is not a violation of the vault's contract.
+    // - `pages` — the analysis scope, the graph's nodes and edges.
+    //
+    // `scope.exclude` narrows the last two, never the first: an excluded page still exists.
     let mut scan_cfg = rc.graph.clone();
     scan_cfg.scope.dirs = scan_dirs;
-    // The universe is the vault, so `scope.exclude` has no say in it: an excluded page still
-    // exists. The globs narrow the analysis and are applied to the node set below.
     if integrity {
         scan_cfg.scope.exclude = Vec::new();
     }
     let scanned = scan::scan_vault(&rc.root, &scan_cfg).map_err(|e| format!("{e}"))?;
     let existence = scan::VaultExistence::build(&scanned, &rc.vault_dirs);
     let excluded = scan::Excludes::compile(&rc.graph.scope.exclude).map_err(|e| format!("{e}"))?;
+    let in_scope = |page: &scan::ScannedPage, dirs: &[PathBuf]| {
+        dirs.iter().any(|d| page.path.starts_with(d)) && !excluded.matches(&page.path)
+    };
+    let managed_dirs = command_source_dirs(&rc.graph.scope.dirs, &rc.root, &rc.vault_dirs);
+    let link_sources: Vec<scan::ScannedPage> = scanned
+        .iter()
+        .filter(|p| in_scope(p, &managed_dirs))
+        .cloned()
+        .collect();
     let pages: Vec<scan::ScannedPage> = scanned
         .iter()
-        .filter(|p| rc.graph.scope.dirs.iter().any(|d| p.path.starts_with(d)))
-        .filter(|p| !excluded.matches(&p.path))
+        .filter(|p| in_scope(p, &rc.graph.scope.dirs))
         .cloned()
         .collect();
     let g = graph::WikiGraph::build_with_existence(&pages, &existence, &rc.vault_dirs);
@@ -198,7 +211,7 @@ fn run_inner(
         GraphCommand::Lint => {
             let hubs = g.hubs(10, rc.graph.metrics.min_hub_degree);
             let orphans = g.orphans(&rc.graph.metrics.orphan_exclude);
-            let broken = graph::broken_links(&scanned, &existence, &rc.vault_dirs);
+            let broken = graph::broken_links(&link_sources, &existence, &rc.vault_dirs);
             let drift = index_drift::diff(
                 &g,
                 &existence,
@@ -267,7 +280,7 @@ fn run_inner(
             false
         }
         GraphCommand::Broken => {
-            let broken = graph::broken_links(&scanned, &existence, &rc.vault_dirs);
+            let broken = graph::broken_links(&link_sources, &existence, &rc.vault_dirs);
             let count = broken.len();
             let report = output::BrokenReport { broken, count };
             let has = report.count > 0;
@@ -534,6 +547,20 @@ fn run_merge(
 /// at this id", and that question is exact only over every page there is. Anything narrower
 /// makes "not scanned" indistinguishable from "not there", in whichever direction the narrowing
 /// resolves it. `scan_vault` skips dot-directories, so `.trash` never resolves.
+/// The pages whose links are CHECKED: the analysis scope plus every page directory this tool
+/// writes. A vault also holds the user's own folders, and a stray link in a hand-written note is
+/// neither the pipeline's output nor something it can repair — reporting one as a violation gates
+/// the scheduled pipeline on content the tool does not manage.
+fn command_source_dirs(scope_dirs: &[PathBuf], root: &Path, dirs: &VaultDirs) -> Vec<PathBuf> {
+    let mut sources = scope_dirs.to_vec();
+    for dir in vault_page_dirs(root, dirs) {
+        if !sources.contains(&dir) {
+            sources.push(dir);
+        }
+    }
+    sources
+}
+
 fn command_scan_dirs(integrity: bool, scope_dirs: &[PathBuf]) -> Vec<PathBuf> {
     if integrity {
         // The vault root: an empty relative path joins to `root` itself.

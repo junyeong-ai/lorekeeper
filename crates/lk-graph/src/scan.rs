@@ -101,14 +101,27 @@ pub fn scan_vault(root: &Path, config: &GraphConfig) -> Result<Vec<ScannedPage>,
         .retain(|path| seen.insert(std::fs::canonicalize(path).unwrap_or_else(|_| path.clone())));
     file_paths.sort();
 
+    // A page whose body will not parse still EXISTS, and its id comes from the path rather than
+    // from anything inside it — so it yields a page with no title and no links rather than
+    // vanishing. Dropping it would make a link to a real file on disk read as broken, and leave
+    // it out of every count of what the vault holds.
     let mut pages: Vec<ScannedPage> = file_paths
         .par_iter()
-        .filter_map(|path| match parse_file(path, root) {
-            Ok(page) => Some(page),
-            Err(e) => {
-                tracing::warn!(path = %path.display(), error = %e, "skipping unparseable page");
-                None
-            }
+        .map(|path| {
+            parse_file(path, root).unwrap_or_else(|e| {
+                tracing::warn!(path = %path.display(), error = %e, "unparseable page: id only");
+                let rel = path.strip_prefix(root).unwrap_or(path);
+                ScannedPage {
+                    id: path_slug(rel),
+                    path: rel.to_path_buf(),
+                    title: path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("untitled")
+                        .to_owned(),
+                    outgoing: Vec::new(),
+                }
+            })
         })
         .collect();
 
@@ -410,6 +423,29 @@ mod tests {
                 "{not_a_source} is not provenance"
             );
         }
+    }
+
+    #[test]
+    fn an_unparseable_page_still_exists() {
+        // Its id comes from the PATH, so nothing inside the file is needed to know it is there.
+        // Dropping it would make a link to a real file on disk read as broken.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let wiki = tmp.path().join("wiki");
+        std::fs::create_dir_all(&wiki).unwrap();
+        std::fs::write(wiki.join("good.md"), "---\nid: good\n---\n\n# Good\n").unwrap();
+        std::fs::write(wiki.join("broken.md"), "---\nid: broken\ntitle: unclosed\n").unwrap();
+
+        let mut config = GraphConfig::default();
+        config.scope.dirs = vec![PathBuf::from("wiki")];
+        let pages = scan_vault(tmp.path(), &config).unwrap();
+
+        let ids: Vec<&str> = pages.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, vec!["wiki/broken", "wiki/good"]);
+        let unparseable = pages.iter().find(|p| p.id == "wiki/broken").unwrap();
+        assert!(
+            unparseable.outgoing.is_empty(),
+            "a page whose body did not parse contributes no links"
+        );
     }
 
     #[test]
