@@ -70,9 +70,10 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
     if report.pages.iter().any(|page| !page.unanswered.is_empty()) {
         eprintln!(
             "\nAn unanswered section's work was enqueued and lost: the queue file it belonged\n\
-             to has been archived or pruned, so nothing pending remains to fill it. Re-ingest\n\
-             that page's date (`lore ingest <source> --date <date>`) to enqueue it again, then\n\
-             drain with /lore-process."
+             to has been archived or pruned, so nothing pending remains to fill it. A section\n\
+             is re-enqueued when its page is re-rendered and a scheduled run only re-renders\n\
+             the current date, so this will not come back on its own. Re-ingest that page's\n\
+             date (`lore ingest <source> --date <date>`), then drain with /lore-process."
         );
     }
     // Non-zero on a real defect OR on a page that could not be verified — "clean" must
@@ -121,16 +122,25 @@ struct PageDefects {
 ///
 /// The pipeline stamps `llm_inputs.<key>` when it enqueues the work and whoever does the work
 /// stamps `<key>_done`; a cache hit is the two being equal, and emptiness never signals either
-/// way. So a page carrying the input and not the answer has work that was enqueued and lost —
-/// the queue file it belonged to has since been archived or pruned, `lore queue count` reports
-/// nothing pending, and the section stays empty for good.
+/// way. So a page carrying the input and not the answer has work that was enqueued and lost:
+/// `lore queue count` reports nothing pending, and nothing will re-enqueue it either, because
+/// `llm_cache::lookup` runs when a page is RE-RENDERED and only today's date gets re-rendered.
+/// `lore ingest --date <that day>` is what re-enqueues it — the lookup keys on the `_done`
+/// marker, so an absent one is a miss.
 ///
-/// Nothing else reports this. The one visible trace is indirect and only for concepts: a
-/// concept page whose origin never completed its extraction has no citation, so it surfaces in
-/// `lore graph lint`'s observation channel as an orphan — mixed in with concepts that simply
-/// have not been cited yet, which is not a defect at all and is why that channel does not gate.
-/// On the vault this was measured against, 38 pages carried
-/// unanswered sections while `doctor` reported no defects and the queue reported nothing to do.
+/// This detects residue, and the residue it was written for has a known cause. Measured on a
+/// 2,110-page vault: 38 pages, 75 sections, every one of them dated 2026-05-27 to 2026-06-05
+/// and none after — the window between the materialized-view LLM cache landing and the four
+/// commits that made completion uniformly marker-signalled. Every affected page lost ALL of its
+/// enqueued sections together, never one while another on the same page succeeded, which is a
+/// page's citations and markers never being written rather than a section-level miss. The same
+/// event is why concepts from those days sit uncited.
+///
+/// So this is not a check for a live bug; it is the check that was missing while one existed.
+/// Nothing else reports it — the one visible trace was indirect and only for concepts, which
+/// surface in `lore graph lint`'s observation channel as orphans, mixed in with concepts that
+/// simply have not been cited yet. `doctor` reported no defects and the queue reported no work
+/// for two months while the residue sat there.
 ///
 /// The keys come from `TargetKind`, so a new task kind is covered without being listed here.
 fn unanswered_sections(text: &str) -> Vec<&'static str> {
