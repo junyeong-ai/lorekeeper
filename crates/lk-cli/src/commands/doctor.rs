@@ -71,13 +71,22 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
 /// `annual` are subdirectories within `personal` and `synthesis`, so those two roots
 /// cover every personal review and team synthesis; `wiki` covers concepts, documents,
 /// explorations, and the generated catalogs. Everything else in the vault is
-/// user-authored and deliberately out of scope. Deduplicated so an unusual config that
-/// points two of the four at the same directory does not scan it twice.
+/// user-authored and deliberately out of scope.
+///
+/// Deduplicated by CANONICAL identity, so an unusual config pointing two of the four at the
+/// same directory does not scan it twice — and the comparison has to be canonical, because the
+/// spellings that reach here differ by construction: the filesystem folds case, or Unicode
+/// normalization, or a symlink, and equal paths were never the interesting case. Comparing the
+/// joined text reported one physical file as two defective pages, each told to be re-ingested,
+/// and doubled the scanned count.
 fn managed_roots(vault_root: &Path, dirs: &VaultDirs) -> Vec<PathBuf> {
-    let mut roots = Vec::with_capacity(4);
+    let mut roots: Vec<PathBuf> = Vec::with_capacity(4);
+    let mut seen: Vec<PathBuf> = Vec::with_capacity(4);
     for dir in [&dirs.daily, &dirs.personal, &dirs.synthesis, &dirs.wiki] {
         let path = vault_root.join(dir);
-        if !roots.contains(&path) {
+        let identity = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if !seen.contains(&identity) {
+            seen.push(identity);
             roots.push(path);
         }
     }

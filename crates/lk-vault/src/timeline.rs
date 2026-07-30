@@ -24,9 +24,9 @@
 //! linearly in the number of nodes (a few hundred KB even after years), so neither
 //! truncates; the long-term evolution of the vault is the whole point of a by-time view.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use lk_core::config::VaultDirs;
 use lk_core::frontmatter::parse_page;
@@ -57,12 +57,13 @@ pub fn build_timeline(
     dirs: &VaultDirs,
 ) -> Result<String, VaultError> {
     let mut entries: Vec<TimelineEntry> = Vec::new();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
     for dir in [
         concepts_dir(dirs),
         documents_dir(dirs),
         explorations_dir(dirs),
     ] {
-        collect_into(&mut entries, vault_root, &dir);
+        collect_into(&mut entries, vault_root, &dir, &mut seen);
     }
 
     // Group by created date. BTreeMap keeps dates ascending; we emit descending so the
@@ -115,7 +116,18 @@ pub fn write_timeline(
 
 /// Walk one knowledge directory, parsing each page's `created`/`title` into a [`TimelineEntry`].
 /// Unreadable or undated pages are skipped — never guessed onto the timeline.
-fn collect_into(entries: &mut Vec<TimelineEntry>, vault_root: &Path, rel_dir: &Path) {
+///
+/// `seen` carries canonical page identity across the three directories. All three sit under
+/// `wiki`, which reads like enough — but a `vault.dirs` root the filesystem folds onto another
+/// puts a daily page inside one of them, and the timeline promises durable knowledge nodes
+/// only. It was reached that way: a daily digest became a permanent entry in the knowledge
+/// timeline, which is the one thing this file says it will not do.
+fn collect_into(
+    entries: &mut Vec<TimelineEntry>,
+    vault_root: &Path,
+    rel_dir: &Path,
+    seen: &mut HashSet<PathBuf>,
+) {
     let abs = vault_root.join(rel_dir);
     if !abs.is_dir() {
         return;
@@ -125,6 +137,9 @@ fn collect_into(entries: &mut Vec<TimelineEntry>, vault_root: &Path, rel_dir: &P
             continue;
         }
         let path = dirent.path();
+        if !seen.insert(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())) {
+            continue;
+        }
         if path.extension().and_then(|s| s.to_str()) != Some("md") {
             continue;
         }
