@@ -29,9 +29,16 @@ fn declared_type(content: &str) -> Option<String> {
 /// is loud, so the refusal names both causes and how to get back from either; a failure a user
 /// cannot clear is not an improvement on a silent loss.
 ///
-/// A target with no readable type, or content declaring none, is not a contradiction and is
-/// allowed: an unparseable page is a different problem and this is not the place that reports
-/// it.
+/// A target with no readable type, or content declaring none, is allowed — malformed
+/// frontmatter, a non-string `type`, bytes that are not UTF-8. That is a real bound: a
+/// hand-edited page with a YAML typo has LESS protection here than a well-formed one. Refusing
+/// instead would be worse, because a page whose frontmatter got corrupted could then never be
+/// repaired by the re-render that exists to reproduce it — self-healing is the property being
+/// preserved, and a file whose content cannot be interpreted cannot be reasoned about anyway.
+///
+/// Coverage bound: this guards writes routed through `VaultWriter`. `graph merge`,
+/// `graph normalize` and `index_drift` call `lk_core::fs::write_atomic` directly — each edits a
+/// page in place without changing its format, so none of them can be the write this refuses.
 fn refuse_format_change(full: &Path, content: &str) -> Result<(), VaultError> {
     let Some(writing) = declared_type(content) else {
         return Ok(());
@@ -49,8 +56,9 @@ fn refuse_format_change(full: &Path, content: &str) -> Result<(), VaultError> {
         "refusing to write a '{writing}' page over the '{existing_type}' page at {} — two page \
          formats cannot share one file, and this write replaces it wholesale. Either that \
          page's `type` was edited by hand, in which case restore it to '{writing}' or move the \
-         page aside and the next run writes it again; or two vault.dirs roots resolve to one \
-         directory, which `lore validate` reports.",
+         page aside and the next run writes it again; or two directories the vault addresses \
+         separately are one directory on disk, which `lore validate` reports when the two are \
+         `vault.dirs` roots. This will keep failing until one of those is resolved.",
         full.display()
     ))))
 }
