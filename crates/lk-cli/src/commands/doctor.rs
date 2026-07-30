@@ -1,5 +1,6 @@
-//! `lore doctor` — audit materialized vault pages against the text-cleanliness
-//! contract (`lk_core::markdown::scan_defects`).
+//! `lore doctor` — audit materialized vault pages against the contracts they must satisfy: the
+//! text-cleanliness contract (`lk_core::markdown::scan_defects`) and the completion-marker
+//! contract that says a section whose input was recorded has been answered.
 //!
 //! The pipeline guarantees every page it writes is clean by construction (the
 //! rich-text converters strip the offending content at conversion time). A
@@ -35,8 +36,15 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
         for (line, defect) in &page.defects {
             eprintln!("    L{line}: {}", defect.description());
         }
+        for section in &page.unanswered {
+            eprintln!("    `{section}` was enqueued and never answered");
+        }
     }
-    let total: usize = report.pages.iter().map(|p| p.defects.len()).sum();
+    let total: usize = report
+        .pages
+        .iter()
+        .map(|p| p.defects.len() + p.unanswered.len())
+        .sum();
     eprintln!(
         "\n{} pages scanned, {} with defects ({total} total){}",
         report.scanned,
@@ -52,11 +60,19 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
             "\nNo pages found under the configured vault.dirs — check the config if unexpected."
         );
     }
-    if !report.pages.is_empty() {
+    if report.pages.iter().any(|page| !page.defects.is_empty()) {
         eprintln!(
-            "\nThese pages predate a tightened cleanliness contract. Re-ingest the affected\n\
-             page's source with the current binary — the contract is upheld at conversion,\n\
-             so a fresh ingest reproduces each page clean."
+            "\nPages with a cleanliness defect predate a tightened contract. Re-ingest the\n\
+             affected page's source with the current binary — the contract is upheld at\n\
+             conversion, so a fresh ingest reproduces each page clean."
+        );
+    }
+    if report.pages.iter().any(|page| !page.unanswered.is_empty()) {
+        eprintln!(
+            "\nAn unanswered section's work was enqueued and lost: the queue file it belonged\n\
+             to has been archived or pruned, so nothing pending remains to fill it. Re-ingest\n\
+             that page's date (`lore ingest <source> --date <date>`) to enqueue it again, then\n\
+             drain with /lore-process."
         );
     }
     // Non-zero on a real defect OR on a page that could not be verified — "clean" must
@@ -93,10 +109,50 @@ fn managed_roots(vault_root: &Path, dirs: &VaultDirs) -> Vec<PathBuf> {
     roots
 }
 
-/// One page that violated the contract. Clean pages are never recorded.
+/// One page that violated a contract. Clean pages are never recorded.
 struct PageDefects {
     path: PathBuf,
     defects: Vec<(usize, TextDefect)>,
+    /// `llm_inputs` keys the page records an input hash for and no answer to.
+    unanswered: Vec<&'static str>,
+}
+
+/// The `llm_inputs` sections this page was told to have filled and never was.
+///
+/// The pipeline stamps `llm_inputs.<key>` when it enqueues the work and whoever does the work
+/// stamps `<key>_done`; a cache hit is the two being equal, and emptiness never signals either
+/// way. So a page carrying the input and not the answer has work that was enqueued and lost —
+/// the queue file it belonged to has since been archived or pruned, `lore queue count` reports
+/// nothing pending, and the section stays empty for good.
+///
+/// Nothing else reports this. The one visible trace is indirect and only for concepts: a
+/// concept page whose origin never completed its extraction has no citation, so it surfaces
+/// among `lore graph lint`'s orphans — mixed in with concepts that simply have not been cited
+/// yet, which is not a defect at all. On the vault this was measured against, 38 pages carried
+/// unanswered sections while `doctor` reported no defects and the queue reported nothing to do.
+///
+/// The keys come from `TargetKind`, so a new task kind is covered without being listed here.
+fn unanswered_sections(text: &str) -> Vec<&'static str> {
+    use strum::IntoEnumIterator;
+
+    let Some(inputs) = text
+        .split_once("llm_inputs:")
+        .and_then(|(_, rest)| rest.split_once("\n---").map(|(block, _)| block))
+    else {
+        return Vec::new();
+    };
+    let records = |key: &str| {
+        inputs
+            .lines()
+            .any(|line| line.trim_start().starts_with(&format!("{key}: ")))
+    };
+    let mut found: Vec<&'static str> = lk_queue::TargetKind::iter()
+        .map(|kind| kind.llm_inputs_key())
+        .filter(|key| records(key) && !records(&format!("{key}_done")))
+        .collect();
+    found.sort_unstable();
+    found.dedup();
+    found
 }
 
 /// The outcome of a vault audit: pages scanned, which ones carry defects, and how many
@@ -146,10 +202,12 @@ fn audit(roots: &[PathBuf]) -> AuditReport {
             };
             scanned += 1;
             let defects = scan_defects(&text);
-            if !defects.is_empty() {
+            let unanswered = unanswered_sections(&text);
+            if !defects.is_empty() || !unanswered.is_empty() {
                 pages.push(PageDefects {
                     path: path.to_path_buf(),
                     defects,
+                    unanswered,
                 });
             }
         }
@@ -172,6 +230,72 @@ fn rel<'a>(path: &'a Path, root: &Path) -> std::borrow::Cow<'a, str> {
 mod tests {
     use super::*;
     use std::fs;
+
+    /// The completion-marker contract, which nothing reported until now: the pipeline stamps the
+    /// input hash when it enqueues the work, whoever does the work stamps `<key>_done`, and a page
+    /// carrying the first without the second has work that was enqueued and then lost with its
+    /// queue file. Measured on a live vault: 38 pages, 75 sections, while `doctor` said no defects
+    /// and `queue count` said nothing pending.
+    ///
+    /// Emptiness is deliberately not the test — a focus-filtered summary, an extraction that found
+    /// nothing and a trivial-only work-log are all legitimately empty AND answered, which is why
+    /// the marker exists.
+    #[test]
+    fn audit_flags_a_section_whose_work_was_enqueued_and_never_answered() {
+        let answered = "---\nid: a\nllm_inputs:\n  summary: \"h1\"\n  summary_done: \"h1\"\n---\n\n## Summary\n";
+        assert!(
+            unanswered_sections(answered).is_empty(),
+            "an answered section is not a defect, even with an empty body"
+        );
+
+        let pending = "---\nid: a\nllm_inputs:\n  summary: \"h1\"\n  concepts: \"h2\"\n  concepts_done: \"h2\"\n---\n\n## Summary\n";
+        assert_eq!(
+            unanswered_sections(pending),
+            vec!["summary"],
+            "the input without its answer is the one reported"
+        );
+
+        assert!(
+            unanswered_sections("---\nid: a\n---\n\n# no llm_inputs at all\n").is_empty(),
+            "a page the pipeline never enqueued work for has nothing outstanding"
+        );
+
+        // Through the walk, so the finding reaches the report the CLI prints.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("daily");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("answered.md"), answered).unwrap();
+        fs::write(root.join("pending.md"), pending).unwrap();
+        let report = audit(&[root]);
+        assert_eq!(report.scanned, 2);
+        assert_eq!(
+            report.pages.len(),
+            1,
+            "only the unanswered page is reported"
+        );
+        assert_eq!(report.pages[0].unanswered, vec!["summary"]);
+        assert!(
+            report.pages[0].defects.is_empty(),
+            "an unanswered section is not a text defect"
+        );
+    }
+
+    /// Every task kind's key is covered, because the keys come from `TargetKind` rather than a
+    /// list here — a new kind would otherwise be enqueued and never audited.
+    #[test]
+    fn every_task_kinds_key_is_audited() {
+        use strum::IntoEnumIterator;
+
+        for kind in lk_queue::TargetKind::iter() {
+            let key = kind.llm_inputs_key();
+            let page = format!("---\nid: a\nllm_inputs:\n  {key}: \"h\"\n---\n\n# x\n");
+            assert_eq!(
+                unanswered_sections(&page),
+                vec![key],
+                "{kind:?}'s key is not audited"
+            );
+        }
+    }
 
     #[test]
     fn audit_flags_defective_pages_and_scans_clean_ones() {
