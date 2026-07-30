@@ -700,25 +700,36 @@ mod tests {
     }
 
     #[test]
-    fn a_configured_directory_is_found_under_the_spelling_the_disk_uses() {
-        // The guard and the membership rule have to agree, or a vault whose directory is
-        // spelled `Wiki` errors on a case-sensitive filesystem and is analysed on one that
-        // folds — the same vault, two verdicts.
+    fn a_configured_directory_is_resolved_the_way_the_filesystem_answers() {
+        // Which outcome is right is a property of the FILESYSTEM, so ask it. Where both
+        // spellings reach one directory the vault works and its pages are analysed; where they
+        // are kept apart the vault is split — pages under one name, the catalog written under
+        // the other — and running is worse than refusing.
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("Wiki/concepts")).unwrap();
         std::fs::write(tmp.path().join("Wiki/concepts/x.md"), "# X\n").unwrap();
+        let folds = tmp.path().join("wiki").is_dir();
 
         let mut config = GraphConfig::default();
         config.scope.dirs = vec![PathBuf::from("wiki")];
-        let views = VaultViews::resolve(tmp.path(), &config, &VaultDirs::default()).unwrap();
-        assert_eq!(
-            views
-                .pages
-                .iter()
-                .map(|p| p.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["wiki/concepts/x"]
-        );
+        let resolved = VaultViews::resolve(tmp.path(), &config, &VaultDirs::default());
+
+        if folds {
+            let views = resolved.expect("one directory under two names");
+            assert_eq!(
+                views
+                    .pages
+                    .iter()
+                    .map(|p| p.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["wiki/concepts/x"]
+            );
+        } else {
+            assert!(
+                matches!(resolved, Err(GraphError::DirSpelling { .. })),
+                "two directories must be refused, naming both spellings"
+            );
+        }
     }
 
     #[test]
