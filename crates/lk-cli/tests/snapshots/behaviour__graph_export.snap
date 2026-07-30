@@ -1,0 +1,10 @@
+---
+source: crates/lk-cli/tests/behaviour.rs
+expression: "observe(staged.path(), argv)"
+---
+exit: 0
+--- stdout ---
+nodes: 4
+edges: 5
+(use `lore graph --json export` for full graph data)
+--- stderr ---

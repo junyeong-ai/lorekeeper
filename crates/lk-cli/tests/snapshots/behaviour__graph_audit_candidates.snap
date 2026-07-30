@@ -1,0 +1,12 @@
+---
+source: crates/lk-cli/tests/behaviour.rs
+expression: "observe(staged.path(), argv)"
+---
+exit: 0
+--- stdout ---
+=== Concepts due for contradiction audit ===
+  behaviour-snapshot  (3 source(s), set changed since last audit)  wiki/concepts/behaviour-snapshot.md
+  deterministic-clock  (2 source(s), set changed since last audit)  wiki/concepts/deterministic-clock.md
+
+2 concept(s) to audit
+--- stderr ---

@@ -1,0 +1,11 @@
+---
+source: crates/lk-cli/tests/behaviour.rs
+expression: "observe(staged.path(), argv)"
+---
+exit: 1
+--- stdout ---
+  +index  wiki/concepts/behaviour-snapshot
+  +index  wiki/concepts/deterministic-clock
+  +index  wiki/concepts/guard-population
+  +index  wiki/concepts/unlinked-note
+--- stderr ---

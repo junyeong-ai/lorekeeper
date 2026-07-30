@@ -1,0 +1,16 @@
+---
+source: crates/lk-cli/tests/behaviour.rs
+expression: "observe(staged.path(), argv)"
+---
+exit: 0
+--- stdout ---
+# lorekeeper scheduled tasks
+# Paste into your crontab: crontab -e
+# Requires: lore in PATH (cargo install --path crates/lk-cli)
+# Working dir: <staged>
+#
+# On macOS prefer `lore schedule --format launchd`: cron SKIPS a job whose time
+# passed while the machine was asleep, which silently drops a day's ingest.
+
+0 7 * * * cd <staged> && lore --config <staged>/corpus/config.yaml ingest
+--- stderr ---

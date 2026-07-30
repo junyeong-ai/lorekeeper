@@ -1,0 +1,12 @@
+---
+source: crates/lk-cli/tests/behaviour.rs
+expression: "observe(staged.path(), argv)"
+---
+exit: 0
+--- stdout ---
+# 4 concepts
+behaviour-snapshot	Behaviour snapshot	engineering	3	
+deterministic-clock	Deterministic clock	engineering	2	injected clock
+guard-population	Guard population		1	
+unlinked-note	Unlinked note		0	
+--- stderr ---

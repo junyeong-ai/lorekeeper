@@ -1,0 +1,10 @@
+---
+source: crates/lk-cli/tests/behaviour.rs
+expression: "observe(staged.path(), argv)"
+---
+exit: 0
+--- stdout ---
+  #0   size=3   
+  #1   size=1   
+2 community(ies), modularity=0.0000, iterations=3
+--- stderr ---

@@ -13,3 +13,6 @@ target/
 # `cargo mutants` run output — build artifacts, regenerated per run.
 mutants.out/
 mutants.out.old/
+
+# insta writes these on a mismatch; a snapshot is accepted by review, never by a commit
+*.snap.new

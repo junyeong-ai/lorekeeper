@@ -1,0 +1,14 @@
+---
+source: crates/lk-cli/tests/behaviour.rs
+expression: "observe(staged.path(), argv)"
+---
+exit: 0
+--- stdout ---
+=== Backlinks sync ===
+
+Updated: 3 concept page(s)
+  wiki/concepts/behaviour-snapshot.md  (-1 source(s))
+  wiki/concepts/deterministic-clock.md  (-1 source(s))
+  wiki/concepts/guard-population.md
+Unchanged: 1 concept page(s)
+--- stderr ---

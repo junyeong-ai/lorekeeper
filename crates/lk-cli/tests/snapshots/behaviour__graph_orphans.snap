@@ -1,0 +1,9 @@
+---
+source: crates/lk-cli/tests/behaviour.rs
+expression: "observe(staged.path(), argv)"
+---
+exit: 0
+--- stdout ---
+  wiki/concepts/unlinked-note
+1 orphan(s)
+--- stderr ---

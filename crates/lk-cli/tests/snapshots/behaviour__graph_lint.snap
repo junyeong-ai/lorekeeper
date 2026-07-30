@@ -1,0 +1,27 @@
+---
+source: crates/lk-cli/tests/behaviour.rs
+expression: "observe(staged.path(), argv)"
+---
+exit: 1
+--- stdout ---
+=== Lint Report ===
+pages: 4, links: 5, components: 2
+
+--- Violations ---
+
+Broken links (1):
+  wiki/concepts/guard-population -> wiki/concepts/nowhere
+
+Index drift:
+  +index  wiki/concepts/behaviour-snapshot
+  +index  wiki/concepts/deterministic-clock
+  +index  wiki/concepts/guard-population
+  +index  wiki/concepts/unlinked-note
+
+--- Observations (do not affect the exit code) ---
+
+Orphans (1):
+  wiki/concepts/unlinked-note
+
+5 violation(s), 1 observation(s)
+--- stderr ---

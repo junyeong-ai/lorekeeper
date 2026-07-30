@@ -5,47 +5,30 @@
 //! that exists but appears in none of them is one no agent following a skill will ever
 //! reach — `lore doctor` shipped that way and stayed invisible through three releases.
 //!
-//! The command list comes from the binary's own `--help`, so it cannot drift from what
-//! clap actually accepts. Exemptions are explicit and few: a command earns one only by
-//! being unreachable from a skill BY DESIGN, and adding a command forces the choice here.
+//! The command list is the argument tree ITSELF, walked through `clap::CommandFactory`, so it
+//! cannot drift from what the binary accepts. Exemptions are explicit and few: a command earns
+//! one only by being unreachable from a skill BY DESIGN, and adding a command forces the choice
+//! here.
 
+use clap::CommandFactory;
 use std::path::PathBuf;
 use std::process::Command;
 
 /// Commands deliberately outside every skill's scope.
 const EXEMPT: &[(&str, &str)] = &[("help", "clap's own; not a pipeline operation")];
 
-/// Subcommand names as clap prints them under `Commands:` in the top-level help.
+/// Every subcommand `lore` accepts, from the argument tree rather than from its rendered help.
 ///
-/// Colour is forced off on the child: anstream honours an ambient `CLICOLOR_FORCE`, which
-/// would wrap the `Commands:` header in SGR escapes and leave this parsing nothing — a
-/// failure blaming a help-layout change for the developer's terminal settings.
+/// `--help` output is a layout: the names sit at one indent, a wrapped description at a deeper
+/// one, and colour escapes wrap the header when the terminal asks for them. Reading it means
+/// depending on all three, and a parse that comes back empty blames a help-layout change for
+/// what may be the developer's own environment. `Cli::command()` is the surface itself.
 fn subcommands() -> Vec<String> {
-    let out = Command::new(env!("CARGO_BIN_EXE_lore"))
-        .env("NO_COLOR", "1")
-        .env_remove("CLICOLOR_FORCE")
-        .env_remove("FORCE_COLOR")
-        .arg("--help")
-        .output()
-        .expect("run lore --help");
-    assert!(out.status.success(), "lore --help failed: {out:?}");
-    let help = String::from_utf8(out.stdout).expect("help is utf-8");
-
-    // A command line is indented exactly two spaces. Requiring that rather than trusting
-    // the first token means a wrapped description — which clap emits at a deeper indent
-    // once `wrap_help` is on — is never mistaken for a command name.
-    let names: Vec<String> = help
-        .lines()
-        .skip_while(|line| !line.starts_with("Commands:"))
-        .skip(1)
-        .take_while(|line| !line.trim().is_empty())
-        .filter(|line| line.starts_with("  ") && !line.starts_with("   "))
-        .filter_map(|line| line.split_whitespace().next().map(str::to_string))
+    let names: Vec<String> = lore::Cli::command()
+        .get_subcommands()
+        .map(|sub| sub.get_name().to_string())
         .collect();
-    assert!(
-        names.len() > 5,
-        "parsed {names:?} from the Commands: block — the help layout changed"
-    );
+    assert!(!names.is_empty(), "the CLI declares no subcommands");
     names
 }
 

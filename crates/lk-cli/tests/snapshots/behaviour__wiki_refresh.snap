@@ -1,0 +1,10 @@
+---
+source: crates/lk-cli/tests/behaviour.rs
+expression: "observe(staged.path(), argv)"
+---
+exit: 0
+--- stdout ---
+--- stderr ---
+Wrote <staged>/corpus/./vault/wiki/index.md
+Wrote <staged>/corpus/./vault/wiki/log.md
+Wrote <staged>/corpus/./vault/wiki/map.md

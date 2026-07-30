@@ -1,0 +1,9 @@
+---
+source: crates/lk-cli/tests/behaviour.rs
+expression: "observe(staged.path(), argv)"
+---
+exit: 0
+--- stdout ---
+--- stderr ---
+[dry-run] log: no log file to maintain.
+[dry-run] queue: no processed/ directory to maintain.

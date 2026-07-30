@@ -1,0 +1,8 @@
+---
+source: crates/lk-cli/tests/behaviour.rs
+expression: "observe(staged.path(), argv)"
+---
+exit: 0
+--- stdout ---
+--- stderr ---
+queue prune: dropped 0 stale + 0 missing-target, kept 0 current, 0 already done; 0 file(s) rewritten, 0 archived, 0 deleted
