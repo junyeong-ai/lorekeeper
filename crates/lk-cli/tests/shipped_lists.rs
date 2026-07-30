@@ -66,6 +66,87 @@ fn install_scripts_list_every_skill() {
     }
 }
 
+/// The skills are what an agent reads before writing a document page's frontmatter, and three of
+/// them enumerate the `document_type` values by hand while `lk_core::document::DOCUMENT_TYPES` is
+/// what the vault accepts. A value added there and not here leaves every skill telling agents to
+/// choose from a shorter list; a value renamed leaves them writing one the schema does not admit.
+///
+/// The files are discovered rather than named: any skill markdown whose text near `document_type`
+/// enumerates values must enumerate all of them. That catches both drifts, because a rename
+/// removes the old name from the code and the file that still lacks the new one fails.
+///
+/// Judged on the window around each mention rather than the whole file, because `data` is an
+/// ordinary English word that appears in prose everywhere — a whole-file search for it would pass
+/// no matter what the enumeration said. A mention whose window names SOME of the values is an
+/// enumeration and must name them all; one that names none is prose about the field, not a list.
+#[test]
+fn every_skill_that_enumerates_document_types_enumerates_all_of_them() {
+    const WINDOW: usize = 240;
+    let declared = lk_core::document::DOCUMENT_TYPES;
+    let mut enumerations = 0;
+    for skill in glob_skill_markdown() {
+        let body = read(&skill);
+        for (at, _) in body.match_indices("document_type") {
+            let start = body[..at]
+                .char_indices()
+                .rev()
+                .nth(WINDOW)
+                .map_or(0, |(i, _)| i);
+            let end = body[at..]
+                .char_indices()
+                .nth(WINDOW)
+                .map_or(body.len(), |(i, _)| at + i);
+            let window = &body[start..end];
+            let named: Vec<&&str> = declared.iter().filter(|v| names_word(window, v)).collect();
+            if named.is_empty() {
+                continue;
+            }
+            enumerations += 1;
+            assert_eq!(
+                named.len(),
+                declared.len(),
+                "{} enumerates document_type values but names only {named:?} of {declared:?}",
+                skill.display()
+            );
+        }
+    }
+    assert!(
+        enumerations > 0,
+        "no skill markdown enumerates the document_type values — did they move?"
+    );
+}
+
+/// Whether `text` contains `word` as a whole word, so `note` does not match `notebook`.
+fn names_word(text: &str, word: &str) -> bool {
+    text.match_indices(word).any(|(at, _)| {
+        let before = text[..at].chars().next_back();
+        let after = text[at + word.len()..].chars().next();
+        let boundary = |c: Option<char>| c.is_none_or(|c| !c.is_alphanumeric() && c != '_');
+        boundary(before) && boundary(after)
+    })
+}
+
+/// Every `.md` under `.claude/skills`, SKILL.md and `references/` alike.
+fn glob_skill_markdown() -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![repo_root().join(".claude/skills")];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
+            .flatten()
+        {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "md") {
+                found.push(path);
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
 /// `rust-version` is the one the toolchain enforces; the CI job name, the toolchain it pins, and
 /// both READMEs restate it. All of them are read by people deciding whether they can build this.
 #[test]
