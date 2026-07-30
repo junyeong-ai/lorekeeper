@@ -316,6 +316,18 @@ mod tests {
     /// name is simply absent and the sibling branch does. Probed rather than assumed — CI runs
     /// on both, and a test that writes down one platform's answer passes on it and fails on the
     /// other, which is how these two tests were first written.
+    /// A directory symlink, or `false` where the platform or filesystem refuses one. Windows
+    /// needs a privilege most accounts lack, so every caller treats absence as "skip this case"
+    /// rather than as a failure — and writing the call cross-platform is what lets the release's
+    /// own target compile these tests at all.
+    fn symlink_dir(target: &std::path::Path, link: &std::path::Path) -> bool {
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(target, link);
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_dir(target, link);
+        made.is_ok()
+    }
+
     fn filesystem_folds_case(dir: &std::path::Path) -> bool {
         let probe = dir.join("fold-probe");
         std::fs::create_dir(&probe).unwrap();
@@ -382,7 +394,7 @@ mod tests {
                 .is_empty(),
             "a directory that does not exist yet is the first run"
         );
-        if std::os::unix::fs::symlink(tmp.path().join("wiki"), tmp.path().join("notes")).is_ok() {
+        if symlink_dir(&tmp.path().join("wiki"), &tmp.path().join("notes")) {
             assert!(
                 inspect_vault_dirs(&write_config(tmp.path(), "    wiki: notes\n", "link"))
                     .await
@@ -409,7 +421,7 @@ mod tests {
         );
 
         std::fs::remove_file(tmp.path().join("wiki")).unwrap();
-        if std::os::unix::fs::symlink(tmp.path().join("gone"), tmp.path().join("wiki")).is_ok() {
+        if symlink_dir(&tmp.path().join("gone"), &tmp.path().join("wiki")) {
             let found =
                 inspect_vault_dirs(&write_config(tmp.path(), "    wiki: wiki\n", "dangling")).await;
             assert_eq!(found.len(), 1, "{}", found.len());
@@ -502,6 +514,7 @@ mod tests {
     /// a fold where nothing was folded — a warning that is not merely useless but says
     /// something false about a correct config. Saying nothing at all is also wrong, though:
     /// silence reads as "checked, and fine" for a check that did not run.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_unlistable_parent_is_reported_as_unverified_not_as_a_fold() {
         use std::os::unix::fs::PermissionsExt;
@@ -569,7 +582,7 @@ mod tests {
     fn roots_that_overlap_on_disk_are_reported() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir(tmp.path().join("wiki")).unwrap();
-        if std::os::unix::fs::symlink(tmp.path().join("wiki"), tmp.path().join("notes")).is_err() {
+        if !symlink_dir(&tmp.path().join("wiki"), &tmp.path().join("notes")) {
             return;
         }
 

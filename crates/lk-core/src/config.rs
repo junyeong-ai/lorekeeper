@@ -1255,12 +1255,29 @@ sources:
 
     #[test]
     fn expand_tilde_works() {
-        let expanded = expand_tilde("~/Documents");
-        assert!(!expanded.to_string_lossy().contains('~'));
-        // A bare `~` is the home directory itself — shell convention, and the
-        // `~/...` form's natural degenerate case.
-        if let Ok(home) = std::env::var("HOME") {
-            assert_eq!(expand_tilde("~"), PathBuf::from(home));
+        // Asked the way the function decides it, so the assertions hold with `HOME` unset or
+        // empty — a stripped container, a launchd job — rather than only where a home exists.
+        // Reading `var("HOME")` instead would admit `Ok("")`, which is exactly the case
+        // `expand_tilde` treats as no home at all.
+        match std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .filter(|home| !home.is_empty())
+        {
+            Some(home) => {
+                assert_eq!(
+                    expand_tilde("~/Documents"),
+                    PathBuf::from(&home).join("Documents")
+                );
+                // A bare `~` is the home directory itself — shell convention, and the
+                // `~/...` form's natural degenerate case.
+                assert_eq!(expand_tilde("~"), PathBuf::from(home));
+            }
+            None => {
+                // Nothing to expand to, so the path is left as written rather than losing its
+                // first component to an empty prefix.
+                assert_eq!(expand_tilde("~/Documents"), PathBuf::from("~/Documents"));
+                assert_eq!(expand_tilde("~"), PathBuf::from("~"));
+            }
         }
         // `~` is only special as the whole first component.
         assert_eq!(expand_tilde("a/~/b"), PathBuf::from("a/~/b"));
@@ -1627,8 +1644,12 @@ personal:
 
     #[test]
     fn relative_vault_root_resolved_against_config_dir() {
-        let dir = std::env::temp_dir().join("wi-config-relative-test");
-        std::fs::create_dir_all(&dir).unwrap();
+        // A per-run directory, not a fixed name under `temp_dir()`: on macOS that is the
+        // per-user `$TMPDIR`, so a fixed name looks private, and on Linux it is the shared
+        // world-writable `/tmp`, where a concurrent run's cleanup deletes this config between
+        // the write and the load and another uid's leftover makes the write fail outright.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
         let cfg_path = dir.join("config.yaml");
         std::fs::write(
             &cfg_path,
@@ -1647,11 +1668,10 @@ sources:
         let config = Config::load(&cfg_path).unwrap();
         let resolved = config.vault.root_path();
         assert!(
-            resolved.starts_with(&dir),
+            resolved.starts_with(dir),
             "vault root should be anchored to config dir, got: {}",
             resolved.display()
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

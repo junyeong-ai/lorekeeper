@@ -1352,6 +1352,7 @@ mod tests {
     /// A dangling symlink reproduces the exact state deterministically: `read_dir` lists it,
     /// the read fails `NotFound`, and the existence probe follows it to nothing — which is
     /// what a file moved out from under the scan looks like.
+    #[cfg(unix)]
     #[test]
     fn a_run_retired_mid_scan_does_not_abort_the_whole_prune() {
         let dir = TempDir::new().unwrap();

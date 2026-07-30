@@ -580,6 +580,16 @@ fn first_subheading_under_heading(body: &str, heading: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    /// A directory symlink, or `false` where the platform or filesystem refuses one. Windows
+    /// needs a privilege most accounts lack, so the caller treats absence as "skip this case".
+    fn symlink_dir(target: &std::path::Path, link: &std::path::Path) -> bool {
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(target, link);
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_dir(target, link);
+        made.is_ok()
+    }
+
     use super::*;
     use tempfile::TempDir;
 
@@ -604,7 +614,7 @@ mod tests {
             "wiki/concepts/rag.md",
             "---\nid: rag\ntype: concept\ntitle: RAG\n---\n\n# RAG\n\n## 핵심\n\nx.\n",
         );
-        if std::os::unix::fs::symlink(tmp.path().join("wiki"), tmp.path().join("alias")).is_err() {
+        if !symlink_dir(&tmp.path().join("wiki"), &tmp.path().join("alias")) {
             return;
         }
 

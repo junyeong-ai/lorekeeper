@@ -1,6 +1,6 @@
 [package]
 name = "lk-source"
-version = "0.13.7"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -29,6 +29,11 @@ blake3 = { workspace = true }
 emojis = "0.9"
 
 [dev-dependencies]
+# Named zones come from the SYSTEM tzdb on Unix (`jiff-tzdb-platform` activates only on
+# Windows/wasm), so tests that assert zone arithmetic fail on an image without `tzdata`.
+# Bundled here rather than skipped, because the arithmetic is what those tests are for —
+# and only for tests: the shipped binary keeps reading the OS tzdb, which stays current.
+jiff = { workspace = true, features = ["tzdb-bundle-always"] }
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt"] }
 proptest = { workspace = true }

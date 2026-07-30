@@ -833,12 +833,18 @@ mod tests {
             resolve_inbox_dir(Path::new("inbox"), Path::new("/vault")).unwrap(),
             PathBuf::from("/vault/inbox")
         );
-        // `~/` expands to the home directory (the example config's shape).
-        if let Ok(home) = std::env::var("HOME") {
-            assert_eq!(
-                resolve_inbox_dir(Path::new("~/inbox"), Path::new("/vault")).unwrap(),
-                PathBuf::from(home).join("inbox")
-            );
+        // `~/` expands to the home directory (the example config's shape), and where there is
+        // no home the tilde is left as written and anchors at the vault like any other relative
+        // path. Decided by the same predicate `expand_tilde` uses — guarding on `var("HOME")`
+        // admits `Ok("")`, which the expansion treats as no home, so the guard would let in
+        // exactly the case it exists to exclude and then assert the answer for the other one.
+        let resolved = resolve_inbox_dir(Path::new("~/inbox"), Path::new("/vault")).unwrap();
+        match std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .filter(|home| !home.is_empty())
+        {
+            Some(home) => assert_eq!(resolved, PathBuf::from(home).join("inbox")),
+            None => assert_eq!(resolved, PathBuf::from("/vault/~/inbox")),
         }
     }
 
@@ -872,8 +878,8 @@ mod tests {
         }
     }
 
-    #[test]
     #[cfg(unix)]
+    #[test]
     fn resolve_rejects_symlinked_ancestor_of_an_absent_vault_root() {
         // The mixed-basis trap: the inbox EXISTS through a symlink while the vault root
         // does NOT yet exist (first run — the vault is created later, in the write phase).

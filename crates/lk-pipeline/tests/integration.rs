@@ -441,6 +441,11 @@ async fn write_failure_keeps_events_novel_for_retry() {
         .await
         .unwrap();
 
+    // A privileged process ignores directory permissions, so `0o555` denies nothing when the
+    // suite runs as root — which is the default in every `rust:*` container. Probe rather than
+    // assume, and restore the mode BEFORE asserting so a failure does not strand the TempDir.
+    let denies_writes = std::fs::write(daily_dir.join("probe"), b"x").is_err();
+
     let writer = lk_vault::VaultWriter::new(vault);
     let write_outcome = writer
         .write_page(
@@ -448,15 +453,17 @@ async fn write_failure_keeps_events_novel_for_retry() {
             &result.daily_pages[0].content,
         )
         .await;
+
+    tokio::fs::set_permissions(&daily_dir, original_perms)
+        .await
+        .unwrap();
+    if !denies_writes {
+        return;
+    }
     assert!(
         write_outcome.is_err(),
         "write should fail in read-only directory"
     );
-
-    // Restore permissions so the test can clean up
-    tokio::fs::set_permissions(&daily_dir, original_perms)
-        .await
-        .unwrap();
 
     // The run is idempotent: a daily page is a projection of its event log, re-rendered
     // in full each run. A write that failed is simply reproduced on the next plan.

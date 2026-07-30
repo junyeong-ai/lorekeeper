@@ -371,7 +371,7 @@ mod tests {
                 {"id": "b", "url": "http://127.0.0.1:1/b.xml"},
             ]
         });
-        let source = RssSource::new(crate::build_http_client().unwrap());
+        let source = RssSource::new(loopback_client());
         let err = source
             .extract(&params, &test_ctx())
             .await
@@ -399,7 +399,7 @@ mod tests {
         let params = serde_json::json!({
             "feeds": [{"id": "a", "url": format!("http://{}/f.xml", server.addr)}]
         });
-        let source = RssSource::new(crate::build_http_client().unwrap());
+        let source = RssSource::new(loopback_client());
         let err = source
             .extract(&params, &test_ctx())
             .await
@@ -425,12 +425,27 @@ mod tests {
         let params = serde_json::json!({
             "feeds": [{"id": "a", "url": format!("http://{}/f.xml", server.addr)}]
         });
-        let source = RssSource::new(crate::build_http_client().unwrap());
+        let source = RssSource::new(loopback_client());
         let items = source
             .extract(&params, &test_ctx())
             .await
             .expect("a quiet feed is a success");
         assert!(items.is_empty(), "and it yields nothing for this day");
+    }
+
+    /// A client for the loopback fixtures below, which differs from the production one in the
+    /// single respect that matters here: `reqwest` honours `http_proxy`/`ALL_PROXY` from the
+    /// environment, so on a machine that sets either, a fetch aimed at `127.0.0.1` leaves for
+    /// the proxy and the fixture never answers. Production keeps that behaviour deliberately —
+    /// a real feed may only be reachable through a proxy — so the fixture opts out rather than
+    /// the code.
+    fn loopback_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .read_timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap()
     }
 
     /// A single-response HTTP server on loopback — enough to answer one feed fetch without

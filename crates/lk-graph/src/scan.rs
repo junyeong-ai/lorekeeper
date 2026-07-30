@@ -300,6 +300,16 @@ fn build_exclude_set(patterns: &[String]) -> Result<GlobSet, GraphError> {
 
 #[cfg(test)]
 mod tests {
+    /// A directory symlink, or `false` where the platform or filesystem refuses one. Windows
+    /// needs a privilege most accounts lack, so the caller treats absence as "skip this case".
+    fn symlink_dir(target: &std::path::Path, link: &std::path::Path) -> bool {
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(target, link);
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_dir(target, link);
+        made.is_ok()
+    }
+
     use super::*;
 
     #[test]
@@ -468,7 +478,7 @@ mod tests {
         std::fs::create_dir_all(&wiki).unwrap();
         std::fs::write(wiki.join("a.md"), "# A\n\n[b](b.md)\n").unwrap();
         std::fs::write(wiki.join("b.md"), "# B\n").unwrap();
-        if std::os::unix::fs::symlink(&wiki, tmp.path().join("notes")).is_err() {
+        if !symlink_dir(&wiki, &tmp.path().join("notes")) {
             return;
         }
 
