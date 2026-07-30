@@ -91,6 +91,10 @@ pub fn diff(root: &Path, locale: Locale, dirs: &VaultDirs) -> Result<IndexDrift,
 
 /// Write the re-derived catalog, repairing drift in both directions at once. Returns the
 /// number of drifted entries the write resolves.
+///
+/// Published through [`lk_vault::VaultWriter`], because this is the same wholesale replacement
+/// `lore wiki index` performs and the two are offered to a user as alternatives in one sentence.
+/// A repair that the guarded spelling refuses must not go through under the other.
 pub fn fix(drift: &IndexDrift, root: &Path, dirs: &VaultDirs) -> Result<usize, GraphError> {
     if drift.is_in_sync() {
         return Ok(0);
@@ -100,13 +104,10 @@ pub fn fix(drift: &IndexDrift, root: &Path, dirs: &VaultDirs) -> Result<usize, G
     // count and is still rewritten — reporting 0 while writing would be the lie.
     let repaired = (drift.missing_from_index.len() + drift.missing_from_disk.len()).max(1);
 
-    let index_path = root.join(&dirs.wiki).join(lk_core::vault_path::INDEX_FILE);
-    if let Some(parent) = index_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| GraphError::Io(format!("create {}: {e}", parent.display())))?;
-    }
-    lk_core::fs::write_atomic(&index_path, drift.rebuilt.as_bytes(), None)
-        .map_err(|e| GraphError::Io(format!("failed to write {}: {e}", index_path.display())))?;
+    let index_rel = Path::new(&dirs.wiki).join(lk_core::vault_path::INDEX_FILE);
+    lk_vault::VaultWriter::new(root)
+        .write_page_sync(&index_rel, &drift.rebuilt)
+        .map_err(|e| GraphError::Io(format!("write {}: {e}", index_rel.display())))?;
 
     Ok(repaired)
 }
@@ -253,6 +254,33 @@ mod tests {
         let content = std::fs::read_to_string(tmp.path().join("wiki/index.md")).unwrap();
         assert!(content.contains("(concepts/gamma.md)"));
         assert!(!content.contains("(concepts/gone.md)"));
+    }
+
+    #[test]
+    fn fix_refuses_a_catalog_that_is_a_typed_page() {
+        // The repair replaces the file wholesale, so it is the same write `lore wiki index`
+        // performs — and the two are offered as alternatives in one sentence. While this one
+        // published unguarded, following the second half of that sentence destroyed a
+        // hand-authored `index.md` with a `type`, exit 0, where the first half refused.
+        let tmp = TempDir::new().unwrap();
+        concept(tmp.path(), "alpha");
+        let hand_authored = "---\nid: index\ntype: index\ntitle: \"Knowledge index\"\n---\n\n# Knowledge index\n\n\
+             > Ask before regenerating.\n";
+        write(tmp.path(), "wiki/index.md", hand_authored);
+
+        let drift = drift_of(tmp.path());
+        assert!(!drift.is_in_sync());
+        let refusal = fix(&drift, tmp.path(), &VaultDirs::default())
+            .expect_err("a wholesale write over a typed page is refused");
+        assert!(
+            format!("{refusal}").contains("two page formats cannot share one file"),
+            "{refusal}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("wiki/index.md")).unwrap(),
+            hand_authored,
+            "and the page it refused to write is untouched"
+        );
     }
 
     #[test]
