@@ -160,7 +160,11 @@ jobs:
           ref: ${{ inputs.ref }}
       - id: msrv
         run: |
-          version=$(awk -F'"' '/^rust-version = /{print $2; exit}' Cargo.toml)
+          version=$(awk -F'"' '
+            /^[[:space:]]*\[workspace\.package\][[:space:]]*$/ { in_section = 1; next }
+            /^[[:space:]]*\[/                                   { in_section = 0 }
+            in_section && /^[[:space:]]*rust-version[[:space:]]*=/ { print $2; exit }
+          ' Cargo.toml)
           [ -n "$version" ] || { echo "Cargo.toml declares no rust-version" >&2; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@stable

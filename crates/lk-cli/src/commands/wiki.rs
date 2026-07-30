@@ -62,15 +62,40 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
 /// separate places: the scheduled pipeline and four skills. One command means a caller cannot
 /// name a subset, and a page added to the set reaches every caller without any of them changing.
 ///
+/// Every view is attempted even when an earlier one fails, and the failures are reported
+/// together. The views are independent — one failing says nothing about the others — and the
+/// scheduled pipeline is deliberately not `set -e` for exactly this reason: a stage that cannot
+/// run must not decide for the stages after it. Collapsing three of its stages into one command
+/// would otherwise have imported the fail-fast semantics that file rejects, leaving the later
+/// views stale on the run that reported the failure.
+///
 /// `lore schema` stays separate: `AGENTS.md` derives from config, not from the vault, so a run
 /// that only added pages has nothing to refresh there.
 pub async fn run_refresh(
     opts: &super::GlobalOptions,
     root_override: Option<PathBuf>,
 ) -> miette::Result<()> {
-    run_index(opts, root_override.clone()).await?;
-    run_log(opts, root_override.clone()).await?;
-    run_map(opts, root_override).await
+    use lk_core::vault_path::{INDEX_FILE, MAP_FILE, TIMELINE_FILE};
+
+    let mut failed: Vec<String> = Vec::new();
+    for (page, outcome) in [
+        (INDEX_FILE, run_index(opts, root_override.clone()).await),
+        (TIMELINE_FILE, run_log(opts, root_override.clone()).await),
+        (MAP_FILE, run_map(opts, root_override).await),
+    ] {
+        if let Err(error) = outcome {
+            eprintln!("✗ {page}: {error}");
+            failed.push(page.to_string());
+        }
+    }
+    if failed.is_empty() {
+        return Ok(());
+    }
+    Err(miette::miette!(
+        "{} of the vault's derived pages could not be written: {}",
+        failed.len(),
+        failed.join(", ")
+    ))
 }
 
 pub async fn run_map(
@@ -166,6 +191,12 @@ async fn run_concepts(opts: &super::GlobalOptions, json: bool) -> miette::Result
     let concept_dir = vault_root.join(lk_core::vault_path::concepts_dir(&config.vault.dirs));
 
     let mut entries: Vec<ConceptEntry> = Vec::new();
+    // A page this cannot read is a concept the caller will not see. `/lore-process` loads this as
+    // its dedup baseline, so an answer that silently omits one has the drain mint a second page
+    // for a concept the vault already holds — or overwrite the one it could not read. Collected
+    // and refused at the end rather than warned about: a warning on stderr leaves a JSON array
+    // that looks complete.
+    let mut unreadable: Vec<String> = Vec::new();
 
     let dir_exists = tokio::fs::metadata(&concept_dir)
         .await
@@ -193,14 +224,14 @@ async fn run_concepts(opts: &super::GlobalOptions, json: bool) -> miette::Result
         let content = match tokio::fs::read_to_string(&path).await {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!(path = %path.display(), error = %e, "wiki concepts: skipping unreadable concept page");
+                unreadable.push(format!("{}: {e}", path.display()));
                 continue;
             }
         };
         let page = match frontmatter::parse_page(&content) {
             Ok(p) => p,
             Err(e) => {
-                tracing::warn!(path = %path.display(), error = %e, "wiki concepts: skipping concept page with unparseable frontmatter");
+                unreadable.push(format!("{}: {e}", path.display()));
                 continue;
             }
         };
@@ -249,6 +280,15 @@ async fn run_concepts(opts: &super::GlobalOptions, json: bool) -> miette::Result
             source_count,
             aliases,
         });
+    }
+
+    if !unreadable.is_empty() {
+        return Err(miette::miette!(
+            "{} concept page(s) could not be read, so this registry is incomplete and dedup \
+             against it would mint a second page for a concept the vault already holds:\n  {}",
+            unreadable.len(),
+            unreadable.join("\n  ")
+        ));
     }
 
     entries.sort_by(|a, b| a.slug.cmp(&b.slug));

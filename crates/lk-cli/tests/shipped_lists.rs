@@ -203,19 +203,35 @@ fn everything_that_writes_pages_refreshes_the_pages_derived_from_the_vault() {
     }
 
     // Any skill that finalizes a page-writing run must call it, and none may call the per-page
-    // commands instead — a subset is what went stale.
+    // commands instead — a subset is what went stale. The GENERATED page is held to the same rule:
+    // it is the authoritative procedure every skill is told to read, and it went on naming
+    // `wiki index` then `wiki map` after the skills had stopped.
     let mut refreshing = 0;
-    for skill in glob_skill_markdown() {
+    for skill in glob_skill_markdown()
+        .into_iter()
+        .chain([repo_root().join("crates/lk-cli/src/commands/schema.rs")])
+    {
         let body = read(&skill);
         if body.contains("lore wiki refresh") {
             refreshing += 1;
         }
         for (page, command, derivation) in lk_core::vault_path::GENERATED_WIKI_PAGES {
-            if derivation == Derivation::VaultContents {
+            if derivation != Derivation::VaultContents {
+                continue;
+            }
+            // Both the full invocation and the bare view name: `lore wiki index` is one way to
+            // name a subset, and "`queue apply` + `backlinks-sync` + `index` + `map`" is another —
+            // that informal spelling survived in a report step, telling an agent to confirm
+            // commands the procedure no longer runs while still omitting the timeline.
+            let view = command
+                .rsplit(' ')
+                .next()
+                .expect("a command has a last word");
+            for named in [format!("lore {command}"), format!("`{view}`")] {
                 assert!(
-                    !body.contains(&format!("lore {command}")),
-                    "{} names `lore {command}` for {page} — call `lore wiki refresh` so no caller \
-                     can refresh a subset",
+                    !body.contains(&named),
+                    "{} names `{named}` for {page} — say `lore wiki refresh` so no caller can \
+                     refresh or report on a subset",
                     skill.display()
                 );
             }
@@ -269,17 +285,30 @@ fn every_source_type_is_documented_and_exemplified() {
     }
 }
 
-/// The type names in the first column of a README's source table.
+/// The type names in the first column of the README's source table.
 ///
-/// Read as a table rather than searched for as a substring: a name that appears anywhere in the
-/// prose satisfied the weaker check, so a table missing a row could pass on an unrelated mention
-/// elsewhere in the document — a gate that reads a whole file cannot say where it looked.
+/// Located by its heading and bounded by the end of the table, not collected from every line in
+/// the file that happens to start like a row: a standalone `| `x` | … |` line elsewhere satisfied
+/// the looser rule, and a legitimate row whose cell is not backticked failed it. Both directions
+/// were wrong, in a gate whose whole purpose is to say where it looked.
 fn source_table(body: &str) -> Vec<String> {
-    body.lines()
-        .filter_map(|line| line.trim().strip_prefix("| `"))
-        .filter_map(|rest| rest.split('`').next())
-        .map(str::to_owned)
+    let table = body
+        .lines()
+        .skip_while(|line| !is_sources_heading(line))
+        .skip(1)
+        .skip_while(|line| !line.trim_start().starts_with('|'))
+        .take_while(|line| line.trim_start().starts_with('|'));
+    table
+        .filter_map(|row| row.trim().trim_start_matches('|').split('|').next())
+        .map(|cell| cell.trim().trim_matches('`').trim().to_owned())
+        .filter(|cell| !cell.is_empty() && !cell.starts_with('-'))
         .collect()
+}
+
+/// The heading the source table sits under, in either README's language.
+fn is_sources_heading(line: &str) -> bool {
+    let heading = line.trim();
+    heading.starts_with("## ") && matches!(&heading[3..], "Sources" | "소스")
 }
 
 /// Every source in the shipped example must pass its own adapter's parameter validation. The

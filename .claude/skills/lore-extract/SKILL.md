@@ -36,7 +36,8 @@ scan (discover → manifest) → run (manifest → vault pages) → audit (verif
 
 Run `lore config vault-root` for the resolved vault path — a bare line, never
 parsed out of prose or read from `config.yaml` (a relative `vault.root` resolves
-against the config file's own directory). AGENTS.md sits under the wiki dir.
+against the config file's own directory). AGENTS.md sits under the wiki dir
+(`vault.dirs.wiki`, default `wiki`).
 Read it before creating pages — it defines path patterns,
 frontmatter, and section headings. If missing, run `lore schema`.
 
@@ -242,7 +243,7 @@ Extract knowledge using the manifest. Requires a prior scan.
       section / `source_count`
       stay machine-owned (AGENTS.md § Concept convergence); the Finalize
       `backlinks-sync` re-derives both from the document's forward
-      forward link (step g), the single source of truth. If no configured
+      link (step g), the single source of truth. If no configured
       category fits a transferable concept, omit the `category` field (leave it
       uncategorized) rather than forcing a wrong one.
 

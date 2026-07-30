@@ -120,17 +120,94 @@ fn wiki_refresh_writes_every_page_derived_from_the_vault() {
         );
     }
 
-    // A materialized view: a second run is a no-op.
-    let before: Vec<String> = ["index.md", "log.md", "map.md"]
-        .iter()
-        .map(|page| std::fs::read_to_string(root.join("vault/wiki").join(page)).expect(page))
-        .collect();
+    // Re-derived, not merely present. Asserting only that a second run leaves the files unchanged
+    // passes for an implementation that never rewrites an existing view at all — the vault has to
+    // CHANGE between the runs, and every view has to follow it.
+    let views = ["index.md", "log.md", "map.md"];
+    let read_all = || -> Vec<String> {
+        views
+            .iter()
+            .map(|page| std::fs::read_to_string(root.join("vault/wiki").join(page)).expect(page))
+            .collect()
+    };
+    let before = read_all();
+    std::fs::write(
+        concepts.join("beta.md"),
+        "---\nid: wiki/concepts/beta\ntype: concept\ntitle: Beta\ncreated: 2026-05-21\n---\n\
+         ## Synthesis\nSees [Alpha](alpha.md).\n",
+    )
+    .expect("beta");
     assert!(run(root, &["wiki", "refresh"]).status.success());
-    let after: Vec<String> = ["index.md", "log.md", "map.md"]
-        .iter()
-        .map(|page| std::fs::read_to_string(root.join("vault/wiki").join(page)).expect(page))
-        .collect();
-    assert_eq!(before, after, "wiki refresh must be idempotent");
+    let after = read_all();
+    for (page, (before, after)) in views.iter().zip(before.iter().zip(after.iter())) {
+        assert_ne!(
+            before, after,
+            "{page} did not follow the vault it is derived from"
+        );
+        assert!(
+            after.contains("Beta") || after.contains("beta"),
+            "{page}:\n{after}"
+        );
+    }
+
+    // And with the vault unchanged, a re-run is a true no-op.
+    assert!(run(root, &["wiki", "refresh"]).status.success());
+    assert_eq!(after, read_all(), "wiki refresh must be idempotent");
+}
+
+/// Every view is attempted even when an earlier one fails, and the command still exits non-zero.
+///
+/// The views are independent, and the scheduled pipeline is deliberately not `set -e` so that a
+/// stage which cannot run does not decide for the stages after it. Collapsing three of its stages
+/// into one command imported fail-fast semantics with it: the first `?` left the later views stale
+/// on the very run that reported the failure.
+#[test]
+fn wiki_refresh_attempts_every_view_even_when_one_fails() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let root = dir.path();
+    let concepts = root.join("vault/wiki/concepts");
+    std::fs::create_dir_all(&concepts).expect("concepts dir");
+    std::fs::create_dir_all(root.join("vault/inbox")).expect("inbox dir");
+    std::fs::write(
+        root.join("config.yaml"),
+        "vault:\n  root: vault\nidentity:\n  name: T\n  email: t@e.com\n\
+         sources:\n  notes:\n    type: manual\n    params:\n      inbox_dir: inbox\n",
+    )
+    .expect("config");
+    std::fs::write(
+        concepts.join("alpha.md"),
+        "---\nid: wiki/concepts/alpha\ntype: concept\ntitle: Alpha\ncreated: 2026-05-20\n---\n\
+         ## Synthesis\nA.\n",
+    )
+    .expect("alpha");
+
+    // A directory where the catalog belongs: the write fails and nothing about it is recoverable
+    // by the other two, which must still run.
+    std::fs::create_dir(
+        root.join("vault/wiki")
+            .join(lk_core::vault_path::INDEX_FILE),
+    )
+    .expect("blocking dir");
+
+    let out = run(root, &["wiki", "refresh"]);
+    assert!(
+        !out.status.success(),
+        "a view that could not be written is a failure"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(lk_core::vault_path::INDEX_FILE),
+        "the failure must name the page:\n{stderr}"
+    );
+    for page in [
+        lk_core::vault_path::TIMELINE_FILE,
+        lk_core::vault_path::MAP_FILE,
+    ] {
+        assert!(
+            root.join("vault/wiki").join(page).is_file(),
+            "{page} was skipped because an earlier view failed"
+        );
+    }
 }
 
 /// `lore wiki concepts --json` is the dedup baseline `/lore-process` loads at run start: it matches
@@ -154,7 +231,8 @@ fn wiki_concepts_lists_every_concept_with_the_aliases_dedup_needs() {
     std::fs::write(
         concepts.join("rag.md"),
         "---\nid: wiki/concepts/rag\ntype: concept\ntitle: RAG\n\
-         aliases: [\"RAG\", \"Retrieval Augmented Generation\"]\ncategory: technique\n\
+         aliases: [\"RAG\", \"Retrieval Augmented Generation\", \"retrieval-augmented generation\"]\n\
+         category: technique\n\
          source_count: 3\n---\n\n## Synthesis\nR.\n",
     )
     .expect("rag");
@@ -189,10 +267,15 @@ fn wiki_concepts_lists_every_concept_with_the_aliases_dedup_needs() {
     assert_eq!(rag["source_count"], 3);
     // The title is carried in `title`; `aliases` is the SYNONYMS beyond it, which is what makes an
     // alias-only surface form resolve to this page instead of forking one.
+    // Two synonyms, so a collection truncated to one is visible — with a single alias, `.take(1)`
+    // was indistinguishable from keeping them all.
     assert_eq!(
         rag["aliases"],
-        serde_json::json!(["Retrieval Augmented Generation"]),
-        "aliases must exclude the title and keep the synonyms: {listed}"
+        serde_json::json!([
+            "Retrieval Augmented Generation",
+            "retrieval-augmented generation"
+        ]),
+        "aliases must exclude the title and keep every synonym: {listed}"
     );
 
     let embeddings = entries

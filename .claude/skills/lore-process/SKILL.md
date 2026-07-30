@@ -244,7 +244,7 @@ The essentials: a visible `.jsonl` is fully written and every
 
 6. **Report** to the user:
    - On full success: number of files processed and tasks completed, and confirm
-     the step-5 Finalize ran (`queue apply` + `backlinks-sync` + `index` + `map`, all exited 0).
+     the step-5 Finalize ran (every command listed there, all exited 0).
    - On any failure (including a non-zero Finalize command): which file was left
      in place and the failed `task_id`s (or the failed command) with their error
      messages, then stop — leave remaining files for the next run.

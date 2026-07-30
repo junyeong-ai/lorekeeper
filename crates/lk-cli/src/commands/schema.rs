@@ -449,7 +449,7 @@ pub fn render_agents_md(
     writeln!(
         out,
         "From an entry point, open the pages it links and follow their links. \
-         Regenerate the entry points with `lore wiki map` / `lore wiki index` / `lore wiki log`."
+         Regenerate every entry point with `lore wiki refresh`."
     )
     .unwrap();
 
@@ -566,8 +566,7 @@ pub fn render_agents_md(
          an entry not backed by a forward link is wiped, and a concept cited by several \
          pages in one batch is counted correctly where hand-written one-ref-per-item \
          entries would undercount. Finish any batch that created concept pages OR \
-         citations with `lore graph backlinks-sync`, then `lore wiki index`, then \
-         `lore wiki map`."
+         citations with `lore graph backlinks-sync`, then `lore wiki refresh`."
     )
     .unwrap();
 
