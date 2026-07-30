@@ -201,6 +201,7 @@ fn repoint_renamed_links(
 mod tests {
     use super::*;
     use crate::scan;
+    use crate::scan::Link;
 
     fn build_page(path: &str, outgoing: &[&str]) -> ScannedPage {
         let rel = PathBuf::from(path);
@@ -208,7 +209,10 @@ mod tests {
             id: scan::path_slug(&rel),
             path: rel,
             title: "test".to_owned(),
-            outgoing: outgoing.iter().map(|s| (*s).to_string()).collect(),
+            outgoing: outgoing
+                .iter()
+                .map(|s| Link::to(&format!("{s}.md")))
+                .collect(),
         }
     }
 

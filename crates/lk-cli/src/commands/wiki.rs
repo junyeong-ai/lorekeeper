@@ -103,9 +103,10 @@ pub async fn run_map(
 
     tracing::info!(vault = %vault_root.display(), "building wiki knowledge map");
 
-    let pages = lk_graph::scan::scan_vault(&vault_root, &graph_config)
+    let views = lk_graph::scan::VaultViews::resolve(&vault_root, &graph_config, &dirs)
         .map_err(|e| miette::miette!("scan vault: {e}"))?;
-    let graph = lk_graph::graph::WikiGraph::build(&pages, &dirs);
+    let graph =
+        lk_graph::graph::WikiGraph::build_with_existence(&views.pages, &views.existence, &dirs);
     let content = lk_graph::map::build_map(&graph, &graph_config, &dirs, locale);
 
     let rel = std::path::Path::new(&dirs.wiki).join(lk_core::vault_path::MAP_FILE);

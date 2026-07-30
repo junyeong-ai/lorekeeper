@@ -47,7 +47,10 @@ pub struct BacklinksSyncResult {
     /// Concept pages that could not record `source_count` because they carry no frontmatter
     /// block. Reported rather than silently skipped — their citation counts are stale until
     /// a human gives them frontmatter — and the command exits non-zero while any remain.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ///
+    /// Always serialized. This list IS the command's verdict, so omitting it when empty hides
+    /// the field on exactly the clean runs a consumer sees most, where `undefined` reads as
+    /// neither empty nor absent.
     pub skipped: Vec<PathBuf>,
     /// Whether this was a dry run (no writes were performed).
     pub dry_run: bool,
@@ -68,7 +71,7 @@ pub fn sync_concept_backlinks(
     dirs: &VaultDirs,
 ) -> Result<BacklinksSyncResult, GraphError> {
     // Reverse index: concept page id → sorted set of source page ids that cite it.
-    // `outgoing` targets are already resolved page ids (scan resolves each destination
+    // Each link already carries its resolved page id (scan resolves every destination
     // against its page's location), so crediting is a set-membership check — `## Sources`
     // and `source_count` can never diverge from the link graph. Only non-concept content
     // pages count as sources (`is_valid_source`); a concept→concept link belongs in
@@ -82,7 +85,7 @@ pub fn sync_concept_backlinks(
         if !is_valid_source(&page.path, dirs) {
             continue;
         }
-        for target in &page.outgoing {
+        for target in page.outgoing.iter().map(|link| &link.id) {
             // Self-references are excluded for the same reason the graph excludes
             // self-edges.
             if *target != page.id && existence.is_knowledge(target) {
@@ -262,6 +265,7 @@ pub(crate) fn render_sources_body(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scan::Link;
     use tempfile::TempDir;
 
     fn build_page(id: &str, rel: &str, outgoing: &[&str]) -> ScannedPage {
@@ -269,7 +273,10 @@ mod tests {
             id: id.to_owned(),
             path: PathBuf::from(rel),
             title: id.to_owned(),
-            outgoing: outgoing.iter().map(|s| (*s).to_string()).collect(),
+            outgoing: outgoing
+                .iter()
+                .map(|s| Link::to(&format!("{s}.md")))
+                .collect(),
         }
     }
 

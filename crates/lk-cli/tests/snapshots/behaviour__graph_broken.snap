@@ -4,6 +4,6 @@ expression: "observe(staged.path(), argv)"
 ---
 exit: 1
 --- stdout ---
-  wiki/concepts/guard-population -> wiki/concepts/nowhere (not found)
+  wiki/concepts/guard-population -> wiki/concepts/nowhere.md (not found)
 1 broken link(s)
 --- stderr ---

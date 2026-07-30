@@ -7,6 +7,7 @@ use crate::concept_lint::{DuplicateConcept, InvalidCategoryConcept, UnresolvedCo
 use crate::export::GraphExport;
 use crate::graph::{BrokenLink, HubPageReference};
 use crate::merge::MergeResult;
+use crate::scan::AddressCollision;
 
 /// Wraps the hub list so `--json` emits a named object (`{"hubs": [...]}`) consistent with
 /// the other graph reports, rather than a bare top-level array — the wrapper IS the JSON
@@ -61,6 +62,7 @@ pub struct Violations {
     pub index: IndexSyncReport,
     pub invalid_categories: Vec<InvalidCategoryConcept>,
     pub duplicate_concepts: Vec<DuplicateConcept>,
+    pub address_collisions: Vec<AddressCollision>,
 }
 
 /// True statements about a vault in good standing, reported because they guide a human's next
@@ -98,8 +100,13 @@ impl Violations {
             index,
             invalid_categories,
             duplicate_concepts,
+            address_collisions,
         } = self;
-        broken.len() + index.count() + invalid_categories.len() + duplicate_concepts.len()
+        broken.len()
+            + index.count()
+            + invalid_categories.len()
+            + duplicate_concepts.len()
+            + address_collisions.len()
     }
 }
 
@@ -262,35 +269,44 @@ pub fn print_lint(r: &LintReport) {
     }
 }
 
+/// Destructured like [`Violations::count`], and for the same reason: a channel counted but not
+/// printed gates the pipeline with nothing naming the repair.
 fn print_violations(v: &Violations) {
+    let Violations {
+        broken,
+        index,
+        invalid_categories,
+        duplicate_concepts,
+        address_collisions,
+    } = v;
     if v.count() == 0 {
         return;
     }
     println!("\n--- Violations ---");
 
-    if !v.broken.is_empty() {
-        println!("\nBroken links ({}):", v.broken.len());
-        for link in &v.broken {
+    if !broken.is_empty() {
+        println!("\nBroken links ({}):", broken.len());
+        for link in broken {
             println!("  {} -> {}", link.source, link.target);
         }
     }
 
-    if !v.index.missing_from_index.is_empty() || !v.index.missing_from_disk.is_empty() {
+    if !index.missing_from_index.is_empty() || !index.missing_from_disk.is_empty() {
         println!("\nIndex drift:");
-        for p in &v.index.missing_from_index {
+        for p in &index.missing_from_index {
             println!("  +index  {p}");
         }
-        for p in &v.index.missing_from_disk {
+        for p in &index.missing_from_disk {
             println!("  -disk   {p}");
         }
     }
 
-    if !v.invalid_categories.is_empty() {
+    if !invalid_categories.is_empty() {
         println!(
             "\nInvalid concept categories ({}):",
-            v.invalid_categories.len()
+            invalid_categories.len()
         );
-        for c in &v.invalid_categories {
+        for c in invalid_categories {
             println!(
                 "  {}  category={}  ({})",
                 c.slug,
@@ -300,40 +316,52 @@ fn print_violations(v: &Violations) {
         }
     }
 
-    if !v.duplicate_concepts.is_empty() {
-        println!("\nDuplicate concepts ({}):", v.duplicate_concepts.len());
-        for d in &v.duplicate_concepts {
+    if !duplicate_concepts.is_empty() {
+        println!("\nDuplicate concepts ({}):", duplicate_concepts.len());
+        for d in duplicate_concepts {
             println!("  {} ~ {}  (\"{}\" = \"{}\")", d.a, d.b, d.a_name, d.b_name);
+        }
+    }
+
+    if !address_collisions.is_empty() {
+        println!("\nOne address, two files ({}):", address_collisions.len());
+        for c in address_collisions {
+            println!("  {}  <-  {}", c.id, c.paths.join(", "));
         }
     }
 }
 
 fn print_observations(o: &Observations) {
+    let Observations {
+        hubs,
+        orphans,
+        unresolved_conflicts,
+    } = o;
     if o.count() == 0 {
         return;
     }
     println!("\n--- Observations (do not affect the exit code) ---");
 
-    if !o.hubs.is_empty() {
+    if !hubs.is_empty() {
         println!("\nHub pages:");
-        for hub in &o.hubs {
+        for hub in hubs {
             println!("  {:>4} links  {}", hub.degree, hub.id);
         }
     }
 
-    if !o.orphans.is_empty() {
-        println!("\nOrphans ({}):", o.orphans.len());
-        for id in &o.orphans {
+    if !orphans.is_empty() {
+        println!("\nOrphans ({}):", orphans.len());
+        for id in orphans {
             println!("  {id}");
         }
     }
 
-    if !o.unresolved_conflicts.is_empty() {
+    if !unresolved_conflicts.is_empty() {
         println!(
             "\nUnresolved concept conflicts ({}):",
-            o.unresolved_conflicts.len()
+            unresolved_conflicts.len()
         );
-        for c in &o.unresolved_conflicts {
+        for c in unresolved_conflicts {
             if c.note.is_empty() {
                 println!("  {}  ({})", c.slug, c.path.display());
             } else {
@@ -490,6 +518,7 @@ mod tests {
     #[test]
     fn the_violation_channel_counts_every_list_it_carries() {
         let v = Violations {
+            address_collisions: Vec::new(),
             broken: vec![BrokenLink {
                 source: "a".into(),
                 target: "b".into(),

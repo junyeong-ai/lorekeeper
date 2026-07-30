@@ -10,7 +10,7 @@ pages: 4, links: 5, components: 2
 --- Violations ---
 
 Broken links (1):
-  wiki/concepts/guard-population -> wiki/concepts/nowhere
+  wiki/concepts/guard-population -> wiki/concepts/nowhere.md
 
 Index drift:
   +index  wiki/concepts/behaviour-snapshot

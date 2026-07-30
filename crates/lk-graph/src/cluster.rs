@@ -434,6 +434,7 @@ fn adamic_adar(graph: &WikiGraph, shared: &[usize], degree: &mut HashMap<usize, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scan::Link;
     use crate::scan::ScannedPage;
     use lk_core::config::VaultDirs;
     use std::path::PathBuf;
@@ -444,7 +445,10 @@ mod tests {
             id: id.to_owned(),
             path: PathBuf::from(format!("{id}.md")),
             title: name.to_owned(),
-            outgoing: outgoing.iter().map(|s| s.to_string()).collect(),
+            outgoing: outgoing
+                .iter()
+                .map(|s| Link::to(&format!("{s}.md")))
+                .collect(),
         }
     }
 

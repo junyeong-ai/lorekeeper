@@ -10,6 +10,13 @@ fn fixture_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/small")
 }
 
+/// The analysis view of a vault — what `hubs`/`cluster`/`normalize` read.
+fn fixture_pages(root: &Path, config: &GraphConfig) -> Vec<scan::ScannedPage> {
+    scan::VaultViews::resolve(root, config, &VaultDirs::default())
+        .unwrap()
+        .pages
+}
+
 fn default_config() -> GraphConfig {
     let mut config = GraphConfig::default();
     config.scope.dirs = vec![std::path::PathBuf::from("wiki")];
@@ -22,7 +29,7 @@ fn default_config() -> GraphConfig {
 fn build_correct_page_count() {
     let root = fixture_root();
     let config = default_config();
-    let pages = scan::scan_vault(&root, &config).unwrap();
+    let pages = fixture_pages(&root, &config);
     let g = graph::WikiGraph::build(&pages, &VaultDirs::default());
     // The fixture has 5 markdown files, but `index.md` is a reserved navigation/catalog
     // meta-file — NOT a knowledge node — so the analysis graph has 4 nodes (3 concepts +
@@ -38,7 +45,7 @@ fn reserved_meta_files_are_excluded_from_the_graph() {
     // node it would be the top hub and would connect every otherwise-separate community.
     let root = fixture_root();
     let config = default_config();
-    let pages = scan::scan_vault(&root, &config).unwrap();
+    let pages = fixture_pages(&root, &config);
     assert!(
         pages.iter().any(|p| p.id == "wiki/index"),
         "fixture includes index.md in the raw scan"
@@ -60,7 +67,7 @@ fn reserved_meta_files_are_excluded_from_the_graph() {
 fn hubs_returns_results() {
     let root = fixture_root();
     let config = default_config();
-    let pages = scan::scan_vault(&root, &config).unwrap();
+    let pages = fixture_pages(&root, &config);
     let g = graph::WikiGraph::build(&pages, &VaultDirs::default());
     let hubs = g.hubs(3, 1);
     assert!(!hubs.is_empty());
@@ -72,7 +79,7 @@ fn hubs_returns_results() {
 fn orphans_detected() {
     let root = fixture_root();
     let config = default_config();
-    let pages = scan::scan_vault(&root, &config).unwrap();
+    let pages = fixture_pages(&root, &config);
     let g = graph::WikiGraph::build(&pages, &VaultDirs::default());
     let orphans = g.orphans(&config.metrics.orphan_exclude);
     assert!(!orphans.is_empty(), "fixture has orphan-page.md");
@@ -91,7 +98,7 @@ fn fixture_broken_links(pages: &[scan::ScannedPage]) -> Vec<graph::BrokenLink> {
 fn broken_links_detected() {
     let root = fixture_root();
     let config = default_config();
-    let pages = scan::scan_vault(&root, &config).unwrap();
+    let pages = fixture_pages(&root, &config);
     let broken = fixture_broken_links(&pages);
     assert!(!broken.is_empty(), "fixture has nonexistent-page link");
     assert!(broken.iter().any(|b| b.target.contains("nonexistent")));
@@ -101,7 +108,7 @@ fn broken_links_detected() {
 fn broken_json_has_count() {
     let root = fixture_root();
     let config = default_config();
-    let pages = scan::scan_vault(&root, &config).unwrap();
+    let pages = fixture_pages(&root, &config);
     let broken = fixture_broken_links(&pages);
     let report = output::BrokenReport {
         count: broken.len(),
@@ -181,7 +188,7 @@ fn index_sync_fix_mutates_and_idempotent() {
 fn normalize_fixture_already_normalized() {
     let root = fixture_root();
     let config = default_config();
-    let pages = scan::scan_vault(&root, &config).unwrap();
+    let pages = fixture_pages(&root, &config);
     let renames = normalize::scan(&pages);
     assert!(renames.is_empty());
 }
@@ -199,7 +206,7 @@ fn normalize_fix_renames_and_rewrites() {
     .unwrap();
 
     let config = default_config();
-    let pages = scan::scan_vault(tmp.path(), &config).unwrap();
+    let pages = fixture_pages(tmp.path(), &config);
 
     let renames = normalize::scan(&pages);
     assert!(!renames.is_empty());
@@ -218,7 +225,7 @@ fn normalize_fix_renames_and_rewrites() {
 fn cluster_json_has_communities() {
     let root = fixture_root();
     let config = default_config();
-    let pages = scan::scan_vault(&root, &config).unwrap();
+    let pages = fixture_pages(&root, &config);
     let g = graph::WikiGraph::build(&pages, &VaultDirs::default());
     let mut result = cluster::detect_communities(&g, &config);
     cluster::label_communities(&g, &mut result.communities);
@@ -240,7 +247,7 @@ fn cluster_json_has_communities() {
 fn export_json_with_clusters() {
     let root = fixture_root();
     let config = default_config();
-    let pages = scan::scan_vault(&root, &config).unwrap();
+    let pages = fixture_pages(&root, &config);
     let g = graph::WikiGraph::build(&pages, &VaultDirs::default());
     let cluster_result = cluster::detect_communities(&g, &config);
     let graph_export = export::export(&g, Some(&cluster_result));
@@ -256,7 +263,7 @@ fn export_json_with_clusters() {
 fn lint_combined_report() {
     let root = fixture_root();
     let config = default_config();
-    let pages = scan::scan_vault(&root, &config).unwrap();
+    let pages = fixture_pages(&root, &config);
     let g = graph::WikiGraph::build(&pages, &VaultDirs::default());
 
     let hubs = g.hubs(10, config.metrics.min_hub_degree);
@@ -277,6 +284,7 @@ fn lint_combined_report() {
             },
             invalid_categories: Vec::new(),
             duplicate_concepts: Vec::new(),
+            address_collisions: Vec::new(),
         },
         observations: output::Observations {
             hubs,
@@ -303,7 +311,7 @@ fn lint_combined_report() {
 fn suggest_links_from_fixture() {
     let root = fixture_root();
     let config = default_config();
-    let pages = scan::scan_vault(&root, &config).unwrap();
+    let pages = fixture_pages(&root, &config);
     let g = graph::WikiGraph::build(&pages, &VaultDirs::default());
     let clusters = cluster::detect_communities(&g, &config);
     let result = cluster::suggest_links(&g, &clusters, 1);
@@ -317,8 +325,7 @@ fn suggest_links_from_fixture() {
 // --- Missing directory exits with error ---
 
 #[test]
-fn missing_directory_errors() {
-    let config = default_config();
-    let result = scan::scan_vault(Path::new("/nonexistent/path"), &config);
+fn scan_missing_dir_errors() {
+    let result = scan::scan_vault(Path::new("/nonexistent/path"), false);
     assert!(result.is_err());
 }

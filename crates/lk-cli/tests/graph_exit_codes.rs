@@ -296,6 +296,79 @@ fn a_broken_link_written_outside_the_analysis_scope_still_gates() {
     );
 }
 
+/// Existence is a question about a FILE, so it is asked of the path a link names — not of the
+/// page id that path slugifies to. Slugifying is lossy: `Bad_Name.md`, `BAD-NAME.md` and
+/// `bad--name.md` all share `bad-name`, so answering by id reports a destination that is dead in
+/// Obsidian, dead on GitHub and dead in git as sound.
+#[test]
+fn a_link_to_a_destination_no_file_answers_exits_one() {
+    let ws = sound_vault();
+    ws.write(
+        "daily/notes/2026-05-24.md",
+        "---\nid: notes-2026-05-24\ntype: daily\ntitle: \"Notes\"\n\
+         created: 2026-05-24\nupdated: 2026-05-24\n---\n\n\
+         ## Related concepts\n\n- [Cited](../../wiki/concepts/Cited.md)\n",
+    );
+
+    let out = ws.run(&["graph", "broken"]);
+    let stdout = String::from_utf8(out.stdout).expect("utf8");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "the file on disk is `cited.md`; nothing answers to `Cited.md`\n{stdout}"
+    );
+    assert!(stdout.contains("wiki/concepts/Cited.md"), "{stdout}");
+}
+
+/// Two files whose paths slugify to one page id. The id is the graph's node key, so one of them
+/// silently loses its node: its edges are attributed to its twin, and it vanishes from orphans,
+/// hubs and drift while still counted in the totals. `A B.md` beside `a-b.md` is enough.
+#[test]
+fn two_files_at_one_address_exit_one() {
+    let ws = sound_vault();
+    ws.write(
+        "wiki/documents/A B.md",
+        "---\nid: a-b-spaced\ntype: document\ntitle: \"A B spaced\"\ncreated: 2026-05-23\n---\n\n# A B spaced\n",
+    );
+    ws.write(
+        "wiki/documents/a-b.md",
+        "---\nid: a-b\ntype: document\ntitle: \"A B hyphen\"\ncreated: 2026-05-23\n---\n\n# A B hyphen\n",
+    );
+
+    let out = ws.run(&["graph", "lint"]);
+    let stdout = String::from_utf8(out.stdout).expect("utf8");
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    assert!(stdout.contains("One address, two files"), "{stdout}");
+    assert!(stdout.contains("wiki/documents/A B.md"), "{stdout}");
+}
+
+/// A vault directory whose spelling on disk differs from the configured one — the case a
+/// case-insensitive filesystem folds for you. `is_dir` passes, so the directory "exists" while a
+/// raw prefix test matches no page: every graph command then reports an empty vault and exits 0,
+/// and the scheduled pipeline stays green over a vault nothing is checking.
+#[test]
+fn a_vault_directory_the_filesystem_folded_is_still_analysed() {
+    let ws = Workspace::new();
+    ws.write(
+        "Wiki/concepts/folded.md",
+        &concept(
+            "folded",
+            "Folded",
+            "Links nothing that exists: [Ghost](ghost.md)",
+        ),
+    );
+
+    let out = ws.run(&["graph", "lint"]);
+    let stdout = String::from_utf8(out.stdout).expect("utf8");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a page under the folded spelling is still the tool's to check\n{stdout}"
+    );
+    assert!(stdout.contains("pages: 1"), "{stdout}");
+    assert!(stdout.contains("ghost.md"), "{stdout}");
+}
+
 /// A citation on an excluded page is still a citation. The mutating commands read the same
 /// whole-vault view the read-only ones do, so a narrowing meant for `hubs`/`cluster` cannot make
 /// a page they REWRITE disappear. Applying the globs to their scan instead makes an excluded

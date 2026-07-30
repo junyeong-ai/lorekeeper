@@ -19,86 +19,85 @@ use walkdir::WalkDir;
 
 use crate::GraphError;
 
-/// A scanned vault page: its slug id, vault-relative path, display title, and the
-/// resolved page ids of its outgoing links (deduped, first-appearance order).
+/// A scanned vault page: its slug id, vault-relative path, display title, and its outgoing
+/// links (deduped by address, first-appearance order).
 ///
-/// Resolution happens at scan time: each internal markdown-link destination is
-/// resolved against the page's own location ([`link::resolve_dest`]) and normalized
-/// to a page id ([`path_slug`]). A destination that escapes the vault root keeps its
-/// decoded text — it matches no page, so the graph reports it broken as written.
+/// Resolution happens at scan time: each internal markdown-link destination is resolved
+/// against the page's own location ([`link::resolve_dest`]), so every downstream consumer is a
+/// plain lookup with no second resolution to disagree about.
 #[derive(Debug, Clone, Default)]
 pub struct ScannedPage {
     pub id: String,
     pub path: PathBuf,
     pub title: String,
-    pub outgoing: Vec<String>,
+    pub outgoing: Vec<Link>,
 }
 
-/// Walk the configured scope directories under `root` and parse every `.md` file.
-pub fn scan_vault(root: &Path, config: &GraphConfig) -> Result<Vec<ScannedPage>, GraphError> {
-    let exclude = build_exclude_set(&config.scope.exclude)?;
-    let mut file_paths: Vec<PathBuf> = Vec::new();
+/// One resolved link, carried as both of the things a consumer asks it for.
+///
+/// The two are not interchangeable, and conflating them answers the wrong question. `dest` is
+/// an ADDRESS — the vault-relative path the link names — and only a path can answer "is there a
+/// file there". `id` is the page id that address belongs to, which is the graph's node key.
+/// Slugifying a path is lossy, so `Bad_Name.md` and `bad-name.md` share an id while only one of
+/// them is a file: checking existence by id reports a link to the other one sound.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Link {
+    pub dest: String,
+    pub id: String,
+}
 
-    for dir in &config.scope.dirs {
-        let scan_dir = root.join(dir);
-        if !scan_dir.exists() {
-            return Err(GraphError::ScanDirNotFound(scan_dir));
-        }
-
-        // Dot-directories are never knowledge: `.obsidian` is the app's own config, `.trash` is
-        // where Obsidian puts a DELETED page — resolving a link to one would report a deleted
-        // page as present — and `.lorekeeper` is this tool's state. A fact about a vault rather
-        // than about a caller, which is what makes the vault root safe to walk.
-        let walker = WalkDir::new(&scan_dir)
-            .follow_links(config.scope.follow_links)
-            .into_iter()
-            .filter_entry(|entry| {
-                entry.depth() == 0
-                    || !entry
-                        .file_name()
-                        .to_str()
-                        .is_some_and(|name| name.starts_with('.'))
-            });
-        for entry in walker {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(e) => {
-                    tracing::warn!(error = %e, "skipping unreadable path");
-                    continue;
-                }
-            };
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let path = entry.path();
-            if path.extension().is_some_and(|ext| ext == "md") {
-                let rel = path.strip_prefix(root).unwrap_or(path);
-                let rel_str = rel.to_string_lossy().replace('\\', "/");
-                if !exclude.is_match(&rel_str) {
-                    file_paths.push(path.to_path_buf());
-                }
-            }
+impl Link {
+    /// A link to a vault-relative address. The id is DERIVED, so the pair cannot drift.
+    pub fn to(dest: &str) -> Self {
+        Self {
+            id: path_slug(Path::new(dest)),
+            dest: dest.to_owned(),
         }
     }
+}
 
-    // Deduplicating on the path TEXT is not enough, and the text is exactly what differs: two
-    // scope directories can name ONE directory while spelling it differently — case on a
-    // case-insensitive filesystem, NFC against NFD on APFS, a symlink — and the same physical
-    // file then arrives under both prefixes. Both copies carry the same page id, but a page's
-    // type is decided by prefix-matching its raw path, so one copy reads as a concept page
-    // and the other as a page citing it, and `backlinks-sync` writes the concept's own
-    // curated cross-references into its sources. Canonical identity is the filesystem's
-    // answer to "the same file", which is the question being asked; a path that cannot be
-    // canonicalized stands for itself, since a file that no longer resolves cannot collide
-    // with one that does.
-    //
-    // Resolved in WALK order, before sorting: the surviving spelling is the one the
-    // earliest-listed scope directory gave it, and that order is the vault's own precedence
-    // (`wiki` first). Keeping the sort-first copy would let an alias outrank the directory
-    // every other page addresses, so links to it from elsewhere would resolve nowhere.
-    let mut seen: HashSet<PathBuf> = HashSet::new();
-    file_paths
-        .retain(|path| seen.insert(std::fs::canonicalize(path).unwrap_or_else(|_| path.clone())));
+/// Walk the vault at `root` and parse every markdown file it holds.
+///
+/// The walk is the WHOLE vault, always. Which pages are analysed, and whose links are checked,
+/// are questions about the result — [`VaultViews`] answers them by filtering — because a walk
+/// that had already dropped a page cannot tell "not there" from "not looked at", in whichever
+/// direction a caller happens to resolve it.
+pub fn scan_vault(root: &Path, follow_links: bool) -> Result<Vec<ScannedPage>, GraphError> {
+    if !root.exists() {
+        return Err(GraphError::ScanDirNotFound(root.to_path_buf()));
+    }
+
+    // Dot-directories are never knowledge: `.obsidian` is the app's own config, `.trash` is
+    // where Obsidian puts a DELETED page — resolving a link to one would report a deleted
+    // page as present — and `.lorekeeper` is this tool's state.
+    let walker = WalkDir::new(root)
+        .follow_links(follow_links)
+        .into_iter()
+        .filter_entry(|entry| {
+            entry.depth() == 0
+                || !entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with('.'))
+        });
+
+    let mut file_paths: Vec<PathBuf> = Vec::new();
+    for entry in walker {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(error = %e, "skipping unreadable path");
+                continue;
+            }
+        };
+        let path = entry.path();
+        // `is_file` FOLLOWS the link, so a symlinked page is a page: it is readable at exactly
+        // this address, and a link to it resolves in every editor. `follow_links` decides
+        // whether the walk descends symlinked directories, which is a separate question.
+        if path.is_file() && path.extension().is_some_and(|ext| ext == "md") {
+            file_paths.push(path.to_path_buf());
+        }
+    }
     file_paths.sort();
 
     // A page whose body will not parse still EXISTS, and its id comes from the path rather than
@@ -129,6 +128,76 @@ pub fn scan_vault(root: &Path, config: &GraphConfig) -> Result<Vec<ScannedPage>,
     Ok(pages)
 }
 
+/// ONE scan of the vault, partitioned into the three views that answer three different
+/// questions. Conflating any two of them reports something false.
+pub struct VaultViews {
+    /// Every page in the vault. The existence universe, and the view the mutating commands
+    /// repoint links across — a citation of a renamed or merged page lives wherever it was
+    /// written.
+    pub scanned: Vec<ScannedPage>,
+    pub existence: VaultExistence,
+    /// The pages this tool writes and manages: the analysis scope ∪ every page directory. A
+    /// vault also holds the user's own folders, and a stray link in a hand-written note is
+    /// neither this tool's output nor something it can repair.
+    pub link_sources: Vec<ScannedPage>,
+    /// The analysis scope — the graph's nodes and edges.
+    pub pages: Vec<ScannedPage>,
+}
+
+impl VaultViews {
+    /// `scope.exclude` and `scope.dirs` narrow the last two views only: an excluded page still
+    /// exists, so it still resolves a link and still has its own links repointed by a rename.
+    pub fn resolve(root: &Path, graph: &GraphConfig, dirs: &VaultDirs) -> Result<Self, GraphError> {
+        let scanned = scan_vault(root, graph.scope.follow_links)?;
+        let existence = VaultExistence::build(&scanned, dirs);
+        let excluded = Excludes::compile(&graph.scope.exclude)?;
+
+        let managed = page_dirs(root, dirs);
+        let in_scope = |page: &ScannedPage, scope: &[PathBuf]| {
+            scope.iter().any(|dir| under(&page.id, dir)) && !excluded.matches(&page.path)
+        };
+
+        Ok(Self {
+            link_sources: scanned
+                .iter()
+                .filter(|p| in_scope(p, &graph.scope.dirs) || in_scope(p, &managed))
+                .cloned()
+                .collect(),
+            pages: scanned
+                .iter()
+                .filter(|p| in_scope(p, &graph.scope.dirs))
+                .cloned()
+                .collect(),
+            scanned,
+            existence,
+        })
+    }
+}
+
+/// Whether a page id sits under a configured vault-relative directory.
+///
+/// Compared on the ID, not the raw path: an id is the address after normalization, so a vault
+/// whose directory on disk is spelled `Wiki` while the config says `wiki` still matches. A raw
+/// prefix test answers no there — `is_dir` passes on a case-insensitive volume, so the directory
+/// "exists", no page ever matches it, and every graph command reports an empty vault and exits 0.
+fn under(id: &str, dir: &Path) -> bool {
+    let prefix = path_slug(dir);
+    if prefix.is_empty() {
+        return true;
+    }
+    id == prefix || id.starts_with(&format!("{prefix}/"))
+}
+
+/// Every vault-relative page directory that exists on disk — anything this tool writes a page
+/// into. Missing directories are skipped so a partially-populated vault doesn't error out.
+fn page_dirs(root: &Path, dirs: &VaultDirs) -> Vec<PathBuf> {
+    [&dirs.wiki, &dirs.daily, &dirs.personal, &dirs.synthesis]
+        .iter()
+        .filter(|name| root.join(name).is_dir())
+        .map(|s| PathBuf::from(s.as_str()))
+        .collect()
+}
+
 fn parse_file(path: &Path, root: &Path) -> Result<ScannedPage, String> {
     let raw = std::fs::read_to_string(path)
         .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
@@ -155,14 +224,16 @@ fn parse_file(path: &Path, root: &Path) -> Result<ScannedPage, String> {
         if !Path::new(&dest).extension().is_some_and(|ext| ext == "md") {
             continue;
         }
-        let target = match link::resolve_dest(rel, &dest) {
-            Some(resolved) => path_slug(&resolved),
-            // Escapes the vault root: keep the destination as written — it matches
-            // no page id, so the graph reports it broken rather than dropping it.
+        let address = match link::resolve_dest(rel, &dest) {
+            Some(resolved) => rel_str(&resolved),
+            // Escapes the vault root: keep the destination as written — it names no file in
+            // the vault, so it is reported broken rather than dropped.
             None => dest,
         };
-        if !target.is_empty() && seen.insert(target.clone()) {
-            outgoing.push(target);
+        // Deduped by ADDRESS, not by id: two dead spellings of one id are two broken links,
+        // and each names its own repair.
+        if !address.is_empty() && seen.insert(address.clone()) {
+            outgoing.push(Link::to(&address));
         }
     }
 
@@ -195,13 +266,14 @@ fn extract_first_heading(body: &str) -> Option<String> {
 /// the analysis scope (`graph.scope.dirs`): a `wiki/` concept linking a `daily/` page is not a
 /// broken link, and a concept linked only from `daily/` is not an orphan.
 ///
-/// Built from a scan of the vault ROOT, so "absent from `ids`" means absent from the vault.
+/// Built from a scan of the vault ROOT, so "absent" means absent from the vault.
 #[derive(Debug, Clone)]
 pub struct VaultExistence {
-    /// Every page id the scan found, INCLUDING the generated catalogs: "is a file addressed by
-    /// this id" has one answer, and a catalog is a file a page may legitimately link.
-    ids: HashSet<String>,
-    /// `ids` minus the generated catalogs: the connectivity question orphan detection asks.
+    /// Every page ADDRESS the scan found — the vault-relative path as spelled on disk, catalogs
+    /// INCLUDED, since a catalog is a file a page may legitimately link.
+    paths: HashSet<String>,
+    /// Every page id, minus the generated catalogs: the connectivity question orphan detection
+    /// asks.
     /// `index.md` links every page it catalogs, so counting a link to it as a connection would
     /// mask exactly the orphans that detection exists to find.
     knowledge: HashSet<String>,
@@ -220,10 +292,10 @@ impl VaultExistence {
         // they must not do is count as connectivity, since index.md links every page it catalogs
         // and would mark every concept "linked", defeating orphan detection.
         let is_reserved = reserved_page_predicate(Path::new(&dirs.wiki));
-        let mut ids = HashSet::with_capacity(pages.len());
+        let mut paths = HashSet::with_capacity(pages.len());
         let mut knowledge = HashSet::with_capacity(pages.len());
         for page in pages {
-            ids.insert(page.id.clone());
+            paths.insert(rel_str(&page.path));
             if !is_reserved(page.id.as_str()) {
                 knowledge.insert(page.id.clone());
             }
@@ -234,24 +306,24 @@ impl VaultExistence {
             if is_reserved(page.id.as_str()) {
                 continue;
             }
-            for target in &page.outgoing {
-                if *target != page.id && knowledge.contains(target) {
-                    linked.insert(target.clone());
+            for link in &page.outgoing {
+                if link.id != page.id && knowledge.contains(&link.id) {
+                    linked.insert(link.id.clone());
                 }
             }
         }
 
         Self {
-            ids,
+            paths,
             knowledge,
             linked,
         }
     }
 
-    /// Whether a resolved link target addresses a page in the vault — a knowledge page or a
-    /// generated catalog, both of which are files on disk.
-    pub fn is_resolvable(&self, target: &str) -> bool {
-        self.ids.contains(target)
+    /// Whether a link's address names a file in the vault — a knowledge page or a generated
+    /// catalog, both of which are files on disk.
+    pub fn is_resolvable(&self, dest: &str) -> bool {
+        self.paths.contains(dest)
     }
 
     /// Whether a resolved link target addresses a KNOWLEDGE page — the question orphan
@@ -317,6 +389,47 @@ pub fn reserved_page_predicate(wiki_dir: &Path) -> impl Fn(&str) -> bool {
     move |id: &str| ids.contains(id)
 }
 
+/// A vault-relative path as one comparable address: separators normalized to `/`, nothing else
+/// touched. The spelling is the address — it is what the filesystem answers to.
+pub fn rel_str(rel: &Path) -> String {
+    rel.to_string_lossy().replace('\\', "/")
+}
+
+/// Two files whose paths slugify to ONE page id.
+///
+/// The id is the graph's node key, so only one of them can hold the node: the other's edges are
+/// attributed to its twin, and it is absent from every list derived from the node map while
+/// still counted in the totals. `wiki/documents/A B.md` beside `wiki/documents/a-b.md` is enough
+/// — no exotic filesystem needed — which is why this is reported rather than resolved: which of
+/// the two the tool should keep is not its call to make.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AddressCollision {
+    pub id: String,
+    pub paths: Vec<String>,
+}
+
+pub fn address_collisions(pages: &[ScannedPage]) -> Vec<AddressCollision> {
+    let mut by_id: std::collections::BTreeMap<&str, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for page in pages {
+        by_id
+            .entry(page.id.as_str())
+            .or_default()
+            .push(rel_str(&page.path));
+    }
+    by_id
+        .into_iter()
+        .filter(|(_, paths)| paths.len() > 1)
+        .map(|(id, mut paths)| {
+            paths.sort();
+            AddressCollision {
+                id: id.to_owned(),
+                paths,
+            }
+        })
+        .collect()
+}
+
 /// Slug id for a vault-relative path: drop the extension, normalize separators to `/`,
 /// then slugify each path segment (so `wiki/Concept A.md` → `wiki/concept-a`).
 pub fn path_slug(rel: &Path) -> String {
@@ -361,6 +474,11 @@ fn build_exclude_set(patterns: &[String]) -> Result<GlobSet, GraphError> {
 
 #[cfg(test)]
 mod tests {
+    /// Links as the ADDRESSES they name, which is what existence is asked about.
+    fn dests(page: &ScannedPage) -> Vec<&str> {
+        page.outgoing.iter().map(|l| l.dest.as_str()).collect()
+    }
+
     /// A directory symlink, or `false` where the platform or filesystem refuses one. Windows
     /// needs a privilege most accounts lack, so the caller treats absence as "skip this case".
     fn symlink_dir(target: &std::path::Path, link: &std::path::Path) -> bool {
@@ -435,9 +553,7 @@ mod tests {
         std::fs::write(wiki.join("good.md"), "---\nid: good\n---\n\n# Good\n").unwrap();
         std::fs::write(wiki.join("broken.md"), "---\nid: broken\ntitle: unclosed\n").unwrap();
 
-        let mut config = GraphConfig::default();
-        config.scope.dirs = vec![PathBuf::from("wiki")];
-        let pages = scan_vault(tmp.path(), &config).unwrap();
+        let pages = scan_vault(tmp.path(), false).unwrap();
 
         let ids: Vec<&str> = pages.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, vec!["wiki/broken", "wiki/good"]);
@@ -455,7 +571,7 @@ mod tests {
                 id: "daily/team-slack/2026-05-22".to_owned(),
                 path: PathBuf::from("daily/team-slack/2026-05-22.md"),
                 title: "t".to_owned(),
-                outgoing: vec!["wiki/concepts/confluence-cloud".to_owned()],
+                outgoing: vec![Link::to("wiki/concepts/confluence-cloud.md")],
             },
             ScannedPage {
                 id: "wiki/concepts/confluence-cloud".to_owned(),
@@ -465,9 +581,9 @@ mod tests {
             },
         ];
         let ex = VaultExistence::build(&pages, &VaultDirs::default());
-        assert!(ex.is_resolvable("daily/team-slack/2026-05-22"));
-        assert!(ex.is_resolvable("wiki/concepts/confluence-cloud"));
-        assert!(!ex.is_resolvable("nope"));
+        assert!(ex.is_resolvable("daily/team-slack/2026-05-22.md"));
+        assert!(ex.is_resolvable("wiki/concepts/confluence-cloud.md"));
+        assert!(!ex.is_resolvable("nope.md"));
         // The daily page links the concept → its page id is a link target.
         assert!(ex.is_linked("wiki/concepts/confluence-cloud"));
         // The daily page itself is linked by nobody.
@@ -504,7 +620,7 @@ mod tests {
         assert_eq!(page.id, "daily/x/2026-05-22");
         assert_eq!(page.title, "Day");
         // Both links resolve to the same page id and dedupe; the external is skipped.
-        assert_eq!(page.outgoing, vec!["wiki/concepts/kubernetes"]);
+        assert_eq!(dests(&page), vec!["wiki/concepts/kubernetes.md"]);
     }
 
     #[test]
@@ -518,7 +634,7 @@ mod tests {
         )
         .unwrap();
         let page = parse_file(&wiki.join("a.md"), tmp.path()).unwrap();
-        assert_eq!(page.outgoing, vec!["wiki/concepts/b"]);
+        assert_eq!(dests(&page), vec!["wiki/concepts/b.md"]);
     }
 
     #[test]
@@ -529,7 +645,7 @@ mod tests {
         std::fs::write(wiki.join("a.md"), "[out](../../outside/x.md)\n").unwrap();
         let page = parse_file(&wiki.join("a.md"), tmp.path()).unwrap();
         // The destination escapes the vault root: kept as written, never resolvable.
-        assert_eq!(page.outgoing, vec!["../../outside/x.md"]);
+        assert_eq!(dests(&page), vec!["../../outside/x.md"]);
     }
 
     #[test]
@@ -556,7 +672,7 @@ mod tests {
     /// failing on the spellings that actually occur. A second name for one directory is the
     /// real shape, and a symlink is the portable way to make one.
     #[test]
-    fn a_page_reached_through_two_names_for_one_directory_is_scanned_once() {
+    fn a_page_reachable_at_two_addresses_exists_at_both() {
         let tmp = tempfile::tempdir().unwrap();
         let wiki = tmp.path().join("wiki");
         std::fs::create_dir_all(&wiki).unwrap();
@@ -566,30 +682,100 @@ mod tests {
             return;
         }
 
-        let mut config = GraphConfig::default();
-        config.scope.dirs = vec![PathBuf::from("wiki"), PathBuf::from("notes")];
-        let pages = scan_vault(tmp.path(), &config).unwrap();
-
+        // `follow_links` is the vault owner declaring that a symlink is part of the vault, so
+        // both spellings are addresses a reader can open — and a link to either resolves.
+        // Collapsing them onto one would make the other read as broken, and which of the two
+        // survived would depend on readdir order.
+        let pages = scan_vault(tmp.path(), true).unwrap();
         let ids: Vec<&str> = pages.iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(ids, vec!["wiki/a", "wiki/b"], "each page exactly once");
+        assert_eq!(ids, vec!["notes/a", "notes/b", "wiki/a", "wiki/b"]);
+
+        // Left alone, a symlink is not walked into, so the vault is what the walk finds.
+        let pages = scan_vault(tmp.path(), false).unwrap();
+        let ids: Vec<&str> = pages.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, vec!["wiki/a", "wiki/b"]);
     }
 
     #[test]
-    fn scan_respects_exclude_and_missing_dir() {
+    fn the_views_narrow_what_is_analysed_and_never_what_exists() {
         let tmp = tempfile::tempdir().unwrap();
         let wiki = tmp.path().join("wiki");
         std::fs::create_dir_all(&wiki).unwrap();
         std::fs::write(wiki.join("keep.md"), "# Keep\n").unwrap();
         std::fs::write(wiki.join("skip.md"), "# Skip\n").unwrap();
+        std::fs::create_dir_all(tmp.path().join("private")).unwrap();
+        std::fs::write(tmp.path().join("private/note.md"), "# Note\n").unwrap();
 
         let mut config = GraphConfig::default();
         config.scope.dirs = vec![PathBuf::from("wiki")];
         config.scope.exclude = vec!["wiki/skip.md".to_string()];
-        let pages = scan_vault(tmp.path(), &config).unwrap();
-        assert_eq!(pages.len(), 1);
-        assert_eq!(pages[0].id, "wiki/keep");
+        let views = VaultViews::resolve(tmp.path(), &config, &VaultDirs::default()).unwrap();
 
-        config.scope.dirs = vec![PathBuf::from("nonexistent")];
-        assert!(scan_vault(tmp.path(), &config).is_err());
+        assert_eq!(
+            views
+                .pages
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["wiki/keep"],
+            "the analysis scope is narrowed by both settings"
+        );
+        for id in ["wiki/keep", "wiki/skip", "private/note"] {
+            assert!(
+                views.existence.is_resolvable(&format!("{id}.md")),
+                "{id} exists whatever the analysis scope is"
+            );
+        }
+        assert!(
+            !views
+                .link_sources
+                .iter()
+                .any(|p| p.id == "private/note" || p.id == "wiki/skip"),
+            "neither a user's own folder nor an excluded page is this tool's to lint"
+        );
+    }
+
+    #[test]
+    fn a_vault_root_that_is_not_there_is_an_error() {
+        assert!(scan_vault(Path::new("/nonexistent-vault-root"), false).is_err());
+    }
+
+    #[test]
+    fn a_directory_matches_the_configured_spelling_the_filesystem_folded() {
+        // `is_dir` passes on a case-insensitive volume, so the directory "exists" while a raw
+        // prefix test matches no page — every graph command then reports an empty vault, green.
+        assert!(under("wiki/concepts/x", Path::new("Wiki")));
+        assert!(under("wiki/concepts/x", Path::new("wiki")));
+        assert!(!under("wikipedia/x", Path::new("wiki")));
+        assert!(under("anything", Path::new("")));
+    }
+
+    #[test]
+    fn two_files_at_one_address_are_reported() {
+        let pages = vec![
+            ScannedPage {
+                id: "wiki/documents/a-b".to_owned(),
+                path: PathBuf::from("wiki/documents/A B.md"),
+                ..ScannedPage::default()
+            },
+            ScannedPage {
+                id: "wiki/documents/a-b".to_owned(),
+                path: PathBuf::from("wiki/documents/a-b.md"),
+                ..ScannedPage::default()
+            },
+            ScannedPage {
+                id: "wiki/documents/c".to_owned(),
+                path: PathBuf::from("wiki/documents/c.md"),
+                ..ScannedPage::default()
+            },
+        ];
+
+        let collisions = address_collisions(&pages);
+        assert_eq!(collisions.len(), 1);
+        assert_eq!(collisions[0].id, "wiki/documents/a-b");
+        assert_eq!(
+            collisions[0].paths,
+            vec!["wiki/documents/A B.md", "wiki/documents/a-b.md"]
+        );
     }
 }

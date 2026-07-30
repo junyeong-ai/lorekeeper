@@ -61,10 +61,10 @@ pub fn broken_links(
         .flat_map(|page| {
             page.outgoing
                 .iter()
-                .filter(|target| !existence.is_resolvable(target))
-                .map(|target| BrokenLink {
+                .filter(|link| !existence.is_resolvable(&link.dest))
+                .map(|link| BrokenLink {
                     source: page.id.clone(),
-                    target: target.clone(),
+                    target: link.dest.clone(),
                 })
         })
         .collect();
@@ -133,12 +133,14 @@ impl WikiGraph {
                 continue;
             }
             let source_idx = id_to_node[&page.id];
-            for target in &page.outgoing {
-                // `outgoing` targets are already resolved page ids (scan resolves each
+            for target in page.outgoing.iter().map(|link| &link.id) {
+                // Each link already carries the resolved page id (scan resolves every
                 // destination against its page's location), so an edge is a plain lookup.
                 if let Some(&target_idx) = id_to_node.get(target.as_str()) {
+                    // `update_edge`, not `add_edge`: two spellings of one address are two
+                    // links but one connection, and a parallel edge would double the degree.
                     if source_idx != target_idx {
-                        graph.add_edge(source_idx, target_idx, ());
+                        graph.update_edge(source_idx, target_idx, ());
                     }
                 } else if existence.is_knowledge(target) {
                     // Resolves to a knowledge page outside the analysis scope: a vault-wide
@@ -284,6 +286,7 @@ impl WikiGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scan::Link;
     use crate::scan::{ScannedPage, VaultExistence};
     use lk_core::config::GraphConfig;
     use std::path::PathBuf;
@@ -294,7 +297,10 @@ mod tests {
             id: id.to_owned(),
             path: PathBuf::from(format!("{id}.md")),
             title: name.to_owned(),
-            outgoing: outgoing.iter().map(|s| s.to_string()).collect(),
+            outgoing: outgoing
+                .iter()
+                .map(|s| Link::to(&format!("{s}.md")))
+                .collect(),
         }
     }
 
@@ -327,7 +333,7 @@ mod tests {
 
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].source, "wiki/alpha");
-        assert_eq!(found[0].target, "wiki/nonexistent");
+        assert_eq!(found[0].target, "wiki/nonexistent.md");
     }
 
     #[test]
@@ -342,7 +348,7 @@ mod tests {
 
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].source, "daily/ai-news/2026-06-12");
-        assert_eq!(found[0].target, "wiki/concepts/gone");
+        assert_eq!(found[0].target, "wiki/concepts/gone.md");
     }
 
     /// A vault holds user-authored folders outside the four page dirs, and a page there is a
@@ -361,7 +367,7 @@ mod tests {
         let found = broken_links(&pages, &VaultExistence::build(&pages, &dirs), &dirs);
 
         assert_eq!(found.len(), 1, "the note exists, so only `gone` is broken");
-        assert_eq!(found[0].target, "wiki/concepts/gone");
+        assert_eq!(found[0].target, "wiki/concepts/gone.md");
     }
 
     /// A destination that escapes the vault root is kept as written rather than resolved to an

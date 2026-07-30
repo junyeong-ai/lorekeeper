@@ -333,6 +333,7 @@ fn concept_has_authored_body(abs: &Path) -> Result<bool, GraphError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scan::Link;
     use tempfile::TempDir;
 
     fn write(root: &Path, rel: &str, content: &str) {
@@ -346,7 +347,10 @@ mod tests {
             id: id.to_owned(),
             path: PathBuf::from(rel),
             title: id.to_owned(),
-            outgoing: outgoing.iter().map(|s| (*s).to_string()).collect(),
+            outgoing: outgoing
+                .iter()
+                .map(|s| Link::to(&format!("{s}.md")))
+                .collect(),
         }
     }
 

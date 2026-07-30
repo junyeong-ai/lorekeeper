@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use lk_core::config::{ConceptCategory, GraphConfig, VaultDirs};
 use lk_core::i18n::Locale;
@@ -15,60 +15,6 @@ struct ResolvedConfig {
     locale: Locale,
     vault_dirs: VaultDirs,
     concept_categories: Vec<ConceptCategory>,
-}
-
-/// ONE scan of the vault, partitioned into the three views that answer three different
-/// questions. Conflating any two of them reports something false.
-struct VaultViews {
-    /// Every page in the vault. The existence universe — "is a file addressed by this id" is
-    /// exact only over all of them — and the view the mutators repoint links across, since a
-    /// citation of a renamed or merged page lives wherever it was written.
-    scanned: Vec<scan::ScannedPage>,
-    existence: scan::VaultExistence,
-    /// The pages this tool writes and manages: the analysis scope ∪ every page directory. A
-    /// vault also holds the user's own folders, and a stray link in a hand-written note is
-    /// neither this tool's output nor something it can repair.
-    link_sources: Vec<scan::ScannedPage>,
-    /// The analysis scope — the graph's nodes and edges.
-    pages: Vec<scan::ScannedPage>,
-}
-
-impl VaultViews {
-    /// The walk is always the vault ROOT, and `scope.exclude` narrows the last two views only.
-    /// An excluded page still exists, so it still resolves a link and still has its own links
-    /// repointed; anything narrower makes "not scanned" indistinguishable from "not there", in
-    /// whichever direction the narrowing resolves it. `scan_vault` skips dot-directories, so
-    /// `.trash` — where Obsidian puts a DELETED page — never resolves.
-    fn resolve(rc: &ResolvedConfig) -> Result<Self, String> {
-        let mut scan_cfg = rc.graph.clone();
-        // An empty relative path joins to the root itself.
-        scan_cfg.scope.dirs = vec![PathBuf::new()];
-        scan_cfg.scope.exclude = Vec::new();
-        let scanned = scan::scan_vault(&rc.root, &scan_cfg).map_err(|e| format!("{e}"))?;
-        let existence = scan::VaultExistence::build(&scanned, &rc.vault_dirs);
-
-        let excluded =
-            scan::Excludes::compile(&rc.graph.scope.exclude).map_err(|e| format!("{e}"))?;
-        let in_scope = |page: &scan::ScannedPage, dirs: &[PathBuf]| {
-            dirs.iter().any(|d| page.path.starts_with(d)) && !excluded.matches(&page.path)
-        };
-        let managed = managed_dirs(&rc.graph.scope.dirs, &rc.root, &rc.vault_dirs);
-
-        Ok(Self {
-            link_sources: scanned
-                .iter()
-                .filter(|p| in_scope(p, &managed))
-                .cloned()
-                .collect(),
-            pages: scanned
-                .iter()
-                .filter(|p| in_scope(p, &rc.graph.scope.dirs))
-                .cloned()
-                .collect(),
-            scanned,
-            existence,
-        })
-    }
 }
 
 #[derive(clap::Subcommand)]
@@ -202,7 +148,8 @@ fn run_inner(
     }
 
     let mut rc = resolve_config_full(opts, root_override)?;
-    let views = VaultViews::resolve(&rc)?;
+    let views = scan::VaultViews::resolve(&rc.root, &rc.graph, &rc.vault_dirs)
+        .map_err(|e| format!("{e}"))?;
     let g = graph::WikiGraph::build_with_existence(&views.pages, &views.existence, &rc.vault_dirs);
 
     let violated = match cmd {
@@ -234,6 +181,7 @@ fn run_inner(
                     },
                     invalid_categories,
                     duplicate_concepts,
+                    address_collisions: scan::address_collisions(&views.scanned),
                 },
                 observations: output::Observations {
                     hubs,
@@ -483,30 +431,6 @@ fn run_audit_mark(
     Ok(false)
 }
 
-/// The pages whose links are CHECKED: the analysis scope plus every page directory this tool
-/// writes. A vault also holds the user's own folders, and a stray link in a hand-written note is
-/// neither the pipeline's output nor something it can repair — reporting one as a violation gates
-/// the scheduled pipeline on content the tool does not manage.
-fn managed_dirs(scope_dirs: &[PathBuf], root: &Path, dirs: &VaultDirs) -> Vec<PathBuf> {
-    let mut sources = scope_dirs.to_vec();
-    for dir in vault_page_dirs(root, dirs) {
-        if !sources.contains(&dir) {
-            sources.push(dir);
-        }
-    }
-    sources
-}
-
-/// Every vault-relative page directory that exists on disk — anything this tool writes a page
-/// into. Missing directories are skipped so a partially-populated vault doesn't error out.
-fn vault_page_dirs(root: &std::path::Path, dirs: &VaultDirs) -> Vec<PathBuf> {
-    [&dirs.wiki, &dirs.daily, &dirs.personal, &dirs.synthesis]
-        .iter()
-        .filter(|name| root.join(name).is_dir())
-        .map(|s| PathBuf::from(s.as_str()))
-        .collect()
-}
-
 fn resolve_config_full(
     opts: &GlobalOptions,
     root_override: Option<PathBuf>,
@@ -537,36 +461,5 @@ fn resolve_config_full(
                 concept_categories: Vec::new(),
             })
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn p(s: &str) -> PathBuf {
-        PathBuf::from(s)
-    }
-
-    #[test]
-    fn the_analysis_scope_is_a_link_source_even_outside_the_page_dirs() {
-        // `graph.scope.dirs` is validated only as a relative in-vault path, so it can name a
-        // directory outside the standard four. Its pages are still the tool's to check.
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("wiki")).unwrap();
-        let dirs = VaultDirs::default();
-
-        let sources = managed_dirs(&[p("notes")], tmp.path(), &dirs);
-        assert!(sources.contains(&p("notes")));
-        assert!(sources.contains(&p("wiki")));
-    }
-
-    #[test]
-    fn a_page_directory_that_does_not_exist_is_not_scanned() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("wiki")).unwrap();
-        let dirs = VaultDirs::default();
-
-        assert_eq!(vault_page_dirs(tmp.path(), &dirs), vec![p("wiki")]);
     }
 }

@@ -72,6 +72,7 @@ pub fn export(graph: &WikiGraph, cluster: Option<&ClusterResult>) -> GraphExport
 mod tests {
     use super::*;
     use crate::cluster::detect_communities;
+    use crate::scan::Link;
     use crate::scan::ScannedPage;
     use lk_core::config::{GraphConfig, VaultDirs};
     use std::path::PathBuf;
@@ -82,7 +83,10 @@ mod tests {
             id: id.to_owned(),
             path: PathBuf::from(format!("{id}.md")),
             title: name.to_owned(),
-            outgoing: outgoing.iter().map(|s| (*s).to_string()).collect(),
+            outgoing: outgoing
+                .iter()
+                .map(|s| Link::to(&format!("{s}.md")))
+                .collect(),
         }
     }
 
