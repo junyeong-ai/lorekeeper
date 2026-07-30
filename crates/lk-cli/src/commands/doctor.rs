@@ -142,24 +142,30 @@ struct PageDefects {
 /// simply have not been cited yet. `doctor` reported no defects and the queue reported no work
 /// for two months while the residue sat there.
 ///
-/// The keys come from `TargetKind`, so a new task kind is covered without being listed here.
-fn unanswered_sections(text: &str) -> Vec<&'static str> {
+/// Read as frontmatter, never as text. The marker pair is a frontmatter record, so a body that
+/// merely discusses the format is prose — and `parse_page` is where "the first line is exactly
+/// `---`, and a delimiter stands alone on its line" is already decided, along with CRLF and a
+/// BOM. A substring scan for `llm_inputs:` reported a page whose Synthesis explained the
+/// contract as having an unanswered `summary`.
+///
+/// Both keys come from `TargetKind` — `llm_inputs_key` and the `completion_key` derived from it
+/// — so a new task kind is covered without being listed here, and the `_done` suffix rule is
+/// not restated where it could drift from the type that owns it.
+fn unanswered_sections(page: &lk_core::frontmatter::VaultPage) -> Vec<&'static str> {
     use strum::IntoEnumIterator;
 
-    let Some(inputs) = text
-        .split_once("llm_inputs:")
-        .and_then(|(_, rest)| rest.split_once("\n---").map(|(block, _)| block))
-    else {
-        return Vec::new();
-    };
+    let inputs = page
+        .frontmatter
+        .get(lk_core::frontmatter::field::LLM_INPUTS);
     let records = |key: &str| {
         inputs
-            .lines()
-            .any(|line| line.trim_start().starts_with(&format!("{key}: ")))
+            .and_then(|v| v.get(key))
+            .and_then(|v| v.as_str())
+            .is_some()
     };
     let mut found: Vec<&'static str> = lk_queue::TargetKind::iter()
+        .filter(|kind| records(kind.llm_inputs_key()) && !records(&kind.completion_key()))
         .map(|kind| kind.llm_inputs_key())
-        .filter(|key| records(key) && !records(&format!("{key}_done")))
         .collect();
     found.sort_unstable();
     found.dedup();
@@ -212,8 +218,18 @@ fn audit(roots: &[PathBuf]) -> AuditReport {
                 }
             };
             scanned += 1;
+            // `scan_defects` reads the bytes as written — trailing whitespace and CRLF are the
+            // point there. The marker pair is a frontmatter record, so it is read as one, and a
+            // page whose frontmatter will not parse is unverifiable rather than clean.
             let defects = scan_defects(&text);
-            let unanswered = unanswered_sections(&text);
+            let unanswered = match lk_core::frontmatter::parse_page(&text) {
+                Ok(page) => unanswered_sections(&page),
+                Err(e) => {
+                    eprintln!("⚠ {}: frontmatter: {e}", path.display());
+                    errors += 1;
+                    Vec::new()
+                }
+            };
             if !defects.is_empty() || !unanswered.is_empty() {
                 pages.push(PageDefects {
                     path: path.to_path_buf(),
@@ -251,23 +267,29 @@ mod tests {
     /// Emptiness is deliberately not the test — a focus-filtered summary, an extraction that found
     /// nothing and a trivial-only work-log are all legitimately empty AND answered, which is why
     /// the marker exists.
+    /// Tests state a page as its file contents, the way the walk finds it, and go through the
+    /// same parse the walk uses.
+    fn unanswered(text: &str) -> Vec<&'static str> {
+        unanswered_sections(&lk_core::frontmatter::parse_page(text).expect("frontmatter"))
+    }
+
     #[test]
     fn audit_flags_a_section_whose_work_was_enqueued_and_never_answered() {
         let answered = "---\nid: a\nllm_inputs:\n  summary: \"h1\"\n  summary_done: \"h1\"\n---\n\n## Summary\n";
         assert!(
-            unanswered_sections(answered).is_empty(),
+            unanswered(answered).is_empty(),
             "an answered section is not a defect, even with an empty body"
         );
 
         let pending = "---\nid: a\nllm_inputs:\n  summary: \"h1\"\n  concepts: \"h2\"\n  concepts_done: \"h2\"\n---\n\n## Summary\n";
         assert_eq!(
-            unanswered_sections(pending),
+            unanswered(pending),
             vec!["summary"],
             "the input without its answer is the one reported"
         );
 
         assert!(
-            unanswered_sections("---\nid: a\n---\n\n# no llm_inputs at all\n").is_empty(),
+            unanswered("---\nid: a\n---\n\n# no llm_inputs at all\n").is_empty(),
             "a page the pipeline never enqueued work for has nothing outstanding"
         );
 
@@ -291,6 +313,51 @@ mod tests {
         );
     }
 
+    /// A page that WRITES ABOUT the contract is not a page that violates it. The marker pair is
+    /// a frontmatter record; prose is prose. A substring scan for `llm_inputs:` reported this
+    /// exact page as carrying an unanswered `summary` — a vault whose concepts include its own
+    /// tooling is the ordinary case, so the false positive was reachable in the place the check
+    /// is most likely to be read.
+    #[test]
+    fn a_page_whose_body_explains_the_marker_contract_is_not_a_defect() {
+        let page = "---\nid: markers\ntype: concept\ntitle: \"Completion markers\"\n---\n\n\
+                    ## Synthesis\n\n\
+                    A page records llm_inputs: entries such as\n\
+                    \x20 summary: \"deadbeef\"\n\
+                    and the drain stamps the companion marker.\n\n\
+                    ---\n\n\
+                    ## Sources\n";
+        assert!(
+            unanswered(page).is_empty(),
+            "prose about the format is not a record: {:?}",
+            unanswered(page)
+        );
+    }
+
+    /// A page whose frontmatter will not parse is unverifiable, not clean — `doctor` must never
+    /// report a page it could not read as having nothing outstanding.
+    #[test]
+    fn a_page_with_unparseable_frontmatter_is_counted_as_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("daily");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("broken.md"),
+            "---\nid: a\nllm_inputs:\n  summary: \"h\"\n",
+        )
+        .unwrap();
+
+        let report = audit(&[root]);
+        assert_eq!(
+            report.errors, 1,
+            "an unclosed frontmatter block is an error"
+        );
+        assert!(
+            report.pages.is_empty(),
+            "nothing is claimed about a page that could not be read"
+        );
+    }
+
     /// Every task kind's key is covered, because the keys come from `TargetKind` rather than a
     /// list here — a new kind would otherwise be enqueued and never audited.
     #[test]
@@ -301,7 +368,7 @@ mod tests {
             let key = kind.llm_inputs_key();
             let page = format!("---\nid: a\nllm_inputs:\n  {key}: \"h\"\n---\n\n# x\n");
             assert_eq!(
-                unanswered_sections(&page),
+                unanswered(&page),
                 vec![key],
                 "{kind:?}'s key is not audited"
             );
