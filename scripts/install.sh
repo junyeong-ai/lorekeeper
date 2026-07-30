@@ -395,8 +395,11 @@ install_pipelines() {
 # materializes a concept. Run interactively, `lore schedule` also picks up the PATH and the
 # `claude` binary the scripts need, which a scheduler does not provide on its own.
 print_pipeline_schedule() {
-    local lore_bin
-    lore_bin="$(command -v lore || printf '%s/lore' "$INSTALL_DIR")"
+    # The binary THIS run installed, not whatever `lore` PATH resolves to. A first install into
+    # a directory not yet on PATH — the case this script warns about a few lines later — would
+    # otherwise print an older `lore` found elsewhere, and the scheduled job would keep running
+    # that one. The plist needs an absolute path either way, and only one of them is knowable.
+    local lore_bin="${INSTALL_DIR}/${BINARY_NAME}"
 
     if [ "$(uname -s)" = "Darwin" ]; then
         printf '       %slore schedule --format launchd --bin %s \\\n' "$C_BOLD" "$lore_bin"
