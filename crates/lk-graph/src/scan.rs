@@ -395,10 +395,19 @@ pub fn reserved_page_predicate(wiki_dir: &Path) -> impl Fn(&str) -> bool {
     move |id: &str| ids.contains(id)
 }
 
-/// A vault-relative path as one comparable address: separators normalized to `/`, nothing else
-/// touched. The spelling is the address — it is what the filesystem answers to.
+/// A vault-relative path as one comparable address: separators normalized to `/`, and the text
+/// to Unicode NFC.
+///
+/// The spelling IS the address — a link resolves to a file only if the path it names is the one
+/// on disk — but two byte sequences can spell the same name. A composed and a decomposed Hangul
+/// filename look identical, address the same file on every filesystem that stores either, and
+/// differ as strings; HFS+ decomposed on write, APFS keeps what it is given, and a sync tool
+/// can hand a vault both. Comparing without normalizing would report every link into such a
+/// directory broken, which is Unicode canonical equivalence being ignored rather than a defect
+/// in the vault. Both sides of every comparison come through here, so they cannot disagree.
 pub fn rel_str(rel: &Path) -> String {
-    rel.to_string_lossy().replace('\\', "/")
+    use unicode_normalization::UnicodeNormalization;
+    rel.to_string_lossy().replace('\\', "/").nfc().collect()
 }
 
 /// Two files whose paths slugify to ONE page id.
@@ -567,6 +576,33 @@ mod tests {
         assert!(
             unparseable.outgoing.is_empty(),
             "a page whose body did not parse contributes no links"
+        );
+    }
+
+    #[test]
+    fn a_decomposed_filename_answers_a_composed_link() {
+        // HFS+ decomposed on write and APFS keeps what it is given, so one vault can hold a
+        // decomposed filename and a composed link to it. They name the same file everywhere;
+        // comparing the bytes would report every link into such a directory broken.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let concepts = tmp.path().join("wiki/concepts");
+        std::fs::create_dir_all(&concepts).unwrap();
+        let decomposed: String = {
+            use unicode_normalization::UnicodeNormalization;
+            "개념".nfd().collect()
+        };
+        std::fs::write(concepts.join(format!("{decomposed}.md")), "# 개념\n").unwrap();
+        std::fs::write(concepts.join("cites.md"), "# Cites\n\n[개념](개념.md)\n").unwrap();
+
+        let pages = scan_vault(tmp.path(), false).unwrap();
+        let existence = VaultExistence::build(&pages, &VaultDirs::default());
+        let citer = pages
+            .iter()
+            .find(|p| p.id == "wiki/concepts/cites")
+            .unwrap();
+        assert!(
+            existence.is_resolvable(&citer.outgoing[0].dest),
+            "a composed link must resolve to the decomposed file it names"
         );
     }
 
