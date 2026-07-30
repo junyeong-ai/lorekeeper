@@ -54,7 +54,7 @@ pub fn build_map(
     let dest_of = |id: &str| link::relative_dest(&map_rel, &PathBuf::from(format!("{id}.md")));
 
     let mut out = String::new();
-    writeln!(out, "---\ntype: map\n---\n").unwrap();
+    writeln!(out, "---\ntype: {}\n---\n", lk_core::vault_path::MAP_FORMAT).unwrap();
     writeln!(out, "# {}", strings.map_title).unwrap();
     writeln!(out).unwrap();
     writeln!(out, "{}", strings.map_intro).unwrap();

@@ -11,14 +11,22 @@ use crate::config::VaultDirs;
 /// findings.
 pub const RESERVED_WIKI_FILES: [&str; 4] = ["index.md", "AGENTS.md", "log.md", "map.md"];
 
+/// The `type` the citation-cluster navigation map and the page-format schema declare. Named
+/// here rather than written inline at the two render sites, so the value a page carries and the
+/// value [`PAGE_FORMATS`] admits cannot drift apart. The catalog and the timeline declare no
+/// `type`; they are pure listings of pages that carry their own.
+pub const MAP_FORMAT: &str = "map";
+pub const SCHEMA_FORMAT: &str = "schema";
+
 /// Every value the `type` frontmatter key takes on a page this tool writes — the page-format
 /// ids `lore schema` publishes, and OKF's one required key.
 ///
 /// A page therefore states its own provenance, which is what lets a directory be recognized as
 /// holding Lorekeeper's output rather than someone's own notes without guessing at content. The
 /// personal-module formats are included: whether they are PRODUCED depends on config, but a
-/// page carrying one was still written here.
-pub const PAGE_FORMATS: [&str; 10] = [
+/// page carrying one was still written here. So are the two generated wiki meta-pages, which
+/// are the only Lorekeeper output a wiki directory holding no concepts yet can be recognized by.
+pub const PAGE_FORMATS: [&str; 12] = [
     "concept",
     "daily",
     "document",
@@ -29,6 +37,8 @@ pub const PAGE_FORMATS: [&str; 10] = [
     "monthly-review",
     "quarterly-review",
     "annual-review",
+    MAP_FORMAT,
+    SCHEMA_FORMAT,
 ];
 
 /// Fixed subdirectory names within the configurable top-level vault dirs. The
