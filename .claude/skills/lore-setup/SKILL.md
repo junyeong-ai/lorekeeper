@@ -11,8 +11,8 @@ allowed-tools: |
   Bash(slack-cli *)
   Bash(atlassian-cli *)
   Bash(gws *)
-  Bash(lore validate)
-  Bash(lore ingest --dry-run *)
+  Bash(jq *)
+  Bash(lore *)
   Bash(ls *)
   Read
   Edit
@@ -40,8 +40,9 @@ channel IDs, project keys, and custom-field IDs.
    `./config.yaml` (repo) or `~/.config/lorekeeper/config.yaml`
    (binary install). If a file already exists, merge the source block
    only — never overwrite.
-4. **Validate** — `lore validate` then `lore ingest --dry-run` to
-   verify auth and extraction.
+4. **Validate** — `lore validate`, then `lore schema` if it warns that AGENTS.md is missing
+   or out of date (every page-writing skill hard-depends on that file), then
+   `lore ingest --dry-run` to verify auth and extraction.
 
 ## Design principles
 

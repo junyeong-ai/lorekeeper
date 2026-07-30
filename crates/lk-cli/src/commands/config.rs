@@ -17,6 +17,15 @@ pub enum ConfigCommand {
     /// location and the config file is itself auto-discovered. Without this they assume the
     /// default `wiki`, and on a vault configured otherwise they look in the wrong place, find
     /// nothing, run `lore schema`, and look in the wrong place again.
+    /// Print the configured concept categories, one `id\tlabel` per line, and nothing else.
+    ///
+    /// A category outside this vocabulary is a lint VIOLATION, so every skill that creates a
+    /// concept page needs the list — and the same skills are told not to read `config.yaml`,
+    /// because a relative `vault.root` resolves against the config file's own directory and the
+    /// file itself is auto-discovered. Without this they guess, and a guess fails the pipeline on
+    /// the page the run just wrote. `lore wiki concepts` cannot stand in: it reports the
+    /// categories already in USE, so a vocabulary entry nothing has used yet is invisible there.
+    Categories,
     SchemaPath {
         /// Vault root override, like `lore schema --root` — so the two agree about where
         /// AGENTS.md is for the vault the caller means, not only for the configured one.
@@ -30,6 +39,13 @@ pub async fn run(opts: &super::GlobalOptions, cmd: ConfigCommand) -> miette::Res
         ConfigCommand::VaultRoot => {
             let config = load_config(&find_config(opts)?)?;
             println!("{}", config.vault.root_path().display());
+            Ok(())
+        }
+        ConfigCommand::Categories => {
+            let config = load_config(&find_config(opts)?)?;
+            for category in &config.concepts.categories {
+                println!("{}\t{}", category.id, category.label);
+            }
             Ok(())
         }
         ConfigCommand::SchemaPath { root } => {

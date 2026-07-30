@@ -473,12 +473,18 @@ impl VaultConfig {
     /// vault location is anchored to the config file, not to the process CWD.
     pub(crate) fn resolve_relative_to(&mut self, base: &Path) {
         let expanded = expand_tilde(&self.root);
-        if expanded.is_relative() {
-            let absolute = base.join(&expanded);
-            self.root = absolute.to_string_lossy().into_owned();
+        let absolute = if expanded.is_relative() {
+            base.join(&expanded)
         } else {
-            self.root = expanded.to_string_lossy().into_owned();
-        }
+            expanded
+        };
+        // Folded lexically, not canonicalized: `vault.root: ./vault` joined onto the config's
+        // directory yields `…/base/./vault`, which is absolute and works but is a SECOND spelling
+        // of one path. `lore config vault-root` and `schema-path` are contracts a script or a
+        // skill reads and passes on, and two spellings of the same vault fail a string compare.
+        // Canonicalizing instead would resolve symlinks and fail outright on a vault that does
+        // not exist yet, which is the first run.
+        self.root = fold_current_dir(&absolute).to_string_lossy().into_owned();
     }
 
     pub fn timezone(&self) -> jiff::tz::TimeZone {
@@ -1195,6 +1201,16 @@ pub fn expand_tilde(path: &str) -> PathBuf {
         return PathBuf::from(home).join(rest);
     }
     PathBuf::from(path)
+}
+
+/// Drop `.` components from an absolute path, leaving every other component untouched.
+///
+/// `..` is deliberately NOT folded: resolving it lexically changes which directory a path names
+/// when a symlink is involved, and this runs on a path that may not exist yet.
+fn fold_current_dir(path: &Path) -> PathBuf {
+    path.components()
+        .filter(|component| !matches!(component, std::path::Component::CurDir))
+        .collect()
 }
 
 #[cfg(test)]

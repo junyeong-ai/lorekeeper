@@ -4,7 +4,7 @@ version: 0.16.1
 description: Semantic wiki operations for the Lorekeeper vault. Add sources, query with compounding, audit structural and semantic health. Reads AGENTS.md for page formats and section vocabulary — never hardcodes headings. Pairs with `lore` (the deterministic binary) for graph analysis and queue processing.
 when_to_use: |
   wiki query, knowledge search, ask wiki, search vault,
-  wiki add, add to wiki, ingest from URL, ingest from file,
+  wiki add, add to wiki, ingest from file, ingest from folder,
   wiki audit, lint wiki, check wiki health, wiki status
 argument-hint: "<command> [args]"
 allowed-tools: |
@@ -41,7 +41,9 @@ If AGENTS.md is missing, run `lore schema` first.
 
 ### `/lore-wiki add <source>`
 
-Manual ad-hoc ingest of a URL, file, **folder**, or pasted text. When given a
+Manual ad-hoc ingest of a file, **folder**, or pasted text. A URL is not one of them: no
+`lore` subcommand fetches one and this skill's tools cannot reach the network, so paste the
+content or save it to a file first. When given a
 folder path, scan it recursively for `.md`, `.txt`, and `.pdf` files, process
 each as an independent source, and report the aggregate results.
 
@@ -50,8 +52,11 @@ each as an independent source, and report the aggregate results.
 3. For EACH source, create a **document page** (per AGENTS.md): preserve the
    original content, set `document_type` from the format vocabulary AGENTS.md
    states (the source's nature goes in `tags`), and link the
-   extracted concepts as relative markdown links (`[Name](<concepts-dir>/<slug>.md)`,
-   per AGENTS.md § Links) in the related-concepts section.
+   extracted concepts as relative markdown links in the related-concepts section, in the
+   form AGENTS.md § Links defines — resolved against the CITING page's own directory, which is
+   what a template written here gets wrong: a literal `concepts/<slug>.md` on a document page
+   resolves to `<wiki>/documents/concepts/<slug>.md`, which `graph lint` reports broken and
+   whose citation never reaches the concept's `source_count`.
 4. Extract every named entity, technology, and topic as concepts (typically
    several per source). Converge each one through the **Concept convergence**
    section of the vault's `AGENTS.md` — which covers loading the
@@ -112,8 +117,11 @@ read it before running any layer.
 Quick vault stats.
 
 - Total concept pages, explorations, daily pages.
-- Last ingest time (read `<vault>/.lorekeeper/ingest.jsonl` — vault-relative; resolve the vault root with `lore config vault-root` first).
-- Any pending queue files.
+- Last ingest time per source: `lore status`. It reads that log and answers the question, so
+  hand-parsing `<vault>/.lorekeeper/ingest.jsonl` reimplements a summary that already exists —
+  including the rule that an empty run still counts as a collection.
+- Pending LLM work: `lore queue count` (a bare integer), and `lore queue status` when the
+  breakdown matters — it names each task's state, including one whose target page will not parse.
 
 ## When NOT to invoke
 

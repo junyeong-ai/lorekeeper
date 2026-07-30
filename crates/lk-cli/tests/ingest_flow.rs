@@ -299,3 +299,60 @@ fn a_dry_run_reports_the_event_count_it_would_write() {
     // page does, and the same reporting path prints both.
     assert!(stderr.contains("would write:"), "{stderr}");
 }
+
+/// A re-render EMPTIES a section whose answer nothing recorded, and says so BEFORE it writes.
+///
+/// This is the pipeline's own path — the task is enqueued again and a drain refills it — but the
+/// same state describes a body somebody wrote and never stamped, and the write is not
+/// reversible. `lore doctor` reports exactly that state and used to prescribe this re-render as
+/// the repair, so the loss happened by following the tool's own instructions, silently.
+#[test]
+fn a_re_render_names_the_unanswered_section_it_is_about_to_empty() {
+    let ws = Workspace::new("");
+    ws.drop_note(
+        "note.md",
+        "# Rollback\n\nThe only record of the rollback decision.\n",
+    );
+    assert!(ws.run(&["ingest"]).status.success());
+
+    // Fill the summary by hand and do NOT stamp — what an agent does when it cannot show the
+    // content came from this input, which is what `doctor` now tells it to do.
+    let page = ws.vault().join("wiki/documents/rollback.md");
+    let before = std::fs::read_to_string(&page).expect("page");
+    let heading = before
+        .lines()
+        .find(|line| line.starts_with("## "))
+        .expect("the page carries a section heading")
+        .to_owned();
+    std::fs::write(
+        &page,
+        before.replace(
+            &format!("{heading}\n"),
+            &format!("{heading}\n\nHAND WRITTEN: the only record of this decision.\n"),
+        ),
+    )
+    .expect("write");
+
+    // Re-drop the same note so the source can re-render the page.
+    ws.drop_note(
+        "note.md",
+        "# Rollback\n\nThe only record of the rollback decision.\n",
+    );
+    let out = ws.run(&["ingest"]);
+    let stderr = stderr_of(&out);
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("emptying an unanswered section"),
+        "the loss must be named before the write\n{stderr}"
+    );
+    assert!(
+        stderr.contains(heading.trim_start_matches("## ")),
+        "and it must name which section\n{stderr}"
+    );
+    assert!(
+        !std::fs::read_to_string(&page)
+            .expect("page")
+            .contains("HAND WRITTEN"),
+        "the body is gone — the point is that this was reported, not that it survived"
+    );
+}

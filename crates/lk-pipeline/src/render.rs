@@ -512,6 +512,7 @@ mod tests {
             hash: "h".into(),
             cached: true,
             preserved_body: Some(body.into()),
+            discarding: None,
         }
     }
 
@@ -520,6 +521,7 @@ mod tests {
             hash: "h".into(),
             cached: false,
             preserved_body: None,
+            discarding: None,
         }
     }
 

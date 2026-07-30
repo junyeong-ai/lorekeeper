@@ -18,7 +18,10 @@ one issue and inspect its date fields:
 ```bash
 atlassian-cli jira get <ISSUE-KEY> | grep -i -A2 "start date"
 ```
-(`jira get` returns all fields by default — there is no `--fields` flag on `get`.)
+(`jira get` takes `--fields`, and its DEFAULT is an essential subset plus whatever custom
+fields are configured — so a custom field nobody configured is absent unless you pass
+`--fields '*all'`. Note the response names keys as `customfield_NNNNN`, not by label, so grepping
+for a human name may find nothing even then; `--expand names` is what maps them.)
 Put the id you find in `start_date_field`. Omit it if there is none (the start date just
 won't be shown).
 

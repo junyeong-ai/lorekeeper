@@ -23,7 +23,7 @@ Inspect the category distribution of unread mail to gauge the noise:
 ```bash
 for c in primary promotions updates social forums; do
   n=$(gws gmail users messages list --params "{\"userId\":\"me\",\"q\":\"is:unread category:$c\",\"maxResults\":1}" 2>/dev/null \
-       | python3 -c "import sys,json;print(json.load(sys.stdin).get('resultSizeEstimate','?'))" 2>/dev/null)
+       | jq -r '.resultSizeEstimate // "?"' 2>/dev/null)
   echo "$c: $n"
 done
 ```

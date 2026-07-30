@@ -175,7 +175,7 @@ impl VaultViews {
         let existence = VaultExistence::build(&scanned, dirs);
         let excluded = Excludes::compile(&graph.scope.exclude)?;
 
-        let managed = page_dirs(root, dirs);
+        let managed = page_dirs(dirs);
         let in_scope = |page: &ScannedPage, scope: &[PathBuf]| {
             scope.iter().any(|dir| under(&page.id, dir)) && !excluded.matches(&page.path)
         };
@@ -225,6 +225,19 @@ fn resolve_dir(root: &Path, dir: &Path) -> Result<PathBuf, GraphError> {
             continue;
         };
         let name = segment.to_string_lossy();
+        // The configured path resolving IS the answer, and nothing beside it can make it
+        // ambiguous: reads and writes both go to this directory, so the vault works. Asking a
+        // further question here is what made an empty `.daily` — a directory the scan refuses to
+        // look inside — remove the whole `daily/` tree from the checked set, and `graph broken`
+        // report 0 on a vault with dead links.
+        let exact = at.join(&*name);
+        if exact.is_dir() {
+            at = exact;
+            continue;
+        }
+        // It does not resolve, so the analysis would be empty. A directory the FILESYSTEM would
+        // call the same name is worth naming — that is a vault split in half, pages under one
+        // spelling and the catalog written under the other. Anything else is a typo.
         let siblings: Vec<String> = std::fs::read_dir(&at)
             .into_iter()
             .flatten()
@@ -232,61 +245,39 @@ fn resolve_dir(root: &Path, dir: &Path) -> Result<PathBuf, GraphError> {
             .filter(|entry| entry.path().is_dir())
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect();
-        match match_segment(&siblings, &name) {
-            SegmentMatch::None => return Err(GraphError::ScanDirNotFound(root.join(dir))),
-            SegmentMatch::Ambiguous(a, b) => {
-                return Err(GraphError::DirSpelling {
+        return match match_segment(&siblings, &name) {
+            SegmentMatch::None => Err(GraphError::ScanDirNotFound(root.join(dir))),
+            SegmentMatch::One(found) | SegmentMatch::Ambiguous(found, _) => {
+                Err(GraphError::DirSpelling {
                     configured: dir.to_path_buf(),
-                    on_disk: PathBuf::from(format!("{a} / {b}")),
-                });
+                    on_disk: PathBuf::from(found),
+                })
             }
-            SegmentMatch::One(found) => {
-                if found != name && !at.join(&*name).is_dir() {
-                    return Err(GraphError::DirSpelling {
-                        configured: dir.to_path_buf(),
-                        on_disk: PathBuf::from(found),
-                    });
-                }
-                at = at.join(found);
-            }
-        }
+        };
     }
     Ok(at)
 }
 
-/// Which directory a configured name reaches, given the directory names beside it.
+/// Which directory a configured name reaches when the configured path itself does not resolve.
 ///
-/// Pure so the RULE can be tested where the filesystem cannot be: the interesting cases only
-/// arise where two spellings stay apart, which the development machine folds.
+/// Pure, so the rule can be tested where the filesystem cannot say it: the cases that matter
+/// only arise where two spellings stay apart, which the development machine folds.
+///
+/// Compared with [`lk_core::fs::names_fold_together`] — case and Unicode normalization, the
+/// union of what the filesystems this ships to collapse. NOT `slugify`, which is the CONCEPT
+/// name rule: it folds every run of non-alphanumerics too, so it called `daily_`, `daily-` and
+/// `.daily` spellings of `daily` — names no filesystem confuses.
 #[derive(Debug, PartialEq, Eq)]
 enum SegmentMatch {
     None,
-    /// Exactly one directory answers to the name — under folding, so it may be spelled
-    /// differently from the configured one.
     One(String),
-    /// Two directories answer to it. Nothing can choose between them: the pages under one would
-    /// be analysed while a catalog is written under the other.
     Ambiguous(String, String),
 }
 
 fn match_segment(siblings: &[String], want: &str) -> SegmentMatch {
-    if siblings.iter().any(|s| s == want) {
-        // An exact match still loses to a second folded spelling: `wiki/` beside `Wiki/` on a
-        // filesystem that keeps them apart is two directories answering to one configured name.
-        if let Some(other) = siblings
-            .iter()
-            .find(|s| *s != want && slugify(s) == slugify(want))
-        {
-            return SegmentMatch::Ambiguous(want.to_owned(), other.clone());
-        }
-        return SegmentMatch::One(want.to_owned());
-    }
-    let Some(wanted) = slugify(want) else {
-        return SegmentMatch::None;
-    };
     let mut folded = siblings
         .iter()
-        .filter(|s| slugify(s).as_deref() == Some(&wanted));
+        .filter(|s| lk_core::fs::names_fold_together(s, want));
     match (folded.next(), folded.next()) {
         (None, _) => SegmentMatch::None,
         (Some(one), None) => SegmentMatch::One(one.clone()),
@@ -296,10 +287,13 @@ fn match_segment(siblings: &[String], want: &str) -> SegmentMatch {
 
 /// Every vault-relative page directory that exists on disk — anything this tool writes a page
 /// into. Missing directories are skipped so a partially-populated vault doesn't error out.
-fn page_dirs(root: &Path, dirs: &VaultDirs) -> Vec<PathBuf> {
+fn page_dirs(dirs: &VaultDirs) -> Vec<PathBuf> {
+    // Every one of them, unconditionally. Membership is decided by `under` over page ids, so a
+    // directory the vault has not created yet simply matches nothing — while a filesystem check
+    // here could DROP a directory that does exist, and dropping `daily` takes every link written
+    // on a daily page out of the checked set without saying so.
     [&dirs.wiki, &dirs.daily, &dirs.personal, &dirs.synthesis]
         .iter()
-        .filter(|name| resolve_dir(root, Path::new(name.as_str())).is_ok())
         .map(|s| PathBuf::from(s.as_str()))
         .collect()
 }
@@ -757,44 +751,40 @@ mod tests {
     }
 
     #[test]
-    fn one_configured_name_must_reach_one_directory() {
+    fn only_a_name_a_filesystem_could_confuse_answers_for_another() {
         // The rule, tested where the filesystem cannot say it: this machine folds `wiki` onto
-        // `Wiki`, so a vault holding both as SEPARATE directories cannot be built here — and
-        // that is exactly the vault the verdict is about.
+        // `Wiki`, so a vault holding both as SEPARATE directories cannot be built here.
+        //
+        // `slugify` was the wrong comparison and cost the most: it folds every run of
+        // non-alphanumerics, so an empty `.daily` — a directory the scan refuses to look inside —
+        // read as a rival spelling of the daily page dir, took `daily` out of the checked set,
+        // and `graph broken` reported 0 on a vault with dead links.
         let dirs = |v: &[&str]| v.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
 
-        assert_eq!(
-            match_segment(&dirs(&["wiki", "daily"]), "wiki"),
-            SegmentMatch::One("wiki".into())
-        );
+        for imposter in [".daily", "daily_", "daily-", "_daily", "daily.md", "dai-ly"] {
+            assert_eq!(
+                match_segment(&dirs(&[imposter]), "daily"),
+                SegmentMatch::None,
+                "{imposter} is a different name to every filesystem"
+            );
+        }
         assert_eq!(
             match_segment(&dirs(&["Wiki", "daily"]), "wiki"),
             SegmentMatch::One("Wiki".into()),
-            "one directory under a spelling the config folds onto"
-        );
-        assert_eq!(match_segment(&dirs(&["daily"]), "wiki"), SegmentMatch::None);
-        assert_eq!(
-            match_segment(&dirs(&["wiki", "Wiki"]), "wiki"),
-            SegmentMatch::Ambiguous("wiki".into(), "Wiki".into()),
-            "an exact match does not settle it while a second spelling also answers"
+            "case is folded by APFS and NTFS"
         );
         assert_eq!(
             match_segment(&dirs(&["Wiki", "WIKI"]), "wiki"),
             SegmentMatch::Ambiguous("Wiki".into(), "WIKI".into())
         );
-        assert_eq!(
-            match_segment(&dirs(&["wikipedia"]), "wiki"),
-            SegmentMatch::None,
-            "folding is not prefix matching"
-        );
+        assert_eq!(match_segment(&dirs(&["daily"]), "wiki"), SegmentMatch::None);
+        assert_eq!(match_segment(&dirs(&[]), "wiki"), SegmentMatch::None);
     }
 
     #[test]
     fn a_configured_directory_is_resolved_the_way_the_filesystem_answers() {
-        // Which outcome is right is a property of the FILESYSTEM, so ask it. Where both
-        // spellings reach one directory the vault works and its pages are analysed; where they
-        // are kept apart the vault is split — pages under one name, the catalog written under
-        // the other — and running is worse than refusing.
+        // Where both spellings reach one directory the vault works and its pages are analysed;
+        // where they are kept apart the vault is split and running is worse than refusing.
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("Wiki/concepts")).unwrap();
         std::fs::write(tmp.path().join("Wiki/concepts/x.md"), "# X\n").unwrap();
@@ -817,9 +807,35 @@ mod tests {
         } else {
             assert!(
                 matches!(resolved, Err(GraphError::DirSpelling { .. })),
-                "two directories must be refused, naming both spellings"
+                "two directories must be refused, naming the spelling on disk"
             );
         }
+    }
+
+    #[test]
+    fn a_sibling_no_filesystem_confuses_leaves_the_page_dirs_alone() {
+        // The regression this replaces: an empty `.daily` beside `daily/` dropped every page
+        // under `daily/` from the set whose links are checked, silently.
+        let tmp = tempfile::tempdir().unwrap();
+        for dir in ["wiki/concepts", "daily/notes", ".daily", "daily_", "_daily"] {
+            std::fs::create_dir_all(tmp.path().join(dir)).unwrap();
+        }
+        std::fs::write(
+            tmp.path().join("daily/notes/2026-05-24.md"),
+            "# Day\n\n[Ghost](../../wiki/concepts/ghost.md)\n",
+        )
+        .unwrap();
+
+        let mut config = GraphConfig::default();
+        config.scope.dirs = vec![PathBuf::from("wiki")];
+        let views = VaultViews::resolve(tmp.path(), &config, &VaultDirs::default()).unwrap();
+        assert!(
+            views
+                .link_sources
+                .iter()
+                .any(|p| p.id == "daily/notes/2026-05-24"),
+            "the daily page is still this tool's to check"
+        );
     }
 
     #[test]

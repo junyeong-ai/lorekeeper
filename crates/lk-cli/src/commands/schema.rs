@@ -360,14 +360,18 @@ pub fn render_agents_md(
     writeln!(
         out,
         "Pages with an LLM-owned section also carry an `llm_inputs` frontmatter block, and it \
-         is a two-part contract, not an opaque cache. `lore ingest` records `<key>` — the hash \
-         of the input it enqueued — and whoever ANSWERS the section records `<key>_done` with \
+         is a two-part contract, not an opaque cache. `lore ingest` and `lore synthesis` record \
+         `<key>` — the hash of the input enqueued — and whoever ANSWERS the section records \
+         `<key>_done` with \
          that same hash. A section counts as answered only when the two are EQUAL; a non-empty \
          body never signals it, because a section can be legitimately empty (an extraction that \
          found nothing, a focus-filtered summary), and inferring completion from content would \
          re-enqueue every such result forever. So: never touch a `<key>` input hash, and stamp \
-         `<key>_done` when you fill the section it belongs to — `lore doctor` reports a page \
-         where they disagree. The one exception is `concepts_done`: that section and its marker \
+         `<key>_done` when you fill the section it belongs to. Stamping is not bookkeeping: a \
+         section whose marker does not match its input is ANSWERED AGAIN by the next render, \
+         which writes it EMPTY and re-queues it — so an unstamped body is lost the next time \
+         `lore ingest` or `lore synthesis` touches the page. `lore doctor` lists the pages in \
+         that state. The one exception is `concepts_done`: that section and its marker \
          are both written by `lore queue apply`, and stamping it by hand claims an empty \
          section is answered, which loses the extraction permanently. A page you create \
          directly has no pipeline behind it and omits the whole block."

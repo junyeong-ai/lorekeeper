@@ -116,7 +116,10 @@ in this capture as the created-this-run set. Then:
 1. New → create with a 1-2 sentence synthesis in the Synthesis section
    (heading from AGENTS.md).
 2. Existing → update `updated` and enrich the synthesis if warranted.
-3. Assign category from config.yaml `concepts.categories`.
+3. Assign a category from `lore config categories` (one `id\tlabel` per line) — never read
+   `config.yaml` yourself, for the same reason `vault.root` is not read there. A category
+   outside that vocabulary is a lint violation on the page you just wrote; if none fits, omit
+   the field rather than forcing one.
 
 The sources section / `source_count` stay machine-owned (AGENTS.md § Concept convergence) —
 `backlinks-sync` re-derives both in step 6 from the document's forward link

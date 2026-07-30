@@ -246,6 +246,15 @@ pub async fn run(
             eprintln!("  concepts: {}", result.concepts.len());
         }
 
+        // A section whose answer nothing recorded is about to be replaced with an empty one. The
+        // pipeline re-enqueues it, so for its own output this is routine — but the same state
+        // describes a body written by hand or by a drain that never stamped, and the write is not
+        // reversible. Said before the write, so `lore doctor`'s remediation cannot cost prose
+        // silently the way it did.
+        for section in &result.discarded {
+            eprintln!("  ! emptying an unanswered section: {section}");
+        }
+
         if dry_run {
             for out in &result.daily_pages {
                 eprintln!(

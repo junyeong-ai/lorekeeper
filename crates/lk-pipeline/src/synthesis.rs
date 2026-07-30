@@ -57,6 +57,7 @@ impl SynthesisSection {
                 hash: String::new(),
                 cached: false,
                 preserved_body: None,
+                discarding: None,
             },
             narrative: None,
         }

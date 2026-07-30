@@ -4,5 +4,5 @@ expression: "observe(staged.path(), argv)"
 ---
 exit: 0
 --- stdout ---
-<staged>/corpus/./vault
+<staged>/corpus/vault
 --- stderr ---

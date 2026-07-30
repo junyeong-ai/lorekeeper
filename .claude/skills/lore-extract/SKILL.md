@@ -6,7 +6,7 @@ when_to_use: |
   lore extract, batch extract, extract project knowledge,
   docs to vault, extract ADRs, extract learnings, repo knowledge,
   project knowledge extraction, harvest docs, scan project
-argument-hint: "scan|run|audit <repo-path> [--domain <name>] [--include-git]"
+argument-hint: "scan|run|audit <repo-path> [--domain <name>] [--transferability T1|T2|T3] [--include-git]"
 allowed-tools: |
   Bash(lore *)
   Bash(ls *)
@@ -151,8 +151,10 @@ Discover knowledge sources and persist a manifest.
 6. Infer `strip_patterns` from project config/README (project names,
    GCP project IDs, internal URLs).
 
-7. Infer `concept_mapping` from discovered tags → vault categories
-   (read categories from `config.yaml`).
+7. Infer `concept_mapping` from discovered tags → vault categories. Read the vocabulary
+   with `lore config categories` (one `id\tlabel` per line) — never out of `config.yaml`, for
+   the same reason `vault.root` is not read there. A category outside it is a lint violation on
+   the page this run writes; if none fits, omit the field.
 
 8. **Persist manifest** to `<vault>/.lorekeeper/extracts/<project>/`.
 

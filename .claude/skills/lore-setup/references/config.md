@@ -22,7 +22,7 @@ ingest:
 
 sources:                             # key = source id = <daily>/{id}/ directory name
   <id>:
-    type: gmail | google-calendar | google-drive | slack-channel | slack-search | jira | rss | manual
+    type: gmail | google-calendar | google-drive | slack-channel | slack-search | jira | confluence | rss | manual
     enabled: true
     params: { ... }                  # per-type (see each reference)
     focus: "..."                     # optional natural-language relevance filter (LLM-applied)
@@ -52,7 +52,7 @@ llm: {provider: queue}
 
 ## Location / validation
 - `./config.yaml` (repo) or `~/.config/lorekeeper/config.yaml` (binary install). Also
-  selectable via `--config` / `LORE_CONFIG`. It cannot live inside the vault (the vault
+  selectable via `--config` / `LORE_CONFIG`. It should not live inside the vault (the vault
   path is defined inside the config — that would be circular).
 - After writing, always verify with `lore validate` → `lore ingest --dry-run`.
 - If a config already exists, merge only the relevant source block — never overwrite the whole file.

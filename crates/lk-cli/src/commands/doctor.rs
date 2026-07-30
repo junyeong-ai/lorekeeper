@@ -104,6 +104,13 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
              \x20                          reason the marker exists. Stamp only what you can show.\n\
              \x20 the input is not a string  nothing can equal it; only a re-render restores the pair.\n\
              \n\
+             A re-render EMPTIES the section. Nothing recorded an answer for the input the page\n\
+             now carries, so there is nothing to splice back — the task is enqueued again and a\n\
+             drain writes the section from scratch. If the section holds something already, that\n\
+             is exactly the case this report cannot tell from an unanswered one, and rewriting\n\
+             the page is not reversible: copy the body out first. `lore ingest` names each\n\
+             section it is about to empty before it writes.\n\
+             \n\
              Re-rendering costs more than it looks. `lore ingest --date <date>` re-renders EVERY\n\
              daily page for that date from a fresh fetch BEFORE it reaches the work-log, and a\n\
              source whose window has passed returns fewer events than the page holds — so\n\

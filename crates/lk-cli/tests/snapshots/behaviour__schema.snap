@@ -5,4 +5,4 @@ expression: "observe(staged.path(), argv)"
 exit: 0
 --- stdout ---
 --- stderr ---
-Wrote <staged>/corpus/./vault/wiki/AGENTS.md
+Wrote <staged>/corpus/vault/wiki/AGENTS.md

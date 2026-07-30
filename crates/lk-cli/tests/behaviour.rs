@@ -33,6 +33,7 @@ const SWEEP: &[&[&str]] = &[
     &["validate"],
     &["config", "vault-root"],
     &["config", "schema-path"],
+    &["config", "categories"],
     &["status"],
     &["health"],
     &["doctor"],

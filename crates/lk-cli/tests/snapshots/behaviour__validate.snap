@@ -6,7 +6,7 @@ exit: 0
 --- stdout ---
 --- stderr ---
 Config valid: <staged>/corpus/config.yaml
-  vault: <staged>/corpus/./vault
+  vault: <staged>/corpus/vault
   timezone: Some("UTC")
   sources (0): 
   warning: wiki/AGENTS.md is missing or out of date; run `lore schema` to regenerate

@@ -149,6 +149,10 @@ stale. A daily run is `lore ingest` → `/lore-process`, not `lore ingest` alone
   later, kept 10. So it repairs a page whose source can still reproduce it, and truncates one
   whose source cannot. `--dry-run` reports the event count it would write; compare that
   against the count the page states before running it for real.
-- The LLM-owned sections (a summary, refined events, concept links) survive a re-render —
-  they are spliced through from the page on disk — so what a re-ingest can lose is the
-  structural half: the event list.
+- An LLM-owned section (a summary, refined events, concept links) survives a re-render only
+  while its `llm_inputs.<key>_done` marker matches the input the render computes. That is the
+  ordinary case, and the section is spliced through from the page on disk. Where the marker is
+  absent or stale the section is ANSWERED AGAIN, which means it is written empty and re-queued
+  — so a body nobody recorded (written by hand, or by a drain that did not stamp) is lost.
+  `lore ingest` names each section it is about to empty before it writes; `lore doctor` lists
+  the pages in that state.

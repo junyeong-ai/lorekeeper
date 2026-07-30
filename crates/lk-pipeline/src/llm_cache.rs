@@ -48,6 +48,15 @@ pub struct SectionDecision {
     /// `cached`. Stripped of section framing whitespace so it can be handed to
     /// `replace_section`.
     pub preserved_body: Option<String>,
+    /// The section held content that this render will REPLACE with an empty one.
+    ///
+    /// Only ever true on a cache miss, which is the pipeline's normal path: the section is
+    /// re-enqueued and a drain fills it again. It matters because a miss also describes a
+    /// section somebody answered without recording it — a body written by hand, or by a drain
+    /// that never stamped — and that content is not recoverable once the page is rewritten.
+    /// Reported rather than inferred, so a caller can say what it is about to discard instead of
+    /// leaving it to be noticed afterwards.
+    pub discarding: Option<String>,
 }
 
 impl SectionDecision {
@@ -87,6 +96,11 @@ pub fn lookup(
             hash,
             cached: false,
             preserved_body: None,
+            discarding: existing
+                .and_then(|page| section_body(&page.body, heading))
+                .map(str::trim)
+                .filter(|body| !body.is_empty())
+                .map(str::to_owned),
         };
     }
 
@@ -105,6 +119,7 @@ pub fn lookup(
             hash,
             cached: false,
             preserved_body: None,
+            discarding: None,
         };
     };
 
@@ -112,6 +127,7 @@ pub fn lookup(
         hash,
         cached: true,
         preserved_body: Some(body.trim_matches('\n').to_string()),
+        discarding: None,
     }
 }
 

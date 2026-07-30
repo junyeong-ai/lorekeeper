@@ -511,14 +511,15 @@ async fn count(opts: &super::GlobalOptions, root: Option<PathBuf>) -> miette::Re
     let vault_root = resolve_vault_root(opts, root)?;
     let queue_dir = vault_root.join(".lorekeeper").join("queue");
     let mut current = 0usize;
-    let mut blocked = 0usize;
+    let mut unreadable = 0usize;
+    let mut unparseable = 0usize;
     for file in pending_queue_files(&queue_dir)? {
         let read = read_tasks(&file)?;
-        blocked += read.unparseable;
+        unparseable += read.unparseable;
         for task in read.tasks {
             match classify_task(&vault_root, &task)? {
                 s if s.is_work() => current += 1,
-                TaskStatus::Unreadable => blocked += 1,
+                TaskStatus::Unreadable => unreadable += 1,
                 _ => {}
             }
         }
@@ -527,10 +528,19 @@ async fn count(opts: &super::GlobalOptions, root: Option<PathBuf>) -> miette::Re
     // classify is not one of them — spending a session on it would help nothing — but reporting
     // only the number leaves a queue that is BLOCKED indistinguishable from one that is empty,
     // and the scheduled drain reads exactly this number to decide whether to run.
-    if blocked > 0 {
+    // Named separately because the repairs differ: an unreadable task points at a page whose
+    // frontmatter needs fixing, while an unparseable LINE decoded no target at all — there is
+    // nothing to look the page up by, and only the queue file itself can be repaired.
+    if unreadable > 0 {
         eprintln!(
-            "warning: {blocked} task(s) cannot be classified — their target pages will not \
-             parse. `lore queue status` names them; they stay pending until a page is repaired."
+            "warning: {unreadable} task(s) name a target page that will not parse — \
+             `lore queue status` names them; they stay pending until the page is repaired."
+        );
+    }
+    if unparseable > 0 {
+        eprintln!(
+            "warning: {unparseable} queue line(s) could not be parsed, so the work they name is \
+             unknown — their file is left whole for repair by hand."
         );
     }
     println!("{current}");
@@ -818,12 +828,24 @@ async fn prune(
     // frontmatter — and nothing else in a scheduled run reports it: `queue count` deliberately
     // omits it from the drain decision so a session is never spent on work no session can do,
     // which leaves the janitor as the only place it can surface.
-    if summary.kept_unreadable > 0 {
-        eprintln!(
-            "{} task(s) kept because their target page will not parse — repair the page and \
-             they become drainable again; `lore queue status` names them.",
-            summary.kept_unreadable
-        );
+    // Either kind leaves work nothing can drain, and both need a human — the target page's
+    // frontmatter, or the queue line itself. Reporting one and not the other left the janitor
+    // green over a queue it had just described as blocked.
+    if summary.kept_unreadable > 0 || summary.kept_unparseable > 0 {
+        if summary.kept_unreadable > 0 {
+            eprintln!(
+                "{} task(s) kept because their target page will not parse — repair the page and \
+                 they become drainable again; `lore queue status` names them.",
+                summary.kept_unreadable
+            );
+        }
+        if summary.kept_unparseable > 0 {
+            eprintln!(
+                "{} queue line(s) could not be parsed, so their file is kept whole — repair it \
+                 by hand; nothing can tell what work they named.",
+                summary.kept_unparseable
+            );
+        }
         std::process::exit(1);
     }
     Ok(())

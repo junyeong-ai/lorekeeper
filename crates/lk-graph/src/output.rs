@@ -133,7 +133,10 @@ impl IndexSyncReport {
         } = self;
         // `stale` is the verdict and the lists are its explanation, so a catalog stale in a way
         // neither list names still counts once.
-        missing_from_index.len().max(usize::from(*stale)) + missing_from_disk.len()
+        // `stale` is the verdict for the whole channel and the lists are its explanation: a
+        // catalog stale in a way neither list names counts once, and one they DO name counts
+        // what they name — folding the flag into either list would count it twice.
+        (missing_from_index.len() + missing_from_disk.len()).max(usize::from(*stale))
     }
 }
 
