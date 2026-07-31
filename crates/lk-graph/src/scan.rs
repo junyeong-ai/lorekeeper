@@ -401,40 +401,49 @@ impl VaultExistence {
         let mut paths = HashSet::with_capacity(pages.len());
         let mut knowledge = HashSet::with_capacity(pages.len());
         for page in pages {
-            paths.insert(rel_str(&page.path));
+            paths.insert(lk_core::fs::fold_name(&rel_str(&page.path)));
             if !is_reserved(page.id.as_str()) {
                 knowledge.insert(page.id.clone());
             }
         }
 
-        let mut linked = HashSet::new();
-        for page in pages {
-            if is_reserved(page.id.as_str()) {
-                continue;
-            }
-            // Same rule as `reached`, inline because `paths` is what is being built: a link
-            // whose address is not a file reaches nothing, so it connects nothing.
-            for link in &page.outgoing {
-                let Some(id) = link.id.as_ref().filter(|_| paths.contains(&link.dest)) else {
-                    continue;
-                };
-                if *id != page.id && knowledge.contains(id) {
-                    linked.insert(id.clone());
-                }
-            }
-        }
-
-        Self {
+        // Connectivity asks the same question `reached` answers, so it asks `reached` — a
+        // second spelling of the rule here is a second answer to "what does this link reach",
+        // and the three consumers that disagreed over exactly that is what the rule exists to
+        // prevent. Collected first because reading it borrows the set being filled.
+        let mut existence = Self {
             paths,
             knowledge,
-            linked,
-        }
+            linked: HashSet::new(),
+        };
+        existence.linked = pages
+            .iter()
+            .filter(|page| !is_reserved(page.id.as_str()))
+            .flat_map(|page| {
+                page.outgoing.iter().filter_map(|link| {
+                    let id = existence.reached(link)?;
+                    (id != page.id && existence.is_knowledge(id)).then(|| id.to_owned())
+                })
+            })
+            .collect();
+        existence
     }
 
     /// Whether a link's address names a file in the vault — a knowledge page or a generated
     /// catalog, both of which are files on disk.
+    ///
+    /// Compared under [`lk_core::fs::fold_name`], the rule the directory segments of an address
+    /// already resolve by: `wiki/concepts/foo.md` and a file stored as `.../Foo.md` are one file
+    /// on the filesystem this vault is most often edited on, and `cat` opens it at either
+    /// spelling. Answering the file segment exactly while the directory segments fold made one
+    /// address resolve two ways within a single path, so a link a reader can follow was reported
+    /// broken and the citation went uncounted. What the two spellings cost when the vault syncs
+    /// to a filesystem that keeps them apart is a violation with its own channel and its own
+    /// repair — `unnormalized` names the file, `address_collisions` names the pair — so folding
+    /// here does not hide it, and refusing to fold here would report it a second time under a
+    /// sentence that is false.
     pub fn is_resolvable(&self, dest: &str) -> bool {
-        self.paths.contains(dest)
+        self.paths.contains(&lk_core::fs::fold_name(dest))
     }
 
     /// The page a link actually REACHES: its id, and only when the address it names is a file.

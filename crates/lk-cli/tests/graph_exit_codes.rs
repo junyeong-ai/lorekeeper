@@ -351,11 +351,39 @@ fn a_page_with_unparseable_frontmatter_still_reports_its_broken_link() {
 }
 
 /// Existence is a question about a FILE, so it is asked of the path a link names — not of the
-/// page id that path slugifies to. Slugifying is lossy: `Bad_Name.md`, `BAD-NAME.md` and
-/// `bad--name.md` all share `bad-name`, so answering by id reports a destination that is dead in
+/// page id that path slugifies to. Slugifying is lossy: `Bad_Name.md`, `bad--name.md` and
+/// `bad name.md` all share `bad-name`, so answering by id reports a destination that is dead in
 /// Obsidian, dead on GitHub and dead in git as sound.
 #[test]
 fn a_link_to_a_destination_no_file_answers_exits_one() {
+    let ws = sound_vault();
+    ws.write(
+        "daily/notes/2026-05-24.md",
+        "---\nid: notes-2026-05-24\ntype: daily\ntitle: \"Notes\"\n\
+         created: 2026-05-24\nupdated: 2026-05-24\n---\n\n\
+         ## Related concepts\n\n- [Cited](../../wiki/concepts/Cited_Page.md)\n",
+    );
+
+    let out = ws.run(&["graph", "broken"]);
+    let stdout = String::from_utf8(out.stdout).expect("utf8");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "the file on disk is `cited.md`; no filesystem opens `Cited_Page.md`\n{stdout}"
+    );
+    assert!(stdout.contains("wiki/concepts/Cited_Page.md"), "{stdout}");
+}
+
+/// The other half of that rule: a spelling the FILESYSTEM answers to is not a dead destination.
+///
+/// `Cited.md` and `cited.md` are one file on APFS and NTFS — `cat` opens either — and the
+/// directory segments of an address already resolve by that same fold. Answering the file
+/// segment exactly made one address resolve two ways within a single path: a link a reader can
+/// follow was reported broken, and `backlinks-sync` left the citation out of the cited page's
+/// sources. What the two spellings cost on a filesystem that keeps them apart is a violation
+/// with its own channel and its own repair, asserted below, so folding here hides nothing.
+#[test]
+fn a_link_whose_case_the_filesystem_folds_is_not_broken() {
     let ws = sound_vault();
     ws.write(
         "daily/notes/2026-05-24.md",
@@ -366,12 +394,19 @@ fn a_link_to_a_destination_no_file_answers_exits_one() {
 
     let out = ws.run(&["graph", "broken"]);
     let stdout = String::from_utf8(out.stdout).expect("utf8");
-    assert_eq!(
-        out.status.code(),
-        Some(1),
-        "the file on disk is `cited.md`; nothing answers to `Cited.md`\n{stdout}"
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("0 broken link(s)"), "{stdout}");
+
+    // And the file whose name is not its own slug is still named, under the channel whose
+    // repair is renaming it.
+    let raw = ws.stdout(&["graph", "--json", "lint"]);
+    let parsed: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
+    assert!(
+        parsed["data"]["violations"]["broken"]
+            .as_array()
+            .is_some_and(|b| b.is_empty()),
+        "{raw}"
     );
-    assert!(stdout.contains("wiki/concepts/Cited.md"), "{stdout}");
 }
 
 /// Two files whose paths slugify to one page id. The id is the graph's node key, so one of them

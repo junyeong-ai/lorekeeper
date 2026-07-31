@@ -108,18 +108,28 @@ pub fn canonical_prefix(path: &Path) -> std::path::PathBuf {
     }
 }
 
-/// Whether two directory-entry names could be one file on some filesystem this ships to.
+/// The key two names share exactly when they could be one file on some filesystem this ships to.
 ///
 /// The filesystems differ on which names are distinct: ext4 keeps every byte sequence apart,
 /// APFS and NTFS fold case, APFS also folds Unicode normalization. So a name comparison that
 /// only lowercases ASCII answers for one of them — `Wiki`/`wiki` pairs, `Café`/`café` does not,
 /// and the NFC and NFD spellings of a Korean name do not, which is exactly the vocabulary this
-/// vault's directories are named in. Compared after Unicode case folding AND NFC, so the answer
-/// is the union of what any of them would collapse rather than one platform's.
-pub fn names_fold_together(a: &str, b: &str) -> bool {
+/// vault's directories are named in. Folded by Unicode case AND NFC, so the answer is the union
+/// of what any of them would collapse rather than one platform's — one answer for a vault that
+/// syncs between them, rather than a verdict that changes with the machine it ran on.
+///
+/// A key rather than only a predicate, so a set of addresses can be looked up in one hash
+/// instead of scanned pairwise. `/` is unaffected by either fold, so this applies to a whole
+/// path exactly as it does to one segment.
+pub fn fold_name(name: &str) -> String {
     use unicode_normalization::UnicodeNormalization;
-    let folded = |name: &str| name.to_lowercase().nfc().collect::<String>();
-    folded(a) == folded(b)
+    name.to_lowercase().nfc().collect()
+}
+
+/// Whether two directory-entry names could be one file on some filesystem this ships to.
+/// The predicate form of [`fold_name`]; both answer from the one rule.
+pub fn names_fold_together(a: &str, b: &str) -> bool {
+    fold_name(a) == fold_name(b)
 }
 
 #[cfg(test)]
