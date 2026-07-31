@@ -125,7 +125,7 @@ fn refuse_format_change(full: &Path, content: &str) -> Result<(), VaultError> {
 /// Two contracts, because a page is replaced for two different reasons. [`Self::write_page`]
 /// and [`Self::write_page_sync`] PUBLISH a page rendered from somewhere else — a template, a
 /// catalog derivation — and cannot know what occupies the path, so they carry
-/// [`refuse_format_change`]. [`Self::edit_page_sync`] rewrites a page from its own bytes, where
+/// a format guard. [`Self::edit_page_sync`] rewrites a page from its own bytes, where
 /// that question has no meaning: the content IS that page, transformed.
 pub struct VaultWriter {
     root: PathBuf,

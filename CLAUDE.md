@@ -44,10 +44,9 @@ templates/      Jinja2 markdown templates (.md.jinja), compiled into the binary
 ## Development
 
 ```bash
+scripts/check.sh                   # every gate CI runs, failing on the first that does
 cargo check                        # type check
-cargo clippy --workspace --all-targets -- -D warnings  # lint (must be clean; --all-targets covers tests)
 cargo fmt                          # format
-cargo nextest run --workspace      # tests
 lore validate                      # verify config.yaml + source params
 lore ingest ai-news                # run a single source
 lore schema                        # generate <wiki>/AGENTS.md
