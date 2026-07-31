@@ -43,6 +43,11 @@ channel IDs, project keys, and custom-field IDs.
 4. **Validate** — `lore validate`, then `lore schema` if it warns that AGENTS.md is missing
    or out of date (every page-writing skill hard-depends on that file), then
    `lore ingest --dry-run` to verify auth and extraction.
+   `lore schema` REPLACES `<wiki>/AGENTS.md` wholesale, and `validate` warns whenever the
+   file differs for any reason — including a hand edit, which the bytes cannot be told apart
+   from a generator change. It reports `Replaced` rather than `Wrote` when a file was there;
+   if the vault's copy carries anything hand-written, copy it out first, because the next run
+   of this step takes it.
 
 ## Design principles
 
