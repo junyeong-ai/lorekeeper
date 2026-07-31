@@ -12,8 +12,12 @@ allowed-tools: |
   Bash(atlassian-cli *)
   Bash(gws *)
   Bash(jq *)
-  Bash(lore *)
+  Bash(grep *)
   Bash(ls *)
+  Bash(lore validate)
+  Bash(lore schema)
+  Bash(lore config *)
+  Bash(lore ingest --dry-run *)
   Read
   Edit
   Write

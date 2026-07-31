@@ -15,6 +15,7 @@ allowed-tools: |
   Bash(mkdir *)
   Bash(lore *)
   Bash(date *)
+  Bash([ *)
   Read
   Edit
   Write

@@ -103,6 +103,101 @@ fn every_target_an_installer_asks_for_is_one_the_release_builds() {
     }
 }
 
+/// Every command a skill's own procedure spells is one its `allowed-tools` permits.
+///
+/// A skill runs under `claude -p` in the scheduled pipeline, where nothing can prompt: a command
+/// the procedure spells and the allowlist omits is simply DENIED mid-step. `lore-setup` declared
+/// nine tools and its own `references/jira.md` piped into `grep`, which was the step that finds
+/// the `start_date_field` id — so config discovery stopped there, unattended, with no way to ask.
+/// Two hand-kept lists in one file, which is what a gate is for.
+#[test]
+fn every_command_a_skill_spells_is_one_it_permits() {
+    // Shell builtins and control words. A procedure that leads with one of these is not naming a
+    // tool an allowlist can spell, which is itself the finding — `Bash(for *)` does not exist.
+    const NOT_A_TOOL: &[&str] = &[
+        "for", "do", "done", "if", "then", "fi", "else", "while", "case", "esac", "cd", "export",
+    ];
+
+    let mut denied: Vec<String> = Vec::new();
+    for dir in std::fs::read_dir(repo_root().join(".claude/skills"))
+        .expect("skills dir")
+        .flatten()
+        .filter(|e| e.path().is_dir())
+    {
+        let skill = dir.file_name().to_string_lossy().into_owned();
+        let manifest = read(&dir.path().join("SKILL.md"));
+        let frontmatter = manifest.split("---").nth(1).expect("skill frontmatter");
+        let permitted: Vec<String> = frontmatter
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("Bash("))
+            .filter_map(|rest| rest.strip_suffix(')'))
+            .map(|spec| spec.split_whitespace().next().unwrap_or(spec).to_owned())
+            .collect();
+        if permitted.is_empty() {
+            continue;
+        }
+
+        // The manifest and every reference file it ships with.
+        let mut bodies = vec![manifest.clone()];
+        let references = dir.path().join("references");
+        if references.is_dir() {
+            for entry in std::fs::read_dir(&references)
+                .expect("references")
+                .flatten()
+            {
+                bodies.push(read(&entry.path()));
+            }
+        }
+
+        for body in bodies {
+            for block in body.split("```bash").skip(1) {
+                let Some(code) = block.split("```").next() else {
+                    continue;
+                };
+                // A trailing `\\` continues the line, so the next one carries flags rather than
+                // a command; joining first is what keeps `--limit` from reading as a tool.
+                let joined = code.replace("\\\n", " ");
+                for line in joined.lines() {
+                    let line = line.trim().trim_start_matches("$ ");
+                    // A slash-command illustration is not a shell command.
+                    if line.is_empty() || line.starts_with('#') || line.starts_with('/') {
+                        continue;
+                    }
+                    // Every stage of a pipe or a `||`/`&&` chain is its own permission decision.
+                    for stage in line.split(["|", "&"].map(|s| s.chars().next().unwrap())) {
+                        let Some(argv0) = stage.split_whitespace().next() else {
+                            continue;
+                        };
+                        let argv0 = argv0.trim_start_matches('(');
+                        if NOT_A_TOOL.contains(&argv0) || argv0.contains('=') {
+                            denied.push(format!("{skill}: `{argv0}` is a shell builtin, which no allowlist entry can name — spell the step as a command"));
+                            continue;
+                        }
+                        if !argv0
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || "-_./[".contains(c))
+                        {
+                            continue;
+                        }
+                        if !permitted.iter().any(|tool| tool == argv0) {
+                            denied.push(format!(
+                                "{skill}: spells `{argv0}`, which its allowed-tools does not permit"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    denied.sort();
+    denied.dedup();
+    assert!(
+        denied.is_empty(),
+        "under `claude -p` an unpermitted step is denied, never prompted:\n  {}",
+        denied.join("\n  ")
+    );
+}
+
 /// The pipeline's `--allowedTools` covers every command the skills it runs declare needing.
 ///
 /// Nothing in `claude -p` can prompt, so a command the skill's protocol spells and this list
@@ -386,6 +481,34 @@ fn every_source_type_is_documented_and_exemplified() {
             );
         }
     }
+
+    // Where a source's pages LAND is one branch in the pipeline — `manual` writes documents,
+    // everything else writes a daily page — and `lore-ingest` stated it as a list of six
+    // adapters. `confluence` reached config.example.yaml, both READMEs and the setup skill's
+    // config reference while that sentence stayed at six, so the skill offered a source and then
+    // described a routing without it. A rule cannot fall behind; a list has to be gated, so the
+    // gate is that it stays a rule.
+    let routing = read(&root.join(".claude/skills/lore-ingest/SKILL.md"));
+    let sentence = routing
+        .lines()
+        .zip(routing.lines().skip(1))
+        .find(|(line, next)| {
+            line.contains("writes `<wiki>/documents/{slug}.md`")
+                || next.contains("writes `<daily>/{source-id}/DATE.md`")
+        })
+        .map(|(line, next)| format!("{line} {next}"))
+        .expect("lore-ingest states where each source's pages land");
+    let enumerated: Vec<String> = lk_core::config::SourceType::iter()
+        .map(|t| t.to_string())
+        .filter(|wire| wire != "manual")
+        .filter(|wire| sentence.to_lowercase().contains(wire.as_str()))
+        .collect();
+    assert!(
+        enumerated.is_empty(),
+        "lore-ingest's page-routing sentence names {enumerated:?} instead of stating the rule \
+         (`manual` writes documents, every other type writes a daily page) — a list of adapters \
+         goes stale the moment one is added, which is how `confluence` was left out"
+    );
 }
 
 /// The type names in the first column of the README's source table.

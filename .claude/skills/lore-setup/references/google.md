@@ -20,12 +20,15 @@ Event descriptions are converted HTML→Markdown automatically.
 
 ## Gmail — which mail to collect
 Inspect the category distribution of unread mail to gauge the noise:
+One line per category, so every command is one the skill's `allowed-tools` names — a
+`for … echo … done` loop leads with a shell builtin the allowlist cannot spell, and in
+`claude -p` an unpermitted step is denied rather than prompted:
 ```bash
-for c in primary promotions updates social forums; do
-  n=$(gws gmail users messages list --params "{\"userId\":\"me\",\"q\":\"is:unread category:$c\",\"maxResults\":1}" 2>/dev/null \
-       | jq -r '.resultSizeEstimate // "?"' 2>/dev/null)
-  echo "$c: $n"
-done
+gws gmail users messages list --params '{"userId":"me","q":"is:unread category:primary","maxResults":1}' | jq -r '.resultSizeEstimate'
+gws gmail users messages list --params '{"userId":"me","q":"is:unread category:promotions","maxResults":1}' | jq -r '.resultSizeEstimate'
+gws gmail users messages list --params '{"userId":"me","q":"is:unread category:updates","maxResults":1}' | jq -r '.resultSizeEstimate'
+gws gmail users messages list --params '{"userId":"me","q":"is:unread category:social","maxResults":1}' | jq -r '.resultSizeEstimate'
+gws gmail users messages list --params '{"userId":"me","q":"is:unread category:forums","maxResults":1}' | jq -r '.resultSizeEstimate'
 ```
 Usually only `category:primary` is work mail; the rest is bots/marketing. Recommended:
 ```yaml
