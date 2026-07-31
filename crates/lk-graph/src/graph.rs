@@ -74,6 +74,54 @@ pub fn broken_links(
     broken
 }
 
+/// One link whose address is not the spelling of the file it reaches.
+#[derive(Debug, Clone, Serialize)]
+pub struct RespelledLink {
+    pub source: String,
+    /// The destination as the page wrote it.
+    pub target: String,
+    /// The file's own vault-relative spelling.
+    pub on_disk: String,
+}
+
+/// Every link that resolves only because the filesystem folds case or Unicode normalization.
+///
+/// The other half of [`crate::scan::VaultExistence::is_resolvable`]'s fold. An address is
+/// compared under `fold_name` because that is what the filesystem this vault is edited on does,
+/// so `wiki/concepts/ALPHA.md` opens `alpha.md` and reporting it broken would be false here. It
+/// IS dead on ext4, though, and neither existing channel says so: `unnormalized` judges a FILE's
+/// name and this file is already its own slug, `address_collisions` needs two files and there is
+/// one. Without this the vault could sync to Linux and lose the link with `lint` having said
+/// clean — which is the fold losing the question rather than answering it.
+///
+/// The repair is the link, not the file: rewrite the destination as the file spells it.
+pub fn respelled_links(
+    pages: &[ScannedPage],
+    existence: &VaultExistence,
+    dirs: &VaultDirs,
+) -> Vec<RespelledLink> {
+    let is_reserved = crate::scan::reserved_page_predicate(Path::new(&dirs.wiki));
+    let mut found: Vec<RespelledLink> = pages
+        .iter()
+        .filter(|page| !is_reserved(page.id.as_str()))
+        .flat_map(|page| {
+            page.outgoing.iter().filter_map(|link| {
+                existence
+                    .respelled(&link.dest)
+                    .map(|on_disk| RespelledLink {
+                        source: page.id.clone(),
+                        target: link.dest.clone(),
+                        on_disk: on_disk.to_owned(),
+                    })
+            })
+        })
+        .collect();
+
+    found.sort_by(|a, b| (&a.source, &a.target).cmp(&(&b.source, &b.target)));
+    found.dedup_by(|a, b| a.source == b.source && a.target == b.target);
+    found
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct HubPageReference {
     pub id: String,

@@ -5,7 +5,7 @@
 //! `link`). This module keeps only the I/O concerns: filesystem walking (walkdir +
 //! rayon) and assembling [`ScannedPage`]s.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -375,9 +375,14 @@ fn extract_first_heading(body: &str) -> Option<String> {
 /// Built from a scan of the vault ROOT, so "absent" means absent from the vault.
 #[derive(Debug, Clone)]
 pub struct VaultExistence {
-    /// Every page ADDRESS the scan found — the vault-relative path as spelled on disk, catalogs
-    /// INCLUDED, since a catalog is a file a page may legitimately link.
-    paths: HashSet<String>,
+    /// Every page ADDRESS the scan found, keyed by [`lk_core::fs::fold_name`] and holding the
+    /// spelling as it is on disk. Catalogs INCLUDED, since a catalog is a file a page may
+    /// legitimately link.
+    ///
+    /// Keyed folded because that is how an address resolves; the value is kept because the
+    /// difference between the two is itself reportable — a link that only resolves under the
+    /// fold is dead on a filesystem that does not fold.
+    paths: HashMap<String, String>,
     /// Every page id, minus the generated catalogs: the connectivity question orphan detection
     /// asks.
     /// `index.md` links every page it catalogs, so counting a link to it as a connection would
@@ -398,10 +403,15 @@ impl VaultExistence {
         // they must not do is count as connectivity, since index.md links every page it catalogs
         // and would mark every concept "linked", defeating orphan detection.
         let is_reserved = reserved_page_predicate(Path::new(&dirs.wiki));
-        let mut paths = HashSet::with_capacity(pages.len());
+        let mut paths: HashMap<String, String> = HashMap::with_capacity(pages.len());
         let mut knowledge = HashSet::with_capacity(pages.len());
         for page in pages {
-            paths.insert(lk_core::fs::fold_name(&rel_str(&page.path)));
+            let spelled = rel_str(&page.path);
+            // First spelling wins, and the scan is sorted, so two files that fold together
+            // resolve to the same one every run. That they are two is `address_collisions`.
+            paths
+                .entry(lk_core::fs::fold_name(&spelled))
+                .or_insert(spelled);
             if !is_reserved(page.id.as_str()) {
                 knowledge.insert(page.id.clone());
             }
@@ -437,13 +447,28 @@ impl VaultExistence {
     /// on the filesystem this vault is most often edited on, and `cat` opens it at either
     /// spelling. Answering the file segment exactly while the directory segments fold made one
     /// address resolve two ways within a single path, so a link a reader can follow was reported
-    /// broken and the citation went uncounted. What the two spellings cost when the vault syncs
-    /// to a filesystem that keeps them apart is a violation with its own channel and its own
-    /// repair — `unnormalized` names the file, `address_collisions` names the pair — so folding
-    /// here does not hide it, and refusing to fold here would report it a second time under a
-    /// sentence that is false.
+    /// broken and the citation went uncounted.
+    ///
+    /// What the two spellings cost when the vault syncs to a filesystem that keeps them apart is
+    /// answered by [`Self::respelled`] and reported under its own violation channel, with the
+    /// repair the link needs rather than the one `broken` would have named falsely. Neither
+    /// `unnormalized` nor `address_collisions` covers it — the first judges a FILE's name and
+    /// the file here is already its own slug, the second needs two files and there is one — so
+    /// without that channel the fold would lose the question instead of answering it.
     pub fn is_resolvable(&self, dest: &str) -> bool {
-        self.paths.contains(&lk_core::fs::fold_name(dest))
+        self.paths.contains_key(&lk_core::fs::fold_name(dest))
+    }
+
+    /// The on-disk spelling of the file `dest` reaches, when it differs from `dest` itself.
+    ///
+    /// The other half of the fold: `wiki/concepts/ALPHA.md` opens `alpha.md` here and opens
+    /// nothing on ext4, and neither `unnormalized` (which judges a FILE's name) nor
+    /// `address_collisions` (which needs two files) has anything to say about it — the file is
+    /// its own slug and there is only one of it. Reporting the difference is what makes folding
+    /// a resolution rule rather than a way to lose the question.
+    pub fn respelled<'a>(&'a self, dest: &str) -> Option<&'a str> {
+        let on_disk = self.paths.get(&lk_core::fs::fold_name(dest))?;
+        (on_disk != dest).then_some(on_disk.as_str())
     }
 
     /// The page a link actually REACHES: its id, and only when the address it names is a file.

@@ -988,3 +988,41 @@ fn the_json_envelope_agrees_with_the_exit_code() {
     );
     check(&contradicted, "contradicted vault");
 }
+
+/// A link that only resolves because the filesystem folds has its own violation.
+///
+/// The fold is what lets `is_resolvable` answer "is there a file there" the way the filesystem
+/// answers it, so reporting such a link BROKEN would be false on the machine it is edited on.
+/// It is genuinely dead on a filesystem that keeps the spellings apart, though, and the two
+/// channels that sound like they cover it do not: `unnormalized` judges a FILE's name and this
+/// file is already its own slug, `address_collisions` needs two files and there is one.
+#[test]
+fn a_link_that_only_resolves_under_folding_is_a_violation_of_its_own() {
+    let ws = sound_vault();
+    ws.write(
+        "daily/notes/2026-05-24.md",
+        "---\nid: notes-2026-05-24\ntype: daily\ntitle: \"Notes\"\n\
+         created: 2026-05-24\nupdated: 2026-05-24\n---\n\n\
+         ## Related concepts\n\n- [Cited](../../wiki/concepts/CITED.md)\n",
+    );
+
+    // Not broken: the file opens at that address here.
+    assert_eq!(ws.code(&["graph", "broken"]), 0);
+    // And not a filename defect: `cited.md` is its own slug.
+    let normalize = ws.stdout(&["graph", "normalize"]);
+    assert!(normalize.contains("all slugs normalized"), "{normalize}");
+
+    let raw = ws.stdout(&["graph", "--json", "lint"]);
+    let parsed: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
+    let respelled = parsed["data"]["violations"]["respelled_links"]
+        .as_array()
+        .expect("respelled_links array");
+    assert_eq!(respelled.len(), 1, "{raw}");
+    assert_eq!(
+        respelled[0]["on_disk"].as_str(),
+        Some("wiki/concepts/cited.md"),
+        "the repair names the spelling the file actually has\n{raw}"
+    );
+    assert_eq!(parsed["ok"].as_bool(), Some(false), "{raw}");
+    assert_eq!(ws.code(&["graph", "lint"]), 1);
+}

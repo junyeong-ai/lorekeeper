@@ -73,6 +73,9 @@ pub struct Violations {
     /// Filenames that disagree with their own normalized slug. A link is written from the slug,
     /// so the page is addressed by a name its file does not have.
     pub unnormalized: Vec<RenameSuggestion>,
+    /// Links that resolve only because the filesystem folds case or Unicode normalization. Dead
+    /// on one that does not, which is where a synced vault ends up.
+    pub respelled_links: Vec<crate::graph::RespelledLink>,
 }
 
 /// True statements about a vault in good standing, reported because they guide a human's next
@@ -112,6 +115,7 @@ impl Violations {
             duplicate_concepts,
             address_collisions,
             unnormalized,
+            respelled_links,
         } = self;
         broken.len()
             + index.count()
@@ -119,6 +123,7 @@ impl Violations {
             + duplicate_concepts.len()
             + address_collisions.len()
             + unnormalized.len()
+            + respelled_links.len()
     }
 }
 
@@ -329,6 +334,7 @@ fn print_violations(v: &Violations) {
         duplicate_concepts,
         address_collisions,
         unnormalized,
+        respelled_links,
     } = v;
     if v.count() == 0 {
         return;
@@ -383,6 +389,24 @@ fn print_violations(v: &Violations) {
         for c in address_collisions {
             println!("  {}  <-  {}", c.id, c.paths.join(", "));
         }
+    }
+
+    if !respelled_links.is_empty() {
+        println!(
+            "\nLinks the filesystem forgives ({}):",
+            respelled_links.len()
+        );
+        for link in respelled_links {
+            println!(
+                "  {} -> {}  (the file is {})",
+                link.source, link.target, link.on_disk
+            );
+        }
+        println!(
+            "  repair: rewrite each destination as the file spells it — this resolves here \
+                  only because the filesystem folds case and Unicode, and is dead on one that \
+                  does not"
+        );
     }
 
     if !unnormalized.is_empty() {
@@ -615,6 +639,11 @@ mod tests {
         let v = Violations {
             address_collisions: Vec::new(),
             unnormalized: Vec::new(),
+            respelled_links: vec![crate::graph::RespelledLink {
+                source: "daily/notes/2026-05-23".into(),
+                target: "../../wiki/concepts/ALPHA.md".into(),
+                on_disk: "wiki/concepts/alpha.md".into(),
+            }],
             broken: vec![BrokenLink {
                 source: "a".into(),
                 target: "b".into(),

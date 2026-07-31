@@ -185,6 +185,11 @@ fn run_inner(
                     duplicate_concepts,
                     address_collisions: scan::address_collisions(&views.link_sources),
                     unnormalized: rename_suggestions(&normalize::scan(&views.pages)),
+                    respelled_links: graph::respelled_links(
+                        &views.link_sources,
+                        &views.existence,
+                        &rc.vault_dirs,
+                    ),
                 },
                 observations: output::Observations {
                     hubs,
