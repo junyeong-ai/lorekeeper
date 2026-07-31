@@ -108,7 +108,8 @@ pub enum Command {
         /// Root directory of the vault (overrides config.yaml vault.root)
         #[arg(long)]
         root: Option<PathBuf>,
-        /// Output in JSON format (envelope: {"ok": true, "data": …})
+        /// Output in JSON format. `ok` is the verdict the exit code carries: false exactly
+        /// when the vault contradicts itself
         #[arg(long)]
         json: bool,
         #[command(subcommand)]

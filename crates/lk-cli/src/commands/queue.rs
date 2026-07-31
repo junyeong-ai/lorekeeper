@@ -16,7 +16,8 @@ pub enum QueueCommand {
         /// Vault root override (default: vault.root from config)
         #[arg(long)]
         root: Option<PathBuf>,
-        /// Output in JSON format (envelope: {"ok": true, "data": …})
+        /// Output in JSON format. `ok` is always true: classifying a queue is not a verdict
+        /// on it, and this exits 0 over any queue it can describe
         #[arg(long)]
         json: bool,
     },
@@ -64,7 +65,8 @@ pub enum QueueCommand {
         /// Vault root override (default: vault.root from config)
         #[arg(long)]
         root: Option<PathBuf>,
-        /// Output in JSON format (envelope: {"ok": true, "data": …})
+        /// Output in JSON format. `ok` is the verdict the exit code carries: false when work
+        /// is left that no drain can do
         #[arg(long)]
         json: bool,
         /// Classify and report only; write and delete nothing

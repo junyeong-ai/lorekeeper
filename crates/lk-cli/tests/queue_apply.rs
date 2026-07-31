@@ -398,3 +398,41 @@ fn a_result_file_with_no_task_behind_it_recovers_a_lost_section() {
         "the applier stamps the marker it owns\n{page}"
     );
 }
+
+/// `queue prune`'s `--json` envelope carries the same verdict as its exit code.
+///
+/// The janitor is the only place a blocked queue surfaces — `queue count` omits it so a
+/// scheduled run never spends a session on work no session can do — so a caller that parses
+/// `ok` is the one that has to be told, and telling it the opposite of the exit code is worse
+/// than saying nothing.
+#[test]
+fn prune_reports_the_same_verdict_in_json_as_in_its_exit_code() {
+    let ws = Workspace::new();
+    let queue = ws.vault().join(".lorekeeper/queue");
+    std::fs::create_dir_all(&queue).expect("queue dir");
+
+    let verdict = |args: &[&str]| {
+        let out = ws.run(args);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).expect("valid JSON");
+        (
+            parsed["ok"].as_bool().expect("ok is a bool"),
+            out.status.code() == Some(0),
+            parsed,
+        )
+    };
+
+    // Nothing to do: green, and it says so.
+    let (ok, exited_zero, _) = verdict(&["queue", "prune", "--json"]);
+    assert!(ok && exited_zero, "an empty queue is not a finding");
+
+    // One line nobody can parse: the file is kept whole, and so is any task beside it.
+    std::fs::write(queue.join("run-1.jsonl"), "{not json\n").expect("queue file");
+    let (ok, exited_zero, parsed) = verdict(&["queue", "prune", "--json", "--dry-run"]);
+    assert_eq!(
+        ok, exited_zero,
+        "the parsed verdict and the exit code are one answer\n{parsed}"
+    );
+    assert!(!ok, "a queue nothing can drain is a finding\n{parsed}");
+    assert_eq!(parsed["data"]["kept_unparseable"].as_u64(), Some(1));
+}
