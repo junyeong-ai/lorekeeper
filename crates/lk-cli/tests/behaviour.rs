@@ -405,3 +405,57 @@ fn every_command_is_swept_or_exempt() {
         "these EXEMPT entries name commands the binary no longer has: {stale:?}"
     );
 }
+
+/// A `--root` is spelled the way `vault.root` is: `~` expanded, made absolute.
+///
+/// It arrives from a shell with a shell's conventions and had none of them applied. A quoted
+/// `~/vault` — which is what a script variable always produces — made `lore schema` create a
+/// directory literally named `~` in the process CWD, exit 0; and a relative `--root` made
+/// `lore config schema-path` print a relative path into a contract the skills pass from one
+/// command to the next, where it names a different directory to each caller.
+#[test]
+fn a_root_override_is_spelled_like_a_configured_one() {
+    let home_dir = TempDir::new().expect("tempdir");
+    let cwd_dir = TempDir::new().expect("tempdir");
+    // The kernel's idea of the CWD, which is what the binary reads: macOS resolves `/var` to
+    // `/private/var`, so comparing against the unresolved tempdir would fail on the OS rather
+    // than on the behaviour.
+    let home = home_dir.path().canonicalize().expect("canonicalize");
+    let cwd = cwd_dir.path().canonicalize().expect("canonicalize");
+
+    let schema_path = |root: &str| -> String {
+        let out = Command::cargo_bin("lore")
+            .expect("lore binary")
+            .current_dir(&cwd)
+            .env("HOME", &home)
+            .env_remove("LORE_CONFIG")
+            .args(["config", "schema-path", "--root", root])
+            .output()
+            .expect("command ran");
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout)
+            .expect("utf8")
+            .trim()
+            .to_owned()
+    };
+
+    assert_eq!(
+        schema_path("~/myvault"),
+        home.join("myvault/wiki/AGENTS.md").to_string_lossy(),
+        "a quoted tilde is a home directory, not a directory named `~`"
+    );
+    assert_eq!(
+        schema_path("rel"),
+        cwd.join("rel/wiki/AGENTS.md").to_string_lossy(),
+        "a relative root is anchored to the CWD the caller typed it in"
+    );
+    assert_eq!(
+        schema_path("./rel"),
+        cwd.join("rel/wiki/AGENTS.md").to_string_lossy(),
+        "and one vault has one spelling"
+    );
+    assert!(
+        !cwd.join("~").exists(),
+        "no directory named `~` was created"
+    );
+}

@@ -173,7 +173,7 @@ fn resolve_vault_root(
     root: Option<PathBuf>,
 ) -> miette::Result<PathBuf> {
     match root {
-        Some(r) => Ok(r),
+        Some(r) => super::resolve_root_override(r),
         None => Ok(load_config(&find_config(opts)?)?.vault.root_path()),
     }
 }

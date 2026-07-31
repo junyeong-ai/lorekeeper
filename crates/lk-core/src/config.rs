@@ -487,19 +487,9 @@ impl VaultConfig {
     /// Resolve a relative vault root against the config file's parent directory so the
     /// vault location is anchored to the config file, not to the process CWD.
     pub(crate) fn resolve_relative_to(&mut self, base: &Path) {
-        let expanded = expand_tilde(&self.root);
-        let absolute = if expanded.is_relative() {
-            base.join(&expanded)
-        } else {
-            expanded
-        };
-        // Folded lexically, not canonicalized: `vault.root: ./vault` joined onto the config's
-        // directory yields `…/base/./vault`, which is absolute and works but is a SECOND spelling
-        // of one path. `lore config vault-root` and `schema-path` are contracts a script or a
-        // skill reads and passes on, and two spellings of the same vault fail a string compare.
-        // Canonicalizing instead would resolve symlinks and fail outright on a vault that does
-        // not exist yet, which is the first run.
-        self.root = fold_current_dir(&absolute).to_string_lossy().into_owned();
+        self.root = resolve_vault_root(&self.root, base)
+            .to_string_lossy()
+            .into_owned();
     }
 
     pub fn timezone(&self) -> jiff::tz::TimeZone {
@@ -1216,6 +1206,31 @@ pub fn expand_tilde(path: &str) -> PathBuf {
         return PathBuf::from(home).join(rest);
     }
     PathBuf::from(path)
+}
+
+/// The one spelling of a vault root a human supplied: `~` expanded, made absolute against
+/// `base`, `.` folded.
+///
+/// A vault root reaches this tool two ways — `vault.root` in the config, and `--root` on the
+/// command line — and only the first went through any of it. `lore schema --root "~/vault"`
+/// therefore created a directory literally named `~` in the process CWD, exit 0, and
+/// `lore config schema-path --root rel` printed a relative path into a contract that skills pass
+/// from one command to the next, where it means a different directory to each caller. The `base`
+/// differs by entry point — the config file's directory for `vault.root`, the process CWD for
+/// `--root`, which is where the caller typed it — and that is the only thing that differs.
+///
+/// Folded lexically, not canonicalized: `./vault` joined onto a base yields `…/base/./vault`,
+/// which is absolute and works but is a SECOND spelling of one path, and two spellings of one
+/// vault fail a string compare. Canonicalizing instead would resolve symlinks and fail outright
+/// on a vault that does not exist yet, which is the first run.
+pub fn resolve_vault_root(root: &str, base: &Path) -> PathBuf {
+    let expanded = expand_tilde(root);
+    let absolute = if expanded.is_relative() {
+        base.join(&expanded)
+    } else {
+        expanded
+    };
+    fold_current_dir(&absolute)
 }
 
 /// Re-spell an absolute path with its `.` components dropped.

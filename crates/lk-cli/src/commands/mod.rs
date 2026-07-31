@@ -97,7 +97,7 @@ pub(crate) fn resolve_root_config(
     opts: &GlobalOptions,
     root_override: Option<PathBuf>,
 ) -> miette::Result<RootConfig> {
-    match root_override {
+    match root_override.map(resolve_root_override).transpose()? {
         Some(root) => match find_config(opts) {
             Ok(path) => Ok(RootConfig {
                 root,
@@ -114,6 +114,22 @@ pub(crate) fn resolve_root_config(
             })
         }
     }
+}
+
+/// Spell a `--root` the way `vault.root` is spelled, against the process CWD.
+///
+/// The flag is typed in a shell, so it arrives with a shell's conventions and none of them
+/// applied: a quoted `~/vault` — which is what a script variable always produces — created a
+/// directory literally named `~`, and a relative `--root rel` made `lore config schema-path`
+/// print a relative path into a contract the skills pass from one command to the next.
+pub(crate) fn resolve_root_override(root: PathBuf) -> miette::Result<PathBuf> {
+    let cwd = std::env::current_dir().map_err(|e| {
+        miette::miette!("--root is relative and the working directory is unknown: {e}")
+    })?;
+    Ok(lk_core::config::resolve_vault_root(
+        &root.to_string_lossy(),
+        &cwd,
+    ))
 }
 
 /// Atomically write `contents` to an absolute `path` from an async command handler.
