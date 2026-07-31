@@ -278,9 +278,8 @@ fn behaviour_sweep() {
     }
 }
 
-/// A snapshot file the sweep no longer writes reads as coverage of a command
-/// nothing runs: `synthesis weekly` moved to [`EXEMPT`] and its pin stayed on
-/// disk, so the directory listing claimed a leaf the sweep had stopped touching.
+/// A snapshot file no swept invocation writes reads as coverage of a command nothing runs: the
+/// directory listing claims a leaf, and nothing compares against it.
 #[test]
 fn no_snapshot_outlives_its_invocation() {
     let pinned: Vec<String> = SWEEP

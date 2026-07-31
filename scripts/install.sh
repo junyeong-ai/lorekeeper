@@ -421,9 +421,9 @@ install_pipelines() {
             fi
         elif curl -fsSL --retry 3 --retry-delay 2 \
             -o "${TMP_DIR}/${name}" "${RELEASE_BASE}/v${version}/${name}" 2>/dev/null; then
-            # These run unattended from a scheduler with the user's shell environment, so a
-            # substituted one is the most dangerous asset here — and it was the only one taken on
-            # trust while the binary and every skill were checksummed.
+            # A scheduler fires these unattended with the user's shell environment, so a
+            # substituted one is the most dangerous asset here — verified like the binary and
+            # every skill, and skipped rather than run when it cannot be.
             if ! curl -fsSL --retry 3 --retry-delay 2 \
                 -o "${TMP_DIR}/${name}.sha256" "${RELEASE_BASE}/v${version}/${name}.sha256" 2>/dev/null; then
                 log_warn "Pipeline '${name}' checksum unavailable; skipping"

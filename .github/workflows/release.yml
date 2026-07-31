@@ -173,32 +173,10 @@ jobs:
         env:
           REF: ${{ github.event.inputs.tag || github.ref_name }}
         run: echo "version=${REF#v}" >> "$GITHUB_OUTPUT"
-      - name: Package skill tarballs
+      - name: Package skill tarballs and pipeline scripts
         env:
           VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          set -euo pipefail
-          # One archive per skill, named `{skill}-skill-v{version}.tar.gz` to match
-          # what scripts/install.sh and install.ps1 download. Each contains the
-          # skill directory. Enumerated from the directory rather than listed: a seventh
-          # skill added to `.claude/skills` passed every gate and was then never packaged,
-          # never published and never installed, because three separate literal lists
-          # (here, install.sh, install.ps1) each had to be remembered.
-          for dir in .claude/skills/*/; do
-            skill="$(basename "$dir")"
-            archive="${skill}-skill-v${VERSION}.tar.gz"
-            tar -czf "$archive" -C .claude/skills "$skill"
-            sha256sum "$archive" > "${archive}.sha256"
-          done
-          # The scheduled pipelines ship as plain shell assets; install.sh fetches them
-          # by name (`v{version}/{name}`) when there is no repo checkout to copy from.
-          # Checksummed like every other asset: these run unattended from a scheduler with the
-          # user's shell environment, so a substituted one is the most dangerous thing here, and
-          # they were the only assets the installer took on trust.
-          for name in lore-pipeline.sh lore-daily.sh lore-weekly.sh; do
-            cp "scripts/${name}" .
-            sha256sum "$name" > "${name}.sha256"
-          done
+        run: scripts/package-release-assets.sh "$VERSION"
       - uses: actions/upload-artifact@v7
         with:
           name: skills

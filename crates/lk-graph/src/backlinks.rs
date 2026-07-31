@@ -135,13 +135,11 @@ pub fn sync_concept_backlinks(
         // `vault.locale` switch keeps its old-language heading), then rewrite under it —
         // mirrors the pipeline's all-locale `capture_section`.
         //
-        // A page carrying no such heading has nowhere to record its sources, and this used to
-        // fall back to the current locale's spelling: `replace_section` then found nothing to
-        // replace and returned the page unchanged, while `source_count` was written anyway. The
-        // page ended up ASSERTING a citation count that appears nowhere on it, and the report
-        // said `+1 source(s)` — the exact disagreement between a derived count and its evidence
-        // that this sweep exists to remove. It is the same defect as a page with no frontmatter
-        // block: recorded, skipped, and the command exits non-zero.
+        // A page carrying no such heading has nowhere to record its sources. The citation list
+        // and `source_count` are one fact, so neither is written: falling back to the current
+        // locale's spelling would leave `replace_section` nothing to replace while the count was
+        // written anyway, and the page would assert a citation that appears nowhere on it. Same
+        // treatment as a page with no frontmatter block — recorded, skipped, exit non-zero.
         let Some(heading) = Locale::ALL
             .iter()
             .map(|l| l.strings().concept_sources)

@@ -88,11 +88,10 @@ pub struct RespelledLink {
 ///
 /// The other half of [`crate::scan::VaultExistence::is_resolvable`]'s fold. An address is
 /// compared under `fold_name` because that is what the filesystem this vault is edited on does,
-/// so `wiki/concepts/ALPHA.md` opens `alpha.md` and reporting it broken would be false here. It
-/// IS dead on ext4, though, and neither existing channel says so: `unnormalized` judges a FILE's
-/// name and this file is already its own slug, `address_collisions` needs two files and there is
-/// one. Without this the vault could sync to Linux and lose the link with `lint` having said
-/// clean — which is the fold losing the question rather than answering it.
+/// so `wiki/concepts/ALPHA.md` opens `alpha.md` and calling it broken would be false here — and
+/// it is dead the moment the vault syncs to one that keeps the spellings apart. `unnormalized`
+/// judges a FILE's name and this file is already its own slug; `address_collisions` needs two
+/// files and there is one. This is the channel that answers it.
 ///
 /// The repair is the link, not the file: rewrite the destination as the file spells it.
 pub fn respelled_links(

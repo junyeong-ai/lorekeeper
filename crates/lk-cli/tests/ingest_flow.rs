@@ -310,8 +310,8 @@ fn a_dry_run_reports_the_event_count_it_would_write() {
 ///
 /// This is the pipeline's own path — the task is enqueued again and a drain refills it — but the
 /// same state describes a body somebody wrote and never stamped, and the write is not
-/// reversible. `lore doctor` reports exactly that state and used to prescribe this re-render as
-/// the repair, so the loss happened by following the tool's own instructions, silently.
+/// reversible — and `lore doctor` reports exactly that state and prescribes this re-render as
+/// the repair, so an unannounced loss happens by following the tool's own instructions.
 #[test]
 fn a_re_render_names_the_unanswered_section_it_is_about_to_empty() {
     let ws = Workspace::new("");
@@ -408,13 +408,14 @@ fn a_dry_run_says_it_would_empty_the_section_rather_than_that_it_did() {
 
 /// A section the render REFILLS is not a section this write empties.
 ///
-/// A cache miss says only that the section was not answered for this input. The
-/// related-concepts section renders the ACCUMULATED links on a miss — carried forward precisely
-/// so a citation is never retracted — so nothing is emptied and the warning was false. That is
-/// the ordinary state of every page between an ingest and a drain, so it fired on nearly every
-/// re-render, which is how an operator learns to skip the one line that reports an irreversible
-/// loss. Both earlier tests here pick the first `## ` heading, which on a document page is the
-/// summary — the section that genuinely does empty — so neither could see this.
+/// A cache miss says only that the section was not answered for this input; whether the render
+/// leaves it empty is the template's business. Related-concepts renders the ACCUMULATED links,
+/// carried forward precisely so a citation is never retracted. Reporting that as a loss would
+/// fire on the ordinary state of every page between an ingest and a drain — which is how an
+/// operator learns to skip the one line that reports an irreversible one.
+///
+/// The two tests above pick the first `## ` heading, which on a document page is the summary —
+/// the section that genuinely does empty — so this needs its own fixture.
 #[test]
 fn a_section_the_render_refills_is_not_reported_as_emptied() {
     let ws = Workspace::with_notes_options("    extract_concepts: true\n", "");

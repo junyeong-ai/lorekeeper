@@ -16,6 +16,7 @@ allowed-tools: |
   Bash(lore *)
   Bash(date *)
   Bash([ *)
+  Bash(basename *)
   Read
   Edit
   Write

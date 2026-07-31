@@ -681,10 +681,9 @@ fn prune_queue(vault_root: &Path, queue_dir: &Path, dry_run: bool) -> miette::Re
         // A file holding a line nobody can parse keeps every line: rewriting it would drop
         // work nothing could classify. Its own GC waits for a human; the rest proceeds.
         //
-        // Counted, not skipped over: the tasks held with it are what a reader needs to know is
-        // stuck. Reporting `kept 0 current` for a file that still holds a current task made the
-        // janitor's summary of what it kept omit the work it kept — and they are not counted
-        // under their classification, because nothing here acted on it.
+        // The tasks held with it are counted, because what is stuck is what a reader needs —
+        // and counted as blocked rather than under their classification, because nothing here
+        // acted on it.
         if !read.is_rewritable() {
             summary.kept_unparseable += read.unparseable;
             summary.kept_blocked += read.tasks.len();

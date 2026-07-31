@@ -99,9 +99,9 @@ pub fn diff(root: &Path, locale: Locale, dirs: &VaultDirs) -> Result<IndexDrift,
 /// Write the re-derived catalog, repairing drift in both directions at once. Returns the
 /// number of drifted entries the write resolves.
 ///
-/// Published through [`lk_vault::VaultWriter`], because this is the same wholesale replacement
-/// `lore wiki index` performs and the two are offered to a user as alternatives in one sentence.
-/// A repair that the guarded spelling refuses must not go through under the other.
+/// Published through [`lk_vault::VaultWriter`]: this is the same wholesale replacement
+/// `lore wiki index` performs, and `lint` offers the two as alternatives in one sentence, so a
+/// write one of them refuses cannot go through under the other.
 pub fn fix(drift: &IndexDrift, root: &Path, dirs: &VaultDirs) -> Result<usize, GraphError> {
     if drift.is_in_sync() {
         return Ok(0);

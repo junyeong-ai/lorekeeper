@@ -103,88 +103,178 @@ fn every_target_an_installer_asks_for_is_one_the_release_builds() {
     }
 }
 
+/// The leading word of every command a fenced `bash` block spells, in order.
+///
+/// Exact over the shell these documents use — quoted strings, comment tails, redirections, line
+/// continuations, command substitution, and `|` / `&&` / `||` / `;` chains — and it REFUSES a
+/// construct it cannot read rather than guessing at one. Guessing would answer for a document
+/// nobody wrote, in either direction: a step reported unpermitted that is not a command, or a
+/// command hidden inside something the scan skipped.
+fn spelled_commands(markdown: &str, origin: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for block in markdown.split("```bash").skip(1) {
+        let Some(code) = block.split("```").next() else {
+            continue;
+        };
+        assert!(
+            !code.contains("<<") && !code.contains('`'),
+            "{origin}: a heredoc or a backtick is outside the shell this reads; \
+             spell the step without one, or teach this function the construct"
+        );
+        for line in code.replace("\\\n", " ").lines() {
+            let line = line.trim().trim_start_matches("$ ");
+            // A slash-command is an instruction to the session, not a command to a shell.
+            if line.starts_with('/') {
+                continue;
+            }
+            found.extend(stages(line, origin).into_iter().filter_map(head));
+        }
+    }
+    found
+}
+
+/// One line split into the commands a shell would run, honouring quotes: an operator inside a
+/// quoted argument is data, and `--params '{"q":"a|b"}'` is one command, not two.
+fn stages(line: &str, origin: &str) -> Vec<String> {
+    let (mut stages, mut current) = (Vec::new(), String::new());
+    let (mut single, mut double) = (false, false);
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            // `#` opens a comment at the start of a word, never mid-token (`a#b` is one word).
+            '#' if !single
+                && !double
+                && current.chars().next_back().is_none_or(char::is_whitespace) =>
+            {
+                break;
+            }
+            '|' | '&' | ';' | '(' | ')' if !single && !double => {
+                stages.push(std::mem::take(&mut current));
+                continue;
+            }
+            '$' if !single && chars.peek() == Some(&'(') => {
+                chars.next();
+                stages.push(std::mem::take(&mut current));
+                continue;
+            }
+            _ => {}
+        }
+        current.push(c);
+    }
+    assert!(
+        !single && !double,
+        "{origin}: a quote opens and never closes on `{line}`, so where a command begins is \
+         not decidable"
+    );
+    stages.push(current);
+    stages
+}
+
+/// The command a stage runs: its first word, past any `NAME=value` assignment prefix.
+fn head(stage: String) -> Option<String> {
+    stage
+        .split_whitespace()
+        .find(|word| {
+            !word
+                .split_once('=')
+                .is_some_and(|(name, _)| !name.is_empty() && name.chars().all(is_name_char))
+        })
+        .map(str::to_owned)
+}
+
+fn is_name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// The commands a skill's `allowed-tools` frontmatter permits, one parser for every spelling of
+/// the entry (`Bash(lore *)`, `Bash(lore:*)`, `Bash(lore validate)`).
+fn permitted_tools(frontmatter: &str) -> Vec<String> {
+    frontmatter
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("Bash("))
+        .filter_map(|rest| rest.strip_suffix(')'))
+        .filter_map(|spec| {
+            spec.split([' ', ':'])
+                .next()
+                .filter(|head| !head.is_empty())
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+#[test]
+fn a_spelled_command_is_read_the_way_a_shell_would() {
+    let read_block = |code: &str| spelled_commands(&format!("```bash\n{code}\n```"), "fixture");
+
+    // An operator inside a quoted argument is data.
+    assert_eq!(
+        read_block(r#"gws list --params '{"q":"a|b;c"}' | jq -r '.n'"#),
+        vec!["gws", "jq"]
+    );
+    // A comment tail ends the line; a full-line comment is not a command.
+    assert_eq!(
+        read_block("# not a step\nlore graph lint   # non-zero means it contradicts itself"),
+        vec!["lore"]
+    );
+    // A continuation carries flags, not a new command.
+    assert_eq!(
+        read_block("atlassian-cli jira search \"x\" \\\n  --limit 5 --fields summary"),
+        vec!["atlassian-cli"]
+    );
+    // Command substitution runs a command, and a `||` chain is two decisions.
+    assert_eq!(
+        read_block(r#"mv "$f" "$d/" || [ -f "$d/$(basename "$f")" ]"#),
+        vec!["mv", "[", "basename"]
+    );
+    // A redirection is not a command, and an assignment prefix is not one either.
+    assert_eq!(
+        read_block("ls \"$VAULT/queue/\"*.jsonl 2>/dev/null\nLC_ALL=C sort -z"),
+        vec!["ls", "sort"]
+    );
+}
+
 /// Every command a skill's own procedure spells is one its `allowed-tools` permits.
 ///
-/// A skill runs under `claude -p` in the scheduled pipeline, where nothing can prompt: a command
-/// the procedure spells and the allowlist omits is simply DENIED mid-step. `lore-setup` declared
-/// nine tools and its own `references/jira.md` piped into `grep`, which was the step that finds
-/// the `start_date_field` id — so config discovery stopped there, unattended, with no way to ask.
-/// Two hand-kept lists in one file, which is what a gate is for.
+/// A skill runs under `claude -p`, where nothing can prompt: a command the procedure spells and
+/// the allowlist omits is DENIED mid-step, unattended, with no way to ask. The two lists sit in
+/// one file and are kept by hand, which is the shape a gate exists for.
+///
+/// Bound: it reads fenced `bash` blocks, which is where these documents put the steps an agent
+/// runs. A command spelled in prose is not seen — and `spelled_commands` refuses a block it
+/// cannot read exactly, so what it does not see is never something it guessed at.
 #[test]
 fn every_command_a_skill_spells_is_one_it_permits() {
-    // Shell builtins and control words. A procedure that leads with one of these is not naming a
-    // tool an allowlist can spell, which is itself the finding — `Bash(for *)` does not exist.
-    const NOT_A_TOOL: &[&str] = &[
-        "for", "do", "done", "if", "then", "fi", "else", "while", "case", "esac", "cd", "export",
-    ];
-
     let mut denied: Vec<String> = Vec::new();
     for dir in std::fs::read_dir(repo_root().join(".claude/skills"))
         .expect("skills dir")
         .flatten()
-        .filter(|e| e.path().is_dir())
+        .filter(|entry| entry.path().is_dir())
     {
         let skill = dir.file_name().to_string_lossy().into_owned();
         let manifest = read(&dir.path().join("SKILL.md"));
-        let frontmatter = manifest.split("---").nth(1).expect("skill frontmatter");
-        let permitted: Vec<String> = frontmatter
-            .lines()
-            .filter_map(|line| line.trim().strip_prefix("Bash("))
-            .filter_map(|rest| rest.strip_suffix(')'))
-            .map(|spec| spec.split_whitespace().next().unwrap_or(spec).to_owned())
-            .collect();
+        let permitted = permitted_tools(manifest.split("---").nth(1).expect("skill frontmatter"));
         if permitted.is_empty() {
             continue;
         }
 
-        // The manifest and every reference file it ships with.
-        let mut bodies = vec![manifest.clone()];
+        let mut sources = vec![(format!("{skill}/SKILL.md"), manifest)];
         let references = dir.path().join("references");
         if references.is_dir() {
             for entry in std::fs::read_dir(&references)
                 .expect("references")
                 .flatten()
             {
-                bodies.push(read(&entry.path()));
+                let name = format!("{skill}/references/{}", entry.file_name().to_string_lossy());
+                sources.push((name, read(&entry.path())));
             }
         }
 
-        for body in bodies {
-            for block in body.split("```bash").skip(1) {
-                let Some(code) = block.split("```").next() else {
-                    continue;
-                };
-                // A trailing `\\` continues the line, so the next one carries flags rather than
-                // a command; joining first is what keeps `--limit` from reading as a tool.
-                let joined = code.replace("\\\n", " ");
-                for line in joined.lines() {
-                    let line = line.trim().trim_start_matches("$ ");
-                    // A slash-command illustration is not a shell command.
-                    if line.is_empty() || line.starts_with('#') || line.starts_with('/') {
-                        continue;
-                    }
-                    // Every stage of a pipe or a `||`/`&&` chain is its own permission decision.
-                    for stage in line.split(["|", "&"].map(|s| s.chars().next().unwrap())) {
-                        let Some(argv0) = stage.split_whitespace().next() else {
-                            continue;
-                        };
-                        let argv0 = argv0.trim_start_matches('(');
-                        if NOT_A_TOOL.contains(&argv0) || argv0.contains('=') {
-                            denied.push(format!("{skill}: `{argv0}` is a shell builtin, which no allowlist entry can name — spell the step as a command"));
-                            continue;
-                        }
-                        if !argv0
-                            .chars()
-                            .all(|c| c.is_ascii_alphanumeric() || "-_./[".contains(c))
-                        {
-                            continue;
-                        }
-                        if !permitted.iter().any(|tool| tool == argv0) {
-                            denied.push(format!(
-                                "{skill}: spells `{argv0}`, which its allowed-tools does not permit"
-                            ));
-                        }
-                    }
+        for (origin, body) in sources {
+            for command in spelled_commands(&body, &origin) {
+                if !permitted.contains(&command) {
+                    denied.push(format!("{origin}: spells `{command}`"));
                 }
             }
         }
@@ -193,20 +283,21 @@ fn every_command_a_skill_spells_is_one_it_permits() {
     denied.dedup();
     assert!(
         denied.is_empty(),
-        "under `claude -p` an unpermitted step is denied, never prompted:\n  {}",
+        "these steps are denied under `claude -p`, never prompted — permit them in the skill's \
+         `allowed-tools`, or spell the step as a command that is:\n  {}",
         denied.join("\n  ")
     );
 }
 
 /// The pipeline's `--allowedTools` covers every command the skills it runs declare needing.
 ///
-/// Nothing in `claude -p` can prompt, so a command the skill's protocol spells and this list
-/// omits is simply DENIED — the drain then fails on a step it was told to perform, every night,
-/// for work it may already have committed. Two hand-kept lists that must agree is exactly the
-/// shape the skill-packaging lists were in when a skill shipped uninstallable.
+/// Same denial, one layer out: the pipeline hands `claude -p` its own allowlist, so a tool the
+/// skill declares and the pipeline omits is refused every night, for work the drain may already
+/// have committed.
 #[test]
 fn the_pipeline_permits_every_tool_the_skills_it_runs_declare() {
     let pipeline = read(&repo_root().join("scripts/lore-pipeline.sh"));
+    let weekly = read(&repo_root().join("scripts/lore-weekly.sh"));
     let allowed: Vec<String> = pipeline
         .split('"')
         .filter_map(|token| token.strip_prefix("Bash("))
@@ -215,8 +306,7 @@ fn the_pipeline_permits_every_tool_the_skills_it_runs_declare() {
         .collect();
     assert!(!allowed.is_empty(), "the pipeline permits no Bash command");
 
-    // The skills the pipelines actually invoke, read off the scripts rather than listed here.
-    let weekly = read(&repo_root().join("scripts/lore-weekly.sh"));
+    // The skills the pipelines invoke, read off the scripts rather than listed again here.
     let invoked: Vec<String> = format!("{pipeline}{weekly}")
         .split('"')
         .filter_map(|token| token.strip_prefix("$SKILL_DIR/"))
@@ -228,64 +318,134 @@ fn the_pipeline_permits_every_tool_the_skills_it_runs_declare() {
     );
 
     for skill in invoked {
-        let body = read(
+        let manifest = read(
             &repo_root()
                 .join(".claude/skills")
                 .join(&skill)
                 .join("SKILL.md"),
         );
-        let frontmatter = body.split("---").nth(1).expect("skill frontmatter");
-        for line in frontmatter.lines() {
-            let Some(cmd) = line
-                .trim()
-                .strip_prefix("Bash(")
-                .and_then(|rest| rest.strip_suffix(" *)"))
-            else {
-                continue;
-            };
+        for tool in permitted_tools(manifest.split("---").nth(1).expect("skill frontmatter")) {
             assert!(
-                allowed.iter().any(|a| a == cmd),
-                "{skill} declares it runs `{cmd}`, which the pipeline's --allowedTools denies — \
-                 nothing in `claude -p` can prompt, so the step is refused unattended"
+                allowed.contains(&tool),
+                "{skill} declares it runs `{tool}`, which the pipeline's --allowedTools denies"
             );
         }
     }
 }
 
-/// Every asset the installer downloads is checksummed, and the release publishes the checksum.
+/// Every asset the installer downloads is packaged with a checksum, and every checksum verifies.
 ///
-/// The pipelines were the exception both ways: `install.sh` fetched them and ran them without
-/// verifying anything, and `release.yml` published no `.sha256` beside them. They are the most
-/// dangerous asset of the three — a scheduler fires them unattended with the user's shell
-/// environment — and they were the only one taken on trust.
+/// The installer refuses an asset whose `.sha256` is missing or does not match, so an unpackaged
+/// checksum is an asset nobody can install. The pipelines are the ones that matter most: a
+/// scheduler fires them unattended with the user's shell environment.
+///
+/// Run, not read. The packaging is a script for exactly this reason — a property established by
+/// grepping the workflow answers for its spelling rather than its result, and goes red on a
+/// reformat while staying green on a rename.
 #[test]
-fn every_downloaded_pipeline_is_checksummed_on_both_sides() {
-    let install = read(&repo_root().join("scripts/install.sh"));
-    let release = read(&repo_root().join(".github/workflows/release.yml"));
+fn every_release_asset_is_packaged_with_a_checksum_that_verifies() {
+    let out = tempfile::TempDir::new().expect("tempdir");
+    let packaged = std::process::Command::new("bash")
+        .arg(repo_root().join("scripts/package-release-assets.sh"))
+        .arg("9.9.9")
+        .arg(out.path())
+        .output()
+        .expect("run the packaging script");
+    assert!(
+        packaged.status.success(),
+        "packaging failed: {}",
+        String::from_utf8_lossy(&packaged.stderr)
+    );
 
-    let pipelines: Vec<String> = install
+    let produced: Vec<String> = std::fs::read_dir(out.path())
+        .expect("output dir")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+
+    // Every skill in the repository, and every pipeline the installer fetches by name.
+    let mut expected: Vec<String> = std::fs::read_dir(repo_root().join(".claude/skills"))
+        .expect("skills dir")
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| {
+            format!(
+                "{}-skill-v9.9.9.tar.gz",
+                entry.file_name().to_string_lossy()
+            )
+        })
+        .collect();
+    expected.extend(installer_pipelines());
+    assert!(expected.len() > 1, "nothing to package");
+
+    for asset in &expected {
+        assert!(produced.contains(asset), "{asset} was not packaged");
+        let sum = format!("{asset}.sha256");
+        assert!(
+            produced.contains(&sum),
+            "{asset} was packaged without {sum}"
+        );
+    }
+
+    // The checksums are the contract, so they are verified rather than counted.
+    let tool = if which("sha256sum") {
+        "sha256sum"
+    } else {
+        "shasum"
+    };
+    let mut args: Vec<String> = if tool == "shasum" {
+        vec!["-a".into(), "256".into()]
+    } else {
+        Vec::new()
+    };
+    args.push("-c".into());
+    args.extend(expected.iter().map(|asset| format!("{asset}.sha256")));
+    let checked = std::process::Command::new(tool)
+        .args(&args)
+        .current_dir(out.path())
+        .output()
+        .expect("verify checksums");
+    assert!(
+        checked.status.success(),
+        "a published checksum does not verify: {}{}",
+        String::from_utf8_lossy(&checked.stdout),
+        String::from_utf8_lossy(&checked.stderr)
+    );
+}
+
+/// The pipelines `install.sh` downloads by name, read off the installer itself.
+fn installer_pipelines() -> Vec<String> {
+    read(&repo_root().join("scripts/install.sh"))
         .lines()
         .find_map(|line| line.trim().strip_prefix("PIPELINES=\"").map(str::to_owned))
         .expect("install.sh declares a PIPELINES list")
         .trim_end_matches('"')
         .split_whitespace()
         .map(str::to_owned)
-        .collect();
-    assert!(!pipelines.is_empty(), "install.sh declares no pipelines");
+        .collect()
+}
 
-    for name in &pipelines {
+fn which(tool: &str) -> bool {
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .any(|dir| dir.join(tool).is_file())
+}
+
+/// The installer verifies every asset it downloads, and packaging supplies every one it names.
+///
+/// The pipelines were the exception in both directions at once: fetched without verification,
+/// and published without a checksum to verify against.
+#[test]
+fn the_installer_verifies_every_pipeline_it_downloads() {
+    let install = read(&repo_root().join("scripts/install.sh"));
+    for name in installer_pipelines() {
         assert!(
-            release.contains(name),
-            "release.yml never packages `{name}`, which install.sh downloads"
+            install.contains(&format!("{name}.sha256")) || install.contains("${name}.sha256"),
+            "install.sh downloads {name} without fetching its checksum"
         );
     }
     assert!(
-        release.contains(r#"sha256sum "$name" > "${name}.sha256""#),
-        "release.yml packages the pipelines without publishing their checksums"
-    );
-    assert!(
-        install.contains("Pipeline '${name}' checksum mismatch"),
-        "install.sh downloads a pipeline without verifying it"
+        install.contains("checksum mismatch; skipping"),
+        "install.sh fetches a pipeline checksum without acting on a mismatch"
     );
 }
 
@@ -482,32 +642,25 @@ fn every_source_type_is_documented_and_exemplified() {
         }
     }
 
-    // Where a source's pages LAND is one branch in the pipeline — `manual` writes documents,
-    // everything else writes a daily page — and `lore-ingest` stated it as a list of six
-    // adapters. `confluence` reached config.example.yaml, both READMEs and the setup skill's
-    // config reference while that sentence stayed at six, so the skill offered a source and then
-    // described a routing without it. A rule cannot fall behind; a list has to be gated, so the
-    // gate is that it stays a rule.
-    let routing = read(&root.join(".claude/skills/lore-ingest/SKILL.md"));
-    let sentence = routing
+    // Where a source's pages land is one branch in the pipeline — `manual` writes documents,
+    // every other type writes a daily page. Stated as that rule, `lore-ingest` cannot fall behind
+    // a new adapter; stated as a list, it silently does. The gate is that it stays a rule: no
+    // adapter name beside the path template it routes to.
+    const DAILY_TEMPLATE: &str = "`<daily>/{source-id}/DATE.md`";
+    let enumerated: Vec<String> = read(&root.join(".claude/skills/lore-ingest/SKILL.md"))
         .lines()
-        .zip(routing.lines().skip(1))
-        .find(|(line, next)| {
-            line.contains("writes `<wiki>/documents/{slug}.md`")
-                || next.contains("writes `<daily>/{source-id}/DATE.md`")
+        .filter(|line| line.contains(DAILY_TEMPLATE))
+        .flat_map(|line| {
+            let lowered = line.to_lowercase();
+            lk_core::config::SourceType::iter()
+                .map(|source_type| source_type.to_string())
+                .filter(move |wire| wire != "manual" && lowered.contains(wire.as_str()))
         })
-        .map(|(line, next)| format!("{line} {next}"))
-        .expect("lore-ingest states where each source's pages land");
-    let enumerated: Vec<String> = lk_core::config::SourceType::iter()
-        .map(|t| t.to_string())
-        .filter(|wire| wire != "manual")
-        .filter(|wire| sentence.to_lowercase().contains(wire.as_str()))
         .collect();
     assert!(
         enumerated.is_empty(),
-        "lore-ingest's page-routing sentence names {enumerated:?} instead of stating the rule \
-         (`manual` writes documents, every other type writes a daily page) — a list of adapters \
-         goes stale the moment one is added, which is how `confluence` was left out"
+        "lore-ingest names {enumerated:?} beside {DAILY_TEMPLATE} instead of stating the rule \
+         every source type follows — a list goes stale the moment an adapter is added"
     );
 }
 

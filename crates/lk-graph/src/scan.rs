@@ -443,18 +443,16 @@ impl VaultExistence {
     /// catalog, both of which are files on disk.
     ///
     /// Compared under [`lk_core::fs::fold_name`], the rule the directory segments of an address
-    /// already resolve by: `wiki/concepts/foo.md` and a file stored as `.../Foo.md` are one file
-    /// on the filesystem this vault is most often edited on, and `cat` opens it at either
-    /// spelling. Answering the file segment exactly while the directory segments fold made one
-    /// address resolve two ways within a single path, so a link a reader can follow was reported
-    /// broken and the citation went uncounted.
+    /// already resolve by, so one address resolves one way along its whole path:
+    /// `wiki/concepts/foo.md` and a file stored as `.../Foo.md` are one file on the filesystem
+    /// this vault is most often edited on, and `cat` opens it at either spelling.
     ///
     /// What the two spellings cost when the vault syncs to a filesystem that keeps them apart is
-    /// answered by [`Self::respelled`] and reported under its own violation channel, with the
-    /// repair the link needs rather than the one `broken` would have named falsely. Neither
-    /// `unnormalized` nor `address_collisions` covers it — the first judges a FILE's name and
-    /// the file here is already its own slug, the second needs two files and there is one — so
-    /// without that channel the fold would lose the question instead of answering it.
+    /// [`Self::respelled`]'s question, reported under its own violation channel with the repair
+    /// the link needs. Neither `unnormalized` nor `address_collisions` covers it — the first
+    /// judges a FILE's name and the file here is already its own slug, the second needs two files
+    /// and there is one — so without that channel the fold would lose the question rather than
+    /// answer it.
     pub fn is_resolvable(&self, dest: &str) -> bool {
         self.paths.contains_key(&lk_core::fs::fold_name(dest))
     }

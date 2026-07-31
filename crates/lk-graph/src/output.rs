@@ -177,9 +177,8 @@ struct Envelope<T: Serialize> {
 /// Print a report inside the `{"ok": …, "data": …}` envelope.
 ///
 /// `ok` is the verdict the exit code carries: false exactly when the vault contradicts itself.
-/// It was a hardcoded `true`, so a `--json` consumer reading the field it was given got the
-/// opposite answer from the process it read it out of — `lore graph --json lint` on a drifted
-/// vault printed `"ok": true` and exited 1.
+/// The exit code is a shell fact and this is the parsed one, and a consumer reads whichever its
+/// language makes easy — so a constant here would hand half of them the opposite answer.
 pub fn print_json<T: Serialize>(data: &T, violated: bool) -> Result<(), String> {
     let envelope = Envelope {
         ok: !violated,

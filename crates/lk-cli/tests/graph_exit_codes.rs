@@ -924,10 +924,9 @@ fn a_concept_due_for_re_audit_is_a_worklist_and_exits_zero() {
 /// The `--json` envelope's `ok` is the same verdict as the exit code, for every subcommand and
 /// on both a sound and a contradicted vault.
 ///
-/// It was a hardcoded `true`, so a consumer that read the field it was given got the opposite
-/// answer from the process it read it out of: `lore graph --json lint` on a drifted vault printed
-/// `"ok": true` and exited 1. The exit code is a shell fact and `ok` is the parsed one, so a
-/// pipeline that parses is the one that believed it.
+/// The exit code is a shell fact and `ok` is the parsed one, and a caller reads whichever its
+/// language makes easy — so the two disagreeing means half of them are told the vault is sound
+/// while it contradicts itself.
 #[test]
 fn the_json_envelope_agrees_with_the_exit_code() {
     // Every read-only subcommand, so a new one is covered by adding it here rather than by

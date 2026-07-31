@@ -263,10 +263,9 @@ struct AuditReport {
     /// Sections a pending task can still fill, as `(page, section)`. Reported, never counted as
     /// a defect: the work is queued and the drain has simply not run yet.
     ///
-    /// NAMED, not merely counted. The generated AGENTS.md tells an agent that `lore doctor`
-    /// lists the pages whose unstamped body the next render will empty — and this is that state
-    /// too, since a queued section is emptied by the re-render just the same. Answering a
-    /// request to name them with a number is what sent a reader looking for the pages by hand.
+    /// NAMED, not merely counted: the generated AGENTS.md sends an agent here to find the pages
+    /// whose unstamped body the next render will empty, and a queued section is emptied by that
+    /// render just the same. A number answers a question nobody asked.
     in_flight: Vec<(PathBuf, &'static str)>,
 }
 

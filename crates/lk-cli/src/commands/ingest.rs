@@ -30,9 +30,8 @@ fn event_count(content: &str) -> String {
 /// A section whose answer nothing recorded is replaced with an empty one. The pipeline
 /// re-enqueues it, so for its own output this is routine — but the same state describes a body
 /// written by hand or by a drain that never stamped, and the write is not reversible. Said at
-/// the write rather than at planning time, so a page a later failure never reaches is never
-/// reported as lost; and under `--dry-run`, where nothing is written, in the same conditional
-/// mood as every other line that run prints.
+/// the write, so a page a later failure never reaches is never reported as lost, and under
+/// `--dry-run` in the same conditional mood as every other line that run prints.
 pub(super) fn report_discards(page: &lk_pipeline::RenderResult, dry_run: bool) {
     for heading in &page.discarded {
         if dry_run {
