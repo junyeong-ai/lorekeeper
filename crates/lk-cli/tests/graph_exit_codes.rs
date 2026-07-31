@@ -920,3 +920,71 @@ fn a_concept_due_for_re_audit_is_a_worklist_and_exits_zero() {
     assert!(stdout.contains("cited"), "worklist empty\n{stdout}");
     assert_eq!(out.status.code(), Some(0), "{stdout}");
 }
+
+/// The `--json` envelope's `ok` is the same verdict as the exit code, for every subcommand and
+/// on both a sound and a contradicted vault.
+///
+/// It was a hardcoded `true`, so a consumer that read the field it was given got the opposite
+/// answer from the process it read it out of: `lore graph --json lint` on a drifted vault printed
+/// `"ok": true` and exited 1. The exit code is a shell fact and `ok` is the parsed one, so a
+/// pipeline that parses is the one that believed it.
+#[test]
+fn the_json_envelope_agrees_with_the_exit_code() {
+    // Every read-only subcommand, so a new one is covered by adding it here rather than by
+    // remembering to. The mutating ones (`merge`, `audit-mark`, `--fix`) take arguments or edit
+    // the vault, and each already has its own test.
+    const COMMANDS: &[&[&str]] = &[
+        &["lint"],
+        &["hubs"],
+        &["orphans"],
+        &["broken"],
+        &["cluster"],
+        &["export"],
+        &["index-sync"],
+        &["normalize"],
+        &["suggest-links"],
+        &["audit-candidates"],
+        &["backlinks-sync", "--dry-run"],
+    ];
+
+    let check = |ws: &Workspace, label: &str| {
+        for argv in COMMANDS {
+            let mut args = vec!["graph", "--json"];
+            args.extend_from_slice(argv);
+            let out = ws.run(&args);
+            let stdout = String::from_utf8(out.stdout).expect("utf8");
+            let parsed: serde_json::Value = serde_json::from_str(&stdout)
+                .unwrap_or_else(|e| panic!("{label} `{}`: {e}\n{stdout}", argv.join(" ")));
+            assert_eq!(
+                parsed["ok"].as_bool(),
+                Some(out.status.code() == Some(0)),
+                "{label} `{}` says ok={} and exits {:?}",
+                argv.join(" "),
+                parsed["ok"],
+                out.status.code()
+            );
+        }
+    };
+
+    let sound = sound_vault();
+    check(&sound, "sound vault");
+
+    // A broken link and index drift: `lint`, `broken` and `index-sync` all exit 1 here.
+    let contradicted = sound_vault();
+    contradicted.write(
+        "daily/notes/2026-05-24.md",
+        "---\nid: notes-2026-05-24\ntype: daily\ntitle: \"Notes\"\n\
+         created: 2026-05-24\nupdated: 2026-05-24\n---\n\n\
+         ## Related concepts\n\n- [Ghost](../../wiki/concepts/ghost.md)\n",
+    );
+    contradicted.write(
+        "wiki/concepts/late.md",
+        &concept("late", "Late", "Added after the catalog was built."),
+    );
+    assert_eq!(
+        contradicted.code(&["graph", "lint"]),
+        1,
+        "the fixture must actually contradict itself"
+    );
+    check(&contradicted, "contradicted vault");
+}

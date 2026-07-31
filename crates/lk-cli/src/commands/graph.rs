@@ -194,7 +194,7 @@ fn run_inner(
             };
             let violated = report.violations.count() > 0;
             if json {
-                output::print_json(&report)?;
+                output::print_json(&report, violated)?;
             } else {
                 output::print_lint(&report);
             }
@@ -204,35 +204,39 @@ fn run_inner(
             let report = output::HubsReport {
                 hubs: g.hubs(top, 1),
             };
+            // An observation: a hub is true of a vault in good standing.
+            let violated = false;
             if json {
-                output::print_json(&report)?;
+                output::print_json(&report, violated)?;
             } else {
                 output::print_hubs(&report);
             }
-            false
+            violated
         }
         GraphCommand::Orphans => {
             let orphans = g.orphans(&rc.graph.metrics.orphan_exclude);
             let count = orphans.len();
             let report = output::OrphansReport { orphans, count };
+            // An observation: a concept nothing cites yet is not a false claim.
+            let violated = false;
             if json {
-                output::print_json(&report)?;
+                output::print_json(&report, violated)?;
             } else {
                 output::print_orphans(&report);
             }
-            false
+            violated
         }
         GraphCommand::Broken => {
             let broken = graph::broken_links(&views.link_sources, &views.existence, &rc.vault_dirs);
             let count = broken.len();
             let report = output::BrokenReport { broken, count };
-            let has = report.count > 0;
+            let violated = report.count > 0;
             if json {
-                output::print_json(&report)?;
+                output::print_json(&report, violated)?;
             } else {
                 output::print_broken(&report);
             }
-            has
+            violated
         }
         GraphCommand::Cluster { label, min_size } => {
             if let Some(size) = min_size {
@@ -242,12 +246,14 @@ fn run_inner(
             if label {
                 cluster::label_communities(&g, &mut result.communities);
             }
+            // An observation: communities describe a vault, they do not indict it.
+            let violated = false;
             if json {
-                output::print_json(&result)?;
+                output::print_json(&result, violated)?;
             } else {
                 output::print_cluster(&result);
             }
-            false
+            violated
         }
         GraphCommand::Export { with_clusters } => {
             let cluster_result = if with_clusters {
@@ -256,12 +262,14 @@ fn run_inner(
                 None
             };
             let graph_export = export::export(&g, cluster_result.as_ref());
+            // A dump of the graph, not a verdict on it.
+            let violated = false;
             if json {
-                output::print_json(&graph_export)?;
+                output::print_json(&graph_export, violated)?;
             } else {
                 output::print_export(&graph_export);
             }
-            false
+            violated
         }
         GraphCommand::IndexSync { fix } => {
             let drift = index_drift::diff(&rc.root, rc.locale, &rc.vault_dirs)
@@ -284,12 +292,13 @@ fn run_inner(
                 missing_from_disk: drift.missing_from_disk,
                 fixed,
             };
+            let violated = has && fixed.is_none();
             if json {
-                output::print_json(&report)?;
+                output::print_json(&report, violated)?;
             } else {
                 output::print_index_sync(&report);
             }
-            has && fixed.is_none()
+            violated
         }
         GraphCommand::Normalize { fix } => {
             // Rename candidates come from the analysis scope: only the wiki's own pages
@@ -310,12 +319,13 @@ fn run_inner(
                 renames: rename_suggestions(&renames),
                 applied,
             };
+            let violated = has && applied.is_none();
             if json {
-                output::print_json(&report)?;
+                output::print_json(&report, violated)?;
             } else {
                 output::print_normalize(&report);
             }
-            has && applied.is_none()
+            violated
         }
         GraphCommand::SuggestLinks { min_community_size } => {
             if let Some(size) = min_community_size {
@@ -332,12 +342,14 @@ fn run_inner(
                 pairs: result.pairs,
                 count,
             };
+            // An observation: a missing link is a suggestion, never a false claim.
+            let violated = false;
             if json {
-                output::print_json(&report)?;
+                output::print_json(&report, violated)?;
             } else {
                 output::print_suggest_links(&report);
             }
-            false
+            violated
         }
         GraphCommand::BacklinksSync { dry_run } => {
             let sync = backlinks::sync_concept_backlinks(
@@ -354,7 +366,7 @@ fn run_inner(
             let violated = !sync.skipped.is_empty();
             let report = output::BacklinksSyncReport { sync, changed };
             if json {
-                output::print_json(&report)?;
+                output::print_json(&report, violated)?;
             } else {
                 output::print_backlinks(&report);
             }
@@ -376,13 +388,14 @@ fn run_inner(
                 force,
             )
             .map_err(|e| format!("{e}"))?;
+            // A successful merge leaves nothing contradicted.
+            let violated = false;
             if json {
-                output::print_json(&result)?;
+                output::print_json(&result, violated)?;
             } else {
                 output::print_merge(&result);
             }
-            // A successful merge leaves nothing contradicted.
-            false
+            violated
         }
         // Dispatched at the top of `run_inner`: they read the concept pages directly.
         GraphCommand::AuditCandidates | GraphCommand::AuditMark { .. } => unreachable!(),
@@ -401,14 +414,15 @@ fn run_audit_candidates(
         .map_err(|e| format!("{e}"))?;
     let count = candidates.len();
     let report = output::AuditCandidatesReport { candidates, count };
+    // A worklist, not a defect: a concept whose evidence changed since its last audit says
+    // nothing false about the vault, so the list can be read under `set -e`.
+    let violated = false;
     if json {
-        output::print_json(&report)?;
+        output::print_json(&report, violated)?;
     } else {
         output::print_audit_candidates(&report);
     }
-    // A worklist, not a defect: a concept whose evidence changed since its last audit says
-    // nothing false about the vault, so the list can be read under `set -e`.
-    Ok(false)
+    Ok(violated)
 }
 
 fn run_audit_mark(
@@ -420,14 +434,19 @@ fn run_audit_mark(
     let rc = resolve_config_full(opts, root_override)?;
     let changed = audit::mark_audited(&rc.root, &rc.vault_dirs.wiki, slug, rc.locale)
         .map_err(|e| format!("{e}"))?;
+    // Stamping a marker cannot leave the vault contradicting itself.
+    let violated = false;
     if json {
-        output::print_json(&serde_json::json!({ "slug": slug, "changed": changed }))?;
+        output::print_json(
+            &serde_json::json!({ "slug": slug, "changed": changed }),
+            violated,
+        )?;
     } else if changed {
         println!("Marked '{slug}' as audited.");
     } else {
         println!("'{slug}' was already up to date.");
     }
-    Ok(false)
+    Ok(violated)
 }
 
 /// A rename candidate as the report carries it: the slug a file has and the one its own name

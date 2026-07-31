@@ -169,8 +169,17 @@ struct Envelope<T: Serialize> {
     data: T,
 }
 
-pub fn print_json<T: Serialize>(data: &T) -> Result<(), String> {
-    let envelope = Envelope { ok: true, data };
+/// Print a report inside the `{"ok": …, "data": …}` envelope.
+///
+/// `ok` is the verdict the exit code carries: false exactly when the vault contradicts itself.
+/// It was a hardcoded `true`, so a `--json` consumer reading the field it was given got the
+/// opposite answer from the process it read it out of — `lore graph --json lint` on a drifted
+/// vault printed `"ok": true` and exited 1.
+pub fn print_json<T: Serialize>(data: &T, violated: bool) -> Result<(), String> {
+    let envelope = Envelope {
+        ok: !violated,
+        data,
+    };
     println!(
         "{}",
         serde_json::to_string_pretty(&envelope).map_err(|e| e.to_string())?

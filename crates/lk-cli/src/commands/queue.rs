@@ -591,6 +591,8 @@ async fn status(
             })
             .collect();
         let envelope = serde_json::json!({
+            // `status` is a classification, not a verdict — it exits 0 over any queue it can
+            // describe, so `ok` is true whenever it got that far.
             "ok": true,
             "data": {
                 "current": current,
@@ -636,6 +638,10 @@ struct PruneSummary {
     kept_unreadable: usize,
     /// Lines nobody could parse. Their file is left whole — see [`QueueFile::is_rewritable`].
     kept_unparseable: usize,
+    /// Tasks held only because they share a file with such a line. Not classified: nothing here
+    /// acted on them, and counting one under `kept_current` or `pruned_stale` would say prune
+    /// decided something it did not.
+    kept_blocked: usize,
     retired_done: usize,
     files_rewritten: usize,
     files_deleted: usize,
@@ -674,8 +680,14 @@ fn prune_queue(vault_root: &Path, queue_dir: &Path, dry_run: bool) -> miette::Re
         };
         // A file holding a line nobody can parse keeps every line: rewriting it would drop
         // work nothing could classify. Its own GC waits for a human; the rest proceeds.
+        //
+        // Counted, not skipped over: the tasks held with it are what a reader needs to know is
+        // stuck. Reporting `kept 0 current` for a file that still holds a current task made the
+        // janitor's summary of what it kept omit the work it kept — and they are not counted
+        // under their classification, because nothing here acted on it.
         if !read.is_rewritable() {
             summary.kept_unparseable += read.unparseable;
+            summary.kept_blocked += read.tasks.len();
             continue;
         }
         let tasks = read.tasks;
@@ -787,9 +799,19 @@ async fn prune(
     let queue_dir = vault_root.join(".lorekeeper").join("queue");
     let summary = prune_queue(&vault_root, &queue_dir, dry_run)?;
 
+    // A retained-because-unclassifiable task is a defect with a named repair — the target page's
+    // frontmatter, or the queue line itself — and nothing else in a scheduled run reports it:
+    // `queue count` deliberately omits it from the drain decision so a session is never spent on
+    // work no session can do, which leaves the janitor as the only place it can surface.
+    // Reporting one kind and not the other left the janitor green over a queue it had just
+    // described as blocked.
+    let blocked = summary.kept_unreadable > 0 || summary.kept_unparseable > 0;
+
     if json {
         let envelope = serde_json::json!({
-            "ok": true,
+            // The verdict the exit code carries, not a constant: a consumer reading `ok` out of
+            // a process that exited 1 was told the opposite of what the process said.
+            "ok": !blocked,
             "data": {
                 "dry_run": dry_run,
                 "pruned_stale": summary.pruned_stale,
@@ -797,6 +819,7 @@ async fn prune(
                 "kept_current": summary.kept_current,
                 "kept_unreadable": summary.kept_unreadable,
                 "kept_unparseable": summary.kept_unparseable,
+                "kept_blocked": summary.kept_blocked,
                 "retired_done": summary.retired_done,
                 "files_rewritten": summary.files_rewritten,
                 "files_deleted": summary.files_deleted,
@@ -812,26 +835,22 @@ async fn prune(
         };
         eprintln!(
             "{label}: dropped {} stale + {} missing-target, kept {} current + {} unreadable \
-             + {} unparseable, {} already done; {} file(s) rewritten, {} archived, {} deleted",
+             + {} unparseable + {} blocked, {} already done; {} file(s) rewritten, {} archived, \
+             {} deleted",
             summary.pruned_stale,
             summary.pruned_missing_target,
             summary.kept_current,
             summary.kept_unreadable,
             summary.kept_unparseable,
+            summary.kept_blocked,
             summary.retired_done,
             summary.files_rewritten,
             summary.files_archived,
             summary.files_deleted
         );
     }
-    // A retained-because-unclassifiable task is a defect with a named repair — the target page's
-    // frontmatter — and nothing else in a scheduled run reports it: `queue count` deliberately
-    // omits it from the drain decision so a session is never spent on work no session can do,
-    // which leaves the janitor as the only place it can surface.
-    // Either kind leaves work nothing can drain, and both need a human — the target page's
-    // frontmatter, or the queue line itself. Reporting one and not the other left the janitor
-    // green over a queue it had just described as blocked.
-    if summary.kept_unreadable > 0 || summary.kept_unparseable > 0 {
+
+    if blocked {
         if summary.kept_unreadable > 0 {
             eprintln!(
                 "{} task(s) kept because their target page will not parse — repair the page and \
@@ -841,9 +860,9 @@ async fn prune(
         }
         if summary.kept_unparseable > 0 {
             eprintln!(
-                "{} queue line(s) could not be parsed, so their file is kept whole — repair it \
-                 by hand; nothing can tell what work they named.",
-                summary.kept_unparseable
+                "{} queue line(s) could not be parsed, so their file is kept whole, holding {} \
+                 task(s) with them — repair it by hand; nothing can tell what work they named.",
+                summary.kept_unparseable, summary.kept_blocked
             );
         }
         std::process::exit(1);
@@ -1267,6 +1286,7 @@ mod tests {
                 kept_current: 1,
                 kept_unreadable: 0,
                 kept_unparseable: 0,
+                kept_blocked: 0,
                 retired_done: 0,
                 files_rewritten: 1,
                 files_deleted: 0,
