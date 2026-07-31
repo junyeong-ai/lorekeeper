@@ -73,8 +73,8 @@ pub struct Violations {
     /// Filenames that disagree with their own normalized slug. A link is written from the slug,
     /// so the page is addressed by a name its file does not have.
     pub unnormalized: Vec<RenameSuggestion>,
-    /// Links that resolve only because the filesystem folds case or Unicode normalization. Dead
-    /// on one that does not, which is where a synced vault ends up.
+    /// Links that resolve only because the filesystem folds case. Dead on one that does not,
+    /// which is where a synced vault ends up.
     pub respelled_links: Vec<crate::graph::RespelledLink>,
 }
 
@@ -402,9 +402,8 @@ fn print_violations(v: &Violations) {
             );
         }
         println!(
-            "  repair: rewrite each destination as the file spells it — this resolves here \
-                  only because the filesystem folds case and Unicode, and is dead on one that \
-                  does not"
+            "  repair: rewrite each destination as the file spells it — this resolves only on a \
+             filesystem that folds case, and is dead on one that does not"
         );
     }
 
@@ -414,7 +413,7 @@ fn print_violations(v: &Violations) {
             unnormalized.len()
         );
         for r in unnormalized {
-            println!("  {} -> {}", r.from, r.to);
+            println!("  {} -> {}{}", r.from, r.to, normalization_note(r));
         }
     }
 }
@@ -574,6 +573,21 @@ pub fn print_backlinks(r: &BacklinksSyncReport) {
     }
 }
 
+/// Said when a rename's two sides LOOK identical.
+///
+/// A filename in NFD and its NFC slug render the same glyphs, so `개념 -> 개념` reads as a
+/// no-op and any tooling that string-compares them concludes there is nothing to do — while on
+/// a filesystem that keeps the two apart they are different files, which is the whole finding.
+fn normalization_note(rename: &RenameSuggestion) -> &'static str {
+    use unicode_normalization::UnicodeNormalization;
+    let same_glyphs = |a: &str, b: &str| a.nfc().collect::<String>() == b.nfc().collect::<String>();
+    if same_glyphs(&rename.from, &rename.to) {
+        "  (same glyphs, different bytes: the name is not in Unicode NFC)"
+    } else {
+        ""
+    }
+}
+
 fn format_diff(update: &ConceptUpdate) -> String {
     let mut parts = Vec::new();
     if !update.added.is_empty() {
@@ -687,5 +701,28 @@ mod tests {
             }],
         };
         assert_eq!(o.count(), listed(&serde_json::to_value(&o).unwrap()));
+    }
+
+    /// A rename whose two sides render the same glyphs says which difference it means.
+    #[test]
+    fn a_normalization_only_rename_says_the_bytes_differ() {
+        let nfd = "\u{1100}\u{1162}\u{1102}\u{1167}\u{11b7}";
+        let nfc = "\u{ac1c}\u{b150}";
+        assert_ne!(nfd, nfc, "the fixture must be two spellings of one word");
+        assert!(
+            normalization_note(&RenameSuggestion {
+                from: nfd.into(),
+                to: nfc.into(),
+            })
+            .contains("not in Unicode NFC")
+        );
+        assert!(
+            normalization_note(&RenameSuggestion {
+                from: "Bad_Name".into(),
+                to: "bad-name".into(),
+            })
+            .is_empty(),
+            "a rename a reader can see needs no note"
+        );
     }
 }

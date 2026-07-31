@@ -447,12 +447,12 @@ impl VaultExistence {
     /// `wiki/concepts/foo.md` and a file stored as `.../Foo.md` are one file on the filesystem
     /// this vault is most often edited on, and `cat` opens it at either spelling.
     ///
-    /// What the two spellings cost when the vault syncs to a filesystem that keeps them apart is
-    /// [`Self::respelled`]'s question, reported under its own violation channel with the repair
-    /// the link needs. Neither `unnormalized` nor `address_collisions` covers it — the first
-    /// judges a FILE's name and the file here is already its own slug, the second needs two files
-    /// and there is one — so without that channel the fold would lose the question rather than
-    /// answer it.
+    /// What a CASE difference costs when the vault syncs to a filesystem that keeps the two
+    /// apart is [`Self::respelled`]'s question, reported under its own violation channel with the
+    /// repair the link needs. Neither `unnormalized` nor `address_collisions` covers it — the
+    /// first judges a FILE's name and the file here is already its own slug, the second needs two
+    /// files and there is one. A NORMALIZATION difference is `unnormalized`'s: both sides here
+    /// have been through [`rel_str`], so by this point there is none left to see.
     pub fn is_resolvable(&self, dest: &str) -> bool {
         self.paths.contains_key(&lk_core::fs::fold_name(dest))
     }

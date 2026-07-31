@@ -93,6 +93,10 @@ pub struct RespelledLink {
 /// judges a FILE's name and this file is already its own slug; `address_collisions` needs two
 /// files and there is one. This is the channel that answers it.
 ///
+/// CASE is the difference it sees. Both sides of the comparison have been through
+/// `scan::rel_str`, so a normalization difference is already gone by here — that one is a
+/// property of the FILE's name and `unnormalized` reports it, with the rename that fixes it.
+///
 /// The repair is the link, not the file: rewrite the destination as the file spells it.
 pub fn respelled_links(
     pages: &[ScannedPage],
