@@ -372,8 +372,9 @@ pub fn render_agents_md(
          `<key>_done` when you fill the section it belongs to. Stamping is not bookkeeping: a \
          section whose marker does not match its input is ANSWERED AGAIN by the next render, \
          which writes it EMPTY and re-queues it — so an unstamped body is lost the next time \
-         `lore ingest` or `lore synthesis` touches the page. `lore doctor` lists the pages in \
-         that state. The one exception is `concepts_done`: that section and its marker \
+         `lore ingest` or `lore synthesis` touches the page — whichever RENDERS it: a daily or \
+         document page by the first, a synthesis or review page by the second. `lore doctor` \
+         names every page in that state, the queued ones included. The one exception is `concepts_done`: that section and its marker \
          are both written by `lore queue apply`, and stamping it by hand claims an empty \
          section is answered, which loses the extraction permanently. A page you create \
          directly has no pipeline behind it and omits the whole block."

@@ -83,11 +83,15 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
             );
         }
     }
-    if report.in_flight > 0 {
+    if !report.in_flight.is_empty() {
         eprintln!(
-            "\n{} section(s) are queued for a drain and not counted above — run `/lore-process`.",
-            report.in_flight
+            "\n{} section(s) are queued for a drain and not counted above — run `/lore-process`. \
+             A re-render empties each of these too, so they are named:",
+            report.in_flight.len()
         );
+        for (path, section) in &report.in_flight {
+            eprintln!("    {}: `{section}`", path.display());
+        }
     }
     if report.pages.iter().any(|page| !page.defects.is_empty()) {
         eprintln!(
@@ -122,8 +126,9 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
              now carries, so there is nothing to splice back — the task is enqueued again and a\n\
              drain writes the section from scratch. If the section holds something already, that\n\
              is exactly the case this report cannot tell from an unanswered one, and rewriting\n\
-             the page is not reversible: copy the body out first. `lore ingest` names each\n\
-             section it is about to empty before it writes.\n\
+             the page is not reversible: copy the body out first. `lore ingest` and `lore\n\
+             synthesis` each name the sections they are about to empty before they write —\n\
+             a synthesis page is re-rendered by the latter, never by an ingest.\n\
              \n\
              Re-rendering costs more than it looks. `lore ingest --date <date>` re-renders EVERY\n\
              daily page for that date from a fresh fetch BEFORE it reaches the work-log, and a\n\
@@ -255,9 +260,14 @@ struct AuditReport {
     scanned: u32,
     errors: u32,
     pages: Vec<PageDefects>,
-    /// Sections a pending task can still fill. Reported, never counted as a defect: the work
-    /// is queued and the drain has simply not run yet.
-    in_flight: u32,
+    /// Sections a pending task can still fill, as `(page, section)`. Reported, never counted as
+    /// a defect: the work is queued and the drain has simply not run yet.
+    ///
+    /// NAMED, not merely counted. The generated AGENTS.md tells an agent that `lore doctor`
+    /// lists the pages whose unstamped body the next render will empty — and this is that state
+    /// too, since a queued section is emptied by the re-render just the same. Answering a
+    /// request to name them with a number is what sent a reader looking for the pages by hand.
+    in_flight: Vec<(PathBuf, &'static str)>,
 }
 
 /// Walk `roots`, scanning every `.md` against the cleanliness contract. Pure with
@@ -274,7 +284,7 @@ fn audit(
 ) -> AuditReport {
     let mut scanned = 0u32;
     let mut errors = 0u32;
-    let mut in_flight = 0u32;
+    let mut in_flight: Vec<(PathBuf, &'static str)> = Vec::new();
     let mut pages = Vec::new();
 
     for root in roots {
@@ -313,7 +323,7 @@ fn audit(
                     let (queued, outstanding): (Vec<_>, Vec<_>) = unanswered_sections(&page)
                         .into_iter()
                         .partition(|key| in_flight_keys.contains(&(rel.clone(), *key)));
-                    in_flight += queued.len() as u32;
+                    in_flight.extend(queued.into_iter().map(|key| (rel.clone(), key)));
                     outstanding
                 }
                 Err(e) => {
