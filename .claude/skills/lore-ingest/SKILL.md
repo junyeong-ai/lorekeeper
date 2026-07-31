@@ -29,7 +29,7 @@ an Obsidian vault. All commands accept `--config <path>` to override.
 | `lore synthesis quarterly [--previous]` | Quarterly review with category stats |
 | `lore synthesis annual [--previous]` | Annual review from quarterly reviews |
 | `lore status` | Last time each source was COLLECTED — an empty run counts, so a quiet source shows its real timestamp with `0 events` |
-| `lore health [--strict]` | Warn if any source is overdue vs `ingest.schedule` (2 missed fires; 48h fallback) |
+| `lore health [--strict]` | Warn if any source is overdue vs `ingest.schedule` (2 missed fires; 48h fallback). `--strict` also fails when a source has NEVER ingested, which a first install has and a broken one looks identical to |
 | `lore performance` | Performance category distribution |
 | `lore doctor` | Audit materialized pages against the contracts they must satisfy — text cleanliness, and a section whose input was recorded and never answered (non-zero on any defect, or on a page it could not read) |
 | `lore schedule --format launchd --bin <abs> --pipeline-dir <dir>` | Print scheduled-task definitions. Both flags are required in practice — see the notes below; the bare form is rarely the one you want |
@@ -116,12 +116,10 @@ queue never references an unwritten page.
 
 1. **Plan each source** — fetch, normalize, intra-batch dedup, classify. A source
    that fails is recorded and skipped; the run continues with the rest.
-2. **Write pages** — atomic per file (tmp + rename). All daily sources
-   `manual` — and only `manual` — writes `<wiki>/documents/{slug}.md`; EVERY other source
-   type writes `<daily>/{source-id}/DATE.md`. Stated as the rule rather than as a list of
-   adapters, because it is one branch in the pipeline and a list goes stale the moment a
-   source type is added. Concept pages are a cross-source aggregate,
-   rendered once after all sources plan.
+2. **Write pages** — atomic per file (tmp + rename). `manual` — and only `manual` — writes
+   `<wiki>/documents/{slug}.md`; every other source type writes
+   `<daily>/{source-id}/DATE.md`. Concept pages are a cross-source aggregate, rendered once
+   after all sources plan.
 3. **Write work-log** — personal events only, and only when the optional `personal:`
    module is configured (a source must be in `personal.tracked_sources` AND match its
    adapter `is_self`; `manual`/RSS/Drive have no authorship, so never produce work-log

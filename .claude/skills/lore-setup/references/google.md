@@ -20,9 +20,6 @@ Event descriptions are converted HTML→Markdown automatically.
 
 ## Gmail — which mail to collect
 Inspect the category distribution of unread mail to gauge the noise:
-One line per category, so every command is one the skill's `allowed-tools` names — a
-`for … echo … done` loop leads with a shell builtin the allowlist cannot spell, and in
-`claude -p` an unpermitted step is denied rather than prompted:
 ```bash
 gws gmail users messages list --params '{"userId":"me","q":"is:unread category:primary","maxResults":1}' | jq -r '.resultSizeEstimate'
 gws gmail users messages list --params '{"userId":"me","q":"is:unread category:promotions","maxResults":1}' | jq -r '.resultSizeEstimate'
