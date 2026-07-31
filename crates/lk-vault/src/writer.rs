@@ -69,10 +69,11 @@ impl Format {
 /// exit 0. What the exemption bought was not having to move a damaged file aside by hand, which is
 /// what the refusal already says to do.
 ///
-/// Coverage bound: this guards writes routed through `VaultWriter`. `graph merge` and
-/// `graph normalize` call `lk_core::fs::write_atomic` directly — each edits a page in place
-/// without changing its format, so neither can be the write this refuses. A wholesale
-/// replacement is the write this refuses, and every one of those routes through here.
+/// Every write of a vault page goes through here — there is no second path to keep a list of.
+/// What does not is the vault's operational state (`.lorekeeper/`: the queue, the event logs,
+/// the ingest log) and `credentials.json`, none of which is a page and none of which this
+/// guard has anything to say about.
+///
 /// The check and the publish are separate syscalls, so two concurrent processes writing
 /// different formats to one path can both pass it; the vault has no cross-process lock, and
 /// every writer in it is check-then-write.

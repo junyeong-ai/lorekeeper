@@ -157,8 +157,9 @@ pub fn merge_concepts(
         let (updated, count) = rewrite_links(&content, &page.path, &from_rel, &into_rel);
         if count > 0 {
             if !dry_run && updated != content {
-                lk_core::fs::write_atomic(&abs, updated.as_bytes(), None)
-                    .map_err(|e| GraphError::Io(format!("write {}: {e}", abs.display())))?;
+                lk_vault::VaultWriter::new(vault_root)
+                    .write_page_sync(&page.path, &updated)
+                    .map_err(|e| GraphError::Io(format!("write {}: {e}", page.path.display())))?;
             }
             rewritten.push(RewrittenPage {
                 path: page.path.clone(),
@@ -269,7 +270,8 @@ fn apply_aliases(vault_root: &Path, into_rel: &Path, aliases: &[String]) -> Resu
                 into_rel.display()
             ))
         })?;
-    lk_core::fs::write_atomic(&vault_root.join(into_rel), updated.as_bytes(), None)
+    lk_vault::VaultWriter::new(vault_root)
+        .write_page_sync(into_rel, &updated)
         .map_err(|e| GraphError::Io(format!("write {}: {e}", into_rel.display())))?;
     Ok(())
 }

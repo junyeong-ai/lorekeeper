@@ -176,9 +176,11 @@ pub fn apply(renames: &[Rename], pages: &[ScannedPage], root: &Path) -> Result<u
         }
 
         if updated != content {
-            lk_core::fs::write_atomic(&abs_path, updated.as_bytes(), None).map_err(|e| {
-                GraphError::Io(format!("failed to write {}: {e}", abs_path.display()))
-            })?;
+            lk_vault::VaultWriter::new(root)
+                .write_page_sync(rel_path, &updated)
+                .map_err(|e| {
+                    GraphError::Io(format!("failed to write {}: {e}", rel_path.display()))
+                })?;
         }
     }
 
