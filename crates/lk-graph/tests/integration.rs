@@ -279,6 +279,7 @@ fn lint_combined_report() {
             broken,
             index: output::IndexSyncReport {
                 stale: false,
+                absent: drift.absent,
                 missing_from_index: drift.missing_from_index,
                 missing_from_disk: drift.missing_from_disk,
                 fixed: None,

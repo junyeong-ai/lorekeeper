@@ -102,7 +102,7 @@ pub async fn render_work_log(
         let decision: SectionDecision = llm_cache::lookup(
             existing.as_ref(),
             &completion_key,
-            topic_heading,
+            |s| s.topic_summary,
             hash.clone(),
         );
 
@@ -154,10 +154,10 @@ pub async fn render_work_log(
             .render("work-log.md.jinja", &context)
             .map_err(|e| PipelineError::Render(e.to_string()))?;
 
-        if let Some(content) =
+        if let Some(spliced) =
             splice_preserved_sections(fresh, std::iter::once((topic_heading, &decision)))
         {
-            outputs.push(RenderResult { path, content });
+            outputs.push(RenderResult::spliced(path, spliced));
         }
     }
 

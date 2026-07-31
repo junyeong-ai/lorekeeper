@@ -157,6 +157,10 @@ pub async fn run(opts: &super::GlobalOptions, period: Period) -> miette::Result<
     };
 
     for out in &outputs {
+        // A synthesis section is LLM-owned like any other, so re-running a period whose
+        // input grew empties the narrative it already held. Named before the write, as
+        // `lore ingest` names the same thing.
+        super::ingest::report_discards(out, false);
         writer
             .write_page(out.path.as_ref(), &out.content)
             .await

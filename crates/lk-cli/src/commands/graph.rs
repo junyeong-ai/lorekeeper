@@ -176,6 +176,7 @@ fn run_inner(
                     broken,
                     index: output::IndexSyncReport {
                         stale: !drift.is_in_sync(),
+                        absent: drift.absent,
                         missing_from_index: drift.missing_from_index,
                         missing_from_disk: drift.missing_from_disk,
                         fixed: None,
@@ -278,6 +279,7 @@ fn run_inner(
             };
             let report = output::IndexSyncReport {
                 stale: has,
+                absent: drift.absent,
                 missing_from_index: drift.missing_from_index,
                 missing_from_disk: drift.missing_from_disk,
                 fixed,

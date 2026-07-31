@@ -38,6 +38,10 @@ pub struct IndexSyncReport {
     /// The catalog differs from a re-derivation in a way the two lists do not name — a title or
     /// a summary that changed while the page set did not.
     pub stale: bool,
+    /// There is no catalog on disk. Distinct from `stale`, which the lists explain: in an empty
+    /// vault they name nothing, and a report reading the state off them alone describes a file
+    /// that was never built as one that disagrees with itself.
+    pub absent: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fixed: Option<usize>,
 }
@@ -127,12 +131,13 @@ impl IndexSyncReport {
             missing_from_index,
             missing_from_disk,
             stale,
+            // Why the catalog is stale, not a second finding: a catalog that is absent differs
+            // from its re-derivation, so `stale` already counts it.
+            absent: _,
             // Not a finding: how many entries `index-sync --fix` ADDED. `lint` never fixes, and
             // the standalone command reports it separately.
             fixed: _,
         } = self;
-        // `stale` is the verdict and the lists are its explanation, so a catalog stale in a way
-        // neither list names still counts once.
         // `stale` is the verdict for the whole channel and the lists are its explanation: a
         // catalog stale in a way neither list names counts once, and one they DO name counts
         // what they name — folding the flag into either list would count it twice.
@@ -211,16 +216,31 @@ pub fn print_index_sync(r: &IndexSyncReport) {
     for p in &r.missing_from_disk {
         println!("  -disk   {p}");
     }
-    // A catalog holding every page can still state a title or a summary no page does, and then
-    // neither list names anything — saying "in sync" there is the report contradicting its own
-    // exit code.
-    if r.missing_from_index.is_empty() && r.missing_from_disk.is_empty() {
-        println!("  the catalog holds every page, but states something no page does");
+    if let Some(reason) = unlisted_reason(r) {
+        println!("  {reason}");
     }
     match r.fixed {
         Some(n) => println!("index.md rewritten ({n} page(s) settled)"),
         None => println!("  repair: `lore wiki index` (or re-run with --fix)"),
     }
+}
+
+/// Why the catalog drifted when neither list says — printed by both reports, so they cannot
+/// describe one state in two ways.
+///
+/// A catalog holding every page can still state a title or a summary no page does, and then
+/// neither list names anything; saying "in sync" there is the report contradicting its own exit
+/// code. But in a vault with no pages, neither list names anything EITHER while the catalog is
+/// simply unbuilt, and the same sentence then describes a file that is not there.
+fn unlisted_reason(r: &IndexSyncReport) -> Option<&'static str> {
+    if !r.missing_from_index.is_empty() || !r.missing_from_disk.is_empty() {
+        return None;
+    }
+    Some(if r.absent {
+        "no catalog has been built yet"
+    } else {
+        "the catalog holds every page, but states something no page does"
+    })
 }
 
 pub fn print_normalize(r: &NormalizeReport) {
@@ -321,8 +341,8 @@ fn print_violations(v: &Violations) {
         for p in &index.missing_from_disk {
             println!("  -disk   {p}");
         }
-        if index.missing_from_index.is_empty() && index.missing_from_disk.is_empty() {
-            println!("  the catalog holds every page, but states something no page does");
+        if let Some(reason) = unlisted_reason(index) {
+            println!("  {reason}");
         }
         println!("  repair: `lore wiki index` (or `lore graph index-sync --fix`)");
     }
@@ -548,6 +568,32 @@ mod tests {
         }
     }
 
+    /// Which sentence explains a drift neither list names. The two states are indistinguishable
+    /// from the lists — both leave them empty — and only one of them is about a file that exists.
+    #[test]
+    fn an_unbuilt_catalog_is_not_described_as_one_that_disagrees() {
+        let drifted = |absent, missing_from_index: Vec<String>| IndexSyncReport {
+            stale: true,
+            absent,
+            missing_from_index,
+            missing_from_disk: Vec::new(),
+            fixed: None,
+        };
+        assert_eq!(
+            unlisted_reason(&drifted(false, Vec::new())),
+            Some("the catalog holds every page, but states something no page does")
+        );
+        assert_eq!(
+            unlisted_reason(&drifted(true, Vec::new())),
+            Some("no catalog has been built yet")
+        );
+        assert_eq!(
+            unlisted_reason(&drifted(true, vec!["wiki/concepts/a".into()])),
+            None,
+            "a list that names the drift explains it on its own"
+        );
+    }
+
     /// `count`'s destructuring refuses a new field until it is mentioned; this is the other
     /// half, that the fields are counted CORRECTLY — one `.len()` per list, none doubled, none
     /// read off the wrong field — against the entries serde can see in a full channel.
@@ -562,6 +608,7 @@ mod tests {
             }],
             index: IndexSyncReport {
                 stale: false,
+                absent: false,
                 missing_from_index: vec!["c".into()],
                 missing_from_disk: vec!["d".into()],
                 fixed: None,

@@ -25,6 +25,30 @@ fn event_count(content: &str) -> String {
     }
 }
 
+/// Say what writing this page costs, immediately before writing it.
+///
+/// A section whose answer nothing recorded is replaced with an empty one. The pipeline
+/// re-enqueues it, so for its own output this is routine — but the same state describes a body
+/// written by hand or by a drain that never stamped, and the write is not reversible. Said at
+/// the write rather than at planning time, so a page a later failure never reaches is never
+/// reported as lost; and under `--dry-run`, where nothing is written, in the same conditional
+/// mood as every other line that run prints.
+pub(super) fn report_discards(page: &lk_pipeline::RenderResult, dry_run: bool) {
+    for heading in &page.discarded {
+        if dry_run {
+            eprintln!(
+                "  [dry-run] would empty an unanswered section: {}: {heading}",
+                page.path
+            );
+        } else {
+            eprintln!(
+                "  ! emptying an unanswered section: {}: {heading}",
+                page.path
+            );
+        }
+    }
+}
+
 pub async fn run(
     opts: &super::GlobalOptions,
     source: Option<String>,
@@ -246,22 +270,9 @@ pub async fn run(
             eprintln!("  concepts: {}", result.concepts.len());
         }
 
-        // A section whose answer nothing recorded is about to be replaced with an empty one. The
-        // pipeline re-enqueues it, so for its own output this is routine — but the same state
-        // describes a body written by hand or by a drain that never stamped, and the write is not
-        // reversible. Said before the write, so `lore doctor`'s remediation cannot cost prose
-        // silently the way it did — and under `--dry-run`, where nothing is written, in the same
-        // conditional mood as the write it is warning about.
-        for section in &result.discarded {
-            if dry_run {
-                eprintln!("  [dry-run] would empty an unanswered section: {section}");
-            } else {
-                eprintln!("  ! emptying an unanswered section: {section}");
-            }
-        }
-
         if dry_run {
             for out in &result.daily_pages {
+                report_discards(out, dry_run);
                 eprintln!(
                     "  [dry-run] would write: {}{}",
                     out.path,
@@ -269,6 +280,7 @@ pub async fn run(
                 );
             }
             for out in &result.document_pages {
+                report_discards(out, dry_run);
                 eprintln!("  [dry-run] would write: {} (document)", out.path);
             }
             continue;
@@ -305,6 +317,7 @@ pub async fn run(
 
     for p in &planned {
         for out in &p.result.daily_pages {
+            report_discards(out, dry_run);
             if let Err(e) = writer.write_page(out.path.as_ref(), &out.content).await {
                 eprintln!("  ✗ vault write {}: {e}", out.path);
                 any_write_failed = true;
@@ -314,6 +327,7 @@ pub async fn run(
             eprintln!("  ✓ wrote: {} ({})", out.path, p.id);
         }
         for out in &p.result.document_pages {
+            report_discards(out, dry_run);
             if let Err(e) = writer.write_page(out.path.as_ref(), &out.content).await {
                 eprintln!("  ✗ vault write {}: {e}", out.path);
                 any_write_failed = true;
@@ -376,6 +390,7 @@ pub async fn run(
             .await
             .map_err(|e| miette::miette!("work-log: {e}"))?;
         for wl in &work_logs {
+            report_discards(wl, dry_run);
             if let Err(e) = writer.write_page(wl.path.as_ref(), &wl.content).await {
                 eprintln!("✗ work-log write {}: {e}", wl.path);
                 any_write_failed = true;

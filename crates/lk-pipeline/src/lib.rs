@@ -44,20 +44,31 @@ pub struct IngestResult {
     pub concepts: Vec<ExtractedConcept>,
     pub daily_pages: Vec<RenderResult>,
     pub document_pages: Vec<RenderResult>,
-    /// Sections this run REPLACED with an empty one because nothing recorded an answer for the
-    /// input they now carry — `{page}: {heading}`.
-    ///
-    /// The pipeline's own flow re-enqueues them and a drain fills them again, so this is normal.
-    /// It is reported because the same state describes a section somebody answered WITHOUT
-    /// recording it — a body written by hand, or by a drain that never stamped — and rewriting
-    /// the page is not reversible. A caller that prints nothing here leaves that loss to be
-    /// discovered later, which is what made `lore doctor`'s own remediation destructive.
-    pub discarded: Vec<String>,
 }
 
 impl IngestResult {
     pub fn is_empty(&self) -> bool {
         self.daily_pages.is_empty() && self.document_pages.is_empty()
+    }
+
+    /// Every section this run's writes replace with an empty one, as `{page}: {heading}`.
+    ///
+    /// Read off the pages themselves, so a loss cannot be reported for a page that is not
+    /// written. The pipeline's own flow re-enqueues each one and a drain fills it again, so
+    /// this is routine; it is reported because the same state describes a section somebody
+    /// answered WITHOUT recording it — a body written by hand, or by a drain that never
+    /// stamped — and rewriting the page is not reversible. A caller that prints nothing here
+    /// leaves that loss to be discovered later, which is what made `lore doctor`'s own
+    /// remediation destructive.
+    pub fn discarded(&self) -> impl Iterator<Item = String> + '_ {
+        self.daily_pages
+            .iter()
+            .chain(&self.document_pages)
+            .flat_map(|page| {
+                page.discarded
+                    .iter()
+                    .map(move |heading| format!("{}: {heading}", page.path))
+            })
     }
 }
 
@@ -209,7 +220,6 @@ impl Pipeline {
         }
 
         let mut daily_pages: Vec<RenderResult> = Vec::new();
-        let mut discarded: Vec<String> = Vec::new();
         // Concepts are staged per date and merged into the run-level accumulator only after
         // the whole source plan succeeds, so a mid-source render failure (`?`) contributes
         // nothing to the cross-source concept pages — the same commit-on-success contract the
@@ -220,8 +230,9 @@ impl Pipeline {
         let focus = config.normalized_focus();
 
         let strings = self.ctx.locale.strings();
+        let item_kind = config.source_type.descriptor().item_kind;
         let summary_heading = strings.summary;
-        let events_heading = config.source_type.descriptor().item_kind.heading(strings);
+        let events_heading = item_kind.heading(strings);
         let concepts_heading = strings.related_concepts;
 
         for (date, day_indices) in &by_date {
@@ -266,7 +277,7 @@ impl Pipeline {
             let summary_decision = llm_cache::lookup(
                 existing.as_ref(),
                 &summary_req.target.kind.completion_key(),
-                summary_heading,
+                |s| s.summary,
                 summary_req.cache_hash(),
             );
 
@@ -289,7 +300,7 @@ impl Pipeline {
             let refine_decision = llm_cache::lookup(
                 existing.as_ref(),
                 &refine_req.target.kind.completion_key(),
-                events_heading,
+                |s| item_kind.heading(s),
                 refine_req.cache_hash(),
             );
 
@@ -340,7 +351,7 @@ impl Pipeline {
                 let decision = llm_cache::lookup(
                     existing.as_ref(),
                     &concepts_req.target.kind.completion_key(),
-                    concepts_heading,
+                    |s| s.related_concepts,
                     concepts_req.cache_hash(),
                 );
                 let extracted = if decision.enqueue() {
@@ -446,22 +457,13 @@ impl Pipeline {
             if let Some(d) = concepts_decision.as_ref() {
                 splices.push((concepts_heading, d));
             }
-            // What this render is about to replace with an empty section. Normal for the
-            // pipeline — the task is re-enqueued — and not reversible for a body nobody
-            // recorded, so the caller is given it to report rather than left to discover it.
-            for (heading, decision) in &splices {
-                if decision.discarding.is_some() {
-                    discarded.push(format!("{}: {heading}", fresh.path));
-                }
-            }
             // A cached body that can't be spliced (a custom template heading diverged
             // from the configured one) yields `None`; skip the write so the previous
             // on-disk page — and its LLM body — is left intact.
             match render::splice_preserved_sections(fresh.content, splices) {
-                Some(content) => daily_pages.push(render::RenderResult {
-                    path: fresh.path,
-                    content,
-                }),
+                Some(spliced) => {
+                    daily_pages.push(render::RenderResult::spliced(fresh.path, spliced))
+                }
                 // A cached section heading is absent from the freshly rendered template
                 // (almost always a custom template that renamed it). The previous on-disk
                 // page is kept intact; warn so the divergence is observable instead of a
@@ -504,7 +506,6 @@ impl Pipeline {
             concepts: all_concepts,
             daily_pages,
             document_pages: vec![],
-            discarded,
         })
     }
 
@@ -677,7 +678,6 @@ impl Pipeline {
         let concepts_heading = strings.related_concepts;
 
         let mut document_pages: Vec<RenderResult> = Vec::new();
-        let mut discarded: Vec<String> = Vec::new();
         // Run-level state (slug claims, concept drafts) is staged locally and committed to
         // `self` only after the whole source plan succeeds, so a mid-source render failure
         // (which returns `Err` and is rolled back by the CLI) never poisons the shared slug
@@ -793,7 +793,7 @@ impl Pipeline {
             let summary_decision = llm_cache::lookup(
                 existing.as_ref(),
                 &summary_req.target.kind.completion_key(),
-                summary_heading,
+                |s| s.summary,
                 summary_req.cache_hash(),
             );
 
@@ -833,7 +833,7 @@ impl Pipeline {
                 let decision = llm_cache::lookup(
                     existing.as_ref(),
                     &concepts_req.target.kind.completion_key(),
-                    concepts_heading,
+                    |s| s.related_concepts,
                     concepts_req.cache_hash(),
                 );
                 let extracted = if decision.enqueue() {
@@ -912,17 +912,10 @@ impl Pipeline {
             if let Some(d) = concepts_decision.as_ref() {
                 splices.push((concepts_heading, d));
             }
-            // See the daily path: a body nobody recorded is not recoverable once written over.
-            for (heading, decision) in &splices {
-                if decision.discarding.is_some() {
-                    discarded.push(format!("{}: {heading}", fresh.path));
-                }
-            }
             match render::splice_preserved_sections(fresh.content, splices) {
-                Some(content) => document_pages.push(render::RenderResult {
-                    path: fresh.path,
-                    content,
-                }),
+                Some(spliced) => {
+                    document_pages.push(render::RenderResult::spliced(fresh.path, spliced))
+                }
                 None => tracing::warn!(
                     source = source_id,
                     slug = %slug,
@@ -960,7 +953,6 @@ impl Pipeline {
             concepts: all_concepts,
             daily_pages: vec![],
             document_pages,
-            discarded,
         })
     }
 }
@@ -972,7 +964,6 @@ fn empty_result(source_id: &str) -> IngestResult {
         concepts: vec![],
         daily_pages: vec![],
         document_pages: vec![],
-        discarded: vec![],
     }
 }
 

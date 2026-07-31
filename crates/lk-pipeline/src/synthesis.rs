@@ -4,14 +4,15 @@ use std::sync::Arc;
 
 use lk_core::config::Config;
 use lk_core::frontmatter::field;
+use lk_core::i18n::Strings;
 use lk_core::vault_path::{VaultPath, work_log_dir};
 use lk_queue::TargetKind;
 use lk_vault::{FsVault, VaultPage, VaultStore, section_body};
 
 use crate::PipelineError;
 use crate::context::PipelineContext;
-use crate::llm_cache::{self, SectionDecision};
-use crate::render::{RenderResult, llm_inputs_map, splice_preserved_sections};
+use crate::llm_cache::{self, Heading, SectionDecision};
+use crate::render::{RenderResult, Spliced, llm_inputs_map, splice_preserved_sections};
 
 pub struct Synthesizer {
     ctx: Arc<PipelineContext>,
@@ -106,7 +107,7 @@ impl Synthesizer {
         max_sentences: usize,
         path: &VaultPath,
         kind: TargetKind,
-        heading: &str,
+        heading: impl Heading + Copy,
         what: &str,
     ) -> Result<SynthesisSection, PipelineError> {
         let req = lk_queue::SummarizeRequest {
@@ -120,7 +121,7 @@ impl Synthesizer {
             target: lk_queue::TaskTarget {
                 vault_path: path.to_string(),
                 kind,
-                anchor: format!("## {heading}"),
+                anchor: format!("## {}", heading(self.ctx.locale.strings())),
             },
         };
         let decision = self.lookup(path, kind, heading, req.cache_hash()).await?;
@@ -145,7 +146,7 @@ impl Synthesizer {
         &self,
         path: &VaultPath,
         kind: TargetKind,
-        heading: &str,
+        heading: impl Heading,
         hash: String,
     ) -> Result<SectionDecision, PipelineError> {
         let existing = self.reader.read_page(path.as_ref()).await?;
@@ -165,10 +166,10 @@ impl Synthesizer {
         &self,
         template: &str,
         kind: TargetKind,
-        heading: &str,
+        heading: impl Heading,
         decision: &SectionDecision,
         context: serde_json::Value,
-    ) -> Result<Option<String>, PipelineError> {
+    ) -> Result<Option<Spliced>, PipelineError> {
         let mut ctx = context;
         if let Some(map) = ctx.as_object_mut() {
             let i18n = serde_json::to_value(self.ctx.locale.strings())
@@ -196,7 +197,7 @@ impl Synthesizer {
         // on-disk page untouched — the caller skips the write and a later run re-fills.
         Ok(splice_preserved_sections(
             rendered,
-            std::iter::once((heading, decision)),
+            std::iter::once((heading(self.ctx.locale.strings()), decision)),
         ))
     }
 
@@ -233,7 +234,7 @@ impl Synthesizer {
 
         let path = VaultPath::weekly_synthesis(&self.ctx.dirs, year, week);
         let kind = TargetKind::WeeklySynthesisThemes;
-        let heading = self.ctx.locale.strings().key_themes_this_week;
+        let heading = |s: &'static Strings| s.key_themes_this_week;
 
         let req = lk_queue::ThemeRequest {
             text: combined,
@@ -242,7 +243,7 @@ impl Synthesizer {
             target: lk_queue::TaskTarget {
                 vault_path: path.to_string(),
                 kind,
-                anchor: format!("## {heading}"),
+                anchor: format!("## {}", heading(self.ctx.locale.strings())),
             },
         };
         let decision = self.lookup(&path, kind, heading, req.cache_hash()).await?;
@@ -270,7 +271,7 @@ impl Synthesizer {
             "themes": themes,
         });
 
-        let content = self.render_section(
+        let spliced = self.render_section(
             "weekly-synthesis.md.jinja",
             kind,
             heading,
@@ -278,7 +279,7 @@ impl Synthesizer {
             context,
         )?;
 
-        Ok(content.map(|content| RenderResult { path, content }))
+        Ok(spliced.map(|spliced| RenderResult::spliced(path, spliced)))
     }
 
     pub async fn try_weekly_review(
@@ -306,7 +307,7 @@ impl Synthesizer {
 
         let path = VaultPath::weekly_review(&self.ctx.dirs, year, week);
         let kind = TargetKind::WeeklyReviewNarrative;
-        let heading = self.ctx.locale.strings().key_summary;
+        let heading = |s: &'static Strings| s.key_summary;
         let section = self
             .summarize_section(
                 format!(
@@ -334,7 +335,7 @@ impl Synthesizer {
             "category_stats": category_stats,
         });
 
-        let content = self.render_section(
+        let spliced = self.render_section(
             "weekly-review.md.jinja",
             kind,
             heading,
@@ -342,7 +343,7 @@ impl Synthesizer {
             context,
         )?;
 
-        Ok(content.map(|content| RenderResult { path, content }))
+        Ok(spliced.map(|spliced| RenderResult::spliced(path, spliced)))
     }
 
     pub async fn try_monthly_review(
@@ -369,7 +370,7 @@ impl Synthesizer {
 
         let path = VaultPath::monthly_review(&self.ctx.dirs, year, month);
         let kind = TargetKind::MonthlyReviewNarrative;
-        let heading = self.ctx.locale.strings().key_summary;
+        let heading = |s: &'static Strings| s.key_summary;
         let section = self
             .summarize_section(
                 format!(
@@ -397,7 +398,7 @@ impl Synthesizer {
             "category_stats": category_stats,
         });
 
-        let content = self.render_section(
+        let spliced = self.render_section(
             "monthly-review.md.jinja",
             kind,
             heading,
@@ -405,7 +406,7 @@ impl Synthesizer {
             context,
         )?;
 
-        Ok(content.map(|content| RenderResult { path, content }))
+        Ok(spliced.map(|spliced| RenderResult::spliced(path, spliced)))
     }
 
     pub async fn try_quarterly_review(
@@ -445,7 +446,7 @@ impl Synthesizer {
 
         let path = VaultPath::quarterly_review(&self.ctx.dirs, year, quarter);
         let kind = TargetKind::QuarterlyReviewNarrative;
-        let heading = self.ctx.locale.strings().key_summary;
+        let heading = |s: &'static Strings| s.key_summary;
         let section = self
             .summarize_section(
                 format!(
@@ -476,7 +477,7 @@ impl Synthesizer {
             "narrative": narrative,
         });
 
-        let content = self.render_section(
+        let spliced = self.render_section(
             "quarterly-review.md.jinja",
             kind,
             heading,
@@ -484,7 +485,7 @@ impl Synthesizer {
             context,
         )?;
 
-        Ok(content.map(|content| RenderResult { path, content }))
+        Ok(spliced.map(|spliced| RenderResult::spliced(path, spliced)))
     }
 
     pub async fn try_annual_review(
@@ -519,7 +520,7 @@ impl Synthesizer {
 
         let path = VaultPath::annual_review(&self.ctx.dirs, year);
         let kind = TargetKind::AnnualReviewNarrative;
-        let heading = strings.overall_summary;
+        let heading = |s: &'static Strings| s.overall_summary;
         let section = self
             .summarize_section(
                 format!(
@@ -551,7 +552,7 @@ impl Synthesizer {
             "category_stats": category_stats,
         });
 
-        let content = self.render_section(
+        let spliced = self.render_section(
             "annual-review.md.jinja",
             kind,
             heading,
@@ -559,7 +560,7 @@ impl Synthesizer {
             context,
         )?;
 
-        Ok(content.map(|content| RenderResult { path, content }))
+        Ok(spliced.map(|spliced| RenderResult::spliced(path, spliced)))
     }
 
     /// Narrative standing in for one month of a quarterly/annual rollup: the monthly

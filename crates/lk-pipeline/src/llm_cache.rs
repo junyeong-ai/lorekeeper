@@ -30,7 +30,29 @@
 //! on the next ingest. No `--force-llm` flag, no out-of-band cache invalidation API.
 
 use lk_core::frontmatter::{VaultPage, field};
+use lk_core::i18n::{Locale, Strings};
 use lk_vault::section_body;
+
+/// Which section a cache decision is about, named independently of the locale it was
+/// rendered under — `|s| s.summary` rather than `"Summary"`.
+///
+/// READ tolerates any locale's heading; only WRITE uses the current one. That is the rule
+/// `lk_vault::index`, `graph audit`, `graph merge` and `graph backlinks-sync` already follow,
+/// and this is the READ where breaking it destroys content instead of omitting a line: a
+/// `vault.locale` switch renames every heading at once, so a lookup that searched only the new
+/// spelling found no body to preserve and none to report, and an answered, marker-stamped
+/// section was overwritten empty on every page in the vault.
+pub trait Heading: Fn(&'static Strings) -> &'static str {}
+impl<F: Fn(&'static Strings) -> &'static str> Heading for F {}
+
+/// The existing body of `heading`'s section under whichever locale the page was authored in.
+/// First match wins in [`Locale::ALL`] order, so a half-migrated page carrying two spellings
+/// resolves the same way every run.
+fn body_across_locales<'a>(page: &'a VaultPage, heading: &impl Heading) -> Option<&'a str> {
+    Locale::ALL
+        .iter()
+        .find_map(|locale| section_body(&page.body, heading(locale.strings())))
+}
 
 /// Per-section cache decision. The pipeline computes one of these for every LLM
 /// task it could enqueue.
@@ -77,8 +99,8 @@ pub fn stored_hash<'a>(existing: Option<&'a VaultPage>, key: &str) -> Option<&'a
 
 /// Decide whether the LLM task for this section can be skipped because the existing
 /// page already carries the `completion_key` marker equal to the current input `hash`.
-/// `heading` is the text after `## ` — the same form `lk_vault::section` functions
-/// accept everywhere.
+/// `heading` names the section as a [`Heading`] selector, so the existing body is found
+/// under whichever locale the page was authored in.
 ///
 /// Body emptiness is deliberately NOT consulted: completion is the marker alone, so a
 /// legitimately-empty result (an extraction that found nothing, a focus-filtered
@@ -88,31 +110,31 @@ pub fn stored_hash<'a>(existing: Option<&'a VaultPage>, key: &str) -> Option<&'a
 pub fn lookup(
     existing: Option<&VaultPage>,
     completion_key: &str,
-    heading: &str,
+    heading: impl Heading,
     hash: String,
 ) -> SectionDecision {
+    let existing_body = existing.and_then(|page| body_across_locales(page, &heading));
+
     if stored_hash(existing, completion_key) != Some(&hash) {
         return SectionDecision {
             hash,
             cached: false,
             preserved_body: None,
-            discarding: existing
-                .and_then(|page| section_body(&page.body, heading))
+            discarding: existing_body
                 .map(str::trim)
                 .filter(|body| !body.is_empty())
                 .map(str::to_owned),
         };
     }
 
-    let Some(body) = existing.and_then(|p| section_body(&p.body, heading)) else {
-        // Marker says done, but the section heading isn't present — the rendered
-        // heading drifted from the one the marker was written against (e.g. a custom
+    let Some(body) = existing_body else {
+        // Marker says done, but no locale's spelling of the section is present — the
+        // rendered heading drifted from the one the marker was written against (a custom
         // `--template-dir` renamed it). Reporting a hit would freeze the stale body
         // forever (the task is never re-enqueued, and with no preserved body the
         // splice-site drift warning never fires either). Force a re-run and surface it.
         tracing::warn!(
             completion_key,
-            heading,
             "section marked done but heading not found (custom-template drift?); re-enqueueing"
         );
         return SectionDecision {
@@ -143,7 +165,7 @@ mod tests {
 
     #[test]
     fn missing_page_is_uncached() {
-        let d = lookup(None, "summary_done", "요약", "abc".into());
+        let d = lookup(None, "summary_done", |s| s.summary, "abc".into());
         assert!(d.enqueue());
         assert!(d.preserved_body.is_none());
     }
@@ -153,7 +175,7 @@ mod tests {
         // Input hash present but the `*_done` marker absent — the skill hasn't
         // finished this input yet.
         let page = page_with("id: x\nllm_inputs:\n  summary: abc\n", "## 요약\n\nbody\n");
-        let d = lookup(Some(&page), "summary_done", "요약", "abc".into());
+        let d = lookup(Some(&page), "summary_done", |s| s.summary, "abc".into());
         assert!(d.enqueue());
     }
 
@@ -163,7 +185,7 @@ mod tests {
             "id: x\nllm_inputs:\n  summary: fresh\n  summary_done: stale\n",
             "## 요약\n\nbody\n",
         );
-        let d = lookup(Some(&page), "summary_done", "요약", "fresh".into());
+        let d = lookup(Some(&page), "summary_done", |s| s.summary, "fresh".into());
         assert!(d.enqueue());
     }
 
@@ -173,7 +195,7 @@ mod tests {
             "id: x\nllm_inputs:\n  summary: abc\n  summary_done: abc\n",
             "## 요약\n\nreal content\n\n## 출처\n",
         );
-        let d = lookup(Some(&page), "summary_done", "요약", "abc".into());
+        let d = lookup(Some(&page), "summary_done", |s| s.summary, "abc".into());
         assert!(!d.enqueue());
         assert_eq!(d.preserved_body.as_deref(), Some("real content"));
     }
@@ -188,24 +210,29 @@ mod tests {
             "id: x\nllm_inputs:\n  concepts: abc\n  concepts_done: abc\n",
             "## 관련 개념\n\n\n## 출처\n",
         );
-        let d = lookup(Some(&page), "concepts_done", "관련 개념", "abc".into());
+        let d = lookup(
+            Some(&page),
+            "concepts_done",
+            |s| s.related_concepts,
+            "abc".into(),
+        );
         assert!(!d.enqueue(), "empty-but-done section must stay cached");
         assert_eq!(d.preserved_body.as_deref(), Some(""));
     }
 
     #[test]
     fn marker_set_but_heading_missing_is_uncached() {
-        // Completion marker matches, but the section heading drifted (e.g. a custom
-        // template renamed it). This must NOT count as cached — otherwise the body
-        // would freeze and the task would never re-enqueue.
+        // Completion marker matches, but the section sits under a heading NO locale writes —
+        // a custom template renamed it. This must NOT count as cached, or the body would
+        // freeze and the task would never re-enqueue.
         let page = page_with(
             "id: x\nllm_inputs:\n  refine_events: abc\n  refine_events_done: abc\n",
-            "## Key Events\n\n### A\n\nbody\n",
+            "## Daily Rundown\n\n### A\n\nbody\n",
         );
         let d = lookup(
             Some(&page),
             "refine_events_done",
-            "주요 이벤트",
+            |s| s.key_events,
             "abc".into(),
         );
         assert!(
@@ -213,6 +240,28 @@ mod tests {
             "missing heading must force re-enqueue, not a silent hit"
         );
         assert!(d.preserved_body.is_none());
+    }
+
+    /// A `vault.locale` switch renames every heading at once. READ must still find the body —
+    /// the rule `lk_vault::index` and every concept reader already follow — because here the
+    /// alternative is not an omitted summary line but an answered, marker-stamped section
+    /// overwritten empty, on every page in the vault, reported as a clean run.
+    #[test]
+    fn a_body_authored_under_another_locale_is_still_found() {
+        let ko_page = page_with(
+            "id: x\nllm_inputs:\n  summary: abc\n  summary_done: abc\n",
+            "## 요약\n\nThe durable record.\n\n## 내용\n",
+        );
+        let hit = lookup(Some(&ko_page), "summary_done", |s| s.summary, "abc".into());
+        assert!(!hit.enqueue(), "the same input is still answered");
+        assert_eq!(hit.preserved_body.as_deref(), Some("The durable record."));
+
+        // A locale is part of the request, so the switch also changes the hash: the section is
+        // legitimately re-enqueued to be rewritten in the new language — and what that costs
+        // is now reported instead of discovered.
+        let miss = lookup(Some(&ko_page), "summary_done", |s| s.summary, "new".into());
+        assert!(miss.enqueue());
+        assert_eq!(miss.discarding.as_deref(), Some("The durable record."));
     }
 
     #[test]
@@ -224,7 +273,7 @@ mod tests {
         let d = lookup(
             Some(&page),
             "refine_events_done",
-            "주요 이벤트",
+            |s| s.key_events,
             "abc".into(),
         );
         assert!(!d.enqueue());

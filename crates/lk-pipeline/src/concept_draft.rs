@@ -397,7 +397,7 @@ impl ConceptDraft {
             }
         }
 
-        Ok(RenderResult { path, content })
+        Ok(RenderResult::fresh(path, content))
     }
 }
 

@@ -22,6 +22,10 @@ pub struct IndexDrift {
     /// set is unchanged and both lists are empty. Drift is the file disagreeing with its own
     /// derivation; the lists explain it.
     stale: bool,
+    /// Whether there is no catalog on disk at all, which the lists cannot say either: in an empty
+    /// vault they name nothing while the catalog is simply unbuilt, and a report inferring the
+    /// state from them describes a file that does not exist.
+    pub absent: bool,
     /// The catalog a re-derivation produces right now — what [`fix`] writes.
     rebuilt: String,
 }
@@ -52,8 +56,8 @@ pub fn diff(root: &Path, locale: Locale, dirs: &VaultDirs) -> Result<IndexDrift,
     // it, prompting `lore wiki index`. A real read error (permissions, corruption) must NOT
     // masquerade as "in sync" — propagate it.
     let on_disk = match std::fs::read_to_string(&index_path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Ok(c) => Some(c),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => {
             return Err(GraphError::Io(format!(
                 "read {}: {e}",
@@ -61,6 +65,8 @@ pub fn diff(root: &Path, locale: Locale, dirs: &VaultDirs) -> Result<IndexDrift,
             )));
         }
     };
+    let absent = on_disk.is_none();
+    let on_disk = on_disk.unwrap_or_default();
 
     // Both sides read through the same resolution, so a spelling difference between two
     // renderings of one entry cannot register as drift. Summaries are link-stripped by the
@@ -85,6 +91,7 @@ pub fn diff(root: &Path, locale: Locale, dirs: &VaultDirs) -> Result<IndexDrift,
         missing_from_index,
         missing_from_disk,
         stale: rebuilt != on_disk,
+        absent,
         rebuilt,
     })
 }
@@ -230,6 +237,26 @@ mod tests {
             drift.missing_from_index,
             vec!["wiki/concepts/alpha", "wiki/concepts/beta"]
         );
+    }
+
+    #[test]
+    fn an_empty_vault_with_no_catalog_reports_it_as_unbuilt() {
+        // Neither list can name anything — there are no pages — so a report reading the state
+        // off them alone said the catalog "holds every page, but states something no page does"
+        // about a file that had never been written.
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("wiki")).unwrap();
+
+        let drift = drift_of(tmp.path());
+        assert!(drift.absent);
+        assert!(!drift.is_in_sync(), "an unbuilt catalog is drift");
+        assert!(drift.missing_from_index.is_empty());
+        assert!(drift.missing_from_disk.is_empty());
+
+        assert_eq!(fix(&drift, tmp.path(), &VaultDirs::default()).unwrap(), 1);
+        let after = drift_of(tmp.path());
+        assert!(!after.absent);
+        assert!(after.is_in_sync());
     }
 
     #[test]

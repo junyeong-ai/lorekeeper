@@ -29,6 +29,36 @@ pub fn llm_inputs_map(
 pub struct RenderResult {
     pub path: VaultPath,
     pub content: String,
+    /// Section headings on the existing page whose body this write replaces with an empty one.
+    ///
+    /// Travels with the page rather than beside it, so a caller cannot report a loss for a
+    /// write that did not happen: no page, no entry. The pipeline's own flow re-enqueues each
+    /// one and a drain fills it again, so this is routine — it is carried because the same
+    /// state describes a section somebody answered WITHOUT recording it, and rewriting the
+    /// page is not reversible.
+    pub discarded: Vec<String>,
+}
+
+impl RenderResult {
+    /// A freshly rendered page, before any preserved body is spliced back into it. Nothing is
+    /// discarded yet — [`splice_preserved_sections`] decides that, and only for a page that
+    /// will be written.
+    pub fn fresh(path: VaultPath, content: String) -> Self {
+        Self {
+            path,
+            content,
+            discarded: Vec::new(),
+        }
+    }
+
+    /// A page whose preserved bodies have been spliced back in, ready to write.
+    pub fn spliced(path: VaultPath, spliced: Spliced) -> Self {
+        Self {
+            path,
+            content: spliced.content,
+            discarded: spliced.discarded,
+        }
+    }
 }
 
 /// Relative path from a target page to the concepts directory — the base of every concept
@@ -322,7 +352,7 @@ pub fn render_daily_page(
         .render(chosen, &context)
         .map_err(|e| PipelineError::Render(e.to_string()))?;
 
-    Ok(RenderResult { path, content })
+    Ok(RenderResult::fresh(path, content))
 }
 
 pub struct DocumentLlmInputHashes<'a> {
@@ -410,7 +440,7 @@ pub fn render_document_page(
         .render("document.md.jinja", &context)
         .map_err(|e| PipelineError::Render(e.to_string()))?;
 
-    Ok(RenderResult { path, content })
+    Ok(RenderResult::fresh(path, content))
 }
 
 /// Splice cached LLM-filled bodies into a freshly-rendered page. Each
@@ -424,11 +454,16 @@ pub fn render_document_page(
 /// section. Emitting the blanked render would drop the preserved LLM body, so the
 /// caller keeps the previous on-disk page; a later run re-enqueues the section under
 /// the new heading.
-pub fn splice_preserved_sections<'a, I>(content: String, sections: I) -> Option<String>
+///
+/// The headings whose existing body this render replaces with an empty one come back with
+/// the content, so they are reported by the same thing that decides a page is written at
+/// all — a run that returns `None` writes nothing and so discards nothing.
+pub fn splice_preserved_sections<'a, I>(content: String, sections: I) -> Option<Spliced>
 where
     I: IntoIterator<Item = (&'a str, &'a SectionDecision)>,
 {
     let mut out = content;
+    let mut discarded = Vec::new();
     for (heading, decision) in sections {
         if let Some(body) = &decision.preserved_body {
             if section_body(&out, heading).is_none() {
@@ -440,9 +475,21 @@ where
                 return None;
             }
             out = replace_section(&out, heading, body);
+        } else if decision.discarding.is_some() {
+            discarded.push(heading.to_owned());
         }
     }
-    Some(out)
+    Some(Spliced {
+        content: out,
+        discarded,
+    })
+}
+
+/// A page ready to write, and what writing it costs.
+pub struct Spliced {
+    pub content: String,
+    /// Headings whose existing body this render replaces with an empty one.
+    pub discarded: Vec<String>,
 }
 
 /// A highlight bucket item is a POINTER — subject + sender only, never the body.
@@ -702,15 +749,35 @@ and [a real one](../../wiki/concepts/nl2sql.md)
         let out =
             splice_preserved_sections(fresh, [("Summary", &summary), ("Concepts", &concepts)])
                 .expect("every cached heading exists in the fresh render");
+        let content = &out.content;
         assert!(
-            out.contains("A preserved summary body."),
-            "cached body must be written over the empty section:\n{out}"
+            content.contains("A preserved summary body."),
+            "cached body must be written over the empty section:\n{content}"
         );
         assert_eq!(
-            section_body(&out, "Concepts").map(str::trim),
+            section_body(content, "Concepts").map(str::trim),
             Some(""),
-            "an uncached section must stay empty for the queue processor to fill:\n{out}"
+            "an uncached section must stay empty for the queue processor to fill:\n{content}"
         );
+        assert!(
+            out.discarded.is_empty(),
+            "neither section held a body this render replaces"
+        );
+    }
+
+    /// Only a section that HELD something is reported, and only alongside the content that
+    /// replaces it — the report and the write are one return value, so a splice that refuses
+    /// cannot leave a loss announced for a page nobody writes.
+    #[test]
+    fn splice_names_the_sections_whose_body_it_replaces_with_an_empty_one() {
+        let fresh = "# Page\n\n## Summary\n\n## Concepts\n\n".to_string();
+        let mut summary = uncached();
+        summary.discarding = Some("An answer nothing recorded.".into());
+        let concepts = uncached();
+        let out =
+            splice_preserved_sections(fresh, [("Summary", &summary), ("Concepts", &concepts)])
+                .expect("nothing cached, so nothing can fail to splice");
+        assert_eq!(out.discarded, vec!["Summary".to_string()]);
     }
 
     #[test]
