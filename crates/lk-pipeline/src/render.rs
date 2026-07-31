@@ -463,7 +463,7 @@ pub fn render_document_page(
 /// means only that the section was not answered for this input; whether the render leaves it
 /// empty is the template's business, and they differ. `{{ summary }}` renders `""` on a miss —
 /// genuinely emptied. Related-concepts renders the ACCUMULATED links, which
-/// [`accumulate_concepts`] carries forward precisely so a citation is never retracted. Reporting
+/// `accumulate_concepts` carries forward precisely so a citation is never retracted. Reporting
 /// the second as a loss would fire on the ordinary state of every page between an ingest and a
 /// drain, teaching a reader to skip the one line that reports an irreversible one.
 pub fn splice_preserved_sections<'a, I>(content: String, sections: I) -> Option<Spliced>
