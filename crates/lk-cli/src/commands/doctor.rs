@@ -65,9 +65,23 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
         }
     );
     if report.scanned == 0 {
-        eprintln!(
-            "\nNo pages found under the configured vault.dirs — check the config if unexpected."
-        );
+        // Which roots are absent is the answer to "check the config", and it is on disk — so it
+        // is handed over rather than asked for. A vault before its first ingest legitimately has
+        // none of them, which is why this reports and does not gate: an absent directory is a
+        // config question, not the vault contradicting itself.
+        let missing: Vec<String> = managed_roots(&vault_root, &config.vault.dirs)
+            .iter()
+            .filter(|root| !root.is_dir())
+            .map(|root| rel(root, &vault_root).into_owned())
+            .collect();
+        eprintln!("\nNo pages found under the configured vault.dirs.");
+        if !missing.is_empty() {
+            eprintln!(
+                "  These do not exist under {}: {}",
+                vault_root.display(),
+                missing.join(", ")
+            );
+        }
     }
     if report.in_flight > 0 {
         eprintln!(
@@ -289,8 +303,8 @@ fn audit(
                 }
             };
             scanned += 1;
-            // `scan_defects` reads the bytes as written — trailing whitespace and CRLF are the
-            // point there — while the marker pair is a frontmatter record and is read as one. A
+            // `scan_defects` reads the bytes as written — an inlined `data:` URI is a fact about
+            // the text — while the marker pair is a frontmatter record and is read as one. A
             // page whose frontmatter will not parse is unverifiable rather than clean.
             let defects = scan_defects(&text);
             let unanswered = match lk_core::frontmatter::parse_page(&text) {
