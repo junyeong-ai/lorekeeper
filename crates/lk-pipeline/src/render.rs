@@ -458,12 +458,21 @@ pub fn render_document_page(
 /// The headings whose existing body this render replaces with an empty one come back with
 /// the content, so they are reported by the same thing that decides a page is written at
 /// all — a run that returns `None` writes nothing and so discards nothing.
+///
+/// Emptiness is read off the FINISHED page, never inferred from the decision. A cache miss
+/// means only that the section was not answered for this input; whether the render leaves it
+/// empty is the template's business, and they differ. `{{ summary }}` renders `""` on a miss —
+/// genuinely emptied. Related-concepts renders the ACCUMULATED links, which
+/// [`accumulate_concepts`] carries forward precisely so a citation is never retracted, so
+/// nothing was emptied and the warning was false. That case is the ordinary state of every page
+/// between an ingest and a drain, so it fired on nearly every re-render — teaching an operator
+/// to skip the one line that reports an irreversible loss.
 pub fn splice_preserved_sections<'a, I>(content: String, sections: I) -> Option<Spliced>
 where
     I: IntoIterator<Item = (&'a str, &'a SectionDecision)>,
 {
     let mut out = content;
-    let mut discarded = Vec::new();
+    let mut candidates = Vec::new();
     for (heading, decision) in sections {
         if let Some(body) = &decision.preserved_body {
             if section_body(&out, heading).is_none() {
@@ -476,9 +485,16 @@ where
             }
             out = replace_section(&out, heading, body);
         } else if decision.discarding.is_some() {
-            discarded.push(heading.to_owned());
+            candidates.push(heading);
         }
     }
+    // After every splice, so a section is judged on the page as it will be written. A heading
+    // the render does not carry at all is a loss too: the body goes with the section.
+    let discarded = candidates
+        .into_iter()
+        .filter(|heading| section_body(&out, heading).is_none_or(|body| body.trim().is_empty()))
+        .map(str::to_owned)
+        .collect();
     Some(Spliced {
         content: out,
         discarded,

@@ -19,11 +19,17 @@ impl Workspace {
     /// A config-file + vault pair with one manual source reading `vault/inbox`.
     /// `extra_sources` is appended verbatim under `sources:`.
     fn new(extra_sources: &str) -> Self {
+        Self::with_notes_options("", extra_sources)
+    }
+
+    /// The same, with `notes_options` appended verbatim to the `notes` source's own keys —
+    /// `extract_concepts: true`, say, which is what gives a page a related-concepts section.
+    fn with_notes_options(notes_options: &str, extra_sources: &str) -> Self {
         let root = tempfile::TempDir::new().expect("tempdir");
         std::fs::create_dir_all(root.path().join("vault/inbox")).expect("inbox dir");
         let config = format!(
             "vault:\n  root: vault\nidentity:\n  name: Tester\n  email: tester@example.com\n\
-             sources:\n  notes:\n    type: manual\n    params:\n      inbox_dir: inbox\n\
+             sources:\n  notes:\n    type: manual\n{notes_options}    params:\n      inbox_dir: inbox\n\
              {extra_sources}"
         );
         std::fs::write(root.path().join("config.yaml"), config).expect("config");
@@ -397,5 +403,56 @@ fn a_dry_run_says_it_would_empty_the_section_rather_than_that_it_did() {
             .expect("page")
             .contains("HAND WRITTEN"),
         "and writes nothing, which is what makes the conditional the true mood"
+    );
+}
+
+/// A section the render REFILLS is not a section this write empties.
+///
+/// A cache miss says only that the section was not answered for this input. The
+/// related-concepts section renders the ACCUMULATED links on a miss — carried forward precisely
+/// so a citation is never retracted — so nothing is emptied and the warning was false. That is
+/// the ordinary state of every page between an ingest and a drain, so it fired on nearly every
+/// re-render, which is how an operator learns to skip the one line that reports an irreversible
+/// loss. Both earlier tests here pick the first `## ` heading, which on a document page is the
+/// summary — the section that genuinely does empty — so neither could see this.
+#[test]
+fn a_section_the_render_refills_is_not_reported_as_emptied() {
+    let ws = Workspace::with_notes_options("    extract_concepts: true\n", "");
+    ws.drop_note("note.md", "# Rollback\n\nThe rollback decision.\n");
+    assert!(ws.run(&["ingest"]).status.success());
+
+    // A citation on the page and no `concepts_done` — exactly what a drain's result leaves
+    // behind until `queue apply` stamps it.
+    let page = ws.vault().join("wiki/documents/rollback.md");
+    let before = std::fs::read_to_string(&page).expect("page");
+    std::fs::write(
+        &page,
+        format!("{}\n- [Ghost](../concepts/ghost.md)\n", before.trim_end()),
+    )
+    .expect("write");
+
+    ws.drop_note("note.md", "# Rollback\n\nThe rollback decision.\n");
+    let out = ws.run(&["ingest"]);
+    let stderr = stderr_of(&out);
+    assert!(out.status.success(), "{stderr}");
+
+    let after = std::fs::read_to_string(&page).expect("page");
+    assert!(
+        after.contains("concepts/ghost.md"),
+        "the citation is carried forward, which is what makes the warning false\n{after}"
+    );
+    // The LAST `## ` heading of a document page is the related-concepts one, whatever the
+    // configured locale spells it.
+    let concepts_heading = after
+        .lines()
+        .rfind(|line| line.starts_with("## "))
+        .expect("the page carries section headings")
+        .trim_start_matches("## ")
+        .to_owned();
+    assert!(
+        !stderr.contains(&format!(
+            "emptying an unanswered section: wiki/documents/rollback.md: {concepts_heading}"
+        )),
+        "a section the render refills must not be reported as emptied\n{stderr}"
     );
 }
