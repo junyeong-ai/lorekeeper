@@ -111,7 +111,28 @@ pub async fn run(
                  working directory to resolve a relative path against."
             ));
         }
-        Some(_) => pipeline_env(bin, &config_path),
+        Some(_) => {
+            // What this prints is piped straight into `crontab -`, so a script that is not
+            // there becomes a job that fails every night into a mail nobody reads. The
+            // installer's own next-step names this directory, and a release whose pipeline
+            // assets could not be verified now leaves it empty — so the one moment the answer
+            // is knowable is here. Reported, not refused: generating a schedule for a machine
+            // that is not this one is legitimate, and the schedule is still the one asked for.
+            let absent: Vec<&str> = jobs
+                .iter()
+                .filter_map(|job| job.program.as_deref())
+                .filter(|program| !std::path::Path::new(program).exists())
+                .collect();
+            if !absent.is_empty() {
+                eprintln!(
+                    "warning: these scheduled scripts are not there — a scheduler will fail them \
+                     silently. Re-run the installer, or point --pipeline-dir at where they were \
+                     installed.\n  {}",
+                    absent.join("\n  ")
+                );
+            }
+            pipeline_env(bin, &config_path)
+        }
         None => Vec::new(),
     };
     match format {

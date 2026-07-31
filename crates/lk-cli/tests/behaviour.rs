@@ -459,3 +459,34 @@ fn a_root_override_is_spelled_like_a_configured_one() {
         "no directory named `~` was created"
     );
 }
+
+/// `lore schedule --pipeline-dir` names scripts that are not there.
+///
+/// Its output is piped straight into `crontab -`, so a missing script becomes a job that fails
+/// every night into mail nobody reads. The installer's own next step names that directory, and a
+/// release whose pipeline assets cannot be verified now leaves it empty — so this is the one
+/// moment the answer is knowable. Reported, not refused: generating a schedule for another
+/// machine is legitimate, and the schedule is still the one that was asked for.
+#[test]
+fn scheduling_a_pipeline_dir_that_holds_nothing_says_so() {
+    let staged = stage();
+    let out = Command::cargo_bin("lore")
+        .expect("lore binary")
+        .current_dir(staged.path())
+        .arg("--config")
+        .arg(staged.path().join("corpus/config.yaml"))
+        .args(["schedule", "--pipeline-dir", "/nonexistent/pipelines"])
+        .output()
+        .expect("command ran");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("/nonexistent/pipelines/lore-daily.sh"),
+        "the missing script must be named\n{stderr}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("/nonexistent/pipelines/lore-daily.sh"),
+        "and the schedule is still emitted"
+    );
+    assert!(out.status.success(), "reported, not refused");
+}

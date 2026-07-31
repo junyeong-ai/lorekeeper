@@ -133,7 +133,12 @@ fn the_pipeline_permits_every_tool_the_skills_it_runs_declare() {
     );
 
     for skill in invoked {
-        let body = read(&repo_root().join(".claude/skills").join(&skill).join("SKILL.md"));
+        let body = read(
+            &repo_root()
+                .join(".claude/skills")
+                .join(&skill)
+                .join("SKILL.md"),
+        );
         let frontmatter = body.split("---").nth(1).expect("skill frontmatter");
         for line in frontmatter.lines() {
             let Some(cmd) = line
