@@ -127,7 +127,7 @@ The page exists, but its `## Summary` / `## Related Concepts` are still empty �
 $ lore queue status
   [current] sum-… (summarize)        → wiki/documents/rag-pipeline-…
   [current] ext-… (extract-concepts) → wiki/documents/rag-pipeline-…
-queue: 2 current, 0 stale, 0 missing-target across 2 task(s)
+queue: 2 current, 0 done, 0 stale, 0 missing-target, 0 unreadable across 2 task(s)
 ```
 
 Now, in a Claude Code session, run **`/lore-process`**. The skill drains that queue — writing each summary and extracting concepts — using Claude's own LLM (no API key). When it finishes, `lore queue status` reports `0 current` and the page is filled:

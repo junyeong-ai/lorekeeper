@@ -536,9 +536,13 @@ pub fn print_backlinks(r: &BacklinksSyncReport) {
     }
 
     if !r.sync.skipped.is_empty() {
+        // Two states reach this list — no frontmatter block at all, and one that will not
+        // parse — and the repair differs. "until one is added" named only the first, so a page
+        // whose frontmatter is CORRUPT was handed an instruction that does not apply to it.
         println!(
-            "\nSkipped: {} concept page(s) whose frontmatter cannot be read — their sources section \
-             and source_count both stay stale until one is added",
+            "\nSkipped: {} concept page(s) whose frontmatter cannot be read — their sources \
+             section and source_count both stay stale until it is repaired (a page with no \
+             frontmatter block needs one added; one that will not parse needs the YAML fixed)",
             r.sync.skipped.len()
         );
         for path in &r.sync.skipped {

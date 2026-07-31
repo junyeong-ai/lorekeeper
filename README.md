@@ -126,7 +126,7 @@ Done. 1 pages written, 0 personal items tracked.
 $ lore queue status
   [current] sum-… (summarize)        → wiki/documents/rag-파이프라인-…
   [current] ext-… (extract-concepts) → wiki/documents/rag-파이프라인-…
-queue: 2 current, 0 stale, 0 missing-target across 2 task(s)
+queue: 2 current, 0 done, 0 stale, 0 missing-target, 0 unreadable across 2 task(s)
 ```
 
 이제 Claude Code 세션에서 **`/lore-process`** 를 실행합니다. 이 스킬이 큐를 비우며 — 각 요약을 쓰고 개념을 추출해 — Claude 자체 LLM으로 처리합니다(API 키 없음). 끝나면 `lore queue status`는 `0 current`가 되고 페이지가 채워집니다:

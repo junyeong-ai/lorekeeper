@@ -62,7 +62,10 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   (`llm_inputs.<key>` vs `task.cache_hash`; `missing-target` when the page is gone, `stale`
   when the hash moved on), and has this exact input already been answered
   (`llm_inputs.<key>_done` → `done`), and — for work still to be written — does the page
-  still carry the SECTION it names (`missing-target` when not). That last one closes a
+  still carry the SECTION it names (`missing-target` when not) — and, when the page's
+  frontmatter will not parse, neither question can be asked, which is `unreadable`: not a
+  judgment but the absence of one, so it counts as work LEFT and waits for the page to be
+  repaired. That third question closes a
   permanent-failure hole: a `vault.locale` switch re-renders every heading while leaving the
   concept input hash untouched (locale is not in that cache identity), so a task or result
   queued before the switch stayed hash-current while naming a section that no longer exists,
@@ -88,10 +91,18 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   drain archives stays whole; but a run whose every remaining task is `done` needs no
   session, so nothing would ever archive it and `lore ingest` would warn about pending work
   forever — it is retired to `processed/` as it stands, the same retirement a drain performs
-  on a finished run. A file left holding nothing was all dead tasks, so it never edited a
-  page and is deleted rather than archived. Rewrites go through
+  on a finished run. An `unreadable` task counts as work LEFT, so its run is never retired:
+  archiving it would put it where nothing reclassifies it, and the page repair this status
+  waits for could never bring it back. A file left holding nothing was all dead tasks, so it
+  never edited a page and is deleted rather than archived. Rewrites go through
   `lk_queue::write_tasks_atomic` (the one writer for queue files); a file needing no change
   stays byte-identical. `--dry-run` reports the same counts with zero writes.
+  A file holding a LINE nobody can parse is never rewritten — that would drop work nothing
+  could classify — so it is reported as `unparseable` with its tasks counted as `blocked`,
+  deliberately not under a classification prune did not act on. Either that or an
+  `unreadable` task makes prune exit 1 and its `--json` envelope's `ok` false: both leave
+  work nothing can drain, both need a human, and the janitor is the only place either
+  surfaces (`queue count` omits them so a session is never spent on work no session can do).
 - **`lore queue apply`** materializes the concept extractions a drain wrote to
   `queue/results/*.json` through the same `ConceptDrafts` merge the ingest path uses, then
   deletes each result it consumed — so an empty `results/` after a pipeline run is evidence
