@@ -88,16 +88,32 @@ so plainly with the evidence; state finished work plainly without hedging.'
 # list has to cover the protocol exactly rather than approximately.
 claude_skill() {
     local prompt="$1" skill_dir="$2"
-    env -C "$VAULT" "$CLAUDE" -p "$prompt" \
+    if [ ! -d "$skill_dir" ]; then
+        log "✗ skill not installed at $skill_dir — re-run the installer, or point"
+        log "  LORE_SKILL_DIR at where you installed the skills (\`--skill project\` puts them"
+        log "  under the project's .claude/skills)"
+        return 1
+    fi
+    # `LORE_CONFIG` is passed IN, not left to be rediscovered. `lore` auto-discovers
+    # `./config.yaml` before the XDG one, and this session runs with the vault as its CWD — so a
+    # `config.yaml` sitting at the vault root silently drained a different vault than the one
+    # every other stage of this run operated on.
+    env -C "$VAULT" LORE_CONFIG="$CONFIG" "$CLAUDE" -p "$prompt" \
         --append-system-prompt "$AUTONOMOUS_PREAMBLE" \
         --permission-mode acceptEdits \
         --allowedTools "Bash(lore:*)" "Bash(ls:*)" "Bash(cat:*)" "Bash(jq:*)" \
         "Bash(mkdir:*)" "Bash(mv:*)" "Bash(basename:*)" "Bash(test:*)" "Bash([:*)" \
-        "Bash(find:*)" "Bash(wc:*)" \
+        "Bash(find:*)" "Bash(wc:*)" "Bash(head:*)" "Bash(date:*)" "Bash(grep:*)" \
         "Read" "Edit" "Write" "Glob" "Grep" \
         --add-dir "$skill_dir" \
         --output-format text
 }
+
+# Where the skills were installed. `install.sh --skill project` puts them under the project
+# rather than the home directory, and a hardcoded `$HOME/.claude/skills` then named a directory
+# that does not exist — which `--add-dir` accepts, leaving the session without the skill it was
+# told to run.
+SKILL_DIR="${LORE_SKILL_DIR:-$HOME/.claude/skills}"
 
 # Drain the LLM queue, skipping the session entirely when there is nothing to fill.
 #
@@ -118,7 +134,7 @@ drain_queue() {
     fi
     if [ "$pending" -gt 0 ]; then
         log "queue: $pending current"
-        run "queue drain" claude_skill "/lore-process" "$HOME/.claude/skills/lore-process"
+        run "queue drain" claude_skill "/lore-process" "$SKILL_DIR/lore-process"
     else
         log "− queue drain skipped (no current tasks)"
     fi

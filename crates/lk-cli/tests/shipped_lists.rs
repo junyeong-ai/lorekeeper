@@ -103,6 +103,55 @@ fn every_target_an_installer_asks_for_is_one_the_release_builds() {
     }
 }
 
+/// The pipeline's `--allowedTools` covers every command the skills it runs declare needing.
+///
+/// Nothing in `claude -p` can prompt, so a command the skill's protocol spells and this list
+/// omits is simply DENIED — the drain then fails on a step it was told to perform, every night,
+/// for work it may already have committed. Two hand-kept lists that must agree is exactly the
+/// shape the skill-packaging lists were in when a skill shipped uninstallable.
+#[test]
+fn the_pipeline_permits_every_tool_the_skills_it_runs_declare() {
+    let pipeline = read(&repo_root().join("scripts/lore-pipeline.sh"));
+    let allowed: Vec<String> = pipeline
+        .split('"')
+        .filter_map(|token| token.strip_prefix("Bash("))
+        .filter_map(|token| token.strip_suffix(":*)"))
+        .map(str::to_owned)
+        .collect();
+    assert!(!allowed.is_empty(), "the pipeline permits no Bash command");
+
+    // The skills the pipelines actually invoke, read off the scripts rather than listed here.
+    let weekly = read(&repo_root().join("scripts/lore-weekly.sh"));
+    let invoked: Vec<String> = format!("{pipeline}{weekly}")
+        .split('"')
+        .filter_map(|token| token.strip_prefix("$SKILL_DIR/"))
+        .map(str::to_owned)
+        .collect();
+    assert!(
+        !invoked.is_empty(),
+        "no skill invocation found in the pipeline scripts"
+    );
+
+    for skill in invoked {
+        let body = read(&repo_root().join(".claude/skills").join(&skill).join("SKILL.md"));
+        let frontmatter = body.split("---").nth(1).expect("skill frontmatter");
+        for line in frontmatter.lines() {
+            let Some(cmd) = line
+                .trim()
+                .strip_prefix("Bash(")
+                .and_then(|rest| rest.strip_suffix(" *)"))
+            else {
+                continue;
+            };
+            assert!(
+                allowed.iter().any(|a| a == cmd),
+                "{skill} declares it runs `{cmd}`, which the pipeline's --allowedTools denies — \
+                 nothing in `claude -p` can prompt, so the step is refused unattended"
+            );
+        }
+    }
+}
+
 /// Every asset the installer downloads is checksummed, and the release publishes the checksum.
 ///
 /// The pipelines were the exception both ways: `install.sh` fetched them and ran them without
