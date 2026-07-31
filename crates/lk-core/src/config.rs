@@ -357,6 +357,21 @@ impl Config {
                         cat.id
                     )));
                 }
+                // A label is a one-line display name, and every consumer treats it as one:
+                // `lore config categories` and `lore wiki concepts` emit tab-separated records
+                // one per line, and `index.md` renders it as a heading. A control character
+                // makes it more than one — a label of `"AI\nfake"` put a category id `fake` in
+                // the vocabulary an agent reads, which no config declares, so the page it then
+                // wrote failed `lint` under `invalid_categories`. Refused where it enters,
+                // rather than escaped in each consumer, which is where they would drift.
+                if cat.label.chars().any(char::is_control) {
+                    return Err(ConfigError::Validation(format!(
+                        "concepts.categories: category '{}' has a label containing a control \
+                         character (newline or tab) — a label is one line, and the commands that \
+                         publish the vocabulary emit one record per line",
+                        cat.id
+                    )));
+                }
                 if !seen.insert(&cat.id) {
                     return Err(ConfigError::Validation(format!(
                         "concepts.categories: duplicate category id '{}'",
@@ -2145,6 +2160,36 @@ concepts:
             config.validate().is_err(),
             "category id with '/' must be rejected"
         );
+    }
+
+    /// `lore config categories` and `lore wiki concepts` publish the vocabulary as one
+    /// tab-separated record per line, so a label carrying a newline invents a category id no
+    /// config declares — and an agent that writes it fails `lint` on the page it just wrote.
+    #[test]
+    fn validate_rejects_a_concept_category_label_that_is_not_one_line() {
+        for label in [r#""AI\nfake""#, r#""AI\tfake""#] {
+            let yaml = format!(
+                r#"
+vault:
+  root: /tmp/vault
+identity:
+  name: test
+  email: test@test.com
+sources:
+  s1:
+    type: gmail
+concepts:
+  categories:
+    - id: technology
+      label: {label}
+"#
+            );
+            let mut config: Config = serde_yaml_ng::from_str(&yaml).unwrap();
+            assert!(
+                config.validate().is_err(),
+                "a label spanning more than one record must be rejected: {label}"
+            );
+        }
     }
 
     #[test]
