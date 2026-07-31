@@ -192,7 +192,13 @@ jobs:
           done
           # The scheduled pipelines ship as plain shell assets; install.sh fetches them
           # by name (`v{version}/{name}`) when there is no repo checkout to copy from.
-          cp scripts/lore-pipeline.sh scripts/lore-daily.sh scripts/lore-weekly.sh .
+          # Checksummed like every other asset: these run unattended from a scheduler with the
+          # user's shell environment, so a substituted one is the most dangerous thing here, and
+          # they were the only assets the installer took on trust.
+          for name in lore-pipeline.sh lore-daily.sh lore-weekly.sh; do
+            cp "scripts/${name}" .
+            sha256sum "$name" > "${name}.sha256"
+          done
       - uses: actions/upload-artifact@v7
         with:
           name: skills
@@ -202,6 +208,7 @@ jobs:
             lore-pipeline.sh
             lore-daily.sh
             lore-weekly.sh
+            lore-*.sh.sha256
           if-no-files-found: error
 
   release:

@@ -146,7 +146,11 @@ fetch_latest_version() {
 }
 
 resolve_version() {
-    if [ -n "$LORE_INSTALL_VERSION" ]; then echo "$LORE_INSTALL_VERSION"; return; fi
+    # Every URL below is built as `v${version}`, so the version here is the bare number. The tag
+    # on the releases page is `v0.16.1` and that is what a user copies, which made
+    # `--version v0.16.1` request `.../vv0.16.1/lore-vv0.16.1-…` and 404 with a download error
+    # naming neither cause.
+    if [ -n "$LORE_INSTALL_VERSION" ]; then echo "${LORE_INSTALL_VERSION#v}"; return; fi
     local v; v="$(fetch_latest_version || true)"
     [ -n "$v" ] || die "Cannot fetch latest version (network issue or no release exists yet)"
     echo "$v"
@@ -263,9 +267,27 @@ compare_versions() {
     local a="${1#v}" b="${2#v}"
     [ -z "$a" ] || [ -z "$b" ] && { echo "unknown"; return; }
     [ "$a" = "$b" ] && { echo "equal"; return; }
+    # `sort -V` orders `1.0.0` BEFORE `1.0.0-beta.1`; semver is the other way round, a
+    # prerelease precedes its release. Installing 1.0.0 over an installed 1.0.0-beta.1 therefore
+    # asked "Installed v1.0.0-beta.1 is newer — Downgrade?", whose default answer keeps the beta.
+    # Compared as (release, prerelease) so the release part decides first and, on a tie, the side
+    # WITH a prerelease is the older one.
+    local a_rel="${a%%-*}" b_rel="${b%%-*}"
+    local a_pre="" b_pre=""
+    [ "$a" != "$a_rel" ] && a_pre="${a#*-}"
+    [ "$b" != "$b_rel" ] && b_pre="${b#*-}"
+
+    if [ "$a_rel" != "$b_rel" ]; then
+        local first
+        first="$(printf '%s\n%s\n' "$a_rel" "$b_rel" | sort -V | head -n1)"
+        [ "$first" = "$a_rel" ] && echo "older" || echo "newer"
+        return
+    fi
+    if [ -z "$a_pre" ]; then echo "newer"; return; fi   # b has one, a does not
+    if [ -z "$b_pre" ]; then echo "older"; return; fi   # a has one, b does not
     local first
-    first="$(printf '%s\n%s\n' "$a" "$b" | sort -V | head -n1)"
-    [ "$first" = "$a" ] && echo "older" || echo "newer"
+    first="$(printf '%s\n%s\n' "$a_pre" "$b_pre" | sort -V | head -n1)"
+    [ "$first" = "$a_pre" ] && echo "older" || echo "newer"
 }
 
 # Content hash of a whole skill DIRECTORY: every file's path and bytes, in a stable order.
@@ -399,6 +421,22 @@ install_pipelines() {
             fi
         elif curl -fsSL --retry 3 --retry-delay 2 \
             -o "${TMP_DIR}/${name}" "${RELEASE_BASE}/v${version}/${name}" 2>/dev/null; then
+            # These run unattended from a scheduler with the user's shell environment, so a
+            # substituted one is the most dangerous asset here — and it was the only one taken on
+            # trust while the binary and every skill were checksummed.
+            if ! curl -fsSL --retry 3 --retry-delay 2 \
+                -o "${TMP_DIR}/${name}.sha256" "${RELEASE_BASE}/v${version}/${name}.sha256" 2>/dev/null; then
+                log_warn "Pipeline '${name}' checksum unavailable; skipping"
+                continue
+            fi
+            if ! ( cd "$TMP_DIR" && {
+                if command -v sha256sum >/dev/null 2>&1; then sha256sum -c "${name}.sha256" >/dev/null
+                else shasum -a 256 -c "${name}.sha256" >/dev/null
+                fi
+            } ); then
+                log_warn "Pipeline '${name}' checksum mismatch; skipping"
+                continue
+            fi
             src="${TMP_DIR}/${name}"
         else
             log_warn "Pipeline '${name}' unavailable; skipping"
@@ -408,7 +446,15 @@ install_pipelines() {
         chmod +x "${dest_dir}/${name}"
         installed=$((installed + 1))
     done
-    [ "$installed" -gt 0 ] && log_ok "Pipelines installed to ${dest_dir}"
+    # Not `[ "$installed" -gt 0 ] && log_ok …`: as the last command of the function that returns
+    # 1 when nothing installed, and under `set -e` it killed the whole installer AFTER the binary,
+    # templates and skills had landed — no completion message, no next steps, and an exit code
+    # saying the install failed.
+    if [ "$installed" -gt 0 ]; then
+        log_ok "Pipelines installed to ${dest_dir}"
+    else
+        log_warn "No pipelines installed; schedule them by hand or re-run once the release has them"
+    fi
 }
 
 # Print how to schedule what was just installed, with this machine's paths resolved.

@@ -103,6 +103,60 @@ fn every_target_an_installer_asks_for_is_one_the_release_builds() {
     }
 }
 
+/// Every asset the installer downloads is checksummed, and the release publishes the checksum.
+///
+/// The pipelines were the exception both ways: `install.sh` fetched them and ran them without
+/// verifying anything, and `release.yml` published no `.sha256` beside them. They are the most
+/// dangerous asset of the three — a scheduler fires them unattended with the user's shell
+/// environment — and they were the only one taken on trust.
+#[test]
+fn every_downloaded_pipeline_is_checksummed_on_both_sides() {
+    let install = read(&repo_root().join("scripts/install.sh"));
+    let release = read(&repo_root().join(".github/workflows/release.yml"));
+
+    let pipelines: Vec<String> = install
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("PIPELINES=\"").map(str::to_owned))
+        .expect("install.sh declares a PIPELINES list")
+        .trim_end_matches('"')
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect();
+    assert!(!pipelines.is_empty(), "install.sh declares no pipelines");
+
+    for name in &pipelines {
+        assert!(
+            release.contains(name),
+            "release.yml never packages `{name}`, which install.sh downloads"
+        );
+    }
+    assert!(
+        release.contains(r#"sha256sum "$name" > "${name}.sha256""#),
+        "release.yml packages the pipelines without publishing their checksums"
+    );
+    assert!(
+        install.contains("Pipeline '${name}' checksum mismatch"),
+        "install.sh downloads a pipeline without verifying it"
+    );
+}
+
+/// The two scripts agree about where an install lives.
+///
+/// `install.sh --install-dir /opt/bin` put the binary somewhere `uninstall.sh` had no way to be
+/// told about, so it reported "Nothing to uninstall" and left it there.
+#[test]
+fn the_uninstaller_takes_every_path_flag_the_installer_does() {
+    let install = read(&repo_root().join("scripts/install.sh"));
+    let uninstall = read(&repo_root().join("scripts/uninstall.sh"));
+    for flag in ["--install-dir", "--data-dir"] {
+        assert!(install.contains(flag), "install.sh lost {flag}");
+        assert!(
+            uninstall.contains(flag),
+            "uninstall.sh cannot be told about {flag}, so an install made with it is invisible"
+        );
+    }
+}
+
 /// No skill spells out a vocabulary `AGENTS.md` already generates.
 ///
 /// Enumerating the `document_type` values in a skill copies a list the schema generator emits

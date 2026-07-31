@@ -36,30 +36,40 @@ print_usage() {
 Lorekeeper uninstaller
 
 Usage:
-  ./scripts/uninstall.sh [--yes] [--keep-data]
+  ./scripts/uninstall.sh [--yes] [--keep-data] [--install-dir PATH] [--data-dir PATH]
 
 Removes:
-  - $LORE_INSTALL_DIR/lore                        (binary)
-  - $LORE_INSTALL_DATA_DIR/templates              (installed templates)
+  - <install-dir>/lore                             (binary)
+  - <data-dir>/templates                           (installed templates)
   - ~/.config/lorekeeper/config.example.yaml       (installed config template)
   - ~/.claude/skills/lore-*                        (user-level skills)
   - ./.claude/skills/lore-*                        (project-level skills, if present)
-  - $DATA_DIR/pipelines                            (scheduled pipeline scripts)
+  - <data-dir>/pipelines                           (scheduled pipeline scripts)
   - ~/.claude/scheduled-tasks/lore-*-ingest        (superseded, pre-0.11)
 
 Flags:
-  --yes, -y       Skip all confirmations
-  --keep-data     Keep templates and vault data (only remove binary + skill)
-  --help, -h      Show this message
+  --install-dir PATH  Where the binary was installed
+                      (default: $LORE_INSTALL_DIR, else $HOME/.local/bin)
+  --data-dir PATH     Where templates and pipelines were installed
+                      (default: $LORE_INSTALL_DATA_DIR, else
+                       $XDG_DATA_HOME/lorekeeper or $HOME/.local/share/lorekeeper)
+  --yes, -y           Skip all confirmations
+  --keep-data         Keep everything this installed except the binary and the skills
+  --help, -h          Show this message
+
+The two path flags mirror install.sh's. Without them, an install made with
+`install.sh --install-dir /opt/bin` was invisible here and the binary stayed.
 USAGE
 }
 
 KEEP_DATA=0
 while [ $# -gt 0 ]; do
     case "$1" in
-        --yes|-y)    LORE_UNINSTALL_YES=1; shift ;;
-        --keep-data) KEEP_DATA=1; shift ;;
-        --help|-h)   print_usage; exit 0 ;;
+        --yes|-y)      LORE_UNINSTALL_YES=1; shift ;;
+        --keep-data)   KEEP_DATA=1; shift ;;
+        --install-dir) INSTALL_DIR="$2"; shift 2 ;;
+        --data-dir)    DATA_DIR="$2"; shift 2 ;;
+        --help|-h)     print_usage; exit 0 ;;
         *)           die "Unknown flag: $1 (use --help)" ;;
     esac
 done
@@ -132,9 +142,11 @@ for skill in "${SKILL_NAMES[@]}"; do
     fi
 done
 
-# The scheduled pipelines.
+# The scheduled pipelines. Installed data like the templates beside them, so `--keep-data`
+# keeps them: it removed the scripts a scheduler was still firing while promising to "keep
+# templates and vault data", and the jobs then failed nightly with no file to point at.
 pipelines_dir="$DATA_DIR/pipelines"
-if [ -d "$pipelines_dir" ]; then
+if [ "$KEEP_DATA" != "1" ] && [ -d "$pipelines_dir" ]; then
     if prompt_yesno "Remove pipelines $pipelines_dir?"; then
         render_step "Removing $pipelines_dir"
         rm -rf "$pipelines_dir"
