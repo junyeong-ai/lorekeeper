@@ -1218,10 +1218,16 @@ pub fn expand_tilde(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
-/// Drop `.` components from an absolute path, leaving every other component untouched.
+/// Re-spell an absolute path with its `.` components dropped.
 ///
 /// `..` is deliberately NOT folded: resolving it lexically changes which directory a path names
 /// when a symlink is involved, and this runs on a path that may not exist yet.
+///
+/// Rebuilding from `components()` also collapses redundant separators (`a//b`, a trailing `/`),
+/// which serves the same purpose — one spelling per vault. It reaches one case where POSIX
+/// permits a difference: a path beginning with exactly two slashes is implementation-defined,
+/// and this makes `//host/share` into `/host/share`. Neither platform this ships to (Linux,
+/// macOS) gives that spelling a separate meaning, so there is no path it redirects.
 fn fold_current_dir(path: &Path) -> PathBuf {
     path.components()
         .filter(|component| !matches!(component, std::path::Component::CurDir))
