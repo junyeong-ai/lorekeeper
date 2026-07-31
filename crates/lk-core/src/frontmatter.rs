@@ -75,8 +75,11 @@ pub fn is_delimiter_line(line: &str) -> bool {
 pub struct PageParts {
     pub yaml: String,
     pub body: String,
-    /// False when a block opens and never closes. There is no body then — every line is still
-    /// inside the frontmatter — so a link below an unterminated block is not a link.
+    /// False when a block opens and never closes, which is a page with NO frontmatter rather
+    /// than one whose frontmatter runs to the end: nothing delimits a block that never closed,
+    /// so every line of it is text a reader sees and a link in it is a link they can follow.
+    /// [`parse_page`] refuses such a page — no fields can be read from it, and a writer cannot
+    /// show it is preserving a format the bytes never stated.
     pub closed: bool,
 }
 
@@ -112,8 +115,8 @@ pub fn split_page(content: &str) -> PageParts {
     }
     let Some(closing) = closing else {
         return PageParts {
-            yaml: rest.to_string(),
-            body: String::new(),
+            yaml: String::new(),
+            body: rest.to_string(),
             closed: false,
         };
     };
@@ -167,6 +170,25 @@ mod tests {
         let page = parse_page("# Just a heading\n\nContent.").unwrap();
         assert!(page.frontmatter.fields.is_empty());
         assert!(page.body.contains("Just a heading"));
+    }
+
+    /// A block that opens and never closes delimits nothing, so the text below it is TEXT —
+    /// a reader sees it and a link in it is one they can follow. Taking it as frontmatter
+    /// running to the end left every such page with an empty body, so its links vanished from
+    /// the scan: `graph broken` reported none, and `graph merge` deleted a concept while a live
+    /// citation still pointed at it.
+    #[test]
+    fn an_unclosed_block_is_a_page_with_no_frontmatter() {
+        let parts = split_page("---\nid: notes\ntitle: unclosed\n\n# Notes\n\n[a](b.md)\n");
+        assert!(!parts.closed);
+        assert!(
+            parts.yaml.is_empty(),
+            "nothing delimits a block that never closed"
+        );
+        assert!(parts.body.contains("[a](b.md)"), "{:?}", parts.body);
+
+        // And no fields can be read from it, so the page still has no frontmatter to trust.
+        assert!(parse_page("---\nid: notes\n\n# Notes\n").is_err());
     }
 
     #[test]

@@ -158,7 +158,7 @@ pub fn merge_concepts(
         if count > 0 {
             if !dry_run && updated != content {
                 lk_vault::VaultWriter::new(vault_root)
-                    .write_page_sync(&page.path, &updated)
+                    .edit_page_sync(&page.path, &updated)
                     .map_err(|e| GraphError::Io(format!("write {}: {e}", page.path.display())))?;
             }
             rewritten.push(RewrittenPage {
@@ -271,7 +271,7 @@ fn apply_aliases(vault_root: &Path, into_rel: &Path, aliases: &[String]) -> Resu
             ))
         })?;
     lk_vault::VaultWriter::new(vault_root)
-        .write_page_sync(into_rel, &updated)
+        .edit_page_sync(into_rel, &updated)
         .map_err(|e| GraphError::Io(format!("write {}: {e}", into_rel.display())))?;
     Ok(())
 }
@@ -824,5 +824,45 @@ mod tests {
             "from's names must be absorbed into the canonical page's aliases:\n{into}"
         );
         assert!(!root.join("wiki/concepts/vector-db.md").exists());
+    }
+
+    /// A citation on a page whose frontmatter will not parse is still a citation.
+    ///
+    /// The links live in the body, and a block that opens and never closes delimits nothing —
+    /// so the sweep that repoints them must reach that page, or the concept is deleted while a
+    /// live citation still points at it and `graph broken` reports nothing.
+    #[test]
+    fn a_citation_inside_an_unparseable_page_is_repointed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("wiki/concepts")).unwrap();
+        std::fs::create_dir_all(root.join("daily/notes")).unwrap();
+        write(
+            root,
+            "wiki/concepts/from.md",
+            "---\nid: from\ntype: concept\n---\n\n# From\n\n## Sources\n",
+        );
+        write(
+            root,
+            "wiki/concepts/into.md",
+            "---\nid: into\ntype: concept\n---\n\n# Into\n\n## Sources\n",
+        );
+        write(
+            root,
+            "daily/notes/2026-07-31.md",
+            "---\nid: notes\ntitle: unclosed\n\n# Notes\n\n[F](../../wiki/concepts/from.md)\n",
+        );
+        let citing = root.join("daily/notes/2026-07-31.md");
+
+        let pages = crate::scan::scan_vault(root, false).unwrap();
+        let result = merge_concepts(&pages, root, "wiki", "from", "into", false, false).unwrap();
+
+        assert_eq!(result.rewritten.len(), 1, "{result:?}");
+        let after = std::fs::read_to_string(&citing).unwrap();
+        assert!(after.contains("concepts/into.md"), "{after}");
+        assert!(
+            after.starts_with("---\nid: notes\ntitle: unclosed\n"),
+            "the bytes above the body are untouched:\n{after}"
+        );
     }
 }

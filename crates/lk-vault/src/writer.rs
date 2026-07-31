@@ -69,10 +69,11 @@ impl Format {
 /// exit 0. What the exemption bought was not having to move a damaged file aside by hand, which is
 /// what the refusal already says to do.
 ///
-/// Every write of a vault page goes through here — there is no second path to keep a list of.
-/// What does not is the vault's operational state (`.lorekeeper/`: the queue, the event logs,
-/// the ingest log) and `credentials.json`, none of which is a page and none of which this
-/// guard has anything to say about.
+/// Every page PUBLISHED into the vault goes through here — there is no second path to keep a
+/// list of. An in-place edit ([`VaultWriter::edit_page_sync`]) does not, and cannot be the write
+/// this refuses: its content is the page it read. Neither is the vault's operational state
+/// (`.lorekeeper/`: the queue, the event logs, the ingest log) or `credentials.json`, none of
+/// which is a page.
 ///
 /// The check and the publish are separate syscalls, so two concurrent processes writing
 /// different formats to one path can both pass it; the vault has no cross-process lock, and
@@ -116,11 +117,16 @@ fn refuse_format_change(full: &Path, content: &str) -> Result<(), VaultError> {
     ))))
 }
 
-/// Atomic, durable writer for vault pages. Both methods publish through the single
-/// `lk_core::fs::write_atomic` (temp + fsync + rename + dir-fsync, per-writer-unique
-/// temp), so the durability and unique-temp guarantees are single-sourced — there is no
-/// second atomic-write implementation that could drift. `write_page` is the async ingest
-/// path; `write_page_sync` is the sync path (`lk-graph`).
+/// Atomic, durable writer for vault pages. Every method publishes through the single
+/// `lk_core::fs::write_atomic` (temp + fsync + rename + dir-fsync, per-writer-unique temp), so
+/// the durability and unique-temp guarantees are single-sourced — there is no second
+/// atomic-write implementation that could drift.
+///
+/// Two contracts, because a page is replaced for two different reasons. [`Self::write_page`]
+/// and [`Self::write_page_sync`] PUBLISH a page rendered from somewhere else — a template, a
+/// catalog derivation — and cannot know what occupies the path, so they carry
+/// [`refuse_format_change`]. [`Self::edit_page_sync`] rewrites a page from its own bytes, where
+/// that question has no meaning: the content IS that page, transformed.
 pub struct VaultWriter {
     root: PathBuf,
 }
@@ -147,6 +153,23 @@ impl VaultWriter {
     /// `lk_core::fs::write_atomic`, so it is not a second atomic-write implementation.
     pub fn write_page_sync(&self, rel_path: &Path, content: &str) -> Result<(), VaultError> {
         write_blocking(&self.root.join(rel_path), content)
+    }
+
+    /// Rewrite a page from content derived from its own bytes: a link repointed at a renamed
+    /// target, a frontmatter field set. Same atomic publish, no format check.
+    ///
+    /// The check would have nothing to compare. It asks whether a page of one format is about
+    /// to be replaced by a page of ANOTHER, and an edit produces the page it read — including
+    /// when those bytes are illegible, which is when a caller most needs to repoint a link out
+    /// of them. Refusing there abandons the sweep half-done over a page nobody can parse, and
+    /// leaves a citation pointing at a concept that was just deleted.
+    pub fn edit_page_sync(&self, rel_path: &Path, content: &str) -> Result<(), VaultError> {
+        let full = self.root.join(rel_path);
+        if let Some(parent) = full.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        lk_core::fs::write_atomic(&full, content.as_bytes(), None)?;
+        Ok(())
     }
 }
 
@@ -368,5 +391,30 @@ mod tests {
                     .is_some_and(|ext| ext.to_string_lossy().ends_with(".tmp"))
             });
         assert!(!leftover, "temp file leaked into vault");
+    }
+
+    /// An edit publishes content the page itself produced, so the format question has no
+    /// answer to compare — and refusing there is what abandons a repointing sweep half-done
+    /// over the one page nobody can parse.
+    #[test]
+    fn an_edit_rewrites_a_page_whose_frontmatter_will_not_parse() {
+        let dir = TempDir::new().unwrap();
+        let rel = std::path::Path::new("daily/notes/2026-07-31.md");
+        let full = dir.path().join(rel);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        let unparseable = "---\nid: notes\ntitle: unclosed\n\n# Notes\n\n[a](old.md)\n";
+        std::fs::write(&full, unparseable).unwrap();
+
+        let writer = VaultWriter::new(dir.path());
+        let edited = unparseable.replace("old.md", "new.md");
+        writer.edit_page_sync(rel, &edited).unwrap();
+        assert_eq!(std::fs::read_to_string(&full).unwrap(), edited);
+
+        // The publish path still refuses: it cannot show it is preserving a format the bytes
+        // never stated, and its content did not come from them.
+        let refusal = writer
+            .write_page_sync(rel, "---\ntype: concept\n---\n\n# Rendered\n")
+            .expect_err("a wholesale write over an illegible page is refused");
+        assert!(format!("{refusal}").contains("two page formats cannot share one file"));
     }
 }
