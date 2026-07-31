@@ -355,7 +355,6 @@ fn run_inner(
             let sync = backlinks::sync_concept_backlinks(
                 &views.scanned,
                 &rc.root,
-                rc.locale,
                 dry_run,
                 &rc.vault_dirs,
             )
