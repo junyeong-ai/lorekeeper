@@ -742,6 +742,18 @@ mod tests {
     /// form, and it was right to: a repository holding one teaches every clone's scanner that
     /// this shape is noise. The bytes reaching `scan_credentials` are identical, so the
     /// grammar under test is unchanged.
+    ///
+    /// The PROSE fixtures below take the same treatment a different way: a `\` line
+    /// continuation immediately after the prefix, which the compiler resolves to the
+    /// contiguous string while the file never carries one. Do not rejoin them — push
+    /// protection reads several of them as Slack tokens, which is the finding they exist to
+    /// pin, stated by a scanner that has it.
+    ///
+    /// **Nothing in this module verifies that a split reproduces the string it replaced.**
+    /// Every one of them is asserted NOT to match, so a botched continuation yields a
+    /// different string that also matches nothing and the suite stays green — the tests
+    /// answer a question the split does not raise. Changing one is checked by compiling the
+    /// literal and comparing its bytes, never by a passing run.
     fn shaped(parts: &[&str]) -> String {
         parts.concat()
     }
