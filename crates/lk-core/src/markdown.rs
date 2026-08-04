@@ -73,21 +73,25 @@ fn has_inline_data_uri(line: &str) -> bool {
 ///
 /// The set grows as issuers publish; it does not aspire to completeness, and no rule here is
 /// ever inferred from a string's appearance.
+///
+/// Deliberately ABSENT: every form whose issuer publishes a reserved prefix and then a body
+/// over an alphabet that admits `-`, with no inner structure to require — Anthropic, OpenAI
+/// project and admin keys, PyPI, GitLab. English hyphenates, so such a body IS the alphabet
+/// of prose, and each approximation tried against that was defeated by ordinary vault text:
+/// a length floor by a long sentence, a longest-run floor by a single compound word. Slack
+/// stays because Slack publishes the field shape (`xoxb-<team id>-<app id>-<secret>`), which
+/// is a rule rather than a threshold. Missing a key is a cost paid once; a check that fires
+/// on a message about rotating keys is one whose findings stop being read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CredentialForm {
     GitHubToken,
     GitHubFineGrainedToken,
-    AnthropicApiKey,
-    OpenAiProjectKey,
-    OpenAiAdminKey,
-    PyPiToken,
     SlackToken,
     SlackAppToken,
     AwsAccessKeyId,
     GoogleApiKey,
     StripeSecretKey,
     StripeRestrictedKey,
-    GitLabToken,
     NpmToken,
     StripeWebhookSecret,
     PrivateKeyBlock,
@@ -99,17 +103,12 @@ impl CredentialForm {
         match self {
             CredentialForm::GitHubToken => "GitHub access token",
             CredentialForm::GitHubFineGrainedToken => "GitHub fine-grained personal access token",
-            CredentialForm::AnthropicApiKey => "Anthropic API key",
-            CredentialForm::OpenAiProjectKey => "OpenAI project API key",
-            CredentialForm::OpenAiAdminKey => "OpenAI organization admin key",
-            CredentialForm::PyPiToken => "PyPI API token",
             CredentialForm::SlackToken => "Slack API token",
             CredentialForm::SlackAppToken => "Slack app-level token",
             CredentialForm::AwsAccessKeyId => "AWS access key id",
             CredentialForm::GoogleApiKey => "Google API key",
             CredentialForm::StripeSecretKey => "Stripe live secret key",
             CredentialForm::StripeRestrictedKey => "Stripe live restricted key",
-            CredentialForm::GitLabToken => "GitLab personal access token",
             CredentialForm::NpmToken => "npm access token",
             CredentialForm::StripeWebhookSecret => "Stripe webhook signing secret",
             CredentialForm::PrivateKeyBlock => "private key block",
@@ -131,15 +130,16 @@ struct CredentialGrammar {
     /// digit. Slack's `xoxb-<team id>-…` is the shape; `xoxb-please-rotate-…` in a message
     /// about rotating tokens is not, and no length rule separates the two because English
     /// hyphenates.
-    body_starts_digit: bool,
-    /// The longest run the body must hold with no `-` in it.
+    /// The body is `-`-separated fields, the first `numeric_fields` of them digits only, and
+    /// the last at least `min_unbroken_run` characters.
     ///
-    /// The other answer to hyphenated prose, for the forms whose issuer publishes no inner
-    /// structure to require. A body encoded from random bytes carries long unbroken runs — a
-    /// `-` falls about once in 64 characters — while English is segmented by its words. So
-    /// this separates them on SHAPE, where a raised length floor only guesses: a floor tuned
-    /// until the prose stopped matching also stops matching every key shorter than the guess,
-    /// and does it silently.
+    /// Slack publishes that shape — `xoxb-<team id>-<app id>-<secret>` — and requiring it is
+    /// what tells a token from a sentence about tokens. Nothing weaker does: English
+    /// hyphenates, so a body alphabet admitting `-` IS the alphabet of prose, and every
+    /// approximation tried against that has been defeated by ordinary text. A leading digit
+    /// admits `xoxb-1-please-rotate-…`; a longest-run floor admits any sentence carrying one
+    /// long compound word.
+    numeric_fields: usize,
     min_unbroken_run: usize,
 }
 
@@ -162,14 +162,14 @@ fn upper_alnum(c: char) -> bool {
 /// The grammars, each as its issuer publishes it. Exact lengths where the issuer mints a
 /// fixed width; a floor elsewhere, because a prefix a vendor reserved is a finding whatever
 /// length follows it and pinning a width the vendor later changes would miss real keys.
-fn credential_grammars() -> [CredentialGrammar; 14] {
+fn credential_grammars() -> [CredentialGrammar; 11] {
     [
         CredentialGrammar {
             form: CredentialForm::GitHubToken,
             prefixes: &["ghp_", "gho_", "ghu_", "ghs_", "ghr_"],
             body: base62,
             body_len: 36..=255,
-            body_starts_digit: false,
+            numeric_fields: 0,
             min_unbroken_run: 0,
         },
         CredentialGrammar {
@@ -177,43 +177,8 @@ fn credential_grammars() -> [CredentialGrammar; 14] {
             prefixes: &["github_pat_"],
             body: base62_underscore,
             body_len: 40..=255,
-            body_starts_digit: false,
+            numeric_fields: 0,
             min_unbroken_run: 0,
-        },
-        // The key-type tag is part of the reserved marker, not part of the body: `sk-ant-`
-        // alone is what a runbook writes when it names the prefix, and no length rule tells
-        // that from a key because both continue in hyphenated text.
-        CredentialGrammar {
-            form: CredentialForm::AnthropicApiKey,
-            prefixes: &["sk-ant-api03-", "sk-ant-admin01-", "sk-ant-sid01-"],
-            body: base62_extended,
-            body_len: 24..=255,
-            body_starts_digit: false,
-            min_unbroken_run: 20,
-        },
-        CredentialGrammar {
-            form: CredentialForm::OpenAiProjectKey,
-            prefixes: &["sk-proj-"],
-            body: base62_extended,
-            body_len: 24..=255,
-            body_starts_digit: false,
-            min_unbroken_run: 20,
-        },
-        CredentialGrammar {
-            form: CredentialForm::OpenAiAdminKey,
-            prefixes: &["sk-admin-"],
-            body: base62_extended,
-            body_len: 24..=255,
-            body_starts_digit: false,
-            min_unbroken_run: 20,
-        },
-        CredentialGrammar {
-            form: CredentialForm::PyPiToken,
-            prefixes: &["pypi-"],
-            body: base62_extended,
-            body_len: 40..=255,
-            body_starts_digit: false,
-            min_unbroken_run: 20,
         },
         // The rotating forms nest the bot/user prefix behind `xoxe.`, so they are listed in
         // their own right: the scan takes the LONGEST prefix at a position, which is what
@@ -221,27 +186,31 @@ fn credential_grammars() -> [CredentialGrammar; 14] {
         CredentialGrammar {
             form: CredentialForm::SlackToken,
             prefixes: &[
-                "xoxe.xoxb-",
-                "xoxe.xoxp-",
-                "xoxb-",
-                "xoxp-",
-                "xoxa-",
-                "xoxc-",
-                "xoxr-",
-                "xoxs-",
-                "xoxe-",
+                "xoxb-", "xoxp-", "xoxa-", "xoxc-", "xoxr-", "xoxs-", "xoxe-",
             ],
             body: base62_extended,
-            body_len: 20..=255,
-            body_starts_digit: true,
+            body_len: 30..=255,
+            numeric_fields: 2,
+            min_unbroken_run: 20,
+        },
+        // The rotating forms nest the bot/user prefix behind `xoxe.` and carry ONE numeric
+        // field before the secret, so they are their own entry rather than a prefix on the
+        // one above — and the scan takes the longest prefix at a position, which is what
+        // keeps a rotating token from being read as the plain form inside it.
+        CredentialGrammar {
+            form: CredentialForm::SlackToken,
+            prefixes: &["xoxe.xoxb-", "xoxe.xoxp-"],
+            body: base62_extended,
+            body_len: 22..=255,
+            numeric_fields: 1,
             min_unbroken_run: 20,
         },
         CredentialGrammar {
             form: CredentialForm::SlackAppToken,
             prefixes: &["xapp-"],
             body: base62_extended,
-            body_len: 20..=255,
-            body_starts_digit: true,
+            body_len: 30..=255,
+            numeric_fields: 1,
             min_unbroken_run: 20,
         },
         // Two deliberate narrowings, both trading recall for a finding a reader believes.
@@ -257,7 +226,7 @@ fn credential_grammars() -> [CredentialGrammar; 14] {
             prefixes: &["AKIA"],
             body: upper_alnum,
             body_len: 16..=16,
-            body_starts_digit: false,
+            numeric_fields: 0,
             min_unbroken_run: 0,
         },
         CredentialGrammar {
@@ -265,7 +234,7 @@ fn credential_grammars() -> [CredentialGrammar; 14] {
             prefixes: &["AIza"],
             body: base62_extended,
             body_len: 35..=35,
-            body_starts_digit: false,
+            numeric_fields: 0,
             min_unbroken_run: 0,
         },
         CredentialGrammar {
@@ -273,7 +242,7 @@ fn credential_grammars() -> [CredentialGrammar; 14] {
             prefixes: &["sk_live_"],
             body: base62,
             body_len: 24..=255,
-            body_starts_digit: false,
+            numeric_fields: 0,
             min_unbroken_run: 0,
         },
         CredentialGrammar {
@@ -281,26 +250,26 @@ fn credential_grammars() -> [CredentialGrammar; 14] {
             prefixes: &["rk_live_"],
             body: base62,
             body_len: 24..=255,
-            body_starts_digit: false,
+            numeric_fields: 0,
+            min_unbroken_run: 0,
+        },
+        CredentialGrammar {
+            form: CredentialForm::StripeWebhookSecret,
+            prefixes: &["whsec_"],
+            body: base62,
+            body_len: 24..=255,
+            numeric_fields: 0,
             min_unbroken_run: 0,
         },
         // Stripe's TEST forms are deliberately absent. They appear verbatim in Stripe's own
         // documentation, grant nothing, and cannot leak anything — so every hit is a finding
         // with no action behind it, which is the dilution this module exists to avoid.
         CredentialGrammar {
-            form: CredentialForm::GitLabToken,
-            prefixes: &["glpat-"],
-            body: base62_extended,
-            body_len: 20..=255,
-            body_starts_digit: false,
-            min_unbroken_run: 20,
-        },
-        CredentialGrammar {
             form: CredentialForm::NpmToken,
             prefixes: &["npm_"],
             body: base62,
             body_len: 36..=255,
-            body_starts_digit: false,
+            numeric_fields: 0,
             min_unbroken_run: 0,
         },
     ]
@@ -312,7 +281,7 @@ struct PrefixRule {
     form: CredentialForm,
     body: fn(char) -> bool,
     body_len: std::ops::RangeInclusive<usize>,
-    body_starts_digit: bool,
+    numeric_fields: usize,
     min_unbroken_run: usize,
 }
 
@@ -328,7 +297,7 @@ fn prefix_rules() -> Vec<PrefixRule> {
                 form: grammar.form,
                 body: grammar.body,
                 body_len: grammar.body_len.clone(),
-                body_starts_digit: grammar.body_starts_digit,
+                numeric_fields: grammar.numeric_fields,
                 min_unbroken_run: grammar.min_unbroken_run,
             })
         })
@@ -400,22 +369,13 @@ fn scan_line<'a>(
                     // A form the issuer mints with a numeric first field opens with a digit.
                     // English hyphenates, so for a grammar whose alphabet admits `-` this is
                     // what tells a token from a sentence naming one — length cannot.
-                    if rule.body_starts_digit && !tail.starts_with(|c: char| c.is_ascii_digit()) {
-                        return None;
-                    }
                     let body: usize = tail
                         .chars()
                         .take_while(|c| (rule.body)(*c))
                         .map(char::len_utf8)
                         .sum();
                     let matched = &tail[..body];
-                    if matched
-                        .split('-')
-                        .map(|segment| segment.chars().count())
-                        .max()
-                        .unwrap_or(0)
-                        < rule.min_unbroken_run
-                    {
+                    if !fields_match(matched, rule) {
                         return None;
                     }
                     let run = matched.chars().count();
@@ -436,6 +396,28 @@ fn scan_line<'a>(
         }
         None
     })
+}
+
+/// Whether a body has the field shape its issuer mints: the leading fields all digits, and a
+/// final field long enough to be a secret rather than a word.
+///
+/// Both halves are required together. Digits alone admit `xoxb-1-please-rotate-any-token`; a
+/// long final field alone admits any sentence ending in a compound word. Together they
+/// describe `xoxb-<team id>-<app id>-<secret>` and nothing English produces.
+fn fields_match(body: &str, rule: &PrefixRule) -> bool {
+    let fields: Vec<&str> = body.split('-').collect();
+    if fields.len() <= rule.numeric_fields {
+        return false;
+    }
+    if !fields[..rule.numeric_fields]
+        .iter()
+        .all(|field| !field.is_empty() && field.chars().all(|c| c.is_ascii_digit()))
+    {
+        return false;
+    }
+    fields
+        .last()
+        .is_some_and(|last| last.chars().count() >= rule.min_unbroken_run)
 }
 
 /// The tail after an ordered-list marker (`1. `, `12) `), or `None` where there is none. A
@@ -668,11 +650,6 @@ mod tests {
         parts.concat()
     }
 
-    /// Bodies long enough to clear the floors the issuers' minted widths set.
-    const LONG_BODY: &str =
-        "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghij";
-    const PYPI_BODY: &str = "AgEIcHlwaS5vcmcCJGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6MDEyMzQ1Njc4OWFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6MDEy";
-
     /// The forms an issuer publishes a grammar for, each written as that issuer mints it.
     #[test]
     fn every_published_grammar_is_named() {
@@ -689,23 +666,6 @@ mod tests {
                 ]),
                 CredentialForm::GitHubFineGrainedToken,
             ),
-            (
-                shaped(&["sk-ant", "-api03-abcdefghij", "klmnopqrstuvwx"]),
-                CredentialForm::AnthropicApiKey,
-            ),
-            (
-                shaped(&["sk-ant", "-admin01-abcdefghij", "klmnopqrstuvwx"]),
-                CredentialForm::AnthropicApiKey,
-            ),
-            (
-                shaped(&["sk-proj", "-", LONG_BODY]),
-                CredentialForm::OpenAiProjectKey,
-            ),
-            (
-                shaped(&["sk-admin", "-", LONG_BODY]),
-                CredentialForm::OpenAiAdminKey,
-            ),
-            (shaped(&["pypi", "-", PYPI_BODY]), CredentialForm::PyPiToken),
             (
                 shaped(&[
                     "xoxb",
@@ -739,12 +699,12 @@ mod tests {
                 CredentialForm::StripeRestrictedKey,
             ),
             (
-                shaped(&["glpat", "-abcdefghij", "klmnopqrstuvwx"]),
-                CredentialForm::GitLabToken,
-            ),
-            (
                 shaped(&["npm", "_0123456789abcdefghij", "klmnopqrstuvwxyz"]),
                 CredentialForm::NpmToken,
+            ),
+            (
+                shaped(&["whsec", "_0123456789abcdefghij", "klmnopqrstuvwxyz"]),
+                CredentialForm::StripeWebhookSecret,
             ),
             (
                 "-----BEGIN SSH2 ENCRYPTED PRIVATE KEY-----".to_owned(),
@@ -799,10 +759,12 @@ mod tests {
     #[test]
     fn a_separator_before_a_prefix_does_not_hide_the_credential() {
         assert_eq!(
-            forms(
-                "leak_sk-proj-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghij"
-            ),
-            vec![CredentialForm::OpenAiProjectKey]
+            forms(&shaped(&[
+                "leak_npm",
+                "_0123456789abcdefghij",
+                "klmnopqrstuvwxyz"
+            ])),
+            vec![CredentialForm::NpmToken]
         );
         assert!(
             forms(&shaped(&[
@@ -871,31 +833,12 @@ mod tests {
         // `sk-ant-this-is-…`, which matches no prefix at all now that the key-type tag is
         // part of it, so it passed without exercising the rule it was written for.
         for line in [
-            "we are moving to sk-ant-api03-scoped-keys-per-service-this-quarter",
             "the runbook is at xoxb-2026-q1-token-rotation-plan-for-the-workspace",
             "xapp-2-level-token-rotation-runbook-lives-in-the-ops-wiki-page",
-            "sk-proj-migration-notes-for-the-key-rotation-window-next-quarter",
-            "see pypi-publishing-and-token-scoping-guidelines-for-maintainers",
-            "glpat-rotation-runbook-for-the-group-access-tokens-we-issue",
-            "never commit sk-ant-api03-REDACTED-REDACTED-REDACTED to the repo",
+            "Slack xoxb-1-please-rotate-any-token-you-see before friday",
+            "xoxb-123456789012-please-rotate-this-one-as-well-today",
         ] {
             assert!(forms(line).is_empty(), "{line}");
-        }
-    }
-
-    /// A body the issuer encodes from random bytes carries a long unbroken run; English is
-    /// segmented by its words. That is what admits a key of ANY minted width — the first
-    /// generation of a form as well as the current one — where a length floor tuned until
-    /// prose stopped matching would silently exclude the shorter of the two.
-    #[test]
-    fn a_key_is_admitted_at_every_width_its_issuer_has_minted() {
-        for body_len in [40usize, 48, 79, 80, 164] {
-            let body: String = std::iter::repeat_n('a', body_len).collect();
-            assert_eq!(
-                forms(&shaped(&["sk-proj", "-", &body])),
-                vec![CredentialForm::OpenAiProjectKey],
-                "{body_len} characters"
-            );
         }
     }
 

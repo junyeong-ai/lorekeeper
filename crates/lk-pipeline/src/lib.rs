@@ -389,9 +389,15 @@ impl Pipeline {
                 );
             }
             let concept_names = render::accumulate_concepts(
+                // Read under ANY locale's spelling. These links only ever accumulate, and a
+                // `vault.locale` switch renames the heading a page was written under — so a
+                // read that searched only the current one finds nothing to carry, drops every
+                // citation the page holds, and the next backlink sweep strips those concepts
+                // of the evidence justifying them. Nothing records what was lost.
                 existing
                     .as_ref()
-                    .and_then(|p| lk_vault::section_body(&p.body, concepts_heading)),
+                    .and_then(|p| lk_vault::resolve_section(&p.body, |s| s.related_concepts))
+                    .map(|section| section.body),
                 extracted,
                 &daily_path,
                 &self.ctx.dirs,
@@ -632,7 +638,10 @@ impl Pipeline {
             .collect();
 
         let concepts = render::accumulate_concepts(
-            lk_vault::section_body(&stamped, heading),
+            // The links to CARRY are read under any locale, for the reason accumulation
+            // exists; the anchor above is where they are written back, which must stay the
+            // heading the task named.
+            lk_vault::resolve_section(&stamped, |s| s.related_concepts).map(|section| section.body),
             identities,
             &result.target.vault_path,
             &self.ctx.dirs,
@@ -870,9 +879,15 @@ impl Pipeline {
                 );
             }
             let concept_names = render::accumulate_concepts(
+                // Read under ANY locale's spelling. These links only ever accumulate, and a
+                // `vault.locale` switch renames the heading a page was written under — so a
+                // read that searched only the current one finds nothing to carry, drops every
+                // citation the page holds, and the next backlink sweep strips those concepts
+                // of the evidence justifying them. Nothing records what was lost.
                 existing
                     .as_ref()
-                    .and_then(|p| lk_vault::section_body(&p.body, concepts_heading)),
+                    .and_then(|p| lk_vault::resolve_section(&p.body, |s| s.related_concepts))
+                    .map(|section| section.body),
                 extracted,
                 &vault_path,
                 &self.ctx.dirs,
