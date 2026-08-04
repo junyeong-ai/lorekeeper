@@ -192,7 +192,7 @@ fn credential_grammars() -> [CredentialGrammar; 11] {
         // keeps one token from being read as the shorter form it contains.
         CredentialGrammar {
             form: CredentialForm::SlackToken,
-            prefixes: &["xoxb-", "xoxp-", "xoxc-", "xoxr-", "xoxs-"],
+            prefixes: &["xoxb-", "xoxp-", "xoxc-", "xoxs-"],
             body: base62_extended,
             body_len: 30..=255,
             min_fields: 3,
@@ -202,30 +202,36 @@ fn credential_grammars() -> [CredentialGrammar; 11] {
             // has two numeric fields and a long final one, and is a sentence. A year and a
             // month are the numbers prose writes; a workspace id is not.
             //
-            // Slack does not PUBLISH that width, so unlike every other rule here the floor is
-            // read off what it mints: every id observed runs ten digits or more, and this sits
-            // one below the shortest of them so a narrower mint is still caught. A workspace
-            // older than any observed would be a silent miss — the same trade the AWS width
-            // makes below, and the only rule in this module resting on observation rather than
-            // on a published grammar. Widen it if a real token is ever found under it.
+            // Slack's ids run ten to thirteen digits. The floor sits one below the shortest of
+            // those rather than on it, so a narrower mint is still caught, and a workspace
+            // older than any of them is a silent miss — the same trade the AWS width makes
+            // below.
             numeric_field_digits: 9,
             min_unbroken_run: 20,
         },
-        // `xoxe-`/`xoxa-` and the rotating `xoxe.` pair carry ONE short version field before
-        // the secret, so they cannot sit in the two-id group above — left there, every real
-        // refresh token went unreported. Longest prefix wins at a position, which is what
-        // keeps `xoxe.xoxb-…` from being read as the plain form inside it.
+        // The rotating forms carry ONE short version field before the secret, so they cannot
+        // sit in the two-id group above — left there, every real refresh token went
+        // unreported. Longest prefix wins at a position, which is what keeps `xoxe.xoxb-…`
+        // from being read as the plain form inside it.
         //
         // A one-digit version field is the whole shape here, so neither field count nor id
         // width can separate `xoxe-1-<secret>` from `xoxe-1-<compound word>` — and `xoxe-1-`
         // is exactly what a rotation runbook writes out. What separates them is the SECRET,
-        // which Slack mints far longer than a word: every rotating token observed carries
-        // sixty characters or more, so the floor is set there. A shorter mint is a silent
-        // miss, accepted for the same reason the AWS width is pinned — a form whose findings
-        // a reader learns to scroll past protects nothing.
+        // which Slack mints far longer than a word: 146 characters for a refresh token and
+        // 163–166 for a configuration access token. The floor sits well under both rather
+        // than on either, so a re-mint at another width is still caught; a form shortened
+        // past sixty would be a silent miss.
+        //
+        // The legacy WORKSPACE tokens `xoxa-`/`xoxr-` are deliberately absent. They are a
+        // different grammar — an optional one-digit version then eight to forty-eight
+        // alphanumerics — from a beta Slack discontinued, and the two halves of it need two
+        // grammars: the unversioned form ends at the first `-`, the versioned one does not.
+        // Neither is separable from prose at an eight-character floor, and narrowing one far
+        // enough to be believed would miss most of the range it was declared for. `xoxo-` is
+        // absent for a plainer reason: people sign messages with it.
         CredentialGrammar {
             form: CredentialForm::SlackToken,
-            prefixes: &["xoxe.xoxb-", "xoxe.xoxp-", "xoxe-", "xoxa-"],
+            prefixes: &["xoxe.xoxb-", "xoxe.xoxp-", "xoxe-"],
             body: base62_extended,
             body_len: 62..=255,
             min_fields: 2,
@@ -805,28 +811,39 @@ mod tests {
         assert_eq!(forms(&line), vec![CredentialForm::SlackToken]);
     }
 
-    /// The bare rotating prefixes are the ones a runbook writes out, so both directions are
-    /// pinned: a token Slack minted is named, and the sentence naming its prefix is not. The
-    /// version field is one digit either way — the secret's width is the whole rule.
+    /// `xoxe-` is the prefix a rotation runbook writes out, so both directions are pinned: a
+    /// token Slack minted is named, and the sentence naming its prefix is not. The version
+    /// field is one digit either way — the secret's width is the whole rule.
     #[test]
     fn a_rotating_token_is_named_and_the_runbook_naming_it_is_not() {
-        for prefix in ["xoxe", "xoxa"] {
-            let line = shaped(&[
-                prefix,
-                "-1-abcdefghijklmnopqrstuvwxyz0123456789",
-                "abcdefghijklmnopqrstuvwxyz0123456789",
-            ]);
-            assert_eq!(forms(&line), vec![CredentialForm::SlackToken], "{line}");
-        }
+        // A refresh token's secret, at the 146 characters Slack mints it.
+        let secret: String = "abcdefghij0123456789".repeat(8)[..146].to_owned();
+        let line = shaped(&["xoxe", "-1-", &secret]);
+        assert_eq!(forms(&line), vec![CredentialForm::SlackToken], "{line}");
+
         for line in [
             "see xoxe-\
              1-tokenrotationrunbookforsharedworkspaces for details",
             "the xoxe-\
              1-token-rotation-runbook-lives-in-the-ops-wiki",
-            "xoxa-\
-             2-please-rotate-any-token-you-see-in-this-thread",
         ] {
             assert!(forms(line).is_empty(), "{line}");
+        }
+    }
+
+    /// The legacy WORKSPACE tokens are out of scope, and the miss is deliberate: their
+    /// published shape is an eight-to-forty-eight alphanumeric run behind an OPTIONAL
+    /// one-digit version, which no single grammar here expresses and no floor that low tells
+    /// from prose. Declaring the prefix on a grammar it cannot match is the worse answer —
+    /// `xoxr-` sat in the two-id group, where a token carrying no ids never matched anything.
+    #[test]
+    fn a_legacy_workspace_token_is_out_of_scope() {
+        for line in [
+            shaped(&["xoxa", "-2-", &"abcdefghij0123456789".repeat(3)[..48]]),
+            shaped(&["xoxr", "-", &"abcdefghij0123456789".repeat(3)[..48]]),
+            shaped(&["xoxa", "-", "abcdefgh"]),
+        ] {
+            assert!(forms(&line).is_empty(), "{line}");
         }
     }
 

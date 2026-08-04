@@ -162,14 +162,22 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   **Recall is spent freely to keep every finding believable.** A form whose findings a reader
   learns to scroll past protects nothing, so a prefix that cannot be told from text is
   DROPPED rather than reported loosely: AWS `ASIA` (an English word ahead of sixteen more
-  uppercase characters), and Anthropic, OpenAI project and admin, PyPI and GitLab keys, whose
-  published prefixes are followed by an alphabet admitting `-` with no field shape to require.
-  Stripe's TEST forms are absent for the opposite reason — they appear in Stripe's own docs
-  and grant nothing, so every hit is a finding with no action behind it. Two widths are pinned
-  narrower than the issuer documents (`AKIA` at the twenty characters AWS mints, and Slack's
-  ids at nine digits) and each accepts a silent miss to buy that. The Slack digit floor is the
-  one rule here read off OBSERVATION rather than off a published grammar; it is commented as
-  such at the grammar.
+  uppercase characters); Anthropic, OpenAI project and admin, PyPI and GitLab keys, whose
+  published prefixes are followed by an alphabet admitting `-` with no field shape to require;
+  and Slack's legacy WORKSPACE tokens `xoxa-`/`xoxr-`, whose eight-to-forty-eight alphanumeric
+  run behind an optional one-digit version is two shapes needing two grammars, neither
+  separable from prose at that floor. Stripe's TEST forms are absent for the opposite reason —
+  they appear in Stripe's own docs and grant nothing, so every hit is a finding with no action
+  behind it; `xoxo-` for a plainer one, being what people sign messages with.
+  **A prefix declared on a grammar it cannot match is worse than an absent one**: it reads as
+  coverage while matching no token the issuer ever minted, and nothing fails to reveal it —
+  `xoxr-` sat in the two-id group, where a legacy token carrying no ids matched nothing, for
+  as long as it was declared. Widths therefore track what the issuer mints, checked against
+  it rather than assumed: `AKIA` at twenty rather than the sixteen-to-128 AWS permits, Slack
+  ids at nine (one under the ten-to-thirteen it mints), the rotating secret at sixty (well
+  under the 146 of a refresh token and the 163–166 of a configuration access token, so a
+  re-mint at another width is still caught). Each accepts a silent miss to buy a believable
+  finding, and each is commented at its grammar with the width it was set against.
 - **`text::collapse_blank_lines`** squeezes 3+ newlines to a paragraph break,
   strips `\r`. Single source consumed by lk-vault, lk-pipeline, lk-source.
 - **`frontmatter::field`** single-sources this system's PRIVATE machine-coordination
