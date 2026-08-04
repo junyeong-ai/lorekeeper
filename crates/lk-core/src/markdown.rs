@@ -132,7 +132,7 @@ struct CredentialGrammar {
     /// hyphenates.
     /// The body is `-`-separated fields: at least `min_fields` of them, the first
     /// `numeric_fields` digits only and each at least `numeric_field_digits` long, and the
-    /// last at least `min_unbroken_run` characters.
+    /// longest of those PAST the ids at least `min_unbroken_run` characters.
     ///
     /// Slack publishes that shape — `xoxb-<team id>-<app id>-<secret>` — and requiring it is
     /// what tells a token from a sentence about tokens. Nothing weaker does: English
@@ -453,11 +453,22 @@ fn scan_line<'a>(
 }
 
 /// Whether a body has the field shape its issuer mints: the leading fields all digits, and a
-/// final field long enough to be a secret rather than a word.
+/// secret long enough to be a secret rather than a word.
 ///
 /// Both halves are required together. Digits alone admit `xoxb-1-please-rotate-any-token`; a
-/// long final field alone admits any sentence ending in a compound word. Together they
-/// describe `xoxb-<team id>-<app id>-<secret>` and nothing English produces.
+/// long run alone admits any sentence carrying a compound word. Together they describe
+/// `xoxb-<team id>-<app id>-<secret>` and nothing English produces.
+///
+/// The run is the LONGEST field past the ids, not the last one. Slack mints secrets from an
+/// alphabet that admits `-`, so a hyphen anywhere in one leaves a short final field and a
+/// token that is genuinely there goes unreported — the more likely the wider the secret, which
+/// is the wrong way round. Measuring past the ids rather than over every field is what keeps
+/// the ids from satisfying the run themselves: they are already answered for by the digit
+/// rules, and a body whose only long field is numeric carries no secret at all.
+///
+/// A secret broken so that NO piece of it reaches the floor is still a miss. That is the
+/// residual of measuring a run at all, and closing it needs evidence about what the issuer
+/// actually mints inside a secret rather than another threshold.
 fn fields_match(body: &str, rule: &PrefixRule) -> bool {
     let fields: Vec<&str> = body.split('-').collect();
     if fields.len() < rule.min_fields || fields.len() <= rule.numeric_fields {
@@ -469,9 +480,11 @@ fn fields_match(body: &str, rule: &PrefixRule) -> bool {
     }) {
         return false;
     }
-    fields
-        .last()
-        .is_some_and(|last| last.chars().count() >= rule.min_unbroken_run)
+    fields[rule.numeric_fields..]
+        .iter()
+        .map(|field| field.chars().count())
+        .max()
+        .is_some_and(|longest| longest >= rule.min_unbroken_run)
 }
 
 /// The tail after an ordered-list marker (`1. `, `12) `), or `None` where there is none. A
@@ -829,6 +842,32 @@ mod tests {
         ] {
             assert!(forms(line).is_empty(), "{line}");
         }
+    }
+
+    /// The run is measured over the longest field past the ids, not the last one. Slack's own
+    /// secret alphabet admits `-`, so a hyphen landing anywhere in one would leave a short
+    /// final field — and the wider the secret, the likelier that is, which would make the
+    /// check fail most often on exactly the tokens it most wants to name.
+    #[test]
+    fn a_hyphen_inside_a_secret_does_not_hide_the_token() {
+        let secret: String = "abcdefghij0123456789".repeat(8)[..146].to_owned();
+        let split = format!("{}-{}", &secret[..100], &secret[100..]);
+        assert_eq!(
+            forms(&shaped(&["xoxe", "-1-", &split])),
+            vec![CredentialForm::SlackToken],
+            "a secret carrying a hyphen is still a secret"
+        );
+
+        // And the ids never satisfy the run themselves: the digit rules already answer for
+        // them, and a body whose only long field is numeric carries no secret at all.
+        assert!(
+            forms(&shaped(&[
+                "xoxb",
+                "-1234567890123456789012345-",
+                "1234567890123456789012345-x"
+            ]))
+            .is_empty()
+        );
     }
 
     /// The legacy WORKSPACE tokens are out of scope, and the miss is deliberate: their
