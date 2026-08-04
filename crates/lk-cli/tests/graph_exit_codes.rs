@@ -117,10 +117,20 @@ impl Workspace {
 
     /// The SHIPPED `sync_graph`: the real `scripts/lore-pipeline.sh`, sourced the way the
     /// scheduled jobs source it, so what is under test is the file that ships.
+    ///
+    /// Run under `llm.provider: noop`, which is what that provider is for — a run with no LLM
+    /// work. `sync_graph` drains the queue, and a drain spawns `claude` against installed
+    /// skills; under the default provider this test would pass or fail on whether the machine
+    /// running it has both, which is a property of the machine and not of the pipeline. Under
+    /// `noop` the sweep records no synthesis input, nothing is queued, and the drain is
+    /// skipped — leaving exactly the exit-code propagation this test exists to pin.
     #[cfg(unix)]
     fn run_pipeline(&self) -> Output {
         let script =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../scripts/lore-pipeline.sh");
+        let config = self.root.path().join("pipeline-config.yaml");
+        let base = std::fs::read_to_string(self.root.path().join("config.yaml")).expect("config");
+        std::fs::write(&config, format!("{base}llm:\n  provider: noop\n")).expect("write config");
         Command::new("bash")
             .arg("-c")
             .arg(format!(
@@ -128,7 +138,7 @@ impl Workspace {
                 script.display()
             ))
             .env("LORE_BIN", env!("CARGO_BIN_EXE_lore"))
-            .env("LORE_CONFIG", self.root.path().join("config.yaml"))
+            .env("LORE_CONFIG", config)
             .output()
             .expect("spawn bash")
     }
