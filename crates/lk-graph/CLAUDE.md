@@ -164,11 +164,16 @@ on-disk state, never from a cached snapshot.
   heading-missing report names a repair a human can perform. The promise has to be withdrawn
   by the sweep that made it, because nothing else knows it was made: left behind, the queued
   task keeps classifying `current` and a drain writes a synthesis of pages the vault no longer
-  holds. **Withdrawal returns a page to the ADOPTABLE state** — carrying prose and no markers
-  is exactly what adoption is for — so a concept that loses every citation and later regains
-  one has its owed rewrite converted into an adoption of the prose already there. Consistent
-  rather than lossy (after withdrawal the page genuinely records owing nothing), and a
-  multi-citation page still surfaces in the deferral line.
+  holds. **Withdrawal removes the INPUT and never the answer**, which is what bounds it: a page
+  that has ever recorded one keeps its `_done` through any number of empty-and-refilled
+  citation sets, and since adoption requires no recorded answer, such a page can never be
+  re-adopted — when its citations return it is owed a rewrite, or owed nothing if the digest
+  lands back on the value `_done` already carries. Only a page that never recorded an answer
+  is returned to the ADOPTABLE state: one carrying prose and an input but no completion —
+  written before adoption existed, or whose synthesis was never drained — where losing every
+  citation and regaining one converts the owed rewrite into an adoption of the prose already
+  there. Consistent rather than lossy, and a multi-citation page still surfaces in the
+  deferral line.
   It never calls an LLM: it returns `resynthesize`, and `lore graph backlinks-sync` in lk-cli
   turns that into queued work through the same `LlmClient` ingest uses. `--dry-run` enqueues
   nothing, like every other write it withholds. Only
