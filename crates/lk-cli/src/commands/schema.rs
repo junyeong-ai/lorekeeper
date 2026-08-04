@@ -103,7 +103,7 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs, personal: bool) -> Vec<PageSc
                 "updated",
                 "category",
                 lk_core::frontmatter::field::SOURCE_COUNT,
-                lk_core::frontmatter::field::AUDITED_SOURCES_HASH,
+                lk_core::frontmatter::field::LLM_INPUTS,
                 "tags",
             ],
             sections: vec![
@@ -383,10 +383,11 @@ pub fn render_agents_md(
     writeln!(out).unwrap();
     writeln!(
         out,
-        "Some listed frontmatter keys are optional and NOT written at page creation: a \
-         concept's `audited_sources_hash` is stamped only by `lore graph audit-mark` after \
-         the first contradiction audit, and `aliases` appears only when the page actually \
-         has synonyms. Omit both when first authoring a page."
+        "A page's `llm_inputs` map is machine-coordination state: each key records the input \
+         a section is owed against and its `_done` companion the input a section was written \
+         from. Never author or edit those values — the writer of a section stamps its own \
+         marker in the same edit. `aliases` appears only when the page actually has synonyms; \
+         omit it when first authoring a page."
     )
     .unwrap();
     writeln!(out).unwrap();
@@ -398,10 +399,16 @@ pub fn render_agents_md(
          has no pipeline behind it, so you fill EVERY section yourself, `machine` ones \
          included — except a concept's `## {}` section and its `{}`, which `lore graph \
          backlinks-sync` re-derives wholesale from the forward links on citing pages every \
-         time it runs, so leave those empty and let it.",
+         time it runs, so leave those empty and let it.\n\nA concept's `## {}` is yours to \
+         write when you create the page and is NOT yours after that. It is owed against the \
+         set of pages citing the concept, so once that set moves, `lore graph backlinks-sync` \
+         queues a rewrite and a drain writes the section from the sources themselves. Write \
+         what the page's own material establishes; do not write a synthesis you would not \
+         want restated from the evidence.",
         machine_writers(&schemas),
         strings.concept_sources,
         lk_core::frontmatter::field::SOURCE_COUNT,
+        strings.concept_synthesis,
     )
     .unwrap();
     writeln!(out).unwrap();
@@ -530,24 +537,31 @@ pub fn render_agents_md(
     writeln!(out).unwrap();
     writeln!(
         out,
-        "1. **Load the registry** at the start of the run: `lore wiki concepts` — the \
-         on-disk truth at run start (slugs, names, aliases)."
+        "1. **Ask which page owns the name**: `lore resolve <name>` answers with the page a \
+         citation of it addresses, by the same rule the ingest pipeline routes an extraction \
+         by — so the two cannot disagree about what an existing name is. Exit 0 names the \
+         page (reuse its slug and title, never a variant), exit 1 means no page answers to \
+         it, exit 2 means more than one does and `lore graph lint` already reports the pair. \
+         The match is EXACT on identity, which folds spelling and nothing else: `VectorDB` \
+         finds `vector-db`, `k8s` does not find `kubernetes`."
     )
     .unwrap();
     writeln!(
         out,
-        "2. **Maintain a created-this-run set.** Every minted page or newly registered \
-         alias joins your in-context set BEFORE the next item is processed. The \
-         run-start registry cannot see same-run changes — without the running set, two \
-         items independently mint `RAG` and `Retrieval-Augmented-Generation`."
+        "2. **Maintain a created-this-run set.** Every minted page or newly registered alias \
+         joins your in-context set BEFORE the next item is processed. `lore resolve` reads \
+         what is on disk, so it cannot see a page this run has not written yet — without the \
+         running set, two items independently mint `RAG` and `Retrieval-Augmented-Generation`."
     )
     .unwrap();
     writeln!(
         out,
-        "3. **Match each extracted concept** against the union (registry + \
-         created-this-run) by slug-equivalence OR semantic equivalence. On a match, \
-         reuse the existing slug + name — never create a variant. When in doubt, prefer \
-         the established broader concept over a narrow variant."
+        "3. **Judge the names `resolve` cannot.** An exit 1 is the answer for a name nothing \
+         answers to, not for a concept the vault lacks: an acronym and its expansion, a \
+         plural, a team's shorthand are DIFFERENT names for one thing, and no rule about \
+         spelling can see it. Read the registry (`lore wiki concepts`) once for those, and \
+         when one matches, reuse the established page and register the surface form as an \
+         alias. When in doubt prefer the established broader concept over a narrow variant."
     )
     .unwrap();
     writeln!(
@@ -571,7 +585,7 @@ pub fn render_agents_md(
     writeln!(out).unwrap();
     writeln!(
         out,
-        "Machine-owned citation fields — never hand-write them: a NEW concept page \
+        "Machine-owned evidence fields — never hand-write them: a NEW concept page \
          starts with an empty `## {sources_heading}` body and `source_count: 0`; on an \
          EXISTING page leave both exactly as found. Record citations as forward \
          markdown links to the concept page on the ORIGIN page (its \
@@ -831,10 +845,9 @@ mod tests {
     /// `source_uri` in the schema left every author instructed to write a key the vault never
     /// reads — and the schema's own tests, which check its output against itself, all passed.
     ///
-    /// Two formats are exempt, each for a stated reason rather than because it was inconvenient:
-    /// `exploration` has no template at all (the page is authored through `/lore-wiki`, which is
-    /// why the template was deleted), and `audited_sources_hash` is stamped onto an existing page
-    /// by `lore graph audit-mark`, so no render emits it.
+    /// One format is exempt, for a stated reason rather than because it was inconvenient:
+    /// `exploration` has no template at all — the page is authored through `/lore-wiki`, which
+    /// is why the template was deleted.
     #[test]
     fn every_frontmatter_key_the_schema_advertises_is_one_a_template_renders() {
         const AUTHORED_NOT_RENDERED: &[&str] = &["exploration"];
@@ -855,9 +868,6 @@ mod tests {
             let body = std::fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("{} renders through {file}: {e}", schema.type_name));
             for key in schema.frontmatter {
-                if *key == lk_core::frontmatter::field::AUDITED_SOURCES_HASH {
-                    continue;
-                }
                 assert!(
                     body.contains(&format!("{key}:")),
                     "AGENTS.md advertises `{key}` on a {} page, and {file} never renders it",

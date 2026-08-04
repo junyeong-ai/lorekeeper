@@ -3,8 +3,12 @@
 Semantic task queue abstraction. The `LlmClient` trait is the only seam the pipeline
 knows about; provider choice is config-driven (`build_llm_client` in lk-cli).
 
-- **Trait surface**: `summarize`, `extract_concepts`, `identify_themes`, `flush`, and the
-  per-source transaction pair `begin_source`/`rollback_source`. The CLI opens a boundary
+- **Trait surface**: `summarize`, `extract_concepts`, `identify_themes`,
+  `synthesize_concept`, `flush`, and the per-source transaction pair
+  `begin_source`/`rollback_source`. `synthesize_concept` is the one the pipeline never calls:
+  a concept's synthesis is owed against the set of pages citing it, so `lore graph
+  backlinks-sync` — the only thing that derives that set — is what queues it.
+  The CLI opens a boundary
   before planning each source and rolls back if that source's plan fails partway, so a
   half-produced source's buffered tasks never reach the flushed file — preserving the
   invariant that a queued task always targets a written page. Both default to no-ops, so
@@ -41,6 +45,13 @@ knows about; provider choice is config-driven (`build_llm_client` in lk-cli).
     actually shape the LLM's output: `summarize` hashes `text` + `max_sentences` +
     `locale` + `focus`; `extract-concepts` hashes `text` + `source_id` + `date` + `focus`
     + `categories` (`source_id`/`date` scope a concept extraction to one source+day).
+    `concept-synthesis` hashes the citation SET alone, through
+    `lk_core::concept::citation_digest`, so the page's recorded input and the task's
+    `cache_hash` are the same string by construction rather than by two implementations
+    agreeing. `vault.locale` is deliberately absent from it: a concept page's authored body is
+    never translated by a locale switch — `lk_vault::resolve_section` finds it under every
+    locale's heading precisely so a switch renames the heading and leaves the prose — so
+    folding the locale in would rewrite every synthesis in the vault the first time it moved.
     `source_type` is in `task_input` but NOT the identity — it scopes extraction without
     shaping the prompt's semantic output. `categories` is sorted by `id` so configuration field
     order can't perturb the hash. `target` is excluded — it describes where the result

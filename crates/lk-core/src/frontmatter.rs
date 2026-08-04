@@ -15,17 +15,28 @@ use serde::{Deserialize, Serialize};
 /// of a silent internal rename, so a constant would add no protection — only noise.
 pub mod field {
     /// A concept's incoming-citation count. Written by `graph backlinks-sync`; read by
-    /// `graph audit-candidates`, the ingest concept merge, and `wiki index`.
+    /// the ingest concept merge and `wiki index`.
     pub const SOURCE_COUNT: &str = "source_count";
-    /// BLAKE3-128 of a concept's canonical `## Sources` body at its last audit. Written
-    /// by `graph audit-mark`; read by `graph audit-candidates`.
-    pub const AUDITED_SOURCES_HASH: &str = "audited_sources_hash";
     /// The map of LLM-task cache hashes that drives materialized-view completion
-    /// detection. Written by the pipeline render/work-log/synthesis stages; read by the
-    /// pipeline's own `llm_cache` and, across the crate boundary, by `queue status`
-    /// (lk-cli) to classify a pending task current/stale. Its inner per-kind keys are
-    /// single-sourced separately by `lk_queue::TargetKind::llm_inputs_key`.
+    /// detection. Written by the pipeline render/work-log/synthesis stages and by `graph
+    /// backlinks-sync`; read by the pipeline's own `llm_cache` and, across the crate
+    /// boundary, by `queue status` (lk-cli) to classify a pending task current/stale. Its
+    /// inner per-kind keys are single-sourced by `lk_queue::TargetKind::llm_inputs_key`.
     pub const LLM_INPUTS: &str = "llm_inputs";
+    /// The `llm_inputs` child key a concept page's synthesis is cached under. Named here
+    /// rather than only in `TargetKind` because `graph backlinks-sync` writes it and cannot
+    /// see that enum: a concept's synthesis is owed against its citation set, and the crate
+    /// that derives that set is the one that records it.
+    pub const SYNTHESIS: &str = "synthesis";
+
+    /// The `llm_inputs.<key>_done` marker naming the input a section was written from.
+    ///
+    /// Completion is uniformly marker-signalled, never inferred from a body being non-empty,
+    /// so every input key has exactly this companion. Derived in one place so a writer in
+    /// one crate and a reader in another cannot spell it differently.
+    pub fn completion(input_key: &str) -> String {
+        format!("{input_key}_done")
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

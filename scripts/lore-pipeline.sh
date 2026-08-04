@@ -144,7 +144,19 @@ drain_queue() {
 #
 # `queue apply` materializes the concepts the drain reported — creating and merging concept
 # pages, and rewriting each origin page's related-concepts links — and the rest derive from
-# the result. All idempotent: with nothing pending, every step is a no-op.
+# the result. Idempotent in the steady state: with nothing pending and no evidence moved,
+# every step is a no-op. The FIRST run against a vault whose concept pages predate the
+# synthesis input is not: every cited concept is owed one, and the drain REWRITES the section
+# it finds. `lore graph backlinks-sync` names how many already hold a written synthesis
+# before that happens — run it once by hand on an established vault and read that line.
+#
+# The second drain is why this is an order rather than a list. `backlinks-sync` is the only
+# thing that knows which concepts a run has changed the evidence for, so it is where the
+# synthesis rewrites are queued — after `queue apply` has created the pages and their
+# citations. Leaving them for tomorrow would put every concept page a day behind its own
+# sources AND leave a queue file pending at every ingest, whose startup warning about
+# unprocessed work would then never clear. `wiki refresh` follows both drains because the
+# catalog summarizes each concept from its synthesis.
 #
 # `graph lint` is a stage like any other. It exits non-zero only when the vault contradicts
 # itself — a link to a page that is not there, a catalog that disagrees with the disk, an unknown
@@ -155,6 +167,7 @@ sync_graph() {
     run "schema"         lore_cmd schema
     run "queue apply"    lore_cmd queue apply
     run "backlinks-sync" lore_cmd graph backlinks-sync
+    drain_queue
     run "wiki refresh"   lore_cmd wiki refresh
     run "graph lint"     lore_cmd graph lint
 }

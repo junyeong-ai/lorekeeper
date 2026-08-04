@@ -36,6 +36,19 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   stage — the drain and `queue apply` live in the scripts), and `pipeline_env` attaches the
   `PATH`/`LORE_BIN`/`LORE_CONFIG`/`CLAUDE_BIN` a scheduler does not provide, inherited from
   the session this command runs in.
+- **`lore wiki concepts`** keys each entry on the FILE STEM, never the `id` frontmatter: a
+  page's address is where it sits, which is what a link resolves to and what `VaultPath::concept`
+  builds. Reading `id` would be a second answer to the same question, and a page missing the
+  field — hand-authored, or edited in Obsidian — would have no address at all and drop out of a
+  registry whose whole job is completeness. A page whose `id` disagrees with its filename is
+  `graph normalize`'s finding, not a reason for this to disagree with the resolver.
+- **`lore graph backlinks-sync` queues the synthesis rewrites it discovers**, through the same
+  `LlmClient` ingest uses — but only under a provider that can answer them. `noop` records no
+  input either: the input is a promise something will answer it, `lore doctor` reports one with
+  no answer, and nothing re-renders a concept page's markers, so a promise written where no
+  drain can run is a finding that never clears. It also skips a page whose task is already
+  pending, because this sweep runs on every pipeline pass and by hand, and identical `current`
+  tasks all survive `queue prune` and are all drained.
 - **`lore ingest` startup** sweeps stale `*.jsonl.tmp` from crashed runs and
   warns if pending queue files exist (run `/lore-process` first to avoid duplicate
   LLM work).

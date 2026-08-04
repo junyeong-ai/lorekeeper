@@ -22,29 +22,33 @@ resolve section headings before inspecting pages.
    exits non-zero — always inspect the pairs), then confirm topical relatedness
    before proposing a link. Community grounding + LLM confirmation = double gate
    against false positives.
-3. **Contradictions** — run `lore graph --json audit-candidates` for the
-   worklist: concepts with 2+ sources AND a source set that changed since their last
-   audit (the `audited_sources_hash` marker). Work it one page at a time
-   (avoids combinatorial blow-up). For each, read its cited sources and only flag
-   a genuine, unambiguous contradiction (two sources asserting incompatible facts)
-   — never a difference in emphasis or a gap; uncertainty means do not flag. When
-   one is found, add a callout under the Synthesis section stating both sides and
-   citing each source: `> [!conflict] <one-line summary of the disagreement>`.
-   Never choose a side. The callout lives in the LLM-owned Synthesis body, so
-   ingest re-render preserves it, and `lore graph lint` reports it under
-   `observations.unresolved_conflicts` until a human resolves it and deletes the
-   callout — a recorded disagreement is true of the vault, so it never gates.
-   AFTER reviewing a candidate — whether or not you flagged a conflict — run
-   `lore graph audit-mark <slug>` to record its current source set, so it leaves
-   the worklist until its sources change again. This is what keeps the list
-   low-noise; skipping the mark makes every multi-source concept resurface.
+3. **Contradictions** — read layer 1's `observations.unresolved_conflicts`: the
+   concepts whose Synthesis carries an open `> [!conflict]` callout. Flagging is
+   not this skill's job — `lore graph backlinks-sync` queues a synthesis rewrite
+   whenever a concept's citation set moves, and the drain that rewrites the
+   section is the reader of every source, so it is where a disagreement between
+   two of them is seen and stated. What you do here is judge the OPEN ones: read
+   each callout with its cited sources and report whether the disagreement still
+   stands, has been settled by later evidence, or was never a contradiction at
+   all (a difference in emphasis, a gap). Never choose a side.
+
+   A callout is NOT durable, and treating it as a permanent record is the one
+   mistake to avoid here. It lives in `## Synthesis`, which is rewritten from the
+   sources whenever the citation set moves, so it survives only by being written
+   again — a statement about the last rewrite, not a ledger entry. What that means
+   for you: a disagreement worth keeping belongs somewhere the machine does not
+   own. Report it, and if it matters beyond this page, file it as an exploration
+   page whose Grounding cites both sides.
 4. **Frontiers — data gaps + new directions**. Report:
    - Concepts mentioned in daily pages but missing a dedicated wiki page
      (cross-check body links vs concept files from `lore wiki concepts`).
    - Topics with high cross-source activity (3+ sources in a week) but shallow
      concept coverage (placeholder Synthesis or single source listed).
-   - Stale concept syntheses — `updated` recent but Synthesis was written
-     long before the recent reference burst.
+   - Concepts whose Synthesis is thin against the evidence behind it — several
+     citations, a placeholder sentence. Staleness itself is not this layer's:
+     `lore graph backlinks-sync` already queues a rewrite for every concept whose
+     citation set has moved, so what is left here is judging whether the writing
+     is worth the evidence.
    This layer is LLM judgment, not a deterministic check. Surface as questions
    for human review, never auto-create pages.
 5. **Concept convergence** — two parts:
@@ -92,5 +96,6 @@ resolve section headings before inspecting pages.
 
 A page's age or citation recency is never an audit signal: reference knowledge does
 not expire by going unmentioned, so "old and uncited" identifies nothing actionable.
-What makes a concept due for review is a CHANGE in its evidence (layer 3's source-set
-hash) or a defect in its structure (layer 1) — both already covered above.
+What makes a concept due for review is a CHANGE in its evidence — which `lore graph
+backlinks-sync` detects and queues, keyed on the citation set — or a defect in its
+structure (layer 1).

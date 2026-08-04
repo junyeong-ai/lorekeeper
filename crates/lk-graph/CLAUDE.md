@@ -1,9 +1,8 @@
 # lk-graph
 
 Link graph analysis. Pure deterministic — no HTTP, no LLM. The vault writes are the mutations
-below: `index-sync`/`normalize` with `--fix`, `backlinks-sync` and `merge` without `--dry-run`,
-and `audit-mark`, which takes neither flag because recording that a concept was audited IS the
-command. Every check re-scans the vault — markdown
+below: `index-sync`/`normalize` with `--fix`, and `backlinks-sync` and `merge` without
+`--dry-run`. Every check re-scans the vault — markdown
 parsing is rayon-parallel and cheap, so analysis is always computed from current
 on-disk state, never from a cached snapshot.
 
@@ -74,7 +73,7 @@ on-disk state, never from a cached snapshot.
   configured vocabulary, one name answering to two pages, two files answering to one address,
   a filename that disagrees with its normalized slug, a `source_count` no sweep could write. What a vault in good standing
   legitimately carries is reported and exits 0: `lint`'s observation channel, `orphans`,
-  `audit-candidates`, and `hubs`/`cluster`/`export`/`suggest-links`.
+  and `hubs`/`cluster`/`export`/`suggest-links`.
 - **`LintReport` is two channels, and the split IS the exit code**: `violations`
   (broken/index-drift/invalid-categories/duplicate-concepts/address-collisions/unnormalized)
   decides it, `observations`
@@ -110,8 +109,6 @@ on-disk state, never from a cached snapshot.
 - **Mutations gated**: `index_drift::fix()`, `normalize::apply()`,
   `backlinks::sync_concept_backlinks` and `merge::merge_concepts` touch the filesystem — the
   first two only with `--fix`, the last two only without `--dry-run`. All renames pre-checked.
-  `audit::mark_audited` is the exception and is ungated: it writes one frontmatter marker on
-  one named concept, which is the whole of what the subcommand does.
 - **`normalize` reads two different page sets, and conflating them is a defect.** Rename
   candidates come from the ANALYSIS scope (`graph.scope.dirs`, the wiki): only the wiki's
   pages are addressed by slug, and slugifying a dated filename elsewhere (`2026-W30` →
@@ -123,23 +120,28 @@ on-disk state, never from a cached snapshot.
 - **Age is not a signal.** There is deliberately no staleness/decay check: reference
   knowledge does not expire by going unmentioned, so "old and uncited" identifies
   nothing actionable and would misdirect curator attention. A concept becomes due for
-  review when its EVIDENCE changes (`audit`, below) or its structure is defective
-  (`lint`) — never because time passed.
-- **`audit`** — the contradiction worklist. `find_audit_candidates` (`graph
-  audit-candidates`, pure read): a concept is a candidate iff `source_count >= 2` AND
-  the BLAKE3-128 hash of its canonical `## Sources` body differs from the
-  `audited_sources_hash` frontmatter marker. Hashing the source SET (not a count) is
-  what makes it robust: a source swap that keeps the count constant still changes the
-  hash and resurfaces the concept, while an unchanged set stays off the list — low-noise
-  by construction (the same hash-as-change-detector pattern as `llm_inputs`).
-  `mark_audited` (`graph audit-mark <slug>`) stamps the current hash via the
-  single-sourced `lk_vault::set_frontmatter_field`; `/lore-wiki audit` calls it after
-  reviewing. Deterministic selection in Rust; the contradiction *judgment* stays with
-  the LLM/human. Sorted by `source_count` desc, then slug.
-- **`backlinks::sync_concept_backlinks`**: rewrites the `## Sources` section on
-  each concept page to match the link graph (`- [title](relative-path)` entries,
-  destinations relative to the concept page). Uses full-vault scope (not
-  `graph.scope.dirs`) so `<daily>`/`<personal>`/`<synthesis>` pages are included. Only
+  review when its EVIDENCE changes — which `backlinks-sync` detects by digesting the citation
+  SET, and hands to the queue as a synthesis rewrite — or when its structure is defective
+  (`lint`). Never because time passed.
+- **`backlinks::sync_concept_backlinks` is the sole deriver of every evidence-dependent
+  field on a concept page**: the `## Sources` body (`- [title](relative-path)` entries,
+  destinations relative to the concept page), the frontmatter `source_count`, AND the
+  `llm_inputs.synthesis` input its `## Synthesis` is owed against. One sweep because they are
+  one fact — the set of pages citing the concept — and a page that could not record all three
+  records none of them. Uses full-vault scope (not `graph.scope.dirs`) so
+  `<daily>`/`<personal>`/`<synthesis>` pages are included.
+  **The verdict is the candidate page against the page on disk**, not a field-by-field
+  comparison: everything derived is rendered into the candidate, so whatever differs is by
+  definition drift — which is how a source page RETITLED gets its citation line corrected
+  while the synthesis, keyed on the SET, stays answered.
+  **A concept nothing cites records no input and is owed nothing**: there is no evidence for a
+  synthesis to answer to, a queued task would send a drain to read an empty set, and a
+  recorded-but-unanswerable input would have `lore doctor` report it forever. A concept whose
+  last citation was deleted KEEPS the input it already answered — its synthesis still states
+  what the vault learned, and no rewrite could improve on it from a set that is now empty.
+  It never calls an LLM: it returns `resynthesize`, and `lore graph backlinks-sync` in lk-cli
+  turns that into queued work through the same `LlmClient` ingest uses. `--dry-run` enqueues
+  nothing, like every other write it withholds. Only
   non-concept content pages qualify as sources — `<daily>`, `<personal>`, `<synthesis>`,
   `<wiki>/documents`, and `<wiki>/explorations` (a concept-to-concept link belongs in
   `## Related`, and navigation pages never appear).
@@ -225,13 +227,19 @@ on-disk state, never from a cached snapshot.
   scope BY CONSTRUCTION and belongs to `/lore-wiki audit` layer 5. Read-only; `graph merge`
   is the remedy a human triggers.
 - **`concept_lint::find_unresolved_conflicts`**: reports concept pages whose body carries an
-  unresolved `> [!conflict]` callout — a contradiction `/lore-wiki audit` flagged
-  between cited sources. The marker lives in the LLM-owned synthesis body (NOT
-  frontmatter, which ingest re-render regenerates from the template), so it survives
-  re-ingest via `preserved_synthesis`. The scan is fence-aware (a callout quoted in a
+  unresolved `> [!conflict]` callout — a contradiction the drain that wrote the synthesis
+  observed between two of the cited sources. The marker lives in the LLM-owned synthesis body
+  (NOT frontmatter, which ingest re-render regenerates from the template), so it survives
+  re-ingest via `preserved_synthesis` — but NOT across a synthesis rewrite, which replaces the
+  section wholesale. A callout is therefore a statement about the last rewrite rather than a
+  durable record: it exists while each rewrite keeps finding the disagreement, and nothing
+  mechanically preserves it. The old `audited_sources_hash` gave durability only because
+  nothing rewrote that section; claiming it still holds would be an assertion about an LLM
+  re-deriving the same judgment, stated as an invariant. The scan is fence-aware (a callout quoted in a
   code block is content, not a marker) and matches the callout type `conflict`
   exactly — `[!note]`/`[!warning]` never fire. Read-only continuous tracking: the
   lint surfaces it until a human resolves the contradiction and deletes the callout.
-  This is the only contradiction mechanism — there is no automatic contradiction
-  *detection* (it would false-positive on emphasis differences); flagging is an
-  explicit LLM/human judgment in the audit skill.
+  This is the only contradiction mechanism — there is no automatic contradiction *detection*
+  (it would false-positive on emphasis differences); flagging is an explicit LLM judgment,
+  made where the sources are already being read, and `/lore-wiki audit` judges the open ones
+  rather than hunting for new ones.

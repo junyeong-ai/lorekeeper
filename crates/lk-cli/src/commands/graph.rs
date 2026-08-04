@@ -3,8 +3,7 @@ use std::path::PathBuf;
 use lk_core::config::{ConceptCategory, GraphConfig, VaultDirs};
 use lk_core::i18n::Locale;
 use lk_graph::{
-    audit, backlinks, cluster, concept_lint, export, graph, index_drift, merge, normalize, output,
-    scan,
+    backlinks, cluster, concept_lint, export, graph, index_drift, merge, normalize, output, scan,
 };
 
 use super::GlobalOptions;
@@ -15,6 +14,7 @@ struct ResolvedConfig {
     locale: Locale,
     vault_dirs: VaultDirs,
     concept_categories: Vec<ConceptCategory>,
+    llm: lk_core::config::LlmConfig,
 }
 
 #[derive(clap::Subcommand)]
@@ -64,16 +64,6 @@ pub enum GraphCommand {
         #[arg(long)]
         min_community_size: Option<usize>,
     },
-    /// List concept pages due for a contradiction (re-)audit: multiply-cited, with a
-    /// source set that changed since the last `/lore-wiki audit` (tracked by the
-    /// `audited_sources_hash` frontmatter marker)
-    AuditCandidates,
-    /// Mark a concept as audited — record its current source set so it leaves the
-    /// `audit-candidates` worklist until its sources change again
-    AuditMark {
-        /// Concept slug to mark as audited
-        slug: String,
-    },
     /// Rewrite each concept page's `## <Sources>` section from the graph
     BacklinksSync {
         /// Report what would change without writing
@@ -106,16 +96,16 @@ pub enum GraphCommand {
 /// configured vocabulary, one name answering to two pages, a filename that disagrees with its
 /// own normalized slug, a derived count no sweep could write. What a vault in good standing
 /// legitimately carries is reported and exits 0 — the concepts nothing cites yet, the hubs, a
-/// disagreement between sources an audit recorded, a concept whose evidence changed since its
-/// last audit. Those are never empty in a living vault, so counting them would make the exit
-/// code permanently non-zero, and a verdict that is never clean carries no information.
-pub fn run(
+/// disagreement between sources a curator recorded. Those are never empty in a living vault,
+/// so counting them would make the exit code permanently non-zero, and a verdict that is never
+/// clean carries no information.
+pub async fn run(
     opts: &GlobalOptions,
     cmd: GraphCommand,
     json: bool,
     root_override: Option<PathBuf>,
 ) -> i32 {
-    match run_inner(opts, cmd, json, root_override) {
+    match run_inner(opts, cmd, json, root_override).await {
         Ok(violated) => {
             if violated {
                 1
@@ -130,23 +120,12 @@ pub fn run(
     }
 }
 
-fn run_inner(
+async fn run_inner(
     opts: &GlobalOptions,
     cmd: GraphCommand,
     json: bool,
     root_override: Option<PathBuf>,
 ) -> Result<bool, String> {
-    // These two read the concept pages directly and need no scan of the vault.
-    match cmd {
-        GraphCommand::AuditCandidates => {
-            return run_audit_candidates(opts, root_override, json);
-        }
-        GraphCommand::AuditMark { ref slug } => {
-            return run_audit_mark(opts, root_override, json, slug);
-        }
-        _ => {}
-    }
-
     let mut rc = resolve_config_full(opts, root_override)?;
     let views = scan::VaultViews::resolve(&rc.root, &rc.graph, &rc.vault_dirs)
         .map_err(|e| format!("{e}"))?;
@@ -357,18 +336,39 @@ fn run_inner(
             violated
         }
         GraphCommand::BacklinksSync { dry_run } => {
+            // A provider that queues nothing must not have the sweep write a promise nothing
+            // can keep: `lore doctor` reports a recorded input with no answer, and no path
+            // re-derives a concept page's markers, so it would never clear.
+            let policy = match rc.llm.provider {
+                lk_core::config::LlmProvider::Queue => backlinks::SynthesisPolicy::Record,
+                lk_core::config::LlmProvider::Noop => backlinks::SynthesisPolicy::Skip,
+            };
             let sync = backlinks::sync_concept_backlinks(
                 &views.scanned,
                 &rc.root,
                 dry_run,
                 &rc.vault_dirs,
+                policy,
             )
             .map_err(|e| format!("{e}"))?;
             let changed = sync.updated.len();
+            // Deriving a concept's evidence and writing the section that answers to it are
+            // separate acts, and only this sweep knows the first has moved. It computes what
+            // is owed; turning that into queued work is the CLI's, because lk-graph reaches
+            // no LLM. A dry run enqueues nothing, like every other write it withholds.
+            let queued = if dry_run {
+                0
+            } else {
+                enqueue_syntheses(&rc, &sync.resynthesize).await?
+            };
             // A page the sweep could not record a count on keeps a `source_count` the graph
             // contradicts, and only a human adding frontmatter fixes it.
             let violated = !sync.skipped.is_empty();
-            let report = output::BacklinksSyncReport { sync, changed };
+            let report = output::BacklinksSyncReport {
+                sync,
+                changed,
+                queued,
+            };
             if json {
                 output::print_json(&report, violated)?;
             } else {
@@ -401,55 +401,8 @@ fn run_inner(
             }
             violated
         }
-        // Dispatched at the top of `run_inner`: they read the concept pages directly.
-        GraphCommand::AuditCandidates | GraphCommand::AuditMark { .. } => unreachable!(),
     };
 
-    Ok(violated)
-}
-
-fn run_audit_candidates(
-    opts: &GlobalOptions,
-    root_override: Option<PathBuf>,
-    json: bool,
-) -> Result<bool, String> {
-    let rc = resolve_config_full(opts, root_override)?;
-    let candidates = audit::find_audit_candidates(&rc.root, &rc.vault_dirs.wiki, rc.locale)
-        .map_err(|e| format!("{e}"))?;
-    let count = candidates.len();
-    let report = output::AuditCandidatesReport { candidates, count };
-    // A worklist, not a defect: a concept whose evidence changed since its last audit says
-    // nothing false about the vault, so the list can be read under `set -e`.
-    let violated = false;
-    if json {
-        output::print_json(&report, violated)?;
-    } else {
-        output::print_audit_candidates(&report);
-    }
-    Ok(violated)
-}
-
-fn run_audit_mark(
-    opts: &GlobalOptions,
-    root_override: Option<PathBuf>,
-    json: bool,
-    slug: &str,
-) -> Result<bool, String> {
-    let rc = resolve_config_full(opts, root_override)?;
-    let changed = audit::mark_audited(&rc.root, &rc.vault_dirs.wiki, slug, rc.locale)
-        .map_err(|e| format!("{e}"))?;
-    // Stamping a marker cannot leave the vault contradicting itself.
-    let violated = false;
-    if json {
-        output::print_json(
-            &serde_json::json!({ "slug": slug, "changed": changed }),
-            violated,
-        )?;
-    } else if changed {
-        println!("Marked '{slug}' as audited.");
-    } else {
-        println!("'{slug}' was already up to date.");
-    }
     Ok(violated)
 }
 
@@ -461,6 +414,75 @@ fn rename_suggestions(renames: &[normalize::Rename]) -> Vec<output::RenameSugges
         .map(|r| output::RenameSuggestion {
             from: r.old_slug.clone(),
             to: r.new_slug.clone(),
+        })
+        .collect()
+}
+
+/// Queue one synthesis task per concept whose evidence has moved, and commit them as one
+/// file. The queue's own invariant carries over unchanged: a task file becomes visible only
+/// after every page it names was written, which `sync_concept_backlinks` has already done by
+/// the time this runs.
+///
+/// The task carries the citation set as its input and the page's own heading as its anchor,
+/// so the drain writes the section the page actually has — the same reason every other task
+/// carries one.
+async fn enqueue_syntheses(
+    rc: &ResolvedConfig,
+    owed: &[backlinks::ConceptResynthesis],
+) -> Result<usize, String> {
+    // A task already waiting is the same task. This sweep runs on every pipeline pass and by
+    // hand, and re-queueing what a drain has not reached yet accumulates identical jobs that
+    // all classify `current` — so `queue prune` keeps them and the drain does the work again
+    // for each. The ingest path has no such hazard: a re-render REPLACES that run's file.
+    let pending = pending_synthesis_targets(&rc.root);
+    let owed: Vec<&backlinks::ConceptResynthesis> = owed
+        .iter()
+        .filter(|entry| !pending.contains(&entry.path.to_string_lossy().into_owned()))
+        .collect();
+    if owed.is_empty() {
+        return Ok(0);
+    }
+    let client = super::build_llm_client_for(rc.llm.provider, &rc.root);
+    for entry in owed.iter().copied() {
+        client
+            .synthesize_concept(lk_queue::ConceptSynthesisRequest {
+                citations: entry.citations.clone(),
+                target: lk_queue::TaskTarget {
+                    vault_path: entry.path.to_string_lossy().into_owned(),
+                    kind: lk_queue::TargetKind::ConceptSynthesis,
+                    anchor: entry.anchor.clone(),
+                },
+            })
+            .await
+            .map_err(|e| format!("queue synthesis for {}: {e}", entry.path.display()))?;
+    }
+    client.flush().await.map_err(|e| format!("{e}"))?;
+    Ok(owed.len())
+}
+
+/// The `vault_path` of every concept-synthesis task already waiting in the queue.
+///
+/// Read straight off the pending files rather than through a classification: the question is
+/// only whether this exact work is already asked for, and a task whose page moved on is
+/// `stale` — which `queue prune` drops and the next sweep re-queues, so treating it as
+/// pending here costs one cycle and never loses the work. An unreadable queue file yields
+/// nothing, which re-queues rather than skips.
+fn pending_synthesis_targets(vault_root: &std::path::Path) -> std::collections::HashSet<String> {
+    let dir = vault_root.join(".lorekeeper").join("queue");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return std::collections::HashSet::new();
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .flat_map(|content| {
+            content
+                .lines()
+                .filter_map(|line| serde_json::from_str::<lk_queue::QueueTask>(line).ok())
+                .filter(|task| task.target.kind == lk_queue::TargetKind::ConceptSynthesis)
+                .map(|task| task.target.vault_path)
+                .collect::<Vec<_>>()
         })
         .collect()
 }
@@ -482,6 +504,7 @@ fn resolve_config_full(
             vault_dirs: config.vault.dirs.clone(),
             graph: config.graph,
             concept_categories: config.concepts.categories,
+            llm: config.llm,
         }),
         None => {
             let vault_dirs = VaultDirs::default();
@@ -493,6 +516,7 @@ fn resolve_config_full(
                 locale: Locale::default(),
                 vault_dirs,
                 concept_categories: Vec::new(),
+                llm: lk_core::config::LlmConfig::default(),
             })
         }
     }

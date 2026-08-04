@@ -118,10 +118,12 @@ The essentials: a visible `.jsonl` is fully written and every
    (`./config.yaml` → `~/.config/lorekeeper/config.yaml`), so parsing the YAML
    reproduces two resolution rules that already exist in the binary. `lore config schema-path` prints the
    absolute path of the vault's `AGENTS.md`, which carries the page formats and the Concept
-   convergence contract — the wiki dir is configurable, so never assume `wiki/`. Then load the concept registry
-   for this run: `lore wiki concepts` (slugs, names, aliases) — the queue task
-   carries no concept registry, so this on-disk snapshot plus a created-this-run
-   set is the full dedup baseline (see the vault AGENTS.md § Concept convergence).
+   convergence contract — the wiki dir is configurable, so never assume `wiki/`. Ask
+   `lore resolve <name>` which page owns each extracted name: it answers by the same rule
+   the ingest pipeline routes by, so the two cannot disagree about an existing name. The
+   queue task carries no concept registry, so that answer, plus a created-this-run set, plus
+   `lore wiki concepts` for the equivalences spelling cannot see, is the full dedup baseline
+   (see the vault AGENTS.md § Concept convergence).
 
 2. **List unprocessed queue files** in `<vault>/.lorekeeper/queue/` (top
    level only — `processed/` is the archive):
@@ -168,6 +170,7 @@ The essentials: a visible `.jsonl` is fully written and every
       | `daily-summary`, `document-summary` | `summary` | `summary_done` |
       | `daily-refine-events` | `refine_events` | `refine_events_done` |
       | `daily-concepts`, `document-concepts` | `concepts` | **not yours** — `lore queue apply` stamps `concepts_done` in the same edit that writes the links (safety rule 6). Write the result file and stop. |
+      | `concept-synthesis` | `synthesis` | `synthesis_done` |
       | `work-log-synthesis` | `topic_summary` | `topic_summary_done` |
       | `weekly-synthesis-themes` | `themes` | `themes_done` |
       | `weekly-review-narrative`, `monthly-review-narrative` | `narrative` | `narrative_done` |

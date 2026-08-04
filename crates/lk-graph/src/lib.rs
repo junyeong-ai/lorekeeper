@@ -5,7 +5,6 @@
 //! `lk-core`; this crate owns only the graph structure and I/O (walkdir/rayon vault scan,
 //! index-file fixup, file rename).
 
-pub mod audit;
 pub mod backlinks;
 pub mod cluster;
 pub mod concept_lint;

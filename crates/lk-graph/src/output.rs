@@ -1,6 +1,5 @@
 use serde::Serialize;
 
-use crate::audit::AuditCandidate;
 use crate::backlinks::{BacklinksSyncResult, ConceptUpdate};
 use crate::cluster::{ClusterResult, LinkSuggestion};
 use crate::concept_lint::{DuplicateConcept, InvalidCategoryConcept, UnresolvedConflict};
@@ -473,33 +472,13 @@ pub fn print_suggest_links(r: &SuggestLinksReport) {
 }
 
 #[derive(Debug, Serialize)]
-pub struct AuditCandidatesReport {
-    pub candidates: Vec<AuditCandidate>,
-    pub count: usize,
-}
-
-pub fn print_audit_candidates(r: &AuditCandidatesReport) {
-    println!("=== Concepts due for contradiction audit ===");
-    if r.candidates.is_empty() {
-        println!("\nNothing to audit.");
-        return;
-    }
-    for c in &r.candidates {
-        println!(
-            "  {}  ({} source(s), set changed since last audit)  {}",
-            c.slug,
-            c.source_count,
-            c.path.display()
-        );
-    }
-    println!("\n{} concept(s) to audit", r.count);
-}
-
-#[derive(Debug, Serialize)]
 pub struct BacklinksSyncReport {
     #[serde(flatten)]
     pub sync: BacklinksSyncResult,
     pub changed: usize,
+    /// Synthesis tasks this run handed to the queue — always the length of
+    /// `resynthesize`, except under `--dry-run`, where nothing is queued.
+    pub queued: usize,
 }
 
 pub fn print_merge(result: &MergeResult) {
@@ -557,14 +536,63 @@ pub fn print_backlinks(r: &BacklinksSyncReport) {
         println!("Unchanged: {} concept page(s)", r.sync.unchanged);
     }
 
-    if !r.sync.skipped.is_empty() {
-        // Three states reach this list and the repair differs for each, so the message names all
-        // three rather than the one it happened to be written for.
+    if !r.sync.resynthesize.is_empty() {
+        let fate = if r.sync.dry_run {
+            "would be queued"
+        } else {
+            "queued for the next drain"
+        };
         println!(
-            "\nSkipped: {} concept page(s) with nowhere to record their sources — the citation \
-             list and source_count both stay stale until the page is repaired. A page with no \
-             frontmatter block needs one added; frontmatter that will not parse needs the YAML \
-             fixed; a page with no sources heading needs one, in any locale's spelling",
+            "\nSynthesis owed: {} concept page(s) whose evidence has moved since the section was \
+             written — {fate}",
+            r.sync.resynthesize.len()
+        );
+        for entry in &r.sync.resynthesize {
+            println!(
+                "  {} ({} citation(s))",
+                entry.path.display(),
+                entry.citations.len()
+            );
+        }
+        let replacing = r
+            .sync
+            .resynthesize
+            .iter()
+            .filter(|entry| entry.discarding.is_some())
+            .count();
+        if replacing > 0 {
+            // Named for the same reason every other LLM-owned section names it: a body
+            // somebody wrote without recording it does not survive the rewrite, and the page
+            // is the only copy.
+            println!(
+                "  of those, {replacing} already hold a written synthesis, which the rewrite \
+                 REPLACES — copy anything you need out first"
+            );
+        }
+    }
+
+    if !r.sync.headless.is_empty() {
+        println!(
+            "\nNo synthesis heading: {} cited concept page(s). Citations and count are written; \
+             nothing can be owed against evidence the page has nowhere to answer — add the \
+             section, in any locale's spelling",
+            r.sync.headless.len()
+        );
+        for path in &r.sync.headless {
+            println!("  {}", path.display());
+        }
+    }
+
+    if !r.sync.skipped.is_empty() {
+        // Four states reach this list and the repair differs for each, so the message names
+        // all four rather than the one it happened to be written for.
+        println!(
+            "\nSkipped: {} concept page(s) with nowhere to record what the citation graph says \
+             about them — the sources list, source_count and the synthesis input all stay stale \
+             until the page is repaired. A page with no frontmatter block needs one added; \
+             frontmatter that will not parse needs the YAML fixed; a page missing its sources or \
+             synthesis heading needs it back, in any locale's spelling; one with no `llm_inputs:` \
+             mapping needs that line",
             r.sync.skipped.len()
         );
         for path in &r.sync.skipped {

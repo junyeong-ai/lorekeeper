@@ -7,6 +7,13 @@ created: {{ first_seen }}
 updated: {{ last_seen }}
 {% if category %}category: {{ category | tojson }}
 {% endif %}source_count: {{ source_count }}
+llm_inputs:
+{%- if llm_inputs.synthesis %}
+  synthesis: {{ llm_inputs.synthesis | tojson }}
+{%- endif %}
+{%- if llm_inputs.synthesis_done %}
+  synthesis_done: {{ llm_inputs.synthesis_done | tojson }}
+{%- endif %}
 tags: {{ tags | tojson }}
 ---
 

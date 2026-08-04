@@ -5,6 +5,5 @@ expression: "observe(staged.path(), argv)"
 ---
 exit: 0
 --- stdout ---
+behaviour-snapshot	Behaviour snapshot	wiki/concepts/behaviour-snapshot.md
 --- stderr ---
-
-4 pages scanned, 0 flagged (0 defect(s))

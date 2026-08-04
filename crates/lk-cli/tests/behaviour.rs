@@ -47,6 +47,11 @@ const SWEEP: &[&[&str]] = &[
     &["wiki", "concepts"],
     &["wiki", "index"],
     &["wiki", "log"],
+    // A name the corpus holds — spelled as neither its address nor its title, so the answer
+    // is the identity fold doing its work — and one it holds under no spelling. The two
+    // answers are the whole contract, and each is a different exit code.
+    &["resolve", "BehaviourSnapshot"],
+    &["resolve", "nothing-answers-to-this"],
     &["wiki", "map"],
     &["wiki", "refresh"],
     &["graph", "lint"],
@@ -58,7 +63,6 @@ const SWEEP: &[&[&str]] = &[
     &["graph", "index-sync"],
     &["graph", "normalize"],
     &["graph", "suggest-links"],
-    &["graph", "audit-candidates"],
     &["graph", "backlinks-sync"],
     // Each period is named explicitly, so the pin describes the code rather than
     // the calendar: the same argv targets the same period forever.
@@ -86,12 +90,8 @@ const EXEMPT: &[(&[&str], &str)] = &[
         "the same call as the swept top-level `schema`, reached by a second spelling",
     ),
     (
-        &["graph", "audit-mark"],
-        "takes a concept id and stamps it; the id it takes is the observation, and it belongs to a mutation corpus that pins files rather than output",
-    ),
-    (
         &["graph", "merge"],
-        "takes two concept ids and deletes one, as `audit-mark` does",
+        "takes two concept ids and deletes one; the ids it takes are the observation, and it belongs to a mutation corpus that pins files rather than output",
     ),
     (
         &["queue", "apply"],

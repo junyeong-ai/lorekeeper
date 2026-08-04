@@ -141,13 +141,17 @@ domain-neutral engine — then no work-log, reviews, or `is_personal` are produc
   creates and is re-emitted verbatim from the existing page on a re-render, so ingest never
   moves it; it is owned solely by `lore graph backlinks-sync`, which re-derives it
   exactly from the link graph — so a crash or an idempotent re-ingest can never inflate
-  it. Duplicate concept creation is prevented skill-side: `/lore-process` loads the
-  on-disk concept registry (`lore wiki concepts`) and reuses an established name instead
-  of forking a variant — the pipeline embeds no registry in the task.
-- **`build_alias_index` seeds every page's own slug before any name.** The index maps
-  `lk_core::concept::identity_key(name) → ConceptIdentity` — the SAME key `lore graph lint`
-  uses to report two pages owning one name, so what routes here and what the lint calls a
-  duplicate cannot drift apart. Keying on identity rather than the slug is also what makes
+  it. Duplicate concept creation is prevented skill-side by asking this crate's own question:
+  `lore resolve <name>` answers from the same `ConceptRegistry` the router uses, so a skill
+  reuses an established page instead of forking a variant — the pipeline embeds no registry in
+  the task, and the registry a skill reads for the equivalences spelling cannot see
+  (`lore wiki concepts`) is a second, narrower step rather than the primary one.
+- **Name resolution is `lk_core::concept::ConceptRegistry`, not a local index.** `build_registry`
+  reads the vault's concept pages into it; `lore resolve` builds the same registry from a
+  directory read, so the routing decision this crate ACTS on and the answer a skill gets
+  before writing a page are the same answer. Keyed on `identity_key` — the SAME key `lore
+  graph lint` uses to report two pages owning one name, so what routes here and what the lint
+  calls a duplicate cannot drift apart. Keying on identity rather than the slug is also what makes
   `VectorDB` land on `vector-db.md` instead of minting a second page.
   **This index is the one place a fold ACTS rather than reports**, and the act is not
   reviewable afterwards: a name folded onto an established page leaves only one page, so

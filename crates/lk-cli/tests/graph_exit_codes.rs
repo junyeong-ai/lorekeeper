@@ -905,20 +905,79 @@ fn the_single_check_commands_agree_with_lint_about_their_own_channel() {
     assert_eq!(ws.code(&["graph", "broken"]), 0, "{stdout}");
 }
 
+/// A concept whose synthesis has not been written against the citations it now carries is
+/// work the sweep hands to the queue, not a claim the vault contradicts itself. The scheduled
+/// pipeline runs this under `set -e`, so a non-zero exit here would stop the run that is
+/// about to do the work.
 #[test]
-fn a_concept_due_for_re_audit_is_a_worklist_and_exits_zero() {
+fn a_concept_owed_a_synthesis_is_queued_and_exits_zero() {
     let ws = sound_vault();
-    // Multiply cited, never audited (no `audited_sources_hash`) — the worklist's whole
-    // population. It is read as JSON, so a non-zero exit would only stop `set -e` callers.
-    ws.write(
-        "wiki/concepts/cited.md",
-        &concept("cited", "Cited", "A concept.").replace("source_count: 1", "source_count: 2"),
+
+    let out = ws.run(&["graph", "backlinks-sync"]);
+    let stdout = String::from_utf8(out.stdout).expect("utf8");
+    let owed = stdout
+        .split_once("Synthesis owed")
+        .map(|(_, rest)| rest)
+        .unwrap_or_else(|| panic!("nothing was queued\n{stdout}"));
+    assert!(owed.contains("wiki/concepts/cited.md"), "{stdout}");
+    assert!(
+        !owed.contains("wiki/concepts/uncited.md"),
+        "a concept nothing cites has no evidence to answer to\n{stdout}"
+    );
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+
+    // A second run has nothing to say: the input is recorded, and only a drain answering it
+    // moves the page on.
+    let stdout = ws.stdout(&["graph", "backlinks-sync"]);
+    assert!(
+        stdout.contains("Synthesis owed"),
+        "still unanswered\n{stdout}"
+    );
+    assert!(
+        stdout.contains("All 2 concept page(s) in sync."),
+        "{stdout}"
     );
 
-    let out = ws.run(&["graph", "audit-candidates"]);
-    let stdout = String::from_utf8(out.stdout).expect("utf8");
-    assert!(stdout.contains("cited"), "worklist empty\n{stdout}");
-    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    // `queue status` classifies the queued synthesis with the same code it classifies every
+    // other kind by — it is WORK, so the drain reaches it without a special case.
+    let status = ws.stdout(&["queue", "status", "--json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&status).expect("json");
+    let tasks = parsed["data"]["tasks"].as_array().expect("tasks");
+    let task = tasks
+        .iter()
+        .find(|t| t["kind"] == "synthesize-concept")
+        .unwrap_or_else(|| panic!("no synthesis task queued: {status}"));
+    assert_eq!(task["status"], "current", "{status}");
+    assert_eq!(task["vault_path"], "wiki/concepts/cited.md");
+}
+
+/// Answering the task retires it. The completion marker is what `llm_cache` and `queue
+/// status` read, so a synthesis written and stamped leaves the concept owing nothing until
+/// its evidence moves again — the same self-perpetuating cache every other section has.
+#[test]
+fn an_answered_synthesis_stops_being_owed() {
+    let ws = sound_vault();
+    assert_eq!(ws.code(&["graph", "backlinks-sync"]), 0);
+
+    let page = ws.read("wiki/concepts/cited.md");
+    let digest = page
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("synthesis: "))
+        .map(|v| v.trim_matches('"').to_owned())
+        .unwrap_or_else(|| panic!("no synthesis input recorded:\n{page}"));
+    ws.write(
+        "wiki/concepts/cited.md",
+        &page.replace(
+            &format!("  synthesis: \"{digest}\""),
+            &format!("  synthesis: \"{digest}\"\n  synthesis_done: \"{digest}\""),
+        ),
+    );
+
+    let stdout = ws.stdout(&["graph", "backlinks-sync"]);
+    assert!(
+        !stdout.contains("Synthesis owed"),
+        "an answered input is owed nothing:\n{stdout}"
+    );
 }
 
 /// The `--json` envelope's `ok` is the same verdict as the exit code, for every subcommand and
@@ -930,8 +989,8 @@ fn a_concept_due_for_re_audit_is_a_worklist_and_exits_zero() {
 #[test]
 fn the_json_envelope_agrees_with_the_exit_code() {
     // Every read-only subcommand, so a new one is covered by adding it here rather than by
-    // remembering to. The mutating ones (`merge`, `audit-mark`, `--fix`) take arguments or edit
-    // the vault, and each already has its own test.
+    // remembering to. The mutating ones (`merge`, `--fix`) take arguments or edit the vault,
+    // and each already has its own test.
     const COMMANDS: &[&[&str]] = &[
         &["lint"],
         &["hubs"],
@@ -942,7 +1001,6 @@ fn the_json_envelope_agrees_with_the_exit_code() {
         &["index-sync"],
         &["normalize"],
         &["suggest-links"],
-        &["audit-candidates"],
         &["backlinks-sync", "--dry-run"],
     ];
 

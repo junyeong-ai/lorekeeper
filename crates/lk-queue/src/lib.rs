@@ -64,6 +64,8 @@ pub enum TargetKind {
     DocumentSummary,
     /// Document page concept wiki-links.
     DocumentConcepts,
+    /// Concept page synthesis, written from the pages that cite the concept.
+    ConceptSynthesis,
 }
 
 impl TargetKind {
@@ -78,6 +80,7 @@ impl TargetKind {
             TargetKind::DailySummary | TargetKind::DocumentSummary => "summary",
             TargetKind::DailyRefineEvents => "refine_events",
             TargetKind::DailyConcepts | TargetKind::DocumentConcepts => "concepts",
+            TargetKind::ConceptSynthesis => lk_core::frontmatter::field::SYNTHESIS,
             TargetKind::WorkLogSynthesis => "topic_summary",
             TargetKind::WeeklySynthesisThemes => "themes",
             TargetKind::WeeklyReviewNarrative
@@ -102,7 +105,7 @@ impl TargetKind {
     /// from the first render. Tying completion to a body would re-enqueue every such empty
     /// result forever, so no kind does.
     pub fn completion_key(self) -> String {
-        format!("{}_done", self.llm_inputs_key())
+        lk_core::frontmatter::field::completion(self.llm_inputs_key())
     }
 }
 
@@ -158,6 +161,52 @@ pub struct SummarizeRequest {
     /// recognized as Slack.
     pub source_type: Option<SourceType>,
     pub target: TaskTarget,
+}
+
+/// Rewrite one concept page's synthesis from the pages that currently cite it.
+///
+/// The input is the citation SET — the evidence the synthesis is answerable to — and not the
+/// evidence's text. A concept page's synthesis states what the vault knows about the concept,
+/// so it is owed a rewrite exactly when the set of pages backing it changes, and not when one
+/// of them is edited: an ingest re-renders a daily page whenever its source is re-fetched, and
+/// hashing their content would re-enqueue every concept they cite on every run.
+///
+/// The task carries no source text. The concept page's own `## Sources` section links every
+/// page in the set, so the drain reads them at the address the vault already records — which
+/// keeps the payload O(1) as a concept accumulates citations, the same reason the extraction
+/// task carries no concept registry.
+#[derive(Debug, Clone)]
+pub struct ConceptSynthesisRequest {
+    /// Page ids citing this concept, as `lore graph backlinks-sync` derived them.
+    pub citations: Vec<String>,
+    pub target: TaskTarget,
+}
+
+impl ConceptSynthesisRequest {
+    pub fn task_input(&self) -> serde_json::Value {
+        self.cache_identity()
+    }
+
+    pub fn cache_identity(&self) -> serde_json::Value {
+        let mut v = serde_json::Map::new();
+        v.insert(
+            "citations".into(),
+            serde_json::to_value(&self.citations).expect("serializable"),
+        );
+        serde_json::Value::Object(v)
+    }
+
+    /// The evidence digest, computed by the one function `lore graph backlinks-sync` records
+    /// on the page — so the task's input and the page's `llm_inputs.synthesis` are the same
+    /// string by construction rather than by two implementations agreeing.
+    ///
+    /// `vault.locale` is deliberately absent. A concept page's authored body is never
+    /// translated by a locale switch — `capture_section` finds it under every locale's
+    /// heading precisely so a switch renames the heading and leaves the prose — so folding
+    /// the locale in here would rewrite every synthesis in the vault the first time it moved.
+    pub fn cache_hash(&self) -> String {
+        lk_core::concept::citation_digest(&self.citations)
+    }
 }
 
 /// Category definition passed to the LLM for concept classification.
@@ -331,6 +380,18 @@ pub trait LlmClient: Send + Sync {
     /// returns empty (the skill fills the section later).
     async fn identify_themes(&self, _req: ThemeRequest) -> Result<Vec<Theme>, QueueError> {
         Ok(vec![])
+    }
+
+    /// Rewrite a concept page's synthesis from the pages citing it. Called by `lore graph
+    /// backlinks-sync`, the sole deriver of that citation set, when the set a page's
+    /// synthesis was written against is no longer the set the page carries. The default
+    /// returns an empty body, which suffices for noop and mock clients; queue mode emits a
+    /// deferred task and the drain fills the section.
+    async fn synthesize_concept(
+        &self,
+        _req: ConceptSynthesisRequest,
+    ) -> Result<String, QueueError> {
+        Ok(String::new())
     }
 
     /// Commit any buffered side-effects. The CLI MUST call this exactly once at the

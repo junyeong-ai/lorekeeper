@@ -55,12 +55,14 @@ path patterns from AGENTS.md.
 }
 ```
 
-`kind` values: `summarize` | `extract-concepts` | `identify-themes` | `refine-events`
+`kind` values: `summarize` | `extract-concepts` | `identify-themes` | `refine-events` |
+`synthesize-concept`
 
 `target.kind` values: `daily-summary` | `daily-refine-events` | `daily-concepts` |
 `document-summary` | `document-concepts` | `weekly-synthesis-themes` |
 `weekly-review-narrative` | `monthly-review-narrative` |
-`quarterly-review-narrative` | `annual-review-narrative` | `work-log-synthesis`
+`quarterly-review-narrative` | `annual-review-narrative` | `work-log-synthesis` |
+`concept-synthesis`
 
 `target.anchor`: the exact section heading (e.g. `"## Summary"`, or its localized form per
 AGENTS.md) the pipeline wrote, resolved from i18n at queue time. Always use this as the

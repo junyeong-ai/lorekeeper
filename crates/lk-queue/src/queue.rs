@@ -165,6 +165,7 @@ pub enum TaskKind {
     ExtractConcepts,
     IdentifyThemes,
     RefineEvents,
+    SynthesizeConcept,
 }
 
 impl TaskKind {
@@ -177,6 +178,7 @@ impl TaskKind {
             TaskKind::ExtractConcepts => "extract-concepts",
             TaskKind::IdentifyThemes => "identify-themes",
             TaskKind::RefineEvents => "refine-events",
+            TaskKind::SynthesizeConcept => "synthesize-concept",
         }
     }
 }
@@ -289,6 +291,22 @@ impl LlmClient for QueueLlmClient {
         };
         self.enqueue(task).await;
         Ok(vec![])
+    }
+
+    async fn synthesize_concept(
+        &self,
+        req: crate::ConceptSynthesisRequest,
+    ) -> Result<String, QueueError> {
+        let task = QueueTask {
+            task_id: self.next_id("syn"),
+            kind: TaskKind::SynthesizeConcept,
+            created_at: jiff::Timestamp::now(),
+            cache_hash: req.cache_hash(),
+            input: req.task_input(),
+            target: req.target,
+        };
+        self.enqueue(task).await;
+        Ok(String::new())
     }
 
     async fn identify_themes(&self, req: ThemeRequest) -> Result<Vec<Theme>, QueueError> {

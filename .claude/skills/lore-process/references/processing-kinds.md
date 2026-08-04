@@ -56,6 +56,40 @@ top N themes (`input.max_themes`). Write each theme as a numbered subsection
 (`### 1. Theme Title\n\nDescription`) under `target.anchor`. Write the titles
 and descriptions in `input.locale` language; default to Korean if absent.
 
+## `kind: synthesize-concept`
+
+Rewrite one concept page's synthesis from the pages that currently cite it.
+
+`input.citations` lists those pages by id, and the concept page's own sources
+section links every one of them. Read the sources — that is the whole input;
+the task carries no text.
+
+1. Open `target.vault_path` and follow every link in its sources section.
+2. Write, under `target.anchor`, what the vault now knows about this concept:
+   what it is, and what the citing material establishes about it. Use the
+   language the page is already written in.
+3. **REWRITE the section, never append.** The synthesis states current
+   understanding, so an older reading that the evidence has moved past is
+   replaced, not kept beside the new one. (Its citations are the opposite —
+   `## Sources` only ever accumulates, and `lore graph backlinks-sync` owns
+   it. Never edit that section here.)
+4. Every claim must be traceable to one of the cited pages. Write nothing the
+   sources do not support, and nothing from your own background knowledge —
+   a concept page is what the vault observed, not what is generally true.
+5. When two cited sources disagree on a fact about the concept, state the
+   disagreement in a `> [!conflict]` callout naming both sides, inside the
+   section. `lore graph lint` surfaces open callouts. You are the only writer of
+   this section, so a callout exists only where THIS rewrite puts one: if the
+   sources you just read still disagree, write it again. A page that carried one
+   before is not evidence either way — read the sources, not the previous body.
+6. Length follows the evidence: one or two sentences for a concept with a
+   single citation, a short paragraph for one with many. Never pad.
+
+A concept with no citations left keeps whatever the page says — write the
+section from the sources you have; if there are none, leave the existing body
+alone and stamp the marker. The concept became uncited because its sources
+were deleted, which is not a reason to erase what was known about it.
+
 ## `kind: extract-concepts`
 
 Identify the key named entities, topics, and concepts (whatever the source's domain — the
@@ -101,9 +135,9 @@ what counts as a concept (per-type scoping: see
 [source-types.md](source-types.md)). Never invent it from the path.
 
 **Concept dedup** follows the **Concept convergence** section of the vault's
-`AGENTS.md`: the run-start registry
-(`lore wiki concepts`) plus the created-this-run set is the full dedup
-context — the queue task carries no concept registry of its own.
+`AGENTS.md`: `lore resolve <name>` per concept, plus the created-this-run set,
+plus the registry (`lore wiki concepts`) for the equivalences no rule about
+spelling can see — the queue task carries no concept registry of its own.
 
 **Category assignment.** Hard constraint: the `category` value MUST be one of
 the IDs in `input.categories` (verbatim string match) or the field MUST be
