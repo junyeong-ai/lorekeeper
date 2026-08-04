@@ -18,7 +18,6 @@
 use std::path::{Path, PathBuf};
 
 use lk_core::concept::slugify;
-use lk_core::i18n::Locale;
 use lk_core::link;
 use serde::Serialize;
 
@@ -330,12 +329,7 @@ fn concept_has_authored_body(abs: &Path) -> Result<bool, GraphError> {
         .map(|p| p.body)
         .unwrap_or(raw);
 
-    // Match the Sources heading under every locale — a page authored before a
-    // `vault.locale` switch keeps its old-language heading (mirrors backlinks-sync).
-    let source_headings: Vec<&str> = Locale::ALL
-        .iter()
-        .map(|l| l.strings().concept_sources)
-        .collect();
+    let source_headings: Vec<&str> = lk_vault::section_headings(|s| s.concept_sources).collect();
 
     let mut in_sources = false;
     for line in body.lines() {

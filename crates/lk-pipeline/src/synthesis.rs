@@ -7,11 +7,11 @@ use lk_core::frontmatter::field;
 use lk_core::i18n::Strings;
 use lk_core::vault_path::{VaultPath, work_log_dir};
 use lk_queue::TargetKind;
-use lk_vault::{FsVault, VaultPage, VaultStore, section_body};
+use lk_vault::{FsVault, VaultPage, VaultStore};
 
 use crate::PipelineError;
 use crate::context::PipelineContext;
-use crate::llm_cache::{self, Heading, SectionDecision};
+use crate::llm_cache::{self, SectionDecision};
 use crate::render::{RenderResult, Spliced, llm_inputs_map, splice_preserved_sections};
 
 pub struct Synthesizer {
@@ -107,7 +107,7 @@ impl Synthesizer {
         max_sentences: usize,
         path: &VaultPath,
         kind: TargetKind,
-        heading: impl Heading + Copy,
+        heading: impl lk_vault::SectionKey + Copy,
         what: &str,
     ) -> Result<SynthesisSection, PipelineError> {
         let req = lk_queue::SummarizeRequest {
@@ -146,7 +146,7 @@ impl Synthesizer {
         &self,
         path: &VaultPath,
         kind: TargetKind,
-        heading: impl Heading,
+        heading: impl lk_vault::SectionKey + Copy,
         hash: String,
     ) -> Result<SectionDecision, PipelineError> {
         let existing = self.reader.read_page(path.as_ref()).await?;
@@ -166,7 +166,7 @@ impl Synthesizer {
         &self,
         template: &str,
         kind: TargetKind,
-        heading: impl Heading,
+        heading: impl lk_vault::SectionKey + Copy,
         decision: &SectionDecision,
         context: serde_json::Value,
     ) -> Result<Option<Spliced>, PipelineError> {
@@ -711,16 +711,13 @@ impl Synthesizer {
 /// so a quarterly/annual rollup never inherits the child's own distribution table or metadata
 /// headings (which would render as duplicated tables and nested `##` on the parent).
 ///
-/// Searches EVERY locale's heading (like `capture_section`/`backlinks`/`audit`) so a child
-/// authored before a `vault.locale` switch is still found by its old-language heading. A
-/// missing OR empty section yields `""` — there is NO whole-body fallback: an absent heading
-/// (a custom template, or a not-yet-summarized queue-pending child) returns empty and the
-/// caller drops it, rather than leaking the child's raw body into the parent.
+/// Resolved under whichever locale the child was authored in, so one written before a
+/// `vault.locale` switch is still found. A missing OR empty section yields `""` — there is NO
+/// whole-body fallback: an absent heading (a custom template, or a not-yet-summarized
+/// queue-pending child) returns empty and the caller drops it, rather than leaking the
+/// child's raw body into the parent.
 fn child_narrative(page: &VaultPage) -> &str {
-    lk_core::i18n::Locale::ALL
-        .iter()
-        .find_map(|l| section_body(&page.body, l.strings().key_summary))
-        .map_or("", str::trim)
+    lk_vault::resolve_section(&page.body, |s| s.key_summary).map_or("", |s| s.body.trim())
 }
 
 fn iso_year_week(date: jiff::civil::Date) -> (i16, u8) {

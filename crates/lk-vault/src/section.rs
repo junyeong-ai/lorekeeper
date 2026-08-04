@@ -12,6 +12,7 @@
 //! content, not document structure. Heading lines are trimmed of trailing
 //! whitespace before matching.
 
+use lk_core::i18n::{Locale, Strings};
 use lk_core::markdown::FenceState;
 
 /// Locate the H2 section whose heading line is exactly `## {heading}`. Returns
@@ -63,6 +64,12 @@ fn find_section(lines: &[&str], heading: &str) -> Option<(usize, usize)> {
 /// (or trailing newline at EOF). `new_body` must not contain its own leading or
 /// trailing blank lines; this function owns the separators.
 ///
+/// An EMPTY body collapses to `## {heading}\n\n## {next}` — the shape a template renders an
+/// unfilled section as. The two are writers of the same sections: the pipeline renders a page
+/// from a template and this rewrites sections of it in place, so a second spelling of "this
+/// section is empty" makes each run undo the other's, and every sweep reports a page nothing
+/// changed about as changed.
+///
 /// If no line matches `## {heading}`, the document is returned unchanged. This is
 /// the documented contract so callers can run the function unconditionally.
 pub fn replace_section(content: &str, heading: &str, new_body: &str) -> String {
@@ -85,9 +92,9 @@ pub fn replace_section(content: &str, heading: &str, new_body: &str) -> String {
         if !new_body.ends_with('\n') {
             out.push('\n');
         }
-    }
-    if end_idx < lines.len() {
-        out.push('\n');
+        if end_idx < lines.len() {
+            out.push('\n');
+        }
     }
 
     for line in &lines[end_idx..] {
@@ -95,6 +102,64 @@ pub fn replace_section(content: &str, heading: &str, new_body: &str) -> String {
     }
 
     out
+}
+
+/// A logical section of a page, named independently of the locale it was rendered under —
+/// `|s| s.concept_sources` rather than `"Sources"`. A closure rather than a plain function
+/// pointer because a section's identity can depend on the page: a daily page's item heading
+/// is the source type's (`events` vs `messages`), chosen at render time.
+pub trait SectionKey: Fn(&'static Strings) -> &'static str {}
+impl<F: Fn(&'static Strings) -> &'static str> SectionKey for F {}
+
+/// The spelling a page gives one logical section, and the body under it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageSection<'a> {
+    /// The heading as the page writes it, which is what a rewrite must target and what a
+    /// queued task must carry as its anchor.
+    pub heading: &'static str,
+    /// The body verbatim, leading and trailing whitespace included.
+    pub body: &'a str,
+}
+
+/// Every spelling one logical section takes, in [`Locale::ALL`] order and without repeats —
+/// the vocabulary a caller needs when it matches headings itself rather than reading a body.
+pub fn section_headings(section: impl SectionKey) -> impl Iterator<Item = &'static str> {
+    let mut seen: Vec<&'static str> = Vec::new();
+    Locale::ALL.iter().filter_map(move |locale| {
+        let heading = section(locale.strings());
+        (!seen.contains(&heading)).then(|| {
+            seen.push(heading);
+            heading
+        })
+    })
+}
+
+/// The section `content` carries for one logical section, under whichever locale it was
+/// authored in.
+///
+/// READ tolerates any locale's heading; only WRITE uses the current one. A `vault.locale`
+/// switch renames every heading at once, so a lookup that searched only the new spelling
+/// finds no body to preserve and none to report — and the caller overwrites an answered
+/// section with an empty one, on every page in the vault, reporting a clean run.
+///
+/// A page mid-switch can carry both spellings: the freshly rendered heading, empty, beside
+/// the one holding the answer. So a non-blank body WINS over a blank one, whatever order the
+/// locales fall in — otherwise the answer is the thing that gets dropped. A blank body is
+/// still an answer when it is the only one there: a section can be legitimately empty (an
+/// extraction that found nothing, a focus-filtered summary), and reporting the section absent
+/// would re-enqueue it forever.
+pub fn resolve_section(content: &str, section: impl SectionKey) -> Option<PageSection<'_>> {
+    let mut blank: Option<PageSection> = None;
+    for heading in section_headings(&section) {
+        let Some(body) = section_body(content, heading) else {
+            continue;
+        };
+        if !body.trim().is_empty() {
+            return Some(PageSection { heading, body });
+        }
+        blank.get_or_insert(PageSection { heading, body });
+    }
+    blank
 }
 
 /// Read the body of the H2 section whose heading line is exactly `## {heading}`.
@@ -266,8 +331,8 @@ fn continuation_span(lines: &[&str], start: usize, end: usize) -> Option<std::op
 /// (e.g. `summary:` under `llm_inputs:`) is never touched. If the field is absent it is
 /// inserted just before the closing `---`, so a later run sees it and the operation is
 /// idempotent. A leading BOM is preserved. The single source of truth for setting a
-/// frontmatter scalar — used by `backlinks-sync` (`source_count`), the audit marker
-/// (`audited_sources_hash`) and the merge's `aliases`.
+/// frontmatter scalar — used by `backlinks-sync` (`source_count`), `record_llm_input` (which
+/// composes it to add an absent `llm_inputs:` mapping) and the merge's `aliases`.
 ///
 /// `value` is written verbatim, so the caller owns serialization (`serde_json::to_string`
 /// for anything that could need quoting).
@@ -294,12 +359,14 @@ pub fn set_frontmatter_field(content: &str, key: &str, value: &str) -> Option<St
         None => block.end..block.end,
     };
     let eol = terminator(lines[replaced.start]);
-    Some(splice_lines(
-        bom,
-        &lines,
-        replaced,
-        &format!("{key}: {value}{eol}"),
-    ))
+    // An empty value writes a bare `key:` — the YAML for a key whose value is the block
+    // below it. Writing `key: ` instead would leave a trailing space on every page carrying
+    // one, invisible in an editor and a diff away from the form a render produces.
+    let line = match value {
+        "" => format!("{key}:{eol}"),
+        value => format!("{key}: {value}{eol}"),
+    };
+    Some(splice_lines(bom, &lines, replaced, &line))
 }
 
 /// Set `llm_inputs.<key>` in a page's frontmatter, leaving every other line byte-identical.
@@ -366,6 +433,48 @@ pub fn set_llm_input(content: &str, key: &str, value: &str) -> Option<String> {
         replaced,
         &format!("{indent}{key}: {value}{eol}"),
     ))
+}
+
+/// Set `llm_inputs.<key>`, adding the mapping only when the page carries NO `llm_inputs` key
+/// at all.
+///
+/// [`set_llm_input`] refuses a page without a block-style mapping, and rightly: the
+/// pipeline's pages always render one, so its absence means the page is not one the pipeline
+/// wrote, and a marker stamped there would claim a render that never happened. A concept
+/// page's synthesis input is the other shape — `graph backlinks-sync` DERIVES it from the
+/// link graph, so the writer establishes the mapping rather than a reader hoping to find it.
+///
+/// The two reasons that writer can refuse are NOT interchangeable. A page with no key has
+/// nothing to lose by gaining one. A page whose key is a FLOW mapping (`llm_inputs: {summary:
+/// "abc"}`) is refused because this module cannot write into that shape — and creating the
+/// key there would replace every entry it already holds with a bare heading. So absence is
+/// the only case that creates; an unwritable shape is reported to the caller, which is what
+/// [`set_llm_input`] already meant by refusing.
+///
+/// `None` when the page has no frontmatter block, or carries an `llm_inputs` key this cannot
+/// write into.
+pub fn record_llm_input(content: &str, key: &str, value: &str) -> Option<String> {
+    if let Some(updated) = set_llm_input(content, key, value) {
+        return Some(updated);
+    }
+    if has_frontmatter_key(content, lk_core::frontmatter::field::LLM_INPUTS) {
+        return None;
+    }
+    let created = set_frontmatter_field(content, lk_core::frontmatter::field::LLM_INPUTS, "")?;
+    set_llm_input(&created, key, value)
+}
+
+/// Whether the frontmatter block carries `key` as a TOP-LEVEL entry, by the same column-0
+/// match [`set_frontmatter_field`] uses to find one — so what this reports present is exactly
+/// what that writer would replace.
+fn has_frontmatter_key(content: &str, key: &str) -> bool {
+    let (_, body) = split_bom(content);
+    let lines: Vec<&str> = body.split_inclusive('\n').collect();
+    let Some(block) = frontmatter_block(&lines) else {
+        return false;
+    };
+    let prefix = format!("{key}:");
+    lines[block].iter().any(|line| line.starts_with(&prefix))
 }
 
 #[cfg(test)]
@@ -573,11 +682,103 @@ mod tests {
         assert_eq!(out, "# Title\n\n## Sources\n\n- [new](new.md)\n");
     }
 
+    /// A flow mapping is REFUSED, never replaced. `set_llm_input` cannot write into
+    /// `llm_inputs: {summary: "abc"}`, and creating the key there would drop every entry it
+    /// holds — so the two reasons that writer refuses are kept apart: absence creates, an
+    /// unwritable shape is reported.
+    #[test]
+    fn a_flow_mapping_is_refused_rather_than_replaced() {
+        let page =
+            "---\nid: x\nllm_inputs: {summary: \"abc\", summary_done: \"abc\"}\n---\n\n# X\n";
+        assert_eq!(record_llm_input(page, "synthesis", "\"d\""), None);
+    }
+
+    /// A page with no `llm_inputs` key gains one — the case the creation exists for.
+    #[test]
+    fn an_absent_mapping_is_created() {
+        let page = "---\nid: x\nsource_count: 0\n---\n\n# X\n";
+        let out = record_llm_input(page, "synthesis", "\"d\"").expect("created");
+        assert!(out.contains("llm_inputs:\n  synthesis: \"d\""), "{out}");
+        assert!(out.contains("source_count: 0"), "{out}");
+    }
+
+    /// An existing block mapping is joined, not rebuilt.
+    #[test]
+    fn a_block_mapping_keeps_every_entry_it_holds() {
+        let page = "---\nid: x\nllm_inputs:\n  summary: \"abc\"\n---\n\n# X\n";
+        let out = record_llm_input(page, "synthesis", "\"d\"").expect("joined");
+        assert!(out.contains("summary: \"abc\""), "{out}");
+        assert!(out.contains("synthesis: \"d\""), "{out}");
+    }
+
+    /// A page renamed by a `vault.locale` switch carries the answer under its old heading.
+    /// Finding it is the whole point: a lookup that searched only the current spelling would
+    /// hand the caller nothing to preserve, and an answered section would be overwritten
+    /// empty on every page in the vault, reported as a clean run.
+    #[test]
+    fn a_section_authored_under_another_locale_is_found() {
+        let page = "# RAG\n\n## 핵심\n\nThe durable record.\n\n## 출처\n";
+        let found = resolve_section(page, |s| s.concept_synthesis).expect("found");
+        assert_eq!(found.heading, "핵심");
+        assert_eq!(found.body.trim(), "The durable record.");
+    }
+
+    /// Mid-switch a page carries BOTH spellings — the freshly rendered heading, empty, beside
+    /// the one holding the answer. The answer wins whatever order the locales fall in, because
+    /// the alternative is that the answer is the thing dropped.
+    #[test]
+    fn a_filled_section_outranks_an_empty_one_in_another_locale() {
+        for page in [
+            "# RAG\n\n## Synthesis\n\n## 핵심\n\nThe durable record.\n\n## 출처\n",
+            "# RAG\n\n## 핵심\n\nThe durable record.\n\n## Synthesis\n\n## 출처\n",
+        ] {
+            let found = resolve_section(page, |s| s.concept_synthesis).expect("found");
+            assert_eq!(found.heading, "핵심", "{page}");
+            assert_eq!(found.body.trim(), "The durable record.");
+        }
+    }
+
+    /// A section can be legitimately empty — an extraction that found nothing, a
+    /// focus-filtered summary — and completion is marker-signalled, never inferred from a
+    /// body. So the only spelling present answers even when it is blank; reporting the
+    /// section absent would re-enqueue it forever.
+    #[test]
+    fn an_empty_section_is_still_the_answer_when_it_is_the_only_one() {
+        let page = "# Daily\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
+        let found = resolve_section(page, |s| s.related_concepts).expect("found");
+        assert_eq!(found.heading, "Related Concepts");
+        assert!(found.body.trim().is_empty());
+
+        assert!(resolve_section(page, |s| s.concept_sources).is_none());
+    }
+
+    /// One vocabulary, no repeats: a section whose spelling is shared across locales is
+    /// offered once, so a caller matching headings itself never tests the same one twice.
+    #[test]
+    fn section_headings_lists_each_spelling_once() {
+        let spellings: Vec<&str> = section_headings(|s| s.concept_synthesis).collect();
+        assert!(spellings.contains(&"Synthesis"), "{spellings:?}");
+        assert!(spellings.contains(&"핵심"), "{spellings:?}");
+        let mut deduped = spellings.clone();
+        deduped.sort_unstable();
+        deduped.dedup();
+        assert_eq!(deduped.len(), spellings.len(), "{spellings:?}");
+    }
+
+    /// Emptying a section leaves it spelled the way a template renders an unfilled one.
+    /// The pipeline writes pages from templates and this rewrites sections of those pages,
+    /// so a second spelling of "empty" would have each run undo the other's and every sweep
+    /// report a page nothing changed about as changed.
     #[test]
     fn empty_body_produces_blank_section() {
         let doc = "## Sources\n\n- [old](old.md)\n\n## Meta\n";
         let out = replace_section(doc, "Sources", "");
-        assert_eq!(out, "## Sources\n\n\n## Meta\n");
+        assert_eq!(out, "## Sources\n\n## Meta\n");
+        assert_eq!(
+            replace_section(&out, "Sources", ""),
+            out,
+            "and emptying an empty section is a no-op"
+        );
     }
 
     #[test]

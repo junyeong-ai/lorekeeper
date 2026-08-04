@@ -30,29 +30,7 @@
 //! on the next ingest. No `--force-llm` flag, no out-of-band cache invalidation API.
 
 use lk_core::frontmatter::{VaultPage, field};
-use lk_core::i18n::{Locale, Strings};
-use lk_vault::section_body;
-
-/// Which section a cache decision is about, named independently of the locale it was
-/// rendered under — `|s| s.summary` rather than `"Summary"`.
-///
-/// READ tolerates any locale's heading; only WRITE uses the current one. That is the rule
-/// `lk_vault::index`, `graph audit`, `graph merge` and `graph backlinks-sync` already follow,
-/// and this is the READ where breaking it destroys content instead of omitting a line: a
-/// `vault.locale` switch renames every heading at once, so a lookup that searched only the new
-/// spelling found no body to preserve and none to report, and an answered, marker-stamped
-/// section was overwritten empty on every page in the vault.
-pub trait Heading: Fn(&'static Strings) -> &'static str {}
-impl<F: Fn(&'static Strings) -> &'static str> Heading for F {}
-
-/// The existing body of `heading`'s section under whichever locale the page was authored in.
-/// First match wins in [`Locale::ALL`] order, so a half-migrated page carrying two spellings
-/// resolves the same way every run.
-fn body_across_locales<'a>(page: &'a VaultPage, heading: &impl Heading) -> Option<&'a str> {
-    Locale::ALL
-        .iter()
-        .find_map(|locale| section_body(&page.body, heading(locale.strings())))
-}
+use lk_vault::{SectionKey, resolve_section};
 
 /// Per-section cache decision. The pipeline computes one of these for every LLM
 /// task it could enqueue.
@@ -110,10 +88,11 @@ pub fn stored_hash<'a>(existing: Option<&'a VaultPage>, key: &str) -> Option<&'a
 pub fn lookup(
     existing: Option<&VaultPage>,
     completion_key: &str,
-    heading: impl Heading,
+    heading: impl SectionKey,
     hash: String,
 ) -> SectionDecision {
-    let existing_body = existing.and_then(|page| body_across_locales(page, &heading));
+    let existing_body =
+        existing.and_then(|page| resolve_section(&page.body, heading).map(|s| s.body));
 
     if stored_hash(existing, completion_key) != Some(&hash) {
         return SectionDecision {

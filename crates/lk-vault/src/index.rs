@@ -209,20 +209,15 @@ pub fn build_index(
     Ok(out)
 }
 
-/// Run a section extractor against EVERY locale's heading, returning the first hit. An
-/// on-disk page authored under a previous `vault.locale` (e.g. `## 핵심` before a ko→en
-/// switch) is still found — the READ-tolerates-any-locale invariant the rest of the codebase
-/// (`capture_section`/`backlinks`/`audit`/`child_narrative`) follows; only WRITE uses the
-/// current locale. `pick` selects the section heading from a locale's strings; `extract`
-/// pulls the one-liner from that section's body.
+/// Pull a catalog one-liner out of a logical section, under whichever locale the page was
+/// authored in. `extract` reads the section by the heading the page actually carries.
 fn extract_across_locales(
     body: &str,
-    pick: impl Fn(&'static lk_core::i18n::Strings) -> &'static str,
+    section: impl crate::SectionKey,
     extract: impl Fn(&str, &str) -> Option<String>,
 ) -> Option<String> {
-    Locale::ALL
-        .iter()
-        .find_map(|l| extract(body, pick(l.strings())))
+    let found = crate::resolve_section(body, section)?;
+    extract(body, found.heading)
 }
 
 /// Build the index and write it atomically to `<vault_root>/<wiki>/index.md`.
