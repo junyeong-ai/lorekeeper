@@ -4,7 +4,7 @@ use lk_core::concept::{ConceptIdentity, ConceptRegistry, ExtractedConcept, Resol
 use lk_core::config::VaultDirs;
 use lk_core::i18n::Locale;
 use lk_core::vault_path::VaultPath;
-use lk_vault::{TemplateEngine, VaultStore, replace_section};
+use lk_vault::{TemplateEngine, VaultError, VaultStore, replace_section};
 
 use crate::PipelineError;
 use crate::render::RenderResult;
@@ -471,12 +471,25 @@ async fn build_registry(
         // instead would let one hand-edited page block every concept this run would
         // materialize, on every run — and would have the write plane report absent for a name
         // the read plane calls owned, which is the disagreement the shared registry exists to
-        // remove. Its title and aliases are simply unknown until the page is repaired, which
-        // `lore graph lint` reports.
+        // remove.
+        //
+        // ONLY that failure. A page this cannot READ answers to nothing knowable — the
+        // filename is a guess about a file whose content was never seen — and continuing past
+        // it mints a page beside one whose alias would have caught the name, which no lint
+        // reports: the two slugs reduce to different identities, so there is no pair to
+        // compare. `lore resolve` propagates an I/O error for the same reason, and the two
+        // planes answering one question differently is what this registry exists to prevent.
+        //
+        // Losing a broken page's aliases splits the concept the same silent way, and that
+        // cost is real — it is simply smaller than the run this used to block, and repairing
+        // the page is what recovers it. Routing is all this tolerance buys: `stage`'s own
+        // read of the page it is about to re-render stays strict, because a page rendered
+        // from the template without the frontmatter it carries loses everything on it.
         let page = match reader.read_page(&path).await {
             Ok(Some(page)) => Some(page),
             Ok(None) => continue,
-            Err(_) => None,
+            Err(VaultError::Frontmatter(_)) => None,
+            Err(e) => return Err(e.into()),
         };
         let frontmatter = page.as_ref().map(|p| &p.frontmatter);
         let title = frontmatter
@@ -535,6 +548,82 @@ mod tests {
         ) -> Result<Vec<std::path::PathBuf>, lk_vault::VaultError> {
             Ok(Vec::new())
         }
+    }
+
+    /// A vault holding one concept page whose read fails with the given error.
+    struct OneBadPage(lk_vault::VaultError);
+
+    #[async_trait::async_trait]
+    impl VaultStore for OneBadPage {
+        async fn read_page(
+            &self,
+            _rel_path: &std::path::Path,
+        ) -> Result<Option<lk_core::frontmatter::VaultPage>, lk_vault::VaultError> {
+            Err(match &self.0 {
+                lk_vault::VaultError::Frontmatter(m) => {
+                    lk_vault::VaultError::Frontmatter(m.clone())
+                }
+                _ => lk_vault::VaultError::Io(std::io::Error::other("read failed")),
+            })
+        }
+
+        async fn list_markdown(
+            &self,
+            rel_dir: &std::path::Path,
+        ) -> Result<Vec<std::path::PathBuf>, lk_vault::VaultError> {
+            Ok(vec![rel_dir.join("vector-db.md")])
+        }
+    }
+
+    /// The two halves of what a page the registry cannot read means, and they are opposite
+    /// answers. Frontmatter that will not parse leaves the page's ADDRESS knowable, so it
+    /// still claims it and an extraction naming it routes there instead of minting a rival
+    /// beside it. A page that cannot be READ leaves nothing knowable — the filename is a
+    /// guess about content never seen — so the run fails. Tolerating both would put the write
+    /// plane's answer at odds with `lore resolve`, which propagates I/O and only ever
+    /// swallows a parse.
+    ///
+    /// Routing is the only question this tolerance answers. Reading the page to MERGE into is
+    /// stricter and stays that way: an unparseable page re-rendered from the template loses
+    /// the synthesis, aliases, category and count it carries, so `stage` fails rather than
+    /// overwrite what it could not read.
+    #[tokio::test]
+    async fn a_page_that_will_not_parse_claims_its_address_and_one_that_cannot_be_read_fails() {
+        let dirs = VaultDirs::default();
+
+        let unparseable = OneBadPage(lk_vault::VaultError::Frontmatter("bad".into()));
+        let identity = ConceptDrafts::new()
+            .resolve_identity("VectorDB", &unparseable, &dirs)
+            .await
+            .expect("a page that will not parse never fails the routing");
+        assert_eq!(
+            identity.slug, "vector-db",
+            "the extraction routes to the page already holding that address"
+        );
+        assert!(
+            ConceptDrafts::new()
+                .stage(
+                    &ExtractedConcept {
+                        name: "VectorDB".into(),
+                        category: None,
+                    },
+                    None,
+                    &unparseable,
+                    &dirs,
+                )
+                .await
+                .is_err(),
+            "a page this cannot read is not a page to re-render from the template"
+        );
+
+        let unreadable = OneBadPage(lk_vault::VaultError::Io(std::io::Error::other("x")));
+        assert!(
+            ConceptDrafts::new()
+                .resolve_identity("VectorDB", &unreadable, &dirs)
+                .await
+                .is_err(),
+            "a page nothing could read is not a page with no names"
+        );
     }
 
     /// The property every caller that stages a batch before folding it relies on — and the

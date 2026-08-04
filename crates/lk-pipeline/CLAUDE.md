@@ -149,7 +149,17 @@ domain-neutral engine — then no work-log, reviews, or `is_personal` are produc
 - **Name resolution is `lk_core::concept::ConceptRegistry`, not a local index.** `build_registry`
   reads the vault's concept pages into it; `lore resolve` builds the same registry from a
   directory read, so the routing decision this crate ACTS on and the answer a skill gets
-  before writing a page are the same answer. Keyed on `identity_key` — the SAME key `lore
+  before writing a page are the same answer.
+  **A page whose FRONTMATTER will not parse registers its address and nothing else** — the
+  filename is a name parsing has no say in, and failing instead let one hand-edited page block
+  every concept a run would materialize. That is not free: the aliases on it are lost for the
+  run, so an extraction arriving under one mints a page beside it, and no lint reports the
+  split (the two slugs reduce to different identities, so there is no pair to compare). It is
+  the smaller loss, and repairing the page recovers it. Only that failure — a page this cannot
+  READ is not a page with no names, so I/O propagates, exactly as `lore resolve` propagates it.
+  And routing is all the tolerance buys: `stage`'s own read of the page it is about to
+  re-render stays strict, since rendering from the template without the frontmatter the page
+  carries would drop its synthesis, aliases, category and count. Keyed on `identity_key` — the SAME key `lore
   graph lint` uses to report two pages owning one name, so what routes here and what the lint
   calls a duplicate cannot drift apart. Keying on identity rather than the slug is also what makes
   `VectorDB` land on `vector-db.md` instead of minting a second page.
