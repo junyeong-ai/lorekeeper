@@ -21,7 +21,7 @@
 use std::path::{Path, PathBuf};
 
 use lk_core::config::VaultDirs;
-use lk_core::markdown::{TextDefect, scan_defects};
+use lk_core::markdown::{CredentialForm, TextDefect, scan_credentials, scan_defects};
 use walkdir::WalkDir;
 
 use super::{find_config, load_config};
@@ -48,14 +48,29 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
         for section in &page.unanswered {
             eprintln!("    `{section}` records an input nothing has answered");
         }
+        for (line, credential) in &page.credentials {
+            eprintln!(
+                "    L{line}: matches the form of — {}",
+                credential.description()
+            );
+        }
     }
-    let total: usize = report
+    // Counted apart from the defects, because they are not one: a defect is a page this tool
+    // wrote wrong, and a credential is a string a source sent. Summing them under one word
+    // would tell an operator a number that answers neither question.
+    let defects: usize = report
         .pages
         .iter()
         .map(|p| p.defects.len() + p.unanswered.len())
         .sum();
+    let credentials: usize = report.pages.iter().map(|p| p.credentials.len()).sum();
+    let flagged = if credentials == 0 {
+        format!("{defects} defect(s)")
+    } else {
+        format!("{defects} defect(s), {credentials} credential form(s)")
+    };
     eprintln!(
-        "\n{} pages scanned, {} with defects ({total} total){}",
+        "\n{} pages scanned, {} flagged ({flagged}){}",
         report.scanned,
         report.pages.len(),
         if report.errors > 0 {
@@ -104,6 +119,26 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
              next re-render enqueues it to be written again. A page with no ingestible source\n\
              behind it at all — a concept, an exploration, a review narrative — is only ever\n\
              fixed in place."
+        );
+    }
+    if report.pages.iter().any(|page| !page.credentials.is_empty()) {
+        eprintln!(
+            "\nThese are SHAPES, not verdicts. A string matching an issuer's credential form may\n\
+             be a key or may be that issuer's own documented example — AWS publishes\n\
+             `AKIAIOSFODNN7EXAMPLE`, and a page quoting it matches. Only the issuer knows\n\
+             which, so decide there.\n\
+             \n\
+             Where it IS a key it is live wherever it was issued, and the page is not where it\n\
+             is fixed. ROTATE at the issuer first — every copy stops working at once, and\n\
+             until then editing the page only makes the leak harder to find. The page is a\n\
+             record of what a source said, so this reports and never rewrites: what to do with\n\
+             the text, and with the git history holding it, is a decision about the record\n\
+             rather than about the key.\n\
+             \n\
+             Read the clean case honestly too. Only forms whose ISSUER publishes a grammar are\n\
+             named — a reserved prefix followed by that issuer's own alphabet — because\n\
+             nothing in free text distinguishes an unprefixed key from a hash. No finding here\n\
+             means no page carries one of THOSE, never that no page carries a secret."
         );
     }
     if report.pages.iter().any(|page| !page.unanswered.is_empty()) {
@@ -169,7 +204,19 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
     }
     // Non-zero on a real defect OR on a page that could not be verified — "clean" must
     // never be claimed for content that was skipped.
-    if !report.pages.is_empty() || report.errors > 0 {
+    //
+    // A credential does NOT gate it. Every finding this exits on names a repair inside the
+    // vault, and a credential's is at the issuer: the page records what a source sent, so the
+    // guidance above says not to edit it, and a run that stayed red until someone did would
+    // be red forever. That is the same verdict-carries-no-information failure `lore graph
+    // lint` keeps its observation channel out of the exit code to avoid. It is printed first
+    // and loudest instead.
+    let gating = report
+        .pages
+        .iter()
+        .filter(|page| !page.defects.is_empty() || !page.unanswered.is_empty())
+        .count();
+    if gating > 0 || report.errors > 0 {
         std::process::exit(1);
     }
     Ok(())
@@ -207,6 +254,10 @@ struct PageDefects {
     defects: Vec<(usize, TextDefect)>,
     /// `llm_inputs` keys the page records an input hash for and no answer to.
     unanswered: Vec<&'static str>,
+    /// Credentials the page carries verbatim. Separate from `defects` because the repair is
+    /// not this tool's: a rendering defect is fixed by re-rendering, while a live key is
+    /// fixed at its issuer and nowhere else.
+    credentials: Vec<(usize, CredentialForm)>,
 }
 
 /// The `llm_inputs` sections this page records an input for and no answer to.
@@ -316,6 +367,7 @@ fn audit(
             // the text — while the marker pair is a frontmatter record and is read as one. A
             // page whose frontmatter will not parse is unverifiable rather than clean.
             let defects = scan_defects(&text);
+            let credentials = scan_credentials(&text);
             let unanswered = match lk_core::frontmatter::parse_page(&text) {
                 Ok(page) => {
                     let rel = path.strip_prefix(vault_root).unwrap_or(path).to_path_buf();
@@ -331,11 +383,12 @@ fn audit(
                     Vec::new()
                 }
             };
-            if !defects.is_empty() || !unanswered.is_empty() {
+            if !defects.is_empty() || !unanswered.is_empty() || !credentials.is_empty() {
                 pages.push(PageDefects {
                     path: path.to_path_buf(),
                     defects,
                     unanswered,
+                    credentials,
                 });
             }
         }
@@ -377,6 +430,56 @@ mod tests {
     /// the marker exists.
     /// Tests state a page as its file contents, the way the walk finds it, and go through the
     /// same parse the walk uses.
+    /// A credential is a finding of its own, not a text defect: the two have nothing in
+    /// common but the page they sit on, and everything the report says about repairing one
+    /// is wrong for the other.
+    #[test]
+    fn a_credential_is_reported_apart_from_a_rendering_defect() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let daily = dir.path().join("daily").join("slack");
+        std::fs::create_dir_all(&daily).expect("mkdir");
+        // Assembled rather than written, so this file carries no literal a secret scanner
+        // reads as a live key — the same reason the scanner's own fixtures are built.
+        let token = ["ghp", "_0123456789abcdefghij", "klmnopqrstuvwxyz"].concat();
+        std::fs::write(
+            daily.join("2026-05-23.md"),
+            format!(
+                "---\nid: d\ntype: daily\n---\n\n## Key Messages\n\n\
+                 - deploy with GITHUB_TOKEN={token}\n"
+            ),
+        )
+        .expect("page");
+
+        let report = audit(&[dir.path().join("daily")], dir.path(), &Default::default());
+        assert_eq!(report.pages.len(), 1, "{:?}", report.pages.len());
+        let page = &report.pages[0];
+        assert_eq!(
+            page.credentials,
+            vec![(8, lk_core::markdown::CredentialForm::GitHubToken)]
+        );
+        assert!(page.defects.is_empty(), "a key is not a rendering defect");
+        assert!(page.unanswered.is_empty());
+    }
+
+    /// The ordinary vault is silent. A page full of links, hashes and prose names nothing,
+    /// which is what makes a finding worth reading.
+    #[test]
+    fn an_ordinary_page_names_no_credential() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let daily = dir.path().join("daily").join("slack");
+        std::fs::create_dir_all(&daily).expect("mkdir");
+        std::fs::write(
+            daily.join("2026-05-23.md"),
+            "---\nid: d\ntype: daily\nllm_inputs:\n---\n\n## Key Messages\n\n\
+             - [RAG](../../wiki/concepts/rag.md) at commit 0f1e2d3c4b5a6978\n\
+             - keys beginning ghp_ must be rotated\n",
+        )
+        .expect("page");
+
+        let report = audit(&[dir.path().join("daily")], dir.path(), &Default::default());
+        assert!(report.pages.is_empty(), "{:?}", report.pages.len());
+    }
+
     fn unanswered(text: &str) -> Vec<&'static str> {
         unanswered_sections(&lk_core::frontmatter::parse_page(text).expect("frontmatter"))
     }

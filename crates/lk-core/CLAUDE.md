@@ -89,6 +89,26 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   lint has no pair to compare and the extraction's synthesis is dropped as a later mention).
   So the fold must be one no reviewer would overturn; that asymmetry, not tidiness, is why
   it stays this narrow.
+- **`ConceptRegistry` is the one answer to "which page owns this name".** It maps every name
+  a concept page answers to — its own ADDRESS (the file stem), its `title`, and each alias —
+  through `identity_key`, and `resolve` returns `Owned` / `Ambiguous` / `Absent`. Pure over
+  `(slug, title, aliases)` triples, so each caller feeds it from its own I/O: `lk-pipeline`
+  from a `VaultStore` while routing an extraction, `lore resolve` from a directory read while
+  answering a skill about to write a page. Two implementations is what lets the write path
+  fold `VectorDB` onto `vector-db` while the read path calls the name free and mints a rival.
+  A page claims its own address unconditionally and an address outranks any other page's name,
+  so a stale alias cannot redirect a concept away from its own page; among equals the earliest
+  registration routes, which makes a citation's destination reproducible without knowing how
+  many pages claim the name. Ambiguity is REPORTED rather than settled — routing still has to
+  pick, and `Resolution::Ambiguous` carries both the pick and every claimant, because a
+  citation landing on the page a reader did not expect is otherwise unexplainable.
+- **`citation_digest`** is the identity of a concept's EVIDENCE: BLAKE3-128 over the sorted,
+  deduplicated set of pages citing it, serialized as a JSON array so no id is confusable with
+  a pair of shorter ones. The SET, never the rendered citation list — a source page that is
+  retitled changes how a citation reads without changing what it is, and a digest over the
+  text would resurface a concept whose material is identical. Single-sourced because
+  `lk-graph` records it on the page and `lk-queue` carries it as the task's input; two
+  implementations would be a task that can never match the page it names.
 - **`link`** is the single implementation of the vault's link vocabulary: inline
   markdown links `[Display](relative/path.md)`, destinations relative to the containing
   page and always `.md`-suffixed. Construction (`md_link` + `relative_dest`, CommonMark
@@ -107,15 +127,40 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   unique-temp invariant can't drift; `lk_vault::VaultWriter` delegates here from both its
   sync and its async (tokio `spawn_blocking`) paths — not a second implementation. The
   temp keeps `path`'s extension before `.tmp` so suffix sweeps still match.
+- **`markdown` holds two contracts over vault text, and they are not the same kind of thing.**
+  `scan_defects` is the CLEANLINESS contract the converters uphold at conversion time, so a
+  finding means a page predates a tightening and re-rendering repairs it. `scan_credentials`
+  is the opposite shape: nothing prevents it, converters must NOT strip it (editing a message
+  to remove a key leaves the page asserting something nobody wrote while the key stays live),
+  and the repair is at the issuer. It names a SHAPE, never a verdict — AWS publishes
+  `AKIAIOSFODNN7EXAMPLE` in its own docs, so a page quoting it matches while holding no key,
+  and only the issuer can tell the two apart. It reads only forms whose ISSUER publishes a
+  grammar — a reserved prefix followed by a run of that issuer's own alphabet at the width it
+  mints — so a hit is a fact about the text rather than a guess, and a clean scan is
+  explicitly NOT a statement that no secret is present. Nothing inferred: a 40-character
+  base64 run is a key or a hash and the text does not say which, so an entropy rule would fire
+  on every commit id in the vault. Four rules carry the precision: the length gate separates a
+  credential from prose naming its prefix; the left boundary is ALPHANUMERIC rather than the
+  grammar's own alphabet, since several alphabets admit `_` and `-` and testing against them
+  hides a key written after one; prefixes are tried LONGEST first, so a nested form
+  (`xoxe.xoxb-…`) reads as itself rather than as the shorter one inside it; and private-key
+  headers match a closed LABEL set rather than a suffix, which is what admits
+  `PGP PRIVATE KEY BLOCK` while refusing `THIS IS NOT A PRIVATE KEY`. Markdown quoting is
+  stripped before that match — a key pasted into a mail or a Slack thread reaches the vault
+  behind `> `, which is exactly the page this ingests. Every occurrence on a line is reported,
+  because an operator rotates what the report lists.
 - **`text::collapse_blank_lines`** squeezes 3+ newlines to a paragraph break,
   strips `\r`. Single source consumed by lk-vault, lk-pipeline, lk-source.
 - **`frontmatter::field`** single-sources this system's PRIVATE machine-coordination
-  protocol keys (`SOURCE_COUNT`, `AUDITED_SOURCES_HASH`, `LLM_INPUTS`) — names invented here
+  protocol keys (`SOURCE_COUNT`, `LLM_INPUTS`, `SYNTHESIS`, `completion`) — names invented here
   with no meaning outside the tooling — so an internal rename can't silently break the
   cross-crate agreement; `Frontmatter::source_count()` owns the parse. The criterion is
   *internal protocol that crosses a crate boundary*: e.g. `LLM_INPUTS` — pipeline writes,
   `queue status` in lk-cli reads (its inner per-kind keys are single-sourced by
-  `lk_queue::TargetKind::llm_inputs_key`). Standard published vault vocabulary (`created`,
+  `lk_queue::TargetKind::llm_inputs_key`, which reads `SYNTHESIS` from here because `graph
+  backlinks-sync` writes that one key and cannot see the enum; `completion` derives every
+  `<key>_done` marker so a writer in one crate and a reader in another cannot spell it
+  differently). Standard published vault vocabulary (`created`,
   `updated`, `title`, `id`, `aliases`) is read across crates too but stays a literal on
   purpose: it is anchored to the external Obsidian page format, never the target of a silent
   internal rename, so a constant would add no protection — only noise.
