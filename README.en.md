@@ -270,7 +270,7 @@ The source key becomes the vault subfolder name. You can define several of the s
 - **Materialized views** — a page has two layers. The **structural layer** (frontmatter, raw items, headings) re-renders every ingest; the **semantic layer** (summary, concepts, synthesis) is LLM-owned and preserved across re-renders. Unchanged input enqueues zero LLM work (a BLAKE3 hash decides).
 - **No data loss** — re-runs are idempotent (byte-identical). Streaming sources (RSS) keep a permanent event log, so scrolled-out items are never lost.
 - **Realized-only** — a future date materializes no page (a forecast isn't knowledge yet). It becomes knowledge once the date arrives.
-- **The graph does the bookkeeping** — `backlinks-sync` (re-derive citation counts), `lint` (orphans, broken links, duplicate concepts), `merge` (fold duplicate concepts), `cluster` / `suggest-links` (discover relationships).
+- **The graph does the bookkeeping** — `backlinks-sync` (re-derive each concept's citations, count and synthesis input, queueing a rewrite when the evidence moves), `lint` (orphans, broken links, duplicate concepts), `merge` (fold duplicate concepts), `cluster` / `suggest-links` (discover relationships).
 
 ---
 
@@ -286,15 +286,16 @@ lore status                   # last ingest time per source
 lore health                   # warn when a source is overdue vs ingest.schedule
 lore schedule | crontab -     # emit cron lines
 lore wiki concepts            # list concepts
+lore resolve <name>           # which concept page owns a name (0 owned / 1 absent / 2 ambiguous)
 lore wiki index / log / map   # rebuild by-topic index / by-time timeline / citation-cluster map
 lore graph lint               # structural health (orphans, broken links, duplicate concepts, …)
 lore graph suggest-links      # concept-relationship candidates (Adamic-Adar)
 lore graph cluster            # topic communities (Louvain)
-lore graph backlinks-sync     # re-derive each concept's ## Sources + citation count
+lore graph backlinks-sync     # re-derive each concept's ## Sources, citation count and synthesis input
 lore graph merge <from> <into># fold a duplicate concept into the canonical one
 lore graph normalize --fix    # normalize link spelling across the vault
 lore graph index-sync --fix   # repair missing/phantom entries in index.md
-lore doctor                   # page contracts: text cleanliness + unanswered sections
+lore doctor                   # page contracts: text cleanliness, unanswered sections, credentials
 lore maintenance              # prune ingest logs and drained queue files past retention
 lore queue status / prune     # LLM task queue status / clear dead tasks
 lore queue apply              # materialize the concept extractions a drain produced
