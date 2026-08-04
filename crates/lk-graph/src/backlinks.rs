@@ -270,8 +270,16 @@ pub fn sync_concept_backlinks(
         let completion_key = frontmatter::field::completion(frontmatter::field::SYNTHESIS);
         let recorded_answer = llm_input(&parsed, &completion_key);
         let recorded_input = llm_input(&parsed, frontmatter::field::SYNTHESIS);
+        // Keyed on the citation set going EMPTY, never on nothing being owed. Nothing is owed
+        // for three different reasons — no citations, no LLM plane behind this run, no
+        // synthesis heading to answer in — and only the first says the promise can never be
+        // kept. Under `Skip` a fully cited page would have its input stripped and the queued
+        // task killed by a run whose whole point is to touch no LLM plane; a page with no
+        // heading is already handled by the queue's own anchor check, and withdrawing it here
+        // would have one run print that nothing cites a page while the next line reports it as
+        // cited.
         let withdrawing =
-            owed_input.is_none() && recorded_input.is_some() && recorded_answer != recorded_input;
+            sources.is_empty() && recorded_input.is_some() && recorded_answer != recorded_input;
 
         // A page that carries a written synthesis and has never recorded an input is one
         // somebody WROTE — by hand, by `/lore-wiki add`, or as the grounding sentence of the
@@ -1315,6 +1323,48 @@ mod tests {
         assert!(
             content.contains("llm_inputs:"),
             "the mapping itself stays — other keys may live under it:\n{content}"
+        );
+    }
+
+    /// Withdrawal answers to the citation set, not to whether anything is owed. Nothing is
+    /// owed for three reasons and only one of them says the promise is unkeepable: under
+    /// `Skip` — the provider a CI or dev run uses precisely to touch no LLM plane — a fully
+    /// cited page would lose the input its queued task is keyed to, and `queue prune` would
+    /// then delete the task and its file.
+    #[test]
+    fn a_run_with_no_llm_plane_withdraws_nothing_from_a_cited_page() {
+        let dir = TempDir::new().unwrap();
+        let digest = citation_digest(&["daily/slack/2026-05-20".to_owned()]);
+        write_concept_page(
+            &dir,
+            "oy365",
+            &["- [daily/slack/2026-05-20](../../daily/slack/2026-05-20.md)"],
+            &format!("  synthesis: \"{digest}\"\n"),
+        );
+
+        let pages = vec![
+            build_page("wiki/concepts/oy365", "wiki/concepts/oy365.md", &[]),
+            build_page(
+                "daily/slack/2026-05-20",
+                "daily/slack/2026-05-20.md",
+                &["wiki/concepts/oy365"],
+            ),
+        ];
+
+        let report = sync_concept_backlinks(
+            &pages,
+            dir.path(),
+            false,
+            &VaultDirs::default(),
+            SynthesisPolicy::Skip,
+        )
+        .unwrap();
+        assert!(report.withdrawn.is_empty(), "{report:?}");
+
+        let content = std::fs::read_to_string(dir.path().join("wiki/concepts/oy365.md")).unwrap();
+        assert!(
+            content.contains(&format!("synthesis: \"{digest}\"")),
+            "the input its queued task is keyed to survives a run with no LLM plane:\n{content}"
         );
     }
 
