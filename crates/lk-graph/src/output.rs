@@ -589,8 +589,28 @@ pub fn print_backlinks(r: &BacklinksSyncReport) {
              seen",
             r.sync.adopted.len()
         );
-        for path in &r.sync.adopted {
-            println!("  {}", path.display());
+        for adopted in &r.sync.adopted {
+            println!(
+                "  {} ({} citation(s))",
+                adopted.path.display(),
+                adopted.citations
+            );
+        }
+        // Adoption is only obviously right at one citation, where the prose was written from
+        // the single source there is. Above one it defers: the page reads as fully answered
+        // and nothing is queued, so this is the only place that says how much was deferred.
+        let deferred = r
+            .sync
+            .adopted
+            .iter()
+            .filter(|adopted| adopted.citations > 1)
+            .count();
+        if deferred > 0 {
+            println!(
+                "  {deferred} of those answer to MORE than one citation — their prose was \
+                 written from less evidence than the page now carries. Delete a page's \
+                 `llm_inputs.synthesis_done` to have it rewritten from all of it"
+            );
         }
     }
 

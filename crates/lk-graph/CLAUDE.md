@@ -142,6 +142,12 @@ on-disk state, never from a cached snapshot.
   not in git that is gone. What is adopted has to BE an answer: a body of nothing but headings
   or a `> [!conflict]` callout is a marker somebody left, and adopting a lone callout has
   `lint` report an open disagreement nothing is scheduled to restate.
+  **Adoption carries its citation count because above ONE it is a deferral.** At one citation
+  the prose was written from the single source that exists and adopting it is simply right.
+  Above one it is a January sentence standing as the answer for a set spanning six months —
+  and since adoption stamps the page fully answered, `doctor` reads it green and nothing is
+  queued, so the sweep's own report is the ONLY place that deferral is ever stated. It names
+  how many, with the `llm_inputs.synthesis_done` lever that turns one back into work.
   **A concept nothing cites records no input and is owed nothing**: there is no evidence for a
   synthesis to answer to, a queued task would send a drain to read an empty set, and a
   recorded-but-unanswerable input would have `lore doctor` report it forever. A concept whose

@@ -866,14 +866,20 @@ mod tests {
         // `sk-ant-this-is-…`, which matches no prefix at all now that the key-type tag is
         // part of it, so it passed without exercising the rule it was written for.
         for line in [
-            "the runbook is at xoxb-2026-q1-token-rotation-plan-for-the-workspace",
-            "xapp-2-level-token-rotation-runbook-lives-in-the-ops-wiki-page",
-            "Slack xoxb-1-please-rotate-any-token-you-see before friday",
-            "xoxb-123456789012-please-rotate-this-one-as-well-today",
+            "the runbook is at xoxb-\
+             2026-q1-token-rotation-plan-for-the-workspace",
+            "xapp-\
+             2-level-token-rotation-runbook-lives-in-the-ops-wiki-page",
+            "Slack xoxb-\
+             1-please-rotate-any-token-you-see before friday",
+            "xoxb-\
+             123456789012-please-rotate-this-one-as-well-today",
             // A compound word as the last field is what a longest-run rule alone admits;
             // the issuer's own id WIDTHS and field count are what close it.
-            "see xoxb-2026-01-tokenrotationrunbookforus for details",
-            "xapp-2-levelttokenrotationrunbookpage lives in ops",
+            "see xoxb-\
+             2026-01-tokenrotationrunbookforus for details",
+            "xapp-\
+             2-levelttokenrotationrunbookpage lives in ops",
         ] {
             assert!(forms(line).is_empty(), "{line}");
         }

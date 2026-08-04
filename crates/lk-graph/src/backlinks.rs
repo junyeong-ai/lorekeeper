@@ -38,6 +38,21 @@ pub struct ConceptUpdate {
     pub removed: Vec<String>,
 }
 
+/// A concept page whose written synthesis was taken as the answer for the evidence it
+/// carries.
+#[derive(Debug, Clone, Serialize)]
+pub struct AdoptedSynthesis {
+    pub path: PathBuf,
+    /// How many pages cite the concept.
+    ///
+    /// Carried because adoption is only obviously right at ONE: the prose was written from
+    /// the single source that exists. Above one it is a deferral — a January sentence
+    /// standing as the answer for a set spanning six months — and `lore doctor` reads the
+    /// page as fully answered, so nothing else would ever say so. Naming the count turns a
+    /// silent deferral into a list an operator can act on.
+    pub citations: usize,
+}
+
 /// A concept page whose synthesis was written against a citation set the page no longer
 /// carries — or against none at all. The work this sweep hands to the LLM queue.
 #[derive(Debug, Clone, Serialize)]
@@ -74,7 +89,7 @@ pub struct BacklinksSyncResult {
     /// Concept pages whose written synthesis was adopted as the answer for the evidence they
     /// carry, because they had recorded no input before this run. Reported so an upgrade says
     /// what it decided rather than leaving it to be discovered.
-    pub adopted: Vec<PathBuf>,
+    pub adopted: Vec<AdoptedSynthesis>,
     /// Concept pages whose `## <Synthesis>` has not been written against the citation set
     /// the page now carries. Reported rather than acted on here: this crate computes what
     /// is true of the vault and never calls an LLM, so the caller is what turns the list
@@ -292,7 +307,10 @@ pub fn sync_concept_backlinks(
             report.headless.push(page.path.clone());
         }
         if adopting {
-            report.adopted.push(page.path.clone());
+            report.adopted.push(AdoptedSynthesis {
+                path: page.path.clone(),
+                citations: sources.len(),
+            });
         }
 
         // A page with no frontmatter block, or none carrying the `llm_inputs:` mapping, has
@@ -326,7 +344,7 @@ pub fn sync_concept_backlinks(
             report.skipped.push(page.path.clone());
             report.resynthesize.retain(|owed| owed.path != page.path);
             report.headless.retain(|path| path != &page.path);
-            report.adopted.retain(|path| path != &page.path);
+            report.adopted.retain(|adopted| adopted.path != page.path);
             continue;
         };
 
@@ -983,9 +1001,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            report.adopted,
+            report
+                .adopted
+                .iter()
+                .map(|a| a.path.clone())
+                .collect::<Vec<_>>(),
             vec![PathBuf::from("wiki/concepts/legacy.md")]
         );
+        assert_eq!(report.adopted[0].citations, 1);
         assert!(report.resynthesize.is_empty(), "{report:?}");
 
         // Both markers, so the page reads as answered rather than as work nothing did.
