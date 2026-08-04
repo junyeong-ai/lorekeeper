@@ -159,8 +159,16 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   stripped before that match — a key pasted into a mail or a Slack thread reaches the vault
   behind `> `, which is exactly the page this ingests. Every occurrence on a line is reported,
   because an operator rotates what the report lists.
-  **Recall is spent freely to keep every finding believable.** A form whose findings a reader
-  learns to scroll past protects nothing, so a prefix that cannot be told from text is
+  **Recall is spent freely to keep every finding believable, and another scanner's threshold
+  is not evidence for this one.** A push-protection gate on a shared repository and a report
+  into one person's vault pay opposite prices for a false positive: there it costs a developer
+  a few minutes and catches a real key sometimes, here it costs every finding its credibility
+  in a place where the only reader can stop reading. GitHub's scanner flags this module's own
+  false-positive EXAMPLES — the `xoxe-` rotation-runbook sentence among them, which this
+  file cannot quote because quoting it is itself blocked. That corroborates the shapes being
+  reachable from prose and argues nothing about what belongs in these grammars.
+  A form whose findings a reader learns to scroll past protects nothing, so a prefix that
+  cannot be told from text is
   DROPPED rather than reported loosely: AWS `ASIA` (an English word ahead of sixteen more
   uppercase characters); Anthropic, OpenAI project and admin, PyPI and GitLab keys, whose
   published prefixes are followed by an alphabet admitting `-` with no field shape to require;
