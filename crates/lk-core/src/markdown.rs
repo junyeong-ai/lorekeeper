@@ -165,7 +165,7 @@ fn upper_alnum(c: char) -> bool {
 /// The grammars, each as its issuer publishes it. Exact lengths where the issuer mints a
 /// fixed width; a floor elsewhere, because a prefix a vendor reserved is a finding whatever
 /// length follows it and pinning a width the vendor later changes would miss real keys.
-fn credential_grammars() -> [CredentialGrammar; 12] {
+fn credential_grammars() -> [CredentialGrammar; 11] {
     [
         CredentialGrammar {
             form: CredentialForm::GitHubToken,
@@ -195,6 +195,17 @@ fn credential_grammars() -> [CredentialGrammar; 12] {
         // grammar that cannot express it is silently uncovered behind a prefix that looks
         // covered — which is how the three-id `xoxe-` below and the legacy two-field `xoxb-`
         // were both missed while their prefixes matched other shapes fine.
+        //
+        // Slack's LEGACY bot token — one id then an alphanumeric secret — is absent for the
+        // reason the list above it is: one numeric field followed by a bare run is a reserved
+        // prefix and then an alphabet with nothing inner to require, and no floor closes it.
+        // Eight digits is a date, which a nine-digit floor rules out, but the numbers that
+        // actually sit beside `xoxb-` in notes about Slack tooling are epoch timestamps and
+        // object ids, and those clear any floor a real workspace id also clears. The secret
+        // cannot help either: its published range is eighteen to twenty-six characters, which
+        // is exactly where compound words live — `authenticationflow` is 18,
+        // `workspacemigrationplan` 22. So `xoxb-<a ten-digit epoch>-workspacemigrationplan` would be a
+        // finding, and the form it buys is one Slack discontinued.
         //
         // `xoxc-` and `xoxs-` are deliberately absent. Neither of the two widely-deployed
         // scanners covers either: `xoxc-` is a browser session token, and what circulates for
@@ -254,23 +265,6 @@ fn credential_grammars() -> [CredentialGrammar; 12] {
             numeric_fields: 1,
             numeric_field_digits: 1,
             min_unbroken_run: 60,
-        },
-        // Slack's LEGACY bot token is two fields — one id and an alphanumeric secret — so the
-        // three-field group above rejects it on every floor it has. The prefix is live and
-        // matches the modern shape, which is exactly why nothing surfaced this.
-        //
-        // The published id floor is eight digits and this asks nine, for the reason the modern
-        // floor does: eight digits is a date, and `xoxb-20260101-<a compound word>` is a
-        // sentence. A workspace whose id is that old is a silent miss.
-        CredentialGrammar {
-            form: CredentialForm::SlackToken,
-            prefixes: &["xoxb-"],
-            body: base62_extended,
-            body_len: 28..=255,
-            min_fields: 2,
-            numeric_fields: 1,
-            numeric_field_digits: 9,
-            min_unbroken_run: 18,
         },
         CredentialGrammar {
             form: CredentialForm::SlackAppToken,
@@ -908,11 +902,15 @@ mod tests {
     }
 
     /// A prefix carries every shape its issuer mints, and a shape filed under a grammar that
-    /// cannot express it is uncovered behind a prefix that looks covered — which is how both
-    /// of these were missed while their prefixes matched other shapes fine. `xoxe-` is a user
-    /// token as well as a rotating one; `xoxb-` has a two-field legacy form beside the modern
-    /// three-field one. Each shape is pinned here so a later narrowing cannot drop one
-    /// silently the way it did.
+    /// cannot express it is uncovered behind a prefix that looks covered — which is how the
+    /// three-id `xoxe-` was missed while the same prefix matched the rotating form fine. Each
+    /// shape is pinned here so a later narrowing cannot drop one silently the way that did.
+    ///
+    /// Fall-through is safe rather than lucky, and two properties make it so: every Slack
+    /// grammar names the same `CredentialForm`, so a body reaching the wrong one cannot be
+    /// mislabelled, and they share one body alphabet, so the span the cursor skips is the same
+    /// maximal run whichever rule answered. Order decides which rule answers, never what is
+    /// consumed or what is reported.
     #[test]
     fn every_published_shape_of_a_prefix_is_covered() {
         for line in [
@@ -927,8 +925,6 @@ mod tests {
                 "-123456789012-123456789012-123456789012-",
                 &"abcdefghij0123456789".repeat(2)[..28],
             ]),
-            // A legacy bot token: one id, secret 18.
-            shaped(&["xoxb", "-12345678901-", &"abcdefghij0123456789"[..18]]),
             // And the rotating form the same prefix also carries.
             shaped(&["xoxe", "-1-", &"abcdefghij0123456789".repeat(8)[..146]]),
         ] {
@@ -1068,6 +1064,16 @@ mod tests {
              2026-01-tokenrotationrunbookforus for details",
             "xapp-\
              2-levelttokenrotationrunbookpage lives in ops",
+            // One numeric field then a bare run is the legacy bot shape, and these are why
+            // it is out of scope: a nine-digit floor rules out a date and nothing rules out
+            // an epoch timestamp or an object id, while the published secret range is
+            // exactly where compound words live.
+            "log line xoxb-\
+             1748000000-workspacemigrationplan",
+            "ticket xoxb-\
+             123456789-tokenrotationrunbook filed",
+            "xoxb-\
+             123456789-authenticationflow",
         ] {
             assert!(forms(line).is_empty(), "{line}");
         }

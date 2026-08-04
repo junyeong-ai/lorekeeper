@@ -164,25 +164,30 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   DROPPED rather than reported loosely: AWS `ASIA` (an English word ahead of sixteen more
   uppercase characters); Anthropic, OpenAI project and admin, PyPI and GitLab keys, whose
   published prefixes are followed by an alphabet admitting `-` with no field shape to require;
-  and Slack's legacy WORKSPACE tokens `xoxa-`/`xoxr-`, whose eight-to-forty-eight alphanumeric
-  run behind an optional one-digit version is two shapes needing two grammars, neither
-  separable from prose at that floor. Stripe's TEST forms are absent for the opposite reason —
-  they appear in Stripe's own docs and grant nothing, so every hit is a finding with no action
-  behind it; `xoxo-` for a plainer one, being what people sign messages with.
+  and both of Slack's legacy forms — the WORKSPACE tokens `xoxa-`/`xoxr-`, whose
+  eight-to-forty-eight alphanumeric run behind an optional one-digit version is two shapes
+  needing two grammars, and the legacy BOT token, one numeric field then a bare run. That last
+  is the same shape as the five above with a single id doing the work two do in the modern
+  grammar, and no floor closes it: nine digits rules out a date but not the epoch timestamps
+  and object ids that actually sit beside `xoxb-` in tooling notes, while the published secret
+  range of eighteen to twenty-six is exactly where compound words live — so
+  `xoxb-<a ten-digit epoch>-workspacemigrationplan` would be a finding. Stripe's TEST forms are absent
+  for the opposite reason — they appear in Stripe's own docs and grant nothing, so every hit is
+  a finding with no action behind it; `xoxo-` for a plainer one, being what people sign messages with.
   **A prefix declared on a grammar it cannot match is worse than an absent one**: it reads as
   coverage while matching no token the issuer ever minted, and nothing fails to reveal it —
   `xoxr-` sat in the two-id group, where a legacy token carrying no ids matched nothing, for
   as long as it was declared. The same defect hides behind a prefix that is genuinely covered
-  for ANOTHER shape, which is subtler and was there twice: `xoxe-` matched the 146-character
-  rotating form while the three-id user token that may also carry it was rejected, and
-  `xoxb-`'s two-field legacy form was rejected by all three floors of the modern one. So **a
-  prefix carries every shape its issuer mints, each as its own grammar** — `find_map` falls
-  through, so a prefix failing one is tried against the next — and each shape is pinned by a
-  test, since a later narrowing is exactly what drops one silently.
+  for ANOTHER shape, which is subtler: `xoxe-` matched the 146-character rotating form while
+  the three-id user token that may also carry that prefix was rejected. So **a prefix carries
+  every shape its issuer mints, each as its own grammar** — `find_map` falls through, so a
+  prefix failing one is tried against the next — and each shape is pinned by a test, since a
+  later narrowing is exactly what drops one silently. Fall-through is safe rather than lucky
+  because every Slack grammar names one `CredentialForm` and they share one body alphabet: the
+  order decides which rule answers, never what is consumed or what is reported.
   Widths track what the issuer mints, checked against it rather than assumed: `AKIA` at twenty
   rather than the sixteen-to-128 AWS permits, Slack ids at nine (one under the ten-to-thirteen
-  it mints, and above the eight the legacy bot form permits, because eight digits is a date),
-  the rotating secret at sixty (well under the 146 of a refresh token and the 163–166 of a
+  it mints), the rotating secret at sixty (well under the 146 of a refresh token and the 163–166 of a
   configuration access token, so a re-mint at another width is still caught). Each accepts a
   silent miss to buy a believable finding, and each is commented at its grammar with the width
   it was set against. A prefix with NO published widths is dropped rather than carried on
