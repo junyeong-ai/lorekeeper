@@ -19,7 +19,7 @@ use lk_core::config::VaultDirs;
 use lk_core::frontmatter;
 use lk_core::link;
 use lk_vault::{
-    VaultWriter, record_llm_input, replace_section, resolve_section, section_body,
+    VaultWriter, clear_llm_input, record_llm_input, replace_section, resolve_section, section_body,
     set_frontmatter_field,
 };
 use serde::Serialize;
@@ -90,6 +90,10 @@ pub struct BacklinksSyncResult {
     /// carry, because they had recorded no input before this run. Reported so an upgrade says
     /// what it decided rather than leaving it to be discovered.
     pub adopted: Vec<AdoptedSynthesis>,
+    /// Concept pages whose recorded synthesis input was withdrawn: nothing cites them any
+    /// more, and the input was never answered, so the rewrite it promised can never be
+    /// written. Reported because a queued task for one is about to stop being work.
+    pub withdrawn: Vec<PathBuf>,
     /// Concept pages whose `## <Synthesis>` has not been written against the citation set
     /// the page now carries. Reported rather than acted on here: this crate computes what
     /// is true of the vault and never calls an LLM, so the caller is what turns the list
@@ -243,9 +247,16 @@ pub fn sync_concept_backlinks(
         //
         // A concept NOTHING cites has no evidence for a synthesis to answer to, so it records
         // no input and is owed nothing — there would be nothing for a drain to read. A concept
-        // whose last citation was deleted keeps the input it already carries: its synthesis
-        // still states what the vault learned, and no rewrite could improve on it from a set
-        // that is now empty.
+        // whose last citation was deleted keeps the input it ANSWERED: its synthesis still
+        // states what the vault learned, and no rewrite could improve on it from a set that is
+        // now empty.
+        //
+        // An input it never answered is the opposite case and must be WITHDRAWN. It is a
+        // promise that something will write that section from those citations, and the
+        // citations are gone — so the queued task keeps classifying `current` against the
+        // input still on the page, and a drain reaching it writes a synthesis of pages the
+        // vault no longer holds, stamped as answered. Nothing later can clear it: the sweep
+        // that recorded the promise is the only thing that knows it was made.
         //
         // The synthesis heading is required only where a synthesis is OWED. Requiring it
         // unconditionally would let a page missing that one section keep a citation count the
@@ -258,6 +269,9 @@ pub fn sync_concept_backlinks(
         .then(|| citation_digest(&sources));
         let completion_key = frontmatter::field::completion(frontmatter::field::SYNTHESIS);
         let recorded_answer = llm_input(&parsed, &completion_key);
+        let recorded_input = llm_input(&parsed, frontmatter::field::SYNTHESIS);
+        let withdrawing =
+            owed_input.is_none() && recorded_input.is_some() && recorded_answer != recorded_input;
 
         // A page that carries a written synthesis and has never recorded an input is one
         // somebody WROTE — by hand, by `/lore-wiki add`, or as the grounding sentence of the
@@ -312,6 +326,9 @@ pub fn sync_concept_backlinks(
                 citations: sources.len(),
             });
         }
+        if withdrawing {
+            report.withdrawn.push(page.path.clone());
+        }
 
         // A page with no frontmatter block, or none carrying the `llm_inputs:` mapping, has
         // nowhere to record what this sweep derives. Skipped like the corrupt case above, and
@@ -324,6 +341,7 @@ pub fn sync_concept_backlinks(
             desired_count,
         )
         .and_then(|content| match &owed_input {
+            None if withdrawing => clear_llm_input(&content, frontmatter::field::SYNTHESIS),
             None => Some(content),
             Some(digest) => {
                 let stamp = serde_json::to_string(digest).expect("a hex digest always serializes");
@@ -345,6 +363,7 @@ pub fn sync_concept_backlinks(
             report.resynthesize.retain(|owed| owed.path != page.path);
             report.headless.retain(|path| path != &page.path);
             report.adopted.retain(|adopted| adopted.path != page.path);
+            report.withdrawn.retain(|path| path != &page.path);
             continue;
         };
 
@@ -1248,6 +1267,54 @@ mod tests {
         assert!(
             content.contains(&format!("synthesis_done: \"{digest}\"")),
             "the answered input survives losing its evidence:\n{content}"
+        );
+    }
+
+    /// An input the page never ANSWERED is the opposite case and is withdrawn. It promised
+    /// that something would write the section from those citations; the citations are gone,
+    /// so the queued task keeps classifying `current` against the input still on the page and
+    /// a drain reaching it writes a synthesis of pages the vault no longer holds — stamped as
+    /// answered, on a page whose sources list is empty. Nothing later could clear it: this
+    /// sweep is the only thing that knows the promise was made.
+    #[test]
+    fn losing_every_citation_withdraws_an_input_nothing_answered() {
+        let dir = TempDir::new().unwrap();
+        let digest = citation_digest(&["daily/slack/2026-05-20".to_owned()]);
+        write_concept_page(
+            &dir,
+            "oy365",
+            &["- [daily/slack/2026-05-20](../../daily/slack/2026-05-20.md)"],
+            &format!("  synthesis: \"{digest}\"\n"),
+        );
+
+        let pages = vec![build_page(
+            "wiki/concepts/oy365",
+            "wiki/concepts/oy365.md",
+            &[],
+        )];
+
+        let report = sync_concept_backlinks(
+            &pages,
+            dir.path(),
+            false,
+            &VaultDirs::default(),
+            SynthesisPolicy::Record,
+        )
+        .unwrap();
+        assert_eq!(
+            report.withdrawn,
+            vec![PathBuf::from("wiki/concepts/oy365.md")]
+        );
+        assert!(report.resynthesize.is_empty(), "{report:?}");
+
+        let content = std::fs::read_to_string(dir.path().join("wiki/concepts/oy365.md")).unwrap();
+        assert!(
+            !content.contains("synthesis:"),
+            "an input nothing can answer is removed, not left for a drain:\n{content}"
+        );
+        assert!(
+            content.contains("llm_inputs:"),
+            "the mapping itself stays — other keys may live under it:\n{content}"
         );
     }
 

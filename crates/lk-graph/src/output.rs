@@ -614,6 +614,19 @@ pub fn print_backlinks(r: &BacklinksSyncReport) {
         }
     }
 
+    if !r.sync.withdrawn.is_empty() {
+        println!(
+            "\nWithdrawn: {} concept page(s) recorded a synthesis input nothing answered, and \
+             nothing cites them any more — the rewrite they were promised can never be written \
+             from a set that is now empty, so the input is removed. A task queued for one stops \
+             being work; `lore queue prune` drops it",
+            r.sync.withdrawn.len()
+        );
+        for path in &r.sync.withdrawn {
+            println!("  {}", path.display());
+        }
+    }
+
     if !r.sync.headless.is_empty() {
         println!(
             "\nNo synthesis heading: {} cited concept page(s). Citations and count are written; \

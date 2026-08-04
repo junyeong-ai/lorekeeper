@@ -386,53 +386,81 @@ pub fn set_frontmatter_field(content: &str, key: &str, value: &str) -> Option<St
 pub fn set_llm_input(content: &str, key: &str, value: &str) -> Option<String> {
     let (bom, body) = split_bom(content);
     let lines: Vec<&str> = body.split_inclusive('\n').collect();
-    let block = frontmatter_block(&lines)?;
+    let (parent_idx, children) = llm_inputs_mapping(&lines)?;
+    let existing = llm_input_entry(&lines, &children, key);
 
-    // Trailing whitespace after the key is invisible and legal, so it must not decide
-    // whether the mapping is found at all.
+    // A replacement keeps its own line's indentation; a new key joins the mapping directly
+    // after its last child, at the indentation the first one already uses.
+    let children_end = children.clone().map_or(parent_idx + 1, |s| s.end);
+    let at = existing.clone().map_or(children_end, |s| s.start);
+    let indent = existing
+        .clone()
+        .map(|s| s.start)
+        .or_else(|| children.map(|s| s.start))
+        .map(|i| indent_of(unterminated(lines[i])))
+        .unwrap_or("  ");
+    let eol = terminator(lines[at]);
+
+    Some(splice_lines(
+        bom,
+        &lines,
+        existing.unwrap_or(at..at),
+        &format!("{indent}{key}: {value}{eol}"),
+    ))
+}
+
+/// Remove `llm_inputs.<key>`, value continuation included, leaving every other line
+/// byte-identical. `None` where the mapping or the key is absent.
+///
+/// The counterpart to [`record_llm_input`], and needed for the same reason that writer exists:
+/// an input is a PROMISE that something will answer it, so whoever recorded one that can no
+/// longer be answered is the one that has to withdraw it. Left behind, it is a task the queue
+/// keeps calling current and a section `lore doctor` keeps calling unanswered — neither of
+/// which any later run can clear, because nothing else knows the promise was made.
+pub fn clear_llm_input(content: &str, key: &str) -> Option<String> {
+    let (bom, body) = split_bom(content);
+    let lines: Vec<&str> = body.split_inclusive('\n').collect();
+    let (_, children) = llm_inputs_mapping(&lines)?;
+    let entry = llm_input_entry(&lines, &children, key)?;
+    Some(splice_lines(bom, &lines, entry, ""))
+}
+
+/// The block-style `llm_inputs:` mapping: the line it is declared on, and the span its
+/// entries occupy (`None` where it has none yet). Both writers locate it through here, so
+/// what one of them can reach is exactly what the other can.
+///
+/// Trailing whitespace after the key is invisible and legal, so it must not decide whether
+/// the mapping is found at all.
+fn llm_inputs_mapping(lines: &[&str]) -> Option<(usize, Option<std::ops::Range<usize>>)> {
+    let block = frontmatter_block(lines)?;
     let parent = format!("{}:", lk_core::frontmatter::field::LLM_INPUTS);
     let parent_idx = lines[block.clone()]
         .iter()
         .position(|line| unterminated(line).trim_end() == parent)
         .map(|i| i + block.start)?;
+    Some((parent_idx, continuation_span(lines, parent_idx, block.end)))
+}
 
-    let children = continuation_span(&lines, parent_idx, block.end);
-    // The span reaches everything under the mapping, grandchildren included. The marker
-    // lives one level down, so only that level is searched — otherwise a same-named key
-    // nested deeper would be matched first and the real child left stale.
-    let child_indent = children
-        .clone()
-        .map(|s| indent_of(unterminated(lines[s.start])).len());
+/// The lines one entry of that mapping occupies, its value's continuation included — so a
+/// caller replacing or removing a key whose value is a block scalar never orphans the
+/// value's lines under it.
+///
+/// The mapping's span reaches everything under it, grandchildren included. An entry lives one
+/// level down, so only that level is searched: otherwise a same-named key nested deeper would
+/// be matched first and the real one left stale.
+fn llm_input_entry(
+    lines: &[&str],
+    children: &Option<std::ops::Range<usize>>,
+    key: &str,
+) -> Option<std::ops::Range<usize>> {
+    let children = children.clone()?;
+    let child_indent = indent_of(unterminated(lines[children.start])).len();
     let prefix = format!("{key}:");
-    let existing = children.clone().and_then(|span| {
-        span.into_iter().find(|&i| {
-            let line = unterminated(lines[i]);
-            Some(indent_of(line).len()) == child_indent && line.trim_start().starts_with(&prefix)
-        })
-    });
-
-    // A replacement keeps its own line's indentation; a new key joins the mapping directly
-    // after its last child, at the indentation the first one already uses.
-    let children_end = children.clone().map_or(parent_idx + 1, |s| s.end);
-    let at = existing.unwrap_or(children_end);
-    let indent = existing
-        .or_else(|| children.map(|s| s.start))
-        .map(|i| indent_of(unterminated(lines[i])))
-        .unwrap_or("  ");
-    let eol = terminator(lines[at]);
-    // A child takes its own continuation with it, so replacing one whose value is a block
-    // scalar does not orphan the value's lines under the new inline one.
-    let replaced = match existing {
-        Some(at) => at..continuation_span(&lines, at, children_end).map_or(at + 1, |s| s.end),
-        None => at..at,
-    };
-
-    Some(splice_lines(
-        bom,
-        &lines,
-        replaced,
-        &format!("{indent}{key}: {value}{eol}"),
-    ))
+    let at = children.clone().find(|&i| {
+        let line = unterminated(lines[i]);
+        indent_of(line).len() == child_indent && line.trim_start().starts_with(&prefix)
+    })?;
+    Some(at..continuation_span(lines, at, children.end).map_or(at + 1, |s| s.end))
 }
 
 /// Set `llm_inputs.<key>`, adding the mapping only when the page carries NO `llm_inputs` key
