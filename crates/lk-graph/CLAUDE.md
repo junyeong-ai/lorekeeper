@@ -152,7 +152,23 @@ on-disk state, never from a cached snapshot.
   synthesis to answer to, a queued task would send a drain to read an empty set, and a
   recorded-but-unanswerable input would have `lore doctor` report it forever. A concept whose
   last citation was deleted KEEPS the input it already answered — its synthesis still states
-  what the vault learned, and no rewrite could improve on it from a set that is now empty.
+  what the vault learned, and no rewrite could improve on it from a set that is now empty, and
+  a citation that comes BACK returns the digest to a value the `_done` marker already matches,
+  so the page costs no rewrite for having been away.
+  **An input it never answered is WITHDRAWN instead**, and the condition is the citation set
+  going empty — never "nothing is owed", which is true for three unrelated reasons. Under
+  `SynthesisPolicy::Skip` a fully cited page would otherwise lose the input its queued task is
+  keyed to, and a run whose whole purpose is to touch no LLM plane would destroy that work;
+  a page with no synthesis heading is already handled by the queue's anchor check, and
+  withdrawing it would remove the only durable trace that it owes something, where the
+  heading-missing report names a repair a human can perform. The promise has to be withdrawn
+  by the sweep that made it, because nothing else knows it was made: left behind, the queued
+  task keeps classifying `current` and a drain writes a synthesis of pages the vault no longer
+  holds. **Withdrawal returns a page to the ADOPTABLE state** — carrying prose and no markers
+  is exactly what adoption is for — so a concept that loses every citation and later regains
+  one has its owed rewrite converted into an adoption of the prose already there. Consistent
+  rather than lossy (after withdrawal the page genuinely records owing nothing), and a
+  multi-citation page still surfaces in the deferral line.
   It never calls an LLM: it returns `resynthesize`, and `lore graph backlinks-sync` in lk-cli
   turns that into queued work through the same `LlmClient` ingest uses. `--dry-run` enqueues
   nothing, like every other write it withholds. Only
