@@ -1,37 +1,28 @@
 use std::collections::BTreeMap;
 
-use lk_core::concept::{ExtractedConcept, identity_key, slugify};
+use lk_core::concept::{ConceptIdentity, ConceptRegistry, ExtractedConcept, Resolution, slugify};
 use lk_core::config::VaultDirs;
 use lk_core::i18n::Locale;
 use lk_core::vault_path::VaultPath;
-use lk_vault::{TemplateEngine, VaultStore, replace_section, section_body};
+use lk_vault::{TemplateEngine, VaultStore, replace_section};
 
 use crate::PipelineError;
 use crate::render::RenderResult;
 
 /// In-memory aggregator for concept page state across multiple dates in a single run.
 /// Reads existing vault pages on first encounter, then merges further mentions.
-/// The page an extraction resolved to: its established title and slug.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConceptIdentity {
-    pub name: String,
-    pub slug: String,
-}
-
 pub struct ConceptDrafts {
     drafts: BTreeMap<String, ConceptDraft>,
-    /// `identity_key(name)` → the page that owns that name: seeded once from the concept
-    /// pages already in the vault, then extended by each new name this run resolves, so a
-    /// decision made for one spelling is the answer every other spelling of it gets.
+    /// Every name the vault's concept pages answer to: read once from disk, then extended
+    /// by each new name this run resolves, so a decision made for one spelling is the answer
+    /// every other spelling of it gets.
     ///
     /// A concept page's id is NOT always `slugify(title)`: a page renamed or merged keeps
     /// its original id and records the other names as aliases, which is what makes every
     /// existing citation to it keep resolving. Extractions arrive under any of those names,
     /// so resolving by slug alone would mint a second page beside the canonical one
     /// — splitting a concept's citations in two and leaving the synthesis on the old page.
-    /// The lookup is EXACT (both sides through `identity_key`), never fuzzy: a name either
-    /// IS one this vault already answers to, or it is a new concept.
-    alias_index: Option<BTreeMap<String, ConceptIdentity>>,
+    registry: Option<ConceptRegistry>,
 }
 
 /// One extraction with everything the vault could tell us about it already read: the page
@@ -57,13 +48,19 @@ struct ConceptDraft {
     /// established count until the next sync), so it carries the on-disk value
     /// through unchanged. A brand-new page starts at 0.
     source_count: u64,
-    /// Bodies of LLM-authored or graph-maintained sections, captured from the
-    /// existing concept page so a re-render can splice them back. Concept pages
-    /// have no `llm_inputs` hash because their semantic content is monotonically
-    /// additive — the skill writes `## Synthesis` on creation, `lore graph
-    /// backlinks-sync` derives `## Sources` from real incoming citations, and `## Related`
-    /// is curated via `lore-wiki audit` (community-grounded, LLM-confirmed links).
-    /// None of those should ever be wiped by an ingest re-render.
+    /// The page's `llm_inputs` markers, carried verbatim. A concept's synthesis is owed
+    /// against the set of pages citing it, which only `lore graph backlinks-sync` derives —
+    /// so this render has no way to compute the input and no standing to judge the marker.
+    /// Re-emitting both unchanged is what keeps an answered section answered and a section
+    /// awaiting a drain still awaiting it; dropping them would re-enqueue every concept the
+    /// run touched and, once answered again, freeze the page against an input nothing
+    /// recorded.
+    preserved_llm_inputs: BTreeMap<String, String>,
+    /// Bodies of LLM-authored or graph-maintained sections, captured from the existing
+    /// concept page so a re-render can splice them back. Each has a writer of its own —
+    /// `/lore-process` for `## Synthesis`, `lore graph backlinks-sync` for `## Sources`,
+    /// `/lore-wiki audit` for `## Related` — and none should ever be wiped by an ingest
+    /// re-render.
     preserved_synthesis: Option<String>,
     preserved_sources: Option<String>,
     preserved_related: Option<String>,
@@ -104,24 +101,34 @@ impl ConceptDrafts {
     ) -> Result<ConceptIdentity, PipelineError> {
         let slug =
             slugify(name).expect("concepts are slug-filtered via has_valid_slug before staging");
-        let index = match &mut self.alias_index {
-            Some(index) => index,
-            slot => slot.insert(build_alias_index(reader, dirs).await?),
+        let registry = match &mut self.registry {
+            Some(registry) => registry,
+            slot => slot.insert(build_registry(reader, dirs).await?),
         };
-        let key = identity_key(&slug).expect("a slug always carries an identity");
-        Ok(index
-            .entry(key)
-            .or_insert_with(|| ConceptIdentity {
-                name: name.to_string(),
+        if let Resolution::Ambiguous { routed, claimants } = registry.resolve(name) {
+            // The vault defect `lore graph lint` reports as a duplicate concept. Routing has
+            // to pick one, and it does so deterministically — but silence here is what would
+            // make a mis-addressed citation impossible to explain afterwards.
+            tracing::warn!(
+                name,
+                resolves_to = %routed.slug,
+                claimants = %claimants.iter().map(|c| c.slug.as_str()).collect::<Vec<_>>().join(", "),
+                "more than one concept page answers to this name"
+            );
+        }
+        Ok(registry.resolve_or_claim(
+            name,
+            ConceptIdentity {
                 slug,
-            })
-            .clone())
+                title: name.to_string(),
+            },
+        ))
     }
 
     pub fn new() -> Self {
         Self {
             drafts: BTreeMap::new(),
-            alias_index: None,
+            registry: None,
         }
     }
 
@@ -200,8 +207,8 @@ impl ConceptDrafts {
                 draft.category = concept.category.clone();
             }
             return ConceptIdentity {
-                name: draft.name.clone(),
                 slug: safe_slug,
+                title: draft.name.clone(),
             };
         }
 
@@ -265,6 +272,7 @@ impl ConceptDrafts {
                     first_seen,
                     last_seen,
                     source_count,
+                    preserved_llm_inputs: capture_llm_inputs(page),
                     preserved_synthesis: capture_section(&page.body, |s| s.concept_synthesis),
                     preserved_sources: capture_section(&page.body, |s| s.concept_sources),
                     preserved_related: capture_section(&page.body, |s| s.related),
@@ -278,6 +286,7 @@ impl ConceptDrafts {
                 first_seen: date,
                 last_seen: date,
                 source_count: 0,
+                preserved_llm_inputs: BTreeMap::new(),
                 preserved_synthesis: None,
                 preserved_sources: None,
                 preserved_related: None,
@@ -288,8 +297,8 @@ impl ConceptDrafts {
         draft.observe(date);
         draft.seed_synthesis(synthesis);
         let identity = ConceptIdentity {
-            name: draft.name.clone(),
             slug: safe_slug.clone(),
+            title: draft.name.clone(),
         };
         self.drafts.insert(safe_slug, draft);
         identity
@@ -368,6 +377,7 @@ impl ConceptDraft {
             // Preserved verbatim — backlinks-sync owns the real count; ingest never
             // recomputes or resets it (new pages start at 0).
             "source_count": self.source_count,
+            "llm_inputs": self.preserved_llm_inputs,
             // Tag with the category id when set, else the literal "concept" — the same
             // invariant `/lore-process` writes, so every concept page carries at least
             // one tag for Obsidian filtering.
@@ -401,32 +411,28 @@ impl ConceptDraft {
     }
 }
 
-/// Capture the body of a logical concept section from an existing page so a
-/// re-render can splice it back in. `section` selects the heading from a locale's
-/// `Strings` (e.g. `|s| s.concept_synthesis`); the page is searched under EVERY
-/// locale's heading for that section, so a page authored before a `vault.locale`
-/// switch is still found — body content is never translated (i18n invariant), only
-/// the structural heading changes. Returns the body verbatim (trimmed of section
-/// framing newlines) for the first locale heading that yields non-empty content.
-fn capture_section(
-    body: &str,
-    section: fn(&lk_core::i18n::Strings) -> &'static str,
-) -> Option<String> {
-    let mut tried: Vec<&str> = Vec::new();
-    for locale in Locale::ALL {
-        let heading = section(locale.strings());
-        if tried.contains(&heading) {
-            continue;
-        }
-        tried.push(heading);
-        if let Some(raw) = section_body(body, heading) {
-            let trimmed = raw.trim_matches('\n');
-            if !trimmed.trim().is_empty() {
-                return Some(trimmed.to_string());
-            }
-        }
-    }
-    None
+/// Capture an existing concept page's `llm_inputs` markers so a re-render re-emits them
+/// unchanged. Only string values are carried: the map is a protocol between the writer of a
+/// section and the reader deciding whether it is answered, and a value of another shape
+/// belongs to neither side of it.
+fn capture_llm_inputs(page: &lk_core::frontmatter::VaultPage) -> BTreeMap<String, String> {
+    page.frontmatter
+        .get(lk_core::frontmatter::field::LLM_INPUTS)
+        .and_then(|v| v.as_object())
+        .into_iter()
+        .flatten()
+        .filter_map(|(key, value)| Some((key.clone(), value.as_str()?.to_string())))
+        .collect()
+}
+
+/// Capture the body of a logical concept section from an existing page so a re-render can
+/// splice it back in. Returns the body trimmed of section framing, or `None` when the page
+/// carries nothing under that section — an empty one has nothing to preserve, and the fresh
+/// render already writes an empty section.
+fn capture_section(body: &str, section: impl lk_vault::SectionKey) -> Option<String> {
+    let found = lk_vault::resolve_section(body, section)?;
+    let trimmed = found.body.trim_matches('\n');
+    (!trimmed.trim().is_empty()).then(|| trimmed.to_string())
 }
 
 /// Surface a genuine category conflict — an established category that a fresh
@@ -447,17 +453,15 @@ fn warn_category_conflict(slug: &str, established: Option<&str>, incoming: Optio
     }
 }
 
-/// Map every name a concept page answers to — its own slug, its title, and each alias —
-/// to that page's identity, so an extraction naming any of them lands on the established
-/// page. Keyed by `lk_core::concept::identity_key`, the same rule `lore graph lint` uses to
-/// report two pages owning one name: what routes here and what the lint calls a duplicate
-/// cannot drift apart.
-async fn build_alias_index(
+/// Read every concept page in the vault into the registry that answers what a name
+/// addresses. A page whose stem is not readable as a slug is skipped — it has no address
+/// for a citation to name.
+async fn build_registry(
     reader: &dyn VaultStore,
     dirs: &VaultDirs,
-) -> Result<BTreeMap<String, ConceptIdentity>, PipelineError> {
+) -> Result<ConceptRegistry, PipelineError> {
     let dir = lk_core::vault_path::concepts_dir(dirs);
-    let mut index: BTreeMap<String, ConceptIdentity> = BTreeMap::new();
+    let mut registry = ConceptRegistry::new();
     for path in reader.list_markdown(&dir).await? {
         let Some(page) = reader.read_page(&path).await? else {
             continue;
@@ -469,86 +473,25 @@ async fn build_alias_index(
             .frontmatter
             .get("title")
             .and_then(|v| v.as_str())
-            .unwrap_or(slug)
-            .to_string();
-        let names = page
+            .unwrap_or(slug);
+        let aliases: Vec<String> = page
             .frontmatter
-            .get("title")
-            .and_then(|v| v.as_str())
+            .get("aliases")
+            .and_then(|v| v.as_array())
             .into_iter()
-            .chain(
-                page.frontmatter
-                    .get("aliases")
-                    .and_then(|v| v.as_array())
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|v| v.as_str()),
-            );
-        let identity = ConceptIdentity {
-            name: title.clone(),
-            slug: slug.to_string(),
-        };
-        // A page owns its own address unconditionally, whatever order the pages are read
-        // in — so a stale alias elsewhere can never redirect a concept away from its own
-        // page. Seeding the stem is what makes that hold for EVERY page: deriving the
-        // claim from the names alone protects only pages whose title or an alias happens
-        // to reproduce the stem, and a page titled more descriptively than its file
-        // (`access-ingress-2axis-model` ← "Access × Ingress 2-Axis Deployment Model") has
-        // no name that does — leaving its address free for another page's alias to take.
-        // A stem that carries no identity at all has no address to seed; its names still
-        // register, so the page keeps answering to them.
-        if let Some(own_key) = identity_key(slug) {
-            // Two pages whose ADDRESSES claim one identity is the same vault defect the
-            // duplicate lint reports, and the router has to pick one. It does so
-            // deterministically (last read wins) but arbitrarily, so say which — silence
-            // here is what would make a mis-addressed citation impossible to explain.
-            // Only when the holder claims the key as its own ADDRESS: a page displaced
-            // because it merely aliased this name is the seed guarantee working, and the
-            // mirror of that case is deliberately silent a few lines below.
-            if let Some(held) = index.get(&own_key)
-                && held.slug != slug
-                && identity_key(&held.slug).as_deref() == Some(own_key.as_str())
-            {
-                tracing::warn!(
-                    identity = %own_key,
-                    now_resolves_to = %slug,
-                    displaced = %held.slug,
-                    "two concept pages are addressed by the same name"
-                );
-            }
-            index.insert(own_key, identity.clone());
-        }
-        for name in names {
-            let Some(key) = identity_key(name) else {
-                continue;
-            };
-            match index.entry(key) {
-                std::collections::btree_map::Entry::Vacant(slot) => {
-                    slot.insert(identity.clone());
-                }
-                std::collections::btree_map::Entry::Occupied(held) => {
-                    // Two pages registering the same alias is a vault defect, not something
-                    // to settle silently. The winner is deterministic (pages are read in
-                    // sorted path order) but arbitrary, and every citation naming the alias
-                    // lands on one page while the other's meaning stays uncited — so it is
-                    // reported like a category conflict and left for a human to merge.
-                    // Losing to a page that holds the key as its own ADDRESS is the seed
-                    // above working, not a conflict.
-                    let held_claims_it_by_name =
-                        identity_key(&held.get().slug).as_deref() != Some(held.key());
-                    if held.get().slug != slug && held_claims_it_by_name {
-                        tracing::warn!(
-                            name = %held.key(),
-                            resolves_to = %held.get().slug,
-                            also_claimed_by = %slug,
-                            "two concept pages claim the same name"
-                        );
-                    }
-                }
-            }
-        }
+            .flatten()
+            .filter_map(|v| v.as_str())
+            .map(String::from)
+            .collect();
+        registry.register(
+            ConceptIdentity {
+                slug: slug.to_string(),
+                title: title.to_string(),
+            },
+            &aliases,
+        );
     }
-    Ok(index)
+    Ok(registry)
 }
 
 /// Filter that callers use to drop concepts whose slug would be empty before threading
@@ -651,6 +594,7 @@ mod tests {
             first_seen: jiff::civil::date(2026, 5, 1),
             last_seen: jiff::civil::date(2026, 5, 1),
             source_count: 0,
+            preserved_llm_inputs: BTreeMap::new(),
             preserved_synthesis: None,
             preserved_sources: None,
             preserved_related: None,
@@ -684,6 +628,7 @@ mod tests {
             first_seen: jiff::civil::date(2026, 5, 1),
             last_seen: jiff::civil::date(2026, 5, 1),
             source_count: 3,
+            preserved_llm_inputs: BTreeMap::new(),
             preserved_synthesis: Some(
                 "Retrieval-Augmented Generation enriches an LLM prompt with retrieved context."
                     .into(),
@@ -731,6 +676,7 @@ mod tests {
             first_seen: jiff::civil::date(2026, 5, 1),
             last_seen: jiff::civil::date(2026, 5, 1),
             source_count: 0,
+            preserved_llm_inputs: BTreeMap::new(),
             preserved_synthesis: None,
             preserved_sources: None,
             preserved_related: None,
@@ -764,6 +710,7 @@ mod tests {
             first_seen: jiff::civil::date(2026, 5, 1),
             last_seen: jiff::civil::date(2026, 5, 1),
             source_count: 0,
+            preserved_llm_inputs: BTreeMap::new(),
             preserved_synthesis: None,
             preserved_sources: None,
             preserved_related: None,

@@ -233,17 +233,20 @@ async fn run_concepts(opts: &super::GlobalOptions, json: bool) -> miette::Result
                 continue;
             }
         };
-        let slug = page
-            .frontmatter
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
+        // The file stem, never the `id` frontmatter: a page's ADDRESS is where it sits, which
+        // is what a link resolves to and what the graph keys a node on. Reading `id` would be
+        // a second answer to the same question, and a page missing the field — hand-authored,
+        // or with frontmatter someone edited — would have no address at all and drop out of a
+        // registry whose whole job is to be complete.
+        let Some(slug) = path.file_stem().and_then(|s| s.to_str()).map(String::from) else {
+            unreadable.push(format!("{}: filename is not valid UTF-8", path.display()));
+            continue;
+        };
         let title = page
             .frontmatter
             .get("title")
             .and_then(|v| v.as_str())
-            .unwrap_or_default()
+            .unwrap_or(&slug)
             .to_string();
         let category = page
             .frontmatter
@@ -268,9 +271,6 @@ async fn run_concepts(opts: &super::GlobalOptions, json: bool) -> miette::Result
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        if slug.is_empty() {
-            continue;
-        }
         entries.push(ConceptEntry {
             slug,
             title,

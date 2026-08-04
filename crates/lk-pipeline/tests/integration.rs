@@ -3188,7 +3188,7 @@ impl CapturedLogs {
 
 /// Two pages whose own ADDRESSES claim one identity is the state the duplicate lint exists
 /// to report, and until a human resolves it the router still has to answer. It answers
-/// deterministically — the concepts dir is read in sorted order and the last stem seen
+/// deterministically — the concepts dir is read in sorted order and the first stem seen
 /// holds the key — and says so with a `tracing::warn`, because a citation landing on the
 /// page a reader did not expect is otherwise unexplainable. Neither page is deleted: the
 /// pair stays on disk for `graph lint` to surface.
@@ -3200,7 +3200,7 @@ async fn two_pages_claiming_one_address_resolve_deterministically() {
 
     let concepts = vault.join("wiki").join("concepts");
     std::fs::create_dir_all(&concepts).unwrap();
-    // `-` sorts before `3`, so `claude-35.md` is read first and `claude35.md` last.
+    // `-` sorts before `3`, so `claude-35.md` is read first and holds the key.
     for slug in ["claude-35", "claude35"] {
         std::fs::write(
             concepts.join(format!("{slug}.md")),
@@ -3249,12 +3249,12 @@ async fn two_pages_claiming_one_address_resolve_deterministically() {
     let rewritten = pipeline.apply_concept_result(&result, page).await.unwrap();
     drop(guard);
     assert!(
-        rewritten.contains("../../wiki/concepts/claude35.md"),
-        "the last stem read holds the key, and it must do so every run: {rewritten}"
+        rewritten.contains("../../wiki/concepts/claude-35.md"),
+        "the first stem read holds the key, and it must do so every run: {rewritten}"
     );
     let logged = logs.text();
     assert!(
-        logged.contains("two concept pages are addressed by the same name")
+        logged.contains("more than one concept page answers to this name")
             && logged.contains("claude-35")
             && logged.contains("claude35"),
         "the arbitrary winner must be said out loud, or a citation landing on the \
@@ -3262,9 +3262,9 @@ async fn two_pages_claiming_one_address_resolve_deterministically() {
     );
     let pages = pipeline.render_concept_pages().await.unwrap();
     assert_eq!(pages.len(), 1);
-    assert!(pages[0].path.to_string().ends_with("claude35.md"));
+    assert!(pages[0].path.to_string().ends_with("claude-35.md"));
     assert!(
-        concepts.join("claude-35.md").exists(),
+        concepts.join("claude35.md").exists(),
         "the losing page must survive for `graph lint` to report the pair"
     );
 }

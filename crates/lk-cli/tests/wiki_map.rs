@@ -230,7 +230,7 @@ fn wiki_concepts_lists_every_concept_with_the_aliases_dedup_needs() {
     .expect("config");
     std::fs::write(
         concepts.join("rag.md"),
-        "---\nid: wiki/concepts/rag\ntype: concept\ntitle: RAG\n\
+        "---\nid: rag\ntype: concept\ntitle: RAG\n\
          aliases: [\"RAG\", \"Retrieval Augmented Generation\", \"retrieval-augmented generation\"]\n\
          category: technique\n\
          source_count: 3\n---\n\n## Synthesis\nR.\n",
@@ -238,7 +238,7 @@ fn wiki_concepts_lists_every_concept_with_the_aliases_dedup_needs() {
     .expect("rag");
     std::fs::write(
         concepts.join("embeddings.md"),
-        "---\nid: wiki/concepts/embeddings\ntype: concept\ntitle: Embeddings\n---\n\n\
+        "---\nid: embeddings\ntype: concept\ntitle: Embeddings\n---\n\n\
          ## Synthesis\nE.\n",
     )
     .expect("embeddings");
@@ -260,7 +260,7 @@ fn wiki_concepts_lists_every_concept_with_the_aliases_dedup_needs() {
 
     let rag = entries
         .iter()
-        .find(|entry| entry["slug"] == "wiki/concepts/rag")
+        .find(|entry| entry["slug"] == "rag")
         .unwrap_or_else(|| panic!("rag missing from the registry: {listed}"));
     assert_eq!(rag["title"], "RAG");
     assert_eq!(rag["category"], "technique");
@@ -280,7 +280,7 @@ fn wiki_concepts_lists_every_concept_with_the_aliases_dedup_needs() {
 
     let embeddings = entries
         .iter()
-        .find(|entry| entry["slug"] == "wiki/concepts/embeddings")
+        .find(|entry| entry["slug"] == "embeddings")
         .unwrap_or_else(|| panic!("embeddings missing from the registry: {listed}"));
     assert_eq!(embeddings["aliases"], serde_json::json!([]));
     assert_eq!(embeddings["source_count"], 0);

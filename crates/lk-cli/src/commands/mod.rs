@@ -10,6 +10,7 @@ pub mod init;
 pub mod maintenance;
 pub mod performance;
 pub mod queue;
+pub mod resolve;
 pub mod schedule;
 pub mod schema;
 pub mod status;
@@ -146,12 +147,22 @@ pub fn build_llm_client(
     config: &lk_core::config::Config,
     vault_root: &Path,
 ) -> miette::Result<Arc<dyn lk_queue::LlmClient>> {
-    match config.llm.provider {
+    Ok(build_llm_client_for(config.llm.provider, vault_root))
+}
+
+/// The client a provider names. Split from [`build_llm_client`] because `lore graph` resolves
+/// its own configuration and holds no `Config` — the provider is the only part of it that
+/// decides where deferred work goes.
+pub fn build_llm_client_for(
+    provider: lk_core::config::LlmProvider,
+    vault_root: &Path,
+) -> Arc<dyn lk_queue::LlmClient> {
+    match provider {
         lk_core::config::LlmProvider::Queue => {
             let queue_dir = vault_root.join(".lorekeeper").join("queue");
-            Ok(Arc::new(lk_queue::QueueLlmClient::new(queue_dir)))
+            Arc::new(lk_queue::QueueLlmClient::new(queue_dir))
         }
-        lk_core::config::LlmProvider::Noop => Ok(Arc::new(lk_queue::NoopLlmClient)),
+        lk_core::config::LlmProvider::Noop => Arc::new(lk_queue::NoopLlmClient),
     }
 }
 

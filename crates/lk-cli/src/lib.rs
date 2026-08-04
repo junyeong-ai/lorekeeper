@@ -115,6 +115,18 @@ pub enum Command {
         #[command(subcommand)]
         command: commands::graph::GraphCommand,
     },
+    /// Answer which concept page a name addresses — the question the ingest pipeline asks
+    /// before it routes an extraction, so a caller can ask it before writing a page
+    Resolve {
+        /// The concept name to look up, in any spelling
+        name: String,
+        /// Emit the answer as JSON
+        #[arg(long)]
+        json: bool,
+        /// Vault root override (default: vault.root from config)
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
     /// Wiki-level utilities (catalog generation, future maintenance ops)
     Wiki {
         #[command(subcommand)]
@@ -163,7 +175,14 @@ pub async fn run() -> miette::Result<()> {
         command,
     } = cli.command
     {
-        let code = commands::graph::run(&opts, command, json, root);
+        let code = commands::graph::run(&opts, command, json, root).await;
+        std::process::exit(code);
+    }
+
+    // Its exit code IS the answer — 0 owned, 1 absent, 2 ambiguous — so it bypasses miette
+    // for the same reason `graph` does.
+    if let Command::Resolve { name, json, root } = cli.command {
+        let code = commands::resolve::run(&opts, name, json, root).await;
         std::process::exit(code);
     }
 
@@ -191,7 +210,7 @@ pub async fn run() -> miette::Result<()> {
             pipeline_dir,
         } => commands::schedule::run(&opts, &bin, format, pipeline_dir.as_deref()).await,
         Command::Maintenance { dry_run } => commands::maintenance::run(&opts, dry_run).await,
-        Command::Graph { .. } => unreachable!(),
+        Command::Graph { .. } | Command::Resolve { .. } => unreachable!(),
         Command::Wiki { cmd } => commands::wiki::run(&opts, cmd).await,
         Command::Queue { command } => commands::queue::run(&opts, command).await,
     }

@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use lk_core::concept::ConceptIdentity;
 use lk_core::config::{HighlightSection, SourceType, VaultDirs};
 use lk_core::event::Event;
 use lk_core::frontmatter::field;
@@ -85,7 +86,7 @@ pub fn concepts_dir_dest(vault_path: &str, dirs: &VaultDirs) -> String {
 /// elsewhere — so deriving it here again would point the citation at a page that was never
 /// written.
 pub(crate) fn concept_links(
-    concepts: &[crate::concept_draft::ConceptIdentity],
+    concepts: &[ConceptIdentity],
     vault_path: &str,
     dirs: &VaultDirs,
 ) -> Vec<String> {
@@ -96,7 +97,7 @@ pub(crate) fn concept_links(
             format!(
                 "- {}",
                 link::md_link(
-                    &c.name,
+                    &c.title,
                     &format!("{base}/{}.md", link::encode_dest(&c.slug))
                 )
             )
@@ -141,10 +142,10 @@ pub(crate) fn concept_links(
 /// LLM-owned; hand-authored prose belongs in a section that is not.
 pub(crate) fn accumulate_concepts(
     cited: Option<&str>,
-    extracted: Vec<crate::concept_draft::ConceptIdentity>,
+    extracted: Vec<ConceptIdentity>,
     vault_path: &str,
     dirs: &VaultDirs,
-) -> Vec<crate::concept_draft::ConceptIdentity> {
+) -> Vec<ConceptIdentity> {
     let page = Path::new(vault_path);
     let concepts_dir = lk_core::vault_path::concepts_dir(dirs);
     let mut seen = std::collections::HashSet::new();
@@ -185,9 +186,9 @@ pub(crate) fn accumulate_concepts(
         // spelling here would repoint a citation on the strength of a name, which is
         // `lore graph normalize`'s job — it renames the page in the same pass.
         if claim(slug) {
-            concepts.push(crate::concept_draft::ConceptIdentity {
-                name: cite.text,
+            concepts.push(ConceptIdentity {
                 slug: slug.to_string(),
+                title: cite.text,
             });
         }
     }
@@ -228,7 +229,7 @@ pub struct DailyRenderContext<'a> {
     pub events: &'a [&'a Event],
     pub labels: &'a [String],
     pub summary: &'a str,
-    pub concepts: &'a [crate::concept_draft::ConceptIdentity],
+    pub concepts: &'a [ConceptIdentity],
     /// Whether this source extracts concepts. Templates render the `## Related Concepts`
     /// section only when true, so a source that opts out (`extract_concepts: false`,
     /// e.g. a personal work-log feed) doesn't carry a permanently-empty section.
@@ -367,7 +368,7 @@ pub struct DocumentRenderContext<'a> {
     pub slug: &'a str,
     pub event: &'a Event,
     pub summary: &'a str,
-    pub concepts: &'a [crate::concept_draft::ConceptIdentity],
+    pub concepts: &'a [ConceptIdentity],
     pub extract_concepts: bool,
     pub locale: Locale,
     pub llm_inputs: DocumentLlmInputHashes<'a>,
@@ -587,17 +588,14 @@ mod tests {
         }
     }
 
-    fn identity(name: &str, slug: &str) -> crate::concept_draft::ConceptIdentity {
-        crate::concept_draft::ConceptIdentity {
-            name: name.into(),
+    fn identity(title: &str, slug: &str) -> ConceptIdentity {
+        ConceptIdentity {
             slug: slug.into(),
+            title: title.into(),
         }
     }
 
-    fn accumulated(
-        cited: Option<&str>,
-        extracted: Vec<crate::concept_draft::ConceptIdentity>,
-    ) -> Vec<(String, String)> {
+    fn accumulated(cited: Option<&str>, extracted: Vec<ConceptIdentity>) -> Vec<(String, String)> {
         accumulate_concepts(
             cited,
             extracted,
@@ -605,7 +603,7 @@ mod tests {
             &VaultDirs::default(),
         )
         .into_iter()
-        .map(|c| (c.name, c.slug))
+        .map(|c| (c.title, c.slug))
         .collect()
     }
 

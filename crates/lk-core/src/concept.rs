@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
 
@@ -9,6 +11,16 @@ pub struct ExtractedConcept {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
+}
+
+/// The concept page a name resolves to: the ADDRESS it is written at and the TITLE it
+/// is displayed under. The two are independent — a renamed or merged concept keeps its
+/// original slug and records the new name as an alias, which is what keeps every existing
+/// citation resolving.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ConceptIdentity {
+    pub slug: String,
+    pub title: String,
 }
 
 /// Normalize an arbitrary name into a path-safe slug.
@@ -104,9 +116,191 @@ pub fn identity_key(name: &str) -> Option<String> {
     Some(key)
 }
 
+/// The identity of a concept's EVIDENCE: BLAKE3-128 over the set of pages that cite it,
+/// in the same 32-hex form every other cache key in the vault takes.
+///
+/// The SET, never the rendered citation list. A source page that is retitled changes how a
+/// citation reads without changing what it is, and a digest taken over the rendered text
+/// would call that a change of evidence — resurfacing a concept whose material is identical.
+/// Sorted and deduplicated before hashing, so the same evidence digests identically however
+/// it was collected, and serialized as a JSON array so no id can be confused with a pair of
+/// shorter ones.
+///
+/// Single-sourced because two crates must produce the same string: `lore graph
+/// backlinks-sync` records it on the concept page as the input its `## Synthesis` is owed
+/// against, and the queued task carries it as the input it answers.
+pub fn citation_digest(citations: &[String]) -> String {
+    let mut set: Vec<&str> = citations.iter().map(String::as_str).collect();
+    set.sort_unstable();
+    set.dedup();
+    let bytes = serde_json::to_vec(&set).expect("a string array always serializes");
+    blake3::hash(&bytes).to_hex()[..32].to_string()
+}
+
+/// What a name resolves to in a [`ConceptRegistry`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Resolution {
+    /// Exactly one page answers to this name.
+    Owned(ConceptIdentity),
+    /// More than one page answers to it — the vault defect `lore graph lint` reports as a
+    /// duplicate concept. A writer still has to address the citation somewhere, so the
+    /// deterministic choice is named alongside every claimant rather than left implicit.
+    Ambiguous {
+        routed: ConceptIdentity,
+        claimants: Vec<ConceptIdentity>,
+    },
+    /// No page answers to this name.
+    Absent,
+}
+
+impl Resolution {
+    /// The page a citation of this name addresses, or `None` when nothing answers to it.
+    pub fn routed(&self) -> Option<&ConceptIdentity> {
+        match self {
+            Resolution::Owned(identity)
+            | Resolution::Ambiguous {
+                routed: identity, ..
+            } => Some(identity),
+            Resolution::Absent => None,
+        }
+    }
+}
+
+/// Every name the vault's concept pages answer to, keyed by [`identity_key`].
+///
+/// One name reaches one page however its separators fall (`VectorDB` finds `vector-db.md`),
+/// and a page answers to its own address, its title, and each of its aliases. The lookup is
+/// EXACT on both sides: a name either IS one this vault already answers to, or it is a new
+/// concept. There is no score, no threshold and no morphology — whether two different names
+/// mean one concept is a judgment about meaning, and it lives in `/lore-wiki audit`.
+///
+/// Single-sourced because the two planes must agree: the ingest pipeline routes an extracted
+/// name to the page owning it, and a reader asks whether a name is already taken before
+/// writing a second page beside the canonical one. Computing the answer twice is what splits
+/// a concept's citations by spelling.
+#[derive(Debug, Default)]
+pub struct ConceptRegistry {
+    entries: BTreeMap<String, Claims>,
+}
+
+/// The pages answering to one identity, split by HOW they claim it. Both lists keep every
+/// claimant in registration order, and routing takes the first of the first non-empty one:
+/// a page's own ADDRESS outranks any other page's name, so a stale alias can never redirect
+/// a concept away from its own page, and among equals the earliest registration wins. One
+/// rule, so a citation's destination is reproducible without knowing how many pages claim
+/// the name or in which order they were read.
+#[derive(Debug, Default)]
+struct Claims {
+    address: Vec<ConceptIdentity>,
+    named: Vec<ConceptIdentity>,
+}
+
+impl Claims {
+    fn routed(&self) -> Option<&ConceptIdentity> {
+        self.address.first().or_else(|| self.named.first())
+    }
+
+    fn claimants(&self) -> Vec<ConceptIdentity> {
+        let mut out = self.address.clone();
+        for identity in &self.named {
+            if !out.iter().any(|held| held.slug == identity.slug) {
+                out.push(identity.clone());
+            }
+        }
+        out
+    }
+
+    fn holds(&self, slug: &str) -> bool {
+        self.address
+            .iter()
+            .chain(&self.named)
+            .any(|c| c.slug == slug)
+    }
+}
+
+impl ConceptRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register every name one concept page answers to.
+    ///
+    /// A page claims its own ADDRESS unconditionally, whatever order pages are registered in.
+    /// Deriving the claim from names alone would protect only pages whose title or an alias
+    /// happens to reproduce the stem — a page titled more descriptively than its file
+    /// (`access-ingress-2axis-model` ← "Access × Ingress 2-Axis Deployment Model") has no such
+    /// name, leaving its address free for another page's alias to take and sending every
+    /// citation of its own name elsewhere. A stem carrying no identity has no address to seed;
+    /// its names still register, so the page keeps answering to them.
+    pub fn register(&mut self, identity: ConceptIdentity, aliases: &[String]) {
+        if let Some(key) = identity_key(&identity.slug) {
+            let claims = self.entries.entry(key).or_default();
+            if !claims.address.iter().any(|a| a.slug == identity.slug) {
+                claims.address.push(identity.clone());
+            }
+        }
+        for name in std::iter::once(&identity.title).chain(aliases) {
+            let Some(key) = identity_key(name) else {
+                continue;
+            };
+            let claims = self.entries.entry(key).or_default();
+            if !claims.holds(&identity.slug) {
+                claims.named.push(identity.clone());
+            }
+        }
+    }
+
+    /// The page answering to `name`.
+    pub fn resolve(&self, name: &str) -> Resolution {
+        let Some(claims) = identity_key(name).and_then(|key| self.entries.get(&key)) else {
+            return Resolution::Absent;
+        };
+        let claimants = claims.claimants();
+        match claims.routed() {
+            None => Resolution::Absent,
+            Some(routed) if claimants.len() == 1 => Resolution::Owned(routed.clone()),
+            Some(routed) => Resolution::Ambiguous {
+                routed: routed.clone(),
+                claimants,
+            },
+        }
+    }
+
+    /// Resolve `name`, recording `identity` as the page that answers to it when nothing does
+    /// yet, and return the page a citation of it addresses.
+    ///
+    /// Recording the decision is what makes resolution self-consistent for the rest of a run:
+    /// a caller that renders a citation before folding anything, and a caller that stages a
+    /// whole batch before folding any of it, both need every spelling of one name to reach the
+    /// same page. The first spelling seen fixes the address; the title is whichever spelling
+    /// created the page.
+    pub fn resolve_or_claim(&mut self, name: &str, identity: ConceptIdentity) -> ConceptIdentity {
+        let resolved = self.resolve(name);
+        if let Some(routed) = resolved.routed() {
+            return routed.clone();
+        }
+        self.register(identity.clone(), &[]);
+        identity
+    }
+
+    /// Every name the vault answers to, in identity order, with the page each resolves to.
+    pub fn names(&self) -> impl Iterator<Item = (&str, Resolution)> {
+        self.entries
+            .keys()
+            .map(|key| (key.as_str(), self.resolve(key)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn identity(slug: &str, title: &str) -> ConceptIdentity {
+        ConceptIdentity {
+            slug: slug.to_owned(),
+            title: title.to_owned(),
+        }
+    }
 
     #[test]
     fn slugify_basic() {
@@ -234,5 +428,186 @@ mod tests {
         let decomposed = "\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af}"; // ㅎㅏㄴㄱㅡㄹ jamo
         assert_eq!(slugify(composed), slugify(decomposed));
         assert!(slugify(composed).is_some());
+    }
+
+    #[test]
+    fn a_page_answers_to_its_address_its_title_and_every_alias() {
+        let mut registry = ConceptRegistry::new();
+        registry.register(
+            identity(
+                "retrieval-augmented-generation",
+                "Retrieval-Augmented Generation",
+            ),
+            &["RAG".to_owned()],
+        );
+
+        for name in [
+            "retrieval-augmented-generation",
+            "Retrieval-Augmented Generation",
+            "RAG",
+            "rag",
+        ] {
+            assert_eq!(
+                registry.resolve(name).routed().map(|i| i.slug.as_str()),
+                Some("retrieval-augmented-generation"),
+                "{name}"
+            );
+        }
+        assert_eq!(registry.resolve("vector-db"), Resolution::Absent);
+    }
+
+    /// A page whose title reproduces nothing of its filename still owns its address, so a
+    /// citation written at that address reaches it rather than whichever page happens to
+    /// alias the same identity.
+    #[test]
+    fn an_address_outranks_another_pages_alias() {
+        let mut registry = ConceptRegistry::new();
+        registry.register(
+            identity(
+                "access-ingress-2axis-model",
+                "Access × Ingress 2-Axis Deployment Model",
+            ),
+            &[],
+        );
+        registry.register(
+            identity("deployment-topology", "Deployment Topology"),
+            &["access ingress 2axis model".to_owned()],
+        );
+
+        let resolved = registry.resolve("access-ingress-2axis-model");
+        assert_eq!(
+            resolved.routed().map(|i| i.slug.as_str()),
+            Some("access-ingress-2axis-model")
+        );
+        assert!(
+            matches!(resolved, Resolution::Ambiguous { .. }),
+            "both pages answer to the name, and a reader has to be told"
+        );
+    }
+
+    /// Registration order decides nothing a reader can see: whichever page is registered
+    /// first, the answer names every claimant.
+    #[test]
+    fn two_pages_answering_to_one_name_resolve_ambiguous_either_way() {
+        let register = |registry: &mut ConceptRegistry, which| match which {
+            0 => registry.register(identity("doc-hub", "Doc Hub"), &[]),
+            _ => registry.register(
+                identity("docs-portal", "Docs Portal"),
+                &["Doc Hub".to_owned()],
+            ),
+        };
+
+        for order in [[0, 1], [1, 0]] {
+            let mut registry = ConceptRegistry::new();
+            for which in order {
+                register(&mut registry, which);
+            }
+
+            let Resolution::Ambiguous { claimants, .. } = registry.resolve("Doc Hub") else {
+                panic!("two pages answer to `Doc Hub`, registered {order:?}");
+            };
+            let mut slugs: Vec<&str> = claimants.iter().map(|i| i.slug.as_str()).collect();
+            slugs.sort_unstable();
+            assert_eq!(slugs, vec!["doc-hub", "docs-portal"]);
+        }
+    }
+
+    /// The name a page is claimed under is the one every later spelling of it resolves to,
+    /// so a batch that sees `VectorDB` and `Vector DB` addresses one page rather than two.
+    #[test]
+    fn a_claimed_name_answers_every_spelling_of_itself() {
+        let mut registry = ConceptRegistry::new();
+        let claimed = registry.resolve_or_claim("VectorDB", identity("vectordb", "VectorDB"));
+        assert_eq!(claimed.slug, "vectordb");
+
+        assert_eq!(
+            registry
+                .resolve_or_claim("Vector DB", identity("vector-db", "Vector DB"))
+                .slug,
+            "vectordb",
+            "the second spelling must not mint a rival page"
+        );
+        assert_eq!(
+            registry
+                .resolve("vector-db")
+                .routed()
+                .map(|i| i.slug.as_str()),
+            Some("vectordb")
+        );
+    }
+
+    #[test]
+    fn claiming_never_displaces_an_established_page() {
+        let mut registry = ConceptRegistry::new();
+        registry.register(identity("vector-db", "Vector DB"), &[]);
+
+        let resolved = registry.resolve_or_claim("VectorDB", identity("vectordb", "VectorDB"));
+        assert_eq!(resolved.slug, "vector-db");
+        assert_eq!(resolved.title, "Vector DB");
+    }
+
+    /// Two FILES whose stems reduce to one identity both keep their claim. Collapsing them
+    /// to the survivor would leave a citation landing on the page a reader did not expect
+    /// with nothing to explain why, and `lore graph lint` reporting a pair the resolver
+    /// cannot see.
+    #[test]
+    fn two_files_addressed_by_one_identity_both_stay_claimants() {
+        let mut registry = ConceptRegistry::new();
+        registry.register(identity("claude-35", "claude-35"), &[]);
+        registry.register(identity("claude35", "claude35"), &[]);
+
+        let Resolution::Ambiguous { routed, claimants } = registry.resolve("claude 35") else {
+            panic!("two files answer to this address");
+        };
+        assert_eq!(routed.slug, "claude-35", "the earliest registration routes");
+        assert_eq!(
+            claimants
+                .iter()
+                .map(|c| c.slug.as_str())
+                .collect::<Vec<_>>(),
+            vec!["claude-35", "claude35"]
+        );
+    }
+
+    #[test]
+    fn a_citation_digest_is_the_set_not_the_order_or_the_repetition() {
+        let a = citation_digest(&["daily/x/2026-01-01".into(), "wiki/documents/spec".into()]);
+        let b = citation_digest(&["wiki/documents/spec".into(), "daily/x/2026-01-01".into()]);
+        let c = citation_digest(&[
+            "daily/x/2026-01-01".into(),
+            "wiki/documents/spec".into(),
+            "daily/x/2026-01-01".into(),
+        ]);
+        assert_eq!(a, b, "collection order is not evidence");
+        assert_eq!(a, c, "one page cited twice is one citation");
+        assert_eq!(a.len(), 32);
+    }
+
+    #[test]
+    fn a_citation_digest_separates_every_distinct_set() {
+        let empty = citation_digest(&[]);
+        let one = citation_digest(&["daily/x/2026-01-01".into()]);
+        let other = citation_digest(&["daily/x/2026-01-02".into()]);
+        let both = citation_digest(&["daily/x/2026-01-01".into(), "daily/x/2026-01-02".into()]);
+        let all = [&empty, &one, &other, &both];
+        for (i, left) in all.iter().enumerate() {
+            for right in &all[i + 1..] {
+                assert_ne!(left, right);
+            }
+        }
+
+        // Ids are joined through a JSON array, so no split of one id reproduces another set.
+        assert_ne!(
+            citation_digest(&["a/b".into()]),
+            citation_digest(&["a".into(), "b".into()])
+        );
+    }
+
+    #[test]
+    fn a_name_carrying_no_identity_resolves_to_nothing() {
+        let mut registry = ConceptRegistry::new();
+        registry.register(identity("rag", "RAG"), &[]);
+        assert_eq!(registry.resolve("---"), Resolution::Absent);
+        assert_eq!(registry.resolve(""), Resolution::Absent);
     }
 }
