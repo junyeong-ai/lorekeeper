@@ -172,12 +172,22 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   **A prefix declared on a grammar it cannot match is worse than an absent one**: it reads as
   coverage while matching no token the issuer ever minted, and nothing fails to reveal it —
   `xoxr-` sat in the two-id group, where a legacy token carrying no ids matched nothing, for
-  as long as it was declared. Widths therefore track what the issuer mints, checked against
-  it rather than assumed: `AKIA` at twenty rather than the sixteen-to-128 AWS permits, Slack
-  ids at nine (one under the ten-to-thirteen it mints), the rotating secret at sixty (well
-  under the 146 of a refresh token and the 163–166 of a configuration access token, so a
-  re-mint at another width is still caught). Each accepts a silent miss to buy a believable
-  finding, and each is commented at its grammar with the width it was set against.
+  as long as it was declared. The same defect hides behind a prefix that is genuinely covered
+  for ANOTHER shape, which is subtler and was there twice: `xoxe-` matched the 146-character
+  rotating form while the three-id user token that may also carry it was rejected, and
+  `xoxb-`'s two-field legacy form was rejected by all three floors of the modern one. So **a
+  prefix carries every shape its issuer mints, each as its own grammar** — `find_map` falls
+  through, so a prefix failing one is tried against the next — and each shape is pinned by a
+  test, since a later narrowing is exactly what drops one silently.
+  Widths track what the issuer mints, checked against it rather than assumed: `AKIA` at twenty
+  rather than the sixteen-to-128 AWS permits, Slack ids at nine (one under the ten-to-thirteen
+  it mints, and above the eight the legacy bot form permits, because eight digits is a date),
+  the rotating secret at sixty (well under the 146 of a refresh token and the 163–166 of a
+  configuration access token, so a re-mint at another width is still caught). Each accepts a
+  silent miss to buy a believable finding, and each is commented at its grammar with the width
+  it was set against. A prefix with NO published widths is dropped rather than carried on
+  invented ones — `xoxc-`, for which no issuer or scanner publishes a grammar at all, and
+  `xoxs-`, whose one published rule bounds no field.
 - **`text::collapse_blank_lines`** squeezes 3+ newlines to a paragraph break,
   strips `\r`. Single source consumed by lk-vault, lk-pipeline, lk-source.
 - **`frontmatter::field`** single-sources this system's PRIVATE machine-coordination

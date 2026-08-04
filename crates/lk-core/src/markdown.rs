@@ -165,7 +165,7 @@ fn upper_alnum(c: char) -> bool {
 /// The grammars, each as its issuer publishes it. Exact lengths where the issuer mints a
 /// fixed width; a floor elsewhere, because a prefix a vendor reserved is a finding whatever
 /// length follows it and pinning a width the vendor later changes would miss real keys.
-fn credential_grammars() -> [CredentialGrammar; 11] {
+fn credential_grammars() -> [CredentialGrammar; 12] {
     [
         CredentialGrammar {
             form: CredentialForm::GitHubToken,
@@ -190,11 +190,27 @@ fn credential_grammars() -> [CredentialGrammar; 11] {
         // The rotating forms nest the bot/user prefix behind `xoxe.`, so they are listed in
         // their own right: the scan takes the LONGEST prefix at a position, which is what
         // keeps one token from being read as the shorter form it contains.
+        // One PREFIX carries as many published shapes as the issuer mints, and each is its own
+        // grammar: a prefix that fails one falls through to the next. A shape filed under a
+        // grammar that cannot express it is silently uncovered behind a prefix that looks
+        // covered — which is how the three-id `xoxe-` below and the legacy two-field `xoxb-`
+        // were both missed while their prefixes matched other shapes fine.
+        //
+        // `xoxc-` and `xoxs-` are deliberately absent. No issuer or scanner publishes a
+        // grammar for `xoxc-` at all (it is a browser session token, and what circulates for
+        // it is a catch-all over any alphabet, which is not a grammar in this module's sense);
+        // `xoxs-` shares one published rule with `xoxo-` and that rule bounds nothing —
+        // `xox[os]-\d+-\d+-\d+-[a-fA-F\d]+` — so every floor it was declared with here was
+        // invented. Both were carried on assumed widths, which is the thing this module says
+        // it does not do.
         CredentialGrammar {
             form: CredentialForm::SlackToken,
-            prefixes: &["xoxb-", "xoxp-", "xoxc-", "xoxs-"],
+            prefixes: &["xoxb-", "xoxp-", "xoxe-"],
             body: base62_extended,
             body_len: 30..=255,
+            // Two ids and a secret, or three and a secret — a user token carries a third. The
+            // floors describe the leading two either way, so both shapes land here, and
+            // `xoxe-` belongs among them because a user token may carry that prefix too.
             min_fields: 3,
             numeric_fields: 2,
             // Requiring the WIDTH of the two ids and not merely digit-ness is what closes the
@@ -238,6 +254,23 @@ fn credential_grammars() -> [CredentialGrammar; 11] {
             numeric_fields: 1,
             numeric_field_digits: 1,
             min_unbroken_run: 60,
+        },
+        // Slack's LEGACY bot token is two fields — one id and an alphanumeric secret — so the
+        // three-field group above rejects it on every floor it has. The prefix is live and
+        // matches the modern shape, which is exactly why nothing surfaced this.
+        //
+        // The published id floor is eight digits and this asks nine, for the reason the modern
+        // floor does: eight digits is a date, and `xoxb-20260101-<a compound word>` is a
+        // sentence. A workspace whose id is that old is a silent miss.
+        CredentialGrammar {
+            form: CredentialForm::SlackToken,
+            prefixes: &["xoxb-"],
+            body: base62_extended,
+            body_len: 28..=255,
+            min_fields: 2,
+            numeric_fields: 1,
+            numeric_field_digits: 9,
+            min_unbroken_run: 18,
         },
         CredentialGrammar {
             form: CredentialForm::SlackAppToken,
@@ -858,16 +891,69 @@ mod tests {
             "a secret carrying a hyphen is still a secret"
         );
 
-        // And the ids never satisfy the run themselves: the digit rules already answer for
-        // them, and a body whose only long field is numeric carries no secret at all.
+        // And a field the grammar counted as an ID never satisfies the run itself: the digit
+        // rules already answer for those, and a body whose only long fields are the ids
+        // carries no secret at all. `xoxp-` has one published shape, so no other grammar can
+        // read this body as something else.
         assert!(
             forms(&shaped(&[
-                "xoxb",
+                "xoxp",
                 "-1234567890123456789012345-",
                 "1234567890123456789012345-x"
             ]))
             .is_empty()
         );
+    }
+
+    /// A prefix carries every shape its issuer mints, and a shape filed under a grammar that
+    /// cannot express it is uncovered behind a prefix that looks covered — which is how both
+    /// of these were missed while their prefixes matched other shapes fine. `xoxe-` is a user
+    /// token as well as a rotating one; `xoxb-` has a two-field legacy form beside the modern
+    /// three-field one. Each shape is pinned here so a later narrowing cannot drop one
+    /// silently the way it did.
+    #[test]
+    fn every_published_shape_of_a_prefix_is_covered() {
+        for line in [
+            // A user token, which `xox[pe]` says may carry either prefix: three ids, secret 28.
+            shaped(&[
+                "xoxp",
+                "-123456789012-123456789012-123456789012-",
+                &"abcdefghij0123456789".repeat(2)[..28],
+            ]),
+            shaped(&[
+                "xoxe",
+                "-123456789012-123456789012-123456789012-",
+                &"abcdefghij0123456789".repeat(2)[..28],
+            ]),
+            // A legacy bot token: one id, secret 18.
+            shaped(&["xoxb", "-12345678901-", &"abcdefghij0123456789"[..18]]),
+            // And the rotating form the same prefix also carries.
+            shaped(&["xoxe", "-1-", &"abcdefghij0123456789".repeat(8)[..146]]),
+        ] {
+            assert_eq!(forms(&line), vec![CredentialForm::SlackToken], "{line}");
+        }
+    }
+
+    /// A prefix carried on widths nobody publishes is the thing this module says it does not
+    /// do. `xoxc-` has no issuer or scanner grammar at all, and `xoxs-` shares one published
+    /// rule with `xoxo-` that bounds no field — so every floor either was declared with was
+    /// invented here.
+    #[test]
+    fn a_prefix_with_no_published_widths_is_out_of_scope() {
+        for line in [
+            shaped(&[
+                "xoxc",
+                "-123456789012-123456789012-123456789012-",
+                &"abcdefghij0123456789".repeat(2)[..32],
+            ]),
+            shaped(&[
+                "xoxs",
+                "-123456789012-123456789012-123456789012-",
+                "abcdef0123456789abcdef0123456789",
+            ]),
+        ] {
+            assert!(forms(&line).is_empty(), "{line}");
+        }
     }
 
     /// The legacy WORKSPACE tokens are out of scope, and the miss is deliberate: their
