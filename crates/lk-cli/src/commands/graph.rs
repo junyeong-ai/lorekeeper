@@ -430,14 +430,29 @@ async fn enqueue_syntheses(
     rc: &ResolvedConfig,
     owed: &[backlinks::ConceptResynthesis],
 ) -> Result<usize, String> {
-    // A task already waiting is the same task. This sweep runs on every pipeline pass and by
-    // hand, and re-queueing what a drain has not reached yet accumulates identical jobs that
-    // all classify `current` — so `queue prune` keeps them and the drain does the work again
-    // for each. The ingest path has no such hazard: a re-render REPLACES that run's file.
-    let pending = pending_synthesis_targets(&rc.root);
+    // A task already waiting for the SAME INPUT is the same task. This sweep runs on every
+    // pipeline pass and by hand, and re-queueing what a drain has not reached yet accumulates
+    // identical jobs that all classify `current` — so `queue prune` keeps them and the drain
+    // does the work again for each. The ingest path has no such hazard: a re-render REPLACES
+    // that run's file.
+    //
+    // Keyed on the input, never on the page alone. A citation set can move while a task for
+    // that page is still waiting — an ordinary page deletion does it — and the waiting task
+    // then answers an input the page no longer carries, which `queue status` calls `stale`.
+    // Suppressing on the page would leave the page's recorded input with nothing that can
+    // ever answer it: `queue count` counts only current work, so the drain is skipped, so the
+    // file is never archived, so the stale task pins the page forever. That is the exact
+    // finding-that-never-clears `SynthesisPolicy` exists to prevent, reached through another
+    // door. A changed digest is different work and always queues.
+    let pending = pending_synthesis_inputs(&rc.root);
     let owed: Vec<&backlinks::ConceptResynthesis> = owed
         .iter()
-        .filter(|entry| !pending.contains(&entry.path.to_string_lossy().into_owned()))
+        .filter(|entry| {
+            !pending.contains(&(
+                entry.path.to_string_lossy().into_owned(),
+                lk_core::concept::citation_digest(&entry.citations),
+            ))
+        })
         .collect();
     if owed.is_empty() {
         return Ok(0);
@@ -460,14 +475,17 @@ async fn enqueue_syntheses(
     Ok(owed.len())
 }
 
-/// The `vault_path` of every concept-synthesis task already waiting in the queue.
+/// The `(vault_path, cache_hash)` of every concept-synthesis task already waiting in the
+/// queue — the page each answers and the input it answers for.
 ///
 /// Read straight off the pending files rather than through a classification: the question is
-/// only whether this exact work is already asked for, and a task whose page moved on is
-/// `stale` — which `queue prune` drops and the next sweep re-queues, so treating it as
-/// pending here costs one cycle and never loses the work. An unreadable queue file yields
-/// nothing, which re-queues rather than skips.
-fn pending_synthesis_targets(vault_root: &std::path::Path) -> std::collections::HashSet<String> {
+/// only whether this exact work is already asked for, and the pair answers it exactly. A task
+/// for the same page under a DIFFERENT input is not this work — it is work the page has moved
+/// past — so it never suppresses. An unreadable queue file yields nothing, which re-queues
+/// rather than skips.
+fn pending_synthesis_inputs(
+    vault_root: &std::path::Path,
+) -> std::collections::HashSet<(String, String)> {
     let dir = vault_root.join(".lorekeeper").join("queue");
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return std::collections::HashSet::new();
@@ -481,7 +499,7 @@ fn pending_synthesis_targets(vault_root: &std::path::Path) -> std::collections::
                 .lines()
                 .filter_map(|line| serde_json::from_str::<lk_queue::QueueTask>(line).ok())
                 .filter(|task| task.target.kind == lk_queue::TargetKind::ConceptSynthesis)
-                .map(|task| task.target.vault_path)
+                .map(|task| (task.target.vault_path, task.cache_hash))
                 .collect::<Vec<_>>()
         })
         .collect()

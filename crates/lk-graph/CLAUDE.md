@@ -238,7 +238,8 @@ on-disk state, never from a cached snapshot.
   re-deriving the same judgment, stated as an invariant. The scan is fence-aware (a callout quoted in a
   code block is content, not a marker) and matches the callout type `conflict`
   exactly — `[!note]`/`[!warning]` never fire. Read-only continuous tracking: the
-  lint surfaces it until a human resolves the contradiction and deletes the callout.
+  lint surfaces every open callout; what closes one is the disagreement going away in the
+  sources, which the next rewrite then stops restating.
   This is the only contradiction mechanism — there is no automatic contradiction *detection*
   (it would false-positive on emphasis differences); flagging is an explicit LLM judgment,
   made where the sources are already being read, and `/lore-wiki audit` judges the open ones

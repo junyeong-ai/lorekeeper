@@ -537,10 +537,18 @@ pub fn print_backlinks(r: &BacklinksSyncReport) {
     }
 
     if !r.sync.resynthesize.is_empty() {
+        // The count comes from what was ACTUALLY queued when that differs from what is owed:
+        // a task already waiting for the same input is not queued again, and a line that
+        // always said "queued" would describe a run that queued nothing.
         let fate = if r.sync.dry_run {
-            "would be queued"
+            "would be queued".to_owned()
+        } else if r.queued == r.sync.resynthesize.len() {
+            "queued for the next drain".to_owned()
         } else {
-            "queued for the next drain"
+            format!(
+                "{} queued for the next drain, the rest already waiting",
+                r.queued
+            )
         };
         println!(
             "\nSynthesis owed: {} concept page(s) whose evidence has moved since the section was \
@@ -585,14 +593,17 @@ pub fn print_backlinks(r: &BacklinksSyncReport) {
 
     if !r.sync.skipped.is_empty() {
         // Four states reach this list and the repair differs for each, so the message names
-        // all four rather than the one it happened to be written for.
+        // all four rather than the one it happened to be written for. A page missing only its
+        // SYNTHESIS heading is not among them — that one keeps its citations and is reported
+        // above — so naming it here would send a reader after a repair that cannot apply.
         println!(
             "\nSkipped: {} concept page(s) with nowhere to record what the citation graph says \
              about them — the sources list, source_count and the synthesis input all stay stale \
              until the page is repaired. A page with no frontmatter block needs one added; \
-             frontmatter that will not parse needs the YAML fixed; a page missing its sources or \
-             synthesis heading needs it back, in any locale's spelling; one with no `llm_inputs:` \
-             mapping needs that line",
+             frontmatter that will not parse needs the YAML fixed; a page missing its sources \
+             heading needs it back, in any locale's spelling; and an `llm_inputs:` written as \
+             an inline `{{…}}` mapping needs rewriting as a block mapping — the line is there, \
+             but nothing can add a key to it without dropping the ones it holds",
             r.sync.skipped.len()
         );
         for path in &r.sync.skipped {
