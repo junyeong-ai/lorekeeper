@@ -196,10 +196,10 @@ fn credential_grammars() -> [CredentialGrammar; 12] {
         // covered — which is how the three-id `xoxe-` below and the legacy two-field `xoxb-`
         // were both missed while their prefixes matched other shapes fine.
         //
-        // `xoxc-` and `xoxs-` are deliberately absent. No issuer or scanner publishes a
-        // grammar for `xoxc-` at all (it is a browser session token, and what circulates for
-        // it is a catch-all over any alphabet, which is not a grammar in this module's sense);
-        // `xoxs-` shares one published rule with `xoxo-` and that rule bounds nothing —
+        // `xoxc-` and `xoxs-` are deliberately absent. Neither of the two widely-deployed
+        // scanners covers either: `xoxc-` is a browser session token, and what circulates for
+        // it is a catch-all over any alphabet, which is not a grammar in this module's sense.
+        // `xoxs-` appears in one rule, shared with `xoxo-`, that bounds nothing —
         // `xox[os]-\d+-\d+-\d+-[a-fA-F\d]+` — so every floor it was declared with here was
         // invented. Both were carried on assumed widths, which is the thing this module says
         // it does not do.
@@ -492,16 +492,18 @@ fn scan_line<'a>(
 /// long run alone admits any sentence carrying a compound word. Together they describe
 /// `xoxb-<team id>-<app id>-<secret>` and nothing English produces.
 ///
-/// The run is the LONGEST field past the ids, not the last one. Slack mints secrets from an
-/// alphabet that admits `-`, so a hyphen anywhere in one leaves a short final field and a
-/// token that is genuinely there goes unreported — the more likely the wider the secret, which
-/// is the wrong way round. Measuring past the ids rather than over every field is what keeps
-/// the ids from satisfying the run themselves: they are already answered for by the digit
-/// rules, and a body whose only long field is numeric carries no secret at all.
+/// The run is the LONGEST field past the ids, not the last one. Measuring past the ids rather
+/// than over every field is what keeps the ids from satisfying the run themselves: they are
+/// already answered for by the digit rules, and a body whose only long fields are the ids
+/// carries no secret at all.
 ///
-/// A secret broken so that NO piece of it reaches the floor is still a miss. That is the
-/// residual of measuring a run at all, and closing it needs evidence about what the issuer
-/// actually mints inside a secret rather than another threshold.
+/// Taking the longest rather than the last is a safety property, not a recall fix. The
+/// evidence says Slack mints no `-` inside a secret: the scanner patterns that appear to
+/// permit one are separating the id from the secret with it, the one pattern that does put it
+/// in secret position is a widening of an older `[a-z0-9]{32}` rule, and the two most recently
+/// documented forms are explicitly hyphen-free. So a secret split such that no piece reaches
+/// the floor is a case that should not arise — and if the issuer ever changes that, this
+/// degrades instead of silently hiding the token, which is the wrong way for a check to fail.
 fn fields_match(body: &str, rule: &PrefixRule) -> bool {
     let fields: Vec<&str> = body.split('-').collect();
     if fields.len() < rule.min_fields || fields.len() <= rule.numeric_fields {
