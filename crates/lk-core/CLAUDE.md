@@ -139,8 +139,18 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   mints — so a hit is a fact about the text rather than a guess, and a clean scan is
   explicitly NOT a statement that no secret is present. Nothing inferred: a 40-character
   base64 run is a key or a hash and the text does not say which, so an entropy rule would fire
-  on every commit id in the vault. Four rules carry the precision: the length gate separates a
-  credential from prose naming its prefix; the left boundary is ALPHANUMERIC rather than the
+  on every commit id in the vault.
+  **A length gate is enough only where the alphabet excludes `-`.** For a grammar whose
+  alphabet admits it — every Slack form — the body alphabet IS the alphabet of English, so a
+  runbook sentence naming a prefix reaches whatever floor a length gate sets. What separates
+  them is the issuer's own FIELD SHAPE, and each field rule closed a prose class the previous
+  one still admitted: `min_fields` (`xapp-` mints four — version, app id, ticket, secret — so
+  `xapp-2-<one long word>` is two and a sentence); `numeric_fields` (the body opens with ids,
+  so `xoxb-please-rotate-…` is not one); `numeric_field_digits`, because digit-ness alone
+  admits a date — `xoxb-2026-01-tokenrotationrunbookforus` has two numeric fields and a long
+  final one; and `min_unbroken_run` on the SECRET, which is the only rule left for the
+  rotating forms, whose version field is one digit and so carries no width to require.
+  Three more rules carry the rest: the left boundary is ALPHANUMERIC rather than the
   grammar's own alphabet, since several alphabets admit `_` and `-` and testing against them
   hides a key written after one; prefixes are tried LONGEST first, so a nested form
   (`xoxe.xoxb-…`) reads as itself rather than as the shorter one inside it; and private-key
@@ -149,6 +159,17 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   stripped before that match — a key pasted into a mail or a Slack thread reaches the vault
   behind `> `, which is exactly the page this ingests. Every occurrence on a line is reported,
   because an operator rotates what the report lists.
+  **Recall is spent freely to keep every finding believable.** A form whose findings a reader
+  learns to scroll past protects nothing, so a prefix that cannot be told from text is
+  DROPPED rather than reported loosely: AWS `ASIA` (an English word ahead of sixteen more
+  uppercase characters), and Anthropic, OpenAI project and admin, PyPI and GitLab keys, whose
+  published prefixes are followed by an alphabet admitting `-` with no field shape to require.
+  Stripe's TEST forms are absent for the opposite reason — they appear in Stripe's own docs
+  and grant nothing, so every hit is a finding with no action behind it. Two widths are pinned
+  narrower than the issuer documents (`AKIA` at the twenty characters AWS mints, and Slack's
+  ids at nine digits) and each accepts a silent miss to buy that. The Slack digit floor is the
+  one rule here read off OBSERVATION rather than off a published grammar; it is commented as
+  such at the grammar.
 - **`text::collapse_blank_lines`** squeezes 3+ newlines to a paragraph break,
   strips `\r`. Single source consumed by lk-vault, lk-pipeline, lk-source.
 - **`frontmatter::field`** single-sources this system's PRIVATE machine-coordination

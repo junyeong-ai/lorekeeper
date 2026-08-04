@@ -197,10 +197,17 @@ fn credential_grammars() -> [CredentialGrammar; 11] {
             body_len: 30..=255,
             min_fields: 3,
             numeric_fields: 2,
-            // Slack mints workspace and app ids at nine digits and up. Requiring the WIDTH
-            // and not merely digit-ness is what closes the last prose shape a field rule
-            // alone admits: `xoxb-2026-01-tokenrotationrunbookforus` has two numeric fields
-            // and a long final one, and is a sentence.
+            // Requiring the WIDTH of the two ids and not merely digit-ness is what closes the
+            // last prose shape a field rule alone admits: `xoxb-2026-01-tokenrotationrunbookforus`
+            // has two numeric fields and a long final one, and is a sentence. A year and a
+            // month are the numbers prose writes; a workspace id is not.
+            //
+            // Slack does not PUBLISH that width, so unlike every other rule here the floor is
+            // read off what it mints: every id observed runs ten digits or more, and this sits
+            // one below the shortest of them so a narrower mint is still caught. A workspace
+            // older than any observed would be a silent miss — the same trade the AWS width
+            // makes below, and the only rule in this module resting on observation rather than
+            // on a published grammar. Widen it if a real token is ever found under it.
             numeric_field_digits: 9,
             min_unbroken_run: 20,
         },
@@ -208,15 +215,23 @@ fn credential_grammars() -> [CredentialGrammar; 11] {
         // the secret, so they cannot sit in the two-id group above — left there, every real
         // refresh token went unreported. Longest prefix wins at a position, which is what
         // keeps `xoxe.xoxb-…` from being read as the plain form inside it.
+        //
+        // A one-digit version field is the whole shape here, so neither field count nor id
+        // width can separate `xoxe-1-<secret>` from `xoxe-1-<compound word>` — and `xoxe-1-`
+        // is exactly what a rotation runbook writes out. What separates them is the SECRET,
+        // which Slack mints far longer than a word: every rotating token observed carries
+        // sixty characters or more, so the floor is set there. A shorter mint is a silent
+        // miss, accepted for the same reason the AWS width is pinned — a form whose findings
+        // a reader learns to scroll past protects nothing.
         CredentialGrammar {
             form: CredentialForm::SlackToken,
             prefixes: &["xoxe.xoxb-", "xoxe.xoxp-", "xoxe-", "xoxa-"],
             body: base62_extended,
-            body_len: 22..=255,
+            body_len: 62..=255,
             min_fields: 2,
             numeric_fields: 1,
             numeric_field_digits: 1,
-            min_unbroken_run: 20,
+            min_unbroken_run: 60,
         },
         CredentialGrammar {
             form: CredentialForm::SlackAppToken,
@@ -782,8 +797,37 @@ mod tests {
     /// the outer form unmatched.
     #[test]
     fn a_nested_prefix_is_read_as_the_form_that_contains_it() {
-        let line = shaped(&["xoxe.xoxb", "-1-abcdefghij", "klmnopqrstuvwxyz012345"]);
+        let line = shaped(&[
+            "xoxe.xoxb",
+            "-1-abcdefghijklmnopqrstuvwxyz0123456789",
+            "abcdefghijklmnopqrstuvwxyz0123456789",
+        ]);
         assert_eq!(forms(&line), vec![CredentialForm::SlackToken]);
+    }
+
+    /// The bare rotating prefixes are the ones a runbook writes out, so both directions are
+    /// pinned: a token Slack minted is named, and the sentence naming its prefix is not. The
+    /// version field is one digit either way — the secret's width is the whole rule.
+    #[test]
+    fn a_rotating_token_is_named_and_the_runbook_naming_it_is_not() {
+        for prefix in ["xoxe", "xoxa"] {
+            let line = shaped(&[
+                prefix,
+                "-1-abcdefghijklmnopqrstuvwxyz0123456789",
+                "abcdefghijklmnopqrstuvwxyz0123456789",
+            ]);
+            assert_eq!(forms(&line), vec![CredentialForm::SlackToken], "{line}");
+        }
+        for line in [
+            "see xoxe-\
+             1-tokenrotationrunbookforsharedworkspaces for details",
+            "the xoxe-\
+             1-token-rotation-runbook-lives-in-the-ops-wiki",
+            "xoxa-\
+             2-please-rotate-any-token-you-see-in-this-thread",
+        ] {
+            assert!(forms(line).is_empty(), "{line}");
+        }
     }
 
     /// The left boundary is alphanumeric, not the grammar's own alphabet. Several alphabets
