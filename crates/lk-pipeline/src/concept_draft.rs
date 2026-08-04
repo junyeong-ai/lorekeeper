@@ -463,20 +463,28 @@ async fn build_registry(
     let dir = lk_core::vault_path::concepts_dir(dirs);
     let mut registry = ConceptRegistry::new();
     for path in reader.list_markdown(&dir).await? {
-        let Some(page) = reader.read_page(&path).await? else {
-            continue;
-        };
         let Some(slug) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
-        let title = page
-            .frontmatter
-            .get("title")
+        // A page whose frontmatter will not parse still answers to its ADDRESS: the name it
+        // is reachable by is its filename, which parsing has no say in. Failing the read
+        // instead would let one hand-edited page block every concept this run would
+        // materialize, on every run — and would have the write plane report absent for a name
+        // the read plane calls owned, which is the disagreement the shared registry exists to
+        // remove. Its title and aliases are simply unknown until the page is repaired, which
+        // `lore graph lint` reports.
+        let page = match reader.read_page(&path).await {
+            Ok(Some(page)) => Some(page),
+            Ok(None) => continue,
+            Err(_) => None,
+        };
+        let frontmatter = page.as_ref().map(|p| &p.frontmatter);
+        let title = frontmatter
+            .and_then(|f| f.get("title"))
             .and_then(|v| v.as_str())
             .unwrap_or(slug);
-        let aliases: Vec<String> = page
-            .frontmatter
-            .get("aliases")
+        let aliases: Vec<String> = frontmatter
+            .and_then(|f| f.get("aliases"))
             .and_then(|v| v.as_array())
             .into_iter()
             .flatten()

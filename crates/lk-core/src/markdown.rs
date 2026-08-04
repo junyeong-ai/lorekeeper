@@ -130,8 +130,9 @@ struct CredentialGrammar {
     /// digit. Slack's `xoxb-<team id>-…` is the shape; `xoxb-please-rotate-…` in a message
     /// about rotating tokens is not, and no length rule separates the two because English
     /// hyphenates.
-    /// The body is `-`-separated fields, the first `numeric_fields` of them digits only, and
-    /// the last at least `min_unbroken_run` characters.
+    /// The body is `-`-separated fields: at least `min_fields` of them, the first
+    /// `numeric_fields` digits only and each at least `numeric_field_digits` long, and the
+    /// last at least `min_unbroken_run` characters.
     ///
     /// Slack publishes that shape — `xoxb-<team id>-<app id>-<secret>` — and requiring it is
     /// what tells a token from a sentence about tokens. Nothing weaker does: English
@@ -139,7 +140,9 @@ struct CredentialGrammar {
     /// approximation tried against that has been defeated by ordinary text. A leading digit
     /// admits `xoxb-1-please-rotate-…`; a longest-run floor admits any sentence carrying one
     /// long compound word.
+    min_fields: usize,
     numeric_fields: usize,
+    numeric_field_digits: usize,
     min_unbroken_run: usize,
 }
 
@@ -169,7 +172,9 @@ fn credential_grammars() -> [CredentialGrammar; 11] {
             prefixes: &["ghp_", "gho_", "ghu_", "ghs_", "ghr_"],
             body: base62,
             body_len: 36..=255,
+            min_fields: 0,
             numeric_fields: 0,
+            numeric_field_digits: 0,
             min_unbroken_run: 0,
         },
         CredentialGrammar {
@@ -177,7 +182,9 @@ fn credential_grammars() -> [CredentialGrammar; 11] {
             prefixes: &["github_pat_"],
             body: base62_underscore,
             body_len: 40..=255,
+            min_fields: 0,
             numeric_fields: 0,
+            numeric_field_digits: 0,
             min_unbroken_run: 0,
         },
         // The rotating forms nest the bot/user prefix behind `xoxe.`, so they are listed in
@@ -185,24 +192,30 @@ fn credential_grammars() -> [CredentialGrammar; 11] {
         // keeps one token from being read as the shorter form it contains.
         CredentialGrammar {
             form: CredentialForm::SlackToken,
-            prefixes: &[
-                "xoxb-", "xoxp-", "xoxa-", "xoxc-", "xoxr-", "xoxs-", "xoxe-",
-            ],
+            prefixes: &["xoxb-", "xoxp-", "xoxc-", "xoxr-", "xoxs-"],
             body: base62_extended,
             body_len: 30..=255,
+            min_fields: 3,
             numeric_fields: 2,
+            // Slack mints workspace and app ids at nine digits and up. Requiring the WIDTH
+            // and not merely digit-ness is what closes the last prose shape a field rule
+            // alone admits: `xoxb-2026-01-tokenrotationrunbookforus` has two numeric fields
+            // and a long final one, and is a sentence.
+            numeric_field_digits: 9,
             min_unbroken_run: 20,
         },
-        // The rotating forms nest the bot/user prefix behind `xoxe.` and carry ONE numeric
-        // field before the secret, so they are their own entry rather than a prefix on the
-        // one above — and the scan takes the longest prefix at a position, which is what
-        // keeps a rotating token from being read as the plain form inside it.
+        // `xoxe-`/`xoxa-` and the rotating `xoxe.` pair carry ONE short version field before
+        // the secret, so they cannot sit in the two-id group above — left there, every real
+        // refresh token went unreported. Longest prefix wins at a position, which is what
+        // keeps `xoxe.xoxb-…` from being read as the plain form inside it.
         CredentialGrammar {
             form: CredentialForm::SlackToken,
-            prefixes: &["xoxe.xoxb-", "xoxe.xoxp-"],
+            prefixes: &["xoxe.xoxb-", "xoxe.xoxp-", "xoxe-", "xoxa-"],
             body: base62_extended,
             body_len: 22..=255,
+            min_fields: 2,
             numeric_fields: 1,
+            numeric_field_digits: 1,
             min_unbroken_run: 20,
         },
         CredentialGrammar {
@@ -210,7 +223,11 @@ fn credential_grammars() -> [CredentialGrammar; 11] {
             prefixes: &["xapp-"],
             body: base62_extended,
             body_len: 30..=255,
+            // Four fields: version, app id, ticket, secret. `xapp-2-<one long word>` is two,
+            // which is the shape a runbook sentence takes.
+            min_fields: 4,
             numeric_fields: 1,
+            numeric_field_digits: 1,
             min_unbroken_run: 20,
         },
         // Two deliberate narrowings, both trading recall for a finding a reader believes.
@@ -226,7 +243,9 @@ fn credential_grammars() -> [CredentialGrammar; 11] {
             prefixes: &["AKIA"],
             body: upper_alnum,
             body_len: 16..=16,
+            min_fields: 0,
             numeric_fields: 0,
+            numeric_field_digits: 0,
             min_unbroken_run: 0,
         },
         CredentialGrammar {
@@ -234,7 +253,9 @@ fn credential_grammars() -> [CredentialGrammar; 11] {
             prefixes: &["AIza"],
             body: base62_extended,
             body_len: 35..=35,
+            min_fields: 0,
             numeric_fields: 0,
+            numeric_field_digits: 0,
             min_unbroken_run: 0,
         },
         CredentialGrammar {
@@ -242,7 +263,9 @@ fn credential_grammars() -> [CredentialGrammar; 11] {
             prefixes: &["sk_live_"],
             body: base62,
             body_len: 24..=255,
+            min_fields: 0,
             numeric_fields: 0,
+            numeric_field_digits: 0,
             min_unbroken_run: 0,
         },
         CredentialGrammar {
@@ -250,7 +273,9 @@ fn credential_grammars() -> [CredentialGrammar; 11] {
             prefixes: &["rk_live_"],
             body: base62,
             body_len: 24..=255,
+            min_fields: 0,
             numeric_fields: 0,
+            numeric_field_digits: 0,
             min_unbroken_run: 0,
         },
         CredentialGrammar {
@@ -258,7 +283,9 @@ fn credential_grammars() -> [CredentialGrammar; 11] {
             prefixes: &["whsec_"],
             body: base62,
             body_len: 24..=255,
+            min_fields: 0,
             numeric_fields: 0,
+            numeric_field_digits: 0,
             min_unbroken_run: 0,
         },
         // Stripe's TEST forms are deliberately absent. They appear verbatim in Stripe's own
@@ -269,7 +296,9 @@ fn credential_grammars() -> [CredentialGrammar; 11] {
             prefixes: &["npm_"],
             body: base62,
             body_len: 36..=255,
+            min_fields: 0,
             numeric_fields: 0,
+            numeric_field_digits: 0,
             min_unbroken_run: 0,
         },
     ]
@@ -281,7 +310,9 @@ struct PrefixRule {
     form: CredentialForm,
     body: fn(char) -> bool,
     body_len: std::ops::RangeInclusive<usize>,
+    min_fields: usize,
     numeric_fields: usize,
+    numeric_field_digits: usize,
     min_unbroken_run: usize,
 }
 
@@ -297,7 +328,9 @@ fn prefix_rules() -> Vec<PrefixRule> {
                 form: grammar.form,
                 body: grammar.body,
                 body_len: grammar.body_len.clone(),
+                min_fields: grammar.min_fields,
                 numeric_fields: grammar.numeric_fields,
+                numeric_field_digits: grammar.numeric_field_digits,
                 min_unbroken_run: grammar.min_unbroken_run,
             })
         })
@@ -406,13 +439,13 @@ fn scan_line<'a>(
 /// describe `xoxb-<team id>-<app id>-<secret>` and nothing English produces.
 fn fields_match(body: &str, rule: &PrefixRule) -> bool {
     let fields: Vec<&str> = body.split('-').collect();
-    if fields.len() <= rule.numeric_fields {
+    if fields.len() < rule.min_fields || fields.len() <= rule.numeric_fields {
         return false;
     }
-    if !fields[..rule.numeric_fields]
-        .iter()
-        .all(|field| !field.is_empty() && field.chars().all(|c| c.is_ascii_digit()))
-    {
+    if !fields[..rule.numeric_fields].iter().all(|field| {
+        field.chars().count() >= rule.numeric_field_digits
+            && field.chars().all(|c| c.is_ascii_digit())
+    }) {
         return false;
     }
     fields
@@ -837,6 +870,10 @@ mod tests {
             "xapp-2-level-token-rotation-runbook-lives-in-the-ops-wiki-page",
             "Slack xoxb-1-please-rotate-any-token-you-see before friday",
             "xoxb-123456789012-please-rotate-this-one-as-well-today",
+            // A compound word as the last field is what a longest-run rule alone admits;
+            // the issuer's own id WIDTHS and field count are what close it.
+            "see xoxb-2026-01-tokenrotationrunbookforus for details",
+            "xapp-2-levelttokenrotationrunbookpage lives in ops",
         ] {
             assert!(forms(line).is_empty(), "{line}");
         }

@@ -259,10 +259,14 @@ pub fn sync_concept_backlinks(
         // Adoption costs nothing that is not recovered: the next time the citation set MOVES
         // the page is owed a rewrite like any other, and forcing one sooner is the lever every
         // other section already has — delete the `_done` marker.
+        // What is adopted has to BE an answer. A section holding only a heading, or only a
+        // `> [!conflict]` callout, is a marker somebody left rather than a statement about the
+        // concept — and adopting a lone callout is the worst of the two, because `graph lint`
+        // then reports an open disagreement that nothing is scheduled to restate or resolve.
         let adopting = owed_input.is_some()
             && recorded_answer.is_none()
             && llm_input(&parsed, frontmatter::field::SYNTHESIS).is_none()
-            && synthesis_section.is_some_and(|section| !section.body.trim().is_empty());
+            && synthesis_section.is_some_and(|section| carries_an_answer(section.body));
 
         // Deriving the evidence and writing the section that answers to it are separate acts,
         // so the two questions are asked separately: a page whose sources list is already
@@ -315,9 +319,14 @@ pub fn sync_concept_backlinks(
                 }
             }
         }) else {
+            // Every decision this page was going to appear under comes back out: the write
+            // did not happen, so the report must not announce one. Leaving `adopted` behind
+            // had the run claim a page's prose was accepted as its answer while the page was
+            // untouched — and say so beside the line reporting it skipped, on every run.
             report.skipped.push(page.path.clone());
             report.resynthesize.retain(|owed| owed.path != page.path);
             report.headless.retain(|path| path != &page.path);
+            report.adopted.retain(|path| path != &page.path);
             continue;
         };
 
@@ -353,6 +362,19 @@ pub fn sync_concept_backlinks(
     }
 
     Ok(report)
+}
+
+/// Whether a section body says something about the concept, rather than only marking it.
+///
+/// A line that opens a heading (`#`) or a blockquote — which is what a `> [!conflict]`
+/// callout is — annotates the section; anything else is its content. Structural, so no
+/// judgment about how good the prose is enters here: a terse definition is an answer, and a
+/// section holding nothing but annotation is not.
+fn carries_an_answer(body: &str) -> bool {
+    body.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .any(|line| !line.starts_with('#') && !line.starts_with('>'))
 }
 
 /// The value recorded under `llm_inputs.<key>`, if the page carries one.
@@ -977,6 +999,85 @@ mod tests {
             content.contains(&format!("synthesis_done: \"{digest}\"")),
             "{content}"
         );
+    }
+
+    /// A page the sweep could not WRITE was decided nothing about. Reporting it adopted
+    /// beside the line reporting it skipped announces a decision that did not happen, and
+    /// repeats it on every run.
+    #[test]
+    fn a_page_that_could_not_be_written_is_not_reported_adopted() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("wiki/concepts/bare.md");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "# Bare\n\n## 핵심\n\nHand written prose.\n\n## 출처\n\n## 메타\n",
+        )
+        .unwrap();
+
+        let pages = vec![
+            build_page("wiki/concepts/bare", "wiki/concepts/bare.md", &[]),
+            build_page(
+                "daily/slack/2026-05-20",
+                "daily/slack/2026-05-20.md",
+                &["wiki/concepts/bare"],
+            ),
+        ];
+
+        let report = sync_concept_backlinks(
+            &pages,
+            dir.path(),
+            false,
+            &VaultDirs::default(),
+            SynthesisPolicy::Record,
+        )
+        .unwrap();
+        assert_eq!(report.skipped, vec![PathBuf::from("wiki/concepts/bare.md")]);
+        assert!(report.adopted.is_empty(), "{report:?}");
+    }
+
+    /// What is adopted has to BE an answer. A body of nothing but a callout is a marker
+    /// somebody left, and freezing one has `graph lint` report an open disagreement that
+    /// nothing is scheduled to restate or resolve.
+    #[test]
+    fn a_body_that_only_annotates_is_not_an_answer_to_adopt() {
+        for body in [
+            "> [!conflict] two sources disagree on the retention window",
+            "### Notes",
+            "## Later\n\n> a quoted line",
+        ] {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("wiki/concepts/marker.md");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(
+                &path,
+                format!(
+                    "---\nid: marker\nsource_count: 0\nllm_inputs:\n---\n\n# M\n\n\
+                     ## 핵심\n\n{body}\n\n## 출처\n\n## 메타\n"
+                ),
+            )
+            .unwrap();
+
+            let pages = vec![
+                build_page("wiki/concepts/marker", "wiki/concepts/marker.md", &[]),
+                build_page(
+                    "daily/slack/2026-05-20",
+                    "daily/slack/2026-05-20.md",
+                    &["wiki/concepts/marker"],
+                ),
+            ];
+
+            let report = sync_concept_backlinks(
+                &pages,
+                dir.path(),
+                false,
+                &VaultDirs::default(),
+                SynthesisPolicy::Record,
+            )
+            .unwrap();
+            assert!(report.adopted.is_empty(), "{body}: {report:?}");
+            assert_eq!(report.resynthesize.len(), 1, "{body}: {report:?}");
+        }
     }
 
     /// Adoption is about PROSE, not about the marker being absent. A page whose synthesis is

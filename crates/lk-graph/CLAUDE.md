@@ -134,6 +134,14 @@ on-disk state, never from a cached snapshot.
   comparison: everything derived is rendered into the candidate, so whatever differs is by
   definition drift — which is how a source page RETITLED gets its citation line corrected
   while the synthesis, keyed on the SET, stays answered.
+  **A page that already holds a written synthesis and has recorded no input is ADOPTED**: its
+  prose becomes the answer for the evidence the page carries, and the rewrite is owed from the
+  next time that evidence moves. Without it an upgrade replaces every authored synthesis in
+  the vault in its first unattended run — the sweep and the drain are adjacent stages, so the
+  warning reaches a scheduler's log seconds before the rewrite it warns about, and for a vault
+  not in git that is gone. What is adopted has to BE an answer: a body of nothing but headings
+  or a `> [!conflict]` callout is a marker somebody left, and adopting a lone callout has
+  `lint` report an open disagreement nothing is scheduled to restate.
   **A concept nothing cites records no input and is owed nothing**: there is no evidence for a
   synthesis to answer to, a queued task would send a drain to read an empty set, and a
   recorded-but-unanswerable input would have `lore doctor` report it forever. A concept whose

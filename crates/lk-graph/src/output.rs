@@ -584,7 +584,9 @@ pub fn print_backlinks(r: &BacklinksSyncReport) {
             "\nAdopted: {} concept page(s) already held a written synthesis and had recorded no \
              input — their prose stands as the answer for the evidence they carry now, and a \
              rewrite is owed the next time that evidence moves. Delete a page's \
-             `llm_inputs.synthesis_done` to have one written sooner",
+             `llm_inputs.synthesis_done` to have one written sooner — deleting BOTH keys \
+             re-adopts it instead, because a page that records no input is one this has never \
+             seen",
             r.sync.adopted.len()
         );
         for path in &r.sync.adopted {
