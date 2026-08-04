@@ -579,6 +579,19 @@ pub fn print_backlinks(r: &BacklinksSyncReport) {
         }
     }
 
+    if !r.sync.adopted.is_empty() {
+        println!(
+            "\nAdopted: {} concept page(s) already held a written synthesis and had recorded no \
+             input — their prose stands as the answer for the evidence they carry now, and a \
+             rewrite is owed the next time that evidence moves. Delete a page's \
+             `llm_inputs.synthesis_done` to have one written sooner",
+            r.sync.adopted.len()
+        );
+        for path in &r.sync.adopted {
+            println!("  {}", path.display());
+        }
+    }
+
     if !r.sync.headless.is_empty() {
         println!(
             "\nNo synthesis heading: {} cited concept page(s). Citations and count are written; \

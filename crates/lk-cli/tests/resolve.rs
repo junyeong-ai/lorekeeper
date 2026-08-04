@@ -143,6 +143,35 @@ fn a_page_that_will_not_parse_still_answers_to_its_address() {
     assert!(stdout.starts_with("vector-db\t"), "{stdout}");
 }
 
+/// Which page an ambiguous name routes to is decided by REGISTRATION ORDER, so the answer is
+/// only reproducible if the read is ordered. `readdir` is not — it returns what the
+/// filesystem stored, which differs from creation order, from sorted order, and between
+/// machines — while the ingest pipeline reads the same pages through `VaultStore` and sorts.
+/// An unordered read here is the two planes answering one question differently, on exactly
+/// the names this command exists to report.
+#[test]
+fn an_ambiguous_name_routes_the_same_way_the_pipeline_routes_it() {
+    let dir = TempDir::new().expect("tempdir");
+    // Written in reverse order, so a read that preserved creation order would answer `c-sharp`.
+    write_concept(dir.path(), "c-sharp", "C#", &[]);
+    write_concept(dir.path(), "c-plus-plus", "C++", &[]);
+
+    let out = lore()
+        .args(["resolve", "--json", "--root"])
+        .arg(dir.path())
+        .arg("C")
+        .output()
+        .expect("lore runs");
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("--json emits an object");
+    assert_eq!(parsed["verdict"], "ambiguous");
+    assert_eq!(
+        parsed["routed"]["slug"], "c-plus-plus",
+        "the first page in SORTED order routes, which is what the pipeline reads: {parsed}"
+    );
+    assert_eq!(parsed["claimants"].as_array().expect("array").len(), 2);
+}
+
 /// An empty vault answers `absent` rather than failing: there is no concepts directory before
 /// the first ingest, and a caller asking whether a name is taken is exactly the caller who
 /// runs then.

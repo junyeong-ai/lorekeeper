@@ -436,15 +436,17 @@ async fn enqueue_syntheses(
     // does the work again for each. The ingest path has no such hazard: a re-render REPLACES
     // that run's file.
     //
-    // Keyed on the input, never on the page alone. A citation set can move while a task for
-    // that page is still waiting — an ordinary page deletion does it — and the waiting task
-    // then answers an input the page no longer carries, which `queue status` calls `stale`.
-    // Suppressing on the page would leave the page's recorded input with nothing that can
-    // ever answer it: `queue count` counts only current work, so the drain is skipped, so the
-    // file is never archived, so the stale task pins the page forever. That is the exact
-    // finding-that-never-clears `SynthesisPolicy` exists to prevent, reached through another
-    // door. A changed digest is different work and always queues.
-    let pending = pending_synthesis_inputs(&rc.root);
+    // Keyed on the input AND on the task still being alive — both, because a task can stop
+    // being answerable in two independent ways. Its input can move on (an ordinary page
+    // deletion changes a citation set), and it can lose its anchor while the input holds
+    // still (`vault.locale` renames every heading, which the digest deliberately ignores).
+    // Either way `queue count` counts only work, so the drain that would archive the file is
+    // skipped, and a suppression that trusted the file's mere presence would pin the page
+    // forever with a recorded input nothing can answer — the finding-that-never-clears
+    // `SynthesisPolicy` exists to prevent, reached through a third door. So the aliveness
+    // question is asked of `queue status`'s own classifier rather than of the bytes on disk.
+    let pending =
+        super::queue::pending_work_inputs(&rc.root, lk_queue::TargetKind::ConceptSynthesis);
     let owed: Vec<&backlinks::ConceptResynthesis> = owed
         .iter()
         .filter(|entry| {
@@ -473,36 +475,6 @@ async fn enqueue_syntheses(
     }
     client.flush().await.map_err(|e| format!("{e}"))?;
     Ok(owed.len())
-}
-
-/// The `(vault_path, cache_hash)` of every concept-synthesis task already waiting in the
-/// queue — the page each answers and the input it answers for.
-///
-/// Read straight off the pending files rather than through a classification: the question is
-/// only whether this exact work is already asked for, and the pair answers it exactly. A task
-/// for the same page under a DIFFERENT input is not this work — it is work the page has moved
-/// past — so it never suppresses. An unreadable queue file yields nothing, which re-queues
-/// rather than skips.
-fn pending_synthesis_inputs(
-    vault_root: &std::path::Path,
-) -> std::collections::HashSet<(String, String)> {
-    let dir = vault_root.join(".lorekeeper").join("queue");
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return std::collections::HashSet::new();
-    };
-    entries
-        .flatten()
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
-        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
-        .flat_map(|content| {
-            content
-                .lines()
-                .filter_map(|line| serde_json::from_str::<lk_queue::QueueTask>(line).ok())
-                .filter(|task| task.target.kind == lk_queue::TargetKind::ConceptSynthesis)
-                .map(|task| (task.target.vault_path, task.cache_hash))
-                .collect::<Vec<_>>()
-        })
-        .collect()
 }
 
 fn resolve_config_full(

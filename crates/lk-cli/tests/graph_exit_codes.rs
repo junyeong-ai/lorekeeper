@@ -915,14 +915,32 @@ fn the_single_check_commands_agree_with_lint_about_their_own_channel() {
     assert_eq!(ws.code(&["graph", "broken"]), 0, "{stdout}");
 }
 
-/// A concept whose synthesis has not been written against the citations it now carries is
-/// work the sweep hands to the queue, not a claim the vault contradicts itself. The scheduled
-/// pipeline runs this under `set -e`, so a non-zero exit here would stop the run that is
-/// about to do the work.
+/// The lifecycle an upgrade actually takes. A vault whose concept pages predate the synthesis
+/// input holds prose somebody wrote, so the first sweep ADOPTS it rather than queueing every
+/// page in the vault for replacement; the rewrite is owed from the next time the evidence
+/// moves. Both halves exit zero — the scheduled pipeline runs this under `set -e`, so a
+/// non-zero exit would stop the run that is about to do the work.
 #[test]
-fn a_concept_owed_a_synthesis_is_queued_and_exits_zero() {
+fn an_upgraded_vault_adopts_its_prose_then_queues_when_the_evidence_moves() {
     let ws = sound_vault();
 
+    let out = ws.run(&["graph", "backlinks-sync"]);
+    let stdout = String::from_utf8(out.stdout).expect("utf8");
+    assert!(stdout.contains("Adopted"), "{stdout}");
+    assert!(stdout.contains("wiki/concepts/cited.md"), "{stdout}");
+    assert!(
+        !stdout.contains("Synthesis owed"),
+        "authored prose is not replaced on the strength of an upgrade\n{stdout}"
+    );
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+
+    // A second page cites it: the evidence has moved, so now the rewrite is owed.
+    ws.write(
+        "daily/notes/2026-05-24.md",
+        "---\nid: notes-2026-05-24\ntype: daily\ntitle: \"Notes\"\n\
+         created: 2026-05-24\nupdated: 2026-05-24\n---\n\n\
+         ## Related concepts\n\n- [Cited](../../wiki/concepts/cited.md)\n",
+    );
     let out = ws.run(&["graph", "backlinks-sync"]);
     let stdout = String::from_utf8(out.stdout).expect("utf8");
     let owed = stdout

@@ -129,12 +129,22 @@ async fn read_registry(
         Err(e) => return Err(miette::miette!("read {}: {e}", dir.display())),
     };
 
+    // Sorted, because registration ORDER decides which page a name routes to when more than
+    // one claims it, and `readdir` returns whatever the filesystem stored. The pipeline reads
+    // the same pages through `VaultStore::list_markdown`, which sorts — so an unsorted read
+    // here is the two planes answering one question differently, on exactly the ambiguous
+    // names this command exists to report, and differently again on another machine.
+    let mut paths: Vec<PathBuf> = Vec::new();
     while let Some(entry) = entries
         .next_entry()
         .await
         .map_err(|e| miette::miette!("read {}: {e}", dir.display()))?
     {
-        let path = entry.path();
+        paths.push(entry.path());
+    }
+    paths.sort();
+
+    for path in paths {
         if path.extension().is_none_or(|ext| ext != "md") {
             continue;
         }

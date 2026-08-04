@@ -189,7 +189,7 @@ fn credential_grammars() -> [CredentialGrammar; 14] {
             body: base62_extended,
             body_len: 24..=255,
             body_starts_digit: false,
-            min_unbroken_run: 0,
+            min_unbroken_run: 20,
         },
         CredentialGrammar {
             form: CredentialForm::OpenAiProjectKey,
@@ -234,7 +234,7 @@ fn credential_grammars() -> [CredentialGrammar; 14] {
             body: base62_extended,
             body_len: 20..=255,
             body_starts_digit: true,
-            min_unbroken_run: 0,
+            min_unbroken_run: 20,
         },
         CredentialGrammar {
             form: CredentialForm::SlackAppToken,
@@ -242,7 +242,7 @@ fn credential_grammars() -> [CredentialGrammar; 14] {
             body: base62_extended,
             body_len: 20..=255,
             body_starts_digit: true,
-            min_unbroken_run: 0,
+            min_unbroken_run: 20,
         },
         // Two deliberate narrowings, both trading recall for a finding a reader believes.
         // `ASIA` (temporary keys) is dropped because it is an English word and the rest of the
@@ -438,6 +438,21 @@ fn scan_line<'a>(
     })
 }
 
+/// The tail after an ordered-list marker (`1. `, `12) `), or `None` where there is none. A
+/// numbered step is how a runbook writes the line a key was pasted into, so it reaches the
+/// vault exactly as a bullet does.
+fn ordered_marker(rest: &str) -> Option<&str> {
+    let digits = rest.chars().take_while(char::is_ascii_digit).count();
+    if digits == 0 {
+        return None;
+    }
+    let after = &rest[digits..];
+    let tail = after
+        .strip_prefix(". ")
+        .or_else(|| after.strip_prefix(") "))?;
+    Some(tail)
+}
+
 /// A PEM header naming private key material, tolerant of the markdown a quoted message
 /// arrives in. A key pasted into an email or a Slack thread reaches the vault behind `> `,
 /// and a header only recognised at column zero would miss exactly the pages this ingests.
@@ -461,9 +476,12 @@ fn strip_markdown_quoting(line: &str) -> &str {
     loop {
         rest = match rest.strip_prefix('>') {
             Some(quoted) => quoted.trim_start(),
-            None => match rest.split_at_checked(2) {
-                Some(("- " | "* " | "+ ", tail)) => tail.trim_start(),
-                _ => return rest,
+            None => match ordered_marker(rest) {
+                Some(tail) => tail.trim_start(),
+                None => match rest.split_at_checked(2) {
+                    Some(("- " | "* " | "+ ", tail)) => tail.trim_start(),
+                    _ => return rest,
+                },
             },
         };
     }
@@ -805,6 +823,8 @@ mod tests {
             "> -----BEGIN RSA PRIVATE KEY-----",
             ">> -----BEGIN OPENSSH PRIVATE KEY-----",
             "- -----BEGIN PRIVATE KEY-----",
+            "1. -----BEGIN RSA PRIVATE KEY-----",
+            "12) -----BEGIN DSA PRIVATE KEY-----",
             "  > - -----BEGIN EC PRIVATE KEY-----",
         ] {
             assert_eq!(forms(line), vec![CredentialForm::PrivateKeyBlock], "{line}");
@@ -847,13 +867,17 @@ mod tests {
     /// ingests Slack messages about rotating tokens.
     #[test]
     fn hyphenated_prose_naming_a_token_is_not_a_token() {
+        // Each line carries a FULL prefix — the earlier version of this test used
+        // `sk-ant-this-is-…`, which matches no prefix at all now that the key-type tag is
+        // part of it, so it passed without exercising the rule it was written for.
         for line in [
-            "ref: sk-ant-this-is-a-doc-about-key-prefixes-not-a-key",
-            "Slack thread mentions xoxb-please-rotate-any-token-you-see",
-            "the xapp-level-token-rotation-runbook-lives-here",
+            "we are moving to sk-ant-api03-scoped-keys-per-service-this-quarter",
+            "the runbook is at xoxb-2026-q1-token-rotation-plan-for-the-workspace",
+            "xapp-2-level-token-rotation-runbook-lives-in-the-ops-wiki-page",
             "sk-proj-migration-notes-for-the-key-rotation-window-next-quarter",
             "see pypi-publishing-and-token-scoping-guidelines-for-maintainers",
             "glpat-rotation-runbook-for-the-group-access-tokens-we-issue",
+            "never commit sk-ant-api03-REDACTED-REDACTED-REDACTED to the repo",
         ] {
             assert!(forms(line).is_empty(), "{line}");
         }

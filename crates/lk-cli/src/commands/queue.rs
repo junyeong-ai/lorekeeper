@@ -887,6 +887,38 @@ pub(super) struct WorkInFlight {
     pub unread: Vec<String>,
 }
 
+/// The `(vault_path, cache_hash)` of every pending task of `kind` that still classifies as
+/// WORK — one a drain will act on.
+///
+/// The alive question is asked HERE, through the same `classify_task` `queue status` uses,
+/// because a caller deciding whether to queue work again has to know whether what is on disk
+/// can still be answered. A task can die with its input unchanged: `vault.locale` renames a
+/// page's headings, the task's anchor is no longer on the page, and it classifies
+/// `missing-target` while its `cache_hash` still matches. Reading the files directly would
+/// see that task, suppress the re-queue, and leave the page's recorded input with nothing
+/// able to answer it — and `queue count` counts only work, so the drain that would archive
+/// the file is skipped too.
+///
+/// An unreadable file or unparseable line contributes nothing, which re-queues rather than
+/// suppresses — the safe direction.
+pub(super) fn pending_work_inputs(
+    vault_root: &Path,
+    kind: lk_queue::TargetKind,
+) -> std::collections::HashSet<(String, String)> {
+    let queue_dir = vault_root.join(".lorekeeper").join("queue");
+    let Ok(files) = pending_queue_files(&queue_dir) else {
+        return std::collections::HashSet::new();
+    };
+    files
+        .into_iter()
+        .filter_map(|file| read_tasks(&file).ok())
+        .flat_map(|read| read.tasks)
+        .filter(|task| task.target.kind == kind)
+        .filter(|task| classify_task(vault_root, task).is_ok_and(|status| status.is_work()))
+        .map(|task| (task.target.vault_path.clone(), task.cache_hash.clone()))
+        .collect()
+}
+
 pub(super) fn work_in_flight(vault_root: &Path) -> WorkInFlight {
     let queue_dir = vault_root.join(".lorekeeper").join("queue");
     let mut flight = WorkInFlight {

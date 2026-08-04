@@ -71,6 +71,10 @@ pub struct BacklinksSyncResult {
     pub updated: Vec<ConceptUpdate>,
     /// Count of concept pages whose derived state was already correct.
     pub unchanged: usize,
+    /// Concept pages whose written synthesis was adopted as the answer for the evidence they
+    /// carry, because they had recorded no input before this run. Reported so an upgrade says
+    /// what it decided rather than leaving it to be discovered.
+    pub adopted: Vec<PathBuf>,
     /// Concept pages whose `## <Synthesis>` has not been written against the citation set
     /// the page now carries. Reported rather than acted on here: this crate computes what
     /// is true of the vault and never calls an LLM, so the caller is what turns the list
@@ -237,16 +241,35 @@ pub fn sync_concept_backlinks(
             && !sources.is_empty()
             && synthesis_section.is_some())
         .then(|| citation_digest(&sources));
-        let recorded_answer = llm_input(
-            &parsed,
-            &frontmatter::field::completion(frontmatter::field::SYNTHESIS),
-        );
+        let completion_key = frontmatter::field::completion(frontmatter::field::SYNTHESIS);
+        let recorded_answer = llm_input(&parsed, &completion_key);
+
+        // A page that carries a written synthesis and has never recorded an input is one
+        // somebody WROTE — by hand, by `/lore-wiki add`, or as the grounding sentence of the
+        // extraction that created it — before anything tracked what it answers to. Its prose
+        // is adopted as the answer for the evidence the page has today, not queued for
+        // replacement.
+        //
+        // The alternative is what an upgrade would otherwise do: every cited concept is owed
+        // at once, the drain REWRITES rather than appends, and the whole authored corpus is
+        // replaced in the first unattended run — irreversibly, for a vault not in git. No
+        // amount of warning printed to a scheduler's log undoes that, because the rewrite
+        // follows seconds later in the same run.
+        //
+        // Adoption costs nothing that is not recovered: the next time the citation set MOVES
+        // the page is owed a rewrite like any other, and forcing one sooner is the lever every
+        // other section already has — delete the `_done` marker.
+        let adopting = owed_input.is_some()
+            && recorded_answer.is_none()
+            && llm_input(&parsed, frontmatter::field::SYNTHESIS).is_none()
+            && synthesis_section.is_some_and(|section| !section.body.trim().is_empty());
 
         // Deriving the evidence and writing the section that answers to it are separate acts,
         // so the two questions are asked separately: a page whose sources list is already
         // correct can still be owed a synthesis, and asking them together would leave it owed
         // forever.
         if let (Some(digest), Some(section)) = (&owed_input, &synthesis_section)
+            && !adopting
             && recorded_answer != Some(digest.as_str())
         {
             report.resynthesize.push(ConceptResynthesis {
@@ -264,6 +287,9 @@ pub fn sync_concept_backlinks(
         if !sources.is_empty() && synthesis_section.is_none() {
             report.headless.push(page.path.clone());
         }
+        if adopting {
+            report.adopted.push(page.path.clone());
+        }
 
         // A page with no frontmatter block, or none carrying the `llm_inputs:` mapping, has
         // nowhere to record what this sweep derives. Skipped like the corrupt case above, and
@@ -277,11 +303,17 @@ pub fn sync_concept_backlinks(
         )
         .and_then(|content| match &owed_input {
             None => Some(content),
-            Some(digest) => record_llm_input(
-                &content,
-                frontmatter::field::SYNTHESIS,
-                &serde_json::to_string(digest).expect("a hex digest always serializes"),
-            ),
+            Some(digest) => {
+                let stamp = serde_json::to_string(digest).expect("a hex digest always serializes");
+                let recorded = record_llm_input(&content, frontmatter::field::SYNTHESIS, &stamp)?;
+                match adopting {
+                    // Adoption stamps BOTH: the input the prose is taken to answer, and the
+                    // answer itself. One without the other is the unanswered state `lore
+                    // doctor` reports.
+                    true => record_llm_input(&recorded, &completion_key, &stamp),
+                    false => Some(recorded),
+                }
+            }
         }) else {
             report.skipped.push(page.path.clone());
             report.resynthesize.retain(|owed| owed.path != page.path);
@@ -903,6 +935,86 @@ mod tests {
         );
     }
 
+    /// A page that already holds written prose and has recorded no input is ADOPTED: the
+    /// prose becomes the answer for the evidence the page carries. Queueing it instead is an
+    /// upgrade that replaces every authored synthesis in the vault in one unattended run.
+    #[test]
+    fn a_written_synthesis_with_no_recorded_input_is_adopted_not_replaced() {
+        let dir = TempDir::new().unwrap();
+        write_concept_page(&dir, "legacy", &[], "");
+
+        let pages = vec![
+            build_page("wiki/concepts/legacy", "wiki/concepts/legacy.md", &[]),
+            build_page(
+                "daily/slack/2026-05-20",
+                "daily/slack/2026-05-20.md",
+                &["wiki/concepts/legacy"],
+            ),
+        ];
+
+        let report = sync_concept_backlinks(
+            &pages,
+            dir.path(),
+            false,
+            &VaultDirs::default(),
+            SynthesisPolicy::Record,
+        )
+        .unwrap();
+        assert_eq!(
+            report.adopted,
+            vec![PathBuf::from("wiki/concepts/legacy.md")]
+        );
+        assert!(report.resynthesize.is_empty(), "{report:?}");
+
+        // Both markers, so the page reads as answered rather than as work nothing did.
+        let content = std::fs::read_to_string(dir.path().join("wiki/concepts/legacy.md")).unwrap();
+        let digest = citation_digest(&["daily/slack/2026-05-20".to_owned()]);
+        assert!(
+            content.contains(&format!("synthesis: \"{digest}\"")),
+            "{content}"
+        );
+        assert!(
+            content.contains(&format!("synthesis_done: \"{digest}\"")),
+            "{content}"
+        );
+    }
+
+    /// Adoption is about PROSE, not about the marker being absent. A page whose synthesis is
+    /// empty has nothing to adopt, so it is owed one — otherwise a concept created without a
+    /// grounding sentence would be marked answered while its section stayed blank.
+    #[test]
+    fn an_empty_synthesis_with_no_recorded_input_is_owed_one() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("wiki/concepts/blank.md");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "---\nid: blank\nsource_count: 0\nllm_inputs:\n---\n\n# Blank\n\n\
+             ## 핵심\n\n## 출처\n\n## 메타\n",
+        )
+        .unwrap();
+
+        let pages = vec![
+            build_page("wiki/concepts/blank", "wiki/concepts/blank.md", &[]),
+            build_page(
+                "daily/slack/2026-05-20",
+                "daily/slack/2026-05-20.md",
+                &["wiki/concepts/blank"],
+            ),
+        ];
+
+        let report = sync_concept_backlinks(
+            &pages,
+            dir.path(),
+            false,
+            &VaultDirs::default(),
+            SynthesisPolicy::Record,
+        )
+        .unwrap();
+        assert!(report.adopted.is_empty(), "{report:?}");
+        assert_eq!(report.resynthesize.len(), 1, "{report:?}");
+    }
+
     /// A concept page written before the input existed carries no `llm_inputs:` mapping. The
     /// sweep DERIVES that input, so it establishes the mapping rather than skipping every
     /// page in an existing vault.
@@ -936,7 +1048,7 @@ mod tests {
         )
         .unwrap();
         assert!(report.skipped.is_empty(), "{report:?}");
-        assert_eq!(report.resynthesize.len(), 1, "{report:?}");
+        assert_eq!(report.adopted.len(), 1, "{report:?}");
 
         let content = std::fs::read_to_string(&path).unwrap();
         let digest = citation_digest(&["daily/slack/2026-05-20".to_owned()]);

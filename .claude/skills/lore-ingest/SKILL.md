@@ -1,6 +1,6 @@
 ---
 name: lore-ingest
-version: 0.19.0
+version: 0.19.1
 description: Daily knowledge ingestion pipeline — collects from Gmail, Google Drive, Google Calendar, Slack, Jira, RSS, and a manual inbox into an Obsidian vault. Deduplicates, classifies, extracts concepts, writes structured pages. Optionally tracks your own work into a work-log when the `personal:` module is configured. Idempotent, phased ingest with a no-data-loss guarantee.
 argument-hint: "<subcommand> [args]"
 disable-model-invocation: true
@@ -32,7 +32,7 @@ an Obsidian vault. All commands accept `--config <path>` to override.
 | `lore status` | Last time each source was COLLECTED — an empty run counts, so a quiet source shows its real timestamp with `0 events` |
 | `lore health [--strict]` | Warn if any source is overdue vs `ingest.schedule` (2 missed fires; 48h fallback). `--strict` also fails when a source has NEVER ingested, which a first install has and a broken one looks identical to |
 | `lore performance` | Performance category distribution |
-| `lore doctor` | Audit materialized pages against the contracts they must satisfy — text cleanliness, a section whose input was recorded and never answered, and credentials in issuer-published forms (non-zero on any finding, or on a page it could not read). Reports credentials, never rewrites them: rotate at the issuer |
+| `lore doctor` | Audit materialized pages against the contracts they must satisfy — text cleanliness, a section whose input was recorded and never answered, and credentials in issuer-published forms. Non-zero on a defect or an unreadable page; a credential is REPORTED and does not gate, because its repair is at the issuer and editing the page would not undo the leak |
 | `lore schedule --format launchd --bin <abs> --pipeline-dir <dir>` | Print scheduled-task definitions. Both flags are required in practice — see the notes below; the bare form is rarely the one you want |
 | `lore maintenance [--dry-run]` | Prune operational history (ingest log, drained queue files) past `maintenance.retention_days` (default 90d). Streaming event logs are permanent, and each source's latest log entry survives any horizon — it is the state `lore health` reads, not history |
 | `lore queue prune [--dry-run]` | Leave the queue holding only work that still needs an LLM session: drop dead tasks (stale / missing-target), retire a run whose every task is already answered |

@@ -84,8 +84,11 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   queued before the switch stayed hash-current while naming a section that no longer exists,
   failing `queue apply` — and the whole scheduled pipeline — every run, with `prune`
   classifying only TASKS and so unable to clear a result. Dropping loses nothing: the page
-  carries no completion marker, so the next ingest re-enqueues the work under the heading it
-  now has, the same self-healing an unparseable result file relies on. A task passing the
+  carries no completion marker, so the work is enqueued again under the heading it now has —
+  by the next ingest for every kind an ingest renders, and by `lore graph backlinks-sync` for a
+  concept synthesis, which no ingest enqueues. Same self-healing either way, and the reason
+  that sweep asks `queue status` whether a pending task is still WORK before suppressing a
+  re-queue: a task dead on its anchor would otherwise pin the page it names. A task passing the
   first, failing the second and having somewhere to land is `current` — the only status that
   is WORK. **A RESULT never asks the completion question** (`Artifact::Result`): a task is a
   REQUEST, so an answered section makes it redundant, while a result IS the answer in

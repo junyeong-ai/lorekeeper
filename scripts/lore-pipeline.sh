@@ -168,6 +168,10 @@ sync_graph() {
     run "queue apply"    lore_cmd queue apply
     run "backlinks-sync" lore_cmd graph backlinks-sync
     drain_queue
+    # Applied again because the second drain can answer a leftover extraction as well as a
+    # synthesis, and a concept result written after the only apply of the run would wait a
+    # day for its pages. Idempotent: with no results on disk it is a no-op.
+    run "queue apply"    lore_cmd queue apply
     run "wiki refresh"   lore_cmd wiki refresh
     run "graph lint"     lore_cmd graph lint
 }
