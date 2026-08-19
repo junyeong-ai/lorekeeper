@@ -245,18 +245,8 @@ impl Recorded {
             self.committed.insert(transition.id.clone(), day);
         }
         match transition.kind {
-            TransitionKind::Created => {
-                // An id minted again is a NEW task, so nothing its previous life recorded is
-                // its. The closure is cleared inside the completion window, where reading
-                // further back would let an older life settle a live line; the carries are
-                // cleared wherever they were written, because they are keyed on the pair and
-                // are absorbed the same way. Left standing, a carry from a previous life
-                // suppressed a real one for that day and the count that diagnoses a stale task
-                // undercounted with nothing saying so.
-                self.carried.retain(|(id, _)| id != &transition.id);
-                if in_completion_window {
-                    self.closed.remove(&transition.id);
-                }
+            TransitionKind::Created if in_completion_window => {
+                self.closed.remove(&transition.id);
             }
             TransitionKind::Done if in_completion_window => {
                 self.closed.insert(transition.id.clone(), (day, transition));

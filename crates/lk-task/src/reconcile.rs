@@ -465,50 +465,6 @@ mod tests {
         assert_eq!(board.get(&"3b8q".parse().unwrap()).unwrap().carried, 1);
     }
 
-    /// An id minted again is a NEW task, so nothing its previous life recorded is its. The
-    /// closure was cleared by that mint and the carries were not, so a carry from a previous
-    /// life suppressed a real one for that day and the count that diagnoses a stale task
-    /// undercounted with nothing saying so.
-    #[test]
-    fn a_carry_from_an_id_s_previous_life_does_not_suppress_a_real_one() {
-        let tmp = tempfile::tempdir().unwrap();
-        let log = crate::log::TransitionLog::new(tmp.path());
-        let ended = jiff::civil::date(2026, 8, 18);
-        let at = |day: jiff::civil::Date| {
-            day.at(9, 0, 0, 0)
-                .to_zoned(jiff::tz::TimeZone::UTC)
-                .unwrap()
-                .timestamp()
-        };
-        log.record(
-            &[
-                Transition::new(
-                    "9xh2".parse().unwrap(),
-                    TransitionKind::Carried,
-                    "a previous life",
-                    at(jiff::civil::date(2026, 8, 5)),
-                )
-                .with_closing(ended),
-                Transition::new(
-                    "9xh2".parse().unwrap(),
-                    TransitionKind::Created,
-                    "a new life",
-                    at(jiff::civil::date(2026, 8, 10)),
-                )
-                .with_state(TaskState::Today),
-            ],
-            &jiff::tz::TimeZone::UTC,
-        )
-        .unwrap();
-
-        let mut board = board_of("## Today\n\n- [ ] a new life <!--t:9xh2 since:2026-08-10-->\n");
-        let recorded = log.recorded_for(&board, today(), Some(ended)).unwrap();
-        let outcome = rollover(&mut board, now(), today(), ended, &recorded);
-
-        assert_eq!(outcome.carried, vec!["9xh2".parse::<TaskId>().unwrap()]);
-        assert_eq!(board.get(&"9xh2".parse().unwrap()).unwrap().carried, 1);
-    }
-
     /// The completion guard is asked per TASK, not once for the batch. Its window reaches back
     /// to the EARLIEST `since` among every ticked line, so one long-standing task ticked beside
     /// a newer one widened it for both — and a completion recorded under a recycled id two weeks

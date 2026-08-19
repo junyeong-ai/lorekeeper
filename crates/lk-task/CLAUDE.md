@@ -335,7 +335,10 @@ the commands in `lk-cli` are the only thing that decides when to apply them.
   never for this one: reading further back for a completion let an older life of a recycled id
   settle a live line, and made `sync` and `rollover` disagree about the same tick. "Was this
   task already carried FOR THIS ENDED DAY?" is keyed on the pair, so it needs no window of its
-  own and is absorbed wherever the transition was written — a carry for another day cannot
+  own — and no per-task bound either, unlike the completion guard beside it: a carry for an ended
+  day is recorded on or after that day, so a stale pair from a recycled id could only be reached
+  by a task that entered `## Today` on or before it, and both lives being on the board then is
+  what the mint already makes impossible. It is absorbed wherever the transition was written — a carry for another day cannot
   suppress this one, and asked of today's file alone a close retried on a later calendar day
   wrote a second carry for one day. The window has a start and NO ceiling, and it is read off
   the dates the record actually HOLDS rather than counted day by day up to today: a completion
@@ -346,10 +349,7 @@ the commands in `lk-cli` are the only thing that decides when to apply them.
   date file
   that will not read is FATAL to a write here rather than warned past, because the completion
   guard spans several of them and one read as an empty day harvests what the missing half
-  already recorded. A `Created` clears that id's CARRIES wherever they were written — an id
-  minted again is a new task, so nothing its previous life recorded is its, and a carry left
-  standing suppressed a real one for that day while the count that diagnoses a stale task
-  undercounted with nothing saying so. Inside the completion window it CLEARS the closure standing for its id rather
+  already recorded. Inside that window a `Created` CLEARS the closure standing for its id rather
   than being compared to it: an id freed by a completion can be minted again, and then the
   earlier task's `Done` describes a task that no longer exists — so a line ticked for the NEW
   task reads as already closed and its completion is never recorded at all. Comparing instants
