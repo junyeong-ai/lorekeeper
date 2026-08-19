@@ -995,12 +995,12 @@ impl IntentPlane {
             .collect())
     }
 
-    /// What an editor changed that no pass has recorded yet.
-    /// What an editor changed that no pass has recorded yet — asked about TODAY, never about a
-    /// day the caller is previewing. Probing with an overridden date reported edits nobody made
-    /// and named a command that then answered "nothing to record".
     /// What an editor changed that no pass has recorded — `None` where the history cannot be
     /// read, which is not the same as nothing.
+    ///
+    /// Asked about TODAY, never about a day the caller is previewing: probing with an overridden
+    /// date reported edits nobody made and named a command that then answered "nothing to
+    /// record".
     ///
     /// A view answers with what it can SEE and says when it cannot see. Answering `0` on an
     /// unreadable record was the one shape this codebase refuses everywhere else: a caller
@@ -1035,9 +1035,17 @@ fn claim(vault_root: &std::path::Path) -> Option<std::fs::File> {
     match opened.and_then(|file| file.lock().map(|()| file)) {
         Ok(file) => Some(file),
         Err(e) => {
+            // Named for what it costs, because the run PROCEEDS. `File::lock` blocks until it
+            // is granted, so an error is not contention — it is a filesystem that cannot lock at
+            // all, and it will not start being able to on the next run. Two `lore task` commands
+            // overlapping there lose board lines AND transition records, and the history is the
+            // only thing the archive reads. Refusing instead would make an unlockable vault
+            // unusable with no way out, which is worse than the race for the one person on one
+            // machine who is the ordinary case.
             eprintln!(
-                "warning: could not claim {} ({e}) — a command running at the same time as this \
-                 one could lose one of the two changes",
+                "warning: could not claim {} ({e}) — this filesystem cannot lock, so a second \
+                 `lore task` running at the same time as this one will silently lose changes to \
+                 the board AND to the history. Run them one at a time.",
                 path.display()
             );
             None
