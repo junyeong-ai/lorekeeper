@@ -47,11 +47,12 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
     // an editor made that nothing has recorded — and leaving it out meant the one command that
     // answers "is anything wrong" could not see the half of the vault a person touches daily.
     //
-    // The mark follows the same rule as every other row: it is `!` when the command that owns
-    // it would REFUSE, which for the board means a page a write cannot land on — two lines
-    // claiming one id, or a code fence that never closes.
+    // The mark says a person has something to do here, which for every other row happens to be
+    // the same thing as the owning command's exit code. It is not for this one: `lore agenda` is
+    // a VIEW and always succeeds, so a page a write cannot land on and a page holding tasks no
+    // rule can reach both have to raise the mark on their own.
     if let Some(board) = super::task::IntentPlane::survey(opts) {
-        line("board", board.state, board.writable, "lore agenda");
+        line("board", board.state, board.ok, "lore agenda");
     }
 
     let freshness = super::health::freshness(&config, &vault_root, now).await?;

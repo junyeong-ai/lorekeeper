@@ -181,10 +181,29 @@ the commands in `lk-cli` are the only thing that decides when to apply them.
   sitting on the page. One record with the line, the text and the REASON; `stamped` is the one
   place a field is mined out of a line, under all three questions. A CLOSED fence's examples are
   placed correctly and are not counted — the board's own format reference is full of them, and
-  counting one would make every task-linked question permanently unanswerable. Reported at every
-  read and carried onto the front door's row, grouped by reason and never summarised away: one
+  counting one would make every task-linked question permanently unanswerable — but a line
+  carrying an address this MINTED can only have reached a fence by being one of this tool's own,
+  parked behind one, pasted back in, or wrapped by a plugin, so it is named whether the fence
+  closes or not. Cleared with the rest when the fence closed, the tidier the person's markup the
+  quieter the loss. Reported at every read and carried onto the front door's row, grouped by reason and never summarised away: one
   sentence listing every way it can happen made the reader work out which was theirs, and a line
   whose repair goes unsaid is one nobody repairs.
+- **"Is this our stamp" is asked of the stamp's own GRAMMAR.** An address this could have
+  MINTED and the `since:` `render_task` always writes beside it — not the two characters `t:`.
+  Asked that way, any comment a person wrote holding a `t:`-prefixed token was this tool's:
+  `- [ ] call the vendor <!-- t:30 min -->` was quarantined and told its author that `30` is not
+  a task id, a machine reference they never wrote; a line of prose carrying `<!-- t:5pm -->`
+  degraded the front door's board row; and because the same signal decides whether the parse was
+  COMPLETE, one stray note left every task-linked reminder undecidable — neither fired nor
+  retired, for as long as the line sat there. A four-character value alone is not enough:
+  `t:10am` is a legal address by shape, and it is the PAIR that nobody writes by accident.
+- **A comment nobody closed still has a body: the rest of the line.** That is where a stamp goes
+  when a write is truncated or a sync client resolves a conflict, and yielding no body for it
+  made the damage invisible to every question here — the line read as one a person typed, was
+  adopted under a fresh id, and the real task's address, first day, carry count and origin were
+  gone, with the broken fragment folded into the new visible title. Ticked, a fabricated
+  completion under that title reached the archive. Reading it is what lets a truncated stamp be
+  RECOGNISED rather than reinterpreted; the two repairs differ, so the message names which.
 - **A trailing comment is a STAMP only if it names a task, asked in BOTH branches.** A comment
   written the normal way — as the only trailing one, `- [ ] fix the bug <!--more-->` — went to
   the branch a first fix did not touch, where `split_stamp` handed it to `read_stamp` and the

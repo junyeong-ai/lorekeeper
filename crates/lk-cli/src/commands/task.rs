@@ -381,7 +381,14 @@ fn group_by_reason(unplaced: &[lk_task::Unplaced]) -> Vec<(&str, String)> {
 /// One line of the board's state, as `lore status` prints it.
 pub(crate) struct BoardSurvey {
     pub(crate) state: String,
-    pub(crate) writable: bool,
+    /// Whether the front door's row prints `·` or `!`.
+    ///
+    /// The board is one of the rows whose command REPORTS rather than exits — `lore agenda` is
+    /// a view and always succeeds — so this is not an exit code standing in for a verdict. It
+    /// says a person has something to do here: a page a write cannot land on, or one holding
+    /// tasks no rule can reach. Named for the write it once meant, it was the one field still
+    /// running the two moments together after they were separated everywhere else.
+    pub(crate) ok: bool,
 }
 
 /// The board, the log, and the clock the two are read against.
@@ -651,7 +658,7 @@ impl IntentPlane {
                 eprintln!("warning: {e}");
                 return Some(BoardSurvey {
                     state: Locale::En.strings().status_board_unreadable.to_string(),
-                    writable: false,
+                    ok: false,
                 });
             }
         };
@@ -659,7 +666,7 @@ impl IntentPlane {
         if !plane.board.duplicated().is_empty() || plane.board.unterminated_fence().is_some() {
             return Some(BoardSurvey {
                 state: strings.status_board_unwritable.to_string(),
-                writable: false,
+                ok: false,
             });
         }
 
@@ -668,7 +675,7 @@ impl IntentPlane {
         if !plane.board.unplaced().is_empty() {
             return Some(BoardSurvey {
                 state: strings.status_board_unplaceable.to_string(),
-                writable: false,
+                ok: false,
             });
         }
 
@@ -702,14 +709,11 @@ impl IntentPlane {
             None => {
                 return Some(BoardSurvey {
                     state: strings.status_board_unreadable.to_string(),
-                    writable: false,
+                    ok: false,
                 });
             }
         }
-        Some(BoardSurvey {
-            state,
-            writable: true,
-        })
+        Some(BoardSurvey { state, ok: true })
     }
 
     /// Every id a new task must not be given.

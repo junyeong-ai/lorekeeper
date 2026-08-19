@@ -98,9 +98,9 @@ impl Board {
         let mut claimed: std::collections::BTreeSet<TaskId> = std::collections::BTreeSet::new();
         let mut fence: Option<Fence> = None;
         let mut title_seen = false;
-        // Checkbox lines swallowed by a fence still OPEN. A closed fence's examples are
-        // deliberately inert and the parse placed them correctly; an unclosed one swallowed
-        // whatever followed, which it did not.
+        // Checkbox lines carrying no stamp that a fence still OPEN swallowed. A closed fence's
+        // examples are deliberately inert and the parse placed them correctly; an unclosed one
+        // took whatever followed, which it did not.
         let mut swallowed: Vec<Unplaced> = Vec::new();
 
         for (index, line) in body.lines().enumerate() {
@@ -116,7 +116,19 @@ impl Board {
                         fence = None;
                         board.unterminated_fence = None;
                         swallowed.clear();
-                    } else if unplaceable(trimmed) {
+                    } else if names_a_task(trimmed) {
+                        // Named whether the fence closes or not. A line carrying an address
+                        // this MINTED can only have reached a fence by being one of this tool's
+                        // own — a block of real tasks parked behind one, pasted back in, or
+                        // wrapped by a plugin — while a documented example is written by hand
+                        // and carries no live stamp. Cleared with the rest when the fence closed,
+                        // the tidier the person's markup the quieter the loss.
+                        board.unplaced.push(Unplaced {
+                            line: index + 1 + offset,
+                            text: trimmed.to_string(),
+                            why: "it sits inside a code fence, where nothing is markup".into(),
+                        });
+                    } else if checkbox(trimmed).is_some() {
                         swallowed.push(Unplaced {
                             line: index + 1 + offset,
                             text: trimmed.to_string(),
@@ -658,12 +670,31 @@ fn unplaceable(line: &str) -> bool {
     checkbox(line).is_some() || names_a_task(line)
 }
 
-/// The bodies of every `<!--…-->` comment in `line`, in the order they appear.
+/// The bodies of every comment opened on `line`, in the order they appear.
+///
+/// A comment nobody CLOSED yields the rest of the line, because that is where it ends. Yielding
+/// nothing for it made a truncated stamp invisible to every question here: the line was read as
+/// one a person typed, adopted under a fresh id, and the real task's address, first day, carry
+/// count and origin were gone — with the broken fragment folded into the new task's visible
+/// title, and, where the box was ticked, a fabricated completion under that title reaching the
+/// archive. Nothing said a word. A truncated write and a sync client's conflict resolution both
+/// produce exactly that line.
 fn comments(line: &str) -> impl Iterator<Item = &str> {
-    line.split("<!--").skip(1).filter_map(|rest| {
-        let end = rest.find("-->")?;
-        Some(&rest[..end])
-    })
+    line.split("<!--")
+        .skip(1)
+        .map(|rest| match rest.find("-->") {
+            Some(end) => &rest[..end],
+            None => rest,
+        })
+}
+
+/// Whether a comment opened on `line` is never closed.
+///
+/// The two repairs differ — add the `-->`, or move what follows the stamp in front of it — and a
+/// message naming the wrong one is a message its reader cannot act on.
+fn has_unclosed_comment(line: &str) -> bool {
+    line.rsplit_once("<!--")
+        .is_some_and(|(_, rest)| !rest.contains("-->"))
 }
 
 /// The value stamp field `key` carries on `line`, wherever a comment on it holds one.
@@ -691,9 +722,20 @@ fn names_a_task(line: &str) -> bool {
     comments(line).any(is_stamp)
 }
 
-/// Whether a comment BODY is one of this tool's stamps — it names a task id.
+/// Whether a comment BODY is one of this tool's stamps.
+///
+/// Asked of the stamp's own GRAMMAR — a `t:` naming a real address and the `since:` that
+/// `render_task` always writes beside it — rather than of the two characters `t:`. Asked that
+/// way, any comment a person wrote holding a `t:`-prefixed token was this tool's: `<!-- t:30
+/// min -->` beside a checkbox was quarantined and told its author that `30` is not a task id, a
+/// machine reference they never wrote; `<!-- t:5pm -->` on a line of prose degraded the front
+/// door's board row; and because the same signal decides whether the parse was COMPLETE, one
+/// stray note left every task-linked reminder undecidable — neither fired nor retired, for as
+/// long as the line sat there. A four-character value alone is not enough either: `t:10am` is a
+/// legal address by shape, and the pair is what nobody writes by accident.
 fn is_stamp(body: &str) -> bool {
-    field(body, "t:").is_some_and(|id| !id.is_empty())
+    field(body, "t:").is_some_and(|id| id.parse::<TaskId>().is_ok())
+        && field(body, "since:").is_some()
 }
 
 /// tool's. `Err` is a line carrying a stamp that would not read.
@@ -716,9 +758,14 @@ fn read_line(line: &str) -> Result<Option<Entry>, TaskError> {
         // stamp, or annotating an addressed task with a note comment, is how it happens.
         if names_a_task(rest) {
             return Err(TaskError::Malformed(
-                "a stamp must be the LAST thing on its line — move what follows it in front of \
-                 the comment, or delete the comment to have the line adopted as a new task"
-                    .into(),
+                if has_unclosed_comment(rest) {
+                    "the comment carrying this line's stamp is never closed — add the `-->` that \
+                     ends it, or delete the comment to have the line adopted as a new task"
+                } else {
+                    "a stamp must be the LAST thing on its line — move what follows it in front \
+                     of the comment, or delete the comment to have the line adopted as a new task"
+                }
+                .into(),
             ));
         }
         return Ok(Some(Entry::Unstamped {
@@ -992,11 +1039,22 @@ mod tests {
             assert_eq!(board.unplaced().len(), 1, "{page}");
         }
 
-        // A CLOSED fence's example is placed correctly — the board's own format reference is
-        // full of them, and counting one would make every task-linked question unanswerable.
-        let documented = board_of(&format!("## Today\n\n```md\n{stamped}\n```\n\n{stamped}\n"));
+        // A documented EXAMPLE is written by hand and carries no address this minted, so a
+        // closed fence leaves it inert and the page accounts for everything.
+        let documented = board_of(&format!(
+            "## Today\n\n```md\n- [ ] an example, not a task\n```\n\n{stamped}\n"
+        ));
         assert_eq!(documented.tasks().count(), 1);
         assert!(documented.unplaced().is_empty());
+
+        // A line carrying one can only have reached a fence by being one of this tool's own —
+        // real tasks parked behind it, pasted back in, or wrapped by a plugin — and is named
+        // whether the fence closes or not. Cleared when it closed, the tidier the person's
+        // markup the quieter the loss.
+        let parked = board_of(&format!("## Today\n\n```md\n{stamped}\n```\n"));
+        assert_eq!(parked.tasks().count(), 0);
+        assert_eq!(parked.unplaced().len(), 1);
+        assert!(parked.unplaced()[0].why.contains("code fence"));
 
         // And an ordinary board accounts for everything.
         assert!(
@@ -1104,6 +1162,60 @@ mod tests {
                 .render(Locale::En, jiff::civil::date(2026, 8, 19))
                 .contains("## Blocked\n\n- [ ] waiting on legal <!--t:aaa2 since:2026-08-18-->\n- [ ] typed by hand\n")
         );
+    }
+
+    /// A comment nobody closed is where a stamp goes when a write is truncated or a sync client
+    /// resolves a conflict. Yielding no comment body for it, every question here read the line
+    /// as one a person typed: adopted under a fresh id, the real task's address, first day,
+    /// carry count and origin gone, the broken fragment folded into the new visible title — and
+    /// with the box ticked, a fabricated completion under that title reaching the archive.
+    #[test]
+    fn a_stamp_whose_comment_never_closes_is_reported_rather_than_reinterpreted() {
+        for line in [
+            "- [ ] fix the bug <!--t:7k2p since:2026-08-14 carried:5 src:abc123",
+            "- [x] fix the bug <!--t:7k2p since:2026-08-14 carried:5 src:abc123",
+        ] {
+            let board = board_of(&format!("## Today\n\n{line}\n"));
+            assert!(board.tasks().next().is_none(), "{line}");
+            assert!(board.unstamped().is_empty(), "not adopted: {line}");
+            assert_eq!(board.unplaced().len(), 1, "{line}");
+            assert!(board.unplaced()[0].why.contains("never closed"), "{line}");
+            // The address it still names is protected from the mint, so repairing the line
+            // brings the task back whole rather than beside a rival.
+            assert!(board.ids().contains(&"7k2p".parse().unwrap()), "{line}");
+        }
+
+        // A person's own unclosed `<!--` is their text, and the line is adopted as it reads.
+        let prose = board_of("## Today\n\n- [ ] explain the <!-- syntax\n");
+        assert!(prose.unplaced().is_empty());
+        assert_eq!(prose.unstamped().len(), 1);
+    }
+
+    /// Asked of the two characters `t:`, any comment a person wrote holding a `t:`-prefixed
+    /// token was this tool's stamp — and the same signal decides whether the parse was COMPLETE,
+    /// so one stray note left every task-linked reminder undecidable. The stamp's own grammar is
+    /// the question: an address this could have minted, and the `since:` always written beside it.
+    #[test]
+    fn a_comment_that_only_looks_like_a_stamp_is_the_persons_own_text() {
+        for line in [
+            "- [ ] call the vendor <!-- t:30 min -->",
+            "- [ ] leave for the airport <!-- t:5pm -->",
+            "- [ ] stand-up <!-- t:10am -->",
+            "- [ ] draft the memo <!-- t:asap -->",
+        ] {
+            let board = board_of(&format!("## Today\n\n{line}\n"));
+            assert!(board.unplaced().is_empty(), "{line}");
+            assert_eq!(board.unstamped().len(), 1, "{line}");
+        }
+
+        // Prose carrying one is prose, and does not make the parse incomplete.
+        let note = board_of("## Today\n\nRemember to email Sam <!-- t:5pm -->\n");
+        assert!(note.unplaced().is_empty());
+
+        // While a real stamp whose FIELD is damaged is still ours, and still reported.
+        let damaged = board_of("## Today\n\n- [ ] a <!--t:7k2p since:nonsense-->\n");
+        assert_eq!(damaged.unplaced().len(), 1);
+        assert!(damaged.ids().contains(&"7k2p".parse().unwrap()));
     }
 
     /// A line the parse could not place still NAMES a task, and both rules that reach a task
