@@ -21,12 +21,16 @@
 
 mod board;
 mod log;
+mod propose;
 mod reconcile;
+mod schedule;
 mod task;
 
 pub use board::{Board, Entry};
 pub use log::{Recorded, Transition, TransitionKind, TransitionLog};
+pub use propose::{Candidate, Candidates, Judged};
 pub use reconcile::{Reconciled, rollover, sync};
+pub use schedule::{Appointment, Schedule};
 pub use task::{Task, TaskId, TaskState};
 
 use thiserror::Error;

@@ -452,6 +452,9 @@ fn render_task(task: &Task) -> String {
     if let Some(day) = task.carried_on {
         let _ = write!(stamp, " carried-on:{day}");
     }
+    if let Some(src) = &task.src {
+        let _ = write!(stamp, " src:{src}");
+    }
     for (key, value) in &task.extra {
         let _ = write!(stamp, " {key}:{value}");
     }
@@ -563,6 +566,7 @@ fn read_stamp(stamp: &str) -> Result<Task, TaskError> {
     let mut wake = None;
     let mut carried = 0u32;
     let mut carried_on = None;
+    let mut src = None;
     let mut extra = Vec::new();
 
     for field in stamp.split_whitespace() {
@@ -589,6 +593,7 @@ fn read_stamp(stamp: &str) -> Result<Task, TaskError> {
                     .map_err(|_| TaskError::Malformed(format!("`{field}` is not a count")))?;
             }
             "carried-on" => carried_on = Some(parse_date(value)?),
+            "src" => src = Some(value.to_string()),
             _ => extra.push((key.to_string(), value.to_string())),
         }
     }
@@ -604,6 +609,7 @@ fn read_stamp(stamp: &str) -> Result<Task, TaskError> {
         wake,
         carried,
         carried_on,
+        src,
         done: false,
         extra,
     })

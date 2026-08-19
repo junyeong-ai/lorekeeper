@@ -33,5 +33,12 @@ fi
 run "ingest" lore_cmd ingest
 
 drain_queue
+
+# After the drain, because the judgment half of a proposal is written by that session: an LLM
+# reading the pages this run wrote names what looked like work, and this offers it. Before it
+# would offer only what the sources declared structurally, a day late on everything else.
+if lore_cmd config board-path >/dev/null 2>&1; then
+    run "task propose" lore_cmd task propose
+fi
 sync_graph
 pipeline_finish

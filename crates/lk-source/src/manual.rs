@@ -311,6 +311,7 @@ fn read_item(path: &Path) -> Result<RawItem, SourceError> {
         author: None,
         timestamp: mtime,
         is_self: false,
+        open_work: None,
         metadata: serde_json::json!({
             "source_file": path.display().to_string(),
             "source_hash": source_hash,

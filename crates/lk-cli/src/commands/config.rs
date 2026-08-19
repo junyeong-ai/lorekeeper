@@ -39,6 +39,12 @@ pub enum ConfigCommand {
     /// for every install that never turned the intent plane on — or one that greps an error
     /// message, which is not a contract.
     BoardPath,
+    /// The sources whose prose an LLM session may read for work, one per line
+    ///
+    /// Empty output is the ordinary answer and not an error: the judgment half of a proposal is
+    /// opt-in, so a session that reads this and finds nothing simply skips the step — which is
+    /// the contract, rather than an agent deciding for itself which sources it may judge.
+    ProposeFrom,
 }
 
 pub async fn run(opts: &super::GlobalOptions, cmd: ConfigCommand) -> miette::Result<()> {
@@ -62,6 +68,19 @@ pub async fn run(opts: &super::GlobalOptions, cmd: ConfigCommand) -> miette::Res
                     .join(lk_core::vault_path::SCHEMA_FILE)
                     .display()
             );
+            Ok(())
+        }
+        ConfigCommand::ProposeFrom => {
+            let config = load_config(&find_config(opts)?)?;
+            let named = config
+                .personal
+                .as_ref()
+                .and_then(|personal| personal.tasks.as_ref())
+                .map(|tasks| tasks.propose_from.clone())
+                .unwrap_or_default();
+            for source in named {
+                println!("{source}");
+            }
             Ok(())
         }
         ConfigCommand::BoardPath => {

@@ -36,14 +36,46 @@ pub async fn run(opts: &GlobalOptions, date: Option<String>) -> miette::Result<(
         match task.state {
             TaskState::Today => committed.push(task),
             TaskState::Waiting => woken.push(task),
+            // `is_active_on` never answers true for a proposal, so this arm is unreachable —
+            // named rather than folded into the one below it, because a proposal is not
+            // something due and a later edit to that predicate must decide this again.
+            TaskState::Proposed => {}
             TaskState::Next | TaskState::Someday => due.push(task),
         }
     }
+
+    // The day's appointments, which the agenda REPORTS and the board never learns of: a
+    // meeting is a time already committed to, not work to decide about. A view answers with
+    // what it can see, so an unreadable record costs the section rather than the command.
+    match lk_task::Schedule::new(&plane.vault_root).read(plane.today) {
+        Ok(appointments) if !appointments.is_empty() => {
+            eprintln!("\n{}", strings.agenda_schedule);
+            for appointment in appointments {
+                let clock = appointment
+                    .at
+                    .to_zoned(plane.zone.clone())
+                    .strftime("%H:%M");
+                eprintln!("  {clock}  {}", appointment.title);
+            }
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!("warning: the day's schedule could not be read ({e})"),
+    }
+
+    // Proposals are listed apart from the day's business and last: they ask to be ANSWERED
+    // rather than worked on, and putting them among what a person committed to would make the
+    // day look fuller than they made it.
+    let proposed: Vec<_> = plane
+        .board
+        .tasks()
+        .filter(|task| task.state == TaskState::Proposed)
+        .collect();
 
     for (heading, tasks) in [
         (strings.tasks_today, &committed),
         (strings.tasks_waiting, &woken),
         (strings.agenda_due, &due),
+        (strings.agenda_proposed, &proposed),
     ] {
         if tasks.is_empty() {
             continue;

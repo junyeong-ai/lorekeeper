@@ -243,6 +243,44 @@ pub async fn run(
             }
         };
 
+        // Written BEFORE the empty-pages skip, and written even when the list is empty: a
+        // source can be open-work-only in a run that renders nothing, and an empty answer is
+        // what retires proposals whose work is now finished. `--dry-run` writes nothing at all.
+        if !dry_run && config.personal.as_ref().is_some_and(|p| p.tasks.is_some()) {
+            let candidates = lk_task::Candidates::new(&vault_root);
+            if let Err(e) = candidates.record(id, &result.open_work) {
+                eprintln!("  ✗ proposals: {e}");
+                had_failure = true;
+            }
+        }
+
+        // A scheduled source's items are appointments, which the agenda reports beside the
+        // day's tasks and nothing ever proposes. Written per DATE the run observed, replacing
+        // that date whole, so a cancelled meeting stops appearing with nothing to reconcile.
+        if !dry_run
+            && sc.source_type.descriptor().scheduled
+            && config.personal.as_ref().is_some_and(|p| p.tasks.is_some())
+        {
+            let schedule = lk_task::Schedule::new(&vault_root);
+            let mut by_date: std::collections::BTreeMap<_, Vec<lk_task::Appointment>> =
+                std::collections::BTreeMap::new();
+            for event in &result.events {
+                by_date
+                    .entry(event.date)
+                    .or_default()
+                    .push(lk_task::Appointment {
+                        at: event.timestamp,
+                        title: event.title.clone(),
+                    });
+            }
+            for (date, appointments) in by_date {
+                if let Err(e) = schedule.record(date, &appointments) {
+                    eprintln!("  ✗ agenda: {e}");
+                    had_failure = true;
+                }
+            }
+        }
+
         // Skip only when there are no pages to write. (A manual source with an empty
         // inbox lands here too; with no events its archive step is a no-op.)
         if result.is_empty() {

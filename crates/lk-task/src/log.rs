@@ -31,6 +31,15 @@ impl TransitionKind {
     pub fn is_observation(self) -> bool {
         matches!(self, TransitionKind::Done)
     }
+
+    /// Whether this transition ANSWERS the observation the task came from.
+    ///
+    /// Finishing and dropping both answer it; moving and carrying do not — the task is still
+    /// open, and it is the BOARD that says so. Keeping the two questions apart is what lets a
+    /// proposal need no store of its own.
+    pub fn is_answer(self) -> bool {
+        matches!(self, TransitionKind::Done | TransitionKind::Dropped)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +61,13 @@ pub struct Transition {
     /// How many day-closes the task had survived when it closed.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub carried: u32,
+    /// The origin this task answered to, where it had one. See [`lk_core::origin`].
+    ///
+    /// Carried into the history so that "has this observation already been ANSWERED" is a
+    /// question the two existing stores can settle between them — the board holds what is open,
+    /// this holds what was finished or dropped — and a proposal needs no store of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src: Option<String>,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -73,7 +89,13 @@ impl Transition {
             state: None,
             note: None,
             carried: 0,
+            src: None,
         }
+    }
+
+    pub fn with_src(mut self, src: Option<String>) -> Self {
+        self.src = src;
+        self
     }
 
     pub fn with_state(mut self, state: TaskState) -> Self {
@@ -123,6 +145,7 @@ impl Transition {
             // A task on this board is the user's own by construction; there is no other author
             // it could have, so ownership is not inferred, it is structural.
             is_self: true,
+            open_work: None,
             metadata: serde_json::json!({
                 "task_id": self.id.as_str(),
                 "carried": self.carried,
@@ -146,6 +169,7 @@ pub struct Recorded {
     closed: std::collections::BTreeMap<TaskId, Transition>,
     carried: std::collections::BTreeSet<TaskId>,
     seen: std::collections::BTreeSet<TaskId>,
+    answered: std::collections::BTreeSet<String>,
 }
 
 impl Recorded {
@@ -171,6 +195,11 @@ impl Recorded {
     /// nothing to clear and the window's own start is what bounds it.
     fn absorb(&mut self, transition: Transition, carried_today: bool) {
         self.seen.insert(transition.id.clone());
+        if let Some(src) = &transition.src
+            && transition.kind.is_answer()
+        {
+            self.answered.insert(src.clone());
+        }
         match transition.kind {
             TransitionKind::Created => {
                 self.closed.remove(&transition.id);
@@ -183,6 +212,15 @@ impl Recorded {
             }
             _ => {}
         }
+    }
+
+    /// Every origin the window records an ANSWER for — a task finished or dropped.
+    ///
+    /// What stops an observation being proposed every morning after the person has already
+    /// dealt with it. A move or a carry is not an answer: the task is still open, and it is the
+    /// BOARD that says so.
+    pub fn answered(&self) -> &std::collections::BTreeSet<String> {
+        &self.answered
     }
 
     /// Every id the window mentions at all.
@@ -292,6 +330,46 @@ impl TransitionLog {
                 .map_err(|e| TaskError::Malformed(format!("{day} has no successor: {e}")))?;
         }
         Ok(recorded)
+    }
+
+    /// Every origin the WHOLE history records an answer for.
+    ///
+    /// Read across every date rather than over a window, because the question is not "what
+    /// happened lately" but "have I dealt with this before" — an issue dropped in March must
+    /// not be proposed again in August. The cost is one directory of small files read once by
+    /// a command that runs at most daily, and it is exact: `lore maintenance` prunes the ingest
+    /// log and drained queue files, never this, so no horizon can turn an answered origin back
+    /// into an unanswered one.
+    ///
+    /// A date whose record will not read is a hard error here, as everywhere: treating it as
+    /// empty would re-propose exactly the work the unreadable half says was finished.
+    pub fn answered_origins(&self) -> Result<std::collections::BTreeSet<String>, TaskError> {
+        let mut answered = std::collections::BTreeSet::new();
+        let entries = match std::fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(answered),
+            Err(e) => return Err(TaskError::io(format!("read {}", self.root.display()), e)),
+        };
+        for entry in entries {
+            let path = entry
+                .map_err(|e| TaskError::io(format!("read {}", self.root.display()), e))?
+                .path();
+            let Some(date) = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|s| s.parse::<jiff::civil::Date>().ok())
+            else {
+                continue;
+            };
+            for transition in self.read(date)? {
+                if let Some(src) = transition.src
+                    && transition.kind.is_answer()
+                {
+                    answered.insert(src);
+                }
+            }
+        }
+        Ok(answered)
     }
 
     /// Add `transitions` to their dates' records.

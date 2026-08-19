@@ -80,6 +80,14 @@ impl fmt::Display for TaskId {
 pub enum TaskState {
     /// Committed to today.
     Today,
+    /// Work an OBSERVATION proposed and the person has not answered yet.
+    ///
+    /// The one state nothing else here reaches: a source put it there, so until someone moves
+    /// it out it is not a commitment. Accepting is dragging the line into another section,
+    /// which the state machine already reads; declining is `lore task drop`, which the history
+    /// already records. That is why a proposal is an ordinary task line rather than a fifth
+    /// kind of thing — the two answers a person can give already exist.
+    Proposed,
     /// Ready, not committed.
     Next,
     /// Blocked on something that is not this list.
@@ -90,8 +98,9 @@ pub enum TaskState {
 
 impl TaskState {
     /// Board order, which is also agenda order: what is committed first, what is parked last.
-    pub const ALL: [TaskState; 4] = [
+    pub const ALL: [TaskState; 5] = [
         TaskState::Today,
+        TaskState::Proposed,
         TaskState::Next,
         TaskState::Waiting,
         TaskState::Someday,
@@ -100,6 +109,7 @@ impl TaskState {
     pub fn as_str(self) -> &'static str {
         match self {
             TaskState::Today => "today",
+            TaskState::Proposed => "proposed",
             TaskState::Next => "next",
             TaskState::Waiting => "waiting",
             TaskState::Someday => "someday",
@@ -111,6 +121,7 @@ impl TaskState {
         let strings = locale.strings();
         match self {
             TaskState::Today => strings.tasks_today,
+            TaskState::Proposed => strings.tasks_proposed,
             TaskState::Next => strings.tasks_next,
             TaskState::Waiting => strings.tasks_waiting,
             TaskState::Someday => strings.tasks_someday,
@@ -174,6 +185,15 @@ pub struct Task {
     /// Carried through parsing so the reconciler can harvest it; a rendered board never holds
     /// one, because harvesting removes the line.
     pub done: bool,
+    /// What OBSERVATION this task answers to, as `blake3(url)[..16]`.
+    ///
+    /// The identity of the origin, as opposed to how it reads — the same split `t:` makes for
+    /// the task itself, and for the same reason: the visible link is part of a title a person
+    /// is expected to rewrite, and a join that read it would stop matching the moment they did.
+    /// It is what stops one Jira issue being proposed every morning after it was accepted,
+    /// declined or finished, and it is a hash rather than the URL because a stamp value is
+    /// `[0-9A-Za-z-]+` and a URL is not.
+    pub src: Option<String>,
     /// Stamp fields this build does not know, kept in the order they were written.
     ///
     /// A board is one file two builds may open — a laptop updated this morning and a desktop
@@ -202,6 +222,7 @@ impl Task {
             carried: 0,
             carried_on: None,
             done: false,
+            src: None,
             extra: Vec::new(),
         }
     }
@@ -212,6 +233,10 @@ impl Task {
         match self.state {
             TaskState::Today => true,
             TaskState::Waiting => self.wake.is_some_and(|wake| wake <= date),
+            // A proposal asks to be ANSWERED, not worked on, so it never joins the day's
+            // commitments — the agenda reports it separately. Reading it as active would put
+            // work nobody accepted into the same list as work somebody did.
+            TaskState::Proposed => false,
             TaskState::Next | TaskState::Someday => self.due.is_some_and(|due| due <= date),
         }
     }

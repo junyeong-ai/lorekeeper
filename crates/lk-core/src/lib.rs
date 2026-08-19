@@ -10,5 +10,6 @@ pub mod i18n;
 pub mod link;
 pub mod markdown;
 pub mod math;
+pub mod origin;
 pub mod text;
 pub mod vault_path;

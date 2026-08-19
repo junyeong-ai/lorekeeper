@@ -96,6 +96,26 @@ impl std::fmt::Display for EventId {
     }
 }
 
+/// Work a source declares UNFINISHED, from its own structured fields.
+///
+/// The same discipline `is_self` follows, for the same reason: the adapter answers from the
+/// field its provider defines — a Jira issue's status category and assignee — and never from
+/// free-form text. An adapter that would have to READ prose to answer leaves this `None`, and
+/// the judgment it would have taken reaches the board through the LLM queue instead, where it
+/// is a judgment declared as one rather than a rule quietly guessing.
+///
+/// This is the "an observation may PROPOSE a task" half of the intent plane's first joint. It
+/// proposes and nothing here creates: `lore task propose` writes a line into the board's
+/// proposed section, and only a person moves it out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenWork {
+    /// What the proposed line reads as.
+    pub summary: String,
+    /// The absolute URL addressing it — both the visible link and, through
+    /// [`crate::origin::identity`], what stops it being proposed twice.
+    pub url: String,
+}
+
 /// Intermediate representation produced by source adapters before normalization.
 /// Each adapter maps its API response into one or more `RawItem`s, which
 /// `lk-pipeline::normalize` then converts into `Event`s (assigning date and id).
@@ -111,6 +131,8 @@ pub struct RawItem {
     /// structured authorship fields; the pipeline never re-derives ownership
     /// from free-form text.
     pub is_self: bool,
+    /// Set only by an adapter whose provider gives it a structured answer. See [`OpenWork`].
+    pub open_work: Option<OpenWork>,
     pub metadata: serde_json::Value,
 }
 

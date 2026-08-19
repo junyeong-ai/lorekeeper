@@ -10,6 +10,37 @@ the commands in `lk-cli` are the only thing that decides when to apply them.
   extraction and every review consume a completion without a line of them changing. That second
   joint is the entire archive — there is no archival machinery here, because finishing something
   is an event and this workspace already knows what to do with an event.
+- **The FIRST joint, at last built: an observation proposes and never creates.** Two layers,
+  because the two halves cannot be right in the same way. A source's STRUCTURED field answers
+  "is this unfinished" with no reading of prose — a Jira issue assigned to the user whose
+  `statusCategory` is not `done` — so no false positive is reachable and the layer needs no
+  opting in; `RawItem::open_work` is where an adapter says so, the same discipline `is_self`
+  follows. Free text has no such field: "does this mail ask me to do something" is a judgment,
+  a rule over subject lines would fire on every newsletter, so it is made where judgments are
+  already made and declared as one through `lore task candidate`, for the sources
+  `personal.tasks.propose_from` names and no others. What lands is a `TaskState::Proposed` line
+  and nothing more — accepting is dragging it into another section, declining is `lore task
+  drop`, and both answers already existed.
+- **A proposal needs no store of its own.** Three things already settle whether an observation
+  has been dealt with: the BOARD holds what is open however it got there, the HISTORY holds a
+  completion or a drop (`TransitionKind::is_answer`), and a source that no longer declares it
+  is not offering it. `lk_core::origin::identity` is the join — `blake3(url)[..16]` on the
+  stamp's `src:`, a hash because a stamp value is `[0-9A-Za-z-]+` and a URL is not, and an
+  identity because the visible link lives in a title a person is expected to rewrite. The one
+  gap is a proposal DELETED in an editor rather than dropped, which returns tomorrow; that is
+  the same silence deleting any task line already has, and a proposal that comes back costs
+  less than one suppressed by a rule guessing at what a deletion meant.
+- **What re-declares gets a snapshot; what is observed once gets consumed.** A source that
+  re-fetches its window can say what is still open every morning, so `Candidates` is replaced
+  whole per source and a closed issue simply stops appearing — including the EMPTY write, which
+  is what retires the proposals of a source whose work is all finished. An LLM session read one
+  day's page and cannot re-declare yesterday's, so `Judged` candidates are consumed by the
+  proposal that offers them; left to accumulate they would be re-read forever, and one deleted
+  in March would return every day after.
+- **An appointment is reported, never proposed.** `SourceDescriptor::scheduled` marks a source
+  whose items are times already committed to. `lore agenda` shows them beside the day's tasks
+  and the board never learns of them: a meeting happens whether or not a line is cleared, and
+  putting one there would hand a person something to tick every morning for nothing.
 - **Only a completion is an observation.** A dropped task belongs in the history and not on a
   daily page: the archive answers "what did I do", and deciding not to do a thing is not doing
   it. `TransitionKind::is_observation` is the one place that judgment lives.

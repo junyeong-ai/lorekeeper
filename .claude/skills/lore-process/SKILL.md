@@ -308,3 +308,22 @@ log covers comes back intact; a date older than the log does not, and no other s
 keeps a log at all. Check first: `lore ingest <source> --date <day> --dry-run` reports the
 event count it would write for each daily page — compare it with the count the page states.
 Regenerating a summary is not worth truncating the events it summarizes.
+
+## Proposing work from what you read
+
+`lore config propose-from` names the sources whose prose you may read for work — it is empty by
+default and this step does not run then. For a daily page belonging to a named source, and only
+those, name anything that asks the vault's owner to DO something:
+
+```
+lore task candidate --source <source-id> --summary "<what-to-do>" --url "<absolute-url>"
+```
+
+The URL is the thing itself — the mail, the thread, the issue — never a vault path: it is copied
+onto the archive page when the task closes, and it is what stops the same work being proposed
+again tomorrow.
+
+This is a proposal and never a commitment. Do not judge priority, do not guess a due date, and
+do not name something merely because it was mentioned: a person answers every line by moving it
+or dropping it, so a wrong one costs them a decision. Say nothing rather than fill a quota.
+

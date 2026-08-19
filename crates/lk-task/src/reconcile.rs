@@ -110,7 +110,8 @@ pub fn sync(
         }
         outcome.transitions.push(
             Transition::new(task.id.clone(), TransitionKind::Done, &task.title, now)
-                .with_carried(task.carried),
+                .with_carried(task.carried)
+                .with_src(task.src.clone()),
         );
         outcome.harvested.push(task.id);
     }

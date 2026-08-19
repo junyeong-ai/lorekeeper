@@ -33,6 +33,8 @@ an Obsidian vault. All commands accept `--config <path>` to override.
 | `lore task list [--state] [--json]` | The board, by section |
 | `lore task done <id> [--note]` | Close a task. The note becomes the archived page's body, and through it the concept extraction — which is how work performed compounds the way work read does |
 | `lore task drop <id>` · `move <id> <state>` · `wait <id> --until <date>` | Take it off the board, move it between sections, park it until a day |
+| `lore task propose` | Put what the sources say is still OPEN into the board's proposed section. An observation proposes and never creates: accept by dragging the line into another section, decline with `lore task drop`. Nothing is proposed twice — the board says what is open and the history says what was answered |
+| `lore task candidate --source <id> --summary <text> --url <URL>` | Name work read out of a page by JUDGMENT, for the next `propose` to offer. Refused for a source `personal.tasks.propose_from` does not name, because unlike a status field a reading of prose can be wrong |
 | `lore task sync` | Record what an editor did: adopt lines typed by hand, close lines ticked, wake what is due |
 | `lore task rollover` | Close the day — carry every still-committed task, counting each carry so a task carried too long reads as the diagnosis it is |
 | `lore resolve <name>` | Which concept page a name addresses, by the rule ingest routes an extraction by. Exit 0 owned, 1 absent, 2 more than one page answers to it |
@@ -59,6 +61,7 @@ an Obsidian vault. All commands accept `--config <path>` to override.
 - "show performance" → `lore performance`
 - "오늘 뭐 하지" / "what's on today" → `lore agenda`
 - "이거 해야 해" / "add a task" → `lore task add`
+- "오늘 뭐 해야 하지" / "what should I pick up" → `lore agenda` (the board + what was proposed)
 - "check status" → `lore status`
 - "health check" → `lore health`
 - "generate cron" / "schedule it" → `lore schedule` (read the flag notes first)

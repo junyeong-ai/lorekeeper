@@ -85,6 +85,10 @@ sources:
       # Issues changed (= worked on) that day = a work-history snapshot. Due/start dates are
       # shown on the page as their values as-of that day, but the search key is `updated`
       # (so a later date change doesn't retroactively pollute past pages).
+      # The JQL decides what is PROPOSED as well as what is ingested: an issue
+      # outside this window is never fetched, so it is never declared open.
+      # To have work still open proposed each morning, widen it — e.g.
+      #   assignee = currentUser() AND (updated >= -1d OR statusCategory != Done)
       jql: >
         assignee = currentUser()
         AND updated >= -1d
@@ -330,6 +334,12 @@ personal:
   tasks:
     board: tasks.md                 # relative to vault.dirs.personal
     carry_warn_after: 3             # the agenda flags a task carried this many day-closes
+    # Sources whose PROSE an LLM session may read to propose work. Opt-in and empty by
+    # default: a Jira issue's status category is the provider's own fixed vocabulary, so an
+    # adapter declares "unfinished" without reading a word and cannot be wrong — while "does
+    # this mail ask me to do something" has no such field, and a rule over subject lines would
+    # fire on every newsletter. Structural proposals need nothing here.
+    # propose_from: [email-digest]
   # Monthly/quarterly/annual review schedules. The weekly review rides `lore synthesis
   # weekly` (scheduled under synthesis.weekly below), so it has no separate schedule here.
   monthly:

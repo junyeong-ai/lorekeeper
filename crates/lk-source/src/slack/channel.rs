@@ -325,6 +325,7 @@ impl Source for SlackChannelSource {
                     author,
                     timestamp: ts,
                     is_self,
+                    open_work: None,
                     metadata: serde_json::json!({
                         "channel": channel_name,
                         "reply_count": root.reply_count,

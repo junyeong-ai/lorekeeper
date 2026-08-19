@@ -35,6 +35,7 @@ const SWEEP: &[&[&str]] = &[
     &["config", "schema-path"],
     &["config", "categories"],
     &["config", "board-path"],
+    &["config", "propose-from"],
     &["status"],
     &["health"],
     &["doctor"],
@@ -117,6 +118,14 @@ const EXEMPT: &[(&[&str], &str)] = &[
     (
         &["task", "sync"],
         "records what an editor did, which is a write by definition",
+    ),
+    (
+        &["task", "propose"],
+        "puts what the sources declared open onto the board, and consumes the judged candidates it offered",
+    ),
+    (
+        &["task", "candidate"],
+        "records a judgment for the next proposal to offer; the judgment is the observation, and it is a write",
     ),
     (
         &["task", "rollover"],

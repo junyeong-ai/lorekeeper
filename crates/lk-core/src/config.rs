@@ -859,6 +859,13 @@ pub struct SourceDescriptor {
     pub default_template: &'static str,
     /// Whether items read as messages or events (daily-page heading terminology).
     pub item_kind: ItemKind,
+    /// A source whose items are APPOINTMENTS — a time already committed to rather than work to
+    /// decide about.
+    ///
+    /// `lore agenda` reports them beside the day's tasks and nothing proposes them: a meeting
+    /// is not a to-do, and putting one on the board would give a person a line to clear every
+    /// morning for something that will happen whether they clear it or not.
+    pub scheduled: bool,
 }
 
 impl SourceType {
@@ -869,26 +876,31 @@ impl SourceType {
             SourceType::GoogleDrive => SourceDescriptor {
                 streaming: false,
                 default_template: "google-drive.md.jinja",
+                scheduled: false,
                 item_kind: ItemKind::Event,
             },
             SourceType::Gmail => SourceDescriptor {
                 streaming: false,
                 default_template: "gmail.md.jinja",
+                scheduled: false,
                 item_kind: ItemKind::Event,
             },
             SourceType::SlackChannel => SourceDescriptor {
                 streaming: false,
                 default_template: "slack-channel.md.jinja",
+                scheduled: false,
                 item_kind: ItemKind::Message,
             },
             SourceType::SlackSearch => SourceDescriptor {
                 streaming: false,
                 default_template: "slack-search.md.jinja",
+                scheduled: false,
                 item_kind: ItemKind::Message,
             },
             SourceType::Jira => SourceDescriptor {
                 streaming: false,
                 default_template: "jira.md.jinja",
+                scheduled: false,
                 item_kind: ItemKind::Event,
             },
             // Not streaming: a CQL window re-queries any past day completely, so a daily
@@ -896,21 +908,25 @@ impl SourceType {
             SourceType::Confluence => SourceDescriptor {
                 streaming: false,
                 default_template: "confluence.md.jinja",
+                scheduled: false,
                 item_kind: ItemKind::Event,
             },
             SourceType::GoogleCalendar => SourceDescriptor {
                 streaming: false,
                 default_template: "google-calendar.md.jinja",
+                scheduled: true,
                 item_kind: ItemKind::Event,
             },
             SourceType::Rss => SourceDescriptor {
                 streaming: true,
                 default_template: "rss.md.jinja",
+                scheduled: false,
                 item_kind: ItemKind::Event,
             },
             SourceType::Manual => SourceDescriptor {
                 streaming: false,
                 default_template: "document.md.jinja",
+                scheduled: false,
                 item_kind: ItemKind::Event,
             },
             // Not streaming: a date's transition log is a closed, durable record, so a past
@@ -918,6 +934,7 @@ impl SourceType {
             SourceType::Tasks => SourceDescriptor {
                 streaming: false,
                 default_template: "tasks.md.jinja",
+                scheduled: false,
                 item_kind: ItemKind::Event,
             },
         }
@@ -977,6 +994,16 @@ pub struct TasksConfig {
     /// How many day-closes a task may survive before the agenda says so. A task carried past
     /// this is not asking for another day — it is too large, or it was never real.
     pub carry_warn_after: u32,
+    /// Sources whose free text an LLM session may read to propose work.
+    ///
+    /// OPT-IN and empty by default, because this is the half that cannot be right by
+    /// construction. A Jira issue's status category is the provider's own fixed vocabulary, so
+    /// an adapter answers "unfinished" without reading a word of prose and no false positive is
+    /// reachable. "Does this mail ask me to do something" has no such field, and a rule over
+    /// the subject line would fire on every newsletter — so it is a judgment, made where
+    /// judgments are already made, and only for the sources a person named.
+    #[serde(default)]
+    pub propose_from: Vec<String>,
 }
 
 impl Default for TasksConfig {
@@ -984,6 +1011,7 @@ impl Default for TasksConfig {
         Self {
             board: "tasks.md".to_string(),
             carry_warn_after: 3,
+            propose_from: Vec::new(),
         }
     }
 }

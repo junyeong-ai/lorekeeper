@@ -78,6 +78,29 @@ pub enum TaskCommand {
         #[arg(long)]
         until: String,
     },
+    /// Name work an LLM session read out of a page, for the next `propose` to offer
+    ///
+    /// The judgment half of the first joint, and the only way in. A source's structured fields
+    /// answer "is this unfinished" with no reading of prose; a mail does not, so the judgment
+    /// is made where judgments are made and declared here as one. Refused for a source
+    /// `personal.tasks.propose_from` does not name.
+    Candidate {
+        /// Which source's page this was read out of
+        #[arg(long)]
+        source: String,
+        /// What the proposed line should read as
+        #[arg(long)]
+        summary: String,
+        /// The absolute URL that addresses it
+        #[arg(long)]
+        url: String,
+    },
+    /// Put what the sources say is still open into the board's proposed section
+    ///
+    /// The intent plane's first joint. An observation PROPOSES and never creates: nothing here
+    /// commits a task to a day, and the two answers a person can give already exist — drag the
+    /// line into another section to accept it, `lore task drop` to decline.
+    Propose,
     /// Record what an editor did: adopt lines typed by hand, close lines ticked, wake what is due
     Sync,
     /// Close the day — carry what is still committed to it, counting each carry
@@ -120,10 +143,16 @@ pub async fn run(opts: &GlobalOptions, cmd: TaskCommand) -> miette::Result<()> {
             let id = TaskId::mint(&format!("{title}{}", plane.now), &plane.taken());
             let mut task = Task::new(id.clone(), &title, state, plane.today);
             task.due = due;
+            // The same identity a proposal carries, so a task written by hand from a Jira issue
+            // and one proposed from it are the same answer to that observation — and neither is
+            // proposed again once it is finished or dropped.
+            task.src = link.as_deref().map(lk_core::origin::identity);
+            let src = task.src.clone();
             plane.board.insert(task);
             plane.record(
                 Transition::new(id.clone(), TransitionKind::Created, &title, plane.now)
-                    .with_state(state),
+                    .with_state(state)
+                    .with_src(src),
             );
             plane.commit().await?;
             eprintln!("{id}  {title}");
@@ -139,7 +168,8 @@ pub async fn run(opts: &GlobalOptions, cmd: TaskCommand) -> miette::Result<()> {
                     plane.record(
                         Transition::new(id.clone(), TransitionKind::Done, &task.title, plane.now)
                             .with_note(note)
-                            .with_carried(task.carried),
+                            .with_carried(task.carried)
+                            .with_src(task.src.clone()),
                     );
                     task.title
                 }
@@ -155,12 +185,10 @@ pub async fn run(opts: &GlobalOptions, cmd: TaskCommand) -> miette::Result<()> {
                 .board
                 .remove(&id)
                 .ok_or_else(|| plane.absent(&id, &pass))?;
-            plane.record(Transition::new(
-                id,
-                TransitionKind::Dropped,
-                &task.title,
-                plane.now,
-            ));
+            plane.record(
+                Transition::new(id, TransitionKind::Dropped, &task.title, plane.now)
+                    .with_src(task.src.clone()),
+            );
             plane.commit().await?;
             eprintln!("dropped  {}", task.title);
             Ok(())
@@ -201,6 +229,47 @@ pub async fn run(opts: &GlobalOptions, cmd: TaskCommand) -> miette::Result<()> {
             eprintln!("waiting until {until}  {title}");
             Ok(())
         }
+        TaskCommand::Candidate {
+            source,
+            summary,
+            url,
+        } => {
+            if !plane.config.propose_from.contains(&source) {
+                return Err(miette::miette!(
+                    "`{source}` is not named by `personal.tasks.propose_from` — reading a \
+                     source's prose for work is opt-in, because unlike a status field it can \
+                     be wrong"
+                ));
+            }
+            if !lk_core::link::is_external(&url) {
+                return Err(miette::miette!(
+                    "`{url}` is not an absolute URL — a proposal carries its origin onto the \
+                     board and from there onto the archive page"
+                ));
+            }
+            let candidate = lk_task::Candidate {
+                source_id: source,
+                summary: one_line(summary)?,
+                url,
+            };
+            lk_task::Judged::new(&plane.vault_root)
+                .add(plane.today, &candidate)
+                .map_err(|e| miette::miette!("{e}"))?;
+            eprintln!("noted  {}", candidate.summary);
+            Ok(())
+        }
+        TaskCommand::Propose => {
+            plane.reconcile()?;
+            let (offered, consumed) = plane.propose()?;
+            match offered {
+                0 => eprintln!("nothing new to propose"),
+                n => eprintln!("{n} proposed"),
+            }
+            plane.commit().await?;
+            // Only once the board holds them. A failure here re-reads the same files next
+            // time, where the board already names what they hold and nothing is offered twice.
+            lk_task::Judged::retire(&consumed).map_err(|e| miette::miette!("{e}"))
+        }
         TaskCommand::Sync => {
             let outcome = plane.reconcile()?;
             report_reconcile(&outcome);
@@ -226,9 +295,9 @@ pub(crate) struct IntentPlane {
     pub(crate) locale: Locale,
     pub(crate) today: jiff::civil::Date,
     pub(crate) now: jiff::Timestamp,
-    vault_root: PathBuf,
+    pub(crate) vault_root: PathBuf,
     board_path: PathBuf,
-    zone: jiff::tz::TimeZone,
+    pub(crate) zone: jiff::tz::TimeZone,
     pending: Vec<Transition>,
     /// The history this pass read. Kept because a command acting AFTER the reconcile asks the
     /// same question over the same window, and the board it was computed from — whose ticked
@@ -352,6 +421,58 @@ impl IntentPlane {
             read_as,
             _guard: guard,
         })
+    }
+
+    /// Put every unanswered candidate into the proposed section, and answer with how many.
+    ///
+    /// Three things already settle whether a candidate has been dealt with, so a proposal needs
+    /// no store of its own: it is on the BOARD (open, however it got there — proposed, accepted
+    /// or written by hand with `--link`), or the HISTORY holds a completion or a drop for it,
+    /// or the source no longer declares it at all, in which case it is not a candidate. What is
+    /// left is work nobody has answered about, which is exactly what a proposal is.
+    ///
+    /// The one gap is a proposal deleted in an editor rather than dropped: nothing records
+    /// that, so it returns tomorrow. That is the same silence deleting any task line already
+    /// has, and a proposal that comes back is a smaller cost than one suppressed by a rule
+    /// guessing at what a deletion meant.
+    fn propose(&mut self) -> miette::Result<(usize, Vec<std::path::PathBuf>)> {
+        let mut candidates = lk_task::Candidates::new(&self.vault_root)
+            .read_all()
+            .map_err(|e| miette::miette!("{e}"))?;
+        let (judged, consumed) = lk_task::Judged::new(&self.vault_root)
+            .take()
+            .map_err(|e| miette::miette!("{e}"))?;
+        candidates.extend(judged);
+        if candidates.is_empty() {
+            return Ok((0, consumed));
+        }
+        let answered = TransitionLog::new(&self.vault_root)
+            .answered_origins()
+            .map_err(|e| miette::miette!("{e}"))?;
+        let standing: std::collections::BTreeSet<String> = self
+            .board
+            .tasks()
+            .filter_map(|task| task.src.clone())
+            .collect();
+
+        let mut offered = 0usize;
+        for candidate in candidates {
+            let origin = candidate.origin();
+            if answered.contains(&origin) || standing.contains(&origin) {
+                continue;
+            }
+            let title = format!(
+                "{} ({})",
+                candidate.summary.trim(),
+                lk_core::link::md_link(&candidate.source_id, &candidate.url)
+            );
+            let id = TaskId::mint(&format!("{origin}{}", self.now), &self.taken());
+            let mut task = Task::new(id, &title, TaskState::Proposed, self.today);
+            task.src = Some(origin);
+            self.board.insert(task);
+            offered += 1;
+        }
+        Ok((offered, consumed))
     }
 
     /// Every id a new task must not be given.

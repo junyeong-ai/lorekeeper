@@ -160,6 +160,8 @@ pub struct Strings {
     pub map_links: &'static str,
     // Task board (lore task) and the day's agenda
     pub tasks_title: &'static str,
+    /// Work an observation proposed that the person has not accepted yet.
+    pub tasks_proposed: &'static str,
     pub tasks_today: &'static str,
     pub tasks_next: &'static str,
     pub tasks_waiting: &'static str,
@@ -174,6 +176,10 @@ pub struct Strings {
     pub agenda_empty: &'static str,
     /// What a task's origin link reads as when the caller named no label.
     pub task_origin: &'static str,
+    /// What the agenda calls the appointments a calendar source observed for the day.
+    pub agenda_schedule: &'static str,
+    /// What the agenda calls proposals waiting to be accepted or dropped.
+    pub agenda_proposed: &'static str,
 }
 
 static KO: Strings = Strings {
@@ -234,6 +240,7 @@ static KO: Strings = Strings {
     map_empty: "(아직 클러스터가 없습니다 — 개념 간 연결이 쌓이면 채워집니다)",
     map_links: "연결",
     tasks_title: "할 일",
+    tasks_proposed: "제안",
     tasks_today: "오늘",
     tasks_next: "다음",
     tasks_waiting: "대기",
@@ -245,6 +252,8 @@ static KO: Strings = Strings {
     agenda_done_today: "오늘 완료",
     agenda_empty: "오늘로 정한 일이 없습니다",
     task_origin: "출처",
+    agenda_schedule: "일정",
+    agenda_proposed: "제안",
 };
 
 static EN: Strings = Strings {
@@ -305,6 +314,7 @@ static EN: Strings = Strings {
     map_empty: "(no clusters yet — this fills in as links accumulate between concepts)",
     map_links: "links",
     tasks_title: "Tasks",
+    tasks_proposed: "Proposed",
     tasks_today: "Today",
     tasks_next: "Next",
     tasks_waiting: "Waiting",
@@ -316,6 +326,8 @@ static EN: Strings = Strings {
     agenda_done_today: "done today",
     agenda_empty: "nothing committed for today",
     task_origin: "source",
+    agenda_schedule: "Schedule",
+    agenda_proposed: "Proposed",
 };
 
 #[cfg(test)]

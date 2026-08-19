@@ -346,6 +346,7 @@ fn map_entry(
         author: Some(author),
         timestamp: ts,
         is_self: false,
+        open_work: None,
         metadata: serde_json::json!({
             "feed_id": feed_id,
             "feed_title": feed_title,

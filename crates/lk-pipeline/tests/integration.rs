@@ -60,6 +60,7 @@ fn raw_item(title: &str, body: &str, external_id: &str, when: jiff::Timestamp) -
         author: Some("alice@example.com".into()),
         timestamp: when,
         is_self: false,
+        open_work: None,
         metadata: serde_json::Value::Null,
     }
 }

@@ -104,7 +104,7 @@ struct IssueFields {
     /// Jira Cloud v3 returns rich text as an Atlassian Document Format tree
     /// (`{type:"doc", content:[…]}`), not a plain string — hence `Value`.
     description: Option<serde_json::Value>,
-    status: Option<NameField>,
+    status: Option<StatusField>,
     priority: Option<NameField>,
     labels: Option<Vec<String>>,
     updated: Option<String>,
@@ -119,6 +119,39 @@ struct IssueFields {
 #[derive(Deserialize)]
 struct NameField {
     name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct StatusField {
+    name: Option<String>,
+    /// Jira's own three-value classification of the status, which every workflow's every
+    /// status maps to: `new`, `indeterminate`, `done`.
+    ///
+    /// Read INSTEAD of the status name, which is per-project and translated — "완료",
+    /// "Closed", "Resolved", "배포완료" all mean done in some workflow and none of them in
+    /// another. Matching the name would be the pattern-matching this codebase refuses: a
+    /// project that renames a status silently turns finished work back into open work, or the
+    /// reverse. The category is Jira's, fixed, and the same in every language.
+    #[serde(rename = "statusCategory")]
+    category: Option<StatusCategory>,
+}
+
+#[derive(Deserialize)]
+struct StatusCategory {
+    key: Option<String>,
+}
+
+impl StatusField {
+    /// Whether Jira classifies this status as finished.
+    ///
+    /// An issue whose category is ABSENT is not treated as open: the answer would be a guess,
+    /// and a guess here proposes work every morning that may already be finished.
+    fn is_open(&self) -> bool {
+        matches!(
+            self.category.as_ref().and_then(|c| c.key.as_deref()),
+            Some("new" | "indeterminate")
+        )
+    }
 }
 
 #[derive(Deserialize)]
@@ -388,6 +421,23 @@ fn map_issue(
             .map(String::from)
     };
 
+    // Declared from the provider's own structured fields and nothing else: the issue is
+    // assigned to the authenticated account, and Jira's own status category says it is not
+    // finished. No text is read, so there is no reading in which this is a false positive.
+    let open_work = issue
+        .fields
+        .status
+        .as_ref()
+        .filter(|_| is_me)
+        .filter(|status| status.is_open())
+        .and_then(|_| {
+            let url = (!base.is_empty()).then(|| format!("{base}/browse/{}", issue.key))?;
+            Some(lk_core::event::OpenWork {
+                summary: format!("[{}] {}", issue.key, summary),
+                url,
+            })
+        });
+
     let status = issue.fields.status.and_then(|s| s.name);
     let description = issue
         .fields
@@ -423,6 +473,7 @@ fn map_issue(
         author,
         timestamp: ts,
         is_self: is_me,
+        open_work,
         metadata: serde_json::json!({
             "status": status,
             "priority": issue.fields.priority.and_then(|p| p.name),
@@ -601,6 +652,75 @@ mod tests {
             item.body.contains("2026-05-18"),
             "start date from custom field: {}",
             item.body
+        );
+    }
+
+    fn mapped(assignee: &str, status: serde_json::Value) -> lk_core::event::RawItem {
+        let issue = issue_from(serde_json::json!({
+            "key": "PROJ-1",
+            "fields": {
+                "summary": "Ship the thing",
+                "status": status,
+                "updated": "2026-05-23T09:00:00.000+0000",
+                "assignee": {"accountId": assignee, "emailAddress": "other@x.com"}
+            }
+        }));
+        map_issue(
+            issue,
+            "acc-123",
+            "https://x.atlassian.net",
+            "me@x.com",
+            None,
+            lk_core::i18n::Locale::En.strings(),
+        )
+        .expect("maps")
+    }
+
+    /// The status NAME is per-project and translated — "완료", "Closed", "Resolved" and
+    /// "배포완료" each mean done in some workflow and none of them in another — so a rule over
+    /// it would turn finished work back into open work the day a project renamed a column.
+    /// Jira's own category is fixed in every language and every workflow maps to it.
+    #[test]
+    fn open_work_is_declared_from_the_status_category_never_the_name() {
+        for (key, open) in [("new", true), ("indeterminate", true), ("done", false)] {
+            let item = mapped(
+                "acc-123",
+                serde_json::json!({"name": "배포완료", "statusCategory": {"key": key}}),
+            );
+            assert_eq!(
+                item.open_work.is_some(),
+                open,
+                "category `{key}` under a name that reads finished"
+            );
+        }
+
+        let open = mapped(
+            "acc-123",
+            serde_json::json!({"name": "In Progress", "statusCategory": {"key": "indeterminate"}}),
+        )
+        .open_work
+        .expect("declared");
+        assert_eq!(open.summary, "[PROJ-1] Ship the thing");
+        assert_eq!(open.url, "https://x.atlassian.net/browse/PROJ-1");
+    }
+
+    /// Someone else's open issue is not the user's work, and an issue whose category Jira did
+    /// not send is not declared open — the answer would be a guess, and a guess proposes work
+    /// every morning that may already be finished.
+    #[test]
+    fn open_work_needs_the_users_own_issue_and_a_category_to_read() {
+        assert!(
+            mapped(
+                "someone-else",
+                serde_json::json!({"name": "In Progress", "statusCategory": {"key": "indeterminate"}})
+            )
+            .open_work
+            .is_none()
+        );
+        assert!(
+            mapped("acc-123", serde_json::json!({"name": "In Progress"}))
+                .open_work
+                .is_none()
         );
     }
 

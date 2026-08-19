@@ -428,6 +428,7 @@ fn map_event(
         author: ev.organizer.and_then(|o| o.display_name.or(o.email)),
         timestamp: ts,
         is_self,
+        open_work: None,
         metadata: serde_json::json!({
             "status": ev.status,
             "attendees": attendee_names,

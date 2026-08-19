@@ -40,6 +40,13 @@ pub enum PipelineError {
 
 pub struct IngestResult {
     pub source_id: String,
+    /// Work this source declared UNFINISHED, from its own structured fields.
+    ///
+    /// Carried out of the pipeline rather than acted on inside it: an observation may propose
+    /// a task and never creates one, so the plane that owns intent decides what to do with it.
+    /// Collected from the RAW items, before normalization drops what the vault has no page for
+    /// — an open issue is a fact about now, not an event on a date.
+    pub open_work: Vec<lk_core::event::OpenWork>,
     pub events: Vec<Event>,
     pub concepts: Vec<ExtractedConcept>,
     pub daily_pages: Vec<RenderResult>,
@@ -134,6 +141,23 @@ impl Pipeline {
     /// over the whole source list — while concept drafts accumulate run-wide across the
     /// `plan` calls and render once in `render_concept_pages`.
     pub async fn plan(
+        &mut self,
+        source_id: &str,
+        config: &SourceConfig,
+        items: Vec<RawItem>,
+        options: &IngestOptions,
+    ) -> Result<IngestResult, PipelineError> {
+        // Taken before the plan runs, because normalization is where a `RawItem` becomes
+        // something the vault will render and a proposal is not a page — and taken on every
+        // exit, because a source can declare open work in a run that renders nothing: an issue
+        // still assigned and unfinished is a fact about now, not an event on a date.
+        let open_work: Vec<_> = items.iter().filter_map(|i| i.open_work.clone()).collect();
+        let mut result = self.plan_pages(source_id, config, items, options).await?;
+        result.open_work = open_work;
+        Ok(result)
+    }
+
+    async fn plan_pages(
         &mut self,
         source_id: &str,
         config: &SourceConfig,
@@ -508,6 +532,7 @@ impl Pipeline {
 
         Ok(IngestResult {
             source_id: source_id.into(),
+            open_work: vec![],
             events,
             concepts: all_concepts,
             daily_pages,
@@ -964,6 +989,7 @@ impl Pipeline {
 
         Ok(IngestResult {
             source_id: source_id.into(),
+            open_work: vec![],
             events,
             concepts: all_concepts,
             daily_pages: vec![],
@@ -975,6 +1001,7 @@ impl Pipeline {
 fn empty_result(source_id: &str) -> IngestResult {
     IngestResult {
         source_id: source_id.into(),
+        open_work: vec![],
         events: vec![],
         concepts: vec![],
         daily_pages: vec![],
