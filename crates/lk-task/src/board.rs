@@ -180,7 +180,12 @@ impl Board {
                 // the first heading, or wrote a heading of their own and put it underneath —
                 // either way it is a task the parse could not place, and nothing else about the
                 // page says so. Kept where it was found, so naming it costs the person nothing.
-                if unplaceable(trimmed) {
+                // A line naming a task of OURS, which is the only evidence a line here is one.
+                // A bare checkbox is not: a grocery list above the first heading and a
+                // `## Reading list` of the person's own are ordinary uses of a page this board
+                // preserves verbatim by design, and naming them asserted a task that was not
+                // there and left the front door at `!` until they stopped writing that way.
+                if names_a_task(trimmed) {
                     board.unplaced.push(Unplaced {
                         line: index + 1 + offset,
                         text: trimmed.to_string(),
@@ -664,12 +669,6 @@ fn heading_level(line: &str) -> Option<usize> {
         .filter(|_| rest.is_empty() || rest.starts_with(' '))
 }
 
-/// Whether `line` is something the parse would have placed as a task had it been under a
-/// section this reads: a checkbox this tool writes, or any line naming a task id.
-fn unplaceable(line: &str) -> bool {
-    checkbox(line).is_some() || names_a_task(line)
-}
-
 /// The bodies of every comment opened on `line`, in the order they appear.
 ///
 /// A comment nobody CLOSED yields the rest of the line, because that is where it ends. Yielding
@@ -679,12 +678,12 @@ fn unplaceable(line: &str) -> bool {
 /// title, and, where the box was ticked, a fabricated completion under that title reaching the
 /// archive. Nothing said a word. A truncated write and a sync client's conflict resolution both
 /// produce exactly that line.
-fn comments(line: &str) -> impl Iterator<Item = &str> {
+fn comments(line: &str) -> impl Iterator<Item = (&str, bool)> {
     line.split("<!--")
         .skip(1)
         .map(|rest| match rest.find("-->") {
-            Some(end) => &rest[..end],
-            None => rest,
+            Some(end) => (&rest[..end], true),
+            None => (rest, false),
         })
 }
 
@@ -703,7 +702,7 @@ fn has_unclosed_comment(line: &str) -> bool {
 /// its stamp, and reading only the last comment found no stamp at all — so an id a live line
 /// still names went unprotected from the mint, and an origin it answers to was offered again.
 fn stamped<'a>(line: &'a str, key: &str) -> Option<&'a str> {
-    comments(line).find_map(|body| field(body, key))
+    comments(line).find_map(|(body, _)| field(body, key))
 }
 
 /// The value stamp field `key` carries in one comment body.
@@ -719,23 +718,33 @@ fn field<'a>(body: &'a str, key: &str) -> Option<&'a str> {
 /// to-do is ordinary. Refusing those turned away lines carrying no stamp of ours, and told their
 /// author that a stamp they never wrote would not read.
 fn names_a_task(line: &str) -> bool {
-    comments(line).any(is_stamp)
+    comments(line).any(|(body, closed)| is_stamp(body, closed))
 }
 
-/// Whether a comment BODY is one of this tool's stamps.
+/// Whether a comment BODY is one of this tool's stamps — the two KEYS `render_task` always
+/// writes, with neither VALUE validated.
 ///
-/// Asked of the stamp's own GRAMMAR — a `t:` naming a real address and the `since:` that
-/// `render_task` always writes beside it — rather than of the two characters `t:`. Asked that
-/// way, any comment a person wrote holding a `t:`-prefixed token was this tool's: `<!-- t:30
-/// min -->` beside a checkbox was quarantined and told its author that `30` is not a task id, a
-/// machine reference they never wrote; `<!-- t:5pm -->` on a line of prose degraded the front
-/// door's board row; and because the same signal decides whether the parse was COMPLETE, one
-/// stray note left every task-linked reminder undecidable — neither fired nor retired, for as
-/// long as the line sat there. A four-character value alone is not enough either: `t:10am` is a
-/// legal address by shape, and the pair is what nobody writes by accident.
-fn is_stamp(body: &str) -> bool {
-    field(body, "t:").is_some_and(|id| id.parse::<TaskId>().is_ok())
-        && field(body, "since:").is_some()
+/// Asked of the keys rather than of the two characters `t:`, because any comment a person wrote
+/// holding a `t:`-prefixed token was otherwise this tool's: `<!-- t:30 min -->` beside a
+/// checkbox was quarantined and told its author that `30` is not a task id, a machine reference
+/// they never wrote; `<!-- t:5pm -->` on a line of prose degraded the front door's board row;
+/// and because the same signal decides whether the parse was COMPLETE, one stray note left every
+/// task-linked reminder undecidable — neither fired nor retired, for as long as it sat there.
+///
+/// And of the keys ALONE, because a value is exactly what damage destroys. Requiring `t:` to
+/// parse as a real address reopened the hole it was meant to close, one field over: an id
+/// truncated, clipped by a nearby edit or mangled by a merge failed the check, the whole comment
+/// stopped being ours, and the line was adopted under a fresh id with the damaged fragment
+/// folded into its visible title — ticked, a fabricated completion under that title reaching the
+/// archive. The keys beside a broken value are what still say whose line it is, and `read_stamp`
+/// then says exactly what is wrong with it, which is a report rather than a silent re-adoption.
+///
+/// `closed` says whether a `-->` ended the comment, and what an unclosed one does not hold is
+/// not evidence: a truncation destroys everything past the cut and lands mid-field as often as
+/// between two, so there `t:` alone names a task.
+fn is_stamp(body: &str, closed: bool) -> bool {
+    field(body, "t:").is_some_and(|id| !id.is_empty())
+        && (!closed || field(body, "since:").is_some())
 }
 
 /// tool's. `Err` is a line carrying a stamp that would not read.
@@ -748,7 +757,9 @@ fn read_line(line: &str) -> Result<Option<Entry>, TaskError> {
     // trailing one — was handed to `read_stamp`, failed as "`more` is not a key:value", and was
     // quarantined: a person's own line refused for a stamp they never wrote. The same question
     // decides both branches, because the question is the same one.
-    let stamp = split_stamp(rest).filter(|(_, stamp)| is_stamp(stamp));
+    // `split_stamp` only ever answers with a comment a `-->` closed, so the question is asked
+    // of one here.
+    let stamp = split_stamp(rest).filter(|(_, stamp)| is_stamp(stamp, true));
     let Some((title, stamp)) = stamp else {
         // A line CARRYING a stamp that is not the last thing on it is not an unstamped line.
         // Read as one it was adopted under a fresh id, and the task it names left the board with
@@ -1147,13 +1158,16 @@ mod tests {
             board.unstamped().is_empty(),
             "nor is one adopted from there"
         );
+        // The STAMPED line is named; the hand-typed one beside it is not. A bare checkbox
+        // under a heading of the person's own is a reading list as readily as a task, and only
+        // an address this minted says otherwise.
         assert_eq!(
             board
                 .unplaced()
                 .iter()
                 .map(|held| held.line)
                 .collect::<Vec<_>>(),
-            [15, 16]
+            [15]
         );
 
         // And the block comes back out exactly as it went in, so being told costs nothing.
@@ -1216,6 +1230,58 @@ mod tests {
         let damaged = board_of("## Today\n\n- [ ] a <!--t:7k2p since:nonsense-->\n");
         assert_eq!(damaged.unplaced().len(), 1);
         assert!(damaged.ids().contains(&"7k2p".parse().unwrap()));
+    }
+
+    /// A value is exactly what damage destroys, so neither is validated here. Requiring `t:` to
+    /// parse as a real address reopened the hole the grammar check was added to close, one field
+    /// over: an id truncated, clipped or mangled by a merge stopped the whole comment being
+    /// ours, and the line was adopted under a fresh id with the damaged fragment folded into its
+    /// visible title — ticked, a fabricated completion under that title reaching the archive.
+    #[test]
+    fn a_stamp_whose_value_is_damaged_is_still_ours() {
+        for stamp in [
+            "<!--t:dd0 since:2026-08-18-->",
+            "<!--t:ee011 since:2026-08-18-->",
+            "<!--t:FF01 since:2026-08-18-->",
+            "<!--t:gg01 since:broken-->",
+            "<!--t:hh01 since:2026-08-18 carried:x-->",
+            "<!--t:jj01 sinc",
+        ] {
+            for box_ in ["- [ ]", "- [x]"] {
+                let page = format!("## Today\n\n{box_} a real task {stamp}\n");
+                let board = board_of(&page);
+                assert!(board.tasks().next().is_none(), "{page}");
+                assert!(board.unstamped().is_empty(), "not adopted: {page}");
+                assert_eq!(board.unplaced().len(), 1, "{page}");
+            }
+        }
+    }
+
+    /// The other direction, at the two sites a bare checkbox still reached. A grocery list above
+    /// the first heading and a `## Reading list` of the person's own are ordinary uses of a page
+    /// this board preserves verbatim by design — named, they asserted a task that was not there
+    /// and left the front door at `!` until the person stopped writing that way. Only an address
+    /// this minted says a line is one of ours.
+    #[test]
+    fn a_bare_checkbox_outside_the_sections_is_the_persons_own_list() {
+        let board = board_of(concat!(
+            "# Tasks\n\n",
+            "- [ ] milk\n",
+            "- [ ] eggs\n\n",
+            "## Today\n\n",
+            "- [ ] committed <!--t:aaa0 since:2026-08-18-->\n\n",
+            "## Reading list\n\n",
+            "- [ ] finish the Rust book\n",
+            "- [x] the DDD one\n",
+        ));
+
+        assert!(board.unplaced().is_empty());
+        assert_eq!(board.tasks().count(), 1);
+        assert!(board.unstamped().is_empty(), "nor are they adopted");
+
+        // A line of OURS at either site is still named.
+        let dragged = board_of("- [ ] up top <!--t:aaa1 since:2026-08-18-->\n\n## Today\n");
+        assert_eq!(dragged.unplaced().len(), 1);
     }
 
     /// A line the parse could not place still NAMES a task, and both rules that reach a task

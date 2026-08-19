@@ -188,15 +188,34 @@ the commands in `lk-cli` are the only thing that decides when to apply them.
   quieter the loss. Reported at every read and carried onto the front door's row, grouped by reason and never summarised away: one
   sentence listing every way it can happen made the reader work out which was theirs, and a line
   whose repair goes unsaid is one nobody repairs.
-- **"Is this our stamp" is asked of the stamp's own GRAMMAR.** An address this could have
-  MINTED and the `since:` `render_task` always writes beside it — not the two characters `t:`.
-  Asked that way, any comment a person wrote holding a `t:`-prefixed token was this tool's:
-  `- [ ] call the vendor <!-- t:30 min -->` was quarantined and told its author that `30` is not
-  a task id, a machine reference they never wrote; a line of prose carrying `<!-- t:5pm -->`
-  degraded the front door's board row; and because the same signal decides whether the parse was
-  COMPLETE, one stray note left every task-linked reminder undecidable — neither fired nor
-  retired, for as long as the line sat there. A four-character value alone is not enough:
-  `t:10am` is a legal address by shape, and it is the PAIR that nobody writes by accident.
+- **"Is this our stamp" is asked of the two KEYS, and of NEITHER value.** `t:` and the `since:`
+  `render_task` always writes beside it, both present — not the two characters `t:`, and not a
+  `t:` that parses. Asked of `t:` alone, any comment a person wrote holding a `t:`-prefixed token
+  was this tool's: `- [ ] call the vendor <!-- t:30 min -->` was quarantined and told its author
+  that `30` is not a task id, a machine reference they never wrote; a line of prose carrying
+  `<!-- t:5pm -->` degraded the front door's board row; and because the same signal decides
+  whether the parse was COMPLETE, one stray note left every task-linked reminder undecidable —
+  neither fired nor retired, for as long as the line sat there. Asked of the VALUE, the fix
+  reopened the hole it closed one field over: an id truncated, clipped by a nearby edit or
+  mangled by a merge failed to parse, the whole comment stopped being ours, and the line was
+  re-adopted under a fresh id with the damaged fragment folded into its visible title — ticked,
+  a fabricated completion under that title reaching the archive. A value is exactly what damage
+  destroys; the keys beside a broken one are what still say whose line it is, and `read_stamp`
+  then names precisely what is wrong. The two questions the predicate answers pull opposite ways
+  — "should `read_stamp` own this line" wants to be strict, "does this line NAME a task" wants
+  to be as permissive as it can be without reaching a person's text — and they meet at the keys.
+  What that leaves is a CLOSED comment holding only `t:` and four legal characters: `<!--t:cc01-->`
+  with its `since` gone and `<!-- t:asap -->` differ in nothing but a space, and no rule reads a
+  mind.
+- **What an unclosed comment does not hold is not evidence.** A truncation destroys everything
+  past the cut and lands mid-field as often as between two, so a comment nobody closed names a
+  task on `t:` alone — `<!--t:bb01 sinc` is a stamp cut in half, not a person's note.
+- **Only an address this MINTED says a line is one of ours.** A bare checkbox is not: a grocery
+  list written above the first heading and a `## Reading list` of the person's own are ordinary
+  uses of a page this board preserves verbatim by design. Named, they asserted a task that was
+  not there and pinned the front door at `!` until the person stopped writing that way — a
+  diagnosis whose only repair is to give up the page. It is the same principle the fence follows,
+  and it was applied there and not at the other two sites.
 - **A comment nobody closed still has a body: the rest of the line.** That is where a stamp goes
   when a write is truncated or a sync client resolves a conflict, and yielding no body for it
   made the damage invisible to every question here — the line read as one a person typed, was
