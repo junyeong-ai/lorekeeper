@@ -445,6 +445,11 @@ the commands in `lk-cli` are the only thing that decides when to apply them.
   it to the bytes this command parsed, BEFORE the log write, so an edit that arrived from an
   editor or a sync client in between is never erased — and a refusal leaves nothing recorded
   either, rather than a completion in the history for a task still sitting on the board.
+- **A line on the board is a board WRITE, and every one of them records its transition.** A
+  proposal appearing under `## Proposed` is a task coming into existence exactly as `add` and an
+  adoption are, and it alone wrote nothing — so the history could not say how a proposed task
+  came to be there, and its id sat outside `Recorded::seen` for as long as nobody answered it.
+  A board written without its transition is something that happened and left no record.
 - **`Reconciled` carries the transitions rather than writing them.** The rules stay a pure
   function of the board and the clock; `IntentPlane::commit` in `lk-cli` is the one place that
   touches the filesystem, and it writes the history BEFORE the board — a transition recorded

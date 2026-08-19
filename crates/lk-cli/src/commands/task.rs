@@ -666,9 +666,19 @@ impl IntentPlane {
                 lk_core::link::md_link(&candidate.source_id, &candidate.url)
             );
             let id = TaskId::mint(&format!("{origin}{}", self.now), &self.taken());
-            let mut task = Task::new(id, &title, TaskState::Proposed, self.today);
-            task.src = Some(origin);
+            let mut task = Task::new(id.clone(), &title, TaskState::Proposed, self.today);
+            task.src = Some(origin.clone());
             self.board.insert(task);
+            // A line on the board is a board write, and a board write without its transition is
+            // something that happened and left no record — the rule every other route into
+            // existence already follows. Without it the history could not say how a proposal
+            // came to be there, and the id it holds was outside `Recorded::seen` for as long as
+            // nobody answered it.
+            self.record(
+                Transition::new(id, TransitionKind::Created, &title, self.now)
+                    .with_state(TaskState::Proposed)
+                    .with_src(Some(origin)),
+            );
         }
         Ok(Proposed {
             offered: offered.len(),
