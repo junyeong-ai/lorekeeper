@@ -198,10 +198,16 @@ fn emit_json(plane: &IntentPlane, actually_today: jiff::civil::Date) -> miette::
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({
             "date": plane.today.to_string(),
-            // The zone every time in this document is a wall-clock reading in, named so a
-            // caller can resolve one without asking the machine — whose own zone is a different
-            // day whenever the vault's is set elsewhere.
-            "timezone": plane.zone.iana_name(),
+            // The zone every time in this document is a wall-clock reading in, so a caller can
+            // resolve one without asking the machine — whose own zone is a different day
+            // whenever the vault's is set elsewhere. Its NAME, or its offset where it has no
+            // name — a `TZ` in POSIX offset form has none, and answering `null` there would say
+            // "could not read", which is what `null` means everywhere else in this document.
+            "timezone": plane
+                .zone
+                .iana_name()
+                .map(str::to_string)
+                .unwrap_or_else(|| plane.zone.to_offset(plane.now).to_string()),
             "schedule": schedule,
             "committed": committed,
             "woken": woken,

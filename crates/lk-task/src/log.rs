@@ -304,6 +304,46 @@ impl Recorded {
     }
 }
 
+/// The origins the history has an answer for, and which answer.
+///
+/// One question suppresses and a different one reports, and folding them together made the
+/// report tell a person to undo their own decisions. A DROP is a decision that stands: naming it
+/// every morning asks them to write down again what they deliberately said no to, and the count
+/// grows with every correct use of `lore task drop`. A COMPLETION is a statement about the work
+/// at a time, so a source still declaring it open is the one thing here worth mentioning.
+#[derive(Debug, Default)]
+pub struct Answered {
+    finished: std::collections::BTreeSet<String>,
+    declined: std::collections::BTreeSet<String>,
+}
+
+impl Answered {
+    /// Record what `kind` says about `origin`. A move or a carry says nothing — the task is
+    /// still open, and it is the BOARD that says so.
+    pub(crate) fn absorb(&mut self, origin: String, kind: TransitionKind) {
+        match kind {
+            TransitionKind::Done => {
+                self.finished.insert(origin);
+            }
+            TransitionKind::Dropped => {
+                self.declined.insert(origin);
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether the history has ANY answer for `origin`. What stops it being proposed again.
+    pub fn contains(&self, origin: &str) -> bool {
+        self.finished.contains(origin) || self.declined.contains(origin)
+    }
+
+    /// Whether `origin` was finished and never since declined — the only answer a person might
+    /// want back, and so the only one worth naming.
+    pub fn is_recoverable(&self, origin: &str) -> bool {
+        self.finished.contains(origin) && !self.declined.contains(origin)
+    }
+}
+
 /// The per-date transition history.
 ///
 /// One file per date, in the same shape and for the same reason as the streaming sources' event
@@ -334,9 +374,10 @@ impl TransitionLog {
             .map(|key| {
                 key.parse().map_err(|e| {
                     TaskError::Malformed(format!(
-                        "the task record holds `{key}.jsonl`, which is not a date: {e} (left \
-                         intact — a conflict copy holds completions this would otherwise pass \
-                         over)"
+                        "the task record holds `{key}.jsonl`, which is not a date: {e} — \
+                         recover what it holds into the day it belongs to, or delete it. Left \
+                         intact and refused rather than passed over, because a conflict copy \
+                         holds completions and reading around it records them twice"
                     ))
                 })
             })
@@ -406,7 +447,7 @@ impl TransitionLog {
         Ok(recorded)
     }
 
-    /// Every origin the WHOLE history records an answer for.
+    /// What the WHOLE history records an answer for.
     ///
     /// Read across every date rather than over a window, because the question is not "what
     /// happened lately" but "have I dealt with this before" — an issue dropped in March must
@@ -417,14 +458,12 @@ impl TransitionLog {
     ///
     /// A date whose record will not read is a hard error here, as everywhere: treating it as
     /// empty would re-propose exactly the work the unreadable half says was finished.
-    pub fn answered_origins(&self) -> Result<std::collections::BTreeSet<String>, TaskError> {
-        let mut answered = std::collections::BTreeSet::new();
+    pub fn answered_origins(&self) -> Result<Answered, TaskError> {
+        let mut answered = Answered::default();
         for date in self.dates()? {
             for transition in self.read(date)? {
-                if let Some(src) = transition.src
-                    && transition.kind.is_answer()
-                {
-                    answered.insert(src);
+                if let Some(src) = transition.src {
+                    answered.absorb(src, transition.kind);
                 }
             }
         }

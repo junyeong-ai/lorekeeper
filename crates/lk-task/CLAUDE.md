@@ -21,6 +21,13 @@ the commands in `lk-cli` are the only thing that decides when to apply them.
   `personal.tasks.propose_from` names and no others. What lands is a `TaskState::Proposed` line
   and nothing more — accepting is dragging it into another section, declining is `lore task
   drop`, and both answers already existed.
+- **Suppressing and REPORTING ask different questions of the same record.** `is_answer()` —
+  finished or dropped — is right for suppression: both mean the observation was dealt with. It is
+  wrong for the report, because a DROP is a decision that stands, and naming it every morning
+  asks a person to write down again what they deliberately said no to. Counted together the line
+  grew with every correct use of `lore task drop` until the remedy it named was wrong for most of
+  what it counted. `Answered` holds both sets from one pass over the history: `contains` answers
+  the suppression, `is_recoverable` answers the report — finished, and not since declined.
 - **A proposal needs no store of its own.** Three things already settle whether an observation
   has been dealt with: the BOARD holds what is open however it got there, the HISTORY holds a
   completion or a drop (`TransitionKind::is_answer`), and a source that no longer declares it

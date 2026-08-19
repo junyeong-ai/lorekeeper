@@ -29,7 +29,7 @@ mod store;
 mod task;
 
 pub use board::{Board, Entry, Unplaced};
-pub use log::{Recorded, Transition, TransitionKind, TransitionLog};
+pub use log::{Answered, Recorded, Transition, TransitionKind, TransitionLog};
 pub use propose::{Candidate, Candidates, Consumed, Gathered, Judged, select};
 pub use reconcile::{Reconciled, rollover, sync};
 pub use remind::{Reminder, Reminders};

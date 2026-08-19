@@ -367,6 +367,16 @@ impl Config {
                     )));
                 }
             }
+            if let Some(tasks) = &personal.tasks
+                && tasks.carry_warn_after == 0
+            {
+                return Err(ConfigError::Validation(
+                    "personal.tasks.carry_warn_after counts day-closes SURVIVED, so 0 calls \
+                     every task stale the moment it is written. The lowest that means anything \
+                     is 1."
+                        .to_string(),
+                ));
+            }
         }
 
         if let Some(ref sched) = self.ingest.schedule {

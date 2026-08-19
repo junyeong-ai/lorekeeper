@@ -186,10 +186,11 @@ pub struct Consumed {
 
 /// The candidates nobody has answered about yet, one per origin.
 ///
-/// The whole judgment of what to offer, as a pure function of three sets — so it is exhaustible
-/// by tests rather than reachable only by running a command against a vault. `answered` is what
-/// the history holds a completion or a drop for, `standing` is every origin the board already
-/// carries however it got there, and what is left is work nobody has answered about.
+/// The whole judgment of what to offer, as a pure function of what the history and the board
+/// already answer for — so it is exhaustible by tests rather than reachable only by running a
+/// command against a vault. `answered` is what the history holds a completion or a drop for,
+/// `standing` is every origin the board already carries however it got there, and what is left
+/// is work nobody has answered about.
 ///
 /// One origin, ONE proposal. The two stores each dedup inside themselves, which is not the same
 /// rule: a Jira issue linked from a mail arrives as two candidates from two stores and would
@@ -197,7 +198,7 @@ pub struct Consumed {
 /// with one right answer is one decision too many.
 pub fn select(
     candidates: Vec<Candidate>,
-    answered: &BTreeSet<String>,
+    answered: &crate::log::Answered,
     standing: &BTreeSet<String>,
 ) -> Vec<Candidate> {
     let mut seen = standing.clone();
@@ -375,7 +376,7 @@ mod tests {
                 candidate("mail", "Re: PLAT-1", "https://j/browse/PLAT-1"),
                 candidate("jira", "[PLAT-2] two", "https://j/browse/PLAT-2"),
             ],
-            &BTreeSet::new(),
+            &crate::Answered::default(),
             &BTreeSet::new(),
         );
         assert_eq!(
@@ -394,7 +395,8 @@ mod tests {
     fn what_is_answered_or_standing_is_not_offered_again() {
         let one = candidate("jira", "[PLAT-1] one", "https://j/browse/PLAT-1");
         let two = candidate("jira", "[PLAT-2] two", "https://j/browse/PLAT-2");
-        let answered: BTreeSet<String> = [one.origin()].into_iter().collect();
+        let mut answered = crate::Answered::default();
+        answered.absorb(one.origin(), crate::TransitionKind::Dropped);
         let standing: BTreeSet<String> = [two.origin()].into_iter().collect();
 
         assert!(
@@ -402,7 +404,12 @@ mod tests {
             "finished, dropped, or already on the board"
         );
         assert_eq!(
-            select(vec![one, two], &BTreeSet::new(), &BTreeSet::new()).len(),
+            select(
+                vec![one, two],
+                &crate::Answered::default(),
+                &BTreeSet::new()
+            )
+            .len(),
             2
         );
     }

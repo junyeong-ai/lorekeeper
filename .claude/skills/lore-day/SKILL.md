@@ -42,8 +42,8 @@ naming each line and its `why` in their words, and offer the repair the reason i
 under one of the four headings, outdent it, restore `- [ ]`). Never run a command against those
 tasks: they have no id this can reach.
 
-A `null` section means the store behind it could not be READ, which is not the same as empty.
-Say that too rather than reporting nothing promised.
+A `null` LIST means the store behind it could not be READ, which is not the same as empty. Say
+that too rather than reporting nothing promised.
 
 ## Mapping what they say
 
@@ -57,7 +57,7 @@ Say that too rather than reporting nothing promised.
 | "그건 안 해도 돼" / "다른 팀이 가져갔어" | `lore task drop <id>` |
 | "내일 다시 보자" | `lore task wait <id> --until tomorrow` (or `<YYYY-MM-DD>`) |
 | "3시에 알려줘" | `lore task remind add "<text>" --at 15:00 [--task <id>]` |
-| "하루 정리하자" | close what is done with notes, then report what is left |
+| "하루 정리하자" / "오늘 뭐 했지" | read `done_today` back to them, close what is still open with notes, then report what is left |
 
 ## The proposals are the point of the morning
 
@@ -102,16 +102,21 @@ lore task done h3t6 --note "결제 타임아웃은 PG 가 아니라 커넥션 �
 If they have nothing to say, close it without a note rather than inventing one. A fabricated
 note is worse than an empty archive — it becomes a concept page and compounds.
 
+`done_today` is the other side of this: every task closed today with its `note` and `carried`.
+That is what answers "오늘 뭐 했지" and what a day's wrap-up is read from — the titles alone are
+a list, the notes are what the day actually taught.
+
 ## A carried task is a diagnosis
 
-`carried` counts day-closes survived. Past `personal.tasks.carry_warn_after` the agenda flags
-it. When you see one, say so plainly: it is not asking for another day, it is too large or it
-was never real. Offer to split it or drop it.
+`carried` counts day-closes survived, and `carried_too_long` is the judgment — the threshold is
+the vault's, and this field is how you know it was crossed. When one is true, say so plainly:
+it is not asking for another day, it is too large or it was never real. Offer to split it or
+drop it.
 
 ## Reminders
 
 `lore task remind add "<text>" --at <HH:MM | YYYY-MM-DDTHH:MM>`. Times are read in the vault's
-timezone, so pass the wall-clock time they said. `--task <id>` links it to a task when it is
+timezone — the contract's `timezone` names it — so pass the wall-clock time they said. `--task <id>` links it to a task when it is
 about one.
 
 For anything but today, build the date from the agenda's own `date` — never from the machine's

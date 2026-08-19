@@ -325,15 +325,22 @@ pub async fn run(opts: &GlobalOptions, cmd: TaskCommand) -> miette::Result<()> {
         }
         TaskCommand::Propose => {
             plane.reconcile()?;
-            let (offered, consumed) = plane.propose()?;
-            match offered {
+            let pass = plane.propose()?;
+            match pass.offered {
                 0 => eprintln!("nothing new to propose"),
                 n => eprintln!("{n} proposed"),
+            }
+            if pass.recoverable > 0 {
+                eprintln!(
+                    "{} finished earlier that the sources still call open — `lore task add \
+                     --link <url>` writes one down again",
+                    pass.recoverable
+                );
             }
             plane.commit().await?;
             // Only once the board holds them. A failure here re-reads the same files next
             // time, where the board already names what they hold and nothing is offered twice.
-            lk_task::Judged::retire(&consumed).map_err(|e| miette::miette!("{e}"))
+            lk_task::Judged::retire(&pass.consumed).map_err(|e| miette::miette!("{e}"))
         }
         TaskCommand::Sync => {
             let outcome = plane.reconcile()?;
@@ -382,6 +389,15 @@ fn group_by_reason(unplaced: &[lk_task::Unplaced]) -> Vec<(&str, String)> {
         }
     }
     grouped
+}
+
+/// What a proposal pass put on the board, and what it declined to.
+struct Proposed {
+    offered: usize,
+    /// Origins the sources still call open that this pass will not offer, because the history
+    /// holds a completion for them and no decision against.
+    recoverable: usize,
+    consumed: Vec<lk_task::Consumed>,
 }
 
 /// One line of the board's state, as `lore status` prints it.
@@ -575,7 +591,7 @@ impl IntentPlane {
     /// that, so it returns tomorrow. That is the same silence deleting any task line already
     /// has, and a proposal that comes back is a smaller cost than one suppressed by a rule
     /// guessing at what a deletion meant.
-    fn propose(&mut self) -> miette::Result<(usize, Vec<lk_task::Consumed>)> {
+    fn propose(&mut self) -> miette::Result<Proposed> {
         let snapshots = lk_task::Candidates::new(&self.vault_root)
             .read_all(&self.sources)
             .map_err(|e| miette::miette!("{e}"))?;
@@ -589,7 +605,11 @@ impl IntentPlane {
         let mut candidates = snapshots.candidates;
         candidates.extend(judged.candidates);
         if candidates.is_empty() {
-            return Ok((0, consumed));
+            return Ok(Proposed {
+                offered: 0,
+                recoverable: 0,
+                consumed,
+            });
         }
 
         let answered = TransitionLog::new(&self.vault_root)
@@ -601,26 +621,24 @@ impl IntentPlane {
         // morning is how the section stops being read.
         let standing = self.board.origins();
 
-        // What the sources still declare and this pass will not offer, because the record
-        // already holds a completion or a drop for it. Said out loud rather than folded into
-        // "nothing new to propose": an origin is answered ONCE and for good, so a Jira issue
-        // reopened weeks later never returns on its own — and reported as a quiet morning, every
-        // surface agreed the board was empty while a source was actively declaring open work.
-        // Counted, it is a fact a person can act on, and `lore task add --link <url>` is how.
-        let suppressed = candidates
+        // What the sources still declare, that this pass will not offer, and that a person
+        // might want back. An origin is answered ONCE and for good, so an issue reopened weeks
+        // later never returns on its own — reported as a quiet morning, every surface agreed the
+        // board was empty while a source was actively declaring open work. Counted, it is a fact
+        // they can act on.
+        //
+        // FINISHED and not since declined, never dropped: a drop is a decision that stands, and
+        // naming it asks them to write down again what they deliberately said no to. Counted
+        // together, the line grew with every correct use of `lore task drop` until the remedy it
+        // named was wrong for most of what it was counting.
+        let recoverable = candidates
             .iter()
             .map(lk_task::Candidate::origin)
-            .filter(|origin| answered.contains(origin) && !standing.contains(origin))
+            .filter(|origin| answered.is_recoverable(origin) && !standing.contains(origin))
             .collect::<std::collections::BTreeSet<_>>()
             .len();
 
         let offered = lk_task::select(candidates, &answered, &standing);
-        if suppressed > 0 {
-            eprintln!(
-                "{suppressed} the record already answers for — `lore task add --link <url>` \
-                 writes one down again"
-            );
-        }
         for candidate in &offered {
             let origin = candidate.origin();
             let title = format!(
@@ -633,7 +651,11 @@ impl IntentPlane {
             task.src = Some(origin);
             self.board.insert(task);
         }
-        Ok((offered.len(), consumed))
+        Ok(Proposed {
+            offered: offered.len(),
+            recoverable,
+            consumed,
+        })
     }
 
     /// Whether `reminder` is about a task the board no longer holds open — `None` where the
