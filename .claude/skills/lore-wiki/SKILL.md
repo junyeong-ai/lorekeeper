@@ -120,7 +120,7 @@ read it before running any layer.
 Quick vault stats.
 
 - Total concept pages, explorations, daily pages.
-- Last ingest time per source: `lore status`. It reads that log and answers the question, so
+- Last ingest time per source: `lore health`. It reads that log and answers the question, so
   hand-parsing `<vault>/.lorekeeper/ingest.jsonl` reimplements a summary that already exists —
   including the rule that an empty run still counts as a collection.
 - Pending LLM work: `lore queue count` (a bare integer), and `lore queue status` when the

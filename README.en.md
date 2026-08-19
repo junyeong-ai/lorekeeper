@@ -259,6 +259,7 @@ Each day's ingest grows the concept graph; synthesis summarizes it at ever-highe
 | `google-drive` | Curated docs in a Drive folder | Google OAuth |
 | `rss` | Vendor blogs / news → concepts (no auth, multi-feed) | none |
 | `manual` | Markdown, text, and HTML files dropped in `inbox/` | none |
+| `tasks` | Your own finished tasks — what `lore task` closed becomes the day's page | none |
 
 The source key becomes the vault subfolder name. You can define several of the same type (e.g. `team-slack`, `ai-news`). Full reference: [`config.example.yaml`](config.example.yaml).
 
@@ -282,7 +283,7 @@ lore ingest [source]          # ingest (all sources, or a single one)
 lore ingest --dry-run         # preview without writing to the vault
 lore ingest --date 2026-06-01 # re-materialize a specific day (backfill / repair)
 lore synthesis weekly         # weekly synthesis + personal review (monthly/quarterly/annual too)
-lore status                   # last ingest time per source
+lore status                   # one line per subsystem (per-source times: lore health)
 lore health                   # warn when a source is overdue vs ingest.schedule
 lore schedule | crontab -     # emit cron lines
 lore wiki concepts            # list concepts
@@ -352,7 +353,34 @@ irm https://raw.githubusercontent.com/junyeong-ai/lorekeeper/main/scripts/instal
 cargo build --release && ./target/release/lore --help
 ```
 
-Install flags: `--version`, `--install-dir`, `--data-dir`, `--skill {user,project,none}`, `--from-source`, `--force`, `--yes`, `--dry-run` (`--help` lists them all). Uninstall: `./scripts/uninstall.sh`.
+Install flags: `--version`, `--install-dir`, `--data-dir`, `--skill {user,project,none}`, `--from-source`, `--force`, `--yes`, `--dry-run` (`--help` lists them all).
+
+### Tasks
+
+```bash
+lore agenda                       # today: what is committed, what woke, what is due
+lore task add "review the spec" --state today
+lore task add "answer the index question" --link https://acme.slack.com/archives/C123/p1755600000 --label thread
+lore task done 7k2p --note "refresh tokens rotate; retrying after a committed rotation kills the grant"
+lore task sync                    # record what you changed in Obsidian
+```
+
+The board is `<personal>/tasks.md` — four sections of ordinary markdown checkboxes
+(`Today / Next / Waiting / Someday`). Tick one on your phone or drag a line to another section
+and it counts: the heading a line sits under IS its state. A completed task becomes that day's
+page, and the note you closed it with flows on into concept extraction — so **what you did
+compounds the way what you read already does.**
+
+### Update, status, removal
+
+```bash
+lore self status      # is every deployed copy still the one this binary carries (non-zero if not)
+lore self update      # replace the binary with a release, then redeploy skills, pipelines, templates, AGENTS.md
+lore self deploy      # redeploy only — the repair `self status` reports
+lore self uninstall   # remove what was installed; the vault is never touched
+```
+
+The skills, pipeline scripts, templates and `config.example.yaml` are **compiled into the binary**, so there is no second artifact to fall out of step with it, and `lore self deploy` writes the copies. `lore self update` refuses while the queue still holds work, and refuses a release older than the running one — pass `--version` to go back deliberately.
 
 ---
 

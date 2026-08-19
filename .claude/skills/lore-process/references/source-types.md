@@ -43,6 +43,15 @@ the work-log), apply the generic guidance without a type bias.
 - Treat as curated documents: preserve the author's structure, distill to the
   core argument and supporting detail
 
+### `tasks`
+- The user's OWN completed work, one item per task they closed. The title is what
+  they set out to do; the body is the note they closed it with, and is often the
+  only record that the work happened at all
+- Summarize what was DONE and what it established — never restate the task list.
+  A day of six closed tasks is a day's work, not six headlines
+- A body naming a finding, a constraint or a decision is the valuable part: keep
+  its specifics (names, values, thresholds) verbatim rather than paraphrasing
+
 ## Extract-concepts (`kind: extract-concepts`) — per-type scoping
 
 Use `input.source_type` to scope what counts as a concept:
@@ -54,3 +63,6 @@ Use `input.source_type` to scope what counts as a concept:
   the user authored is usually the definitive statement of them, so prefer its
   naming over a synonym seen elsewhere
 - `google-drive` / `manual` → document subject matter
+- `tasks` → what the closing note established: the systems touched, the
+  constraint found, the decision taken. The task's title names an intention and
+  is rarely a concept; the note is where the knowledge is

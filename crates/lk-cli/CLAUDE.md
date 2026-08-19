@@ -128,6 +128,35 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   is never overwritten, and `finish_apply` reports all/some/none distinctly. I/O errors
   still fail the command — only malformed CONTENT is quarantined, because a disk that
   cannot be read is not a corrupt payload.
+- **`lore self`** (`commands/installation.rs`) is the installation's own lifecycle. `status`
+  compares every deployed copy — skills, pipelines, templates, config example, and the vault's
+  `AGENTS.md` — against what this binary carries, and exits non-zero on any difference; `deploy`
+  is the repair, and is what both installers run after placing the binary. `update` replaces the
+  binary and then runs `self deploy` and `schema` THROUGH THE NEW ONE: this process holds the
+  predecessor's embedded artifacts and page-format table, so writing them from here would deploy
+  the version being replaced. It refuses while `queue count` is non-zero, because a task is
+  written by one build and answered under whichever build's skills are deployed when the drain
+  runs. `uninstall` removes the binary and everything it deployed and never touches the vault —
+  the vault is the user's knowledge and their credentials, and the tool is the disposable half.
+- **`lore status`** (`commands/status.rs`) is the front door: one line per subsystem — the
+  installation, source currency, the LLM queue, page contracts, the link graph — each computed
+  by the code its own command exits on (`health::freshness`, `queue::queue_load`,
+  `doctor::audit`, `graph::lint`) rather than re-derived, and each naming that command. It
+  reports and does not gate: a summary that failed the shell would be a sixth gate rather than a
+  front door.
+- **`lore task` / `lore agenda`** (`commands/task.rs`, `commands/agenda.rs`) drive the intent
+  plane. Every mutation follows one shape — read the board, reconcile whatever an editor did to
+  it since, apply the change, write the board and record the history — and reconciling FIRST is
+  what stops a command acting on a board that moved underneath it: a box ticked on a phone an
+  hour ago is a completion, and closing a second task without noticing it would write the board
+  back with that one re-opened. `IntentPlane::commit` writes the log before the page, because a
+  transition without its board move is re-derived by the next reconcile while a board without
+  its transition is work that left no record. `lore agenda` is a VIEW: it writes nothing, not
+  even the reconcile, and reports what an editor changed by naming `lore task sync` — a page
+  would be a forward-looking materialization, which is the one thing this vault forbids.
+- **`lore config board-path`** exists so the scheduled day-close can ask whether the intent
+  plane is configured at all instead of failing nightly on every install that never turned it
+  on — the same machine contract `vault-root` and `queue count` are, for the same reason.
 - **`lore init credentials`** (in `init.rs`) is the interactive credential wizard. UX
   (dialoguer prompts, masked secrets, TTY guard) lives here; the JSON shape + atomic
   `0600` write live in `lk_source::credentials` (`load_file`/`load`/`save`). The Google branch

@@ -279,3 +279,16 @@ on-disk state, never from a cached snapshot.
   (it would false-positive on emphasis differences); flagging is an explicit LLM judgment,
   made where the sources are already being read, and `/lore-wiki audit` judges the open ones
   rather than hunting for new ones.
+- **A page that states INTENT is neither evidence nor a link to check.** `ScannedPage` carries
+  the page's `type`, and `scan::states_intent` takes a `task-board` out of `link_sources`, out
+  of `pages`, and — asked again in `backlinks`, which reads the whole vault rather than the
+  analysis scope because a citation lives wherever it was written — out of what may cite a
+  concept. The board is the one managed page that is forward-looking and that SHRINKS: a line
+  leaves it when the box is ticked. As evidence it would make a concept's `## Sources` and
+  `source_count` appear when a to-do was written down and disappear when it was finished,
+  against the rule that concept links only ever accumulate, and queue a synthesis rewrite on
+  each move. As a checked link source it would fail the nightly lint for naming a page that does
+  not exist yet, which on a realized-only vault is exactly what a task about tomorrow does.
+  Recognised by what the page DECLARES rather than where it sits, because its file name is
+  configurable and this crate resolves its own configuration without reading `personal`. The
+  page still EXISTS, so a link TO it resolves.

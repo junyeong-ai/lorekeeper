@@ -28,14 +28,25 @@ an Obsidian vault. All commands accept `--config <path>` to override.
 | `lore synthesis monthly [--previous]` | Monthly performance review |
 | `lore synthesis quarterly [--previous]` | Quarterly review with category stats |
 | `lore synthesis annual [--previous]` | Annual review from quarterly reviews |
+| `lore agenda [--date YYYY-MM-DD]` | The day read off the task board: what is committed to it, what woke, what is due. A view — it writes nothing, and names `lore task sync` when an editor has changed the board since |
+| `lore task add <text> [--state] [--due] [--link URL] [--label]` | Write down something to do (default section: `next`). `--link` records where it came from — the Slack thread, the Jira issue, the mail — as an absolute URL in the task's own text, so it survives onto the archived page and stays out of the link graph. A vault path is refused |
+| `lore task list [--state] [--json]` | The board, by section |
+| `lore task done <id> [--note]` | Close a task. The note becomes the archived page's body, and through it the concept extraction — which is how work performed compounds the way work read does |
+| `lore task drop <id>` · `move <id> <state>` · `wait <id> --until <date>` | Take it off the board, move it between sections, park it until a day |
+| `lore task sync` | Record what an editor did: adopt lines typed by hand, close lines ticked, wake what is due |
+| `lore task rollover` | Close the day — carry every still-committed task, counting each carry so a task carried too long reads as the diagnosis it is |
 | `lore resolve <name>` | Which concept page a name addresses, by the rule ingest routes an extraction by. Exit 0 owned, 1 absent, 2 more than one page answers to it |
-| `lore status` | Last time each source was COLLECTED — an empty run counts, so a quiet source shows its real timestamp with `0 events` |
+| `lore status` | One line per subsystem — the installation, source currency, the LLM queue, page contracts, the link graph — each naming the command that owns it. Reports without gating; the per-source timestamps are `lore health` |
 | `lore health [--strict]` | Warn if any source is overdue vs `ingest.schedule` (2 missed fires; 48h fallback). `--strict` also fails when a source has NEVER ingested, which a first install has and a broken one looks identical to |
 | `lore performance` | Performance category distribution |
 | `lore doctor` | Audit materialized pages against the contracts they must satisfy — text cleanliness, a section whose input was recorded and never answered, and credentials in issuer-published forms. Non-zero on a defect or an unreadable page; a credential is REPORTED and does not gate, because its repair is at the issuer and editing the page would not undo the leak |
 | `lore schedule --format launchd --bin <abs> --pipeline-dir <dir>` | Print scheduled-task definitions. Both flags are required in practice — see the notes below; the bare form is rarely the one you want |
 | `lore maintenance [--dry-run]` | Prune operational history (ingest log, drained queue files) past `maintenance.retention_days` (default 90d). Streaming event logs are permanent, and each source's latest log entry survives any horizon — it is the state `lore health` reads, not history |
 | `lore queue prune [--dry-run]` | Leave the queue holding only work that still needs an LLM session: drop dead tasks (stale / missing-target), retire a run whose every task is already answered |
+| `lore self status` | What this installation is, and whether every deployed copy — skills, pipelines, templates, config example, `AGENTS.md` — still matches the running binary. Non-zero when any differs |
+| `lore self deploy` | Rewrite those copies from what the binary carries. This is the repair `lore self status` reports, and what an install and an update both run |
+| `lore self update [--version V]` | Replace the binary with a published release, then redeploy. Refuses while the queue still holds work, and refuses a release older than the running one unless `--version` names it deliberately |
+| `lore self uninstall` | Remove the binary and everything it deployed. The vault is never touched |
 
 ## Trigger mapping
 
@@ -46,12 +57,15 @@ an Obsidian vault. All commands accept `--config <path>` to override.
 - "quarterly review" → `lore synthesis quarterly --previous`
 - "annual review" → `lore synthesis annual --previous`
 - "show performance" → `lore performance`
+- "오늘 뭐 하지" / "what's on today" → `lore agenda`
+- "이거 해야 해" / "add a task" → `lore task add`
 - "check status" → `lore status`
 - "health check" → `lore health`
 - "generate cron" / "schedule it" → `lore schedule` (read the flag notes first)
 - "prune old logs" → `lore maintenance`
 - "clean dead queue tasks" → `lore queue prune`
 - "check the vault for defects" → `lore doctor`
+- "is my install current" / "update lore" → `lore self status` / `lore self update`
 
 ## Scheduling flags
 

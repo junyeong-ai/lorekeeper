@@ -23,6 +23,7 @@ Gmail·Slack·Jira·캘린더·RSS·메모를 매일 모아 중복을 없애고,
 | 🧹 **노이즈 제거** | 중복 차단, 관련 없는 항목 필터, 내 일은 work-log로 자동 분리 |
 | 🧩 **개념 자산화** | 같은 개념은 한 페이지로 수렴(`Vector DB` = `vector-database`), 카테고리·연관관계 정리 |
 | 🔗 **연결되는 지식 그래프** | 마크다운 링크·역링크·클러스터로 개념이 서로 이어짐 |
+| ✅ **할 일 → 기록** | `lore task`로 관리한 할 일이 완료되는 순간 그날의 페이지가 됨 — SaaS에 흔적을 남기지 않은 일도 work-log와 성과 리뷰에 잡힘 |
 | 📈 **복리** | 주간·월간·분기·연간 합성으로 시간이 갈수록 가치↑ |
 | 🔑 **API 키 불필요** | Claude Code 세션이 직접 LLM 작업 수행 (별도 과금 없음) |
 
@@ -256,6 +257,7 @@ flowchart LR
 | `google-drive` | Drive 폴더의 큐레이션 문서 | Google OAuth |
 | `rss` | 벤더 블로그·뉴스 → 개념 (인증 불필요, 다중 피드) | 없음 |
 | `manual` | `inbox/`에 드롭한 마크다운·텍스트·HTML 파일 | 없음 |
+| `tasks` | 내가 끝낸 작업 — `lore task`로 닫은 항목이 그날의 페이지가 됨 | 없음 |
 
 소스 키 = vault의 하위 폴더 이름. 같은 타입을 여러 개 정의할 수 있습니다(예: `team-slack`, `ai-news`). 전체 예시는 [`config.example.yaml`](config.example.yaml).
 
@@ -279,7 +281,7 @@ lore ingest [소스]            # 수집 (전체 또는 단일 소스)
 lore ingest --dry-run         # vault 변경 없이 미리보기
 lore ingest --date 2026-06-01 # 특정 날짜 재실체화(백필/복구)
 lore synthesis weekly         # 주간 합성 + 개인 리뷰 (monthly/quarterly/annual)
-lore status                   # 소스별 마지막 수집 시각
+lore status                   # 하위시스템별 한 줄 요약 (소스별 시각은 lore health)
 lore health                   # 수집이 밀린 소스 경고 (ingest.schedule 기준)
 lore schedule | crontab -     # cron 발행
 lore wiki concepts            # 개념 목록
@@ -349,7 +351,30 @@ irm https://raw.githubusercontent.com/junyeong-ai/lorekeeper/main/scripts/instal
 cargo build --release && ./target/release/lore --help
 ```
 
-설치 플래그: `--version`, `--install-dir`, `--data-dir`, `--skill {user,project,none}`, `--from-source`, `--force`, `--yes`, `--dry-run` (`--help`로 전체 확인). 제거: `./scripts/uninstall.sh`.
+설치 플래그: `--version`, `--install-dir`, `--data-dir`, `--skill {user,project,none}`, `--from-source`, `--force`, `--yes`, `--dry-run` (`--help`로 전체 확인).
+
+### 할 일 관리
+
+```bash
+lore agenda                       # 오늘 할 일 — 커밋된 것, 깨어난 것, 기한이 온 것
+lore task add "스펙 리뷰" --state today
+lore task add "인덱스 질문 회신" --link https://acme.slack.com/archives/C123/p1755600000 --label 스레드
+lore task done 7k2p --note "refresh token은 회전 후 재시도하면 grant가 무효화된다"
+lore task sync                    # Obsidian에서 직접 고친 것을 기록에 반영
+```
+
+보드는 `<personal>/tasks.md` — `오늘 / 다음 / 대기 / 언젠가` 네 섹션의 평범한 마크다운 체크박스입니다. 폰의 Obsidian에서 체크하거나 줄을 다른 섹션으로 끌어 옮겨도 그대로 상태 변경으로 인정됩니다(섹션 제목이 곧 상태). 완료한 할 일은 그날의 데일리 페이지가 되고, `--note`로 남긴 내용은 개념 추출까지 흘러갑니다 — **읽은 것뿐 아니라 한 일도 복리로 쌓입니다.**
+
+### 업데이트 · 상태 · 제거
+
+```bash
+lore self status      # 배포된 사본이 지금 바이너리와 같은지 (다르면 non-zero)
+lore self update      # 새 릴리스로 교체하고, 스킬·파이프라인·템플릿·AGENTS.md 재배포
+lore self deploy      # 재배포만 (self status가 보고한 차이를 고침)
+lore self uninstall   # 설치한 것만 제거 — vault는 건드리지 않음
+```
+
+스킬·파이프라인·템플릿·`config.example.yaml`은 **바이너리에 내장**되어 있습니다. 별도로 내려받는 아티팩트가 없으니 버전이 어긋날 수 없고, `lore self deploy`가 사본을 씁니다. `lore self update`는 큐에 처리 대기 중인 작업이 있으면 거부하고, 실행 중인 버전보다 오래된 릴리스도 거부합니다(`--version`으로 명시하면 되돌릴 수 있음).
 
 ---
 
