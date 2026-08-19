@@ -1,0 +1,13 @@
+{% extends "_daily_base.md.jinja" %}
+{% block title %}{{ i18n.tasks_archive_title }}{% endblock %}
+{# A completed task's line is its title; the note it was closed with, where one was given, is
+   the body — which is what carries it into concept extraction, so work performed compounds
+   the same way work read does. #}
+{% block events %}
+{% for item in events -%}
+### {{ item.title }}
+
+{{ item.body }}
+
+{% endfor %}
+{% endblock %}

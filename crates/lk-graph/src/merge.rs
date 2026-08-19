@@ -371,6 +371,7 @@ mod tests {
             id: id.to_owned(),
             path: PathBuf::from(rel),
             title: id.to_owned(),
+            format: None,
             outgoing: outgoing
                 .iter()
                 .map(|s| Link::to(&format!("{s}.md")))

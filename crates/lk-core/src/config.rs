@@ -103,6 +103,55 @@ impl Config {
             }
         }
 
+        if let Some(tasks) = self.personal.as_mut().and_then(|p| p.tasks.as_mut()) {
+            // A file name, never a path. `Path::join` on an absolute fragment DISCARDS the
+            // vault root, so `board: /etc/cron.d/anything` would write outside the vault with
+            // nothing to warn on — the same escape the source-id rule closes a few lines below,
+            // arriving through a different key.
+            // Normalized IN PLACE, so what is validated is what every reader uses: validating a
+            // trimmed copy and joining the raw value wrote ` tasks.md ` — a name illegal on
+            // Windows and not the one the check approved.
+            tasks.board = tasks.board.trim().to_string();
+            let board = tasks.board.as_str();
+            let separated = board.contains(['/', '\\', ':']);
+            if board.is_empty() || separated || !board.ends_with(".md") {
+                return Err(ConfigError::Validation(format!(
+                    "personal.tasks.board ('{board}') must be a markdown file name inside \
+                     vault.dirs.personal — no path separators, no drive prefix, no leading slash"
+                )));
+            }
+        }
+
+        // The board writes the transition log and a `tasks` source reads it: one without the
+        // other is a log nothing produces or a board nothing archives, and either is a config
+        // that looks complete and quietly does half the job.
+        let declares_tasks = self
+            .sources
+            .values()
+            .any(|sc| sc.source_type == SourceType::Tasks);
+        let archives_tasks = self
+            .sources
+            .values()
+            .any(|sc| sc.enabled && sc.source_type == SourceType::Tasks);
+        let board = self.personal.as_ref().and_then(|p| p.tasks.as_ref());
+        if board.is_some() && !declares_tasks {
+            return Err(ConfigError::Validation(
+                "personal.tasks is configured but no source has `type: tasks` — add one, or a \
+                 finished task is recorded and never reaches a page"
+                    .into(),
+            ));
+        }
+        // Only an ENABLED source is a claim that something will read the log. A declared one
+        // that is switched off is an ordinary "not now", exactly as it is for every other
+        // source — refusing it would mean turning the plane off required deleting the entry.
+        if archives_tasks && board.is_none() {
+            return Err(ConfigError::Validation(
+                "an enabled source has `type: tasks` but there is no `personal.tasks` block — \
+                 add one, or the source reads a log nothing writes"
+                    .into(),
+            ));
+        }
+
         for (id, sc) in &self.sources {
             // Earlier rules' lowercased keywords, for the reachability proof below.
             let mut earlier: Vec<(&str, String)> = Vec::new();
@@ -761,6 +810,14 @@ pub enum SourceType {
     /// User-curated inbox: files dropped into `<vault>/inbox/` are picked up,
     /// processed through the same pipeline as automated sources, and archived.
     Manual,
+    /// The user's own completed tasks, read from the intent plane's transition log.
+    ///
+    /// The one source whose items this tool produced itself: a task finished on the board is
+    /// work performed, and it re-enters through the same door every external source uses, so
+    /// the daily page, the work-log, the contribution categories and every review consume it
+    /// without changing. It is what makes work that touched no SaaS — reading, deciding,
+    /// debugging — visible to a performance review at all.
+    Tasks,
 }
 
 /// Whether a source's items read as "messages" (Slack) or "events" (everything
@@ -856,6 +913,13 @@ impl SourceType {
                 default_template: "document.md.jinja",
                 item_kind: ItemKind::Event,
             },
+            // Not streaming: a date's transition log is a closed, durable record, so a past
+            // day re-reads complete and the page rebuilds from the read alone.
+            SourceType::Tasks => SourceDescriptor {
+                streaming: false,
+                default_template: "tasks.md.jinja",
+                item_kind: ItemKind::Event,
+            },
         }
     }
 }
@@ -891,11 +955,37 @@ pub struct PersonalConfig {
     /// Label used for events that match no category. When `None`, falls back
     /// to the locale-appropriate default via `uncategorized_label()`.
     pub uncategorized_label: Option<String>,
+    /// The intent plane: the task board and how a day-close reads it. Its PRESENCE enables
+    /// the subsystem, like `personal` itself — an absent block is a vault that records what
+    /// happened and never what was meant to.
+    pub tasks: Option<TasksConfig>,
     /// Monthly/quarterly/annual review enable + schedule. The weekly review rides the
     /// weekly-synthesis run (`lore synthesis weekly`), so it has no separate schedule here.
     pub monthly: PersonalReviewConfig,
     pub quarterly: PersonalReviewConfig,
     pub annual: PersonalReviewConfig,
+}
+
+/// The task board and the one reading a day-close makes of it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TasksConfig {
+    /// The board file, relative to `<personal>`. One durable page rather than one per day: a
+    /// list of what is open is not a record of a day, and fragmenting it by date would mean
+    /// carrying every open task forward by copying it.
+    pub board: String,
+    /// How many day-closes a task may survive before the agenda says so. A task carried past
+    /// this is not asking for another day — it is too large, or it was never real.
+    pub carry_warn_after: u32,
+}
+
+impl Default for TasksConfig {
+    fn default() -> Self {
+        Self {
+            board: "tasks.md".to_string(),
+            carry_warn_after: 3,
+        }
+    }
 }
 
 impl PersonalConfig {
@@ -971,6 +1061,7 @@ impl Default for PersonalConfig {
             source_category_map: BTreeMap::new(),
             source_type_category_map: BTreeMap::new(),
             uncategorized_label: None,
+            tasks: None,
             monthly: PersonalReviewConfig::default(),
             quarterly: PersonalReviewConfig::default(),
             annual: PersonalReviewConfig::default(),

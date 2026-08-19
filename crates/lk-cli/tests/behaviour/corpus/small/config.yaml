@@ -30,6 +30,12 @@ sources:
     enabled: false
     labels: [fixture]
     extract_concepts: true
+  # The intent plane's other half. Disabled like every source here: what it would read is the
+  # transition log, which only a mutating command writes, and the sweep observes a vault that
+  # already exists.
+  my-tasks:
+    type: tasks
+    enabled: false
 
 # The personal module, so `performance` and every `synthesis` period reach their
 # own logic instead of the not-configured guard.
@@ -41,3 +47,6 @@ personal:
   uncategorized_label: "other"
   source_type_category_map:
     manual: project-delivery
+  tasks:
+    board: tasks.md
+    carry_warn_after: 3

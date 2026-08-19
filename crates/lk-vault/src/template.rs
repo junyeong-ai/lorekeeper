@@ -65,6 +65,10 @@ const EMBEDDED: &[(&str, &str)] = &[
         include_str!("../../../templates/slack-search.md.jinja"),
     ),
     (
+        "tasks.md.jinja",
+        include_str!("../../../templates/tasks.md.jinja"),
+    ),
+    (
         "weekly-review.md.jinja",
         include_str!("../../../templates/weekly-review.md.jinja"),
     ),
@@ -77,6 +81,15 @@ const EMBEDDED: &[(&str, &str)] = &[
         include_str!("../../../templates/work-log.md.jinja"),
     ),
 ];
+
+/// The template set compiled into the binary, as `(name, source)`.
+///
+/// Exposed so `lk-dist` can write the same bytes to the directory a `--template-dir` run
+/// starts from. The set a render resolves against and the set a deploy writes are then one
+/// embedding, so a customization can be compared to what it customized.
+pub fn embedded_templates() -> &'static [(&'static str, &'static str)] {
+    EMBEDDED
+}
 
 fn embedded(name: &str) -> Option<String> {
     EMBEDDED

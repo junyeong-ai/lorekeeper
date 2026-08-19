@@ -283,6 +283,20 @@ sources:
     labels: [knowledge]
     extract_concepts: true
 
+  # Your own finished tasks. This is the other half of the task board below: closing a task
+  # records it, and this reads that record so the day's work lands on a daily page like any
+  # other source's. It is what makes work that touched no SaaS — reading, deciding, debugging
+  # — visible to the work-log and to a performance review at all.
+  # Requires `personal.tasks` (and vice versa); `lore validate` says so if only one is here.
+  # NOTE: list this id in `personal.tracked_sources` below. Without it the completions still
+  # get their own daily page, but they never reach the work-log or any review — which is the
+  # one thing this source exists for.
+  my-work:
+    type: tasks
+    enabled: false
+    labels: [personal]
+    extract_concepts: true
+
 # ─── Personal module (OPTIONAL) ───────────────────────────
 # The personal-productivity module: the work-log + weekly/monthly/quarterly/annual personal
 # reviews + the contribution taxonomy. OMIT this whole `personal:` block for a pure,
@@ -293,7 +307,7 @@ personal:
   # here still flows to the concept graph and daily pages — it just isn't "my activity".
   # (Ownership within a tracked source is still exact: Slack uses identity.slack_id, Jira the
   # authenticated account, Gmail/Calendar identity.email — recipients/mentions never count.)
-  tracked_sources: [team-slack, my-tasks, my-schedule, email-digest]
+  tracked_sources: [team-slack, my-tasks, my-schedule, email-digest, my-work]
   performance_categories:
     - project-delivery
     - technical-leadership
@@ -308,6 +322,14 @@ personal:
   source_type_category_map:
     jira: project-delivery
     google-calendar: team-contribution
+  # The task board: what you mean to do, which becomes what you did.
+  # Its PRESENCE turns the board on. `lore task` writes <personal>/tasks.md — four sections
+  # (today / next / waiting / someday) of ordinary markdown checkboxes you can also edit in
+  # Obsidian, on a phone; `lore task sync` picks up whatever you changed there. Closing a task
+  # records it, and the `tasks` source above turns that record into a page.
+  tasks:
+    board: tasks.md                 # relative to vault.dirs.personal
+    carry_warn_after: 3             # the agenda flags a task carried this many day-closes
   # Monthly/quarterly/annual review schedules. The weekly review rides `lore synthesis
   # weekly` (scheduled under synthesis.weekly below), so it has no separate schedule here.
   monthly:

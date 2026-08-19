@@ -30,6 +30,8 @@ pub struct ScannedPage {
     pub id: String,
     pub path: PathBuf,
     pub title: String,
+    /// What the page's `type` frontmatter declares it to be, where it declares one.
+    pub format: Option<String>,
     pub outgoing: Vec<Link>,
 }
 
@@ -126,6 +128,7 @@ pub fn scan_vault(root: &Path, follow_links: bool) -> Result<Vec<ScannedPage>, G
                 ScannedPage {
                     id: path_slug(rel),
                     path: rel.to_path_buf(),
+                    format: None,
                     title: path
                         .file_stem()
                         .and_then(|s| s.to_str())
@@ -177,7 +180,9 @@ impl VaultViews {
 
         let managed = page_dirs(dirs);
         let in_scope = |page: &ScannedPage, scope: &[PathBuf]| {
-            scope.iter().any(|dir| under(&page.id, dir)) && !excluded.matches(&page.path)
+            scope.iter().any(|dir| under(&page.id, dir))
+                && !excluded.matches(&page.path)
+                && !states_intent(page)
         };
 
         Ok(Self {
@@ -195,6 +200,23 @@ impl VaultViews {
             existence,
         })
     }
+}
+
+/// Whether a page asserts INTENT rather than knowledge.
+///
+/// The task board is the one managed page that is forward-looking, and it SHRINKS: a line is
+/// removed when the box is ticked. Both properties break what the link views are for. As a
+/// citation source it would make a concept's evidence appear when a to-do was written down and
+/// disappear when it was finished — against the rule that concept links only ever accumulate,
+/// and it would spend an LLM session rewriting that concept's synthesis on each move. As a
+/// checked link source it would fail the nightly `graph lint` for naming a page that does not
+/// exist yet, which on a realized-only vault is exactly what a task about tomorrow does.
+///
+/// Recognised by what the page DECLARES, not by where it sits: the board's file name is
+/// configurable, and this crate resolves its own configuration without reading `personal`.
+/// The page still EXISTS — a link TO it resolves — it is only never read as evidence.
+pub(crate) fn states_intent(page: &ScannedPage) -> bool {
+    page.format.as_deref() == Some(lk_core::vault_path::TASK_BOARD_FORMAT)
 }
 
 /// Whether a page id sits under a configured vault-relative directory.
@@ -308,8 +330,13 @@ fn parse_file(path: &Path, root: &Path) -> Result<ScannedPage, String> {
     // reads as an orphan. That the frontmatter is unparseable is a defect in its own right, and
     // `lore doctor` is what reports it — the scan's question is what the page points at.
     let parts = frontmatter::split_page(&raw);
-    let title = frontmatter::parse_page(&raw)
-        .ok()
+    let parsed = frontmatter::parse_page(&raw).ok();
+    let format = parsed
+        .as_ref()
+        .and_then(|page| page.frontmatter.get("type"))
+        .and_then(|value| value.as_str())
+        .map(str::to_owned);
+    let title = parsed
         .as_ref()
         .and_then(|page| frontmatter_title(&page.frontmatter))
         .or_else(|| extract_first_heading(&parts.body))
@@ -346,6 +373,7 @@ fn parse_file(path: &Path, root: &Path) -> Result<ScannedPage, String> {
     Ok(ScannedPage {
         id: path_slug(rel),
         path: rel.to_path_buf(),
+        format,
         title,
         outgoing,
     })
@@ -999,12 +1027,14 @@ mod tests {
                 id: "daily/team-slack/2026-05-22".to_owned(),
                 path: PathBuf::from("daily/team-slack/2026-05-22.md"),
                 title: "t".to_owned(),
+                format: None,
                 outgoing: vec![Link::to("wiki/concepts/confluence-cloud.md")],
             },
             ScannedPage {
                 id: "wiki/concepts/confluence-cloud".to_owned(),
                 path: PathBuf::from("wiki/concepts/confluence-cloud.md"),
                 title: "Confluence Cloud".to_owned(),
+                format: None,
                 outgoing: vec![],
             },
         ];
@@ -1056,6 +1086,41 @@ mod tests {
         assert!(under("daily_/notes/2026-07-30", Path::new("daily_")));
         assert!(!under("daily_/notes/2026-07-30", Path::new("daily")));
         assert!(under("daily/notes/2026-07-30", Path::new("daily")));
+    }
+
+    /// The board asserts intent, not knowledge: it is forward-looking and it SHRINKS when a box
+    /// is ticked. As a citation source a concept's evidence would appear when a to-do was
+    /// written down and disappear when it was finished; as a checked link source the nightly
+    /// lint would fail for naming a page that does not exist yet.
+    #[test]
+    fn a_page_stating_intent_is_neither_evidence_nor_a_checked_link_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let personal = tmp.path().join("me");
+        std::fs::create_dir_all(&personal).unwrap();
+        std::fs::write(
+            personal.join("tasks.md"),
+            "---\ntype: task-board\n---\n\n## Today\n\n             - [ ] plan [Alpha](../wiki/concepts/alpha.md) and [Beta](../wiki/concepts/beta.md)\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(tmp.path().join("wiki/concepts")).unwrap();
+        std::fs::write(
+            tmp.path().join("wiki/concepts/alpha.md"),
+            "---\ntype: concept\n---\n\n# Alpha\n",
+        )
+        .unwrap();
+
+        let views = VaultViews::resolve(tmp.path(), &GraphConfig::default(), &VaultDirs::default())
+            .expect("scan");
+
+        assert!(
+            views.scanned.iter().any(|p| p.id == "me/tasks"),
+            "the page still exists, so a link TO it resolves"
+        );
+        assert!(
+            !views.link_sources.iter().any(|p| p.id == "me/tasks"),
+            "and it is read as neither evidence nor a link to check"
+        );
+        assert!(!views.pages.iter().any(|p| p.id == "me/tasks"));
     }
 
     #[test]

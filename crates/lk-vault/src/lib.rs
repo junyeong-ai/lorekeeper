@@ -17,7 +17,7 @@ pub use self::section::{
     section_body, section_headings, set_frontmatter_field, set_llm_input,
 };
 pub use self::store::{FsVault, InMemoryVault, VaultStore};
-pub use self::template::TemplateEngine;
+pub use self::template::{TemplateEngine, embedded_templates};
 pub use self::timeline::{build_timeline, write_timeline};
 pub use self::writer::VaultWriter;
 

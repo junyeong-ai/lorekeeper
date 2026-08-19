@@ -9,6 +9,7 @@ pub(crate) mod paging;
 pub(crate) mod retry;
 mod rss;
 mod slack;
+mod tasks;
 
 /// Move consumed manual-inbox files into `<inbox>/archived/{date}/`. The CLI calls
 /// this only once a source's vault writes and the queue flush have succeeded, so a
@@ -238,6 +239,7 @@ pub fn validate_params(
         SourceType::Confluence => confluence::validate_params(params),
         SourceType::Rss => rss::validate_params(params),
         SourceType::Manual => manual::validate_params(params),
+        SourceType::Tasks => tasks::validate_params(params),
     }
 }
 
@@ -388,6 +390,7 @@ pub fn build_source(
         // RSS feeds are public HTTP — no credentials.
         SourceType::Rss => Ok(Box::new(rss::RssSource::new(http))),
         SourceType::Manual => Ok(Box::new(manual::ManualSource::new())),
+        SourceType::Tasks => Ok(Box::new(tasks::TasksSource)),
     }
 }
 
@@ -480,6 +483,7 @@ mod tests {
                 SourceType::Manual,
                 serde_json::json!({"inbox_dir": "inbox", "extensions": ["md"]}),
             ),
+            (SourceType::Tasks, serde_json::json!({})),
             (
                 SourceType::Confluence,
                 serde_json::json!({"cql": "space = ENG"}),

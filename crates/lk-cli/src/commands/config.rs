@@ -32,6 +32,13 @@ pub enum ConfigCommand {
     /// the page the run just wrote. `lore wiki concepts` cannot stand in: it reports the
     /// categories already in USE, so a vocabulary entry nothing has used yet is invisible there.
     Categories,
+    /// Print the absolute path of the task board on stdout, and nothing else.
+    ///
+    /// Non-zero when no board is configured, which is how a scheduled script decides whether
+    /// the day-close stage applies at all. The alternative is a stage that fails every night
+    /// for every install that never turned the intent plane on — or one that greps an error
+    /// message, which is not a contract.
+    BoardPath,
 }
 
 pub async fn run(opts: &super::GlobalOptions, cmd: ConfigCommand) -> miette::Result<()> {
@@ -53,6 +60,33 @@ pub async fn run(opts: &super::GlobalOptions, cmd: ConfigCommand) -> miette::Res
                 "{}",
                 root.join(wiki)
                     .join(lk_core::vault_path::SCHEMA_FILE)
+                    .display()
+            );
+            Ok(())
+        }
+        ConfigCommand::BoardPath => {
+            let config = load_config(&find_config(opts)?)?;
+            let board = config
+                .personal
+                .as_ref()
+                .and_then(|personal| personal.tasks.as_ref())
+                .ok_or_else(|| {
+                    miette::miette!(
+                        "no task board is configured — add a `tasks:` block under `personal:`"
+                    )
+                })?;
+            println!(
+                "{}",
+                config
+                    .vault
+                    .root_path()
+                    .join(
+                        lk_core::vault_path::VaultPath::task_board(
+                            &config.vault.dirs,
+                            &board.board
+                        )
+                        .as_ref()
+                    )
                     .display()
             );
             Ok(())

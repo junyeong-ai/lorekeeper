@@ -1,0 +1,19 @@
+---
+source: crates/lk-cli/tests/behaviour.rs
+expression: "observe(staged.path(), argv)"
+---
+exit: 0
+--- stdout ---
+--- stderr ---
+
+Today
+  7k2p  carry the guard population forward              5d
+
+Next
+  3b8q  rewrite the deterministic clock note            
+
+Waiting
+  9m4x  hear back about the snapshot corpus             → 2026-08-18
+
+Someday
+  x2vt  read every paper on link graphs

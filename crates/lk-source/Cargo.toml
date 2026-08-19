@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 lk-core = { workspace = true }
+lk-task = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }

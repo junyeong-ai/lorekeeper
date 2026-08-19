@@ -123,6 +123,7 @@ mod tests {
             id: id.to_string(),
             path: PathBuf::from(format!("{id}.md")),
             title: leaf(id).to_string(),
+            format: None,
             outgoing: outgoing
                 .iter()
                 .map(|s| Link::to(&format!("{s}.md")))

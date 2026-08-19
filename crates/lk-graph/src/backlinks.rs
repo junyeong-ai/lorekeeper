@@ -164,7 +164,13 @@ pub fn sync_concept_backlinks(
     let by_id: HashMap<&str, &ScannedPage> = pages.iter().map(|p| (p.id.as_str(), p)).collect();
     let mut incoming: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for page in pages {
-        if !is_valid_source(&page.path, dirs) {
+        // A page that states intent is not evidence: the board is forward-looking and it
+        // SHRINKS when a box is ticked, so crediting it would make a concept's `## Sources`
+        // and `source_count` appear when a to-do was written down and disappear when it was
+        // finished — and queue a synthesis rewrite on each move. This sweep reads the whole
+        // vault rather than the analysis scope, because a citation lives wherever it was
+        // written, so the exclusion has to be asked here too.
+        if crate::scan::states_intent(page) || !is_valid_source(&page.path, dirs) {
             continue;
         }
         for target in page
@@ -502,6 +508,7 @@ mod tests {
             id: id.to_owned(),
             path: PathBuf::from(rel),
             title: id.to_owned(),
+            format: None,
             outgoing: outgoing
                 .iter()
                 .map(|s| Link::to(&format!("{s}.md")))

@@ -1,0 +1,14 @@
+---
+source: crates/lk-cli/tests/behaviour.rs
+expression: "observe(staged.path(), argv)"
+---
+exit: 0
+--- stdout ---
+--- stderr ---
+2026-08-19
+
+Today
+  7k2p  carry the guard population forward              5d
+
+Waiting
+  9m4x  hear back about the snapshot corpus             → 2026-08-18

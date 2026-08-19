@@ -6,6 +6,15 @@ use lk_core::vault_path::{
     CONCEPTS_SUBDIR, DOCUMENTS_SUBDIR, EXPLORATIONS_SUBDIR, WORK_LOG_SUBDIR,
 };
 
+/// The build that renders this page, as the page's `generator` frontmatter states it.
+///
+/// The single spelling of that value: `lore self status` compares the deployed page against
+/// it, so a page rendered here and a page found current there cannot disagree about what
+/// "current" is.
+pub fn generator() -> String {
+    format!("lore {}", env!("CARGO_PKG_VERSION"))
+}
+
 /// Section ownership tag.
 #[derive(Clone, Copy)]
 enum Owner {
@@ -89,7 +98,11 @@ fn machine_writers(schemas: &[PageSchema]) -> String {
         .join("; ")
 }
 
-fn page_schemas(dirs: &lk_core::config::VaultDirs, personal: bool) -> Vec<PageSchema> {
+fn page_schemas(
+    dirs: &lk_core::config::VaultDirs,
+    personal: bool,
+    board: Option<&str>,
+) -> Vec<PageSchema> {
     let mut schemas = vec![
         PageSchema {
             type_name: "concept",
@@ -220,6 +233,25 @@ fn page_schemas(dirs: &lk_core::config::VaultDirs, personal: bool) -> Vec<PageSc
     // The work-log and the four reviews are the personal module's pages — documented in
     // AGENTS.md only when `personal:` is configured, so a domain-neutral vault's format
     // reference never describes pages it will never produce.
+    // Published only where a board is configured, at the name the config gives it. The format
+    // is enabled by `personal.tasks` the way the personal formats are enabled by `personal`,
+    // and `AGENTS.md` is what a skill reads to locate a page — so a hardcoded `tasks.md` beside
+    // a configured `todo.md` would send it to a file that does not exist.
+    if let Some(board) = board {
+        schemas.push(PageSchema {
+            type_name: lk_core::vault_path::TASK_BOARD_FORMAT,
+            path_pattern: lk_core::vault_path::VaultPath::task_board(dirs, board).to_string(),
+            frontmatter: &["id", "type", "title", "updated"],
+            sections: vec![
+                s("Today", |i| i.tasks_today.to_string(), Owner::Machine),
+                s("Next", |i| i.tasks_next.to_string(), Owner::Machine),
+                s("Waiting", |i| i.tasks_waiting.to_string(), Owner::Machine),
+                s("Someday", |i| i.tasks_someday.to_string(), Owner::Machine),
+            ],
+            machine_writer: Some("lore task"),
+        });
+    }
+
     if personal {
         schemas.extend([
             PageSchema {
@@ -336,16 +368,19 @@ pub fn render_agents_md(
     locale: Locale,
     dirs: &lk_core::config::VaultDirs,
     personal: bool,
+    board: Option<&str>,
 ) -> String {
     let strings = locale.strings();
     let locale_tag = locale.tag();
-    let schemas = page_schemas(dirs, personal);
+    let schemas = page_schemas(dirs, personal, board);
 
     let mut out = String::new();
     writeln!(
         out,
-        "---\ntype: {}\n---\n",
-        lk_core::vault_path::SCHEMA_FORMAT
+        "---\ntype: {}\n{}: {}\n---\n",
+        lk_core::vault_path::SCHEMA_FORMAT,
+        lk_core::frontmatter::field::GENERATOR,
+        generator()
     )
     .unwrap();
     writeln!(out, "# Lorekeeper Page Formats").unwrap();
@@ -613,20 +648,29 @@ pub async fn run(
         root: vault_root,
         config,
     } = super::resolve_root_config(opts, root_override)?;
-    let (locale, dirs, personal) = match config {
-        Some(config) => (
-            config.vault.locale(),
-            config.vault.dirs.clone(),
-            config.personal.is_some(),
-        ),
+    let (locale, dirs, personal, board) = match config {
+        Some(config) => {
+            let board = config
+                .personal
+                .as_ref()
+                .and_then(|personal| personal.tasks.as_ref())
+                .map(|tasks| tasks.board.clone());
+            (
+                config.vault.locale(),
+                config.vault.dirs.clone(),
+                config.personal.is_some(),
+                board,
+            )
+        }
         None => (
             Locale::default(),
             lk_core::config::VaultDirs::default(),
             false,
+            None,
         ),
     };
 
-    let content = render_agents_md(locale, &dirs, personal);
+    let content = render_agents_md(locale, &dirs, personal, board.as_deref());
 
     // A page this tool writes into the vault, so it goes through the writer that refuses to
     // replace a page of another format rather than around it.
@@ -654,13 +698,23 @@ mod tests {
 
     #[test]
     fn agents_md_uses_locale_strings() {
-        let ko = render_agents_md(Locale::Ko, &lk_core::config::VaultDirs::default(), true);
+        let ko = render_agents_md(
+            Locale::Ko,
+            &lk_core::config::VaultDirs::default(),
+            true,
+            Some("tasks.md"),
+        );
         assert!(ko.contains("locale: ko"));
         assert!(ko.contains("`## 핵심`"));
         assert!(ko.contains("`## 출처`"));
         assert!(ko.contains("`## 관련`"));
 
-        let en = render_agents_md(Locale::En, &lk_core::config::VaultDirs::default(), true);
+        let en = render_agents_md(
+            Locale::En,
+            &lk_core::config::VaultDirs::default(),
+            true,
+            Some("tasks.md"),
+        );
         assert!(en.contains("locale: en"));
         assert!(en.contains("`## Synthesis`"));
         assert!(en.contains("`## Sources`"));
@@ -673,7 +727,12 @@ mod tests {
         // LLM (`concepts` task, `concepts_done` marker), so AGENTS.md — the agent-facing
         // contract — must label them LLM-owned, consistent with Summary. The raw Events list
         // stays machine-owned (the LLM only refines each body in place).
-        let md = render_agents_md(Locale::En, &lk_core::config::VaultDirs::default(), false);
+        let md = render_agents_md(
+            Locale::En,
+            &lk_core::config::VaultDirs::default(),
+            false,
+            Some("tasks.md"),
+        );
         for line in md.lines() {
             if line.starts_with("| Concepts ") || line.starts_with("| Extracted Concepts ") {
                 assert!(
@@ -706,14 +765,23 @@ mod tests {
         // that makes an author leave a section for a command that will never touch it. The
         // localized heading reference must come from the i18n bundle like every other one.
         for (locale, sources) in [(Locale::Ko, "## 출처"), (Locale::En, "## Sources")] {
-            let md = render_agents_md(locale, &lk_core::config::VaultDirs::default(), true);
+            let md = render_agents_md(
+                locale,
+                &lk_core::config::VaultDirs::default(),
+                true,
+                Some("tasks.md"),
+            );
             let legend = md
                 .lines()
                 .find(|l| l.starts_with("Each table's `Owner` column"))
                 .unwrap_or_else(|| panic!("{locale:?}: ownership legend present"));
             // Read off the schemas, so a format added with a fourth writer cannot leave the
             // legend naming only the three that existed when it was written.
-            let schemas = page_schemas(&lk_core::config::VaultDirs::default(), true);
+            let schemas = page_schemas(
+                &lk_core::config::VaultDirs::default(),
+                true,
+                Some("tasks.md"),
+            );
             let declared: std::collections::BTreeSet<&str> = schemas
                 .iter()
                 .filter(|schema| {
@@ -777,7 +845,12 @@ mod tests {
         // them. Nothing ever read the arrays and no rewriter maintained them, so a merged
         // concept left them naming a page that no longer exists. One record, in the form that
         // is checked.
-        let md = render_agents_md(Locale::En, &lk_core::config::VaultDirs::default(), false);
+        let md = render_agents_md(
+            Locale::En,
+            &lk_core::config::VaultDirs::default(),
+            false,
+            Some("tasks.md"),
+        );
         let section = md
             .split("\n## exploration ")
             .nth(1)
@@ -799,7 +872,12 @@ mod tests {
         // where the page's links live: `backlinks-sync` reads exactly those forward links to
         // derive each cited concept's sources and `source_count`, so an empty Grounding costs
         // the page its entire contribution to the graph, silently and with nothing to repair it.
-        let md = render_agents_md(Locale::En, &lk_core::config::VaultDirs::default(), false);
+        let md = render_agents_md(
+            Locale::En,
+            &lk_core::config::VaultDirs::default(),
+            false,
+            Some("tasks.md"),
+        );
         let section = md
             .split("\n## exploration ")
             .nth(1)
@@ -815,8 +893,17 @@ mod tests {
 
     #[test]
     fn agents_md_contains_all_page_types() {
-        let content = render_agents_md(Locale::Ko, &lk_core::config::VaultDirs::default(), true);
-        for schema in page_schemas(&lk_core::config::VaultDirs::default(), true) {
+        let content = render_agents_md(
+            Locale::Ko,
+            &lk_core::config::VaultDirs::default(),
+            true,
+            Some("tasks.md"),
+        );
+        for schema in page_schemas(
+            &lk_core::config::VaultDirs::default(),
+            true,
+            Some("tasks.md"),
+        ) {
             assert!(
                 content.contains(&format!("## {}", schema.type_name)),
                 "missing page type: {}",
@@ -830,7 +917,12 @@ mod tests {
     /// windowed word search, since `data` is an ordinary English word.
     #[test]
     fn agents_md_states_the_document_type_vocabulary() {
-        let content = render_agents_md(Locale::Ko, &lk_core::config::VaultDirs::default(), true);
+        let content = render_agents_md(
+            Locale::Ko,
+            &lk_core::config::VaultDirs::default(),
+            true,
+            Some("tasks.md"),
+        );
         for value in lk_core::document::DOCUMENT_TYPES {
             assert!(
                 content.contains(&format!("`{value}`")),
@@ -847,15 +939,36 @@ mod tests {
     ///
     /// One format is exempt, for a stated reason rather than because it was inconvenient:
     /// `exploration` has no template at all — the page is authored through `/lore-wiki`, which
-    /// is why the template was deleted.
+    /// is why the template was deleted. One other renders through Rust rather than a template
+    /// and is held to the same property against the renderer that actually writes it.
     #[test]
     fn every_frontmatter_key_the_schema_advertises_is_one_a_template_renders() {
         const AUTHORED_NOT_RENDERED: &[&str] = &["exploration"];
         let templates =
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../templates");
         let mut checked = 0;
-        for schema in page_schemas(&lk_core::config::VaultDirs::default(), true) {
+        for schema in page_schemas(
+            &lk_core::config::VaultDirs::default(),
+            true,
+            Some("tasks.md"),
+        ) {
             if AUTHORED_NOT_RENDERED.contains(&schema.type_name) {
+                continue;
+            }
+            // The task board is rendered in Rust: its lines carry a machine-readable stamp a
+            // template could write and could not read back, so one function owns both
+            // directions. Same property, asked of the renderer that writes it.
+            if schema.type_name == lk_task::BOARD_FORMAT {
+                let page = lk_task::Board::empty()
+                    .render(Locale::default(), jiff::civil::date(2026, 1, 1));
+                for key in schema.frontmatter {
+                    assert!(
+                        page.contains(&format!("{key}:")),
+                        "AGENTS.md advertises `{key}` on a task-board page, and \
+                         `lk_task::Board::render` never writes it"
+                    );
+                    checked += 1;
+                }
                 continue;
             }
             // Daily pages render through the shared base; every other format has its own file.
@@ -887,14 +1000,18 @@ mod tests {
     /// `type` values are named in `vault_path` beside the array so the render sites cannot drift.
     #[test]
     fn every_page_format_is_a_format_the_schema_registry_defines() {
-        let mut declared: Vec<&str> = page_schemas(&lk_core::config::VaultDirs::default(), true)
-            .iter()
-            .map(|schema| schema.type_name)
-            .chain([
-                lk_core::vault_path::MAP_FORMAT,
-                lk_core::vault_path::SCHEMA_FORMAT,
-            ])
-            .collect();
+        let mut declared: Vec<&str> = page_schemas(
+            &lk_core::config::VaultDirs::default(),
+            true,
+            Some("tasks.md"),
+        )
+        .iter()
+        .map(|schema| schema.type_name)
+        .chain([
+            lk_core::vault_path::MAP_FORMAT,
+            lk_core::vault_path::SCHEMA_FORMAT,
+        ])
+        .collect();
         declared.sort_unstable();
         let mut admitted = lk_core::vault_path::PAGE_FORMATS.to_vec();
         admitted.sort_unstable();
@@ -909,7 +1026,12 @@ mod tests {
     fn agents_md_omits_personal_pages_when_module_absent() {
         // A domain-neutral vault (no `personal:` module) must not document page formats it
         // never produces — `lore schema` passes `personal = false` in that case.
-        let content = render_agents_md(Locale::En, &lk_core::config::VaultDirs::default(), false);
+        let content = render_agents_md(
+            Locale::En,
+            &lk_core::config::VaultDirs::default(),
+            false,
+            Some("tasks.md"),
+        );
         for core in [
             "concept",
             "daily",
@@ -941,13 +1063,23 @@ mod tests {
         // The convergence contract is part of the schema: agents that create concept
         // pages read it here, and its heading references must be the LOCALIZED
         // machine-owned headings, never hardcoded English.
-        let ko = render_agents_md(Locale::Ko, &lk_core::config::VaultDirs::default(), true);
+        let ko = render_agents_md(
+            Locale::Ko,
+            &lk_core::config::VaultDirs::default(),
+            true,
+            Some("tasks.md"),
+        );
         assert!(ko.contains("## Concept convergence"));
         assert!(ko.contains("created-this-run"));
         assert!(ko.contains("`lore wiki concepts`"));
         assert!(ko.contains("backlinks-sync"));
 
-        let en = render_agents_md(Locale::En, &lk_core::config::VaultDirs::default(), true);
+        let en = render_agents_md(
+            Locale::En,
+            &lk_core::config::VaultDirs::default(),
+            true,
+            Some("tasks.md"),
+        );
         assert!(en.contains("## Concept convergence"));
 
         // The section's machine-owned-heading references must be LOCALIZED, never
@@ -965,8 +1097,18 @@ mod tests {
     fn agents_md_headings_never_hardcoded() {
         // The Ko and En outputs must produce different headings for the same section,
         // proving they come from locale.strings() and not hardcoded strings.
-        let ko = render_agents_md(Locale::Ko, &lk_core::config::VaultDirs::default(), true);
-        let en = render_agents_md(Locale::En, &lk_core::config::VaultDirs::default(), true);
+        let ko = render_agents_md(
+            Locale::Ko,
+            &lk_core::config::VaultDirs::default(),
+            true,
+            Some("tasks.md"),
+        );
+        let en = render_agents_md(
+            Locale::En,
+            &lk_core::config::VaultDirs::default(),
+            true,
+            Some("tasks.md"),
+        );
         // concept Synthesis section differs
         assert!(ko.contains("`## 핵심`"));
         assert!(en.contains("`## Synthesis`"));

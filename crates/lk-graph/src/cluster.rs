@@ -445,6 +445,7 @@ mod tests {
             id: id.to_owned(),
             path: PathBuf::from(format!("{id}.md")),
             title: name.to_owned(),
+            format: None,
             outgoing: outgoing
                 .iter()
                 .map(|s| Link::to(&format!("{s}.md")))

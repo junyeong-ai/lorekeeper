@@ -224,6 +224,7 @@ mod tests {
             id: scan::path_slug(&rel),
             path: rel,
             title: "test".to_owned(),
+            format: None,
             outgoing: outgoing
                 .iter()
                 .map(|s| Link::to(&format!("{s}.md")))

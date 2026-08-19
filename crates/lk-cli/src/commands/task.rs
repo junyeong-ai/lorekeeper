@@ -1,0 +1,711 @@
+//! `lore task` — the intent plane's command surface.
+//!
+//! Every mutation follows one shape: read the board, reconcile whatever an editor did to it
+//! since, apply the change, then write the board and record the history in the same breath.
+//! Reconciling first is what keeps a command from acting on a board that has moved underneath
+//! it — a box ticked on a phone an hour ago is a completion, and closing a second task without
+//! noticing would write the board back with that one re-opened.
+
+use std::path::PathBuf;
+
+use lk_core::config::{Config, TasksConfig};
+use lk_core::i18n::Locale;
+use lk_task::{Board, Task, TaskId, TaskState, Transition, TransitionKind, TransitionLog};
+
+use super::{GlobalOptions, find_config, load_config};
+
+#[derive(clap::Subcommand)]
+pub enum TaskCommand {
+    /// Write down something to do
+    Add {
+        /// What the task is. Taken as the rest of the line, so it needs no quoting.
+        #[arg(required = true, num_args = 1..)]
+        text: Vec<String>,
+        /// Which section it lands in (default: next)
+        #[arg(long, default_value = "next")]
+        state: String,
+        /// The day it is due (YYYY-MM-DD)
+        #[arg(long)]
+        due: Option<String>,
+        /// Where this came from — the Slack thread, the Jira issue, the mail, the meeting.
+        ///
+        /// An absolute URL, never a vault path. The task outlives the page it came from and is
+        /// archived onto a different one, so a destination written relative to the board would
+        /// resolve somewhere else from there; and a vault destination would make the board a
+        /// citation source, so a concept's evidence would grow when the task was written and
+        /// shrink when it was finished.
+        #[arg(long)]
+        link: Option<String>,
+        /// What the link reads as (default: the locale's word for a source)
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Show the board
+    List {
+        /// Only one section
+        #[arg(long)]
+        state: Option<String>,
+        /// Emit the board as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Close a task
+    Done {
+        /// The task's id, as the board and `lore task list` print it
+        id: String,
+        /// What it taught. This becomes the archived page's body, and through it the concept
+        /// extraction — which is how work performed compounds the way work read already does.
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Take a task off the board without doing it
+    Drop {
+        /// The task's id, as the board and `lore task list` print it
+        id: String,
+    },
+    /// Move a task to another section
+    Move {
+        /// The task's id, as the board and `lore task list` print it
+        id: String,
+        /// today, next, waiting or someday
+        state: String,
+    },
+    /// Park a task until a day, then bring it back
+    Wait {
+        /// The task's id, as the board and `lore task list` print it
+        id: String,
+        /// The day it returns to today (YYYY-MM-DD)
+        #[arg(long)]
+        until: String,
+    },
+    /// Record what an editor did: adopt lines typed by hand, close lines ticked, wake what is due
+    Sync,
+    /// Close the day — carry what is still committed to it, counting each carry
+    Rollover {
+        /// The day being closed — `yesterday`, `today`, or YYYY-MM-DD (default: today).
+        ///
+        /// Declared rather than inferred: a close run by hand in the evening and the scheduled
+        /// one the next morning are two closes of ONE ended day, and nothing about the clock
+        /// says so. The scheduled pipeline names `yesterday`, which `lore` resolves in
+        /// `vault.timezone` — the zone every date here is derived in, and not the shell's.
+        #[arg(long)]
+        closing: Option<String>,
+    },
+}
+
+pub async fn run(opts: &GlobalOptions, cmd: TaskCommand) -> miette::Result<()> {
+    let mut plane = match cmd {
+        TaskCommand::List { .. } => IntentPlane::open(opts)?,
+        _ => IntentPlane::open_for_change(opts)?,
+    };
+
+    match cmd {
+        TaskCommand::List { state, json } => {
+            let only = state.map(|s| parse_state(&s)).transpose()?;
+            list(&plane, only, json);
+            Ok(())
+        }
+        TaskCommand::Add {
+            text,
+            state,
+            due,
+            link,
+            label,
+        } => {
+            let title = one_line(text.join(" "))?;
+            let title = origin_title(title, link.as_deref(), label.as_deref(), &plane)?;
+            let state = parse_state(&state)?;
+            let due = due.as_deref().map(parse_date).transpose()?;
+            plane.reconcile()?;
+            let id = TaskId::mint(&format!("{title}{}", plane.now), &plane.taken());
+            let mut task = Task::new(id.clone(), &title, state, plane.today);
+            task.due = due;
+            plane.board.insert(task);
+            plane.record(
+                Transition::new(id.clone(), TransitionKind::Created, &title, plane.now)
+                    .with_state(state),
+            );
+            plane.commit().await?;
+            eprintln!("{id}  {title}");
+            Ok(())
+        }
+        TaskCommand::Done { id, note } => {
+            let id = parse_id(&id)?;
+            let pass = plane.reconcile()?;
+            let title = match plane.annotate(&id, note.clone(), &pass.settled) {
+                Some(title) => title,
+                None => {
+                    let task = plane.take(&id, &pass)?;
+                    plane.record(
+                        Transition::new(id.clone(), TransitionKind::Done, &task.title, plane.now)
+                            .with_note(note)
+                            .with_carried(task.carried),
+                    );
+                    task.title
+                }
+            };
+            plane.commit().await?;
+            eprintln!("done  {title}");
+            Ok(())
+        }
+        TaskCommand::Drop { id } => {
+            let id = parse_id(&id)?;
+            let pass = plane.reconcile()?;
+            let task = plane
+                .board
+                .remove(&id)
+                .ok_or_else(|| plane.absent(&id, &pass))?;
+            plane.record(Transition::new(
+                id,
+                TransitionKind::Dropped,
+                &task.title,
+                plane.now,
+            ));
+            plane.commit().await?;
+            eprintln!("dropped  {}", task.title);
+            Ok(())
+        }
+        TaskCommand::Move { id, state } => {
+            let id = parse_id(&id)?;
+            let state = parse_state(&state)?;
+            let pass = plane.reconcile()?;
+            let moved = plane
+                .board
+                .move_to(&id, state)
+                .map_err(|_| plane.absent(&id, &pass))?;
+            plane.record(
+                Transition::new(id, TransitionKind::Moved, &moved.title, plane.now)
+                    .with_state(state),
+            );
+            plane.commit().await?;
+            eprintln!("{state}  {}", moved.title);
+            Ok(())
+        }
+        TaskCommand::Wait { id, until } => {
+            let id = parse_id(&id)?;
+            let until = parse_date(&until)?;
+            let pass = plane.reconcile()?;
+            let moved = plane
+                .board
+                .move_to(&id, TaskState::Waiting)
+                .map_err(|_| plane.absent(&id, &pass))?;
+            let title = moved.title.clone();
+            if let Some(task) = plane.board.tasks_mut().find(|task| task.id == id) {
+                task.wake = Some(until);
+            }
+            plane.record(
+                Transition::new(id, TransitionKind::Moved, &title, plane.now)
+                    .with_state(TaskState::Waiting),
+            );
+            plane.commit().await?;
+            eprintln!("waiting until {until}  {title}");
+            Ok(())
+        }
+        TaskCommand::Sync => {
+            let outcome = plane.reconcile()?;
+            report_reconcile(&outcome);
+            plane.commit().await
+        }
+        TaskCommand::Rollover { closing } => {
+            let closing = super::parse_date(closing.as_deref(), plane.today)?;
+            let recorded = plane.read_history()?;
+            // `rollover` reconciles internally, so this path does not call `reconcile()`.
+            let outcome =
+                lk_task::rollover(&mut plane.board, plane.now, plane.today, closing, &recorded);
+            report_reconcile(&outcome);
+            plane.pending.extend(outcome.transitions);
+            plane.commit().await
+        }
+    }
+}
+
+/// The board, the log, and the clock the two are read against.
+pub(crate) struct IntentPlane {
+    pub(crate) board: Board,
+    pub(crate) config: TasksConfig,
+    pub(crate) locale: Locale,
+    pub(crate) today: jiff::civil::Date,
+    pub(crate) now: jiff::Timestamp,
+    vault_root: PathBuf,
+    board_path: PathBuf,
+    zone: jiff::tz::TimeZone,
+    pending: Vec<Transition>,
+    /// The history this pass read. Kept because a command acting AFTER the reconcile asks the
+    /// same question over the same window, and the board it was computed from — whose ticked
+    /// lines bound that window — is gone by then.
+    recorded: lk_task::Recorded,
+    /// The page exactly as it was read, so a write can refuse to land on top of a version it
+    /// never saw. `None` where there was no page yet.
+    read_as: Option<Vec<u8>>,
+    /// Held for a mutation, from before the board is read until after it and the log are
+    /// written. Dropping the file releases it.
+    _guard: Option<std::fs::File>,
+}
+
+impl IntentPlane {
+    /// Read the board without claiming it. Every write goes through `write_atomic`, so a reader
+    /// sees a whole file or the previous one, never a torn page — a reader has nothing to
+    /// serialize against.
+    pub(crate) fn open(opts: &GlobalOptions) -> miette::Result<Self> {
+        Self::acquire(opts, false)
+    }
+
+    /// Claim the board for a change.
+    ///
+    /// The board and the log are each a read-modify-write, so two overlapping commands — the
+    /// scheduled day-close and someone closing a task by hand is the ordinary case — can both
+    /// read, both write, and drop one of the two changes. The completion that disappears is
+    /// gone from the history, and the history is the only thing the archive reads.
+    ///
+    /// The lock is the kernel's, so a crashed process releases it with no staleness rule to get
+    /// wrong. It cannot help across machines — a vault synced by Dropbox or iCloud has two
+    /// kernels — which is the same limitation an editor on either machine already has, and the
+    /// reason a failure to lock is reported rather than fatal: refusing to run would make the
+    /// feature worse than it was without any locking at all.
+    pub(crate) fn open_for_change(opts: &GlobalOptions) -> miette::Result<Self> {
+        Self::acquire(opts, true)
+    }
+
+    fn acquire(opts: &GlobalOptions, exclusive: bool) -> miette::Result<Self> {
+        let config = load_config(&find_config(opts)?)?;
+        let tasks = tasks_config(&config)?;
+        let vault_root = config.vault.root_path();
+        let zone = config.vault.timezone();
+        let now = jiff::Timestamp::now();
+        let board_path =
+            lk_core::vault_path::VaultPath::task_board(&config.vault.dirs, &tasks.board)
+                .to_string();
+        let full = vault_root.join(&board_path);
+
+        // Claimed BEFORE the board is read, so the read and the write it decides are one
+        // critical section rather than two.
+        let guard = exclusive.then(|| claim(&vault_root)).flatten();
+
+        // An absent board is an empty one, not an error: the first `lore task add` creates the
+        // page, exactly as the first ingest creates a daily page.
+        let read_as = match std::fs::read(&full) {
+            Ok(bytes) => Some(bytes),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(miette::miette!("read {}: {e}", full.display())),
+        };
+        let board = match &read_as {
+            Some(bytes) => Board::parse(&String::from_utf8_lossy(bytes)),
+            None => Board::empty(),
+        };
+        for (line, text) in board.malformed() {
+            eprintln!("warning: L{line} is kept as it is — its stamp will not read: {text}");
+        }
+        // A page whose fence never closes is not a page this can write back. Everything below
+        // that line is code to CommonMark, so the headings the render just emitted are read
+        // back as code and a fresh set is emitted after them — a board that grows every night
+        // and, where the fence opens above the first heading, one whose every task is invisible
+        // while sitting in plain sight. Reading it is still useful and says why; writing it is
+        // refused, at the point the board is claimed, so nothing is half-done.
+        // An id addresses a task and every rule reaches a task through one, so two lines
+        // answering to one id make every rule ambiguous — and the ambiguity is settled by file
+        // order, which deleted the wrong line in one arrangement and swallowed a completion in
+        // the other. Reported rather than repaired, and refused before anything is written,
+        // because which of the two the person meant is not knowable from the page.
+        if !board.duplicated().is_empty() {
+            let lines = board
+                .duplicated()
+                .iter()
+                .map(|(id, line)| format!("L{line} (`{id}`)"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            // EVERY one of them, because a sync conflict duplicates a block rather than a line
+            // and naming only the first would be repaired one line per run by anyone following
+            // the message.
+            let notice = format!(
+                "{board_path}: {lines} carry an id an earlier line already claims — delete the \
+                 `<!--t:…-->` comment from each copy and the next pass adopts it as its own task."
+            );
+            if exclusive {
+                return Err(miette::miette!("{notice}"));
+            }
+            eprintln!("warning: {notice}");
+        }
+        if let Some(line) = board.unterminated_fence() {
+            let notice = format!(
+                "{} L{line} opens a code fence that nothing closes — every line below it is code, \
+                 so the sections this reads and writes are not there. Close the fence with the \
+                 same marker it opened with.",
+                board_path,
+            );
+            if exclusive {
+                return Err(miette::miette!("{notice}"));
+            }
+            eprintln!("warning: {notice}");
+        }
+
+        Ok(Self {
+            board,
+            config: tasks,
+            locale: config.vault.locale(),
+            today: now.to_zoned(zone.clone()).date(),
+            now,
+            vault_root,
+            board_path: PathBuf::from(board_path),
+            zone,
+            pending: Vec::new(),
+            recorded: lk_task::Recorded::default(),
+            read_as,
+            _guard: guard,
+        })
+    }
+
+    /// Every id a new task must not be given.
+    ///
+    /// The board's, the window's, and this pass's own — the third because `sync` takes the
+    /// history by shared reference and so cannot record what it frees: an id harvested a moment
+    /// ago is off the board and its completion is in `pending`, in no file the window read. A
+    /// task minted onto it would put `Done(id, …)` and then `Created(id, …)` into one date's
+    /// record, and the new task completing that same day would overwrite the first completion,
+    /// which is the loss the window's ids are here to make unreachable rather than unlikely.
+    fn taken(&self) -> std::collections::BTreeSet<TaskId> {
+        let mut taken = self.board.ids();
+        taken.extend(self.recorded.seen().cloned());
+        taken.extend(self.pending.iter().map(|transition| transition.id.clone()));
+        taken
+    }
+
+    fn reconcile(&mut self) -> miette::Result<lk_task::Reconciled> {
+        self.recorded = self.read_history()?;
+        let outcome = lk_task::sync(&mut self.board, self.now, self.today, &self.recorded);
+        self.pending.extend(outcome.transitions.clone());
+        Ok(outcome)
+    }
+
+    /// Attach a note to a completion this pass already recorded.
+    ///
+    /// Closing a task whose box was ticked in an editor first used to fail — the reconcile had
+    /// harvested it, so `take` found nothing, and because the command then returned an error
+    /// nothing was committed at all, discarding the harvest with it. The note is the one thing
+    /// that carries a completion into concept extraction, and the only way to supply it must
+    /// not be "do not tick the box first".
+    fn annotate(
+        &mut self,
+        id: &TaskId,
+        note: Option<String>,
+        settled: &[TaskId],
+    ) -> Option<String> {
+        if let Some(recorded) = self
+            .pending
+            .iter_mut()
+            .find(|transition| &transition.id == id && transition.kind == TransitionKind::Done)
+        {
+            if let Some(note) = note {
+                *recorded = recorded.clone().with_note(Some(note));
+            }
+            return Some(recorded.title.clone());
+        }
+        // A line THIS PASS settled — a ticked box whose completion the history already held,
+        // because the board write that should have removed it did not land. Answering with its
+        // title closes the command cleanly instead of erroring on an id the user just read off
+        // the board, and a second completion is what is refused, not the note: one task closes
+        // once, so the sentence joins the completion already written rather than being dropped
+        // in silence, exactly as it would have joined one this same run recorded.
+        //
+        // Asked of the id's HISTORY instead, it fired on a task the board still showed as OPEN
+        // whenever some older completion sat in the window — an editor undo or a sync client
+        // restoring an older page is enough — and the work a person did today was folded onto
+        // that day instead of being closed on this one.
+        if !settled.contains(id) {
+            return None;
+        }
+        let closed = self.recorded.closure(id)?.clone();
+        self.board.remove(id);
+        let title = closed.title.clone();
+        if note.is_some() {
+            self.record(closed.with_note(note));
+        }
+        Some(title)
+    }
+
+    fn record(&mut self, transition: Transition) {
+        self.pending.push(transition);
+    }
+
+    fn take(&mut self, id: &TaskId, pass: &lk_task::Reconciled) -> miette::Result<Task> {
+        self.board.remove(id).ok_or_else(|| self.absent(id, pass))
+    }
+
+    /// Why no task answers to `id`.
+    ///
+    /// "No task answers to `7k2p`" is false in the one way that matters to a person who read
+    /// that id off the board a second earlier: this pass took the line off it, because the
+    /// history already held its completion. The command still fails — answering "moved" about a
+    /// finished task would be a worse answer than an error — and the settle it discards is
+    /// re-derived by the next pass from the same board and the same record.
+    fn absent(&self, id: &TaskId, pass: &lk_task::Reconciled) -> miette::Report {
+        if pass.closed(id) {
+            miette::miette!("`{id}` was already closed — this pass took it off the board")
+        } else {
+            miette::miette!("no task answers to `{id}`")
+        }
+    }
+
+    /// Write the board and the history it owes, history first.
+    ///
+    /// Order matters on a crash: a transition recorded without the board move is re-derived
+    /// harmlessly by the next reconcile, while a board written without its transition is work
+    /// that happened and left no record — and the log is the only thing the archive reads.
+    async fn commit(&mut self) -> miette::Result<()> {
+        // Asked BEFORE anything is written. The lock keeps two `lore task` runs apart, but an
+        // editor or a sync client is not holding it, and this command's board was read before
+        // theirs landed — writing it back would erase their edit wholesale. Checked ahead of
+        // the log so a refusal leaves nothing recorded either, rather than a completion in the
+        // history for a task still sitting on the board.
+        let now_on_disk = match std::fs::read(self.vault_root.join(&self.board_path)) {
+            Ok(bytes) => Some(bytes),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(miette::miette!("re-read the board: {e}")),
+        };
+        if now_on_disk != self.read_as {
+            return Err(miette::miette!(
+                "{} changed while this command was running — nothing was written; run it again",
+                self.board_path.display()
+            ));
+        }
+
+        if !self.pending.is_empty() {
+            TransitionLog::new(&self.vault_root)
+                .record(&self.pending, &self.zone)
+                .map_err(|e| miette::miette!("{e}"))?;
+            self.pending.clear();
+        }
+        let page = self.board.render(self.locale, self.today);
+        lk_vault::VaultWriter::new(&self.vault_root)
+            .write_page(&self.board_path, &page)
+            .await
+            .map_err(|e| miette::miette!("write {}: {e}", self.board_path.display()))
+    }
+
+    /// What the history holds about the tasks on this board, over the window each of its two
+    /// questions is answerable across.
+    ///
+    /// A day whose record will not read is fatal here rather than warned past: the completion
+    /// guard reads several dates, and treating one unreadable file as an empty day would harvest
+    /// a tick the missing half already recorded — a second copy of one completion, on a second
+    /// date, which nothing downstream collapses. `lore ingest` fails on the same file, which is
+    /// where the repair belongs.
+    fn read_history(&self) -> miette::Result<lk_task::Recorded> {
+        TransitionLog::new(&self.vault_root)
+            .recorded_for(&self.board, self.today)
+            .map_err(|e| miette::miette!("{e}"))
+    }
+
+    pub(crate) fn recorded_on(&self, date: jiff::civil::Date) -> Vec<Transition> {
+        match TransitionLog::new(&self.vault_root).read(date) {
+            Ok(transitions) => transitions,
+            Err(e) => {
+                eprintln!("warning: {date}'s task record could not be read ({e})");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Completions already recorded for `date` — what the day has to show for itself.
+    pub(crate) fn closed_on(&self, date: jiff::civil::Date) -> Vec<Transition> {
+        self.recorded_on(date)
+            .into_iter()
+            .filter(|transition| transition.kind.is_observation())
+            .collect()
+    }
+
+    /// What an editor changed that no pass has recorded yet.
+    /// What an editor changed that no pass has recorded yet — asked about TODAY, never about a
+    /// day the caller is previewing. Probing with an overridden date reported edits nobody made
+    /// and named a command that then answered "nothing to record".
+    pub(crate) fn unrecorded(&self, today: jiff::civil::Date) -> usize {
+        let mut probe = self.board.clone();
+        // A view answers with what it can see. Nothing is written from here, so an unreadable
+        // record costs a count rather than correctness — and the command that would write is the
+        // one that refuses on it.
+        let Ok(recorded) = self.read_history() else {
+            return 0;
+        };
+        lk_task::sync(&mut probe, self.now, today, &recorded).edits()
+    }
+}
+
+fn claim(vault_root: &std::path::Path) -> Option<std::fs::File> {
+    let dir = vault_root.join(".lorekeeper");
+    let path = dir.join("tasks.lock");
+    let opened = std::fs::create_dir_all(&dir).and_then(|()| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+    });
+    match opened.and_then(|file| file.lock().map(|()| file)) {
+        Ok(file) => Some(file),
+        Err(e) => {
+            eprintln!(
+                "warning: could not claim {} ({e}) — a command running at the same time as this \
+                 one could lose one of the two changes",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
+fn tasks_config(config: &Config) -> miette::Result<TasksConfig> {
+    config
+        .personal
+        .as_ref()
+        .and_then(|personal| personal.tasks.clone())
+        .ok_or_else(|| {
+            miette::miette!(
+                "no task board is configured — add a `tasks:` block under `personal:` in \
+                 config.yaml, and a source with `type: tasks` for its completions to land on"
+            )
+        })
+}
+
+/// The task's own text, with where it came from appended as an ordinary markdown link.
+///
+/// In the VISIBLE half rather than the machine stamp, and absolute rather than vault-relative,
+/// which is what makes it survive everything the task does: it is copied verbatim onto the
+/// archive page when the task closes, it stays resolvable after the origin page is re-rendered
+/// or was never written, and `lk_core::link::is_external` keeps it out of the link graph
+/// entirely — no edge, no broken-link finding, and no citation whose evidence appears when a
+/// task is written down and disappears when it is finished.
+fn origin_title(
+    text: String,
+    link: Option<&str>,
+    label: Option<&str>,
+    plane: &IntentPlane,
+) -> miette::Result<String> {
+    let Some(url) = link else {
+        return Ok(text);
+    };
+    if !lk_core::link::is_external(url) {
+        return Err(miette::miette!(
+            "`{url}` is not an absolute URL — a task is archived onto a different page than the \
+             board, so a vault path written here resolves somewhere else from there"
+        ));
+    }
+    let label = label.unwrap_or(plane.locale.strings().task_origin);
+    Ok(format!("{text} ({})", lk_core::link::md_link(label, url)))
+}
+
+/// A task is one line, because its stamp sits at the end of that line.
+///
+/// A title carrying a newline split the stamp onto a line of its own, which the next read took
+/// as ordinary content: the task became unreachable by its own id forever, a phantom was minted
+/// from the first half, and the log held a `created` for an address no command could close.
+fn one_line(title: String) -> miette::Result<String> {
+    if title.contains(['\n', '\r']) {
+        return Err(miette::miette!(
+            "a task's text must be one line — its stamp sits at the end of that line, and a \
+             break would leave the stamp behind as ordinary content"
+        ));
+    }
+    Ok(title)
+}
+
+fn parse_state(text: &str) -> miette::Result<TaskState> {
+    text.parse().map_err(|e| miette::miette!("{e}"))
+}
+
+fn parse_id(text: &str) -> miette::Result<TaskId> {
+    text.parse().map_err(|e| miette::miette!("{e}"))
+}
+
+fn parse_date(text: &str) -> miette::Result<jiff::civil::Date> {
+    text.parse()
+        .map_err(|e| miette::miette!("invalid date '{text}': {e}"))
+}
+
+fn list(plane: &IntentPlane, only: Option<TaskState>, json: bool) {
+    if json {
+        let rows: Vec<serde_json::Value> = plane
+            .board
+            .tasks()
+            .filter(|task| only.is_none_or(|state| task.state == state))
+            .map(|task| {
+                serde_json::json!({
+                    "id": task.id.as_str(),
+                    "title": task.title,
+                    "state": task.state.as_str(),
+                    "since": task.since.to_string(),
+                    "due": task.due.map(|d| d.to_string()),
+                    "wake": task.wake.map(|d| d.to_string()),
+                    "carried": task.carried,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&rows).unwrap_or_else(|_| "[]".into())
+        );
+        return;
+    }
+
+    for state in TaskState::ALL {
+        if only.is_some_and(|wanted| wanted != state) {
+            continue;
+        }
+        let tasks: Vec<&Task> = plane
+            .board
+            .tasks()
+            .filter(|task| task.state == state)
+            .collect();
+        if tasks.is_empty() && only.is_none() {
+            continue;
+        }
+        eprintln!("\n{}", state.heading(plane.locale));
+        for task in tasks {
+            eprintln!(
+                "  {}  {:<48}{}",
+                task.id,
+                lk_core::link::strip_links(&task.title),
+                annotation(task, plane)
+            );
+        }
+    }
+}
+
+/// What a task's dates and carry count add to its line, in the vault's locale.
+pub(crate) fn annotation(task: &Task, plane: &IntentPlane) -> String {
+    let strings = plane.locale.strings();
+    let mut parts = Vec::new();
+    if let Some(due) = task.due {
+        parts.push(if task.is_overdue_on(plane.today) {
+            format!("{} {due}", strings.agenda_overdue)
+        } else {
+            format!("{} {due}", strings.agenda_due)
+        });
+    }
+    if let Some(wake) = task.wake {
+        parts.push(format!("→ {wake}"));
+    }
+    if task.carried >= plane.config.carry_warn_after {
+        parts.push(format!("{}{}", task.carried + 1, strings.agenda_day));
+    }
+    parts.join("  ")
+}
+
+fn report_reconcile(outcome: &lk_task::Reconciled) {
+    if outcome.is_empty() {
+        eprintln!("nothing to record");
+        return;
+    }
+    for (count, what) in [
+        (outcome.adopted.len(), "adopted from the editor"),
+        (outcome.harvested.len(), "closed"),
+        (outcome.woken.len(), "woken"),
+        (outcome.carried.len(), "carried into the next day"),
+        (
+            outcome.settled.len(),
+            "already closed — the board caught up",
+        ),
+    ] {
+        if count > 0 {
+            eprintln!("{count} {what}");
+        }
+    }
+}

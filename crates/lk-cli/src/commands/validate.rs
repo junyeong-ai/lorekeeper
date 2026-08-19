@@ -78,6 +78,11 @@ async fn agents_md_needs_regen(config: &lk_core::config::Config) -> bool {
         config.vault.locale(),
         &config.vault.dirs,
         config.personal.is_some(),
+        config
+            .personal
+            .as_ref()
+            .and_then(|personal| personal.tasks.as_ref())
+            .map(|tasks| tasks.board.as_str()),
     );
     let path = config
         .vault
@@ -583,6 +588,11 @@ mod tests {
             config.vault.locale(),
             &config.vault.dirs,
             config.personal.is_some(),
+            config
+                .personal
+                .as_ref()
+                .and_then(|personal| personal.tasks.as_ref())
+                .map(|tasks| tasks.board.as_str()),
         );
         std::fs::write(wiki.join("AGENTS.md"), &current).unwrap();
         assert!(

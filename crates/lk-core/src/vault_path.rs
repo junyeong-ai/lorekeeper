@@ -57,6 +57,13 @@ pub const GENERATED_WIKI_PAGES: [(&str, &str, Derivation); 4] = [
 pub const MAP_FORMAT: &str = "map";
 pub const SCHEMA_FORMAT: &str = "schema";
 
+/// The task board's format.
+///
+/// Named here rather than only in `lk-task` because the graph has to recognise it without
+/// depending on that crate: the board is the one managed page that states INTENT rather than
+/// knowledge, so it is neither a citation source nor a page whose links are checked.
+pub const TASK_BOARD_FORMAT: &str = "task-board";
+
 /// Every value the `type` frontmatter key takes on a page this tool writes — the page-format
 /// ids `lore schema` publishes, and OKF's one required key.
 ///
@@ -65,7 +72,7 @@ pub const SCHEMA_FORMAT: &str = "schema";
 /// personal-module formats are included: whether they are PRODUCED depends on config, but a
 /// page carrying one was still written here. So are the two generated wiki meta-pages, which
 /// are the only Lorekeeper output a wiki directory holding no concepts yet can be recognized by.
-pub const PAGE_FORMATS: [&str; 12] = [
+pub const PAGE_FORMATS: [&str; 13] = [
     "concept",
     "daily",
     "document",
@@ -76,6 +83,7 @@ pub const PAGE_FORMATS: [&str; 12] = [
     "monthly-review",
     "quarterly-review",
     "annual-review",
+    TASK_BOARD_FORMAT,
     MAP_FORMAT,
     SCHEMA_FORMAT,
 ];
@@ -100,6 +108,14 @@ impl VaultPath {
                 .join(source_id)
                 .join(format!("{date}.md")),
         )
+    }
+
+    /// The task board, at the file `personal.tasks.board` names under `<personal>`.
+    ///
+    /// One page rather than one per day: it holds what is OPEN, which is not a record of a day
+    /// — the record of a day is the daily page a completed task is archived onto.
+    pub fn task_board(dirs: &VaultDirs, board: &str) -> Self {
+        Self(PathBuf::from(&dirs.personal).join(board))
     }
 
     pub fn work_log(dirs: &VaultDirs, date: jiff::civil::Date) -> Self {
