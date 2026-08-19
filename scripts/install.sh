@@ -19,7 +19,11 @@ LORE_INSTALL_VERSION="${LORE_INSTALL_VERSION:-}"
 LORE_INSTALL_SKILL_LEVEL="${LORE_INSTALL_SKILL_LEVEL:-}"
 LORE_INSTALL_FROM_SOURCE="${LORE_INSTALL_FROM_SOURCE:-0}"
 LORE_INSTALL_FORCE="${LORE_INSTALL_FORCE:-0}"
-LORE_INSTALL_YES="${LORE_INSTALL_YES:-0}"
+# A default run asks NOTHING and every decision resolves to its safe answer, so the documented
+# one-liner is one command rather than one command and two questions. Asked whenever a terminal
+# was merely reachable, `curl … | bash` prompted — /dev/tty is readable from a pipeline, so the
+# ability to ask was taken for the instruction to.
+INTERACTIVE="${LORE_INSTALL_INTERACTIVE:-0}"
 DRY_RUN="${LORE_INSTALL_DRY_RUN:-0}"
 
 INPUT_FD=""
@@ -50,12 +54,15 @@ init_colors() {
     case "${LANG:-}${LC_ALL:-}" in *UTF-8*|*utf8*) USE_UTF8=1 ;; esac
 }
 
+# Where a prompt would READ from, which is a different question from whether to prompt at all.
 detect_tty() {
-    if [ "$LORE_INSTALL_YES" = "1" ]; then INPUT_FD=""; return 1; fi
     if [ -t 0 ]; then INPUT_FD="0"; return 0; fi
     if [ -e /dev/tty ] && [ -r /dev/tty ]; then INPUT_FD="/dev/tty"; return 0; fi
     INPUT_FD=""; return 1
 }
+
+# Whether this run asks. Both halves: the mode is chosen and the terminal is reachable.
+asking() { [ "$INTERACTIVE" = "1" ] && [ -n "$INPUT_FD" ]; }
 
 read_line() {
     local answer
@@ -386,14 +393,20 @@ Flags:
   --skill user|project|none  Skill install level (default: user)
   --from-source              Build from source instead of downloading prebuilt
   --force                    Overwrite existing install without prompting
-  --yes, -y                  Accept all defaults non-interactively
+  --interactive, -i          Ask before each decision instead of taking the defaults
+  --yes, -y                  Take the defaults without asking (this is the default)
   --dry-run                  Print plan, do not execute
   --help, -h                 Show this message
 
+A default run asks nothing: the prebuilt binary for this platform into
+$HOME/.local/bin, with the skills at user level. Each of those has a flag, and
+--interactive restores the guided prompts — they read /dev/tty, so they work
+even under `curl | bash`.
+
 Environment variables (flags win over env, env wins over defaults):
   LORE_INSTALL_DIR, LORE_INSTALL_DATA_DIR, LORE_INSTALL_VERSION,
-  LORE_INSTALL_SKILL_LEVEL, LORE_INSTALL_FROM_SOURCE,
-  LORE_INSTALL_FORCE, LORE_INSTALL_YES, LORE_INSTALL_DRY_RUN, NO_COLOR
+  LORE_INSTALL_SKILL_LEVEL, LORE_INSTALL_FROM_SOURCE, LORE_INSTALL_INTERACTIVE,
+  LORE_INSTALL_FORCE, LORE_INSTALL_DRY_RUN, NO_COLOR
 USAGE
 }
 
@@ -406,7 +419,8 @@ parse_args() {
             --skill)         LORE_INSTALL_SKILL_LEVEL="$2"; EXPLICIT_SKILL_LEVEL=1; shift 2 ;;
             --from-source)   LORE_INSTALL_FROM_SOURCE=1; EXPLICIT_FROM_SOURCE=1; shift ;;
             --force)         LORE_INSTALL_FORCE=1; shift ;;
-            --yes|-y)        LORE_INSTALL_YES=1; shift ;;
+            --interactive|-i) INTERACTIVE=1; shift ;;
+            --yes|-y)        INTERACTIVE=0; shift ;;
             --dry-run)       DRY_RUN=1; shift ;;
             --help|-h)       print_usage; exit 0 ;;
             *)               die "Unknown flag: $1 (use --help)" ;;
@@ -476,6 +490,9 @@ main() {
     TMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t lore-install)"
 
     detect_tty || true
+    if [ "$INTERACTIVE" = "1" ] && [ -z "$INPUT_FD" ]; then
+        die "--interactive was asked for and there is no terminal to ask at"
+    fi
     local platform="" version method bin_dest skill_level binary_src
 
     local repo_dir=""
@@ -483,7 +500,7 @@ main() {
         repo_dir="$(cd "$(dirname "$0")/.." && pwd)"
     fi
 
-    if [ "$EXPLICIT_FROM_SOURCE" = "1" ] || [ -z "$INPUT_FD" ]; then
+    if [ "$EXPLICIT_FROM_SOURCE" = "1" ] || ! asking; then
         method=$([ "$LORE_INSTALL_FROM_SOURCE" = "1" ] && echo "source" || echo "prebuilt")
     else
         local pick
@@ -504,7 +521,7 @@ main() {
 
     render_banner "$platform" "$version"
 
-    if [ -n "$INPUT_FD" ] && [ "$EXPLICIT_INSTALL_DIR" != "1" ]; then
+    if asking && [ "$EXPLICIT_INSTALL_DIR" != "1" ]; then
         local loc
         # The `~` here is display text and, below, the label to match it against — neither is a
         # path being resolved, so quoting it is correct and expanding it would break the match.
@@ -524,7 +541,7 @@ main() {
 
     if [ "$EXPLICIT_SKILL_LEVEL" = "1" ]; then
         skill_level="$LORE_INSTALL_SKILL_LEVEL"
-    elif [ -z "$INPUT_FD" ]; then
+    elif ! asking; then
         skill_level="user"
     else
         local pick
@@ -550,7 +567,7 @@ main() {
         exit 0
     fi
 
-    if [ -n "$INPUT_FD" ] && ! prompt_yesno "Proceed?" "Y"; then
+    if asking && ! prompt_yesno "Proceed?" "Y"; then
         log_info "Aborted by user"; exit 0
     fi
 

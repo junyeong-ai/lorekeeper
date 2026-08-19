@@ -70,6 +70,44 @@ fn the_uninstall_scripts_list_every_skill() {
     }
 }
 
+/// `scripts/check.sh` says a green run there is the same answer CI gives, and nothing compared
+/// the two — so five of ten jobs went unrun while the claim stood, and a release shipped after a
+/// green local run whose shellcheck, actionlint, MSRV and audit had never been asked.
+#[test]
+fn every_ci_gate_is_run_or_declared_unrunnable() {
+    let workflow = read(&repo_root().join(".github/workflows/ci.yml"));
+    let jobs = workflow
+        .lines()
+        .skip_while(|line| line.trim() != "jobs:")
+        .filter_map(|line| line.strip_prefix("  ")?.strip_suffix(':'))
+        .filter(|name| !name.starts_with(char::is_whitespace) && is_job_name(name))
+        .collect::<Vec<_>>();
+    assert!(jobs.len() > 5, "read no job list out of ci.yml: {jobs:?}");
+
+    let script = read(&repo_root().join("scripts/check.sh"));
+    let answered = |verb: &str| -> Vec<&str> {
+        script
+            .lines()
+            .filter_map(|line| line.strip_prefix(&format!("{verb} ")))
+            .map(|rest| rest.split_whitespace().next().unwrap_or(""))
+            .collect()
+    };
+    let run = answered("gate");
+    let declared = answered("unrunnable");
+
+    for job in jobs {
+        assert!(
+            run.contains(&job) || declared.contains(&job),
+            "ci.yml runs `{job}` and scripts/check.sh neither runs it nor declares why it cannot"
+        );
+    }
+}
+
+/// A key under `jobs:` rather than a nested mapping key that happens to sit at the same indent.
+fn is_job_name(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase() || c == '-')
+}
+
 /// The archive an installer asks for has to be one the release builds. They are separate lists in
 /// separate languages, so a target renamed on either side is a 404 at install time — the first
 /// thing a new user sees, and the one failure they cannot work around.

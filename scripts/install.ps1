@@ -7,6 +7,10 @@ param(
     [string]$DataDir,
     [ValidateSet('user', 'project', 'none')] [string]$Skill = 'user',
     [switch]$FromSource,
+    # A default run asks nothing and every decision resolves to its safe answer, so the
+    # documented one-liner is one command rather than one command and a question. -Interactive
+    # restores the confirmation; -Yes says the default out loud.
+    [switch]$Interactive,
     [switch]$Yes,
     [switch]$DryRun
 )
@@ -230,7 +234,7 @@ if ($Skill -ne 'none') {
 
 if ($DryRun) { Write-Host ''; Write-Warn '(dry-run) Not executing'; exit 0 }
 
-if (-not $Yes -and $env:LORE_INSTALL_YES -ne '1') {
+if ($Interactive -and -not $Yes) {
     $resp = Read-Host -Prompt 'Proceed? [Y/n]'
     if ($resp -match '^[Nn]') { Write-Host '  Aborted by user' -ForegroundColor DarkGray; exit 0 }
 }
