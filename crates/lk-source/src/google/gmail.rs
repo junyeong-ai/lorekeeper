@@ -393,10 +393,10 @@ fn map_message(
         external_id: Some(msg.id.clone()),
         title: subject.to_string(),
         body,
-        url: Some(format!(
-            "https://mail.google.com/mail/u/0/#inbox/{}",
-            msg.id
-        )),
+        // `#all/` rather than `#inbox/`: the link outlives the message's place in the inbox,
+        // and a daily page is read months after the mail was archived or filed under a label,
+        // where an `#inbox/` link resolves to nothing.
+        url: Some(format!("https://mail.google.com/mail/u/0/#all/{}", msg.id)),
         author: Some(from.to_string()),
         timestamp: ts,
         is_self,
@@ -543,7 +543,7 @@ mod tests {
         assert!(item.is_self, "From matches identity case-insensitively");
         assert_eq!(
             item.url.as_deref(),
-            Some("https://mail.google.com/mail/u/0/#inbox/m1")
+            Some("https://mail.google.com/mail/u/0/#all/m1")
         );
     }
 
