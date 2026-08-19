@@ -506,8 +506,9 @@ impl IntentPlane {
         // of the four ways it happens report nothing at all.
         if let [first, rest @ ..] = board.unaccounted() {
             eprintln!(
-                "warning: {board_path} L{first}{} {} a task this cannot place — it is under no \
-                 section this reads, so it is in no list, no carry and no archive",
+                "warning: {board_path} L{first}{} {} a task this cannot place — so it is in no \
+                 list, no carry and no archive. Check that the line reads `- [ ]` or `- [x]`, \
+                 sits under a section this writes, and is not indented under another",
                 if rest.is_empty() {
                     String::new()
                 } else {

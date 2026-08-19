@@ -156,11 +156,23 @@ the commands in `lk-cli` are the only thing that decides when to apply them.
   straight past. `Board::unaccounted` is the question the parse can already answer, and it is
   what makes "this id is not on the board" an ANSWER rather than a silence: finding an id is
   proof and needs no guard, while not finding one means something only where every checkbox the
-  page holds was placed. A CLOSED fence's examples are placed correctly and are not counted —
-  the board's own format reference is full of them, and counting one would make every
-  task-linked question permanently unanswerable. Reported at every read and carried onto the
-  front door's row, because three of the four ways it happens said nothing at all while the
-  tasks sat in plain sight in the editor.
+  page holds was placed. It asks the same of a line the CHECKBOX gate drops, not only of one no
+  section ever opened: an indented line nested under another, or one of Obsidian's alternate
+  states (`- [/]`, `- [-]`, `- [>]`) which its default theme renders and a person reaches for
+  while working, carries this tool's own bullet and a stamp naming a live task and was dropped
+  in silence. Not INTERPRETED — what `- [-]` means is a judgment — but named, so the person can
+  put the bullet back and get the task whole with its carry count and origin. A CLOSED fence's
+  examples are placed correctly and are not counted — the board's own format reference is full
+  of them, and counting one would make every task-linked question permanently unanswerable.
+  Reported at every read and carried onto the front door's row, because most of the ways it
+  happens said nothing at all while the tasks sat in plain sight in the editor.
+- **A trailing comment is a STAMP only if it names a task, asked in BOTH branches.** A comment
+  written the normal way — as the only trailing one, `- [ ] fix the bug <!--more-->` — went to
+  the branch a first fix did not touch, where `split_stamp` handed it to `read_stamp` and the
+  line was quarantined as "`more` is not a key:value": a person's own line refused for a stamp
+  they never wrote. One question in both places, or the fix covers the example it was tested
+  with and not the shape a person writes. With a real stamp EARLIER on the line the trailing
+  note is an annotation on an addressed task, and is refused rather than orphaning it.
 - **Nothing inside a fenced code block is markup.** A board that documents its own format holds
   a `## Today` and a checkbox line as examples; reading them as structure deleted the heading
   outright and left the example to be adopted as a real task by the next reconcile. `Fence`

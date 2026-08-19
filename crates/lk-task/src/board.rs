@@ -111,7 +111,7 @@ impl Board {
                         fence = None;
                         board.unterminated_fence = None;
                         swallowed.clear();
-                    } else if checkbox(trimmed).is_some() {
+                    } else if unplaceable(trimmed) {
                         swallowed.push(index + 1 + offset);
                     }
                     // Verbatim without exception: a blank line inside a code block is part of
@@ -147,7 +147,7 @@ impl Board {
                 // section, or a heading was restructured so none was ever opened — either way
                 // it is a task the parse could not place, and nothing else about the page says
                 // so.
-                if checkbox(trimmed).is_some() {
+                if unplaceable(trimmed) {
                     board.unaccounted.push(index + 1 + offset);
                 }
                 board.keep(None, trimmed);
@@ -162,7 +162,20 @@ impl Board {
                     }
                     board.entry_mut(state).push(entry);
                 }
-                Ok(None) => board.keep(Some(state), trimmed),
+                Ok(None) => {
+                    // Not a checkbox this reads — and yet it NAMES a task. An indented line
+                    // nested under another, or one of Obsidian's alternate states (`- [/]` in
+                    // progress, `- [-]` cancelled, `- [>]` forwarded) which its default theme
+                    // renders and a person reaches for while working. The bullet is this tool's
+                    // and the stamp names a live task, and it was dropped in silence: gone from
+                    // every list, every carry and every archive with its carry count and origin
+                    // sitting on the page. Not INTERPRETED — what `- [-]` means is a judgment —
+                    // but named, so the person can put the bullet back and get the task whole.
+                    if names_a_task(trimmed) {
+                        board.unaccounted.push(index + 1 + offset);
+                    }
+                    board.keep(Some(state), trimmed);
+                }
                 Err(why) => {
                     board.unaccounted.push(index + 1 + offset);
                     board.malformed.push(Malformed {
@@ -552,6 +565,12 @@ fn heading_state(line: &str) -> Option<TaskState> {
 }
 
 /// One line under a heading: a task, a checkbox someone typed, or content that is not this
+/// Whether `line` is something the parse would have placed as a task had it been under a
+/// section this reads: a checkbox this tool writes, or any line naming a task id.
+fn unplaceable(line: &str) -> bool {
+    checkbox(line).is_some() || names_a_task(line)
+}
+
 /// The bodies of every `<!--…-->` comment in `line`, in the order they appear.
 fn comments(line: &str) -> impl Iterator<Item = &str> {
     line.split("<!--").skip(1).filter_map(|rest| {
@@ -567,10 +586,13 @@ fn comments(line: &str) -> impl Iterator<Item = &str> {
 /// to-do is ordinary. Refusing those turned away lines carrying no stamp of ours, and told their
 /// author that a stamp they never wrote would not read.
 fn names_a_task(line: &str) -> bool {
-    comments(line).any(|body| {
-        body.split_whitespace()
-            .any(|field| field.strip_prefix("t:").is_some_and(|id| !id.is_empty()))
-    })
+    comments(line).any(is_stamp)
+}
+
+/// Whether a comment BODY is one of this tool's stamps — it names a task id.
+fn is_stamp(body: &str) -> bool {
+    body.split_whitespace()
+        .any(|field| field.strip_prefix("t:").is_some_and(|id| !id.is_empty()))
 }
 
 /// tool's. `Err` is a line carrying a stamp that would not read.
@@ -578,20 +600,23 @@ fn read_line(line: &str) -> Result<Option<Entry>, TaskError> {
     let Some((done, rest)) = checkbox(line) else {
         return Ok(None);
     };
-    let Some((title, stamp)) = split_stamp(rest) else {
-        // A line that CARRIES a stamp and does not end with it is not an unstamped line. Read
-        // as one it was adopted under a fresh id, and the task it names left the board with no
-        // transition of any kind — its carry count, its first day and the origin it answered to
-        // gone, so a proposal treated this way is never answered and returns every morning. The
-        // whole raw comment reached the archived title from there.
-        //
-        // A person typing a word after the stamp is how it happens, which is ordinary. So it is
-        // refused like any stamp this cannot read: kept exactly, reported, and left out of
-        // every rule until they move the text or delete the comment.
+    // A trailing comment is a STAMP only if it names a task. Asked of the split alone, an
+    // ordinary `- [ ] fix the bug <!--more-->` — the comment written the normal way, as the only
+    // trailing one — was handed to `read_stamp`, failed as "`more` is not a key:value", and was
+    // quarantined: a person's own line refused for a stamp they never wrote. The same question
+    // decides both branches, because the question is the same one.
+    let stamp = split_stamp(rest).filter(|(_, stamp)| is_stamp(stamp));
+    let Some((title, stamp)) = stamp else {
+        // A line CARRYING a stamp that is not the last thing on it is not an unstamped line.
+        // Read as one it was adopted under a fresh id, and the task it names left the board with
+        // no transition of any kind — its carry count, its first day and the origin it answered
+        // to gone, so a proposal treated this way is never answered and returns every morning,
+        // while the raw comment reached the archived title. A person typing a word after the
+        // stamp, or annotating an addressed task with a note comment, is how it happens.
         if names_a_task(rest) {
             return Err(TaskError::Malformed(
-                "a stamp must be the LAST thing on its line — move the text after it in front \
-                 of the comment, or delete the comment to have the line adopted as a new task"
+                "a stamp must be the LAST thing on its line — move what follows it in front of \
+                 the comment, or delete the comment to have the line adopted as a new task"
                     .into(),
             ));
         }
@@ -878,6 +903,54 @@ mod tests {
                 .unaccounted()
                 .is_empty()
         );
+    }
+
+    /// A comment written the NORMAL way — as the only trailing one — is the shape a person
+    /// reaches for, and it went to the branch the first fix did not touch: `split_stamp` handed
+    /// it to `read_stamp`, which failed as "`more` is not a key:value", and the line was
+    /// quarantined for a stamp its author never wrote.
+    #[test]
+    fn a_trailing_comment_that_names_no_task_is_not_a_stamp() {
+        for line in [
+            "- [ ] fix the bug <!--more-->",
+            "- [ ] call the vendor <!-- ask Sarah -->",
+        ] {
+            let board = board_of(&format!("## Today\n\n{line}\n"));
+            assert!(board.malformed().is_empty(), "{line}");
+            assert_eq!(board.unstamped().len(), 1, "{line}");
+            assert!(board.unaccounted().is_empty(), "{line}");
+        }
+
+        // With a real stamp EARLIER on the line, the trailing note is still the person
+        // annotating an addressed task — refused rather than orphaning it.
+        let annotated =
+            board_of("## Today\n\n- [ ] addressed <!--t:7k2p since:2026-08-18--> <!--more-->\n");
+        assert_eq!(annotated.malformed().len(), 1);
+        assert!(annotated.ids().contains(&"7k2p".parse().unwrap()));
+    }
+
+    /// A line whose bullet this tool wrote and whose stamp names a live task, dropped by the
+    /// checkbox gate for a reason that has nothing to do with the stamp: indented under another
+    /// task, or one of Obsidian's alternate states, which its default theme renders and a person
+    /// reaches for while working. Not interpreted — what `- [-]` means is a judgment — but NAMED,
+    /// so the person can put the bullet back and get the task whole.
+    #[test]
+    fn a_line_naming_a_task_is_named_wherever_the_parse_drops_it() {
+        let board = board_of(concat!(
+            "## Today\n\n",
+            "- [ ] live <!--t:aaa0 since:2026-08-18-->\n",
+            "  - [ ] indented <!--t:aaa1 since:2026-08-18 carried:4-->\n",
+            "- [/] in progress <!--t:aaa2 since:2026-08-18-->\n",
+            "- [-] cancelled <!--t:aaa3 since:2026-08-18-->\n",
+            "- [>] forwarded <!--t:aaa4 since:2026-08-18-->\n",
+        ));
+        assert_eq!(board.tasks().count(), 1);
+        assert_eq!(board.unaccounted().len(), 4);
+
+        // A sub-step carrying no stamp of ours is a sub-step, and stays one.
+        let nested =
+            board_of("## Today\n\n- [ ] live <!--t:aaa0 since:2026-08-18-->\n  - [ ] a sub-step\n");
+        assert!(nested.unaccounted().is_empty());
     }
 
     /// A person's task line may mention or use an HTML comment — `<!--more-->` is a documented
