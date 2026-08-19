@@ -187,6 +187,7 @@ pub struct Strings {
     pub status_board_unrecorded: &'static str,
     pub status_board_unwritable: &'static str,
     pub status_board_unreadable: &'static str,
+    pub status_board_unplaceable: &'static str,
 }
 
 static KO: Strings = Strings {
@@ -267,6 +268,7 @@ static KO: Strings = Strings {
     status_board_unrecorded: "미기록 편집",
     status_board_unwritable: "쓸 수 없는 보드 — lore task sync 가 이유를 말합니다",
     status_board_unreadable: "읽을 수 없는 기록 — lore agenda 가 이유를 말합니다",
+    status_board_unplaceable: "어느 섹션에도 없는 할 일 — lore agenda 가 줄 번호를 말합니다",
 };
 
 static EN: Strings = Strings {
@@ -347,6 +349,7 @@ static EN: Strings = Strings {
     status_board_unrecorded: "unrecorded edit(s)",
     status_board_unwritable: "the board cannot be written — `lore task sync` says why",
     status_board_unreadable: "the record cannot be read — `lore agenda` says why",
+    status_board_unplaceable: "a task sits under no section — `lore agenda` names the line",
 };
 
 #[cfg(test)]

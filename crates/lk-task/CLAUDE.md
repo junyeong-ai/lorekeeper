@@ -149,6 +149,18 @@ the commands in `lk-cli` are the only thing that decides when to apply them.
   looking task is about may not exist yet. `lk_core::link::is_external` keeps a scheme-bearing
   destination out of the graph entirely, which is what makes all three go away at once; a
   vault-relative `--link` is refused rather than rewritten.
+- **A task on the page that the parse could not PLACE is one fact, not four.** A stamp it
+  cannot read, a line dragged above the first heading, a heading level it does not match so no
+  section is ever opened, a fence that never closed and swallowed the rest — each was found on
+  its own and guarded against on its own, by whole-board proxies that a per-line case walks
+  straight past. `Board::unaccounted` is the question the parse can already answer, and it is
+  what makes "this id is not on the board" an ANSWER rather than a silence: finding an id is
+  proof and needs no guard, while not finding one means something only where every checkbox the
+  page holds was placed. A CLOSED fence's examples are placed correctly and are not counted —
+  the board's own format reference is full of them, and counting one would make every
+  task-linked question permanently unanswerable. Reported at every read and carried onto the
+  front door's row, because three of the four ways it happens said nothing at all while the
+  tasks sat in plain sight in the editor.
 - **Nothing inside a fenced code block is markup.** A board that documents its own format holds
   a `## Today` and a checkbox line as examples; reading them as structure deleted the heading
   outright and left the example to be adopted as a real task by the next reconcile. `Fence`

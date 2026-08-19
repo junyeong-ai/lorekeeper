@@ -55,6 +55,8 @@ pub struct Board {
     unterminated_fence: Option<usize>,
     /// Lines carrying an id an earlier line already claims.
     duplicated: Vec<(TaskId, usize)>,
+    /// Checkbox lines the parse could not place as a task.
+    unaccounted: Vec<usize>,
 }
 
 impl Default for Board {
@@ -71,6 +73,7 @@ impl Board {
             malformed: Vec::new(),
             unterminated_fence: None,
             duplicated: Vec::new(),
+            unaccounted: Vec::new(),
         }
     }
 
@@ -90,6 +93,10 @@ impl Board {
         let mut claimed: std::collections::BTreeSet<TaskId> = std::collections::BTreeSet::new();
         let mut fence: Option<Fence> = None;
         let mut title_seen = false;
+        // Checkbox lines swallowed by a fence still OPEN. A closed fence's examples are
+        // deliberately inert and the parse placed them correctly; an unclosed one swallowed
+        // whatever followed, which it did not.
+        let mut swallowed: Vec<usize> = Vec::new();
 
         for (index, line) in body.lines().enumerate() {
             let trimmed = line.trim_end();
@@ -103,6 +110,9 @@ impl Board {
                     if open.closed_by(trimmed) {
                         fence = None;
                         board.unterminated_fence = None;
+                        swallowed.clear();
+                    } else if checkbox(trimmed).is_some() {
+                        swallowed.push(index + 1 + offset);
                     }
                     // Verbatim without exception: a blank line inside a code block is part of
                     // the code, and two in a row are two, so the rules that decide which blanks
@@ -133,6 +143,13 @@ impl Board {
                 continue;
             }
             let Some(state) = current else {
+                // A checkbox line before any heading this reads. A person dragged it above the
+                // section, or a heading was restructured so none was ever opened — either way
+                // it is a task the parse could not place, and nothing else about the page says
+                // so.
+                if checkbox(trimmed).is_some() {
+                    board.unaccounted.push(index + 1 + offset);
+                }
                 board.keep(None, trimmed);
                 continue;
             };
@@ -147,6 +164,7 @@ impl Board {
                 }
                 Ok(None) => board.keep(Some(state), trimmed),
                 Err(why) => {
+                    board.unaccounted.push(index + 1 + offset);
                     board.malformed.push(Malformed {
                         line: index + 1 + offset,
                         text: trimmed.to_string(),
@@ -156,6 +174,8 @@ impl Board {
                 }
             }
         }
+        board.unaccounted.extend(swallowed);
+        board.unaccounted.sort_unstable();
         board.retag();
         board
     }
@@ -316,6 +336,22 @@ impl Board {
     /// and reporting an inert line would teach a reader to distrust the message.
     pub fn duplicated(&self) -> &[(TaskId, usize)] {
         &self.duplicated
+    }
+
+    /// The checkbox lines the parse could not place as a task, in file order.
+    ///
+    /// The one fact behind every way a task can be on the page and invisible to this tool: a
+    /// stamp it cannot read, a line dragged above the first heading, a heading restructured so
+    /// none was ever opened, a fence that never closed and swallowed the rest. Each was found
+    /// separately and guarded against separately — by whole-board proxies that per-line cases
+    /// walk straight past — when they are one question the parse can already answer.
+    ///
+    /// It is what makes "this id is not on the board" an ANSWER rather than a silence. Finding
+    /// an id is proof on its own and needs no guard; not finding one means something only where
+    /// the parse placed every checkbox the page holds. A closed fence's examples are placed
+    /// correctly and are not counted — the board's own format reference is full of them.
+    pub fn unaccounted(&self) -> &[usize] {
+        &self.unaccounted
     }
 
     /// The line a code fence opened on that the page never closed, if there is one.
@@ -808,6 +844,40 @@ mod tests {
     fn distinct_ids_are_not_reported() {
         let board = board_of("## Today\n\n- [ ] one <!--t:7k2p-->\n- [ ] two <!--t:3b8q-->\n");
         assert!(board.duplicated().is_empty());
+    }
+
+    /// Every way a task can be on the page and invisible to this tool is ONE fact: the parse
+    /// could not place a checkbox line. Found separately, each was guarded against separately —
+    /// by whole-board proxies that a per-line case walks straight past.
+    #[test]
+    fn every_checkbox_the_parse_could_not_place_is_named() {
+        let stamped = "- [ ] a task <!--t:7k2p since:2026-08-18-->";
+
+        // A stamp with text after it; a line above the first heading; a heading level this does
+        // not read, so no section is ever opened; a fence that never closed.
+        for page in [
+            format!("## Today\n\n{stamped} and I typed this after\n"),
+            format!("# Tasks\n\n{stamped}\n\n## Today\n"),
+            format!("### Today\n\n{stamped}\n"),
+            format!("## Today\n\n```sh\nexample\n\n{stamped}\n"),
+        ] {
+            let board = board_of(&page);
+            assert_eq!(board.tasks().count(), 0, "{page}");
+            assert_eq!(board.unaccounted().len(), 1, "{page}");
+        }
+
+        // A CLOSED fence's example is placed correctly — the board's own format reference is
+        // full of them, and counting one would make every task-linked question unanswerable.
+        let documented = board_of(&format!("## Today\n\n```md\n{stamped}\n```\n\n{stamped}\n"));
+        assert_eq!(documented.tasks().count(), 1);
+        assert!(documented.unaccounted().is_empty());
+
+        // And an ordinary board accounts for everything.
+        assert!(
+            board_of(&format!("## Today\n\n{stamped}\n"))
+                .unaccounted()
+                .is_empty()
+        );
     }
 
     /// A person's task line may mention or use an HTML comment — `<!--more-->` is a documented

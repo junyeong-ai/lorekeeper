@@ -501,6 +501,21 @@ impl IntentPlane {
         if let Some(notice) = &unwritable {
             eprintln!("warning: {notice}");
         }
+        // A task on the page that the parse could not place is invisible to every rule while
+        // sitting in plain sight in the editor — and unlike a stamp that will not read, three
+        // of the four ways it happens report nothing at all.
+        if let [first, rest @ ..] = board.unaccounted() {
+            eprintln!(
+                "warning: {board_path} L{first}{} {} a task this cannot place — it is under no \
+                 section this reads, so it is in no list, no carry and no archive",
+                if rest.is_empty() {
+                    String::new()
+                } else {
+                    format!(" and {} more", rest.len())
+                },
+                if rest.is_empty() { "holds" } else { "hold" },
+            );
+        }
 
         Ok(Self {
             board,
@@ -593,10 +608,16 @@ impl IntentPlane {
         let Some(id) = reminder.task.as_ref() else {
             return Some(false);
         };
-        if self.read_as.is_none() || self.board.unterminated_fence().is_some() {
+        // Finding it is PROOF and needs no guard. Only the negative depends on the parse having
+        // been complete — which is one question rather than a list of the ways it can fail, and
+        // the list was what let a per-line case walk past a whole-board guard.
+        if self.board.tasks().any(|task| &task.id == id) {
+            return Some(false);
+        }
+        if self.read_as.is_none() || !self.board.unaccounted().is_empty() {
             return None;
         }
-        Some(!self.board.tasks().any(|task| &task.id == id))
+        Some(true)
     }
 
     /// One line of the board's state, for the front door.
@@ -629,6 +650,15 @@ impl IntentPlane {
         if !plane.board.duplicated().is_empty() || plane.board.unterminated_fence().is_some() {
             return Some(BoardSurvey {
                 state: strings.status_board_unwritable.to_string(),
+                writable: false,
+            });
+        }
+
+        // A page holding tasks this cannot place reads as an empty board to every rule, so the
+        // front door must not report it as a quiet day.
+        if !plane.board.unaccounted().is_empty() {
+            return Some(BoardSurvey {
+                state: strings.status_board_unplaceable.to_string(),
                 writable: false,
             });
         }
