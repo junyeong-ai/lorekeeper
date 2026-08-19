@@ -29,13 +29,21 @@ pub enum Entry {
 /// the product: a checkbox ticked on a phone has to count, and a design that keeps the state
 /// somewhere else discards that edit silently — which is worse than any parsing risk. What
 /// makes the parsing risk small is that a line this cannot read is never rewritten.
-/// A line this cannot read, kept exactly as it was written.
+/// A line the parse could not place as a task, kept exactly as it was written.
+///
+/// One record for every way it happens — a stamp this cannot read, a line dragged above the
+/// first heading, a heading of the person's own with tasks under it, an indented line, one of
+/// Obsidian's alternate checkbox states, a fence that never closed and swallowed the rest.
+/// They were separate lists once, and the TEXT was kept only for the first: so the id and the
+/// origin a line still names were unreachable to the two rules that must see them — the mint,
+/// which would otherwise hand the same address out twice, and the proposal, which offered work
+/// again every morning that was already sitting on the page.
 ///
 /// The REASON travels with it. Reported as "its stamp will not read", a line refused for text
 /// typed after the stamp told its author nothing about the repair, and the warning repeated
 /// every run — a diagnosis a person cannot act on is a diagnosis they learn to scroll past.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Malformed {
+pub struct Unplaced {
     /// The line in the FILE, which is where the person will go and look.
     pub line: usize,
     pub text: String,
@@ -47,16 +55,14 @@ pub struct Board {
     sections: Vec<(TaskState, Vec<Entry>)>,
     /// Content between the generated header and the first section heading.
     prologue: Vec<String>,
-    /// Lines carrying a stamp that would not parse, by 1-based line number. Reported rather
-    /// than repaired: the bytes are somebody's, and a guess at what a corrupted date meant is
-    /// a task silently rescheduled.
-    malformed: Vec<Malformed>,
+    /// Lines holding a task this could not place, in file order. Reported rather than
+    /// repaired: the bytes are somebody's, and a guess at what a corrupted date meant is a task
+    /// silently rescheduled.
+    unplaced: Vec<Unplaced>,
     /// The line a code fence opened on that the page never closed.
     unterminated_fence: Option<usize>,
     /// Lines carrying an id an earlier line already claims.
     duplicated: Vec<(TaskId, usize)>,
-    /// Checkbox lines the parse could not place as a task.
-    unaccounted: Vec<usize>,
 }
 
 impl Default for Board {
@@ -70,10 +76,9 @@ impl Board {
         Self {
             sections: TaskState::ALL.map(|state| (state, Vec::new())).to_vec(),
             prologue: Vec::new(),
-            malformed: Vec::new(),
+            unplaced: Vec::new(),
             unterminated_fence: None,
             duplicated: Vec::new(),
-            unaccounted: Vec::new(),
         }
     }
 
@@ -96,7 +101,7 @@ impl Board {
         // Checkbox lines swallowed by a fence still OPEN. A closed fence's examples are
         // deliberately inert and the parse placed them correctly; an unclosed one swallowed
         // whatever followed, which it did not.
-        let mut swallowed: Vec<usize> = Vec::new();
+        let mut swallowed: Vec<Unplaced> = Vec::new();
 
         for (index, line) in body.lines().enumerate() {
             let trimmed = line.trim_end();
@@ -112,7 +117,11 @@ impl Board {
                         board.unterminated_fence = None;
                         swallowed.clear();
                     } else if unplaceable(trimmed) {
-                        swallowed.push(index + 1 + offset);
+                        swallowed.push(Unplaced {
+                            line: index + 1 + offset,
+                            text: trimmed.to_string(),
+                            why: "it sits inside a code fence that nothing closes".into(),
+                        });
                     }
                     // Verbatim without exception: a blank line inside a code block is part of
                     // the code, and two in a row are two, so the rules that decide which blanks
@@ -160,7 +169,17 @@ impl Board {
                 // either way it is a task the parse could not place, and nothing else about the
                 // page says so. Kept where it was found, so naming it costs the person nothing.
                 if unplaceable(trimmed) {
-                    board.unaccounted.push(index + 1 + offset);
+                    board.unplaced.push(Unplaced {
+                        line: index + 1 + offset,
+                        text: trimmed.to_string(),
+                        why: match placement {
+                            Placement::Foreign(_) => {
+                                "it sits under a heading this board does not read"
+                            }
+                            _ => "it sits above the first heading this board reads",
+                        }
+                        .into(),
+                    });
                 }
                 board.keep(placement.held_in(), trimmed);
                 continue;
@@ -184,13 +203,21 @@ impl Board {
                     // sitting on the page. Not INTERPRETED — what `- [-]` means is a judgment —
                     // but named, so the person can put the bullet back and get the task whole.
                     if names_a_task(trimmed) {
-                        board.unaccounted.push(index + 1 + offset);
+                        board.unplaced.push(Unplaced {
+                            line: index + 1 + offset,
+                            text: trimmed.to_string(),
+                            why: if trimmed.starts_with(char::is_whitespace) {
+                                "it is indented, which makes it a sub-step of the line above"
+                            } else {
+                                "it does not read as `- [ ]` or `- [x]`"
+                            }
+                            .into(),
+                        });
                     }
                     board.keep(Some(state), trimmed);
                 }
                 Err(why) => {
-                    board.unaccounted.push(index + 1 + offset);
-                    board.malformed.push(Malformed {
+                    board.unplaced.push(Unplaced {
                         line: index + 1 + offset,
                         text: trimmed.to_string(),
                         why: why.to_string(),
@@ -199,8 +226,8 @@ impl Board {
                 }
             }
         }
-        board.unaccounted.extend(swallowed);
-        board.unaccounted.sort_unstable();
+        board.unplaced.extend(swallowed);
+        board.unplaced.sort_unstable_by_key(|held| held.line);
         board.retag();
         board
     }
@@ -314,21 +341,29 @@ impl Board {
     pub fn ids(&self) -> BTreeSet<TaskId> {
         self.tasks()
             .map(|task| task.id.clone())
-            .chain(self.malformed.iter().flat_map(|held| {
-                // EVERY comment on the line, not the last one: a quarantined line may carry a
-                // note after its stamp, and reading only the last found no `t:` at all — so an
-                // id a live line still names was left unprotected from the mint.
-                comments(&held.text).filter_map(|body| {
-                    body.split_whitespace()
-                        .find_map(|field| field.strip_prefix("t:"))
-                        .and_then(|value| value.parse().ok())
-                })
-            }))
+            .chain(
+                self.unplaced
+                    .iter()
+                    .filter_map(|held| stamped(&held.text, "t:")?.parse().ok()),
+            )
             .collect()
     }
 
-    pub fn malformed(&self) -> &[Malformed] {
-        &self.malformed
+    /// Every observation the page already answers to, however the line carrying it reads.
+    ///
+    /// What stops one origin being proposed twice, and the reason it asks the unplaced lines
+    /// too: a proposal is a task line like any other, so a person who parks one under a heading
+    /// of their own or ticks it with a marker this does not read takes it out of `tasks()` —
+    /// and it was then offered again every morning, about work already sitting on the page.
+    pub fn origins(&self) -> BTreeSet<String> {
+        self.tasks()
+            .filter_map(|task| task.src.clone())
+            .chain(
+                self.unplaced
+                    .iter()
+                    .filter_map(|held| stamped(&held.text, "src:").map(str::to_string)),
+            )
+            .collect()
     }
 
     /// Lines carrying an id an earlier line already claims, with the line each sits on.
@@ -363,7 +398,7 @@ impl Board {
         &self.duplicated
     }
 
-    /// The checkbox lines the parse could not place as a task, in file order.
+    /// The lines holding a task the parse could not place, in file order.
     ///
     /// The one fact behind every way a task can be on the page and invisible to this tool: a
     /// stamp it cannot read, a line dragged above the first heading, a heading restructured so
@@ -375,8 +410,8 @@ impl Board {
     /// an id is proof on its own and needs no guard; not finding one means something only where
     /// the parse placed every checkbox the page holds. A closed fence's examples are placed
     /// correctly and are not counted — the board's own format reference is full of them.
-    pub fn unaccounted(&self) -> &[usize] {
-        &self.unaccounted
+    pub fn unplaced(&self) -> &[Unplaced] {
+        &self.unplaced
     }
 
     /// The line a code fence opened on that the page never closed, if there is one.
@@ -631,6 +666,21 @@ fn comments(line: &str) -> impl Iterator<Item = &str> {
     })
 }
 
+/// The value stamp field `key` carries on `line`, wherever a comment on it holds one.
+///
+/// EVERY comment, not the last: a line the parse could not place may carry a note written after
+/// its stamp, and reading only the last comment found no stamp at all — so an id a live line
+/// still names went unprotected from the mint, and an origin it answers to was offered again.
+fn stamped<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    comments(line).find_map(|body| field(body, key))
+}
+
+/// The value stamp field `key` carries in one comment body.
+fn field<'a>(body: &'a str, key: &str) -> Option<&'a str> {
+    body.split_whitespace()
+        .find_map(|pair| pair.strip_prefix(key))
+}
+
 /// Whether any comment in `line` names a task — a `t:` field, this tool's own stamp vocabulary.
 ///
 /// Asked this way rather than by looking for a comment at all, because a person's task line may
@@ -643,8 +693,7 @@ fn names_a_task(line: &str) -> bool {
 
 /// Whether a comment BODY is one of this tool's stamps — it names a task id.
 fn is_stamp(body: &str) -> bool {
-    body.split_whitespace()
-        .any(|field| field.strip_prefix("t:").is_some_and(|id| !id.is_empty()))
+    field(body, "t:").is_some_and(|id| !id.is_empty())
 }
 
 /// tool's. `Err` is a line carrying a stamp that would not read.
@@ -832,7 +881,7 @@ mod tests {
 
         let read = Board::parse(&page);
         assert_eq!(read.tasks().collect::<Vec<_>>(), vec![&task]);
-        assert!(read.malformed().is_empty());
+        assert!(read.unplaced().is_empty());
     }
 
     /// The stamp is invisible in both renderers this vault is read in, which is the whole
@@ -940,19 +989,19 @@ mod tests {
         ] {
             let board = board_of(&page);
             assert_eq!(board.tasks().count(), 0, "{page}");
-            assert_eq!(board.unaccounted().len(), 1, "{page}");
+            assert_eq!(board.unplaced().len(), 1, "{page}");
         }
 
         // A CLOSED fence's example is placed correctly — the board's own format reference is
         // full of them, and counting one would make every task-linked question unanswerable.
         let documented = board_of(&format!("## Today\n\n```md\n{stamped}\n```\n\n{stamped}\n"));
         assert_eq!(documented.tasks().count(), 1);
-        assert!(documented.unaccounted().is_empty());
+        assert!(documented.unplaced().is_empty());
 
         // And an ordinary board accounts for everything.
         assert!(
             board_of(&format!("## Today\n\n{stamped}\n"))
-                .unaccounted()
+                .unplaced()
                 .is_empty()
         );
     }
@@ -968,16 +1017,16 @@ mod tests {
             "- [ ] call the vendor <!-- ask Sarah -->",
         ] {
             let board = board_of(&format!("## Today\n\n{line}\n"));
-            assert!(board.malformed().is_empty(), "{line}");
+            assert!(board.unplaced().is_empty(), "{line}");
             assert_eq!(board.unstamped().len(), 1, "{line}");
-            assert!(board.unaccounted().is_empty(), "{line}");
+            assert!(board.unplaced().is_empty(), "{line}");
         }
 
         // With a real stamp EARLIER on the line, the trailing note is still the person
         // annotating an addressed task — refused rather than orphaning it.
         let annotated =
             board_of("## Today\n\n- [ ] addressed <!--t:7k2p since:2026-08-18--> <!--more-->\n");
-        assert_eq!(annotated.malformed().len(), 1);
+        assert_eq!(annotated.unplaced().len(), 1);
         assert!(annotated.ids().contains(&"7k2p".parse().unwrap()));
     }
 
@@ -997,12 +1046,12 @@ mod tests {
             "- [>] forwarded <!--t:aaa4 since:2026-08-18-->\n",
         ));
         assert_eq!(board.tasks().count(), 1);
-        assert_eq!(board.unaccounted().len(), 4);
+        assert_eq!(board.unplaced().len(), 4);
 
         // A sub-step carrying no stamp of ours is a sub-step, and stays one.
         let nested =
             board_of("## Today\n\n- [ ] live <!--t:aaa0 since:2026-08-18-->\n  - [ ] a sub-step\n");
-        assert!(nested.unaccounted().is_empty());
+        assert!(nested.unplaced().is_empty());
     }
 
     /// A heading at the sections' own level or above closes the section it follows. Written
@@ -1040,7 +1089,14 @@ mod tests {
             board.unstamped().is_empty(),
             "nor is one adopted from there"
         );
-        assert_eq!(board.unaccounted(), [15, 16]);
+        assert_eq!(
+            board
+                .unplaced()
+                .iter()
+                .map(|held| held.line)
+                .collect::<Vec<_>>(),
+            [15, 16]
+        );
 
         // And the block comes back out exactly as it went in, so being told costs nothing.
         assert!(
@@ -1048,6 +1104,68 @@ mod tests {
                 .render(Locale::En, jiff::civil::date(2026, 8, 19))
                 .contains("## Blocked\n\n- [ ] waiting on legal <!--t:aaa2 since:2026-08-18-->\n- [ ] typed by hand\n")
         );
+    }
+
+    /// A line the parse could not place still NAMES a task, and both rules that reach a task
+    /// through what the page already claims have to see it. The mint, or repairing the line
+    /// later produces two live tasks answering to one address; and the proposal, or the work
+    /// already sitting there is offered again every morning. Kept only for a stamp that would
+    /// not READ, the text of every other unplaced line was gone and neither rule could ask.
+    #[test]
+    fn an_unplaced_line_still_claims_its_id_and_its_origin() {
+        let board = board_of(concat!(
+            "## Today\n\n",
+            "- [ ] live <!--t:aaa0 since:2026-08-18-->\n",
+            "  - [ ] indented <!--t:aaa1 since:2026-08-18-->\n",
+            "- [/] in progress <!--t:aaa2 since:2026-08-18 src:0123456789abcdef-->\n",
+            "- [ ] its stamp broke <!--t:aaa3 since:nonsense-->\n\n",
+            "## Blocked\n\n",
+            "- [ ] parked <!--t:aaa4 since:2026-08-18 src:fedcba9876543210-->\n",
+        ));
+
+        assert_eq!(board.tasks().count(), 1);
+        assert_eq!(
+            board.ids(),
+            ["aaa0", "aaa1", "aaa2", "aaa3", "aaa4"]
+                .iter()
+                .map(|id| id.parse().unwrap())
+                .collect()
+        );
+        assert_eq!(
+            board.origins(),
+            ["0123456789abcdef", "fedcba9876543210"]
+                .iter()
+                .map(|src| (*src).to_string())
+                .collect()
+        );
+    }
+
+    /// Each way a line goes unplaced says which way it was, because the reason is what the
+    /// person acts on. Reported as one sentence listing all of them, they had to work out which
+    /// applied — and a line whose repair goes unsaid is one nobody repairs.
+    #[test]
+    fn an_unplaced_line_says_why_it_could_not_be_placed() {
+        let board = board_of(concat!(
+            "- [ ] above every heading <!--t:aaa0 since:2026-08-18-->\n\n",
+            "## Today\n\n",
+            "  - [ ] indented <!--t:aaa1 since:2026-08-18-->\n",
+            "- [-] cancelled <!--t:aaa2 since:2026-08-18-->\n",
+            "- [ ] broken <!--t:aaa3 since:nonsense-->\n\n",
+            "## Blocked\n\n",
+            "- [ ] parked <!--t:aaa4 since:2026-08-18-->\n",
+        ));
+
+        let why: Vec<&str> = board
+            .unplaced()
+            .iter()
+            .map(|held| held.why.as_str())
+            .collect();
+        assert_eq!(why.len(), 5);
+        assert!(why[0].contains("above the first heading"), "{why:?}");
+        assert!(why[1].contains("indented"), "{why:?}");
+        assert!(why[2].contains("`- [ ]`"), "{why:?}");
+        assert!(why[3].contains("not a date"), "{why:?}");
+        assert!(why[4].contains("under a heading"), "{why:?}");
     }
 
     /// A person's task line may mention or use an HTML comment — `<!--more-->` is a documented
@@ -1062,14 +1180,14 @@ mod tests {
             "- [ ] a note <!-- ask Sarah --> about the banner",
         ] {
             let board = board_of(&format!("## Today\n\n{line}\n"));
-            assert!(board.malformed().is_empty(), "{line}");
+            assert!(board.unplaced().is_empty(), "{line}");
             assert_eq!(board.unstamped().len(), 1, "{line}");
         }
 
         // A stamp that is last is read however many other comments precede it.
         let board =
             board_of("## Today\n\n- [ ] a note <!-- why --> here <!--t:7k2p since:2026-08-18-->\n");
-        assert!(board.malformed().is_empty());
+        assert!(board.unplaced().is_empty());
         assert_eq!(board.tasks().count(), 1);
     }
 
@@ -1079,7 +1197,7 @@ mod tests {
     fn a_quarantined_line_still_protects_the_id_it_names() {
         let board =
             board_of("## Today\n\n- [x] task <!--t:7k2p since:2026-08-18--> and <!--a note-->\n");
-        assert_eq!(board.malformed().len(), 1);
+        assert_eq!(board.unplaced().len(), 1);
         assert!(board.ids().contains(&"7k2p".parse().unwrap()));
     }
 
@@ -1093,7 +1211,7 @@ mod tests {
             "## Today\n\n- [x] done <!--t:7k2p since:2026-08-18--> and I typed this after\n",
         );
         assert_eq!(board.tasks().count(), 0, "not a task this can act on");
-        assert_eq!(board.malformed().len(), 1);
+        assert_eq!(board.unplaced().len(), 1);
         assert_eq!(
             board
                 .render(Locale::En, date(2026, 8, 19))
@@ -1111,7 +1229,7 @@ mod tests {
         let broken = "## Today\n\n- [ ] a <!--t:7k2p since:not-a-date-->\n";
         let board = board_of(broken);
         assert_eq!(board.tasks().count(), 0);
-        assert_eq!(board.malformed().len(), 1);
+        assert_eq!(board.unplaced().len(), 1);
         assert!(
             board
                 .render(Locale::En, date(2026, 8, 19))
@@ -1126,7 +1244,7 @@ mod tests {
     #[test]
     fn a_stamp_field_this_build_does_not_know_is_carried_through() {
         let board = board_of("## Today\n\n- [ ] a <!--t:7k2p since:2026-08-19 repeat:1w-->\n");
-        assert!(board.malformed().is_empty());
+        assert!(board.unplaced().is_empty());
 
         let task = board
             .tasks()
@@ -1152,7 +1270,7 @@ mod tests {
             "t:7k2p since:2026-08-19 k:a b",
         ] {
             let board = board_of(&format!("## Today\n\n- [ ] a <!--{broken}-->\n"));
-            assert_eq!(board.malformed().len(), 1, "stamp `{broken}`");
+            assert_eq!(board.unplaced().len(), 1, "stamp `{broken}`");
         }
     }
 

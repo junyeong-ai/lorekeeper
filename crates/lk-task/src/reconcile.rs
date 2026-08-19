@@ -636,7 +636,7 @@ mod tests {
             &Recorded::from_day(today(), &[]),
         );
         assert!(outcome.is_empty());
-        assert_eq!(board.malformed().len(), 1);
+        assert_eq!(board.unplaced().len(), 1);
         assert!(
             board.render(Locale::En, today()).contains("since:broken"),
             "the line survives untouched"

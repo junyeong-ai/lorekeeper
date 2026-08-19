@@ -359,6 +359,25 @@ pub async fn run(opts: &GlobalOptions, cmd: TaskCommand) -> miette::Result<()> {
     }
 }
 
+/// The unplaced lines gathered by the reason they were unplaced, in file order.
+///
+/// The reason is what a person acts on, so lines sharing one are named together and each reason
+/// is stated once. Its own message per line repeated the same sentence down the page whenever a
+/// fence swallowed a section; one message for all of them made the reader work out which of the
+/// several possible reasons was theirs.
+fn group_by_reason(unplaced: &[lk_task::Unplaced]) -> Vec<(&str, String)> {
+    let mut grouped: Vec<(&str, String)> = Vec::new();
+    for held in unplaced {
+        match grouped.iter_mut().find(|(why, _)| *why == held.why) {
+            Some((_, lines)) => {
+                let _ = write!(lines, ", L{}", held.line);
+            }
+            None => grouped.push((&held.why, format!("L{}", held.line))),
+        }
+    }
+    grouped
+}
+
 /// One line of the board's state, as `lore status` prints it.
 pub(crate) struct BoardSurvey {
     pub(crate) state: String,
@@ -454,12 +473,6 @@ impl IntentPlane {
             Some(bytes) => Board::parse(&String::from_utf8_lossy(bytes)),
             None => Board::empty(),
         };
-        for held in board.malformed() {
-            eprintln!(
-                "warning: {board_path} L{} is kept as it is — {}: {}",
-                held.line, held.why, held.text
-            );
-        }
         // A page whose fence never closes is not a page this can write back. Everything below
         // that line is code to CommonMark, so the headings the render just emitted are read
         // back as code and a fresh set is emitted after them — a board that grows every night
@@ -502,19 +515,14 @@ impl IntentPlane {
             eprintln!("warning: {notice}");
         }
         // A task on the page that the parse could not place is invisible to every rule while
-        // sitting in plain sight in the editor — and unlike a stamp that will not read, three
-        // of the four ways it happens report nothing at all.
-        if let [first, rest @ ..] = board.unaccounted() {
+        // sitting in plain sight in the editor. Grouped by REASON and never summarised away:
+        // one sentence listing every way it can happen made the reader work out which of them
+        // applied, and a line whose repair goes unsaid is one nobody repairs.
+        for (why, lines) in group_by_reason(board.unplaced()) {
             eprintln!(
-                "warning: {board_path} L{first}{} {} a task this cannot place — so it is in no \
-                 list, no carry and no archive. Check that the line reads `- [ ]` or `- [x]`, \
-                 sits under a section this writes, and is not indented under another",
-                if rest.is_empty() {
-                    String::new()
-                } else {
-                    format!(" and {} more", rest.len())
-                },
-                if rest.is_empty() { "holds" } else { "hold" },
+                "warning: {board_path} {lines} {} a task this cannot place — {why}. Until the \
+                 line is repaired the task is in no list, no carry and no archive",
+                if lines.contains(',') { "hold" } else { "holds" },
             );
         }
 
@@ -574,11 +582,11 @@ impl IntentPlane {
         let answered = TransitionLog::new(&self.vault_root)
             .answered_origins()
             .map_err(|e| miette::miette!("{e}"))?;
-        let standing = self
-            .board
-            .tasks()
-            .filter_map(|task| task.src.clone())
-            .collect();
+        // Every origin the PAGE answers to, including the ones on lines the parse could not
+        // place: a proposal parked under a heading of the person's own, or ticked with a marker
+        // this does not read, is still their answer sitting there, and offering it again every
+        // morning is how the section stops being read.
+        let standing = self.board.origins();
 
         let offered = lk_task::select(candidates, &answered, &standing);
         for candidate in &offered {
@@ -615,7 +623,7 @@ impl IntentPlane {
         if self.board.tasks().any(|task| &task.id == id) {
             return Some(false);
         }
-        if self.read_as.is_none() || !self.board.unaccounted().is_empty() {
+        if self.read_as.is_none() || !self.board.unplaced().is_empty() {
             return None;
         }
         Some(true)
@@ -657,7 +665,7 @@ impl IntentPlane {
 
         // A page holding tasks this cannot place reads as an empty board to every rule, so the
         // front door must not report it as a quiet day.
-        if !plane.board.unaccounted().is_empty() {
+        if !plane.board.unplaced().is_empty() {
             return Some(BoardSurvey {
                 state: strings.status_board_unplaceable.to_string(),
                 writable: false,

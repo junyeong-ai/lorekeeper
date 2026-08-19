@@ -162,23 +162,29 @@ the commands in `lk-cli` are the only thing that decides when to apply them.
   looking task is about may not exist yet. `lk_core::link::is_external` keeps a scheme-bearing
   destination out of the graph entirely, which is what makes all three go away at once; a
   vault-relative `--link` is refused rather than rewritten.
-- **A task on the page that the parse could not PLACE is one fact, not four.** A stamp it
-  cannot read, a line dragged above the first heading, a heading level it does not match so no
-  section is ever opened, a fence that never closed and swallowed the rest — each was found on
-  its own and guarded against on its own, by whole-board proxies that a per-line case walks
-  straight past. `Board::unaccounted` is the question the parse can already answer, and it is
-  what makes "this id is not on the board" an ANSWER rather than a silence: finding an id is
-  proof and needs no guard, while not finding one means something only where every checkbox the
-  page holds was placed. It asks the same of a line the CHECKBOX gate drops, not only of one no
-  section ever opened: an indented line nested under another, or one of Obsidian's alternate
+- **A task on the page that the parse could not PLACE is one fact, not four — and the LINE is
+  kept, not just its number.** A stamp it cannot read, a line dragged above the first heading, a
+  heading of the person's own with tasks under it, an indented line, one of Obsidian's alternate
   states (`- [/]`, `- [-]`, `- [>]`) which its default theme renders and a person reaches for
-  while working, carries this tool's own bullet and a stamp naming a live task and was dropped
-  in silence. Not INTERPRETED — what `- [-]` means is a judgment — but named, so the person can
-  put the bullet back and get the task whole with its carry count and origin. A CLOSED fence's
-  examples are placed correctly and are not counted — the board's own format reference is full
-  of them, and counting one would make every task-linked question permanently unanswerable.
-  Reported at every read and carried onto the front door's row, because most of the ways it
-  happens said nothing at all while the tasks sat in plain sight in the editor.
+  while working, a fence that never closed and swallowed the rest — each was found on its own
+  and guarded against on its own, by whole-board proxies that a per-line case walks straight
+  past. `Board::unplaced` is the question the parse can already answer, and it is what makes
+  "this id is not on the board" an ANSWER rather than a silence: finding an id is proof and
+  needs no guard, while not finding one means something only where every checkbox the page holds
+  was placed. Not INTERPRETED — what `- [-]` means is a judgment — but named, so the person can
+  put the line back and get the task whole with its carry count and origin. Keeping only the
+  TEXT of a stamp that would not READ was the same mistake one level down: an unplaced line
+  still names a task, and both rules that reach a task through what the page already claims were
+  blind to it — `Board::ids`, so the mint could hand the same address out twice and repairing
+  the line would produce two live tasks answering to one, and `Board::origins`, so a proposal
+  parked under a heading of the person's own was offered again every morning about work already
+  sitting on the page. One record with the line, the text and the REASON; `stamped` is the one
+  place a field is mined out of a line, under all three questions. A CLOSED fence's examples are
+  placed correctly and are not counted — the board's own format reference is full of them, and
+  counting one would make every task-linked question permanently unanswerable. Reported at every
+  read and carried onto the front door's row, grouped by reason and never summarised away: one
+  sentence listing every way it can happen made the reader work out which was theirs, and a line
+  whose repair goes unsaid is one nobody repairs.
 - **A trailing comment is a STAMP only if it names a task, asked in BOTH branches.** A comment
   written the normal way — as the only trailing one, `- [ ] fix the bug <!--more-->` — went to
   the branch a first fix did not touch, where `split_stamp` handed it to `read_stamp` and the

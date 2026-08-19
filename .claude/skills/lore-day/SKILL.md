@@ -60,6 +60,12 @@ from. Read them out, one line each, and ask for a decision on each. Then apply i
 Never leave a proposal sitting. It is a question, and one they never saw is worse than none —
 so do not decide for them.
 
+An origin is offered ONCE. Finishing or dropping a proposal answers it for good, so a Jira
+issue reopened weeks later never comes back as a proposal — a source declares what is open, not
+what changed. When the user says something they already closed is live again, write it down
+yourself with `lore task add "<what it is now>" --link <the same URL>`: the origin is the same
+and the work is new.
+
 **When there are many** — a first run against a Jira board with thirty open issues is the normal
 case — do not read thirty lines out. Group them by what they are (project, prefix, age) and put
 the GROUPS to the person: "PLAT 에 12건, OPS 에 5건, 나머지 3건". Then apply their answer per
