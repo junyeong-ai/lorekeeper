@@ -177,7 +177,9 @@ the commands in `lk-cli` are the only thing that decides when to apply them.
   `Transition::closing` is the same fact the task's `carried_on` stamp holds, so the resume
   guard still covers a board write that failed after the log write, without the proxy. A record
   written before the field existed carries none and answers for no day: its absence is not the
-  fact, which leaves one command's window exposed across the upgrade and nothing after it.
+  fact, which leaves one command's window exposed across the upgrade and nothing after it. The
+  window reaches back to the closing day, because the transition answering it was written on
+  whatever day the close first ran — at or after that day, and not necessarily today.
 - **A day closes once.** `rollover` takes the day's transitions and skips the carry for any
   task already carried in them, so the scheduled close and one run by hand do not both count —
   a task reading `carried:8` after four days is worse than no count at all. Asked of the day's
@@ -236,9 +238,13 @@ the commands in `lk-cli` are the only thing that decides when to apply them.
   rather than by a guessed horizon: an id is minted against the ids currently on the board, so a
   recycled id's previous owner left before this task was written down, and a completion recorded
   on or after this task's own first day is this task's. A board with no ticked line asks about
-  today alone, which is every ordinary pass. "Was this task already carried?" must look at today
-  alone: it is the guard that lets a run which stopped partway resume, and a carry seen from
-  yesterday would suppress today's — the one number this plane exists to produce. A date file
+  today alone, which is every ordinary pass — and `floor` widens it for the CARRY question alone,
+  never for this one: reading further back for a completion let an older life of a recycled id
+  settle a live line, and made `sync` and `rollover` disagree about the same tick. "Was this
+  task already carried FOR THIS ENDED DAY?" is keyed on the pair, so it needs no window of its
+  own and is absorbed wherever the transition was written — a carry for another day cannot
+  suppress this one, and asked of today's file alone a close retried on a later calendar day
+  wrote a second carry for one day. A date file
   that will not read is FATAL to a write here rather than warned past, because the completion
   guard spans several of them and one read as an empty day harvests what the missing half
   already recorded. Inside that window a `Created` CLEARS the closure standing for its id rather

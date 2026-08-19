@@ -454,8 +454,11 @@ impl IntentPlane {
             Some(bytes) => Board::parse(&String::from_utf8_lossy(bytes)),
             None => Board::empty(),
         };
-        for (line, text) in board.malformed() {
-            eprintln!("warning: L{line} is kept as it is — its stamp will not read: {text}");
+        for held in board.malformed() {
+            eprintln!(
+                "warning: {board_path} L{} is kept as it is — {}: {}",
+                held.line, held.why, held.text
+            );
         }
         // A page whose fence never closes is not a page this can write back. Everything below
         // that line is code to CommonMark, so the headings the render just emitted are read
@@ -817,7 +820,6 @@ impl IntentPlane {
             .await
             .map_err(|e| miette::miette!("write {}: {e}", self.board_path.display()))?;
 
-        self.answered.clear();
         self.retire_reminders(&answered);
         Ok(())
     }

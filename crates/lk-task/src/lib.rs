@@ -28,7 +28,7 @@ mod schedule;
 mod store;
 mod task;
 
-pub use board::{Board, Entry};
+pub use board::{Board, Entry, Malformed};
 pub use log::{Recorded, Transition, TransitionKind, TransitionLog};
 pub use propose::{Candidate, Candidates, Gathered, Judged, select};
 pub use reconcile::{Reconciled, rollover, sync};

@@ -29,6 +29,19 @@ pub enum Entry {
 /// the product: a checkbox ticked on a phone has to count, and a design that keeps the state
 /// somewhere else discards that edit silently — which is worse than any parsing risk. What
 /// makes the parsing risk small is that a line this cannot read is never rewritten.
+/// A line this cannot read, kept exactly as it was written.
+///
+/// The REASON travels with it. Reported as "its stamp will not read", a line refused for text
+/// typed after the stamp told its author nothing about the repair, and the warning repeated
+/// every run — a diagnosis a person cannot act on is a diagnosis they learn to scroll past.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Malformed {
+    /// The line in the FILE, which is where the person will go and look.
+    pub line: usize,
+    pub text: String,
+    pub why: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Board {
     sections: Vec<(TaskState, Vec<Entry>)>,
@@ -37,7 +50,7 @@ pub struct Board {
     /// Lines carrying a stamp that would not parse, by 1-based line number. Reported rather
     /// than repaired: the bytes are somebody's, and a guess at what a corrupted date meant is
     /// a task silently rescheduled.
-    malformed: Vec<(usize, String)>,
+    malformed: Vec<Malformed>,
     /// The line a code fence opened on that the page never closed.
     unterminated_fence: Option<usize>,
     /// Lines carrying an id an earlier line already claims.
@@ -133,10 +146,12 @@ impl Board {
                     board.entry_mut(state).push(entry);
                 }
                 Ok(None) => board.keep(Some(state), trimmed),
-                Err(_) => {
-                    board
-                        .malformed
-                        .push((index + 1 + offset, trimmed.to_string()));
+                Err(why) => {
+                    board.malformed.push(Malformed {
+                        line: index + 1 + offset,
+                        text: trimmed.to_string(),
+                        why: why.to_string(),
+                    });
                     board.keep(Some(state), trimmed);
                 }
             }
@@ -254,21 +269,20 @@ impl Board {
     pub fn ids(&self) -> BTreeSet<TaskId> {
         self.tasks()
             .map(|task| task.id.clone())
-            .chain(self.malformed.iter().filter_map(|(_, line)| {
-                // Past the comment opener first: the line is stored whole, so the field reads
-                // `<!--t:7k2p` and a bare `t:` prefix match never fired — which is every line
-                // this tool writes, so the guard protected nothing.
-                let stamp = line.rsplit_once("<!--")?.1;
-                stamp
-                    .trim_end_matches("-->")
-                    .split_whitespace()
-                    .find_map(|field| field.strip_prefix("t:"))
-                    .and_then(|value| value.parse().ok())
+            .chain(self.malformed.iter().flat_map(|held| {
+                // EVERY comment on the line, not the last one: a quarantined line may carry a
+                // note after its stamp, and reading only the last found no `t:` at all — so an
+                // id a live line still names was left unprotected from the mint.
+                comments(&held.text).filter_map(|body| {
+                    body.split_whitespace()
+                        .find_map(|field| field.strip_prefix("t:"))
+                        .and_then(|value| value.parse().ok())
+                })
             }))
             .collect()
     }
 
-    pub fn malformed(&self) -> &[(usize, String)] {
+    pub fn malformed(&self) -> &[Malformed] {
         &self.malformed
     }
 
@@ -502,6 +516,27 @@ fn heading_state(line: &str) -> Option<TaskState> {
 }
 
 /// One line under a heading: a task, a checkbox someone typed, or content that is not this
+/// The bodies of every `<!--…-->` comment in `line`, in the order they appear.
+fn comments(line: &str) -> impl Iterator<Item = &str> {
+    line.split("<!--").skip(1).filter_map(|rest| {
+        let end = rest.find("-->")?;
+        Some(&rest[..end])
+    })
+}
+
+/// Whether any comment in `line` names a task — a `t:` field, this tool's own stamp vocabulary.
+///
+/// Asked this way rather than by looking for a comment at all, because a person's task line may
+/// mention or use one: `<!--more-->` is a documented Obsidian idiom and a hidden note beside a
+/// to-do is ordinary. Refusing those turned away lines carrying no stamp of ours, and told their
+/// author that a stamp they never wrote would not read.
+fn names_a_task(line: &str) -> bool {
+    comments(line).any(|body| {
+        body.split_whitespace()
+            .any(|field| field.strip_prefix("t:").is_some_and(|id| !id.is_empty()))
+    })
+}
+
 /// tool's. `Err` is a line carrying a stamp that would not read.
 fn read_line(line: &str) -> Result<Option<Entry>, TaskError> {
     let Some((done, rest)) = checkbox(line) else {
@@ -517,9 +552,10 @@ fn read_line(line: &str) -> Result<Option<Entry>, TaskError> {
         // A person typing a word after the stamp is how it happens, which is ordinary. So it is
         // refused like any stamp this cannot read: kept exactly, reported, and left out of
         // every rule until they move the text or delete the comment.
-        if rest.contains("<!--") {
+        if names_a_task(rest) {
             return Err(TaskError::Malformed(
-                "a stamp must be the last thing on its line — text after it would be read as a                  new task and the one this names would leave the board unrecorded"
+                "a stamp must be the LAST thing on its line — move the text after it in front \
+                 of the comment, or delete the comment to have the line adopted as a new task"
                     .into(),
             ));
         }
@@ -772,6 +808,39 @@ mod tests {
     fn distinct_ids_are_not_reported() {
         let board = board_of("## Today\n\n- [ ] one <!--t:7k2p-->\n- [ ] two <!--t:3b8q-->\n");
         assert!(board.duplicated().is_empty());
+    }
+
+    /// A person's task line may mention or use an HTML comment — `<!--more-->` is a documented
+    /// Obsidian idiom, and a hidden note beside a to-do is ordinary. Asked "does this line hold
+    /// a comment at all", the guard turned those away and told their author that a stamp they
+    /// never wrote would not read.
+    #[test]
+    fn a_line_holding_a_comment_that_names_no_task_is_still_adopted() {
+        for line in [
+            "- [ ] document the <!--more--> tag on the blog",
+            "- [ ] compare <!-- and --> in markdown",
+            "- [ ] a note <!-- ask Sarah --> about the banner",
+        ] {
+            let board = board_of(&format!("## Today\n\n{line}\n"));
+            assert!(board.malformed().is_empty(), "{line}");
+            assert_eq!(board.unstamped().len(), 1, "{line}");
+        }
+
+        // A stamp that is last is read however many other comments precede it.
+        let board =
+            board_of("## Today\n\n- [ ] a note <!-- why --> here <!--t:7k2p since:2026-08-18-->\n");
+        assert!(board.malformed().is_empty());
+        assert_eq!(board.tasks().count(), 1);
+    }
+
+    /// A quarantined line may carry a note AFTER its stamp. Reading only the last comment found
+    /// no `t:` at all, leaving an id a live line still names unprotected from the mint.
+    #[test]
+    fn a_quarantined_line_still_protects_the_id_it_names() {
+        let board =
+            board_of("## Today\n\n- [x] task <!--t:7k2p since:2026-08-18--> and <!--a note-->\n");
+        assert_eq!(board.malformed().len(), 1);
+        assert!(board.ids().contains(&"7k2p".parse().unwrap()));
     }
 
     /// Text typed after the stamp is not an unstamped line. Read as one, the line was adopted

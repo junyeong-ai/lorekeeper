@@ -199,7 +199,7 @@ impl Recorded {
     pub fn from_day(transitions: &[Transition]) -> Self {
         let mut recorded = Self::default();
         for transition in transitions {
-            recorded.absorb(transition.clone());
+            recorded.absorb(transition.clone(), true);
         }
         recorded
     }
@@ -215,7 +215,7 @@ impl Recorded {
     /// be a completion recorded since that id's own most recent creation. Where the window holds
     /// no `Created` for an id — a stamp typed by hand, a task older than the window — there is
     /// nothing to clear and the window's own start is what bounds it.
-    fn absorb(&mut self, transition: Transition) {
+    fn absorb(&mut self, transition: Transition, in_completion_window: bool) {
         self.seen.insert(transition.id.clone());
         if let Some(src) = &transition.src
             && transition.kind.is_answer()
@@ -223,10 +223,10 @@ impl Recorded {
             self.answered.insert(src.clone());
         }
         match transition.kind {
-            TransitionKind::Created => {
+            TransitionKind::Created if in_completion_window => {
                 self.closed.remove(&transition.id);
             }
-            TransitionKind::Done => {
+            TransitionKind::Done if in_completion_window => {
                 self.closed.insert(transition.id.clone(), transition);
             }
             // Absorbed wherever it was written, because the key is the PAIR: a carry for
@@ -323,21 +323,27 @@ impl TransitionLog {
         today: jiff::civil::Date,
         floor: Option<jiff::civil::Date>,
     ) -> Result<Recorded, TaskError> {
-        let mut day = board
+        // Two starts, because the two questions are bounded by different things. A completion
+        // is bounded by the ticked task's own first day — that is what makes "a completion
+        // recorded on or after this task's own first day is this task's" true, and reading
+        // further back for it would let an older life of a recycled id settle a live line. A
+        // carry is bounded by the day being closed. Widening one window for both made `sync`
+        // and `rollover` disagree about the same tick.
+        let completions_from = board
             .tasks()
             .filter(|task| task.done)
             .map(|task| task.since)
             .min()
-            .into_iter()
-            .chain(floor)
-            .min()
             .unwrap_or(today)
+            .min(today);
+        let mut day = floor
+            .map_or(completions_from, |floor| completions_from.min(floor))
             .min(today);
 
         let mut recorded = Recorded::default();
         while day <= today {
             for transition in self.read(day)? {
-                recorded.absorb(transition);
+                recorded.absorb(transition, day >= completions_from);
             }
             day = day
                 .tomorrow()
