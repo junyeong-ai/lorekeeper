@@ -99,6 +99,13 @@ fn path(vault_root: &Path) -> std::path::PathBuf {
 
 /// Whether the lock file is simply not there yet — the one open failure a write repairs by
 /// creating it, and so the only one that is not a lasting refusal.
+///
+/// A DANGLING SYMLINK at that path is the one input where the premise can be false: the open
+/// answers `NotFound` for the target, and whether a write repairs it depends on the target's
+/// parent, which is not a question this can ask without a second probe that may disagree with
+/// the first. It is left to fail at the write, which names the path and the repair — a symlink
+/// is not categorically a lasting refusal, and where its target is creatable the write correctly
+/// succeeds.
 fn is_absent(why: &Unholdable) -> bool {
     matches!(
         why,
