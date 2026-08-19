@@ -320,6 +320,29 @@ impl TransitionLog {
         }
     }
 
+    /// Every date the record holds, oldest first.
+    ///
+    /// A key that is not a date is an ERROR rather than a file to skip. This directory is the
+    /// transition log's alone, so a name that is not a date is damage — a sync client's conflict
+    /// copy holds real completions, and passing over it silently would re-propose exactly the
+    /// work it says was answered and let a completion be recorded twice. `Jsonl::read` refuses a
+    /// line it cannot read for the same reason; the strictness must not go quiet at the filename.
+    fn dates(&self) -> Result<Vec<jiff::civil::Date>, TaskError> {
+        self.shelf
+            .keys()?
+            .into_iter()
+            .map(|key| {
+                key.parse().map_err(|e| {
+                    TaskError::Malformed(format!(
+                        "the task record holds `{key}.jsonl`, which is not a date: {e} (left \
+                         intact — a conflict copy holds completions this would otherwise pass \
+                         over)"
+                    ))
+                })
+            })
+            .collect()
+    }
+
     /// A date's transitions, oldest first, or nothing where the day has none.
     ///
     /// An unreadable line is a hard error rather than a skip: the writer only ever produces
@@ -362,18 +385,23 @@ impl TransitionLog {
             .min()
             .unwrap_or(today)
             .min(today);
-        let mut day = floor
-            .map_or(completions_from, |floor| completions_from.min(floor))
-            .min(today);
+        let from = floor.map_or(completions_from, |floor| completions_from.min(floor));
 
+        // The dates the record actually HOLDS, rather than every date from there to today. Two
+        // things follow from asking the shelf instead of counting days. There is no CEILING: a
+        // completion filed on a date ahead of this pass's today — a `vault.timezone` moved
+        // westward, two machines whose clocks differ — sat outside the window, so the tick was
+        // harvested a second time and one completion was archived on two dates, which two
+        // `EventId`s cannot collapse. And a floor far in the past costs one directory read
+        // rather than an `open` for every day in between.
         let mut recorded = Recorded::default();
-        while day <= today {
+        for day in self.dates()? {
+            if day < from {
+                continue;
+            }
             for transition in self.read(day)? {
                 recorded.absorb(transition, day, day >= completions_from);
             }
-            day = day
-                .tomorrow()
-                .map_err(|e| TaskError::Malformed(format!("{day} has no successor: {e}")))?;
         }
         Ok(recorded)
     }
@@ -391,18 +419,7 @@ impl TransitionLog {
     /// empty would re-propose exactly the work the unreadable half says was finished.
     pub fn answered_origins(&self) -> Result<std::collections::BTreeSet<String>, TaskError> {
         let mut answered = std::collections::BTreeSet::new();
-        // Every key, and a key that is not a date is an ERROR rather than a file to skip. This
-        // directory is the transition log's alone, so a name that is not a date is damage — a
-        // sync client's conflict copy holds real completions, and passing over it silently
-        // would re-propose exactly the work it says was answered. `Jsonl::read` refuses a line
-        // it cannot read for the same reason; the strictness must not go quiet at the filename.
-        for key in self.shelf.keys()? {
-            let date: jiff::civil::Date = key.parse().map_err(|e| {
-                TaskError::Malformed(format!(
-                    "the task record holds `{key}.jsonl`, which is not a date: {e} (left intact \
-                     — a conflict copy holds completions this would otherwise pass over)"
-                ))
-            })?;
+        for date in self.dates()? {
             for transition in self.read(date)? {
                 if let Some(src) = transition.src
                     && transition.kind.is_answer()

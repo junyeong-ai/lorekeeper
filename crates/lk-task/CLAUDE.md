@@ -306,7 +306,13 @@ the commands in `lk-cli` are the only thing that decides when to apply them.
   task already carried FOR THIS ENDED DAY?" is keyed on the pair, so it needs no window of its
   own and is absorbed wherever the transition was written — a carry for another day cannot
   suppress this one, and asked of today's file alone a close retried on a later calendar day
-  wrote a second carry for one day. A date file
+  wrote a second carry for one day. The window has a start and NO ceiling, and it is read off
+  the dates the record actually HOLDS rather than counted day by day up to today: a completion
+  filed on a date ahead of this pass's today — a `vault.timezone` moved westward, two machines
+  whose clocks differ on one vault — sat outside a window that stopped there, so a still-ticked
+  line was harvested again and one completion reached two dates. Asking the shelf also makes a
+  floor far in the past one directory read rather than an `open` for every day in between. A
+  date file
   that will not read is FATAL to a write here rather than warned past, because the completion
   guard spans several of them and one read as an empty day harvests what the missing half
   already recorded. Inside that window a `Created` CLEARS the closure standing for its id rather

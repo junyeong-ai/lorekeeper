@@ -569,7 +569,7 @@ impl IntentPlane {
     /// that, so it returns tomorrow. That is the same silence deleting any task line already
     /// has, and a proposal that comes back is a smaller cost than one suppressed by a rule
     /// guessing at what a deletion meant.
-    fn propose(&mut self) -> miette::Result<(usize, Vec<std::path::PathBuf>)> {
+    fn propose(&mut self) -> miette::Result<(usize, Vec<lk_task::Consumed>)> {
         let snapshots = lk_task::Candidates::new(&self.vault_root)
             .read_all(&self.sources)
             .map_err(|e| miette::miette!("{e}"))?;

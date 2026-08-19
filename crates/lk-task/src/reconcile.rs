@@ -465,6 +465,44 @@ mod tests {
         assert_eq!(board.get(&"3b8q".parse().unwrap()).unwrap().carried, 1);
     }
 
+    /// The completion guard has no CEILING. A record filed on a date ahead of this pass's today
+    /// — a `vault.timezone` moved westward, two machines whose clocks differ — sat outside a
+    /// window that counted days up to today, so the still-ticked line was harvested a second
+    /// time and one completion reached two dates, which two `EventId`s cannot collapse.
+    #[test]
+    fn a_completion_filed_ahead_of_today_still_answers_for_its_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = crate::log::TransitionLog::new(tmp.path());
+        let ahead = today()
+            .tomorrow()
+            .unwrap()
+            .at(9, 0, 0, 0)
+            .to_zoned(jiff::tz::TimeZone::UTC)
+            .unwrap()
+            .timestamp();
+        log.record(
+            &[Transition::new(
+                "7k2p".parse().unwrap(),
+                TransitionKind::Done,
+                "a",
+                ahead,
+            )],
+            &jiff::tz::TimeZone::UTC,
+        )
+        .unwrap();
+
+        let mut board = board_of("## Today\n\n- [x] a <!--t:7k2p since:2026-08-19-->\n");
+        let recorded = log.recorded_for(&board, today(), None).unwrap();
+        let outcome = sync(&mut board, now(), today(), &recorded);
+
+        assert!(
+            outcome.harvested.is_empty(),
+            "not recorded onto a second date"
+        );
+        assert_eq!(outcome.settled, vec!["7k2p".parse::<TaskId>().unwrap()]);
+        assert_eq!(board.tasks().count(), 0, "and the line still goes");
+    }
+
     /// A completion the day already holds is a board write that did not land, not a second
     /// completion — but the LINE still has to go, or the board and the history disagree until
     /// midnight and the next day's pass harvests it again onto a second date, which two

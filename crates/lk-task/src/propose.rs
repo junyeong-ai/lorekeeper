@@ -82,25 +82,20 @@ impl Judged {
     /// per-item isolation an adapter uses when one feed of many is broken.
     pub fn take(&self, permitted: &[String]) -> Result<Gathered, TaskError> {
         let mut all = Vec::new();
-        let mut paths = Vec::new();
+        let mut consumed = Vec::new();
         let mut unreadable = Vec::new();
         for key in self.shelf.keys()? {
             let file = self.shelf.file(&key);
             match file.read::<Candidate>() {
                 Ok(held) => {
-                    let before = held.len();
-                    let taken: Vec<_> = held
+                    let (taken, left): (Vec<_>, Vec<_>) = held
                         .into_iter()
-                        .filter(|candidate| permitted.contains(&candidate.source_id))
-                        .collect();
-                    // Retired only where the file was taken WHOLE. A judgment the filter passed
-                    // over is as unseen as one in a file that would not read, and that one is
-                    // deliberately left on disk — deleting this one loses a proposal nobody saw,
-                    // for a source that is paused rather than gone. `add` keys by DATE, so one
-                    // day's file holds every source's judgments and a mixed file is the
-                    // ordinary shape.
-                    if taken.len() == before {
-                        paths.push(file.path().to_path_buf());
+                        .partition(|candidate| permitted.contains(&candidate.source_id));
+                    if !taken.is_empty() {
+                        consumed.push(Consumed {
+                            path: file.path().to_path_buf(),
+                            left,
+                        });
                     }
                     all.extend(taken);
                 }
@@ -109,18 +104,55 @@ impl Judged {
         }
         Ok(Gathered {
             candidates: all,
-            consumed: paths,
+            consumed,
             unreadable,
         })
     }
 
-    /// Drop the files a proposal run consumed.
+    /// The judgments left by a source no CONFIGURED source answers for.
+    ///
+    /// The same rule the snapshots follow, applied a level down: a snapshot is keyed by source
+    /// so an orphan is a whole file, while these are keyed by DATE and an orphan is a row. A
+    /// source deleted from `config.yaml` leaves judgments nothing can ever act on; one merely
+    /// dropped from `propose_from` is PAUSED, and its judgment waits on disk for the day it
+    /// comes back.
+    pub fn orphans(&self, configured: &[String]) -> Result<Vec<Consumed>, TaskError> {
+        let mut orphaned = Vec::new();
+        for key in self.shelf.keys()? {
+            let file = self.shelf.file(&key);
+            // A file that will not read is left exactly where it is, as everywhere here: it
+            // holds judgments nobody has seen, and a janitor is the last thing that should be
+            // deciding they are gone.
+            let Ok(held) = file.read::<Candidate>() else {
+                continue;
+            };
+            let left: Vec<Candidate> = held
+                .iter()
+                .filter(|candidate| configured.contains(&candidate.source_id))
+                .cloned()
+                .collect();
+            if left.len() != held.len() {
+                orphaned.push(Consumed {
+                    path: file.path().to_path_buf(),
+                    left,
+                });
+            }
+        }
+        Ok(orphaned)
+    }
+
+    /// Write back what each file still holds, removing the ones left holding nothing.
     ///
     /// Called only after the board write has LANDED. A failure here re-reads them next time,
     /// where the board already holds what they name and nothing is proposed twice.
-    pub fn retire(paths: &[PathBuf]) -> Result<(), TaskError> {
-        for path in paths {
-            crate::store::Jsonl::at(path.clone()).retire()?;
+    pub fn retire(consumed: &[Consumed]) -> Result<(), TaskError> {
+        for file in consumed {
+            let jsonl = crate::store::Jsonl::at(file.path.clone());
+            if file.left.is_empty() {
+                jsonl.retire()?;
+            } else {
+                jsonl.replace(&file.left)?;
+            }
         }
         Ok(())
     }
@@ -133,10 +165,23 @@ impl Judged {
 /// could not read while acting on what it could.
 pub struct Gathered {
     pub candidates: Vec<Candidate>,
-    /// Files whose contents are now the board's, for a caller to retire once the write lands.
-    /// Empty for a snapshot, which is re-declared rather than consumed.
-    pub consumed: Vec<PathBuf>,
+    /// Files a proposal took from, for a caller to settle once the write lands. Empty for a
+    /// snapshot, which is re-declared rather than consumed.
+    pub consumed: Vec<Consumed>,
     pub unreadable: Vec<TaskError>,
+}
+
+/// A judged file a proposal took from, and the judgments it still holds.
+///
+/// Retired whole ONLY when nothing is left. Keyed by DATE, one day's file holds every source's
+/// judgments, so a file taken from partly is the ordinary shape the moment `propose_from` names
+/// fewer sources than the session did — and retiring only a WHOLE file left the taken half on
+/// disk with nothing recording that it had been offered, so it came back every morning: the
+/// exact outcome consuming exists to prevent. Written back without them, a judgment the filter
+/// passed over is still on disk for the day its source comes back.
+pub struct Consumed {
+    path: PathBuf,
+    left: Vec<Candidate>,
 }
 
 /// The candidates nobody has answered about yet, one per origin.
@@ -362,11 +407,13 @@ mod tests {
         );
     }
 
-    /// A file the filter passed over holds judgments nobody has seen. Retiring it deletes them
-    /// for a source that is paused rather than gone — and one day's file holds every source's
-    /// judgments, so a mixed file is the ordinary shape rather than the corner.
+    /// A judgment the filter passed over is left where it is — its source is paused rather than
+    /// gone — while the one that WAS offered is written out of the file. Retiring only a WHOLE
+    /// file left the offered half on disk with nothing recording that it had been offered, and
+    /// one day's file holds every source's judgments, so a mixed file is the ordinary shape the
+    /// moment `propose_from` names fewer sources than the session did.
     #[test]
-    fn a_file_not_taken_whole_is_left_where_it_is() {
+    fn a_judgment_taken_is_written_out_and_one_passed_over_stays() {
         let tmp = tempfile::tempdir().unwrap();
         let judged = Judged::new(tmp.path());
         let day = jiff::civil::date(2026, 8, 19);
@@ -379,13 +426,26 @@ mod tests {
 
         let mixed = judged.take(&["alpha".to_string()]).unwrap();
         assert_eq!(mixed.candidates.len(), 1);
-        assert!(mixed.consumed.is_empty(), "beta's judgment is not seen yet");
+        assert_eq!(mixed.consumed.len(), 1);
+        Judged::retire(&mixed.consumed).unwrap();
 
-        let whole = judged
+        // Alpha's judgment was offered and is gone; beta's was never seen and waits on disk.
+        let again = judged
             .take(&["alpha".to_string(), "beta".to_string()])
             .unwrap();
-        assert_eq!(whole.candidates.len(), 2);
-        assert_eq!(whole.consumed.len(), 1);
+        assert_eq!(again.candidates.len(), 1);
+        assert_eq!(again.candidates[0].source_id, "beta");
+        Judged::retire(&again.consumed).unwrap();
+
+        // And with nothing left, the file goes rather than sitting there empty forever.
+        assert!(
+            judged
+                .take(&["beta".to_string()])
+                .unwrap()
+                .candidates
+                .is_empty()
+        );
+        assert!(judged.shelf.keys().unwrap().is_empty());
     }
 
     #[test]

@@ -202,6 +202,26 @@ pub async fn run(opts: &super::GlobalOptions, dry_run: bool) -> miette::Result<(
                 orphans.len()
             );
         }
+
+        // The same rule one level down. A snapshot is keyed by SOURCE, so an orphan is a whole
+        // file; a judgment is keyed by DATE and one day's file holds every source's, so an
+        // orphan is a ROW and what is left is written back. Without this the judgments of a
+        // source deleted from `config.yaml` stayed on disk forever — the one store here that no
+        // declared lifetime covered, because nothing could ever read them again and nothing
+        // swept them either.
+        let judged = lk_task::Judged::new(&vault_root);
+        let stale = judged
+            .orphans(&configured)
+            .map_err(|e| miette::miette!("{e}"))?;
+        if !stale.is_empty() {
+            if !dry_run {
+                lk_task::Judged::retire(&stale).map_err(|e| miette::miette!("{e}"))?;
+            }
+            eprintln!(
+                "{prefix}intent: cleared judgments in {} file(s) no configured source answers for.",
+                stale.len()
+            );
+        }
     }
 
     Ok(())
