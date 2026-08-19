@@ -154,8 +154,8 @@ pub fn rollover(
     recorded: &Recorded,
 ) -> Reconciled {
     // What the day was committed to BEFORE this pass touched it. A task the same pass woke or
-    // adopted arrived today; stamping it `carried:1` would have it claim to have survived a
-    // day-close its own `since` says it never saw.
+    // adopted arrived during the close; stamping it `carried:1` would have it claim to have
+    // survived a day-close its own `since` says it never saw.
     let began_with: std::collections::BTreeSet<TaskId> = board
         .tasks()
         .filter(|task| task.state == TaskState::Today)
@@ -169,10 +169,25 @@ pub fn rollover(
     // the log write — asked of the CLOSING day the transition names rather than of the day it
     // was written, which is the same fact and not a proxy for it. Asked as a proxy, catching up
     // two missed closes in one sitting counted the first and skipped the second.
+    //
+    // What arrived is asked over two passes, because one of them cannot see the other. This
+    // pass's own arrivals are what `began_with` excludes; an EARLIER pass on a later day left
+    // its record, and `entered_today_after` reads it — a task written down this morning was
+    // already under the heading before the close ran, so the first question calls it committed
+    // and only the record disproves it. Left to the first alone, the scheduled close that fires
+    // when the laptop wakes stamped `carried-on:` for a day the task's own `since` says it did
+    // not exist on, and the count that is supposed to diagnose a stale task was wrong from its
+    // first day.
+    //
+    // Silence is not proof. A line dragged under the heading in an editor is a state change
+    // nothing records, and reading its absence as "never committed" would drop the carry of
+    // every task managed the way this board is meant to be — so the record only ever REFUSES a
+    // carry, and never invents one.
     let committed: Vec<TaskId> = board
         .tasks()
         .filter(|task| task.state == TaskState::Today)
         .filter(|task| began_with.contains(&task.id))
+        .filter(|task| !recorded.entered_today_after(&task.id, closing))
         .filter(|task| task.carried_on != Some(closing))
         .filter(|task| !recorded.is_carried(&task.id, closing))
         .map(|task| task.id.clone())
@@ -220,7 +235,12 @@ mod tests {
     #[test]
     fn a_line_typed_in_an_editor_is_given_an_address() {
         let mut board = board_of("## Today\n\n- [ ] wrote this in Obsidian\n");
-        let outcome = sync(&mut board, now(), today(), &Recorded::from_day(&[]));
+        let outcome = sync(
+            &mut board,
+            now(),
+            today(),
+            &Recorded::from_day(today(), &[]),
+        );
 
         assert_eq!(outcome.adopted.len(), 1);
         let task = board.tasks().next().expect("adopted");
@@ -233,7 +253,12 @@ mod tests {
     #[test]
     fn a_box_ticked_in_an_editor_closes_the_task() {
         let mut board = board_of("## Today\n\n- [x] a <!--t:7k2p since:2026-08-17 carried:2-->\n");
-        let outcome = sync(&mut board, now(), today(), &Recorded::from_day(&[]));
+        let outcome = sync(
+            &mut board,
+            now(),
+            today(),
+            &Recorded::from_day(today(), &[]),
+        );
 
         assert_eq!(board.tasks().count(), 0, "a closed task leaves the board");
         assert_eq!(outcome.harvested.len(), 1);
@@ -248,7 +273,12 @@ mod tests {
     #[test]
     fn a_line_typed_and_ticked_at_once_is_created_then_closed() {
         let mut board = board_of("## Today\n\n- [x] did this before writing it down\n");
-        let outcome = sync(&mut board, now(), today(), &Recorded::from_day(&[]));
+        let outcome = sync(
+            &mut board,
+            now(),
+            today(),
+            &Recorded::from_day(today(), &[]),
+        );
 
         let kinds: Vec<TransitionKind> = outcome.transitions.iter().map(|t| t.kind).collect();
         assert_eq!(kinds, [TransitionKind::Created, TransitionKind::Done]);
@@ -259,7 +289,12 @@ mod tests {
     fn a_waiting_task_comes_back_on_the_day_it_named() {
         let mut board =
             board_of("## Waiting\n\n- [ ] a <!--t:7k2p since:2026-08-14 wake:2026-08-19-->\n");
-        let outcome = sync(&mut board, now(), today(), &Recorded::from_day(&[]));
+        let outcome = sync(
+            &mut board,
+            now(),
+            today(),
+            &Recorded::from_day(today(), &[]),
+        );
 
         let task = board.tasks().next().expect("still open");
         assert_eq!(task.state, TaskState::Today);
@@ -272,7 +307,12 @@ mod tests {
     fn a_waiting_task_whose_day_has_not_come_is_untouched() {
         let mut board =
             board_of("## Waiting\n\n- [ ] a <!--t:7k2p since:2026-08-14 wake:2026-08-22-->\n");
-        let outcome = sync(&mut board, now(), today(), &Recorded::from_day(&[]));
+        let outcome = sync(
+            &mut board,
+            now(),
+            today(),
+            &Recorded::from_day(today(), &[]),
+        );
 
         assert_eq!(board.tasks().next().unwrap().state, TaskState::Waiting);
         assert!(outcome.is_empty());
@@ -282,7 +322,12 @@ mod tests {
     fn a_board_that_changed_nowhere_else_reconciles_to_nothing() {
         let mut board = board_of("## Today\n\n- [ ] a <!--t:7k2p since:2026-08-19-->\n");
         let before = board.render(Locale::En, today());
-        let outcome = sync(&mut board, now(), today(), &Recorded::from_day(&[]));
+        let outcome = sync(
+            &mut board,
+            now(),
+            today(),
+            &Recorded::from_day(today(), &[]),
+        );
 
         assert!(outcome.is_empty());
         assert_eq!(board.render(Locale::En, today()), before);
@@ -299,7 +344,7 @@ mod tests {
             now(),
             today(),
             today(),
-            &Recorded::from_day(&[]),
+            &Recorded::from_day(today(), &[]),
         );
         assert_eq!(board.get(&"7k2p".parse().unwrap()).unwrap().carried, 4);
 
@@ -308,7 +353,7 @@ mod tests {
             now(),
             today(),
             today(),
-            &Recorded::from_day(&first.transitions),
+            &Recorded::from_day(today(), &first.transitions),
         );
         assert!(second.carried.is_empty(), "the day closed once");
         assert_eq!(board.get(&"7k2p".parse().unwrap()).unwrap().carried, 4);
@@ -330,7 +375,7 @@ mod tests {
             now(),
             today(),
             today(),
-            &Recorded::from_day(&recorded),
+            &Recorded::from_day(today(), &recorded),
         );
         assert_eq!(outcome.carried, vec!["3b8q".parse::<TaskId>().unwrap()]);
     }
@@ -346,7 +391,7 @@ mod tests {
             now(),
             today(),
             today(),
-            &Recorded::from_day(&[]),
+            &Recorded::from_day(today(), &[]),
         );
         assert_eq!(outcome.woken.len(), 1);
         assert!(outcome.carried.is_empty(), "it spent the day waiting");
@@ -358,10 +403,66 @@ mod tests {
             now(),
             today(),
             today(),
-            &Recorded::from_day(&[]),
+            &Recorded::from_day(today(), &[]),
         );
         assert_eq!(adopted.adopted.len(), 1);
         assert!(adopted.carried.is_empty(), "it was written down today");
+    }
+
+    /// The day being closed is not the day this pass runs on, and what arrived in between is
+    /// written down. A task added this morning is under the heading before the close reads the
+    /// board, so the board alone calls it committed to yesterday — only the record it left says
+    /// otherwise. Built through the real log, because a `Recorded` assembled by hand cannot
+    /// reach the window this is about.
+    #[test]
+    fn a_task_written_down_today_is_not_carried_from_a_day_it_never_saw() {
+        let ended = jiff::civil::date(2026, 8, 18);
+        let tmp = tempfile::tempdir().unwrap();
+        let log = crate::log::TransitionLog::new(tmp.path());
+        log.record(
+            &[
+                Transition::new("3b8q".parse().unwrap(), TransitionKind::Created, "a", now())
+                    .with_state(TaskState::Today),
+            ],
+            &jiff::tz::TimeZone::UTC,
+        )
+        .unwrap();
+
+        let mut board = board_of("## Today\n\n- [ ] a <!--t:3b8q since:2026-08-19-->\n");
+        let recorded = log.recorded_for(&board, today(), Some(ended)).unwrap();
+        let outcome = rollover(&mut board, now(), today(), ended, &recorded);
+
+        assert!(outcome.carried.is_empty(), "it did not exist yesterday");
+        assert_eq!(board.get(&"3b8q".parse().unwrap()).unwrap().carried, 0);
+        assert_eq!(
+            board.get(&"3b8q".parse().unwrap()).unwrap().carried_on,
+            None
+        );
+    }
+
+    /// The same window must not refuse a carry the day did hold. A task committed before the
+    /// day being closed left no later record, and a line dragged under the heading in an editor
+    /// leaves none at all — so the absence of a record carries, and only its presence refuses.
+    #[test]
+    fn a_task_the_record_does_not_speak_for_is_carried() {
+        let ended = jiff::civil::date(2026, 8, 18);
+        let tmp = tempfile::tempdir().unwrap();
+        let log = crate::log::TransitionLog::new(tmp.path());
+        log.record(
+            &[
+                Transition::new("3b8q".parse().unwrap(), TransitionKind::Moved, "a", now())
+                    .with_state(TaskState::Next),
+            ],
+            &jiff::tz::TimeZone::UTC,
+        )
+        .unwrap();
+
+        let mut board = board_of("## Today\n\n- [ ] a <!--t:3b8q since:2026-08-01-->\n");
+        let recorded = log.recorded_for(&board, today(), Some(ended)).unwrap();
+        let outcome = rollover(&mut board, now(), today(), ended, &recorded);
+
+        assert_eq!(outcome.carried, vec!["3b8q".parse::<TaskId>().unwrap()]);
+        assert_eq!(board.get(&"3b8q".parse().unwrap()).unwrap().carried, 1);
     }
 
     /// A completion the day already holds is a board write that did not land, not a second
@@ -372,7 +473,12 @@ mod tests {
     fn a_completion_the_day_already_holds_settles_the_board_without_recording_it() {
         let page = "## Today\n\n- [x] a <!--t:7k2p since:2026-08-19-->\n";
         let mut board = board_of(page);
-        let first = sync(&mut board, now(), today(), &Recorded::from_day(&[]));
+        let first = sync(
+            &mut board,
+            now(),
+            today(),
+            &Recorded::from_day(today(), &[]),
+        );
         assert_eq!(first.harvested.len(), 1);
 
         // The board write failed, so the tick is still there when the next pass reads it.
@@ -381,7 +487,7 @@ mod tests {
             &mut retried,
             now(),
             today(),
-            &Recorded::from_day(&first.transitions),
+            &Recorded::from_day(today(), &first.transitions),
         );
         assert!(second.harvested.is_empty(), "not recorded twice");
         assert!(second.transitions.is_empty());
@@ -399,13 +505,25 @@ mod tests {
         let mut board = board_of(page);
         let ended = today();
 
-        let evening = rollover(&mut board, now(), ended, ended, &Recorded::from_day(&[]));
+        let evening = rollover(
+            &mut board,
+            now(),
+            ended,
+            ended,
+            &Recorded::from_day(today(), &[]),
+        );
         assert_eq!(evening.carried.len(), 1);
         assert_eq!(board.get(&"7k2p".parse().unwrap()).unwrap().carried, 1);
 
         // The next morning: a different date, so a different record — and empty.
         let tomorrow = jiff::civil::date(2026, 8, 20);
-        let morning = rollover(&mut board, now(), tomorrow, ended, &Recorded::from_day(&[]));
+        let morning = rollover(
+            &mut board,
+            now(),
+            tomorrow,
+            ended,
+            &Recorded::from_day(today(), &[]),
+        );
         assert!(
             morning.carried.is_empty(),
             "the same day does not close twice"
@@ -418,7 +536,7 @@ mod tests {
             now(),
             tomorrow,
             tomorrow,
-            &Recorded::from_day(&[]),
+            &Recorded::from_day(today(), &[]),
         );
         assert_eq!(next.carried.len(), 1);
         assert_eq!(board.get(&"7k2p".parse().unwrap()).unwrap().carried, 2);
@@ -435,7 +553,7 @@ mod tests {
             now(),
             today(),
             today(),
-            &Recorded::from_day(&[]),
+            &Recorded::from_day(today(), &[]),
         );
 
         let carried = board.get(&"7k2p".parse().unwrap()).unwrap();
@@ -461,7 +579,7 @@ mod tests {
             now(),
             today(),
             today(),
-            &Recorded::from_day(&[]),
+            &Recorded::from_day(today(), &[]),
         );
 
         assert_eq!(outcome.harvested.len(), 1);
@@ -480,7 +598,7 @@ mod tests {
             now(),
             today(),
             today(),
-            &Recorded::from_day(&[]),
+            &Recorded::from_day(today(), &[]),
         );
         assert!(outcome.carried.is_empty());
         assert!(
@@ -495,7 +613,12 @@ mod tests {
     #[test]
     fn two_identical_lines_are_two_tasks() {
         let mut board = board_of("## Today\n\n- [ ] same\n- [ ] same\n");
-        sync(&mut board, now(), today(), &Recorded::from_day(&[]));
+        sync(
+            &mut board,
+            now(),
+            today(),
+            &Recorded::from_day(today(), &[]),
+        );
         let ids: Vec<&TaskId> = board.tasks().map(|task| &task.id).collect();
         assert_eq!(ids.len(), 2);
         assert_ne!(ids[0], ids[1]);
@@ -506,7 +629,12 @@ mod tests {
     #[test]
     fn a_malformed_line_is_left_exactly_as_it_was() {
         let mut board = board_of("## Today\n\n- [ ] a <!--t:7k2p since:broken-->\n");
-        let outcome = sync(&mut board, now(), today(), &Recorded::from_day(&[]));
+        let outcome = sync(
+            &mut board,
+            now(),
+            today(),
+            &Recorded::from_day(today(), &[]),
+        );
         assert!(outcome.is_empty());
         assert_eq!(board.malformed().len(), 1);
         assert!(
@@ -532,7 +660,7 @@ mod tests {
             now(),
             today(),
             jiff::civil::date(2026, 8, 17),
-            &Recorded::from_day(&[]),
+            &Recorded::from_day(today(), &[]),
         );
         assert_eq!(first.carried.len(), 1);
 
@@ -541,7 +669,7 @@ mod tests {
             now(),
             today(),
             jiff::civil::date(2026, 8, 18),
-            &Recorded::from_day(&first.transitions),
+            &Recorded::from_day(today(), &first.transitions),
         );
         assert_eq!(
             second.carried.len(),
@@ -556,7 +684,7 @@ mod tests {
             now(),
             today(),
             jiff::civil::date(2026, 8, 18),
-            &Recorded::from_day(&[first.transitions, second.transitions].concat()),
+            &Recorded::from_day(today(), &[first.transitions, second.transitions].concat()),
         );
         assert!(third.carried.is_empty());
         assert_eq!(board.tasks().next().unwrap().carried, 2);
@@ -590,7 +718,7 @@ mod tests {
             now(),
             today(),
             closing,
-            &Recorded::from_day(&stranded),
+            &Recorded::from_day(today(), &stranded),
         );
         assert!(outcome.carried.is_empty(), "one ended day closes once");
         assert_eq!(board.tasks().next().unwrap().carried, 0);
@@ -601,7 +729,7 @@ mod tests {
             now(),
             today(),
             jiff::civil::date(2026, 8, 17),
-            &Recorded::from_day(&stranded),
+            &Recorded::from_day(today(), &stranded),
         );
         assert_eq!(next.carried.len(), 1);
     }

@@ -190,16 +190,20 @@ impl Transition {
 pub struct Recorded {
     closed: std::collections::BTreeMap<TaskId, Transition>,
     carried: std::collections::BTreeSet<(TaskId, jiff::civil::Date)>,
+    /// The last day the history records a task ENTERING `## Today`, whichever route took it
+    /// there. What makes "was this committed to the day being closed" answerable from the
+    /// record instead of from the shape the board happened to have when a pass began.
+    committed: std::collections::BTreeMap<TaskId, jiff::civil::Date>,
     seen: std::collections::BTreeSet<TaskId>,
     answered: std::collections::BTreeSet<String>,
 }
 
 impl Recorded {
     /// One day's record answering both questions — what a single date's file supports.
-    pub fn from_day(transitions: &[Transition]) -> Self {
+    pub fn from_day(day: jiff::civil::Date, transitions: &[Transition]) -> Self {
         let mut recorded = Self::default();
         for transition in transitions {
-            recorded.absorb(transition.clone(), true);
+            recorded.absorb(transition.clone(), day, true);
         }
         recorded
     }
@@ -215,12 +219,23 @@ impl Recorded {
     /// be a completion recorded since that id's own most recent creation. Where the window holds
     /// no `Created` for an id — a stamp typed by hand, a task older than the window — there is
     /// nothing to clear and the window's own start is what bounds it.
-    fn absorb(&mut self, transition: Transition, in_completion_window: bool) {
+    fn absorb(
+        &mut self,
+        transition: Transition,
+        day: jiff::civil::Date,
+        in_completion_window: bool,
+    ) {
         self.seen.insert(transition.id.clone());
         if let Some(src) = &transition.src
             && transition.kind.is_answer()
         {
             self.answered.insert(src.clone());
+        }
+        // The DAY the record holds it under, not the instant it names: every date in this plane
+        // is derived in the vault's zone once, when the transition is filed, and re-deriving it
+        // here from a zone this does not have is how the two answers come apart.
+        if transition.state == Some(crate::task::TaskState::Today) {
+            self.committed.insert(transition.id.clone(), day);
         }
         match transition.kind {
             TransitionKind::Created if in_completion_window => {
@@ -275,6 +290,17 @@ impl Recorded {
 
     pub(crate) fn is_carried(&self, id: &TaskId, closing: jiff::civil::Date) -> bool {
         self.carried.contains(&(id.clone(), closing))
+    }
+
+    /// Whether the history records this task entering `## Today` after `day` ended.
+    ///
+    /// A one-directional proof, and deliberately so. It answers YES only on a record of a later
+    /// commitment, so it can refuse a carry the day never held and can never invent one. Silence
+    /// is not evidence: a line dragged under the heading in an editor is a state change nothing
+    /// records, and reading its absence as "never committed" would drop the carry of every task
+    /// managed the way the board is meant to be.
+    pub(crate) fn entered_today_after(&self, id: &TaskId, day: jiff::civil::Date) -> bool {
+        self.committed.get(id).is_some_and(|entered| *entered > day)
     }
 }
 
@@ -343,7 +369,7 @@ impl TransitionLog {
         let mut recorded = Recorded::default();
         while day <= today {
             for transition in self.read(day)? {
-                recorded.absorb(transition, day >= completions_from);
+                recorded.absorb(transition, day, day >= completions_from);
             }
             day = day
                 .tomorrow()
@@ -631,7 +657,7 @@ mod tests {
             Transition::new(recycled.clone(), TransitionKind::Done, "first", at(9)),
             Transition::new(recycled.clone(), TransitionKind::Created, "second", at(10)),
         ];
-        let recorded = Recorded::from_day(&history);
+        let recorded = Recorded::from_day(jiff::civil::date(2026, 8, 19), &history);
         assert!(recorded.closure(&recycled).is_none());
 
         // The task's own completion still answers, and its title is the one it closed under.
@@ -643,7 +669,10 @@ mod tests {
             at(17),
         ));
         assert_eq!(
-            Recorded::from_day(&whole).closure(&recycled).unwrap().title,
+            Recorded::from_day(jiff::civil::date(2026, 8, 19), &whole)
+                .closure(&recycled)
+                .unwrap()
+                .title,
             "second"
         );
     }
@@ -652,16 +681,19 @@ mod tests {
     /// window — has nothing to clear, and the window's own start is what bounds it.
     #[test]
     fn a_completion_with_no_creation_in_the_window_still_answers() {
-        let recorded = Recorded::from_day(&[done(None)]);
+        let recorded = Recorded::from_day(jiff::civil::date(2026, 8, 19), &[done(None)]);
         assert!(recorded.closure(&id("7k2p")).is_some());
     }
 
     #[test]
     fn every_id_the_window_mentions_is_offered_to_the_mint() {
-        let recorded = Recorded::from_day(&[
-            Transition::new(id("7k2p"), TransitionKind::Created, "a", at(7)),
-            Transition::new(id("3b8q"), TransitionKind::Dropped, "b", at(9)),
-        ]);
+        let recorded = Recorded::from_day(
+            jiff::civil::date(2026, 8, 19),
+            &[
+                Transition::new(id("7k2p"), TransitionKind::Created, "a", at(7)),
+                Transition::new(id("3b8q"), TransitionKind::Dropped, "b", at(9)),
+            ],
+        );
         let seen: Vec<_> = recorded.seen().cloned().collect();
         assert_eq!(seen, [id("3b8q"), id("7k2p")]);
     }

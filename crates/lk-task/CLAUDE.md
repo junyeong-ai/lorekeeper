@@ -317,9 +317,19 @@ the commands in `lk-cli` are the only thing that decides when to apply them.
   completion; the observation's `external_id` is `task:{id}` (the day is already in `EventId`)
   so even that collapses in the pipeline's own dedup rather than double-counting the work in the
   daily page, the work-log and the performance record.
-- **A carry counts what the day BEGAN with.** The committed set is captured before `sync` runs,
-  because a task the same pass woke or adopted arrived today — stamping it `carried:1` would have
-  it claim to have survived a day-close its own `since` says it never saw.
+- **A carry counts what the day BEGAN with, asked over two passes.** The committed set is
+  captured before `sync` runs, because a task the same pass woke or adopted arrived during the
+  close — stamping it `carried:1` would have it claim to have survived a day-close its own
+  `since` says it never saw. That question only reaches THIS pass, and the day being closed is
+  not the day the close runs on: a task written down or moved in this morning is already under
+  the heading before the close reads the board, so the board alone calls it committed to
+  yesterday. `Recorded::entered_today_after` is the other half — every route into `## Today`
+  records a transition naming the state, so the history says on which day the commitment began.
+  Without it the scheduled close that fires when the laptop wakes stamped `carried-on:` for a
+  day the task did not exist on, and the count that exists to diagnose a stale task was wrong
+  from its first day. It only ever REFUSES a carry and never invents one: a line dragged under
+  the heading in an editor is a state change nothing records, and reading that silence as "never
+  committed" would drop the carry of every task managed the way this board is meant to be.
 - **A page a write cannot land on is reported when the plane is OPENED and refused at the
   WRITE.** Two different moments: reading is always safe, and a command touching none of the
   board — a reminder firing, a judgment being noted — has no business being turned away by a
