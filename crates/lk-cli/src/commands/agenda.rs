@@ -87,9 +87,9 @@ pub async fn run(opts: &GlobalOptions, date: Option<String>, json: bool) -> miet
         eprintln!("\n{heading}");
         for task in tasks.iter() {
             eprintln!(
-                "  {}  {:<48}{}",
+                "  {}  {}{}",
                 task.id,
-                lk_core::link::strip_links(&task.title),
+                super::pad(&lk_core::link::strip_links(&task.title), 48),
                 annotation(task, &plane)
             );
         }

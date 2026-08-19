@@ -23,6 +23,7 @@ lk-queue = { workspace = true }
 lk-graph = { workspace = true }
 lk-dist = { workspace = true }
 lk-task = { workspace = true }
+unicode-width = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 reqwest = { workspace = true }

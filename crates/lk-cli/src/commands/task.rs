@@ -6,6 +6,7 @@
 //! it — a box ticked on a phone an hour ago is a completion, and closing a second task without
 //! noticing would write the board back with that one re-opened.
 
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use lk_core::config::{Config, TasksConfig};
@@ -180,7 +181,7 @@ pub async fn run(opts: &GlobalOptions, cmd: TaskCommand) -> miette::Result<()> {
             link,
             label,
         } => {
-            let title = one_line(text.join(" "))?;
+            let title = one_line(text.join(" "), TASK_ONE_LINE)?;
             let title = origin_title(title, link.as_deref(), label.as_deref(), &plane)?;
             let state = parse_state(&state)?;
             let due = due.as_deref().map(parse_date).transpose()?;
@@ -295,7 +296,7 @@ pub async fn run(opts: &GlobalOptions, cmd: TaskCommand) -> miette::Result<()> {
             }
             let candidate = lk_task::Candidate {
                 source_id: source,
-                summary: one_line(summary)?,
+                summary: one_line(summary, TASK_ONE_LINE)?,
                 url,
             };
             lk_task::Judged::new(&plane.vault_root)
@@ -332,6 +333,12 @@ pub async fn run(opts: &GlobalOptions, cmd: TaskCommand) -> miette::Result<()> {
             plane.commit().await
         }
     }
+}
+
+/// One line of the board's state, as `lore status` prints it.
+pub(crate) struct BoardSurvey {
+    pub(crate) state: String,
+    pub(crate) writable: bool,
 }
 
 /// The board, the log, and the clock the two are read against.
@@ -495,7 +502,12 @@ impl IntentPlane {
         let answered = TransitionLog::new(&self.vault_root)
             .answered_origins()
             .map_err(|e| miette::miette!("{e}"))?;
-        let standing: std::collections::BTreeSet<String> = self
+        // One origin, ONE proposal — asked here rather than in either store, because the two
+        // answer different questions and a person answers about the WORK. A Jira issue linked
+        // from a mail is one thing to decide about, and two lines for it are two decisions with
+        // one right answer. Grown as the run goes, so a second candidate for an origin this
+        // very pass just offered is caught too.
+        let mut standing: std::collections::BTreeSet<String> = self
             .board
             .tasks()
             .filter_map(|task| task.src.clone())
@@ -504,7 +516,7 @@ impl IntentPlane {
         let mut offered = 0usize;
         for candidate in candidates {
             let origin = candidate.origin();
-            if answered.contains(&origin) || standing.contains(&origin) {
+            if answered.contains(&origin) || !standing.insert(origin.clone()) {
                 continue;
             }
             let title = format!(
@@ -519,6 +531,59 @@ impl IntentPlane {
             offered += 1;
         }
         Ok((offered, consumed))
+    }
+
+    /// One line of the board's state, for the front door.
+    ///
+    /// `None` where the intent plane is off — an install that never configured a board has no
+    /// board row, the same way a vault with no `personal:` module has no work-log.
+    ///
+    /// Read WITHOUT claiming the board and without reconciling: a front door that quietly
+    /// rewrote the page a person is looking at would be a mutation wearing a reader's name,
+    /// which is the same rule `lore agenda` follows.
+    pub(crate) fn survey(opts: &GlobalOptions) -> Option<BoardSurvey> {
+        let plane = Self::open(opts).ok()?;
+        let strings = plane.locale.strings();
+        let broken =
+            !plane.board.duplicated().is_empty() || plane.board.unterminated_fence().is_some();
+        if broken {
+            return Some(BoardSurvey {
+                state: strings.status_board_unwritable.to_string(),
+                writable: false,
+            });
+        }
+
+        let committed = plane
+            .board
+            .tasks()
+            .filter(|task| task.state == TaskState::Today)
+            .count();
+        let proposed = plane
+            .board
+            .tasks()
+            .filter(|task| task.state == TaskState::Proposed)
+            .count();
+        let stale = plane
+            .board
+            .tasks()
+            .filter(|task| task.carried >= plane.config.carry_warn_after)
+            .count();
+
+        let mut state = format!("{committed} {}", strings.status_board_committed);
+        if proposed > 0 {
+            let _ = write!(state, " · {proposed} {}", strings.status_board_proposed);
+        }
+        if stale > 0 {
+            let _ = write!(state, " · {stale} {}", strings.status_board_carried);
+        }
+        let unrecorded = plane.unrecorded(plane.today);
+        if unrecorded > 0 {
+            let _ = write!(state, " · {unrecorded} {}", strings.status_board_unrecorded);
+        }
+        Some(BoardSurvey {
+            state,
+            writable: true,
+        })
     }
 
     /// Every id a new task must not be given.
@@ -635,6 +700,13 @@ impl IntentPlane {
             ));
         }
 
+        let answered: Vec<TaskId> = self
+            .pending
+            .iter()
+            .filter(|transition| transition.kind.is_answer())
+            .map(|transition| transition.id.clone())
+            .collect();
+
         if !self.pending.is_empty() {
             TransitionLog::new(&self.vault_root)
                 .record(&self.pending, &self.zone)
@@ -645,7 +717,52 @@ impl IntentPlane {
         lk_vault::VaultWriter::new(&self.vault_root)
             .write_page(&self.board_path, &page)
             .await
-            .map_err(|e| miette::miette!("write {}: {e}", self.board_path.display()))
+            .map_err(|e| miette::miette!("write {}: {e}", self.board_path.display()))?;
+
+        self.retire_reminders(&answered);
+        Ok(())
+    }
+
+    /// Drop the reminders about tasks this pass ANSWERED.
+    ///
+    /// Done at the moment the task leaves the board rather than when the timer next looks,
+    /// because `lore task remind list` is read by a session deciding what to tell someone, and a
+    /// reminder about work already finished is a wrong answer sitting there until it fires. A
+    /// notification telling a person to do what they did this morning is the one failure that
+    /// makes them stop reading notifications.
+    ///
+    /// Best-effort and after the board write: a reminder that outlives its task costs one
+    /// misfire, while refusing the whole command would undo a completion that already happened.
+    fn retire_reminders(&self, answered: &[TaskId]) {
+        if answered.is_empty() {
+            return;
+        }
+        let store = lk_task::Reminders::new(&self.vault_root);
+        let held = match store.read() {
+            Ok(held) => held,
+            Err(e) => {
+                eprintln!("warning: the reminders could not be read ({e})");
+                return;
+            }
+        };
+        let moot: Vec<_> = held
+            .into_iter()
+            .filter(|reminder| {
+                reminder
+                    .task
+                    .as_ref()
+                    .is_some_and(|id| answered.contains(id))
+            })
+            .collect();
+        for reminder in moot {
+            match store.remove(&reminder.id) {
+                // Said rather than done in silence: a promise the person made and this took
+                // back is theirs to know about.
+                Ok(true) => eprintln!("            reminder dropped — {}", reminder.text),
+                Ok(false) => {}
+                Err(e) => eprintln!("warning: {e}"),
+            }
+        }
     }
 
     /// What the history holds about the tasks on this board, over the window each of its two
@@ -764,15 +881,23 @@ fn origin_title(
 /// A title carrying a newline split the stamp onto a line of its own, which the next read took
 /// as ordinary content: the task became unreachable by its own id forever, a phantom was minted
 /// from the first half, and the log held a `created` for an address no command could close.
-fn one_line(title: String) -> miette::Result<String> {
-    if title.contains(['\n', '\r']) {
-        return Err(miette::miette!(
-            "a task's text must be one line — its stamp sits at the end of that line, and a \
-             break would leave the stamp behind as ordinary content"
-        ));
+/// Refuse text that would not survive being written on one line.
+///
+/// `why` is the caller's, because the reason differs and a wrong one sends someone looking in
+/// the wrong place: a task line carries its stamp at the end, while a reminder is printed one
+/// per line to whatever says it out loud.
+fn one_line(text: String, why: &str) -> miette::Result<String> {
+    if text.contains(['\n', '\r']) {
+        return Err(miette::miette!("{why}"));
     }
-    Ok(title)
+    Ok(text)
 }
+
+const TASK_ONE_LINE: &str = "a task's text must be one line — its stamp sits at the end of that \
+                             line, and a break would leave the stamp behind as ordinary content";
+
+const REMINDER_ONE_LINE: &str = "a reminder must be one line — it is printed one per line to \
+                                 whatever says it out loud, and a break would be said twice";
 
 fn parse_state(text: &str) -> miette::Result<TaskState> {
     text.parse().map_err(|e| miette::miette!("{e}"))
@@ -792,7 +917,7 @@ fn remind(plane: &IntentPlane, cmd: RemindCommand) -> miette::Result<()> {
     let store = lk_task::Reminders::new(&plane.vault_root);
     match cmd {
         RemindCommand::Add { text, at, task } => {
-            let text = one_line(text.join(" "))?;
+            let text = one_line(text.join(" "), REMINDER_ONE_LINE)?;
             let at = parse_moment(&at, plane)?;
             let task = task.as_deref().map(parse_id).transpose()?;
             if let Some(id) = &task
@@ -939,9 +1064,9 @@ fn list(plane: &IntentPlane, only: Option<TaskState>, json: bool) {
         eprintln!("\n{}", state.heading(plane.locale));
         for task in tasks {
             eprintln!(
-                "  {}  {:<48}{}",
+                "  {}  {}{}",
                 task.id,
-                lk_core::link::strip_links(&task.title),
+                super::pad(&lk_core::link::strip_links(&task.title), 48),
                 annotation(task, plane)
             );
         }

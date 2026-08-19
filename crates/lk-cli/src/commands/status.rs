@@ -42,6 +42,18 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
         install.repair(),
     );
 
+    // The intent plane, where it is turned on. It is a subsystem with state a person acts on —
+    // proposals waiting for an answer, a task carried past the point of being a plan, an edit
+    // an editor made that nothing has recorded — and leaving it out meant the one command that
+    // answers "is anything wrong" could not see the half of the vault a person touches daily.
+    //
+    // The mark follows the same rule as every other row: it is `!` when the command that owns
+    // it would REFUSE, which for the board means a page a write cannot land on — two lines
+    // claiming one id, or a code fence that never closes.
+    if let Some(board) = super::task::IntentPlane::survey(opts) {
+        line("board", board.state, board.writable, "lore agenda");
+    }
+
     let freshness = super::health::freshness(&config, &vault_root, now).await?;
     let (fresh, stale, never) = (freshness.fresh(), freshness.stale(), freshness.never());
     let mut currency = format!("{fresh} fresh");
@@ -111,5 +123,9 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
 /// command name and produces a line that reads as one word.
 fn line(label: &str, state: String, ok: bool, next: &str) {
     let mark = if ok { '·' } else { '!' };
-    eprintln!("  {mark} {label:<9}{state:<42}  {next}");
+    eprintln!(
+        "  {mark} {}{}  {next}",
+        super::pad(label, 9),
+        super::pad(&state, 42)
+    );
 }

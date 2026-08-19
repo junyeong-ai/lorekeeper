@@ -13,10 +13,20 @@ set -euo pipefail
 
 LORE_BIN="${LORE_BIN:-lore}"
 
+# AppleScript quoting is NOT shell quoting. `${text@Q}` produces a shell-quoted string, and
+# AppleScript has no single-quoted string literal — so every notification was a syntax error and
+# nothing was ever shown. Escape a backslash and a double quote, then wrap in double quotes,
+# which is the whole of AppleScript's string grammar.
+applescript_string() {
+    local escaped=${1//\\/\\\\}
+    printf '"%s"' "${escaped//\"/\\\"}"
+}
+
 notify() {
     local text="$1"
     if command -v osascript >/dev/null 2>&1; then
-        osascript -e "display notification ${text@Q} with title \"lore\"" >/dev/null 2>&1 && return
+        osascript -e "display notification $(applescript_string "$text") with title \"lore\"" \
+            >/dev/null 2>&1 && return
     fi
     if command -v notify-send >/dev/null 2>&1; then
         notify-send "lore" "$text" >/dev/null 2>&1 && return

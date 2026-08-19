@@ -57,8 +57,14 @@ from. Read them out, one line each, and ask for a decision on each. Then apply i
 - decline → `lore task drop <id>` — this is what stops it being proposed again
 - not now → `lore task wait <id> --until <date>`
 
-Never leave a proposal sitting. It is a question, and an unanswered one is asked again tomorrow.
-Do not decide for them: a proposal they never saw is worse than none.
+Never leave a proposal sitting. It is a question, and one they never saw is worse than none —
+so do not decide for them.
+
+**When there are many** — a first run against a Jira board with thirty open issues is the normal
+case — do not read thirty lines out. Group them by what they are (project, prefix, age) and put
+the GROUPS to the person: "PLAT 에 12건, OPS 에 5건, 나머지 3건". Then apply their answer per
+group. A wall of individual questions is how a person stops reading the section, and the section
+only works if they read it.
 
 ## The note is the whole point of closing a task
 

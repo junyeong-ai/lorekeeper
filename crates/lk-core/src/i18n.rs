@@ -180,6 +180,12 @@ pub struct Strings {
     pub agenda_schedule: &'static str,
     /// What the agenda calls proposals waiting to be accepted or dropped.
     pub agenda_proposed: &'static str,
+    // `lore status` — the board's row
+    pub status_board_committed: &'static str,
+    pub status_board_proposed: &'static str,
+    pub status_board_carried: &'static str,
+    pub status_board_unrecorded: &'static str,
+    pub status_board_unwritable: &'static str,
 }
 
 static KO: Strings = Strings {
@@ -254,6 +260,11 @@ static KO: Strings = Strings {
     task_origin: "출처",
     agenda_schedule: "일정",
     agenda_proposed: "제안",
+    status_board_committed: "오늘",
+    status_board_proposed: "제안 대기",
+    status_board_carried: "장기 이월",
+    status_board_unrecorded: "미기록 편집",
+    status_board_unwritable: "쓸 수 없는 보드 — lore task sync 가 이유를 말합니다",
 };
 
 static EN: Strings = Strings {
@@ -328,6 +339,11 @@ static EN: Strings = Strings {
     task_origin: "source",
     agenda_schedule: "Schedule",
     agenda_proposed: "Proposed",
+    status_board_committed: "committed",
+    status_board_proposed: "awaiting an answer",
+    status_board_carried: "carried too long",
+    status_board_unrecorded: "unrecorded edit(s)",
+    status_board_unwritable: "the board cannot be written — `lore task sync` says why",
 };
 
 #[cfg(test)]

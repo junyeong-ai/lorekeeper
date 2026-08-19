@@ -7,6 +7,7 @@ exit: 0
 --- stderr ---
 lore <version>  <staged>/corpus/vault
   ! install  1 deployed copy differs                     lore schema
+  · board    1 committed · 1 carried too long            lore agenda
   · sources  0 fresh                                     lore health
   · queue    drained                                     /lore-process
   · pages    5 clean                                     lore doctor

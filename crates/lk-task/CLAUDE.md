@@ -46,6 +46,18 @@ the commands in `lk-cli` are the only thing that decides when to apply them.
   resolutions. Firing retires it, for the same reason arriving clears a wake date: it was a
   promise to say something once. Nothing else retires one, so a reminder due while the machine
   slept is said late rather than lost.
+- **A reminder about work that is finished is retired, at the moment it finishes.** A task
+  leaves the board by being done or dropped, and the reminder someone attached to it is moot the
+  same instant — so `commit` drops it there rather than leaving the timer to say it. A
+  notification telling a person to do what they did this morning is the one failure that makes
+  them stop reading notifications, and `lore task remind list` is read by a session deciding
+  what to tell them. Best-effort and AFTER the board write: a reminder that outlives its task
+  costs one misfire, while refusing would undo a completion that already happened.
+- **One origin, ONE proposal — asked where the two stores meet.** Each store dedups inside
+  itself, which is not the same rule: a Jira issue linked from a mail arrived as two candidates
+  from two stores and became two lines about one piece of work. The set grows as the run goes,
+  so a second candidate for an origin this pass just offered is caught too. A person answers
+  about the WORK, and two decisions with one right answer is one decision too many.
 - **An appointment is reported, never proposed.** `SourceDescriptor::scheduled` marks a source
   whose items are times already committed to. `lore agenda` shows them beside the day's tasks
   and the board never learns of them: a meeting happens whether or not a line is cleared, and
