@@ -499,13 +499,12 @@ impl IntentPlane {
         match exclusive {
             true => {
                 guard = Some(
-                    lk_task::PlaneLock::hold(&vault_root)
-                        .map_err(|why| miette::miette!("{}", cannot_hold(&why)))?,
+                    lk_task::PlaneLock::hold(&vault_root).map_err(|e| miette::miette!("{e}"))?,
                 )
             }
             false => {
                 if let Err(why) = lk_task::PlaneLock::is_holdable(&vault_root) {
-                    unheld = Some(cannot_hold(&why));
+                    unheld = Some(why.to_string());
                 }
             }
         }
@@ -1080,28 +1079,6 @@ impl IntentPlane {
         };
         Some(lk_task::sync(&mut probe, self.now, on, &recorded).edits())
     }
-}
-
-/// Why the plane cannot be held, said with the repair its cause calls for.
-///
-/// Two different failures wear one error. The lock FILE may be unopenable — something else is
-/// sitting at that path, or its permissions are wrong — and the repair is at the path. Only
-/// `lock` itself failing means a filesystem that cannot lock, and only then is moving the vault
-/// the answer. Keyed on which call failed rather than on matching text in the message, the same
-/// discipline `AtlassianAuth::explain_failure` follows so an unrelated failure is never
-/// mislabelled.
-fn cannot_hold(why: &lk_task::Unholdable) -> String {
-    let repair = match why {
-        lk_task::Unholdable::Path(_) => "Clear whatever sits at that path, or fix its permissions",
-        lk_task::Unholdable::Filesystem(_) => {
-            "This filesystem cannot lock — move the vault to one that can"
-        }
-    };
-    format!(
-        "{why} — nothing in the intent plane can be changed while it cannot be held, because two \
-         commands overlapping would lose board lines and history with nothing to say so. Reading \
-         is unaffected. {repair}."
-    )
 }
 
 fn tasks_config(config: &Config) -> miette::Result<TasksConfig> {

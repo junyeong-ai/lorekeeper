@@ -11,6 +11,10 @@ use crate::TaskError;
 /// guarded `lore task` while `lore ingest` and `lore maintenance` wrote the same files beside
 /// it, which is the same defect it already had once when it was named for the board alone.
 ///
+/// Never probed by a caller that already HOLDS it: on the platforms where `File::lock` is an
+/// `fcntl` lock rather than `flock`, closing any descriptor for a file drops every lock the
+/// process has on it, so the probe's own close would release the hold.
+///
 /// The kernel's, so a crashed process releases it with no staleness rule to get wrong. It cannot
 /// reach across machines — a vault synced by Dropbox or iCloud has two kernels — which is the
 /// same limitation an editor on either machine already has.
@@ -27,7 +31,7 @@ impl PlaneLock {
     /// locking at all. Writing anyway loses board lines and transition records while reporting
     /// success, so a caller refuses instead.
     pub fn hold(vault_root: &Path) -> Result<Self, Unholdable> {
-        let file = open(vault_root)?;
+        let file = open(vault_root, true)?;
         file.lock()
             .map_err(|e| Unholdable::Filesystem(locking(vault_root, e)))?;
         Ok(Self { _file: file })
@@ -40,7 +44,17 @@ impl PlaneLock {
     /// moment a broken vault. `Err` is the answer that lasts — the same failure [`Self::hold`]
     /// refuses on, which is what lets a view say a write will be refused before one is tried.
     pub fn is_holdable(vault_root: &Path) -> Result<(), Unholdable> {
-        let file = open(vault_root)?;
+        // A lock file that is not THERE is the ordinary state of a vault nothing has written
+        // yet, not a lasting reason a write would be refused — so the probe does not create it.
+        // Sharing the write's own `open` made every read of a fresh vault mint
+        // `.lorekeeper/tasks.lock`, and a view run against a mistyped `vault.root` mint the
+        // directory: a mutation wearing a reader's name, which is the one thing `survey` and
+        // `agenda` are built not to be.
+        let file = match open(vault_root, false) {
+            Ok(file) => file,
+            Err(Unholdable::Path(_)) if !path(vault_root).exists() => return Ok(()),
+            Err(why) => return Err(why),
+        };
         match file.try_lock() {
             Ok(_) | Err(std::fs::TryLockError::WouldBlock) => Ok(()),
             Err(std::fs::TryLockError::Error(e)) => {
@@ -59,11 +73,19 @@ impl PlaneLock {
 pub enum Unholdable {
     /// The lock FILE could not be opened. Something else sits at that path, or its permissions
     /// are wrong, and the repair is there.
-    #[error("{0}")]
+    #[error(
+        "{0} — nothing in the intent plane can be changed while it cannot be held, because two \
+         commands overlapping would lose board lines and history with nothing to say so. Reading \
+         is unaffected. Clear whatever sits at that path, or fix its permissions."
+    )]
     Path(TaskError),
     /// `lock` itself failed, which is a filesystem with no locking — it will not start having
     /// any on the next run.
-    #[error("{0}")]
+    #[error(
+        "{0} — nothing in the intent plane can be changed while it cannot be held, because two \
+         commands overlapping would lose board lines and history with nothing to say so. Reading \
+         is unaffected. This filesystem cannot lock — move the vault to one that can."
+    )]
     Filesystem(TaskError),
 }
 
@@ -75,18 +97,22 @@ fn locking(vault_root: &Path, source: std::io::Error) -> TaskError {
     TaskError::io(format!("lock {}", path(vault_root).display()), source)
 }
 
-fn open(vault_root: &Path) -> Result<std::fs::File, Unholdable> {
+fn open(vault_root: &Path, create: bool) -> Result<std::fs::File, Unholdable> {
     let path = path(vault_root);
     let dir = path.parent().expect("the lock path has a parent");
-    std::fs::create_dir_all(dir)
-        .and_then(|()| {
-            std::fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .write(true)
-                .open(&path)
-        })
-        .map_err(|e| Unholdable::Path(TaskError::io(format!("open {}", path.display()), e)))
+    if create {
+        std::fs::create_dir_all(dir)
+    } else {
+        Ok(())
+    }
+    .and_then(|()| {
+        std::fs::OpenOptions::new()
+            .create(create)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+    })
+    .map_err(|e| Unholdable::Path(TaskError::io(format!("open {}", path.display()), e)))
 }
 
 #[cfg(test)]
