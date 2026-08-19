@@ -870,7 +870,21 @@ fn read_stamp(stamp: &str) -> Result<Task, TaskError> {
                     .map_err(|_| TaskError::Malformed(format!("`{field}` is not a count")))?;
             }
             "carried-on" => carried_on = Some(parse_date(value)?),
-            "src" => src = Some(value.to_string()),
+            // Parsed like every other field whose shape is known, and it was the one that was
+            // not. A `src:` cut short by a crash mid-write or a sync client's conflict stayed a
+            // legal FIELD, so the line parsed as an ordinary task carrying an origin that names
+            // no observation — invisibly, with no report anywhere, and permanently the moment
+            // `done` or `drop` wrote that value into an append-only date file. The work then
+            // read as never answered and its source offered it again forever.
+            "src" => {
+                if !lk_core::origin::is_identity(value) {
+                    return Err(TaskError::Malformed(format!(
+                        "`{field}` is not an origin — `lore task add --link` mints one as 16 hex \
+                         characters, so this stamp was damaged after it was written"
+                    )));
+                }
+                src = Some(value.to_string());
+            }
             _ => extra.push((key.to_string(), value.to_string())),
         }
     }
@@ -1236,6 +1250,40 @@ mod tests {
         let damaged = board_of("## Today\n\n- [ ] a <!--t:7k2p since:nonsense-->\n");
         assert_eq!(damaged.unplaced().len(), 1);
         assert!(damaged.ids().contains(&"7k2p".parse().unwrap()));
+    }
+
+    /// `src:` is parsed like every other field whose shape is known, and it was the one that
+    /// was not. Cut short by a crash mid-write or a sync client's conflict it stayed a legal
+    /// FIELD, so the line parsed as an ordinary task carrying an origin that names no
+    /// observation — invisibly, and permanently the moment a completion wrote that value into
+    /// an append-only date file.
+    #[test]
+    fn an_origin_a_stamp_no_longer_names_is_refused_like_any_other_damaged_field() {
+        let whole = lk_core::origin::identity("https://example.com/leaked-key");
+        let intact = board_of(&format!(
+            "## Today\n\n- [ ] a real task <!--t:kwdc since:2026-08-19 src:{whole}-->\n"
+        ));
+        assert_eq!(
+            intact.get(&"kwdc".parse().unwrap()).unwrap().src.as_deref(),
+            Some(whole.as_str())
+        );
+
+        for damaged in [
+            "0e90",
+            &whole[..15],
+            &format!("{whole}0"),
+            "not-hex-at-all-x",
+        ] {
+            let board = board_of(&format!(
+                "## Today\n\n- [ ] a real task <!--t:kwdc since:2026-08-19 src:{damaged}-->\n"
+            ));
+            assert!(board.tasks().next().is_none(), "{damaged}");
+            assert_eq!(board.unplaced().len(), 1, "{damaged}");
+            assert!(board.unplaced()[0].why.contains("origin"), "{damaged}");
+            // The address it still names is protected, so repairing the line brings the task
+            // back rather than beside a rival.
+            assert!(board.ids().contains(&"kwdc".parse().unwrap()), "{damaged}");
+        }
     }
 
     /// A value is exactly what damage destroys, so neither is validated here. Requiring `t:` to

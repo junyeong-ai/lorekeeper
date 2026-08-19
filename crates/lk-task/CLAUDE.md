@@ -150,6 +150,14 @@ the commands in `lk-cli` are the only thing that decides when to apply them.
   than reading it off the stamp, so dragging a line between two headings in an editor IS the
   state change and a stale stamp cannot undo it. This is what keeps the whole plane usable by
   someone who never runs the command line.
+- **Every field whose SHAPE is known is parsed into it.** `t:` into a `TaskId`, the dates into
+  dates, `carried:` into a count — and `src:` was the one that was not, kept as whatever the
+  field grammar allowed. A `src:` cut short by a crash mid-write or a sync client's conflict
+  stayed a legal field, so the line parsed as an ordinary task carrying an origin that names no
+  observation: invisibly, with nothing reported anywhere, and permanently the moment `done` or
+  `drop` wrote that value into an append-only date file. The work then read as never answered
+  and its source offered it again every morning. Refused now like a broken date, which makes it
+  a named line awaiting repair rather than a silent one.
 - **The stamp READS everything and WRITES what this build knows** — the same rule the headings
   follow. A key `read_stamp` does not recognise is carried on `Task::extra` and re-emitted
   verbatim, because a board is one file two builds may open: a laptop updated this morning and
