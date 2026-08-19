@@ -124,7 +124,10 @@ pub async fn run(opts: &GlobalOptions, date: Option<String>, json: bool) -> miet
 /// mistake `lore queue count` and `lore config vault-root` exist to prevent. Every section the
 /// terminal shows is here, with the dates unformatted and the origin URL a proposal came from
 /// carried through — an agent that has to strip a markdown link out of a title to know where a
-/// task came from is reading prose again.
+/// task came from is reading prose again. What the view could not SEE is here too: a store it
+/// could not read answers `null` rather than empty, and a task on the page that no section could
+/// place is named with its line and its reason — a caller reading only the sections would report
+/// a clean day over work sitting in plain sight in the person's editor.
 fn emit_json(plane: &IntentPlane, actually_today: jiff::civil::Date) -> miette::Result<()> {
     let task_json = |task: &lk_task::Task| {
         serde_json::json!({
@@ -201,6 +204,15 @@ fn emit_json(plane: &IntentPlane, actually_today: jiff::civil::Date) -> miette::
             // see and cannot fix. `null` where the record could not be read at all, which a
             // caller must not mistake for a board that is caught up.
             "unrecorded": plane.unrecorded(actually_today),
+            // Tasks the page holds that no section could place. Empty means every checkbox on
+            // the page reached a list; anything here means the day this document describes is
+            // INCOMPLETE, and a caller reading only the sections above would report a clean
+            // morning while the person's work sat in plain sight in their editor. The reason
+            // travels, because it is what they act on and the line is where they will look.
+            "unplaced": plane.board.unplaced().iter().map(|held| serde_json::json!({
+                "line": held.line,
+                "why": held.why,
+            })).collect::<Vec<_>>(),
         }))
         .unwrap_or_else(|_| "{}".into())
     );

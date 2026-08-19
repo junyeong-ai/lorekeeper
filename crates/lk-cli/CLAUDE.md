@@ -163,6 +163,12 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   forward flags unable to say the one word they need, and guarded nothing — the same future day
   was always writable as a literal. What a day must BE is a bound stated where that command's
   meaning lives, which is where a reason can be given for it.
+- **`lore agenda --json` says what it could not SEE, both ways it can fail.** A store it could
+  not read answers `null` rather than `[]` — a caller cannot otherwise tell "nothing is promised"
+  from "I lost your promises" — and a task the page holds that no section could PLACE is named
+  in `unplaced` with its line and its reason. Without the second the contract reported a clean
+  empty morning over five tasks sitting in plain sight in the person's editor, because the only
+  thing that said otherwise was a warning on stderr and the skill is told not to read prose.
 - **`lore config board-path`** exists so the scheduled day-close can ask whether the intent
   plane is configured at all instead of failing nightly on every install that never turned it
   on — the same machine contract `vault-root` and `queue count` are, for the same reason.

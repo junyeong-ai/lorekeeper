@@ -26,12 +26,21 @@ lore agenda --json
 ```
 
 That one call answers everything: `schedule` (appointments — reported, never actionable),
-`committed`, `woken`, `due`, `proposed`, `reminders`, `done_today`, and `unrecorded`. Use its
-`id` fields for every command below. Do NOT parse `lore agenda`'s human output — the `--json`
-form is the contract and the columns are not.
+`committed`, `woken`, `due`, `proposed`, `reminders`, `done_today`, `unrecorded` and `unplaced`.
+Use its `id` fields for every command below. Do NOT parse `lore agenda`'s human output — the
+`--json` form is the contract and the columns are not.
 
 If `unrecorded` is non-zero the user changed the board in their editor and nothing has recorded
 it. Run `lore task sync` FIRST, then re-read, or you will act on a stale day.
+
+If `unplaced` is not empty, the day above is INCOMPLETE — the page holds tasks no section could
+place, so they are in no list, no carry and no archive. Say so before you report anything else,
+naming each line and its `why` in their words, and offer the repair the reason implies (move it
+under one of the four headings, outdent it, restore `- [ ]`). Never run a command against those
+tasks: they have no id this can reach.
+
+A `null` section means the store behind it could not be READ, which is not the same as empty.
+Say that too rather than reporting nothing promised.
 
 ## Mapping what they say
 
