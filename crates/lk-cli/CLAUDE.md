@@ -154,6 +154,15 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   its transition is work that left no record. `lore agenda` is a VIEW: it writes nothing, not
   even the reconcile, and reports what an editor changed by naming `lore task sync` — a page
   would be a forward-looking materialization, which is the one thing this vault forbids.
+- **`parse_date` names a day relative to the VAULT's, and names all three.** A shell computing
+  one instead answers in the machine's zone, and on a host an hour the other side of
+  `vault.timezone` that is a different day — which is why the scheduled close says the word
+  `yesterday` rather than `date -v-1d`. The words are `yesterday`, `today` and `tomorrow`,
+  because the commands taking a day point in both directions: `--closing` names a day that
+  ENDED while `--due` and `--until` name one ahead. Holding only the backward half left the
+  forward flags unable to say the one word they need, and guarded nothing — the same future day
+  was always writable as a literal. What a day must BE is a bound stated where that command's
+  meaning lives, which is where a reason can be given for it.
 - **`lore config board-path`** exists so the scheduled day-close can ask whether the intent
   plane is configured at all instead of failing nightly on every install that never turned it
   on — the same machine contract `vault-root` and `queue count` are, for the same reason.

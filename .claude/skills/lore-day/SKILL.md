@@ -43,7 +43,7 @@ it. Run `lore task sync` FIRST, then re-read, or you will act on a stale day.
 | "그건 나중에" | `lore task move <id> next` (or `someday`) |
 | "그거 끝냈어" | `lore task done <id> --note "<what it taught>"` — see below |
 | "그건 안 해도 돼" / "다른 팀이 가져갔어" | `lore task drop <id>` |
-| "내일 다시 보자" | `lore task wait <id> --until <YYYY-MM-DD>` |
+| "내일 다시 보자" | `lore task wait <id> --until tomorrow` (or `<YYYY-MM-DD>`) |
 | "3시에 알려줘" | `lore task remind add "<text>" --at 15:00 [--task <id>]` |
 | "하루 정리하자" | close what is done with notes, then report what is left |
 

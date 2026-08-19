@@ -25,7 +25,7 @@ pub enum TaskCommand {
         /// Which section it lands in (default: next)
         #[arg(long, default_value = "next")]
         state: String,
-        /// The day it is due (YYYY-MM-DD)
+        /// The day it is due (YYYY-MM-DD, or `today`/`tomorrow`)
         #[arg(long)]
         due: Option<String>,
         /// Where this came from — the Slack thread, the Jira issue, the mail, the meeting.
@@ -75,7 +75,7 @@ pub enum TaskCommand {
     Wait {
         /// The task's id, as the board and `lore task list` print it
         id: String,
-        /// The day it returns to today (YYYY-MM-DD)
+        /// The day it returns to today (YYYY-MM-DD, or `today`/`tomorrow`)
         #[arg(long)]
         until: String,
     },

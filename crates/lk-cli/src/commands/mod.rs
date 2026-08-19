@@ -194,19 +194,30 @@ pub fn parse_date(
     let Some(s) = s else {
         return Ok(fallback);
     };
-    // `today` and `yesterday` name a day relative to the VAULT's, which is the only zone any
-    // date in this tool is derived in. A script computing it instead — `date -v-1d` — answers in
-    // the machine's zone, and on a host an hour the other side of `vault.timezone` that is a
-    // different day: the scheduled close then declares a day that never ended, and the declared
-    // day is the very key that stops one ended day being closed twice.
+    // These name a day relative to the VAULT's, which is the only zone any date in this tool is
+    // derived in. A script computing one instead — `date -v-1d` — answers in the machine's zone,
+    // and on a host an hour the other side of `vault.timezone` that is a different day: the
+    // scheduled close then declares a day that never ended, and the declared day is the very key
+    // that stops one ended day being closed twice.
+    //
+    // All three words, because the commands taking a day point in both directions: `--closing`
+    // names a day that ENDED, while `--due` and `--until` name one ahead, and a vocabulary
+    // holding only the backward half left the forward flags unable to say the one word they
+    // need — while guarding nothing, since the same future day was always writable as a literal.
+    // What a day must be is stated where that command's meaning lives, which is where a reason
+    // can be given: `rollover` refuses a day that has not ended and says so.
     match s {
         "today" => Ok(fallback),
         "yesterday" => fallback
             .yesterday()
             .map_err(|e| miette::miette!("{fallback} has no predecessor: {e}")),
+        "tomorrow" => fallback
+            .tomorrow()
+            .map_err(|e| miette::miette!("{fallback} has no successor: {e}")),
         _ => s.parse::<jiff::civil::Date>().map_err(|e| {
             miette::miette!(
-                "invalid date '{s}' ({e}) — expected YYYY-MM-DD, `today` or `yesterday`"
+                "invalid date '{s}' ({e}) — expected YYYY-MM-DD, `today`, `yesterday` or \
+                 `tomorrow`"
             )
         }),
     }
@@ -219,7 +230,8 @@ mod tests {
 
     /// The words name a day relative to the one the caller resolved in `vault.timezone`, which
     /// is what takes a shell's `date -v-1d` — answering in the machine's zone — out of the
-    /// scheduled day-close.
+    /// scheduled day-close. All three of them: the commands taking a day point in both
+    /// directions, and a bound belongs to the command that has a reason to give for it.
     #[test]
     fn a_day_is_named_relative_to_the_vaults_own() {
         let today = jiff::civil::date(2026, 3, 1);
@@ -234,8 +246,15 @@ mod tests {
             jiff::civil::date(2025, 12, 31)
         );
 
-        let refused = parse_date(Some("tomorrow"), today).unwrap_err().to_string();
-        assert!(refused.contains("yesterday"), "{refused}");
+        assert_eq!(
+            parse_date(Some("tomorrow"), today).unwrap(),
+            jiff::civil::date(2026, 3, 2)
+        );
+
+        let refused = parse_date(Some("next week"), today)
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("YYYY-MM-DD"), "{refused}");
     }
 
     const VALID_CONFIG: &str = "\
