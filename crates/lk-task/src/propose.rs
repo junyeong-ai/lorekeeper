@@ -414,6 +414,30 @@ mod tests {
         );
     }
 
+    /// The LAST answer stands. Two sets a transition only ever added to said "finished" and
+    /// "declined" at once for an origin dropped in one month and done in another, and the report
+    /// could not tell which the person meant last — so it stayed silent about work they had
+    /// finished and the sources still call open.
+    #[test]
+    fn the_answer_a_person_gave_last_is_the_one_that_stands() {
+        let origin = "0123456789abcdef".to_string();
+
+        let mut declined_then_done = crate::Answered::default();
+        declined_then_done.absorb(origin.clone(), crate::TransitionKind::Dropped);
+        declined_then_done.absorb(origin.clone(), crate::TransitionKind::Done);
+        assert!(declined_then_done.contains(&origin));
+        assert!(declined_then_done.is_recoverable(&origin));
+
+        let mut done_then_declined = crate::Answered::default();
+        done_then_declined.absorb(origin.clone(), crate::TransitionKind::Done);
+        done_then_declined.absorb(origin.clone(), crate::TransitionKind::Dropped);
+        assert!(done_then_declined.contains(&origin));
+        assert!(
+            !done_then_declined.is_recoverable(&origin),
+            "asking them to write down again what they last said no to"
+        );
+    }
+
     /// A judgment the filter passed over is left where it is — its source is paused rather than
     /// gone — while the one that WAS offered is written out of the file. Retiring only a WHOLE
     /// file left the offered half on disk with nothing recording that it had been offered, and

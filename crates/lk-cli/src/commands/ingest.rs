@@ -247,8 +247,17 @@ pub async fn run(
         // source can be open-work-only in a run that renders nothing, and an empty answer is
         // what retires proposals whose work is now finished. `--dry-run` writes nothing at all.
         if !dry_run && config.personal.as_ref().is_some_and(|p| p.tasks.is_some()) {
-            let candidates = lk_task::Candidates::new(&vault_root);
-            if let Err(e) = candidates.record(id, &result.open_work) {
+            // Held for the write and no longer. These are the intent plane's files, so the
+            // command writing them holds the plane whoever it is — scoped to `lore task`, the
+            // guard was named for the first writer that needed it and left every other one
+            // beside it unguarded. Held across the whole ingest instead, a fetch that takes
+            // minutes would lock a person out of their own board for those minutes.
+            if let Err(e) = lk_task::PlaneLock::hold(&vault_root)
+                .map_err(|why| lk_task::TaskError::Malformed(why.to_string()))
+                .and_then(|_held| {
+                    lk_task::Candidates::new(&vault_root).record(id, &result.open_work)
+                })
+            {
                 eprintln!("  ✗ proposals: {e}");
                 had_failure = true;
             }
@@ -270,7 +279,10 @@ pub async fn run(
                     title: title.clone(),
                 })
                 .collect();
-            if let Err(e) = lk_task::Schedule::new(&vault_root).record(id, &appointments) {
+            if let Err(e) = lk_task::PlaneLock::hold(&vault_root)
+                .map_err(|why| lk_task::TaskError::Malformed(why.to_string()))
+                .and_then(|_held| lk_task::Schedule::new(&vault_root).record(id, &appointments))
+            {
                 eprintln!("  ✗ agenda: {e}");
                 had_failure = true;
             }

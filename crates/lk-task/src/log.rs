@@ -320,12 +320,17 @@ pub struct Answered {
 impl Answered {
     /// Record what `kind` says about `origin`. A move or a carry says nothing — the task is
     /// still open, and it is the BOARD that says so.
+    /// The LAST answer stands, which is what "not since declined" means. Kept as two sets a
+    /// transition only ever added to, an origin dropped in March and done in August answered
+    /// both ways at once and the report could not tell which the person meant last.
     pub(crate) fn absorb(&mut self, origin: String, kind: TransitionKind) {
         match kind {
             TransitionKind::Done => {
+                self.declined.remove(&origin);
                 self.finished.insert(origin);
             }
             TransitionKind::Dropped => {
+                self.finished.remove(&origin);
                 self.declined.insert(origin);
             }
             _ => {}
@@ -340,7 +345,7 @@ impl Answered {
     /// Whether `origin` was finished and never since declined — the only answer a person might
     /// want back, and so the only one worth naming.
     pub fn is_recoverable(&self, origin: &str) -> bool {
-        self.finished.contains(origin) && !self.declined.contains(origin)
+        self.finished.contains(origin)
     }
 }
 

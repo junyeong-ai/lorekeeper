@@ -738,13 +738,14 @@ fn names_a_task(line: &str) -> bool {
 /// folded into its visible title — ticked, a fabricated completion under that title reaching the
 /// archive. The keys beside a broken value are what still say whose line it is, and `read_stamp`
 /// then says exactly what is wrong with it, which is a report rather than a silent re-adoption.
+/// An EMPTY value is the most damaged one there is: refusing that one left `<!--t:
+/// since:2026-08-01-->`, both keys standing, read as a person's own line and re-adopted.
 ///
 /// `closed` says whether a `-->` ended the comment, and what an unclosed one does not hold is
 /// not evidence: a truncation destroys everything past the cut and lands mid-field as often as
 /// between two, so there `t:` alone names a task.
 fn is_stamp(body: &str, closed: bool) -> bool {
-    field(body, "t:").is_some_and(|id| !id.is_empty())
-        && (!closed || field(body, "since:").is_some())
+    field(body, "t:").is_some() && (!closed || field(body, "since:").is_some())
 }
 
 /// tool's. `Err` is a line carrying a stamp that would not read.
@@ -1245,6 +1246,7 @@ mod tests {
             "<!--t:FF01 since:2026-08-18-->",
             "<!--t:gg01 since:broken-->",
             "<!--t:hh01 since:2026-08-18 carried:x-->",
+            "<!--t: since:2026-08-18-->",
             "<!--t:jj01 sinc",
         ] {
             for box_ in ["- [ ]", "- [x]"] {

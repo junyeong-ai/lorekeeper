@@ -442,8 +442,8 @@ pub(crate) struct IntentPlane {
     /// never saw. `None` where there was no page yet.
     pub(crate) read_as: Option<Vec<u8>>,
     /// Held for a mutation, from before the board is read until after it and the log are
-    /// written. Dropping the file releases it.
-    _guard: Option<std::fs::File>,
+    /// written. Dropping it releases the plane.
+    _guard: Option<lk_task::PlaneLock>,
 }
 
 impl IntentPlane {
@@ -469,9 +469,9 @@ impl IntentPlane {
     ///
     /// The lock is the kernel's, so a crashed process releases it with no staleness rule to get
     /// wrong. It cannot help across machines — a vault synced by Dropbox or iCloud has two
-    /// kernels — which is the same limitation an editor on either machine already has, and the
-    /// reason a failure to lock is reported rather than fatal: refusing to run would make the
-    /// feature worse than it was without any locking at all.
+    /// kernels — which is the same limitation an editor on either machine already has. Where it
+    /// cannot be taken at all the command REFUSES: writing anyway lost board lines and history
+    /// while reporting success.
     pub(crate) fn open_for_change(opts: &GlobalOptions) -> miette::Result<Self> {
         Self::acquire(opts, true)
     }
@@ -489,10 +489,26 @@ impl IntentPlane {
 
         // Claimed BEFORE the board is read, so the read and the write it decides are one
         // critical section rather than two.
-        let guard = match exclusive {
-            true => Some(claim(&vault_root)?),
-            false => None,
-        };
+        // A write claims the plane; a READ asks only whether one could be, which never waits
+        // and never holds. Asked at all, because a plane nothing can hold refuses every write
+        // while the board itself is perfectly readable — the front door printed a quiet day and
+        // the contract said `unwritable: null` over a vault where the nightly close, every
+        // command and the reminder timer were all being turned away.
+        let mut guard = None;
+        let mut unheld = None;
+        match exclusive {
+            true => {
+                guard = Some(
+                    lk_task::PlaneLock::hold(&vault_root)
+                        .map_err(|why| miette::miette!("{}", cannot_hold(&why)))?,
+                )
+            }
+            false => {
+                if let Err(why) = lk_task::PlaneLock::is_holdable(&vault_root) {
+                    unheld = Some(cannot_hold(&why));
+                }
+            }
+        }
 
         // An absent board is an empty one, not an error: the first `lore task add` creates the
         // page, exactly as the first ingest creates a daily page.
@@ -520,7 +536,7 @@ impl IntentPlane {
         // other. A fence that never closes makes every heading below it code. Both are
         // reported rather than repaired: which of two lines a person meant, and where they
         // meant a code block to end, are not knowable from the page.
-        let mut unwritable = None;
+        let mut unwritable = unheld;
         if !board.duplicated().is_empty() {
             let lines = board
                 .duplicated()
@@ -713,7 +729,10 @@ impl IntentPlane {
             }
         };
         let strings = plane.locale.strings();
-        if !plane.board.duplicated().is_empty() || plane.board.unterminated_fence().is_some() {
+        // Asked of the one flag a write is refused on, rather than of the defects that set it:
+        // a plane nothing can HOLD refuses every write too, and named defect by defect the row
+        // reported a quiet day over a vault where the nightly close was being turned away.
+        if plane.unwritable.is_some() {
             return Some(BoardSurvey {
                 state: strings.status_board_unwritable.to_string(),
                 ok: false,
@@ -1047,40 +1066,26 @@ impl IntentPlane {
     }
 }
 
-/// Hold the intent plane for a mutation, or refuse it.
+/// Why the plane cannot be held, said with the repair its cause calls for.
 ///
-/// `File::lock` BLOCKS until it is granted, so an error here is never contention — it is a
-/// filesystem that cannot lock at all, and it will not start being able to on the next run.
-/// Without it two overlapping `lore task` commands lose board lines and transition records, and
-/// the history is the only thing the archive reads: a measured run of eight concurrent adds on
-/// such a vault reported eight successes and left two lines and four records.
-///
-/// Refused rather than approximated, which is the standing rule wherever this tool cannot keep
-/// a promise — a cron schedule launchd cannot express, a release whose archive will not verify,
-/// a swap that cannot rename over a running binary. Silent loss reported as success is that
-/// shape exactly, and warning about it does not make the loss less silent to whatever read the
-/// exit code. Reads are unaffected: they take no lock, because every write is atomic and a
-/// reader sees a whole file or the previous one.
-fn claim(vault_root: &std::path::Path) -> miette::Result<std::fs::File> {
-    let dir = vault_root.join(".lorekeeper");
-    let path = dir.join("tasks.lock");
-    std::fs::create_dir_all(&dir)
-        .and_then(|()| {
-            std::fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .write(true)
-                .open(&path)
-        })
-        .and_then(|file| file.lock().map(|()| file))
-        .map_err(|e| {
-            miette::miette!(
-                "cannot hold {} ({e}), so nothing here can be changed safely — two commands \
-                 overlapping would lose board lines and history with nothing to say so. Reading \
-                 the board is unaffected. Move the vault to a filesystem that supports locking.",
-                path.display()
-            )
-        })
+/// Two different failures wear one error. The lock FILE may be unopenable — something else is
+/// sitting at that path, or its permissions are wrong — and the repair is at the path. Only
+/// `lock` itself failing means a filesystem that cannot lock, and only then is moving the vault
+/// the answer. Keyed on which call failed rather than on matching text in the message, the same
+/// discipline `AtlassianAuth::explain_failure` follows so an unrelated failure is never
+/// mislabelled.
+fn cannot_hold(why: &lk_task::Unholdable) -> String {
+    let repair = match why {
+        lk_task::Unholdable::Path(_) => "Clear whatever sits at that path, or fix its permissions",
+        lk_task::Unholdable::Filesystem(_) => {
+            "This filesystem cannot lock — move the vault to one that can"
+        }
+    };
+    format!(
+        "{why} — nothing in the intent plane can be changed while it cannot be held, because two \
+         commands overlapping would lose board lines and history with nothing to say so. Reading \
+         is unaffected. {repair}."
+    )
 }
 
 fn tasks_config(config: &Config) -> miette::Result<TasksConfig> {

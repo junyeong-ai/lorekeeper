@@ -1,0 +1,128 @@
+use std::path::Path;
+
+use crate::TaskError;
+
+/// Exclusive hold on the intent plane's stores.
+///
+/// It guards the PLANE — the board, the transition log, the proposal snapshots, the judged
+/// candidates, the day's schedule and the standing reminders — because every one of them is a
+/// read-modify-write and any two writers of any of them can drop one of the two. It lives here
+/// rather than beside the first command that happened to need it: named for one writer, it
+/// guarded `lore task` while `lore ingest` and `lore maintenance` wrote the same files beside
+/// it, which is the same defect it already had once when it was named for the board alone.
+///
+/// The kernel's, so a crashed process releases it with no staleness rule to get wrong. It cannot
+/// reach across machines — a vault synced by Dropbox or iCloud has two kernels — which is the
+/// same limitation an editor on either machine already has.
+#[derive(Debug)]
+pub struct PlaneLock {
+    _file: std::fs::File,
+}
+
+impl PlaneLock {
+    /// Take the plane, WAITING for whoever holds it.
+    ///
+    /// A failure is never contention — the wait is what answers that — so it is a plane that can
+    /// never be held: a lock path that is not a file this may open, or a filesystem with no
+    /// locking at all. Writing anyway loses board lines and transition records while reporting
+    /// success, so a caller refuses instead.
+    pub fn hold(vault_root: &Path) -> Result<Self, Unholdable> {
+        let file = open(vault_root)?;
+        file.lock()
+            .map_err(|e| Unholdable::Filesystem(locking(vault_root, e)))?;
+        Ok(Self { _file: file })
+    }
+
+    /// Whether the plane could be held at all, without waiting to find out.
+    ///
+    /// `Ok` however busy it is: a plane another command holds this instant is one this command
+    /// would get by waiting, and a reader reporting that as unwritable would call every busy
+    /// moment a broken vault. `Err` is the answer that lasts — the same failure [`Self::hold`]
+    /// refuses on, which is what lets a view say a write will be refused before one is tried.
+    pub fn is_holdable(vault_root: &Path) -> Result<(), Unholdable> {
+        let file = open(vault_root)?;
+        match file.try_lock() {
+            Ok(_) | Err(std::fs::TryLockError::WouldBlock) => Ok(()),
+            Err(std::fs::TryLockError::Error(e)) => {
+                Err(Unholdable::Filesystem(locking(vault_root, e)))
+            }
+        }
+    }
+}
+
+/// Why the plane cannot be held, as the two things that have different repairs.
+///
+/// Structural rather than read back out of a message: the caller names a repair from it, and one
+/// keyed on matching text in an error string is one that stops matching the day the string is
+/// reworded. The same discipline `AtlassianAuth::explain_failure` follows.
+#[derive(Debug, thiserror::Error)]
+pub enum Unholdable {
+    /// The lock FILE could not be opened. Something else sits at that path, or its permissions
+    /// are wrong, and the repair is there.
+    #[error("{0}")]
+    Path(TaskError),
+    /// `lock` itself failed, which is a filesystem with no locking — it will not start having
+    /// any on the next run.
+    #[error("{0}")]
+    Filesystem(TaskError),
+}
+
+fn path(vault_root: &Path) -> std::path::PathBuf {
+    vault_root.join(".lorekeeper").join("tasks.lock")
+}
+
+fn locking(vault_root: &Path, source: std::io::Error) -> TaskError {
+    TaskError::io(format!("lock {}", path(vault_root).display()), source)
+}
+
+fn open(vault_root: &Path) -> Result<std::fs::File, Unholdable> {
+    let path = path(vault_root);
+    let dir = path.parent().expect("the lock path has a parent");
+    std::fs::create_dir_all(dir)
+        .and_then(|()| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&path)
+        })
+        .map_err(|e| Unholdable::Path(TaskError::io(format!("open {}", path.display()), e)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A lock path that is not a file this may open can never be held, and saying so is what
+    /// stops a write that would lose records from reporting success.
+    #[test]
+    fn a_plane_that_can_never_be_held_says_so_both_ways() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(PlaneLock::hold(tmp.path()).is_ok());
+        assert!(PlaneLock::is_holdable(tmp.path()).is_ok());
+
+        let lock = tmp.path().join(".lorekeeper").join("tasks.lock");
+        std::fs::remove_file(&lock).unwrap();
+        std::fs::create_dir(&lock).unwrap();
+
+        // And says WHICH failure it is, because the two have different repairs.
+        assert!(matches!(
+            PlaneLock::hold(tmp.path()),
+            Err(Unholdable::Path(_))
+        ));
+        assert!(matches!(
+            PlaneLock::is_holdable(tmp.path()),
+            Err(Unholdable::Path(_))
+        ));
+    }
+
+    /// A plane another command holds this instant is one a caller would get by waiting, so a
+    /// view must not report it as a vault nothing can write.
+    #[test]
+    fn a_plane_someone_else_holds_is_still_holdable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let held = PlaneLock::hold(tmp.path()).unwrap();
+        assert!(PlaneLock::is_holdable(tmp.path()).is_ok());
+        drop(held);
+    }
+}

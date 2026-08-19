@@ -20,6 +20,7 @@
 //! line this cannot read is never rewritten.
 
 mod board;
+mod lock;
 mod log;
 mod propose;
 mod reconcile;
@@ -29,6 +30,7 @@ mod store;
 mod task;
 
 pub use board::{Board, Entry, Unplaced};
+pub use lock::{PlaneLock, Unholdable};
 pub use log::{Answered, Recorded, Transition, TransitionKind, TransitionLog};
 pub use propose::{Candidate, Candidates, Consumed, Gathered, Judged, select};
 pub use reconcile::{Reconciled, rollover, sync};

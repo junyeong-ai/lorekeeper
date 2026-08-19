@@ -182,6 +182,11 @@ pub async fn run(opts: &super::GlobalOptions, dry_run: bool) -> miette::Result<(
     if let Some(personal) = &config.personal
         && personal.tasks.is_some()
     {
+        // Held for this whole block: `Judged::orphans` reads a day's file and `retire` writes
+        // back what survives, which is a read-modify-write on the same file `lore task
+        // candidate` appends to under this lock. A janitor overlapping one drops a judgment
+        // nobody has seen.
+        let _held = lk_task::PlaneLock::hold(&vault_root).map_err(|e| miette::miette!("{e}"))?;
         let configured: Vec<String> = config.sources.keys().cloned().collect();
         let candidates = lk_task::Candidates::new(&vault_root);
         let schedule = lk_task::Schedule::new(&vault_root);

@@ -123,9 +123,9 @@ the commands in `lk-cli` are the only thing that decides when to apply them.
   while the read asks what is enabled. The same rule reaches the judged candidates through
   `propose_from`, because validating a judgment only when it is WRITTEN answers for the moment
   it was made and not for the moment it is acted on — a file five months old was still putting
-  work from a dropped source onto the board. A file is retired only where it was taken WHOLE: a
-  judgment the filter passed over is as unseen as one in a file that would not read, and `add`
-  keys by DATE so one day's file holds every source's judgments.
+  work from a dropped source onto the board. A file is settled by ROW: what was taken is
+  written out of it and what was passed over stays, and `add` keys by DATE so one day's file
+  holds every source's judgments.
 - **The board file is the TRUTH, not a rendering of a store kept elsewhere.** The vault is the
   product: a box ticked on a phone has to count, and a design that keeps state somewhere else
   discards that edit in silence — worse than any parsing risk. What keeps the parsing risk small
@@ -413,24 +413,34 @@ the commands in `lk-cli` are the only thing that decides when to apply them.
   reminders each answer `null` rather than empty, the front door's row says the record cannot be
   read, and the reason goes to stderr where it cannot corrupt the contract on stdout. Fixing one
   of four left three saying the reassuring thing.
-- **Every mutating command holds a kernel lock, or REFUSES.** (`lk-cli`'s `IntentPlane`,
-  `std::fs::File::lock` on `<vault>/.lorekeeper/tasks.lock`, from before the plane is read until
-  after it is written — the PLANE, not the board. Every store beside it is a read-modify-write
-  too, and scoping the guard to the board is what let `lore task candidate` and `lore task remind
-  add` race each other on their own files: it was named for the first thing it happened to
-  protect rather than for what it protects.) The board and the log are each a read-modify-write,
-  so the scheduled day-close and someone closing a task by hand could both read, both write, and
-  drop one of the two — and the completion that disappeared was gone from the history, which is
-  the only thing the archive reads. `File::lock` BLOCKS until it is granted, so a failure is
-  never contention: it is a filesystem that cannot lock at all, and it will not start being able
-  to on the next run. Proceeding there lost board lines and transition records while reporting
-  success — eight concurrent adds left two lines and four records — so it is refused, which is
-  the standing rule wherever this tool cannot keep a promise, and warning instead does not make
-  the loss less silent to whatever read the exit code. The lock is the kernel's, so a crash
-  releases it with no staleness rule to get wrong; it cannot reach across machines, which is the
-  same limitation an editor on either machine already has. READING takes no lock and is never
-  refused: every write goes through `write_atomic`, so a reader sees a whole file or the previous
-  one.
+- **Every writer of the plane holds it, or REFUSES.** `PlaneLock` on
+  `<vault>/.lorekeeper/tasks.lock`, from before the plane is read until after it is written. It
+  lives in `lk-task`, beside the stores it guards, rather than beside the first command that
+  needed it: named for one writer it guarded `lore task` while `lore ingest` wrote the proposal
+  snapshots and `lore maintenance` rewrote judged rows beside it, which is the same defect it
+  already had once when it was named for the BOARD rather than the plane. `lore ingest` holds it
+  for each plane write and no longer — held across a fetch that takes minutes it would lock a
+  person out of their own board for those minutes. The board and the log are each a
+  read-modify-write, so the scheduled day-close and someone closing a task by hand could both
+  read, both write, and drop one of the two — and the completion that disappeared was gone from
+  the history, which is the only thing the archive reads. `File::lock` BLOCKS until it is
+  granted, so a failure is never contention: it is a plane that can never be held. Proceeding
+  there lost board lines and records while reporting success — eight concurrent adds left two
+  lines and four records — so it is refused, which is the standing rule wherever this tool
+  cannot keep a promise. `Unholdable` says WHICH of the two failures it is, structurally rather
+  than by matching text in a message, because they have different repairs: a lock file that
+  cannot be OPENED is something sitting at that path, and only `lock` itself failing means a
+  filesystem with no locking. The lock is the kernel's, so a crash releases it with no staleness
+  rule to get wrong; it cannot reach across machines, which is the same limitation an editor on
+  either machine already has.
+- **A READ never waits for the plane and never holds it — but it asks whether a write could.**
+  `PlaneLock::is_holdable` answers with `try_lock`, which cannot block, and a plane another
+  command holds this instant is HOLDABLE: reported otherwise, every busy moment would read as a
+  broken vault. What it catches is the lasting failure, and it is what fills `unwritable` for a
+  reader — the front door printed a quiet day and the contract said `unwritable: null` over a
+  vault where the nightly close, every command and the reminder timer were all being turned
+  away. Reading itself is never refused: every write goes through `write_atomic`, so a reader
+  sees a whole file or the previous one.
 - **A write refuses to land on a version it never saw.** `commit` re-reads the page and compares
   it to the bytes this command parsed, BEFORE the log write, so an edit that arrived from an
   editor or a sync client in between is never erased — and a refusal leaves nothing recorded
