@@ -1,6 +1,6 @@
 ---
 name: lore-day
-version: 0.20.0
+version: 0.21.0
 description: Run the user's working day off the Lorekeeper task board — what is on today, what the sources proposed, what an editor changed, what to remind them of, and closing the day so what they did becomes knowledge. The user speaks; this maps it to `lore task` and never asks them to type a command.
 when_to_use: |
   오늘 뭐 해야 해, 오늘 할 일, 뭐부터 하지, 이거 해야 해, 이거 할 일로 넣어줘,
