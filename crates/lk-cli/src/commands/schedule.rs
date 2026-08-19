@@ -12,11 +12,32 @@ pub enum Format {
 }
 
 /// One scheduled command, format-independent.
+/// When a job runs.
+///
+/// Two shapes because both schedulers express both NATIVELY, and translating either into the
+/// other's form is the approximation this command refuses. A calendar time is `0 9 * * *` in
+/// cron and `StartCalendarInterval` in launchd; a repeat is `*/5 * * * *` in cron and
+/// `StartInterval` in launchd. What is refused is a cron `*/5` asked to become a calendar
+/// interval — a silently different schedule — and that refusal stands.
+enum When {
+    /// 5-field cron expression from config.
+    Calendar(String),
+    /// Every N minutes, for a job whose whole point is to check often.
+    EveryMinutes(u32),
+}
+
+/// How often the reminder timer looks.
+///
+/// Five minutes rather than one: a reminder exists to interrupt someone, and being interrupted
+/// up to five minutes late is not a different event, while a job that wakes a laptop every
+/// sixty seconds all day is. Nothing but firing retires a reminder, so a tick missed while the
+/// machine slept costs lateness rather than the reminder.
+const REMIND_EVERY_MINUTES: u32 = 5;
+
 struct Job {
     /// Suffix of the launchd label / identity in comments (`ingest`, `synthesis-weekly`, …).
     name: String,
-    /// 5-field cron expression from config.
-    schedule: String,
+    schedule: When,
     /// Program to run. `None` = the `--bin` lore binary; `Some` = a pipeline script, which
     /// also needs [`pipeline_env`] to find its own tools.
     program: Option<String>,
@@ -170,7 +191,7 @@ fn build_jobs(
         args.extend(tail.iter().map(|s| (*s).to_string()));
         Job {
             name: name.to_string(),
-            schedule: schedule.to_string(),
+            schedule: When::Calendar(schedule.to_string()),
             program: None,
             args,
         }
@@ -190,7 +211,7 @@ fn build_jobs(
     // stranding the grant. Keeping the slot stable makes the second install REPLACE the first.
     let pipeline_job = |dir: &std::path::Path, name: &str, schedule: &str, script: &str| Job {
         name: name.to_string(),
-        schedule: schedule.to_string(),
+        schedule: When::Calendar(schedule.to_string()),
         program: Some(dir.join(script).display().to_string()),
         args: Vec::new(),
     };
@@ -222,6 +243,23 @@ fn build_jobs(
                 &["synthesis", period, "--previous"],
             ));
         }
+    }
+    // Only where the intent plane is on, and only with a pipeline dir: the notifier is a
+    // shipped script, and a bare `lore task remind due` on a timer would retire every reminder
+    // into a log nobody reads.
+    if let (Some(dir), true) = (
+        pipeline_dir,
+        config
+            .personal
+            .as_ref()
+            .is_some_and(|personal| personal.tasks.is_some()),
+    ) {
+        jobs.push(Job {
+            name: "remind".to_string(),
+            schedule: When::EveryMinutes(REMIND_EVERY_MINUTES),
+            program: Some(dir.join("lore-remind.sh").display().to_string()),
+            args: Vec::new(),
+        });
     }
     if let Some(ref sched) = config.maintenance.schedule {
         jobs.push(lore_job("maintenance", sched, &["maintenance"]));
@@ -271,7 +309,11 @@ fn print_cron(
             command.push(' ');
             command.push_str(&shell_escape(arg));
         }
-        out.push(format!("{} cd {cwd_str} && {command}", job.schedule));
+        let when = match &job.schedule {
+            When::Calendar(expr) => expr.clone(),
+            When::EveryMinutes(n) => format!("*/{n} * * * *"),
+        };
+        out.push(format!("{when} cd {cwd_str} && {command}"));
     }
 
     let checked: Vec<String> = out
@@ -335,14 +377,18 @@ fn print_launchd(
 
     for job in jobs {
         let label = format!("com.lorekeeper.{}", job.name);
-        let intervals = cron_to_calendar_intervals(&job.schedule).ok_or_else(|| {
-            miette::miette!(
-                "schedule `{}` for `{}` uses cron syntax launchd cannot express \
-                 (step/range values). Use `--format cron`, or simplify the expression.",
-                job.schedule,
-                job.name
-            )
-        })?;
+        let intervals = match &job.schedule {
+            When::Calendar(expr) => Some(cron_to_calendar_intervals(expr).ok_or_else(|| {
+                miette::miette!(
+                    "schedule `{expr}` for `{}` uses cron syntax launchd cannot express \
+                     (step/range values). Use `--format cron`, or simplify the expression.",
+                    job.name
+                )
+            })?),
+            // launchd expresses a repeat natively, so there is nothing to translate and
+            // nothing to refuse.
+            When::EveryMinutes(_) => None,
+        };
 
         println!("# ── {home}/Library/LaunchAgents/{label}.plist");
         println!(r#"<?xml version="1.0" encoding="UTF-8"?>"#);
@@ -383,19 +429,30 @@ fn print_launchd(
             "  <key>WorkingDirectory</key><string>{}</string>",
             xml_escape(&cwd.display().to_string())
         );
-        println!("  <key>StartCalendarInterval</key>");
-        if intervals.len() == 1 {
-            println!("  <dict>");
-            print_interval(&intervals[0], "    ");
-            println!("  </dict>");
-        } else {
-            println!("  <array>");
-            for interval in &intervals {
-                println!("    <dict>");
-                print_interval(interval, "      ");
-                println!("    </dict>");
+        match (&job.schedule, &intervals) {
+            (When::EveryMinutes(minutes), _) => {
+                println!(
+                    "  <key>StartInterval</key><integer>{}</integer>",
+                    u64::from(*minutes) * 60
+                );
             }
-            println!("  </array>");
+            (_, Some(intervals)) if intervals.len() == 1 => {
+                println!("  <key>StartCalendarInterval</key>");
+                println!("  <dict>");
+                print_interval(&intervals[0], "    ");
+                println!("  </dict>");
+            }
+            (_, Some(intervals)) => {
+                println!("  <key>StartCalendarInterval</key>");
+                println!("  <array>");
+                for interval in intervals {
+                    println!("    <dict>");
+                    print_interval(interval, "      ");
+                    println!("    </dict>");
+                }
+                println!("  </array>");
+            }
+            (_, None) => unreachable!("a calendar job always resolves its intervals"),
         }
         println!(
             "  <key>StandardOutPath</key><string>{}/Library/Logs/lorekeeper/{}.log</string>",
@@ -532,7 +589,7 @@ mod tests {
         // refusal on a later line still leaves this one in `crontab -`.
         let jobs = [Job {
             name: "ingest".into(),
-            schedule: "0 9 * * *".into(),
+            schedule: When::Calendar("0 9 * * *".into()),
             program: None,
             args: vec!["ingest".into()],
         }];
@@ -631,7 +688,7 @@ mod tests {
         // and emit a plist that looks right.
         let jobs = [Job {
             name: "daily".into(),
-            schedule: "0 9 * * *".into(),
+            schedule: When::Calendar("0 9 * * *".into()),
             program: None,
             args: vec!["ingest".into()],
         }];

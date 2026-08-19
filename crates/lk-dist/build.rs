@@ -10,7 +10,12 @@ use std::path::{Path, PathBuf};
 
 /// The scheduled pipelines, named because `scripts/` also holds the installers and the gate
 /// runner — files a user never receives through `lore`.
-const PIPELINES: [&str; 3] = ["lore-pipeline.sh", "lore-daily.sh", "lore-weekly.sh"];
+const PIPELINES: [&str; 4] = [
+    "lore-pipeline.sh",
+    "lore-daily.sh",
+    "lore-weekly.sh",
+    "lore-remind.sh",
+];
 
 fn main() {
     let repo = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))

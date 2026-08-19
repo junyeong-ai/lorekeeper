@@ -37,6 +37,15 @@ the commands in `lk-cli` are the only thing that decides when to apply them.
   day's page and cannot re-declare yesterday's, so `Judged` candidates are consumed by the
   proposal that offers them; left to accumulate they would be re-read forever, and one deleted
   in March would return every day after.
+- **A reminder is kept OFF the board.** It looks like it belongs there — forward-looking, the
+  person's own — but a reminder is fired by a TIMER, and a timer that rewrites the board every
+  few minutes writes their own file underneath an open editor and a sync client, on a schedule,
+  forever; the kernel lock does not reach the other machine. So `Reminders` is its own store,
+  where firing costs a write nobody is holding. What stays on the board is `wake:`, because that
+  is a STATE CHANGE and belongs to the state machine — the two are not one idea at two
+  resolutions. Firing retires it, for the same reason arriving clears a wake date: it was a
+  promise to say something once. Nothing else retires one, so a reminder due while the machine
+  slept is said late rather than lost.
 - **An appointment is reported, never proposed.** `SourceDescriptor::scheduled` marks a source
   whose items are times already committed to. `lore agenda` shows them beside the day's tasks
   and the board never learns of them: a meeting happens whether or not a line is cleared, and

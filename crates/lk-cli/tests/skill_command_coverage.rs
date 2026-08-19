@@ -227,6 +227,55 @@ fn backticked_command_paths(corpus: &str) -> Vec<Vec<String>> {
 /// `--help` short-circuits clap AFTER argument parsing, so an unknown flag is rejected (exit 2,
 /// `unexpected argument '--dryrun' found`) while a valid one prints help. Nothing executes.
 ///
+/// Split a documented invocation the way a shell would, honouring double quotes.
+///
+/// A naive whitespace split would force every skill to document arguments no person would type:
+/// `--note` takes a sentence and `--summary` takes a phrase, so an example without quotes is not
+/// the command the skill is telling an agent to run — and a check that only passes for
+/// unrealistic examples verifies nothing. A `#` inside quotes survives too, which is how a mail
+/// or a Slack permalink is written.
+/// Drop a trailing `#` comment, but not a `#` inside quotes — a Gmail permalink carries one.
+fn strip_trailing_comment(line: &str) -> &str {
+    let mut quoted = false;
+    for (index, ch) in line.char_indices() {
+        match ch {
+            '"' => quoted = !quoted,
+            '#' if !quoted => return line[..index].trim_end(),
+            _ => {}
+        }
+    }
+    line
+}
+
+fn shell_words(line: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quoted = false;
+    let mut started = false;
+    for ch in line.chars() {
+        match ch {
+            '"' => {
+                quoted = !quoted;
+                started = true;
+            }
+            c if c.is_whitespace() && !quoted => {
+                if started {
+                    words.push(std::mem::take(&mut word));
+                    started = false;
+                }
+            }
+            c => {
+                word.push(c);
+                started = true;
+            }
+        }
+    }
+    if started {
+        words.push(word);
+    }
+    words
+}
+
 /// The `[--flag]` table rows stay unchecked. Reaching them needs a table of which documentation
 /// notations to strip, and a check that cannot tell notation from a command fails the build on
 /// prose — which is the failure mode this whole file exists to avoid.
@@ -244,14 +293,14 @@ fn every_fenced_lore_invocation_parses_including_its_flags() {
             if !fenced {
                 continue;
             }
-            let command = line.trim().split('#').next().unwrap_or("").trim();
+            let command = strip_trailing_comment(line.trim());
             let Some(args) = command.strip_prefix("lore ") else {
                 continue;
             };
             checked += 1;
             let out = Command::new(env!("CARGO_BIN_EXE_lore"))
                 .env("NO_COLOR", "1")
-                .args(args.split_whitespace())
+                .args(shell_words(args))
                 .arg("--help")
                 .output()
                 .expect("run lore");

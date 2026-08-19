@@ -15,10 +15,14 @@ use lk_task::TaskState;
 use super::GlobalOptions;
 use super::task::{IntentPlane, annotation};
 
-pub async fn run(opts: &GlobalOptions, date: Option<String>) -> miette::Result<()> {
+pub async fn run(opts: &GlobalOptions, date: Option<String>, json: bool) -> miette::Result<()> {
     let mut plane = IntentPlane::open(opts)?;
     let actually_today = plane.today;
     plane.today = super::parse_date(date.as_deref(), plane.today)?;
+
+    if json {
+        return emit_json(&plane, actually_today);
+    }
 
     let strings = plane.locale.strings();
     eprintln!("{}", plane.today);
@@ -104,5 +108,92 @@ pub async fn run(opts: &GlobalOptions, date: Option<String>) -> miette::Result<(
     if unrecorded > 0 {
         eprintln!("\n{unrecorded} change(s) made in an editor — `lore task sync` records them");
     }
+    Ok(())
+}
+
+/// The same day, for something that is not a person.
+///
+/// The view an agent reads every turn, so it is a CONTRACT rather than a rendering: the aligned
+/// columns above exist to be scanned by eye, and asking a caller to parse them is the same
+/// mistake `lore queue count` and `lore config vault-root` exist to prevent. Every section the
+/// terminal shows is here, with the dates unformatted and the origin URL a proposal came from
+/// carried through — an agent that has to strip a markdown link out of a title to know where a
+/// task came from is reading prose again.
+fn emit_json(plane: &IntentPlane, actually_today: jiff::civil::Date) -> miette::Result<()> {
+    let task_json = |task: &lk_task::Task| {
+        serde_json::json!({
+            "id": task.id.as_str(),
+            "title": lk_core::link::strip_links(&task.title),
+            "state": task.state.as_str(),
+            "since": task.since.to_string(),
+            "due": task.due.map(|d| d.to_string()),
+            "wake": task.wake.map(|d| d.to_string()),
+            "carried": task.carried,
+            "overdue": task.is_overdue_on(plane.today),
+            "origin": lk_core::link::first_external_dest(&task.title),
+        })
+    };
+
+    let mut committed = Vec::new();
+    let mut woken = Vec::new();
+    let mut due = Vec::new();
+    let mut proposed = Vec::new();
+    for task in plane.board.tasks() {
+        match task.state {
+            TaskState::Proposed => proposed.push(task_json(task)),
+            _ if !task.is_active_on(plane.today) => {}
+            TaskState::Today => committed.push(task_json(task)),
+            TaskState::Waiting => woken.push(task_json(task)),
+            TaskState::Next | TaskState::Someday => due.push(task_json(task)),
+        }
+    }
+
+    let schedule: Vec<_> = lk_task::Schedule::new(&plane.vault_root)
+        .read(plane.today)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|appointment| {
+            serde_json::json!({
+                "at": appointment
+                    .at
+                    .to_zoned(plane.zone.clone())
+                    .strftime("%FT%H:%M")
+                    .to_string(),
+                "title": appointment.title,
+            })
+        })
+        .collect();
+
+    let reminders: Vec<_> = lk_task::Reminders::new(&plane.vault_root)
+        .read()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|reminder| {
+            serde_json::json!({
+                "id": reminder.id.as_str(),
+                "at": reminder.at.to_zoned(plane.zone.clone()).strftime("%FT%H:%M").to_string(),
+                "text": reminder.text,
+                "task": reminder.task.as_ref().map(|id| id.as_str().to_string()),
+            })
+        })
+        .collect();
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "date": plane.today.to_string(),
+            "schedule": schedule,
+            "committed": committed,
+            "woken": woken,
+            "due": due,
+            "proposed": proposed,
+            "reminders": reminders,
+            "done_today": plane.closed_on(plane.today).len(),
+            // What an editor changed that no pass has recorded — the one thing this view can
+            // see and cannot fix, so it names the command that can.
+            "unrecorded": plane.unrecorded(actually_today),
+        }))
+        .unwrap_or_else(|_| "{}".into())
+    );
     Ok(())
 }

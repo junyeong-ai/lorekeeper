@@ -72,6 +72,8 @@ lore self update                   # replace the binary with a release, then red
 lore agenda                        # the day read off the task board (a view; writes nothing)
 lore task add "…" / done / sync    # the board: intent in, completed work out
 lore task propose                  # what the sources say is still open, offered — never committed
+lore task remind add "…" --at 15:00  # say something at a time (fired by a timer, off the board)
+lore agenda --json                 # the day as a contract, for a skill rather than an eye
 lore task rollover --closing yesterday  # close the day that ended — carry what is still committed
 ```
 
@@ -116,7 +118,15 @@ Auto-discovered: `./config.yaml` → `~/.config/lorekeeper/config.yaml`.
   nextest run --workspace`. That volume still folds NFC against NFD, so the normalization half
   needs real Linux. Where a behaviour legitimately differs, probe rather than assume — the
   `filesystem_folds_case` helper in `commands::validate::tests` is the shape.
-- **`lore schedule` emits cron OR launchd** (`--format`). On macOS launchd is correct: `StartCalendarInterval` runs a job missed during sleep as soon as the machine wakes, whereas cron silently skips it — and a closed laptop at 09:00 is the normal case. Cron syntax launchd cannot express (`*/5`, `1-5`) is REFUSED, never approximated, since a silently different schedule is worse than a rejected one; every emitted path must be absolute (`--bin`, `--pipeline-dir`) because launchd searches no `PATH` and expands no `~`.
+- **A view a skill reads is a CONTRACT, not a rendering.** The user does not type these
+  commands — a skill does, on their behalf — so `lore agenda --json` carries every section the
+  terminal shows, with dates unformatted and the origin URL a task came from resolved, and
+  `lore-day` is the skill that runs the day off it. Asking an agent to parse aligned columns is
+  the same mistake `lore queue count` and `lore config vault-root` exist to prevent, and the
+  columns exist to be scanned by eye. `lk_core::link::first_external_dest` is the mirror of the
+  graph's own extraction: a task's origin is external precisely so the graph never sees it,
+  which means the graph's extractor cannot be what reads it back.
+- **`lore schedule` emits cron OR launchd** (`--format`). On macOS launchd is correct: `StartCalendarInterval` runs a job missed during sleep as soon as the machine wakes, whereas cron silently skips it — and a closed laptop at 09:00 is the normal case. Cron syntax launchd cannot express (`*/5`, `1-5`) is REFUSED, never approximated, since a silently different schedule is worse than a rejected one — what is refused is a TRANSLATION, so a job whose schedule is natively a repeat (the reminder timer) emits `*/5 * * * *` for cron and `StartInterval` for launchd, each in its own vocabulary; every emitted path must be absolute (`--bin`, `--pipeline-dir`) because launchd searches no `PATH` and expands no `~`.
 - **`--pipeline-dir` is what schedules the pipelines rather than their first stage.** `lore ingest` and `lore synthesis weekly` are stage ONE of `lore-daily.sh`/`lore-weekly.sh`; the queue drain and `lore queue apply` exist only in the scripts, so scheduling the bare subcommands ingests every morning and never fills a summary or materializes a concept. With the flag those two jobs run the scripts (and only those two — the janitors and monthly+ syntheses have no LLM stage, which is why the scripts say they belong on their own schedules). A scheduled job starts with almost no environment, so the emitted entry also carries `PATH`/`LORE_BIN`/`LORE_CONFIG`/`CLAUDE_BIN` — all INHERITED from the interactive session `lore schedule` runs in, never invented, since a guessed value reproduces exactly the silently-broken job the flag exists to prevent.
 - **One all-source ingest is the scheduling unit**: the work-log is a cross-source daily aggregate, so `ingest.schedule` is the single ingest cron key and `lore schedule` emits ONE `lore ingest` line — never per source. The work-log renders only on a full ingest: a filtered `lore ingest <source>` sees a structural subset of personal events and never rewrites the cross-source page (a transient source failure inside a full run still writes — loud non-zero exit, complete again on the next full run).
 - **Daily pages re-render in full each run; STREAMING sources project from an event log.** A complete-refetch source (Gmail/Jira/Calendar/Slack/Drive) reproduces its whole window on demand and renders from the fetch. A streaming source (RSS — `SourceType::descriptor().streaming`, a rolling capped feed) can't, so it projects from a durable per-date event log (`.lorekeeper/events/{source}/{date}.jsonl`, raw pre-LLM events): each run UNIONs fetch + stored log (`EventId` key, fresh wins), so a scrolled-out item is never lost and a deleted page self-heals (`lore ingest --date <past>` repairs any day). Raw-layer duplication is provenance; convergence happens at the concept/graph layer (one concept = one page).

@@ -229,6 +229,22 @@ pub fn extract_dests(body: &str) -> Vec<String> {
         .collect()
 }
 
+/// The destination of the first EXTERNAL inline link in `text`.
+///
+/// The mirror of what [`extract_dests`] gates out. A task carries where it came from as an
+/// absolute URL in its own title, precisely so the graph never sees it — which means the graph's
+/// extraction cannot answer where a task came from either, and a caller reaching for the URL
+/// would otherwise re-parse markdown by hand. One vocabulary, both directions.
+pub fn first_external_dest(text: &str) -> Option<String> {
+    MD_LINK_RE.captures_iter(text).find_map(|cap| {
+        if !cap[1].is_empty() {
+            return None; // image embed
+        }
+        let dest = cap[3].trim();
+        is_external(dest).then(|| dest.to_string())
+    })
+}
+
 /// A captured link as a [`PageLink`] — `None` for image embeds and
 /// external/empty/anchor-only destinations.
 fn internal_page_link(cap: &Captures) -> Option<PageLink> {
@@ -361,6 +377,28 @@ fn count_repeated(bytes: &[u8], start: usize, byte: u8) -> usize {
 
 #[cfg(test)]
 mod tests {
+    /// A task's origin is an absolute URL in its title, kept out of the graph on purpose — so
+    /// the graph's own extraction cannot be what reads it back.
+    #[test]
+    fn the_first_external_destination_is_the_origin() {
+        assert_eq!(
+            super::first_external_dest(
+                "[PLAT-411] review ([jira](https://acme.example/browse/PLAT-411))"
+            ),
+            Some("https://acme.example/browse/PLAT-411".to_string())
+        );
+        assert_eq!(
+            super::first_external_dest("a task with [a page](concepts/x.md) and nothing外"),
+            None
+        );
+        assert_eq!(super::first_external_dest("no links at all"), None);
+        assert_eq!(
+            super::first_external_dest("![shot](https://e/x.png) then ([src](https://e/y))"),
+            Some("https://e/y".to_string()),
+            "an image embed is not an origin"
+        );
+    }
+
     use super::*;
 
     #[test]

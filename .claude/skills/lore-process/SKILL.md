@@ -316,7 +316,7 @@ default and this step does not run then. For a daily page belonging to a named s
 those, name anything that asks the vault's owner to DO something:
 
 ```
-lore task candidate --source <source-id> --summary "<what-to-do>" --url "<absolute-url>"
+lore task candidate --source <source-id> --summary "<what to do>" --url "<absolute url>"
 ```
 
 The URL is the thing itself — the mail, the thread, the issue — never a vault path: it is copied

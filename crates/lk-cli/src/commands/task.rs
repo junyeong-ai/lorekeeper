@@ -78,6 +78,16 @@ pub enum TaskCommand {
         #[arg(long)]
         until: String,
     },
+    /// Say something at a time
+    ///
+    /// Kept off the board on purpose: a reminder is fired by a TIMER, and a timer that rewrites
+    /// the board every few minutes writes a person's own file underneath an open editor and a
+    /// sync client, forever. `wake` stays on the board because it is a state change; this only
+    /// says something out loud.
+    Remind {
+        #[command(subcommand)]
+        cmd: RemindCommand,
+    },
     /// Name work an LLM session read out of a page, for the next `propose` to offer
     ///
     /// The judgment half of the first joint, and the only way in. A source's structured fields
@@ -116,9 +126,44 @@ pub enum TaskCommand {
     },
 }
 
+#[derive(clap::Subcommand)]
+pub enum RemindCommand {
+    /// Promise to say something at a time
+    Add {
+        /// What to say
+        #[arg(required = true, num_args = 1..)]
+        text: Vec<String>,
+        /// When — `HH:MM` for today, or `YYYY-MM-DDTHH:MM`. Read in `vault.timezone`, which is
+        /// the zone every other time here is derived in.
+        #[arg(long)]
+        at: String,
+        /// The task this is about, where it is about one
+        #[arg(long)]
+        task: Option<String>,
+    },
+    /// What is promised and not yet said
+    List {
+        /// Emit them as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Take one back
+    Drop {
+        /// The reminder's id, as `add` and `list` print it
+        id: String,
+    },
+    /// Print what is due now, and retire it
+    ///
+    /// The half a timer runs. What turns a line into a notification is the platform's, not
+    /// this binary's — `lore-remind.sh` is the shipped one.
+    Due,
+}
+
 pub async fn run(opts: &GlobalOptions, cmd: TaskCommand) -> miette::Result<()> {
     let mut plane = match cmd {
-        TaskCommand::List { .. } => IntentPlane::open(opts)?,
+        // Neither reads to decide a board write, so neither claims the board. A reminder store
+        // is its own file and `list` only reports.
+        TaskCommand::List { .. } | TaskCommand::Remind { .. } => IntentPlane::open(opts)?,
         _ => IntentPlane::open_for_change(opts)?,
     };
 
@@ -229,6 +274,7 @@ pub async fn run(opts: &GlobalOptions, cmd: TaskCommand) -> miette::Result<()> {
             eprintln!("waiting until {until}  {title}");
             Ok(())
         }
+        TaskCommand::Remind { cmd } => remind(&plane, cmd),
         TaskCommand::Candidate {
             source,
             summary,
@@ -741,6 +787,116 @@ fn parse_date(text: &str) -> miette::Result<jiff::civil::Date> {
         .map_err(|e| miette::miette!("invalid date '{text}': {e}"))
 }
 
+/// `lore task remind` — the promises, and the half a timer fires.
+fn remind(plane: &IntentPlane, cmd: RemindCommand) -> miette::Result<()> {
+    let store = lk_task::Reminders::new(&plane.vault_root);
+    match cmd {
+        RemindCommand::Add { text, at, task } => {
+            let text = one_line(text.join(" "))?;
+            let at = parse_moment(&at, plane)?;
+            let task = task.as_deref().map(parse_id).transpose()?;
+            if let Some(id) = &task
+                && !plane.board.tasks().any(|open| &open.id == id)
+            {
+                return Err(miette::miette!("no task answers to `{id}`"));
+            }
+            let held = store.read().map_err(|e| miette::miette!("{e}"))?;
+            let taken = held.iter().map(|r| r.id.clone()).collect();
+            let id = TaskId::mint(&format!("{text}{at}"), &taken);
+            store
+                .add(lk_task::Reminder {
+                    id: id.clone(),
+                    at,
+                    text: text.clone(),
+                    task,
+                })
+                .map_err(|e| miette::miette!("{e}"))?;
+            eprintln!(
+                "{id}  {}  {text}",
+                at.to_zoned(plane.zone.clone()).strftime("%F %H:%M")
+            );
+            Ok(())
+        }
+        RemindCommand::List { json } => {
+            let held = store.read().map_err(|e| miette::miette!("{e}"))?;
+            if json {
+                let rows: Vec<_> = held
+                    .iter()
+                    .map(|reminder| {
+                        serde_json::json!({
+                            "id": reminder.id.as_str(),
+                            "at": reminder.at.to_zoned(plane.zone.clone()).strftime("%FT%H:%M").to_string(),
+                            "text": reminder.text,
+                            "task": reminder.task.as_ref().map(|id| id.as_str()),
+                        })
+                    })
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&rows).unwrap_or_else(|_| "[]".into())
+                );
+                return Ok(());
+            }
+            for reminder in held {
+                eprintln!(
+                    "{}  {}  {}",
+                    reminder.id,
+                    reminder
+                        .at
+                        .to_zoned(plane.zone.clone())
+                        .strftime("%F %H:%M"),
+                    reminder.text
+                );
+            }
+            Ok(())
+        }
+        RemindCommand::Drop { id } => {
+            let id = parse_id(&id)?;
+            if !store.remove(&id).map_err(|e| miette::miette!("{e}"))? {
+                return Err(miette::miette!("no reminder answers to `{id}`"));
+            }
+            eprintln!("dropped  {id}");
+            Ok(())
+        }
+        RemindCommand::Due => {
+            // To STDOUT, because this is the one output another program consumes — the same
+            // contract `queue count` and `config vault-root` keep.
+            for reminder in store.due(plane.now).map_err(|e| miette::miette!("{e}"))? {
+                println!("{}", reminder.text);
+            }
+            Ok(())
+        }
+    }
+}
+
+/// A wall-clock moment in the VAULT's zone: `HH:MM` today, or `YYYY-MM-DDTHH:MM`.
+///
+/// Resolved here rather than taken as an instant, because every other time in this tool is
+/// derived through `vault.timezone` and a reminder read in the machine's zone would fire an
+/// hour out on a laptop that travelled.
+fn parse_moment(text: &str, plane: &IntentPlane) -> miette::Result<jiff::Timestamp> {
+    let civil: jiff::civil::DateTime = match text.split_once('T') {
+        Some(_) => text.parse().map_err(|e| {
+            miette::miette!("`{text}` is not a moment ({e}) — expected HH:MM or YYYY-MM-DDTHH:MM")
+        })?,
+        None => {
+            let time: jiff::civil::Time = text.parse().map_err(|e| {
+                miette::miette!("`{text}` is not a time ({e}) — expected HH:MM or YYYY-MM-DDTHH:MM")
+            })?;
+            plane.today.at(time.hour(), time.minute(), 0, 0)
+        }
+    };
+    civil
+        .to_zoned(plane.zone.clone())
+        .map(|zoned| zoned.timestamp())
+        .map_err(|e| {
+            miette::miette!(
+                "`{text}` does not exist in {}: {e}",
+                plane.zone.iana_name().unwrap_or("the vault's zone")
+            )
+        })
+}
+
 fn list(plane: &IntentPlane, only: Option<TaskState>, json: bool) {
     if json {
         let rows: Vec<serde_json::Value> = plane
@@ -756,6 +912,8 @@ fn list(plane: &IntentPlane, only: Option<TaskState>, json: bool) {
                     "due": task.due.map(|d| d.to_string()),
                     "wake": task.wake.map(|d| d.to_string()),
                     "carried": task.carried,
+                    "src": task.src,
+                    "origin": lk_core::link::first_external_dest(&task.title),
                 })
             })
             .collect();

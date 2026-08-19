@@ -47,6 +47,7 @@ const SWEEP: &[&[&str]] = &[
     &["queue", "count"],
     &["queue", "prune"],
     &["task", "list"],
+    &["task", "remind", "list"],
     // Read against a fixed day, because the day is half of what an agenda answers: the fixture's
     // dates are compared to it, and reading the real clock would make this a snapshot that
     // changes at midnight rather than when the behaviour does.
@@ -122,6 +123,15 @@ const EXEMPT: &[(&[&str], &str)] = &[
     (
         &["task", "propose"],
         "puts what the sources declared open onto the board, and consumes the judged candidates it offered",
+    ),
+    (
+        &["task", "remind", "add"],
+        "promises to say something at a time, which is a write",
+    ),
+    (&["task", "remind", "drop"], "takes a promise back"),
+    (
+        &["task", "remind", "due"],
+        "prints what is due and RETIRES it, so observing it would consume a reminder nobody saw",
     ),
     (
         &["task", "candidate"],

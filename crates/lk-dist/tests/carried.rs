@@ -86,7 +86,10 @@ fn the_binary_carries_the_pipeline_scripts_the_repository_holds() {
         let path = repo_root().join("scripts").join(file.relative);
         assert_eq!(file.contents, read(&path), "{} drifted", path.display());
     }
-    assert_eq!(lk_dist::pipeline_names().len(), 3);
+    // The three scheduled stages plus the reminder timer. Pinned so a script added to the
+    // repository and not to the manifest is caught by the count rather than by its absence
+    // going unnoticed until someone's reminders stop firing.
+    assert_eq!(lk_dist::pipeline_names().len(), 4);
 }
 
 #[test]
