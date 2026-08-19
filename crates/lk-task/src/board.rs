@@ -375,11 +375,16 @@ impl Board {
     pub fn origins(&self) -> BTreeSet<String> {
         self.tasks()
             .filter_map(|task| task.src.clone())
-            .chain(
-                self.unplaced
-                    .iter()
-                    .filter_map(|held| stamped(&held.text, "src:").map(str::to_string)),
-            )
+            .chain(self.unplaced.iter().filter_map(|held| {
+                // Only what this could have MINTED. The stamp's grammar accepts any run of
+                // `[0-9A-Za-z-]`, so a `src:` a crash or a conflict cut short is a legal field
+                // naming no observation — and a set of "every origin the page answers to"
+                // holding one says something it does not hold. `ids()` gets this from `parse`;
+                // an origin has no type to parse into, so it is asked where it is minted.
+                stamped(&held.text, "src:")
+                    .filter(|src| lk_core::origin::is_identity(src))
+                    .map(str::to_string)
+            }))
             .collect()
     }
 

@@ -50,9 +50,13 @@ impl PlaneLock {
         // `.lorekeeper/tasks.lock`, and a view run against a mistyped `vault.root` mint the
         // directory: a mutation wearing a reader's name, which is the one thing `survey` and
         // `agenda` are built not to be.
+        //
+        // Asked of the syscall's own answer rather than of a second `exists()`, which cannot
+        // traverse a stray FILE where the directory goes: a regular file at `.lorekeeper` is a
+        // lasting refusal, and `exists()` reported it as an empty vault.
         let file = match open(vault_root, false) {
             Ok(file) => file,
-            Err(Unholdable::Path(_)) if !path(vault_root).exists() => return Ok(()),
+            Err(why) if is_absent(&why) => return Ok(()),
             Err(why) => return Err(why),
         };
         match file.try_lock() {
@@ -91,6 +95,16 @@ pub enum Unholdable {
 
 fn path(vault_root: &Path) -> std::path::PathBuf {
     vault_root.join(".lorekeeper").join("tasks.lock")
+}
+
+/// Whether the lock file is simply not there yet — the one open failure a write repairs by
+/// creating it, and so the only one that is not a lasting refusal.
+fn is_absent(why: &Unholdable) -> bool {
+    matches!(
+        why,
+        Unholdable::Path(TaskError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound
+    )
 }
 
 fn locking(vault_root: &Path, source: std::io::Error) -> TaskError {
@@ -138,6 +152,28 @@ mod tests {
         ));
         assert!(matches!(
             PlaneLock::is_holdable(tmp.path()),
+            Err(Unholdable::Path(_))
+        ));
+    }
+
+    /// A stray FILE where the lock's directory goes is a lasting refusal, and the probe read it
+    /// as a vault nothing had written yet — `exists()` cannot traverse through it, so it
+    /// answered the same "not there" a fresh vault does.
+    #[test]
+    fn something_sitting_where_the_lock_goes_is_not_an_empty_vault() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(
+            PlaneLock::is_holdable(tmp.path()).is_ok(),
+            "nothing written yet"
+        );
+
+        std::fs::write(tmp.path().join(".lorekeeper"), b"").unwrap();
+        assert!(matches!(
+            PlaneLock::is_holdable(tmp.path()),
+            Err(Unholdable::Path(_))
+        ));
+        assert!(matches!(
+            PlaneLock::hold(tmp.path()),
             Err(Unholdable::Path(_))
         ));
     }

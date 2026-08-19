@@ -20,6 +20,20 @@ pub fn identity(url: &str) -> String {
     blake3::hash(url.as_bytes()).to_hex()[..16].to_string()
 }
 
+/// The width every identity is minted at.
+const WIDTH: usize = 16;
+
+/// Whether `value` is an identity this could have minted.
+///
+/// Read back out of a board stamp, a `src:` is only what the stamp says it is — the field's
+/// grammar accepts any run of `[0-9A-Za-z-]`, so a value truncated by a crash mid-write or cut
+/// by a sync client's conflict resolution is still a legal FIELD while naming no observation at
+/// all. Asked here rather than at each reader, for the same reason `TaskId` parses rather than
+/// being length-checked wherever it is read.
+pub fn is_identity(value: &str) -> bool {
+    value.len() == WIDTH && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -30,6 +44,21 @@ mod tests {
         assert_eq!(identity(url), identity(url));
         assert_eq!(identity(url).len(), 16);
         assert!(identity(url).bytes().all(|b| b.is_ascii_alphanumeric()));
+    }
+
+    /// A `src:` read back out of a stamp is only what the field's grammar allows, which is any
+    /// run of `[0-9A-Za-z-]` — so a value a crash or a conflict cut short is a legal field
+    /// naming no observation, and a set of "every origin the page answers to" holding one says
+    /// something it does not hold.
+    #[test]
+    fn only_what_this_could_have_minted_is_an_identity() {
+        assert!(is_identity(&identity(
+            "https://acme.example.com/browse/PLAT-411"
+        )));
+        assert!(!is_identity("7fa5"), "truncated");
+        assert!(!is_identity("7fa514724c2f102e0"), "too long");
+        assert!(!is_identity("7fa514724c2f102z"), "not hex");
+        assert!(!is_identity(""), "empty");
     }
 
     #[test]
