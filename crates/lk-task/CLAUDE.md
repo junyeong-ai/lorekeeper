@@ -65,6 +65,26 @@ the commands in `lk-cli` are the only thing that decides when to apply them.
 - **Only a completion is an observation.** A dropped task belongs in the history and not on a
   daily page: the archive answers "what did I do", and deciding not to do a thing is not doing
   it. `TransitionKind::is_observation` is the one place that judgment lives.
+- **The plane's stores answer four questions once, not once each.** `store::Jsonl` and
+  `store::Shelf` hold what every one of them needs — read a JSONL file, treat an absent one as
+  empty, refuse a line that will not parse naming the file and the line, replace the whole file
+  atomically — because four copies is four places for those answers to drift and they already
+  had. What each store still owns is its SHAPE and its LIFETIME: one file or a shelf of them,
+  replaced or accumulated, and whether anything ever retires it. An empty `replace` writes an
+  empty FILE, which for a snapshot is the answer that retires what the last run declared;
+  `retire` removes it, which is a different statement.
+- **Each store's lifetime is declared, and `lore maintenance` reads the declaration.** The
+  TRANSITION LOG is knowledge — a completed task becomes it, `lore ingest --date <past>`
+  reproduces a day from it, and never pruning is what makes "have I answered this observation
+  before" exact rather than bounded by a horizon. The proposal snapshots and the standing
+  reminders are STATE: pruning them would retract what a source says is open and what a person
+  asked to be told. The day's SCHEDULE is neither — a rendering aid whose durable record is the
+  calendar's own daily page — so it is operational history and prunes on the ingest log's
+  horizon. Without that it gained a file a day, forever, for a view that asks about one.
+- **A snapshot no configured source answers for is not read.** A source removed from
+  `config.yaml` leaves its file behind, and reading it goes on proposing work from a system this
+  vault no longer ingests. The configuration decides what is read, so removing the file is
+  tidying rather than the fix; `lore maintenance` does that.
 - **The board file is the TRUTH, not a rendering of a store kept elsewhere.** The vault is the
   product: a box ticked on a phone has to count, and a design that keeps state somewhere else
   discards that edit in silence — worse than any parsing risk. What keeps the parsing risk small
@@ -117,6 +137,13 @@ the commands in `lk-cli` are the only thing that decides when to apply them.
   records both facts instead of closing a task nothing created. A wake date is CLEARED by
   arriving — it was a promise to resurface once, and a task that kept one would be woken by
   every later pass.
+- **Which ended day a carry closed is RECORDED, not inferred from when it was written.** Asked
+  of the day the transition landed in, two closes in one sitting declaring two different ended
+  days — catching up after a few days away — read as one and the second was silently skipped.
+  `Transition::closing` is the same fact the task's `carried_on` stamp holds, so the resume
+  guard still covers a board write that failed after the log write, without the proxy. A record
+  written before the field existed carries none and answers for no day: its absence is not the
+  fact, which leaves one command's window exposed across the upgrade and nothing after it.
 - **A day closes once.** `rollover` takes the day's transitions and skips the carry for any
   task already carried in them, so the scheduled close and one run by hand do not both count —
   a task reading `carried:8` after four days is worse than no count at all. Asked of the day's
@@ -229,9 +256,13 @@ the commands in `lk-cli` are the only thing that decides when to apply them.
 - **A carry counts what the day BEGAN with.** The committed set is captured before `sync` runs,
   because a task the same pass woke or adopted arrived today — stamping it `carried:1` would have
   it claim to have survived a day-close its own `since` says it never saw.
+- **A view says what it could not SEE.** Answering empty on an unreadable store is the one
+  shape refused everywhere else here: a caller — the front door's board row, the JSON a session
+  acts on — cannot tell "nothing is promised" from "I lost your promises", and the second is the
+  one that needs saying. `unrecorded` answers `Option`, the JSON carries `null`, and the reason
+  goes to stderr where it cannot corrupt the contract on stdout.
 - **Every mutating command holds a kernel lock** (`lk-cli`'s `IntentPlane`, `std::fs::File::lock`
-  on `<vault>/.lorekeeper/tasks.lock`) from before the board is read until after the board and
-  the log are written. The board and the log are each a read-modify-write, so the scheduled
+  on `<vault>/.lorekeeper/tasks.lock`) from before the plane is read until after it is written — the PLANE, not the board. Every store beside it is a read-modify-write too, and scoping the guard to the board is what let `lore task candidate` and `lore task remind add` race each other on their own files: it was named for the first thing it happened to protect rather than for what it protects. The board and the log are each a read-modify-write, so the scheduled
   day-close and someone closing a task by hand could both read, both write, and drop one of the
   two — and the completion that disappeared was gone from the history, which is the only thing
   the archive reads. The lock is the kernel's, so a crash releases it with no staleness rule to

@@ -25,18 +25,14 @@ pub struct Appointment {
 /// A calendar re-fetches its window on demand, so what a run did not observe for a date is no
 /// longer on it — a cancelled meeting stops appearing with nothing to reconcile.
 pub struct Schedule {
-    root: PathBuf,
+    shelf: crate::store::Shelf,
 }
 
 impl Schedule {
     pub fn new(vault_root: &Path) -> Self {
         Self {
-            root: vault_root.join(".lorekeeper").join("agenda"),
+            shelf: crate::store::Shelf::at(vault_root.join(".lorekeeper").join("agenda")),
         }
-    }
-
-    fn path(&self, date: jiff::civil::Date) -> PathBuf {
-        self.root.join(format!("{date}.jsonl"))
     }
 
     pub fn record(
@@ -44,20 +40,9 @@ impl Schedule {
         date: jiff::civil::Date,
         appointments: &[Appointment],
     ) -> Result<(), TaskError> {
-        std::fs::create_dir_all(&self.root)
-            .map_err(|e| TaskError::io(format!("create {}", self.root.display()), e))?;
         let mut held = appointments.to_vec();
-        held.sort_by_key(|a| (a.at, a.title.clone()));
-        let mut buf = String::new();
-        for appointment in &held {
-            let line = serde_json::to_string(appointment)
-                .map_err(|e| TaskError::Malformed(format!("serialize appointment: {e}")))?;
-            buf.push_str(&line);
-            buf.push('\n');
-        }
-        let path = self.path(date);
-        lk_core::fs::write_atomic(&path, buf.as_bytes(), None)
-            .map_err(|e| TaskError::io(format!("write {}", path.display()), e))
+        held.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.title.cmp(&b.title)));
+        self.shelf.file(&date.to_string()).replace(&held)
     }
 
     /// What `date` holds, earliest first.
@@ -65,21 +50,30 @@ impl Schedule {
     /// A date that was never ingested has none, which is not an error: the agenda is a view and
     /// answers with what it can see.
     pub fn read(&self, date: jiff::civil::Date) -> Result<Vec<Appointment>, TaskError> {
-        let path = self.path(date);
-        let content = match std::fs::read_to_string(&path) {
-            Ok(content) => content,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(TaskError::io(format!("read {}", path.display()), e)),
-        };
-        content
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(|line| {
-                serde_json::from_str(line).map_err(|e| {
-                    TaskError::Malformed(format!("{} is corrupt: {e}", path.display()))
-                })
-            })
-            .collect()
+        self.shelf.file(&date.to_string()).read()
+    }
+
+    /// The dates whose appointments are older than `cutoff`.
+    ///
+    /// A rendering aid rather than a record: the vault's own daily page holds what a calendar
+    /// observed, so a schedule past the retention horizon is operational history and is pruned
+    /// exactly as the ingest log is. Without this the directory gains a file a day, forever,
+    /// for a view that only ever asks about one of them.
+    pub fn expired(&self, cutoff: jiff::civil::Date) -> Result<Vec<PathBuf>, TaskError> {
+        Ok(self
+            .shelf
+            .dates()?
+            .into_iter()
+            .filter(|date| *date < cutoff)
+            .map(|date| self.shelf.file(&date.to_string()).path().to_path_buf())
+            .collect())
+    }
+
+    pub fn retire(paths: &[PathBuf]) -> Result<(), TaskError> {
+        for path in paths {
+            crate::store::Jsonl::at(path.clone()).retire()?;
+        }
+        Ok(())
     }
 }
 

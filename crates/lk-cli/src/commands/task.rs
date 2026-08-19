@@ -162,9 +162,10 @@ pub enum RemindCommand {
 
 pub async fn run(opts: &GlobalOptions, cmd: TaskCommand) -> miette::Result<()> {
     let mut plane = match cmd {
-        // Neither reads to decide a board write, so neither claims the board. A reminder store
-        // is its own file and `list` only reports.
-        TaskCommand::List { .. } | TaskCommand::Remind { .. } => IntentPlane::open(opts)?,
+        TaskCommand::List { .. } => IntentPlane::open(opts)?,
+        TaskCommand::Remind {
+            cmd: RemindCommand::List { .. },
+        } => IntentPlane::open(opts)?,
         _ => IntentPlane::open_for_change(opts)?,
     };
 
@@ -351,6 +352,9 @@ pub(crate) struct IntentPlane {
     pub(crate) vault_root: PathBuf,
     board_path: PathBuf,
     pub(crate) zone: jiff::tz::TimeZone,
+    /// The enabled sources this vault reads, so a snapshot left by one that was removed from
+    /// the configuration cannot go on proposing work from a system nobody ingests any more.
+    sources: Vec<String>,
     pending: Vec<Transition>,
     /// The history this pass read. Kept because a command acting AFTER the reconcile asks the
     /// same question over the same window, and the board it was computed from — whose ticked
@@ -372,12 +376,18 @@ impl IntentPlane {
         Self::acquire(opts, false)
     }
 
-    /// Claim the board for a change.
+    /// Claim the intent plane for a change.
     ///
-    /// The board and the log are each a read-modify-write, so two overlapping commands — the
-    /// scheduled day-close and someone closing a task by hand is the ordinary case — can both
-    /// read, both write, and drop one of the two changes. The completion that disappears is
-    /// gone from the history, and the history is the only thing the archive reads.
+    /// The plane, not the board. Every store beside it — the transition log, the proposal
+    /// snapshots, the standing reminders — is a read-modify-write too, so two overlapping
+    /// commands can both read, both write, and drop one of the two changes wherever they land.
+    /// Scoping the lock to the board is what let `lore task candidate` and `lore task remind
+    /// add` race each other on their own files: the guard was named for the first thing it
+    /// happened to protect rather than for what it is protecting.
+    ///
+    /// The scheduled day-close and someone closing a task by hand is the ordinary collision,
+    /// and the completion that disappears is gone from the history, which is the only thing the
+    /// archive reads.
     ///
     /// The lock is the kernel's, so a crashed process releases it with no staleness rule to get
     /// wrong. It cannot help across machines — a vault synced by Dropbox or iCloud has two
@@ -469,6 +479,12 @@ impl IntentPlane {
             vault_root,
             board_path: PathBuf::from(board_path),
             zone,
+            sources: config
+                .sources
+                .iter()
+                .filter(|(_, source)| source.enabled)
+                .map(|(id, _)| id.clone())
+                .collect(),
             pending: Vec::new(),
             recorded: lk_task::Recorded::default(),
             read_as,
@@ -490,7 +506,7 @@ impl IntentPlane {
     /// guessing at what a deletion meant.
     fn propose(&mut self) -> miette::Result<(usize, Vec<std::path::PathBuf>)> {
         let mut candidates = lk_task::Candidates::new(&self.vault_root)
-            .read_all()
+            .read_all(&self.sources)
             .map_err(|e| miette::miette!("{e}"))?;
         let (judged, consumed) = lk_task::Judged::new(&self.vault_root)
             .take()
@@ -499,26 +515,19 @@ impl IntentPlane {
         if candidates.is_empty() {
             return Ok((0, consumed));
         }
+
         let answered = TransitionLog::new(&self.vault_root)
             .answered_origins()
             .map_err(|e| miette::miette!("{e}"))?;
-        // One origin, ONE proposal — asked here rather than in either store, because the two
-        // answer different questions and a person answers about the WORK. A Jira issue linked
-        // from a mail is one thing to decide about, and two lines for it are two decisions with
-        // one right answer. Grown as the run goes, so a second candidate for an origin this
-        // very pass just offered is caught too.
-        let mut standing: std::collections::BTreeSet<String> = self
+        let standing = self
             .board
             .tasks()
             .filter_map(|task| task.src.clone())
             .collect();
 
-        let mut offered = 0usize;
-        for candidate in candidates {
+        let offered = lk_task::select(candidates, &answered, &standing);
+        for candidate in &offered {
             let origin = candidate.origin();
-            if answered.contains(&origin) || !standing.insert(origin.clone()) {
-                continue;
-            }
             let title = format!(
                 "{} ({})",
                 candidate.summary.trim(),
@@ -528,9 +537,8 @@ impl IntentPlane {
             let mut task = Task::new(id, &title, TaskState::Proposed, self.today);
             task.src = Some(origin);
             self.board.insert(task);
-            offered += 1;
         }
-        Ok((offered, consumed))
+        Ok((offered.len(), consumed))
     }
 
     /// One line of the board's state, for the front door.
@@ -538,31 +546,22 @@ impl IntentPlane {
     /// `None` where the intent plane is off — an install that never configured a board has no
     /// board row, the same way a vault with no `personal:` module has no work-log.
     ///
-    /// Read WITHOUT claiming the board and without reconciling: a front door that quietly
+    /// Read WITHOUT claiming the plane and without reconciling: a front door that quietly
     /// rewrote the page a person is looking at would be a mutation wearing a reader's name,
     /// which is the same rule `lore agenda` follows.
     pub(crate) fn survey(opts: &GlobalOptions) -> Option<BoardSurvey> {
         let plane = Self::open(opts).ok()?;
         let strings = plane.locale.strings();
-        let broken =
-            !plane.board.duplicated().is_empty() || plane.board.unterminated_fence().is_some();
-        if broken {
+        if !plane.board.duplicated().is_empty() || plane.board.unterminated_fence().is_some() {
             return Some(BoardSurvey {
                 state: strings.status_board_unwritable.to_string(),
                 writable: false,
             });
         }
 
-        let committed = plane
-            .board
-            .tasks()
-            .filter(|task| task.state == TaskState::Today)
-            .count();
-        let proposed = plane
-            .board
-            .tasks()
-            .filter(|task| task.state == TaskState::Proposed)
-            .count();
+        let count = |state| plane.board.tasks().filter(|t| t.state == state).count();
+        let committed = count(TaskState::Today);
+        let proposed = count(TaskState::Proposed);
         let stale = plane
             .board
             .tasks()
@@ -576,8 +575,9 @@ impl IntentPlane {
         if stale > 0 {
             let _ = write!(state, " · {stale} {}", strings.status_board_carried);
         }
-        let unrecorded = plane.unrecorded(plane.today);
-        if unrecorded > 0 {
+        if let Some(unrecorded) = plane.unrecorded(plane.today)
+            && unrecorded > 0
+        {
             let _ = write!(state, " · {unrecorded} {}", strings.status_board_unrecorded);
         }
         Some(BoardSurvey {
@@ -801,15 +801,17 @@ impl IntentPlane {
     /// What an editor changed that no pass has recorded yet — asked about TODAY, never about a
     /// day the caller is previewing. Probing with an overridden date reported edits nobody made
     /// and named a command that then answered "nothing to record".
-    pub(crate) fn unrecorded(&self, today: jiff::civil::Date) -> usize {
+    /// What an editor changed that no pass has recorded — `None` where the history cannot be
+    /// read, which is not the same as nothing.
+    ///
+    /// A view answers with what it can SEE and says when it cannot see. Answering `0` on an
+    /// unreadable record was the one shape this codebase refuses everywhere else: a caller
+    /// reading it — the front door's board row, the JSON a session acts on — cannot tell "your
+    /// board is caught up" from "I could not look", and the second is the one that needs saying.
+    pub(crate) fn unrecorded(&self, today: jiff::civil::Date) -> Option<usize> {
         let mut probe = self.board.clone();
-        // A view answers with what it can see. Nothing is written from here, so an unreadable
-        // record costs a count rather than correctness — and the command that would write is the
-        // one that refuses on it.
-        let Ok(recorded) = self.read_history() else {
-            return 0;
-        };
-        lk_task::sync(&mut probe, self.now, today, &recorded).edits()
+        let recorded = self.read_history().ok()?;
+        Some(lk_task::sync(&mut probe, self.now, today, &recorded).edits())
     }
 }
 

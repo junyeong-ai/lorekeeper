@@ -162,6 +162,62 @@ pub async fn run(opts: &super::GlobalOptions, dry_run: bool) -> miette::Result<(
     // pages from, so `lore ingest --date <past>` can re-render ANY day — a deleted or
     // damaged page self-heals only as far back as the log exists. Knowledge layers are
     // permanent; retention applies to operational history only.
+    //
+    // The intent plane's own stores divide the same way. The TRANSITION LOG is knowledge — it
+    // is what a completed task becomes, and `lore ingest --date <past>` reproduces a day's
+    // archive from it — so it is never pruned, which is also what makes "have I answered this
+    // observation before" exact rather than bounded by a horizon. The proposal snapshots and
+    // the standing reminders are STATE, not history: pruning them would retract what a source
+    // said is open and what a person asked to be told.
+    //
+    // The day's schedule is the one that is neither. It is a rendering aid for `lore agenda`,
+    // and the calendar's own daily page holds the durable record — so it is operational history
+    // and is pruned on the same horizon as the ingest log. Left alone it gains a file a day,
+    // forever, for a view that only ever asks about one of them.
+    if let Some(personal) = &config.personal
+        && personal.tasks.is_some()
+    {
+        let cutoff = jiff::Timestamp::from_second(cutoff_secs)
+            .map_err(|e| miette::miette!("{e}"))?
+            .to_zoned(config.vault.timezone())
+            .date();
+        let schedule = lk_task::Schedule::new(&vault_root);
+        let expired = schedule
+            .expired(cutoff)
+            .map_err(|e| miette::miette!("{e}"))?;
+        if !expired.is_empty() {
+            if !dry_run {
+                lk_task::Schedule::retire(&expired).map_err(|e| miette::miette!("{e}"))?;
+            }
+            eprintln!(
+                "{prefix}agenda: pruned {} day(s) of schedule older than {retention_days}d.",
+                expired.len()
+            );
+        }
+
+        // A source removed from `config.yaml` leaves its snapshot behind. `lore task propose`
+        // already refuses to read one no configured source answers for, so this is tidying
+        // rather than a correctness fix — but a file that can never be read again is not state.
+        let configured: Vec<String> = config
+            .sources
+            .iter()
+            .filter(|(_, source)| source.enabled)
+            .map(|(id, _)| id.clone())
+            .collect();
+        let candidates = lk_task::Candidates::new(&vault_root);
+        let orphans = candidates
+            .orphans(&configured)
+            .map_err(|e| miette::miette!("{e}"))?;
+        if !orphans.is_empty() {
+            if !dry_run {
+                lk_task::Candidates::retire(&orphans).map_err(|e| miette::miette!("{e}"))?;
+            }
+            eprintln!(
+                "{prefix}proposals: removed {} snapshot(s) no configured source answers for.",
+                orphans.len()
+            );
+        }
+    }
 
     Ok(())
 }

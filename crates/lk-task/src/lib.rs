@@ -25,11 +25,12 @@ mod propose;
 mod reconcile;
 mod remind;
 mod schedule;
+mod store;
 mod task;
 
 pub use board::{Board, Entry};
 pub use log::{Recorded, Transition, TransitionKind, TransitionLog};
-pub use propose::{Candidate, Candidates, Judged};
+pub use propose::{Candidate, Candidates, Judged, select};
 pub use reconcile::{Reconciled, rollover, sync};
 pub use remind::{Reminder, Reminders};
 pub use schedule::{Appointment, Schedule};

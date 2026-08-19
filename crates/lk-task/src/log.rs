@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use lk_core::event::RawItem;
 use serde::{Deserialize, Serialize};
@@ -61,6 +61,22 @@ pub struct Transition {
     /// How many day-closes the task had survived when it closed.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub carried: u32,
+    /// The day a `Carried` transition closed.
+    ///
+    /// Recorded rather than inferred from the day the transition was WRITTEN. "Has this task
+    /// already been carried for this ended day" was asked of today's record, which is a proxy
+    /// and not the fact: two closes on one actual day declaring two different ended days —
+    /// catching up after a few days away — read as one, and the second was silently skipped.
+    /// The task's own `carried_on` stamp answers exactly, and this is the same answer in the
+    /// history, so the guard holds when a board write failed after the log write.
+    ///
+    /// A record written before this field existed carries none, and is not read as answering
+    /// for any day — its absence is not the fact. What that leaves exposed is one command's
+    /// window across the upgrade: a close whose log write landed and whose board write did not,
+    /// with the next close on the other side of it. Where the board write DID land, the task's
+    /// stamp answers and nothing is lost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closing: Option<jiff::civil::Date>,
     /// The origin this task answered to, where it had one. See [`lk_core::origin`].
     ///
     /// Carried into the history so that "has this observation already been ANSWERED" is a
@@ -89,8 +105,14 @@ impl Transition {
             state: None,
             note: None,
             carried: 0,
+            closing: None,
             src: None,
         }
+    }
+
+    pub fn with_closing(mut self, closing: jiff::civil::Date) -> Self {
+        self.closing = Some(closing);
+        self
     }
 
     pub fn with_src(mut self, src: Option<String>) -> Self {
@@ -167,7 +189,7 @@ impl Transition {
 #[derive(Debug, Default, Clone)]
 pub struct Recorded {
     closed: std::collections::BTreeMap<TaskId, Transition>,
-    carried: std::collections::BTreeSet<TaskId>,
+    carried: std::collections::BTreeSet<(TaskId, jiff::civil::Date)>,
     seen: std::collections::BTreeSet<TaskId>,
     answered: std::collections::BTreeSet<String>,
 }
@@ -208,7 +230,9 @@ impl Recorded {
                 self.closed.insert(transition.id.clone(), transition);
             }
             TransitionKind::Carried if carried_today => {
-                self.carried.insert(transition.id);
+                if let Some(closing) = transition.closing {
+                    self.carried.insert((transition.id, closing));
+                }
             }
             _ => {}
         }
@@ -245,8 +269,8 @@ impl Recorded {
         self.closed.contains_key(id)
     }
 
-    pub(crate) fn is_carried(&self, id: &TaskId) -> bool {
-        self.carried.contains(id)
+    pub(crate) fn is_carried(&self, id: &TaskId, closing: jiff::civil::Date) -> bool {
+        self.carried.contains(&(id.clone(), closing))
     }
 }
 
@@ -256,18 +280,14 @@ impl Recorded {
 /// log: a day's record is durable and complete on its own, so `lore ingest --date <past>`
 /// reproduces that day's archive exactly rather than approximately.
 pub struct TransitionLog {
-    root: PathBuf,
+    shelf: crate::store::Shelf,
 }
 
 impl TransitionLog {
     pub fn new(vault_root: &Path) -> Self {
         Self {
-            root: vault_root.join(".lorekeeper").join("tasks"),
+            shelf: crate::store::Shelf::at(vault_root.join(".lorekeeper").join("tasks")),
         }
-    }
-
-    fn path(&self, date: jiff::civil::Date) -> PathBuf {
-        self.root.join(format!("{date}.jsonl"))
     }
 
     /// A date's transitions, oldest first, or nothing where the day has none.
@@ -277,26 +297,7 @@ impl TransitionLog {
     /// silently dropping it would let the next append rewrite the file without it, turning
     /// damage into permanent loss.
     pub fn read(&self, date: jiff::civil::Date) -> Result<Vec<Transition>, TaskError> {
-        let path = self.path(date);
-        let content = match std::fs::read_to_string(&path) {
-            Ok(content) => content,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(TaskError::io(format!("read {}", path.display()), e)),
-        };
-        content
-            .lines()
-            .enumerate()
-            .filter(|(_, line)| !line.trim().is_empty())
-            .map(|(index, line)| {
-                serde_json::from_str(line).map_err(|e| {
-                    TaskError::Malformed(format!(
-                        "{} is corrupt at line {}: {e} (left intact — recover or delete it)",
-                        path.display(),
-                        index + 1
-                    ))
-                })
-            })
-            .collect()
+        self.shelf.file(&date.to_string()).read()
     }
 
     /// What the history holds about the tasks on `board`.
@@ -345,22 +346,7 @@ impl TransitionLog {
     /// empty would re-propose exactly the work the unreadable half says was finished.
     pub fn answered_origins(&self) -> Result<std::collections::BTreeSet<String>, TaskError> {
         let mut answered = std::collections::BTreeSet::new();
-        let entries = match std::fs::read_dir(&self.root) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(answered),
-            Err(e) => return Err(TaskError::io(format!("read {}", self.root.display()), e)),
-        };
-        for entry in entries {
-            let path = entry
-                .map_err(|e| TaskError::io(format!("read {}", self.root.display()), e))?
-                .path();
-            let Some(date) = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .and_then(|s| s.parse::<jiff::civil::Date>().ok())
-            else {
-                continue;
-            };
+        for date in self.shelf.dates()? {
             for transition in self.read(date)? {
                 if let Some(src) = transition.src
                     && transition.kind.is_answer()
@@ -402,7 +388,8 @@ impl TransitionLog {
         }
 
         for (date, added) in by_date {
-            let mut day = self.read(date)?;
+            let file = self.shelf.file(&date.to_string());
+            let mut day: Vec<Transition> = file.read()?;
             for transition in added {
                 match day.iter_mut().find(|held| {
                     held.id == transition.id
@@ -413,20 +400,7 @@ impl TransitionLog {
                     None => day.push(transition.clone()),
                 }
             }
-            let path = self.path(date);
-            let dir = path.parent().expect("a log path always has a parent");
-            std::fs::create_dir_all(dir)
-                .map_err(|e| TaskError::io(format!("create {}", dir.display()), e))?;
-
-            let mut buf = String::with_capacity(day.len() * 192);
-            for transition in &day {
-                let line = serde_json::to_string(transition)
-                    .map_err(|e| TaskError::Malformed(format!("serialize transition: {e}")))?;
-                buf.push_str(&line);
-                buf.push('\n');
-            }
-            lk_core::fs::write_atomic(&path, buf.as_bytes(), None)
-                .map_err(|e| TaskError::io(format!("write {}", path.display()), e))?;
+            file.replace(&day)?;
         }
         Ok(())
     }

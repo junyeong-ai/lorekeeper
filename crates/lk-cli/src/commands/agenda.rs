@@ -104,9 +104,12 @@ pub async fn run(opts: &GlobalOptions, date: Option<String>, json: bool) -> miet
         eprintln!("\n{} {}", strings.agenda_done_today, closed.len());
     }
 
-    let unrecorded = plane.unrecorded(actually_today);
-    if unrecorded > 0 {
-        eprintln!("\n{unrecorded} change(s) made in an editor — `lore task sync` records them");
+    match plane.unrecorded(actually_today) {
+        Some(0) => {}
+        Some(n) => eprintln!("\n{n} change(s) made in an editor — `lore task sync` records them"),
+        None => {
+            eprintln!("\nwarning: the task record could not be read — `lore task sync` says why")
+        }
     }
     Ok(())
 }
@@ -148,35 +151,37 @@ fn emit_json(plane: &IntentPlane, actually_today: jiff::civil::Date) -> miette::
         }
     }
 
-    let schedule: Vec<_> = lk_task::Schedule::new(&plane.vault_root)
-        .read(plane.today)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|appointment| {
-            serde_json::json!({
-                "at": appointment
-                    .at
-                    .to_zoned(plane.zone.clone())
-                    .strftime("%FT%H:%M")
-                    .to_string(),
-                "title": appointment.title,
-            })
+    let schedule: Vec<_> = read_or_warn(
+        lk_task::Schedule::new(&plane.vault_root).read(plane.today),
+        "the day's schedule",
+    )
+    .into_iter()
+    .map(|appointment| {
+        serde_json::json!({
+            "at": appointment
+                .at
+                .to_zoned(plane.zone.clone())
+                .strftime("%FT%H:%M")
+                .to_string(),
+            "title": appointment.title,
         })
-        .collect();
+    })
+    .collect();
 
-    let reminders: Vec<_> = lk_task::Reminders::new(&plane.vault_root)
-        .read()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|reminder| {
-            serde_json::json!({
-                "id": reminder.id.as_str(),
-                "at": reminder.at.to_zoned(plane.zone.clone()).strftime("%FT%H:%M").to_string(),
-                "text": reminder.text,
-                "task": reminder.task.as_ref().map(|id| id.as_str().to_string()),
-            })
+    let reminders: Vec<_> = read_or_warn(
+        lk_task::Reminders::new(&plane.vault_root).read(),
+        "the standing reminders",
+    )
+    .into_iter()
+    .map(|reminder| {
+        serde_json::json!({
+            "id": reminder.id.as_str(),
+            "at": reminder.at.to_zoned(plane.zone.clone()).strftime("%FT%H:%M").to_string(),
+            "text": reminder.text,
+            "task": reminder.task.as_ref().map(|id| id.as_str().to_string()),
         })
-        .collect();
+    })
+    .collect();
 
     println!(
         "{}",
@@ -190,10 +195,28 @@ fn emit_json(plane: &IntentPlane, actually_today: jiff::civil::Date) -> miette::
             "reminders": reminders,
             "done_today": plane.closed_on(plane.today).len(),
             // What an editor changed that no pass has recorded — the one thing this view can
-            // see and cannot fix, so it names the command that can.
+            // see and cannot fix. `null` where the record could not be read at all, which a
+            // caller must not mistake for a board that is caught up.
             "unrecorded": plane.unrecorded(actually_today),
         }))
         .unwrap_or_else(|_| "{}".into())
     );
     Ok(())
+}
+
+/// What a store holds, or nothing plus a word about why.
+///
+/// A view answers with what it can SEE, and says when it cannot see — the contract on stdout
+/// stays whole and the reason goes to stderr, where it does not corrupt what a caller parses.
+/// Swallowing the error would make an unreadable store indistinguishable from an empty one,
+/// which for the reminders is the difference between "nothing is promised" and "I lost your
+/// promises".
+fn read_or_warn<T>(read: Result<Vec<T>, lk_task::TaskError>, what: &str) -> Vec<T> {
+    match read {
+        Ok(held) => held,
+        Err(e) => {
+            eprintln!("warning: {what} could not be read ({e})");
+            Vec::new()
+        }
+    }
 }

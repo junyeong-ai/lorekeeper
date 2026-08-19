@@ -11,7 +11,7 @@
 //! belongs to the state machine. These two are not the same thing at two resolutions: one
 //! changes what the day is committed to, the other only says something out loud.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -36,62 +36,31 @@ pub struct Reminder {
 /// the 14th hold", and a fired reminder leaves no history worth keeping — what it was ABOUT is
 /// the task, which has its own.
 pub struct Reminders {
-    path: PathBuf,
+    file: crate::store::Jsonl,
 }
 
 impl Reminders {
     pub fn new(vault_root: &Path) -> Self {
         Self {
-            path: vault_root
-                .join(".lorekeeper")
-                .join("reminders")
-                .join("pending.jsonl"),
+            file: crate::store::Jsonl::at(
+                vault_root
+                    .join(".lorekeeper")
+                    .join("reminders")
+                    .join("pending.jsonl"),
+            ),
         }
     }
 
     pub fn read(&self) -> Result<Vec<Reminder>, TaskError> {
-        let content = match std::fs::read_to_string(&self.path) {
-            Ok(content) => content,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(TaskError::io(format!("read {}", self.path.display()), e)),
-        };
-        let mut held: Vec<Reminder> = content
-            .lines()
-            .enumerate()
-            .filter(|(_, line)| !line.trim().is_empty())
-            .map(|(index, line)| {
-                serde_json::from_str(line).map_err(|e| {
-                    TaskError::Malformed(format!(
-                        "{} is corrupt at line {}: {e} (left intact — recover or delete it)",
-                        self.path.display(),
-                        index + 1
-                    ))
-                })
-            })
-            .collect::<Result<_, _>>()?;
-        held.sort_by_key(|reminder| (reminder.at, reminder.id.as_str().to_string()));
+        let mut held: Vec<Reminder> = self.file.read()?;
+        held.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.id.cmp(&b.id)));
         Ok(held)
-    }
-
-    fn write(&self, held: &[Reminder]) -> Result<(), TaskError> {
-        let dir = self.path.parent().expect("a reminder path has a parent");
-        std::fs::create_dir_all(dir)
-            .map_err(|e| TaskError::io(format!("create {}", dir.display()), e))?;
-        let mut buf = String::new();
-        for reminder in held {
-            let line = serde_json::to_string(reminder)
-                .map_err(|e| TaskError::Malformed(format!("serialize reminder: {e}")))?;
-            buf.push_str(&line);
-            buf.push('\n');
-        }
-        lk_core::fs::write_atomic(&self.path, buf.as_bytes(), None)
-            .map_err(|e| TaskError::io(format!("write {}", self.path.display()), e))
     }
 
     pub fn add(&self, reminder: Reminder) -> Result<(), TaskError> {
         let mut held = self.read()?;
         held.push(reminder);
-        self.write(&held)
+        self.file.replace(&held)
     }
 
     pub fn remove(&self, id: &TaskId) -> Result<bool, TaskError> {
@@ -101,7 +70,7 @@ impl Reminders {
         if held.len() == before {
             return Ok(false);
         }
-        self.write(&held)?;
+        self.file.replace(&held)?;
         Ok(true)
     }
 
@@ -113,11 +82,12 @@ impl Reminders {
     /// while the machine slept is late rather than lost — the timer's next run finds it still
     /// waiting, because nothing but firing removes it.
     pub fn due(&self, now: jiff::Timestamp) -> Result<Vec<Reminder>, TaskError> {
-        let held = self.read()?;
-        let (due, keep): (Vec<_>, Vec<_>) =
-            held.into_iter().partition(|reminder| reminder.at <= now);
+        let (due, keep): (Vec<_>, Vec<_>) = self
+            .read()?
+            .into_iter()
+            .partition(|reminder| reminder.at <= now);
         if !due.is_empty() {
-            self.write(&keep)?;
+            self.file.replace(&keep)?;
         }
         Ok(due)
     }

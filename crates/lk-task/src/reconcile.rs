@@ -164,18 +164,17 @@ pub fn rollover(
 
     let mut outcome = sync(board, now, today, recorded);
 
-    // A day closes once, and WHICH day is the caller's to declare. Asking the record of the day
-    // the command RAN could not answer it: a close by hand at 23:00 and the scheduled close at
-    // 07:00 are two closes of one ended day whose records live in two different date files, so
-    // each read the other's as empty and the count went up twice. The day is stamped on the
-    // task, so the question is asked of the task itself. The day's record still answers the
-    // within-a-day half, which is what lets a run that stopped partway resume.
+    // A day closes once, and WHICH day is the caller's to declare. The task's `carried_on`
+    // stamp answers it, and the day's record answers the half where a board write failed after
+    // the log write — asked of the CLOSING day the transition names rather than of the day it
+    // was written, which is the same fact and not a proxy for it. Asked as a proxy, catching up
+    // two missed closes in one sitting counted the first and skipped the second.
     let committed: Vec<TaskId> = board
         .tasks()
         .filter(|task| task.state == TaskState::Today)
         .filter(|task| began_with.contains(&task.id))
         .filter(|task| task.carried_on != Some(closing))
-        .filter(|task| !recorded.is_carried(&task.id))
+        .filter(|task| !recorded.is_carried(&task.id, closing))
         .map(|task| task.id.clone())
         .collect();
 
@@ -188,7 +187,9 @@ pub fn rollover(
         let carried = task.carried;
         let title = task.title.clone();
         outcome.transitions.push(
-            Transition::new(id.clone(), TransitionKind::Carried, title, now).with_carried(carried),
+            Transition::new(id.clone(), TransitionKind::Carried, title, now)
+                .with_carried(carried)
+                .with_closing(closing),
         );
         outcome.carried.push(id);
     }
@@ -319,12 +320,11 @@ mod tests {
     fn a_close_that_stopped_partway_carries_only_what_it_missed() {
         let page = "## Today\n\n- [ ] a <!--t:7k2p since:2026-08-19-->\n- [ ] b <!--t:3b8q since:2026-08-19-->\n";
         let mut board = board_of(page);
-        let recorded = [Transition::new(
-            "7k2p".parse().unwrap(),
-            TransitionKind::Carried,
-            "a",
-            now(),
-        )];
+        let recorded =
+            [
+                Transition::new("7k2p".parse().unwrap(), TransitionKind::Carried, "a", now())
+                    .with_closing(today()),
+            ];
         let outcome = rollover(
             &mut board,
             now(),
@@ -513,5 +513,52 @@ mod tests {
             board.render(Locale::En, today()).contains("since:broken"),
             "the line survives untouched"
         );
+    }
+
+    /// Catching up two missed day-closes in one sitting counts both. Asked of the day the
+    /// transitions were WRITTEN, the second read the first's record as its own and was skipped.
+    #[test]
+    fn two_ended_days_closed_in_one_sitting_count_twice() {
+        let mut board = Board::empty();
+        board.insert(Task::new(
+            "7k2p".parse().unwrap(),
+            "ship it",
+            TaskState::Today,
+            today(),
+        ));
+
+        let first = rollover(
+            &mut board,
+            now(),
+            today(),
+            jiff::civil::date(2026, 8, 17),
+            &Recorded::from_day(&[]),
+        );
+        assert_eq!(first.carried.len(), 1);
+
+        let second = rollover(
+            &mut board,
+            now(),
+            today(),
+            jiff::civil::date(2026, 8, 18),
+            &Recorded::from_day(&first.transitions),
+        );
+        assert_eq!(
+            second.carried.len(),
+            1,
+            "a different ended day is a second carry"
+        );
+        assert_eq!(board.tasks().next().unwrap().carried, 2);
+
+        // The same ended day, twice, is still once.
+        let third = rollover(
+            &mut board,
+            now(),
+            today(),
+            jiff::civil::date(2026, 8, 18),
+            &Recorded::from_day(&[first.transitions, second.transitions].concat()),
+        );
+        assert!(third.carried.is_empty());
+        assert_eq!(board.tasks().next().unwrap().carried, 2);
     }
 }
