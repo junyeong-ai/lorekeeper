@@ -30,7 +30,8 @@ That one call answers everything: `schedule` (appointments — reported, never a
 `--json` form is the contract and the columns are not.
 
 If `unrecorded` is non-zero the user changed the board in their editor and nothing has recorded
-it. Run `lore task sync` FIRST, then re-read, or you will act on a stale day.
+it. Run `lore task sync` FIRST, then re-read, or you will act on a stale day. If it is `null`
+the record could not be read at all — say so, and do not tell them the board is caught up.
 
 If `unwritable` is not null, every change to the board will be REFUSED until the page is
 repaired. Say so first, quote the reason — it names the line and the one-character fix — and do
@@ -42,8 +43,9 @@ naming each line and its `why` in their words, and offer the repair the reason i
 under one of the four headings, outdent it, restore `- [ ]`). Never run a command against those
 tasks: they have no id this can reach.
 
-A `null` LIST means the store behind it could not be READ, which is not the same as empty. Say
-that too rather than reporting nothing promised.
+`null` ANYWHERE in the document means the store behind that key could not be READ, which is not
+the same as empty or zero. Say so rather than reporting nothing promised, and read the command's
+stderr — it names the file.
 
 ## Mapping what they say
 
@@ -81,8 +83,9 @@ and the work is new.
 
 **When there are many** — a first run against a Jira board with thirty open issues is the normal
 case — do not read thirty lines out. Group them by what they are — the `origin` URL's host and path tell you which system and
-which project, and `since` tells you the age; both are fields, so no title needs parsing — and
-put the GROUPS to the person: "PLAT 에 12건, OPS 에 5건, 나머지 3건". Then apply their answer per
+which project, and `since` tells you the age; both are fields, so no title needs parsing. A
+proposal whose `origin` is `null` is one whose title the person has rewritten past its link:
+group it by its text and say the link is gone. Put the GROUPS to the person: "PLAT 에 12건, OPS 에 5건, 나머지 3건". Then apply their answer per
 group. A wall of individual questions is how a person stops reading the section, and the section
 only works if they read it.
 

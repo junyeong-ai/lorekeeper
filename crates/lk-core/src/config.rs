@@ -338,21 +338,30 @@ impl Config {
             // `propose_from` among them: it is the one source reference here that nothing
             // checked, and a typo silently disabled the judgment half of the first joint — the
             // write refuses the candidate, so the only symptom was proposals that never came.
-            for src_id in personal
-                .tracked_sources
-                .iter()
-                .chain(personal.source_category_map.keys())
-                .chain(
-                    personal
+            // Each names the KEY it came from, because "personal references" leaves the reader
+            // to find which of three lists holds the typo.
+            let referenced = [
+                ("personal.tracked_sources", &personal.tracked_sources),
+                (
+                    "personal.source_category_map",
+                    &personal.source_category_map.keys().cloned().collect(),
+                ),
+                (
+                    "personal.tasks.propose_from",
+                    &personal
                         .tasks
-                        .iter()
-                        .flat_map(|tasks| tasks.propose_from.iter()),
-                )
-            {
-                if !self.sources.contains_key(src_id) {
-                    return Err(ConfigError::Validation(format!(
-                        "personal references unknown source: '{src_id}'"
-                    )));
+                        .as_ref()
+                        .map(|tasks| tasks.propose_from.clone())
+                        .unwrap_or_default(),
+                ),
+            ];
+            for (key, sources) in referenced {
+                for src_id in sources {
+                    if !self.sources.contains_key(src_id) {
+                        return Err(ConfigError::Validation(format!(
+                            "{key} references unknown source: '{src_id}'"
+                        )));
+                    }
                 }
             }
             for category in personal

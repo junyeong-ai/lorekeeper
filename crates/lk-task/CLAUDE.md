@@ -322,8 +322,13 @@ the commands in `lk-cli` are the only thing that decides when to apply them.
   recorded?" must look past midnight: a board write that fails in the evening is repaired by the
   next morning's pass, and asking only that morning's record found nothing, harvested the tick a
   second time, and archived one completion on two dates — which two `EventId`s cannot collapse.
-  The window starts at the earliest `since` among the board's TICKED tasks, bounded by data
-  rather than by a guessed horizon: an id is minted against the ids currently on the board, so a
+  The window starts at the earliest `since` among the board's TICKED tasks and the guard is then
+  asked PER TASK against its own — the window finds a candidate closure, the task's own first day
+  decides whether it is its. Asked once for the batch, one long-standing task ticked beside a
+  newer one widened the window for both, and a completion recorded under a recycled id two weeks
+  before the newer task existed settled it: the line left the board, its real completion reached
+  nothing, and the pass reported the board caught up. The window is bounded by data rather than
+  by a guessed horizon: an id is minted against the ids currently on the board, so a
   recycled id's previous owner left before this task was written down, and a completion recorded
   on or after this task's own first day is this task's. A board with no ticked line asks about
   today alone, which is every ordinary pass — and `floor` widens it for the CARRY question alone,

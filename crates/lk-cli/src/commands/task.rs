@@ -1034,7 +1034,13 @@ impl IntentPlane {
         &self,
         date: jiff::civil::Date,
     ) -> Result<Vec<Transition>, lk_task::TaskError> {
-        TransitionLog::new(&self.vault_root).read(date)
+        let log = TransitionLog::new(&self.vault_root);
+        // The whole store before the one day, because a name that is not a date is a conflict
+        // copy holding completions this cannot read. Answered from the file it COULD read, the
+        // day came back as a confident list that was missing them — on a store where every
+        // write is already refused for exactly this reason.
+        log.dates()?;
+        log.read(date)
     }
 
     /// Completions already recorded for `date` — what the day has to show for itself.

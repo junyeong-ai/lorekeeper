@@ -200,14 +200,18 @@ fn emit_json(plane: &IntentPlane, actually_today: jiff::civil::Date) -> miette::
             "date": plane.today.to_string(),
             // The zone every time in this document is a wall-clock reading in, so a caller can
             // resolve one without asking the machine — whose own zone is a different day
-            // whenever the vault's is set elsewhere. Its NAME, or its offset where it has no
-            // name — a `TZ` in POSIX offset form has none, and answering `null` there would say
-            // "could not read", which is what `null` means everywhere else in this document.
-            "timezone": plane
-                .zone
-                .iana_name()
-                .map(str::to_string)
-                .unwrap_or_else(|| plane.zone.to_offset(plane.now).to_string()),
+            // whenever the vault's is set elsewhere. Its NAME, or where it has none — a `TZ` in
+            // POSIX form — the offset on the DAY this document is about, which is not the offset
+            // now: a nameless zone can still carry a daylight rule, and `--date` reads a day
+            // whose times resolve an hour from today's. `null` would say "could not read", which
+            // is what `null` means everywhere else here.
+            "timezone": plane.zone.iana_name().map(str::to_string).unwrap_or_else(|| {
+                plane
+                    .today
+                    .to_zoned(plane.zone.clone())
+                    .map(|day| day.strftime("%:z").to_string())
+                    .unwrap_or_else(|_| plane.zone.to_offset(plane.now).to_string())
+            }),
             "schedule": schedule,
             "committed": committed,
             "woken": woken,

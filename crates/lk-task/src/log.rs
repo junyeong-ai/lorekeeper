@@ -188,7 +188,14 @@ impl Transition {
 /// today alone a close retried on a later calendar day wrote a second carry for one ended day.
 #[derive(Debug, Default, Clone)]
 pub struct Recorded {
-    closed: std::collections::BTreeMap<TaskId, Transition>,
+    /// The completion the window holds for an id, and the DAY the record holds it under.
+    ///
+    /// The day is what makes the guard's rule per-TASK. It reads "a completion recorded on or
+    /// after this task's own first day is this task's", and the window that finds one is bounded
+    /// by the EARLIEST `since` among every ticked line — so one long-standing task ticked beside
+    /// a newer one widened the window for both, and a completion two weeks older than the newer
+    /// task's own first day settled it. Its real completion reached nothing at all.
+    closed: std::collections::BTreeMap<TaskId, (jiff::civil::Date, Transition)>,
     carried: std::collections::BTreeSet<(TaskId, jiff::civil::Date)>,
     /// The last day the history records a task ENTERING `## Today`, whichever route took it
     /// there. What makes "was this committed to the day being closed" answerable from the
@@ -242,7 +249,7 @@ impl Recorded {
                 self.closed.remove(&transition.id);
             }
             TransitionKind::Done if in_completion_window => {
-                self.closed.insert(transition.id.clone(), transition);
+                self.closed.insert(transition.id.clone(), (day, transition));
             }
             // Absorbed wherever it was written, because the key is the PAIR: a carry for
             // another ended day cannot suppress this one, so there is nothing for a window to
@@ -281,11 +288,18 @@ impl Recorded {
     /// The window is walked forward, so where an id was recycled this is the LATEST completion
     /// recorded under it — the one a line still ticked on the board can belong to.
     pub fn closure(&self, id: &TaskId) -> Option<&Transition> {
-        self.closed.get(id)
+        self.closed.get(id).map(|(_, closed)| closed)
     }
 
-    pub(crate) fn is_closed(&self, id: &TaskId) -> bool {
-        self.closed.contains_key(id)
+    /// Whether the history already holds THIS task's completion.
+    ///
+    /// Asked with the task's own first day, because that is the whole reason a completion under
+    /// its id can be trusted to be its: an id is minted against the ids on the board, so a
+    /// recycled id's previous owner left before this task was written down. A closure recorded
+    /// BEFORE that day belongs to that previous owner, and taking it made the ticked line
+    /// vanish with its completion recorded nowhere.
+    pub(crate) fn is_closed(&self, id: &TaskId, since: jiff::civil::Date) -> bool {
+        self.closed.get(id).is_some_and(|(day, _)| *day >= since)
     }
 
     pub(crate) fn is_carried(&self, id: &TaskId, closing: jiff::civil::Date) -> bool {
@@ -372,7 +386,7 @@ impl TransitionLog {
     /// copy holds real completions, and passing over it silently would re-propose exactly the
     /// work it says was answered and let a completion be recorded twice. `Jsonl::read` refuses a
     /// line it cannot read for the same reason; the strictness must not go quiet at the filename.
-    fn dates(&self) -> Result<Vec<jiff::civil::Date>, TaskError> {
+    pub fn dates(&self) -> Result<Vec<jiff::civil::Date>, TaskError> {
         self.shelf
             .keys()?
             .into_iter()

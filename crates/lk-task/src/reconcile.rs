@@ -104,7 +104,7 @@ pub fn sync(
     let checked: Vec<Task> = board.tasks().filter(|task| task.done).cloned().collect();
     for task in checked {
         board.remove(&task.id);
-        if recorded.is_closed(&task.id) {
+        if recorded.is_closed(&task.id, task.since) {
             outcome.settled.push(task.id);
             continue;
         }
@@ -463,6 +463,54 @@ mod tests {
 
         assert_eq!(outcome.carried, vec!["3b8q".parse::<TaskId>().unwrap()]);
         assert_eq!(board.get(&"3b8q".parse().unwrap()).unwrap().carried, 1);
+    }
+
+    /// The completion guard is asked per TASK, not once for the batch. Its window reaches back
+    /// to the EARLIEST `since` among every ticked line, so one long-standing task ticked beside
+    /// a newer one widened it for both — and a completion recorded under a recycled id two weeks
+    /// before the newer task was written down settled it, silently, with its real completion
+    /// recorded nowhere at all.
+    #[test]
+    fn a_completion_older_than_a_task_belongs_to_the_id_s_previous_life() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = crate::log::TransitionLog::new(tmp.path());
+        let earlier = jiff::civil::date(2026, 8, 5)
+            .at(9, 0, 0, 0)
+            .to_zoned(jiff::tz::TimeZone::UTC)
+            .unwrap()
+            .timestamp();
+        log.record(
+            &[Transition::new(
+                "9xh2".parse().unwrap(),
+                TransitionKind::Done,
+                "a previous life",
+                earlier,
+            )],
+            &jiff::tz::TimeZone::UTC,
+        )
+        .unwrap();
+
+        let mut board = board_of(concat!(
+            "## Today\n\n",
+            "- [x] standing since the first <!--t:aaaa since:2026-08-01-->\n",
+            "- [x] finished today <!--t:9xh2 since:2026-08-19-->\n",
+        ));
+        let recorded = log.recorded_for(&board, today(), None).unwrap();
+        let outcome = sync(&mut board, now(), today(), &recorded);
+
+        assert_eq!(outcome.harvested.len(), 2, "both completions are recorded");
+        assert!(outcome.settled.is_empty());
+
+        // And the guard still holds where the closure IS this task's: a board write that did
+        // not land is repaired without recording the completion twice.
+        let mut retried =
+            board_of("## Today\n\n- [x] finished today <!--t:9xh2 since:2026-08-19-->\n");
+        log.record(&outcome.transitions, &jiff::tz::TimeZone::UTC)
+            .unwrap();
+        let again = log.recorded_for(&retried, today(), None).unwrap();
+        let second = sync(&mut retried, now(), today(), &again);
+        assert!(second.harvested.is_empty());
+        assert_eq!(second.settled, vec!["9xh2".parse::<TaskId>().unwrap()]);
     }
 
     /// The completion guard has no CEILING. A record filed on a date ahead of this pass's today
