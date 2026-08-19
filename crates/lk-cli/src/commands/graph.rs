@@ -120,6 +120,70 @@ pub async fn run(
     }
 }
 
+/// Every structural claim the vault makes about itself, and every observation that guides a
+/// human's next decision.
+///
+/// Split from the `lint` arm so the front-door summary reports the same verdict this command
+/// exits on. Re-deriving it there would be a second answer to one question, and the two would
+/// agree only until either was edited.
+fn lint_report(
+    rc: &ResolvedConfig,
+    g: &graph::WikiGraph,
+    views: &scan::VaultViews,
+) -> Result<output::LintReport, String> {
+    let drift =
+        index_drift::diff(&rc.root, rc.locale, &rc.vault_dirs).map_err(|e| format!("{e}"))?;
+    // Read the concept pages once; the three concept lints are pure functions over the result
+    // rather than each re-walking `{wiki}/concepts/`.
+    let concept_pages = concept_lint::scan_concept_pages(&rc.root, &rc.vault_dirs.wiki)
+        .map_err(|e| format!("{e}"))?;
+
+    Ok(output::LintReport {
+        pages: g.node_count(),
+        links: g.edge_count(),
+        components: g.component_count(),
+        violations: output::Violations {
+            broken: graph::broken_links(&views.link_sources, &views.existence, &rc.vault_dirs),
+            index: output::IndexSyncReport {
+                stale: !drift.is_in_sync(),
+                absent: drift.absent,
+                missing_from_index: drift.missing_from_index,
+                missing_from_disk: drift.missing_from_disk,
+                fixed: None,
+            },
+            invalid_categories: concept_lint::find_invalid_categories(
+                &concept_pages,
+                &rc.concept_categories,
+            ),
+            duplicate_concepts: concept_lint::find_duplicate_concepts(&concept_pages),
+            address_collisions: scan::address_collisions(&views.link_sources),
+            unnormalized: rename_suggestions(&normalize::scan(&views.pages)),
+            respelled_links: graph::respelled_links(
+                &views.link_sources,
+                &views.existence,
+                &rc.vault_dirs,
+            ),
+        },
+        observations: output::Observations {
+            hubs: g.hubs(10, rc.graph.metrics.min_hub_degree),
+            orphans: g.orphans(&rc.graph.metrics.orphan_exclude),
+            unresolved_conflicts: concept_lint::find_unresolved_conflicts(&concept_pages),
+        },
+    })
+}
+
+/// The lint verdict for a vault, resolved and scanned from nothing but the caller's options.
+pub(crate) fn lint(
+    opts: &GlobalOptions,
+    root_override: Option<PathBuf>,
+) -> Result<output::LintReport, String> {
+    let rc = resolve_config_full(opts, root_override)?;
+    let views = scan::VaultViews::resolve(&rc.root, &rc.graph, &rc.vault_dirs)
+        .map_err(|e| format!("{e}"))?;
+    let g = graph::WikiGraph::build_with_existence(&views.pages, &views.existence, &rc.vault_dirs);
+    lint_report(&rc, &g, &views)
+}
+
 async fn run_inner(
     opts: &GlobalOptions,
     cmd: GraphCommand,
@@ -133,49 +197,7 @@ async fn run_inner(
 
     let violated = match cmd {
         GraphCommand::Lint => {
-            let hubs = g.hubs(10, rc.graph.metrics.min_hub_degree);
-            let orphans = g.orphans(&rc.graph.metrics.orphan_exclude);
-            let broken = graph::broken_links(&views.link_sources, &views.existence, &rc.vault_dirs);
-            let drift = index_drift::diff(&rc.root, rc.locale, &rc.vault_dirs)
-                .map_err(|e| format!("{e}"))?;
-            // Read the concept pages once; the three concept lints are pure functions
-            // over the result rather than each re-walking `{wiki}/concepts/`.
-            let concept_pages = concept_lint::scan_concept_pages(&rc.root, &rc.vault_dirs.wiki)
-                .map_err(|e| format!("{e}"))?;
-            let invalid_categories =
-                concept_lint::find_invalid_categories(&concept_pages, &rc.concept_categories);
-            let duplicate_concepts = concept_lint::find_duplicate_concepts(&concept_pages);
-            let unresolved_conflicts = concept_lint::find_unresolved_conflicts(&concept_pages);
-
-            let report = output::LintReport {
-                pages: g.node_count(),
-                links: g.edge_count(),
-                components: g.component_count(),
-                violations: output::Violations {
-                    broken,
-                    index: output::IndexSyncReport {
-                        stale: !drift.is_in_sync(),
-                        absent: drift.absent,
-                        missing_from_index: drift.missing_from_index,
-                        missing_from_disk: drift.missing_from_disk,
-                        fixed: None,
-                    },
-                    invalid_categories,
-                    duplicate_concepts,
-                    address_collisions: scan::address_collisions(&views.link_sources),
-                    unnormalized: rename_suggestions(&normalize::scan(&views.pages)),
-                    respelled_links: graph::respelled_links(
-                        &views.link_sources,
-                        &views.existence,
-                        &rc.vault_dirs,
-                    ),
-                },
-                observations: output::Observations {
-                    hubs,
-                    orphans,
-                    unresolved_conflicts,
-                },
-            };
+            let report = lint_report(&rc, &g, &views)?;
             let violated = report.violations.count() > 0;
             if json {
                 output::print_json(&report, violated)?;

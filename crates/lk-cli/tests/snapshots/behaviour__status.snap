@@ -5,3 +5,9 @@ expression: "observe(staged.path(), argv)"
 exit: 0
 --- stdout ---
 --- stderr ---
+lore <version>  <staged>/corpus/vault
+  ! install  1 deployed copy differs                     lore schema
+  · sources  0 fresh                                     lore health
+  · queue    drained                                     /lore-process
+  · pages    5 clean                                     lore doctor
+  ! graph    5 contradiction(s)                          lore graph lint

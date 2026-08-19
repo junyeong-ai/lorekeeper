@@ -509,23 +509,47 @@ fn free_path(dir: &Path, source: &Path) -> PathBuf {
         .expect("an unused suffix always exists")
 }
 
-async fn count(opts: &super::GlobalOptions, root: Option<PathBuf>) -> miette::Result<()> {
-    let vault_root = resolve_vault_root(opts, root)?;
+/// What a drain would find pending, in the three kinds that call for different repairs.
+///
+/// Read by `queue count`, by the front-door summary, and by `self update` — which refuses to
+/// swap the binary while work is outstanding, because a task written by one build and answered
+/// under another build's skills is the one genuinely lossy moment in an upgrade.
+pub(crate) struct QueueLoad {
+    pub work: usize,
+    /// The task names a target page that will not parse, so nothing can classify it.
+    pub unreadable: usize,
+    /// The queue LINE decoded no target at all, so the work it names is unknown.
+    pub unparseable: usize,
+}
+
+pub(crate) fn queue_load(vault_root: &Path) -> miette::Result<QueueLoad> {
     let queue_dir = vault_root.join(".lorekeeper").join("queue");
-    let mut current = 0usize;
-    let mut unreadable = 0usize;
-    let mut unparseable = 0usize;
+    let mut load = QueueLoad {
+        work: 0,
+        unreadable: 0,
+        unparseable: 0,
+    };
     for file in pending_queue_files(&queue_dir)? {
         let read = read_tasks(&file)?;
-        unparseable += read.unparseable;
+        load.unparseable += read.unparseable;
         for task in read.tasks {
-            match classify_task(&vault_root, &task)? {
-                s if s.is_work() => current += 1,
-                TaskStatus::Unreadable => unreadable += 1,
+            match classify_task(vault_root, &task)? {
+                s if s.is_work() => load.work += 1,
+                TaskStatus::Unreadable => load.unreadable += 1,
                 _ => {}
             }
         }
     }
+    Ok(load)
+}
+
+async fn count(opts: &super::GlobalOptions, root: Option<PathBuf>) -> miette::Result<()> {
+    let vault_root = resolve_vault_root(opts, root)?;
+    let QueueLoad {
+        work: current,
+        unreadable,
+        unparseable,
+    } = queue_load(&vault_root)?;
     // stdout stays the machine contract: how many tasks a drain can act on. A task nothing can
     // classify is not one of them — spending a session on it would help nothing — but reporting
     // only the number leaves a queue that is BLOCKED indistinguishable from one that is empty,

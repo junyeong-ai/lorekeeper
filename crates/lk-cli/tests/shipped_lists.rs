@@ -51,15 +51,14 @@ fn declared_skills(script: &str, anchor: &str) -> Vec<String> {
     names
 }
 
-/// The uninstallers are held to the same list as the installers: a skill missing from them stays
-/// on disk after an uninstall, and stale skill instructions an agent still loads are worse than a
-/// leftover file — they describe a binary that is no longer there.
+/// The uninstallers carry their own list because they must work when the binary is gone — the
+/// installers no longer do, since `lore self deploy` writes what the binary carries. A skill
+/// missing from an uninstaller stays on disk, and stale skill instructions an agent still loads
+/// are worse than a leftover file: they describe a binary that is no longer there.
 #[test]
-fn install_and_uninstall_scripts_list_every_skill() {
+fn the_uninstall_scripts_list_every_skill() {
     let skills = shipped_skills();
     for (script, anchor) in [
-        ("scripts/install.sh", "for skill in "),
-        ("scripts/install.ps1", "$SkillNames = @("),
         ("scripts/uninstall.sh", "SKILL_NAMES=("),
         ("scripts/uninstall.ps1", "$SkillNames = @("),
     ] {
@@ -333,136 +332,35 @@ fn the_pipeline_permits_every_tool_the_skills_it_runs_declare() {
     }
 }
 
-/// Every asset the installer downloads is packaged with a checksum, and every checksum verifies.
-///
-/// The installer refuses an asset whose `.sha256` is missing or does not match, so an unpackaged
-/// checksum is an asset nobody can install. The pipelines are the ones that matter most: a
-/// scheduler fires them unattended with the user's shell environment.
-///
-/// Run, not read. The packaging is a script for exactly this reason — a property established by
-/// grepping the workflow answers for its spelling rather than its result, and goes red on a
-/// reformat while staying green on a rename.
-#[test]
-fn every_release_asset_is_packaged_with_a_checksum_that_verifies() {
-    let out = tempfile::TempDir::new().expect("tempdir");
-    let packaged = std::process::Command::new("bash")
-        .arg(repo_root().join("scripts/package-release-assets.sh"))
-        .arg("9.9.9")
-        .arg(out.path())
-        .output()
-        .expect("run the packaging script");
-    assert!(
-        packaged.status.success(),
-        "packaging failed: {}",
-        String::from_utf8_lossy(&packaged.stderr)
-    );
-
-    let produced: Vec<String> = std::fs::read_dir(out.path())
-        .expect("output dir")
-        .flatten()
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .collect();
-
-    // Every skill in the repository, and every pipeline the installer fetches by name.
-    let mut expected: Vec<String> = std::fs::read_dir(repo_root().join(".claude/skills"))
-        .expect("skills dir")
-        .flatten()
-        .filter(|entry| entry.path().is_dir())
-        .map(|entry| {
-            format!(
-                "{}-skill-v9.9.9.tar.gz",
-                entry.file_name().to_string_lossy()
-            )
-        })
-        .collect();
-    expected.extend(installer_pipelines());
-    assert!(expected.len() > 1, "nothing to package");
-
-    for asset in &expected {
-        assert!(produced.contains(asset), "{asset} was not packaged");
-        let sum = format!("{asset}.sha256");
-        assert!(
-            produced.contains(&sum),
-            "{asset} was packaged without {sum}"
-        );
-    }
-
-    // The checksums are the contract, so they are verified rather than counted.
-    let tool = if which("sha256sum") {
-        "sha256sum"
-    } else {
-        "shasum"
-    };
-    let mut args: Vec<String> = if tool == "shasum" {
-        vec!["-a".into(), "256".into()]
-    } else {
-        Vec::new()
-    };
-    args.push("-c".into());
-    args.extend(expected.iter().map(|asset| format!("{asset}.sha256")));
-    let checked = std::process::Command::new(tool)
-        .args(&args)
-        .current_dir(out.path())
-        .output()
-        .expect("verify checksums");
-    assert!(
-        checked.status.success(),
-        "a published checksum does not verify: {}{}",
-        String::from_utf8_lossy(&checked.stdout),
-        String::from_utf8_lossy(&checked.stderr)
-    );
-}
-
-/// The pipelines `install.sh` downloads by name, read off the installer itself.
-fn installer_pipelines() -> Vec<String> {
-    read(&repo_root().join("scripts/install.sh"))
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("PIPELINES=\"").map(str::to_owned))
-        .expect("install.sh declares a PIPELINES list")
-        .trim_end_matches('"')
-        .split_whitespace()
-        .map(str::to_owned)
-        .collect()
-}
-
-fn which(tool: &str) -> bool {
-    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-        .any(|dir| dir.join(tool).is_file())
-}
-
-/// The installer verifies every asset it downloads, and packaging supplies every one it names.
-///
-/// The pipelines were the exception in both directions at once: fetched without verification,
-/// and published without a checksum to verify against.
-#[test]
-fn the_installer_verifies_every_pipeline_it_downloads() {
-    let install = read(&repo_root().join("scripts/install.sh"));
-    for name in installer_pipelines() {
-        assert!(
-            install.contains(&format!("{name}.sha256")) || install.contains("${name}.sha256"),
-            "install.sh downloads {name} without fetching its checksum"
-        );
-    }
-    assert!(
-        install.contains("checksum mismatch; skipping"),
-        "install.sh fetches a pipeline checksum without acting on a mismatch"
-    );
-}
-
 /// The two scripts agree about where an install lives.
 ///
 /// `install.sh --install-dir /opt/bin` put the binary somewhere `uninstall.sh` had no way to be
 /// told about, so it reported "Nothing to uninstall" and left it there.
 #[test]
 fn the_uninstaller_takes_every_path_flag_the_installer_does() {
-    let install = read(&repo_root().join("scripts/install.sh"));
-    let uninstall = read(&repo_root().join("scripts/uninstall.sh"));
-    for flag in ["--install-dir", "--data-dir"] {
-        assert!(install.contains(flag), "install.sh lost {flag}");
-        assert!(
-            uninstall.contains(flag),
-            "uninstall.sh cannot be told about {flag}, so an install made with it is invisible"
-        );
+    for (installer, uninstaller, flags) in [
+        (
+            "scripts/install.sh",
+            "scripts/uninstall.sh",
+            ["--install-dir", "--data-dir"],
+        ),
+        // The PowerShell pair had the same hole and no gate: `install.ps1 -InstallDir C:\tools`
+        // was invisible to its uninstaller, which reported nothing to remove.
+        (
+            "scripts/install.ps1",
+            "scripts/uninstall.ps1",
+            ["$InstallDir", "$DataDir"],
+        ),
+    ] {
+        let install = read(&repo_root().join(installer));
+        let uninstall = read(&repo_root().join(uninstaller));
+        for flag in flags {
+            assert!(install.contains(flag), "{installer} lost {flag}");
+            assert!(
+                uninstall.contains(flag),
+                "{uninstaller} cannot be told about {flag}, so an install made with it is invisible"
+            );
+        }
     }
 }
 

@@ -1,12 +1,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+pub mod agenda;
 pub mod config;
 pub mod doctor;
 pub mod graph;
 pub mod health;
 pub mod ingest;
 pub mod init;
+pub mod installation;
 pub mod maintenance;
 pub mod performance;
 pub mod queue;
@@ -15,6 +17,7 @@ pub mod schedule;
 pub mod schema;
 pub mod status;
 pub mod synthesis;
+pub mod task;
 pub mod validate;
 pub mod wiki;
 
@@ -170,11 +173,24 @@ pub fn parse_date(
     s: Option<&str>,
     fallback: jiff::civil::Date,
 ) -> miette::Result<jiff::civil::Date> {
+    let Some(s) = s else {
+        return Ok(fallback);
+    };
+    // `today` and `yesterday` name a day relative to the VAULT's, which is the only zone any
+    // date in this tool is derived in. A script computing it instead — `date -v-1d` — answers in
+    // the machine's zone, and on a host an hour the other side of `vault.timezone` that is a
+    // different day: the scheduled close then declares a day that never ended, and the declared
+    // day is the very key that stops one ended day being closed twice.
     match s {
-        Some(s) => s
-            .parse::<jiff::civil::Date>()
-            .map_err(|e| miette::miette!("invalid date '{s}': {e}")),
-        None => Ok(fallback),
+        "today" => Ok(fallback),
+        "yesterday" => fallback
+            .yesterday()
+            .map_err(|e| miette::miette!("{fallback} has no predecessor: {e}")),
+        _ => s.parse::<jiff::civil::Date>().map_err(|e| {
+            miette::miette!(
+                "invalid date '{s}' ({e}) — expected YYYY-MM-DD, `today` or `yesterday`"
+            )
+        }),
     }
 }
 
@@ -182,6 +198,27 @@ pub fn parse_date(
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// The words name a day relative to the one the caller resolved in `vault.timezone`, which
+    /// is what takes a shell's `date -v-1d` — answering in the machine's zone — out of the
+    /// scheduled day-close.
+    #[test]
+    fn a_day_is_named_relative_to_the_vaults_own() {
+        let today = jiff::civil::date(2026, 3, 1);
+        assert_eq!(parse_date(None, today).unwrap(), today);
+        assert_eq!(parse_date(Some("today"), today).unwrap(), today);
+        assert_eq!(
+            parse_date(Some("yesterday"), today).unwrap(),
+            jiff::civil::date(2026, 2, 28)
+        );
+        assert_eq!(
+            parse_date(Some("2025-12-31"), today).unwrap(),
+            jiff::civil::date(2025, 12, 31)
+        );
+
+        let refused = parse_date(Some("tomorrow"), today).unwrap_err().to_string();
+        assert!(refused.contains("yesterday"), "{refused}");
+    }
 
     const VALID_CONFIG: &str = "\
 vault:

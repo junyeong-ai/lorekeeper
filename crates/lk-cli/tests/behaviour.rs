@@ -34,6 +34,7 @@ const SWEEP: &[&[&str]] = &[
     &["config", "vault-root"],
     &["config", "schema-path"],
     &["config", "categories"],
+    &["config", "board-path"],
     &["status"],
     &["health"],
     &["doctor"],
@@ -44,6 +45,11 @@ const SWEEP: &[&[&str]] = &[
     &["queue", "status"],
     &["queue", "count"],
     &["queue", "prune"],
+    &["task", "list"],
+    // Read against a fixed day, because the day is half of what an agenda answers: the fixture's
+    // dates are compared to it, and reading the real clock would make this a snapshot that
+    // changes at midnight rather than when the behaviour does.
+    &["agenda", "--date", "2026-08-19"],
     &["wiki", "concepts"],
     &["wiki", "index"],
     &["wiki", "log"],
@@ -96,6 +102,41 @@ const EXEMPT: &[(&[&str], &str)] = &[
     (
         &["queue", "apply"],
         "materialises a drain's LLM results; the fixture has no drain to apply",
+    ),
+    (
+        &["task", "add"],
+        "writes to the board, and the sweep runs every command against one staged copy — a mutation would decide what the commands after it observe",
+    ),
+    (
+        &["task", "done"],
+        "closes a task and records it; mutating, like every command below it here",
+    ),
+    (&["task", "drop"], "takes a task off the board"),
+    (&["task", "move"], "moves a task between sections"),
+    (&["task", "wait"], "parks a task until a day"),
+    (
+        &["task", "sync"],
+        "records what an editor did, which is a write by definition",
+    ),
+    (
+        &["task", "rollover"],
+        "closes the day, carrying every committed task — the one command whose whole purpose is to change the board",
+    ),
+    (
+        &["self", "status"],
+        "reads the machine's own installation — which binary is running and what is deployed beside it — none of which the fixture supplies",
+    ),
+    (
+        &["self", "deploy"],
+        "writes the skills, pipelines and templates into the running user's directories, which is not the fixture's to observe",
+    ),
+    (
+        &["self", "update"],
+        "resolves and downloads a published release, so its answer is a property of the release channel",
+    ),
+    (
+        &["self", "uninstall"],
+        "removes the running installation; there is no non-destructive form to observe",
     ),
 ];
 
@@ -188,6 +229,17 @@ fn observe(staged: &Path, argv: &[&str]) -> String {
         // the crate would pin one developer's absolute path into the snapshot and fail for
         // everyone else.
         .current_dir(staged)
+        // The sweep's premise is that an answer is a function of the fixture, and a command
+        // that reads the environment breaks it: `lore status` reports the installation beside
+        // the vault, so on a developer's machine it would describe that machine's skills and
+        // templates. Pointing the whole XDG set at the staging directory makes the answer the
+        // fixture's — an installation with nothing deployed — rather than the author's.
+        .env("HOME", staged)
+        .env("XDG_CONFIG_HOME", staged.join("config"))
+        .env("XDG_DATA_HOME", staged.join("data"))
+        .env_remove("USERPROFILE")
+        .env_remove("LOCALAPPDATA")
+        .env_remove("LORE_INSTALL_DATA_DIR")
         .arg("--config")
         .arg(staged.join("corpus/config.yaml"))
         .args(argv)
@@ -203,7 +255,10 @@ fn observe(staged: &Path, argv: &[&str]) -> String {
 }
 
 fn normalise(body: &str, dir: &Path) -> String {
-    let mut out = body.to_string();
+    // The running version is environmental to a behaviour snapshot the same way an absolute
+    // path is: every release would otherwise rewrite every snapshot that names it, and a diff
+    // that describes the version bump hides the one that describes a behaviour change.
+    let mut out = body.replace(env!("CARGO_PKG_VERSION"), "<version>");
     let mut spellings = vec![dir.to_string_lossy().into_owned()];
     if let Ok(resolved) = dir.canonicalize() {
         spellings.push(resolved.to_string_lossy().into_owned());

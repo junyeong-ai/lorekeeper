@@ -58,12 +58,8 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
     // Counted apart from the defects, because they are not one: a defect is a page this tool
     // wrote wrong, and a credential is a string a source sent. Summing them under one word
     // would tell an operator a number that answers neither question.
-    let defects: usize = report
-        .pages
-        .iter()
-        .map(|p| p.defects.len() + p.unanswered.len())
-        .sum();
-    let credentials: usize = report.pages.iter().map(|p| p.credentials.len()).sum();
+    let defects = report.defects();
+    let credentials = report.credentials();
     let flagged = if credentials == 0 {
         format!("{defects} defect(s)")
     } else {
@@ -234,7 +230,7 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
 /// normalization, or a symlink, and equal paths were never the interesting case. Comparing the
 /// joined text reported one physical file as two defective pages, each told to be re-ingested,
 /// and doubled the scanned count.
-fn managed_roots(vault_root: &Path, dirs: &VaultDirs) -> Vec<PathBuf> {
+pub(crate) fn managed_roots(vault_root: &Path, dirs: &VaultDirs) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::with_capacity(4);
     let mut seen: Vec<PathBuf> = Vec::with_capacity(4);
     for dir in [&dirs.daily, &dirs.personal, &dirs.synthesis, &dirs.wiki] {
@@ -307,8 +303,8 @@ fn unanswered_sections(page: &lk_core::frontmatter::VaultPage) -> Vec<&'static s
 
 /// The outcome of a vault audit: pages scanned, which ones carry defects, and how many
 /// were unreadable (so the caller can refuse to report "clean" when some were skipped).
-struct AuditReport {
-    scanned: u32,
+pub(crate) struct AuditReport {
+    pub(crate) scanned: u32,
     errors: u32,
     pages: Vec<PageDefects>,
     /// Sections a pending task can still fill, as `(page, section)`. Reported, never counted as
@@ -320,6 +316,22 @@ struct AuditReport {
     in_flight: Vec<(PathBuf, &'static str)>,
 }
 
+impl AuditReport {
+    /// A claim a page makes that does not hold: a defect this tool wrote, or a section whose
+    /// input nothing has answered. Counted apart from a credential, which is a string a SOURCE
+    /// sent — summing them under one word would report a number that answers neither question.
+    pub(crate) fn defects(&self) -> usize {
+        self.pages
+            .iter()
+            .map(|page| page.defects.len() + page.unanswered.len())
+            .sum()
+    }
+
+    pub(crate) fn credentials(&self) -> usize {
+        self.pages.iter().map(|page| page.credentials.len()).sum()
+    }
+}
+
 /// Walk `roots`, scanning every `.md` against the cleanliness contract. Pure with
 /// respect to its return value — no printing of results, no process exit — so it is
 /// unit-testable. Symlinks are NOT followed (`follow_links(false)`): pipeline pages are
@@ -327,7 +339,7 @@ struct AuditReport {
 /// skipped (a vault may not have produced a synthesis yet); an unreadable or non-UTF-8
 /// file is counted as an error (not as clean), since pipeline output is always valid
 /// UTF-8 — this only ever fires on a foreign file a user dropped under a managed root.
-fn audit(
+pub(crate) fn audit(
     roots: &[PathBuf],
     vault_root: &Path,
     in_flight_keys: &std::collections::HashSet<(PathBuf, &'static str)>,

@@ -48,12 +48,24 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Manage the task board: what is meant to be done, and what carried into today
+    Task {
+        #[command(subcommand)]
+        cmd: commands::task::TaskCommand,
+    },
+    /// The day, read off the board — committed work, what woke, what is due
+    Agenda {
+        /// Read the day against this date instead of today (YYYY-MM-DD)
+        #[arg(long)]
+        date: Option<String>,
+    },
     /// Generate synthesis reports
     Synthesis {
         #[command(subcommand)]
         period: commands::synthesis::Period,
     },
-    /// Show last ingest time per source
+    /// One line per subsystem: the installation, source currency, the LLM queue, page
+    /// contracts and the link graph — each naming the command that owns it
     Status,
     /// Check pipeline health (warn if a source is overdue vs ingest.schedule; 48h fallback when unscheduled)
     Health {
@@ -132,6 +144,12 @@ pub enum Command {
         #[command(subcommand)]
         cmd: commands::wiki::WikiCommand,
     },
+    /// This installation's own lifecycle: what it is, whether it is coherent, and updating it
+    #[command(name = "self")]
+    Installation {
+        #[command(subcommand)]
+        cmd: commands::installation::SelfCommand,
+    },
     /// Inspect the LLM work queue (`/lore-process` consumes this)
     Queue {
         #[command(subcommand)]
@@ -200,6 +218,8 @@ pub async fn run() -> miette::Result<()> {
             date,
             dry_run,
         } => commands::ingest::run(&opts, source, date, dry_run).await,
+        Command::Task { cmd } => commands::task::run(&opts, cmd).await,
+        Command::Agenda { date } => commands::agenda::run(&opts, date).await,
         Command::Synthesis { period } => commands::synthesis::run(&opts, period).await,
         Command::Health { strict } => commands::health::run(&opts, strict).await,
         Command::Doctor => commands::doctor::run(&opts).await,
@@ -212,6 +232,7 @@ pub async fn run() -> miette::Result<()> {
         Command::Maintenance { dry_run } => commands::maintenance::run(&opts, dry_run).await,
         Command::Graph { .. } | Command::Resolve { .. } => unreachable!(),
         Command::Wiki { cmd } => commands::wiki::run(&opts, cmd).await,
+        Command::Installation { cmd } => commands::installation::run(&opts, cmd).await,
         Command::Queue { command } => commands::queue::run(&opts, command).await,
     }
 }

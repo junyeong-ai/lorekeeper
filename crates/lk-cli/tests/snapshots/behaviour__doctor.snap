@@ -1,10 +1,9 @@
 ---
 source: crates/lk-cli/tests/behaviour.rs
-assertion_line: 277
 expression: "observe(staged.path(), argv)"
 ---
 exit: 0
 --- stdout ---
 --- stderr ---
 
-4 pages scanned, 0 flagged (0 defect(s))
+5 pages scanned, 0 flagged (0 defect(s))
