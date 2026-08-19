@@ -89,7 +89,7 @@ impl Board {
         // them past the frontmatter to whatever happened to sit there.
         let offset = page.lines().count() - body.lines().count();
         let mut board = Board::empty();
-        let mut current: Option<TaskState> = None;
+        let mut placement = Placement::Prologue;
         let mut claimed: std::collections::BTreeSet<TaskId> = std::collections::BTreeSet::new();
         let mut fence: Option<Fence> = None;
         let mut title_seen = false;
@@ -117,40 +117,52 @@ impl Board {
                     // Verbatim without exception: a blank line inside a code block is part of
                     // the code, and two in a row are two, so the rules that decide which blanks
                     // are layout do not apply in here.
-                    board.keep_exactly(current, trimmed);
+                    board.keep_exactly(placement.held_in(), trimmed);
                     continue;
                 }
                 None => {
                     if let Some(open) = Fence::opened_by(trimmed) {
                         fence = Some(open);
                         board.unterminated_fence = Some(index + 1 + offset);
-                        board.keep_exactly(current, trimmed);
+                        board.keep_exactly(placement.held_in(), trimmed);
                         continue;
                     }
                 }
             }
 
             if let Some(state) = heading_state(trimmed) {
-                current = Some(state);
+                placement = Placement::Section(state);
                 continue;
             }
             // The generated title is the FIRST `# ` line and only that one. Guarding on an
             // empty prologue instead still ate the second heading whenever only blank lines
             // separated the two — which is exactly how a person writes their own heading, right
             // under the title this tool wrote.
-            if current.is_none() && !title_seen && trimmed.starts_with("# ") {
+            if matches!(placement, Placement::Prologue) && !title_seen && trimmed.starts_with("# ")
+            {
                 title_seen = true;
                 continue;
             }
-            let Some(state) = current else {
-                // A checkbox line before any heading this reads. A person dragged it above the
-                // section, or a heading was restructured so none was ever opened — either way
-                // it is a task the parse could not place, and nothing else about the page says
-                // so.
+            // A heading at the sections' own level or above CLOSES the section it follows, which
+            // is what a heading of that level means in the document — so `## Blocked` written
+            // under `## Next` opens something this board has no state for, and the lines beneath
+            // it belong to no section. Read as ordinary content the whole block was annexed by
+            // the heading above it in silence: a person's blocked work was reported as ready, a
+            // proposal parked there went on being proposed because `select` could not see it,
+            // and the day-close carried all of it. A DEEPER heading is a subdivision — `### 오전`
+            // under `## Today` is how a person organizes a section, not how they leave one.
+            if heading_level(trimmed).is_some_and(|level| level <= SECTION_LEVEL) {
+                placement = Placement::Foreign(placement.held_in());
+            }
+            let Placement::Section(state) = placement else {
+                // A checkbox line no section this reads is open for. A person dragged it above
+                // the first heading, or wrote a heading of their own and put it underneath —
+                // either way it is a task the parse could not place, and nothing else about the
+                // page says so. Kept where it was found, so naming it costs the person nothing.
                 if unplaceable(trimmed) {
                     board.unaccounted.push(index + 1 + offset);
                 }
-                board.keep(None, trimmed);
+                board.keep(placement.held_in(), trimmed);
                 continue;
             };
             match read_line(trimmed) {
@@ -564,7 +576,47 @@ fn heading_state(line: &str) -> Option<TaskState> {
         .map(|(state, _)| state)
 }
 
-/// One line under a heading: a task, a checkbox someone typed, or content that is not this
+/// The level of the heading the sections are written at.
+const SECTION_LEVEL: usize = 2;
+
+/// Where the walk is: which section's entries a line is held in, and whether the heading above
+/// it is one this board reads.
+#[derive(Debug, Clone, Copy)]
+enum Placement {
+    /// Before any heading.
+    Prologue,
+    /// Under a heading this reads. The state a task line here is in.
+    Section(TaskState),
+    /// Under a heading this does not read. Lines are held in the last section they can be
+    /// written back into, so the page comes out exactly as it went in — but no line here is a
+    /// task, because the heading above it names no state and the heading IS the state.
+    Foreign(Option<TaskState>),
+}
+
+impl Placement {
+    /// The section a line found here is held in, which is where the render writes it back.
+    fn held_in(self) -> Option<TaskState> {
+        match self {
+            Placement::Prologue => None,
+            Placement::Section(state) => Some(state),
+            Placement::Foreign(last) => last,
+        }
+    }
+}
+
+/// The level of the ATX heading `line` is, where it is one.
+///
+/// CommonMark's grammar: one to six `#` at the start of the line, then a space or nothing after
+/// them. At column zero, like the headings this writes — an indented one is inside a list item.
+fn heading_level(line: &str) -> Option<usize> {
+    let hashes = line.len() - line.trim_start_matches('#').len();
+    let rest = line.get(hashes..)?;
+    (1..=6)
+        .contains(&hashes)
+        .then_some(hashes)
+        .filter(|_| rest.is_empty() || rest.starts_with(' '))
+}
+
 /// Whether `line` is something the parse would have placed as a task had it been under a
 /// section this reads: a checkbox this tool writes, or any line naming a task id.
 fn unplaceable(line: &str) -> bool {
@@ -951,6 +1003,51 @@ mod tests {
         let nested =
             board_of("## Today\n\n- [ ] live <!--t:aaa0 since:2026-08-18-->\n  - [ ] a sub-step\n");
         assert!(nested.unaccounted().is_empty());
+    }
+
+    /// A heading at the sections' own level or above closes the section it follows. Written
+    /// under one of this board's, `## Blocked` opens something no state answers to — and the
+    /// lines beneath it were annexed by the heading above in silence, so blocked work was
+    /// reported as ready and the day-close carried it. A DEEPER heading is a subdivision and
+    /// changes nothing: `### 오전` under `## Today` is how a person organizes a section.
+    #[test]
+    fn a_heading_this_does_not_read_closes_the_section_it_follows() {
+        let page = concat!(
+            "# Tasks\n\n",
+            "## Today\n\n",
+            "### morning\n\n",
+            "- [ ] under a subdivision <!--t:aaa0 since:2026-08-18-->\n\n",
+            "## Next\n\n",
+            "- [ ] ready <!--t:aaa1 since:2026-08-18-->\n\n",
+            "## Blocked\n\n",
+            "- [ ] waiting on legal <!--t:aaa2 since:2026-08-18-->\n",
+            "- [ ] typed by hand\n",
+        );
+        let board = board_of(page);
+
+        assert_eq!(
+            board.tasks().count(),
+            2,
+            "only what a section this reads holds"
+        );
+        assert_eq!(
+            board.get(&"aaa0".parse().unwrap()).unwrap().state,
+            TaskState::Today,
+            "a subdivision does not leave the section"
+        );
+        assert!(board.get(&"aaa2".parse().unwrap()).is_none());
+        assert!(
+            board.unstamped().is_empty(),
+            "nor is one adopted from there"
+        );
+        assert_eq!(board.unaccounted(), [15, 16]);
+
+        // And the block comes back out exactly as it went in, so being told costs nothing.
+        assert!(
+            board
+                .render(Locale::En, jiff::civil::date(2026, 8, 19))
+                .contains("## Blocked\n\n- [ ] waiting on legal <!--t:aaa2 since:2026-08-18-->\n- [ ] typed by hand\n")
+        );
     }
 
     /// A person's task line may mention or use an HTML comment — `<!--more-->` is a documented

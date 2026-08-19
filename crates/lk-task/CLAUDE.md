@@ -126,6 +126,19 @@ the commands in `lk-cli` are the only thing that decides when to apply them.
   verbatim, reported through `Board::malformed`, and left out of every rule, because the bytes
   belong to whoever wrote them and a guess at what a corrupted date meant is a task silently
   rescheduled.
+- **A heading this does not read CLOSES the section it follows.** That is what a heading at
+  the sections' own level or above means in the document, and the board's whole state machine
+  rests on the heading being the state — so `## Blocked` written under `## Next` opens something
+  no state answers to, and every line beneath it belongs to no section. Read as ordinary content
+  the block was annexed by the heading above it in silence: a person's blocked work was reported
+  as ready and carried by the day-close, a hand-typed line there was adopted into the wrong
+  state, and a proposal parked under it went on being proposed every morning because `select`
+  could not see it. Named rather than interpreted, and the lines are held where they were found
+  so the page comes back out byte-identical — being told costs the person nothing, and
+  `## Waiting` is the state they were reaching for. A DEEPER heading is a subdivision and changes
+  nothing, because `### 오전` under `## Today` is how a person organizes a section rather than
+  how they leave one. The parse already answered this for a checkbox before the FIRST heading;
+  it was the same question with the answer written in only one of the two places.
 - **State is the heading a line sits under.** `Board::retag` assigns it after the walk rather
   than reading it off the stamp, so dragging a line between two headings in an editor IS the
   state change and a stale stamp cannot undo it. This is what keeps the whole plane usable by
