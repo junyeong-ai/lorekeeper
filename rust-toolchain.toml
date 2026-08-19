@@ -1,0 +1,15 @@
+# The toolchain this repository BUILDS with, pinned so `scripts/check.sh` on a laptop and the
+# CI gates answer the same question. Without it each machine builds on whatever `stable` it
+# last updated to, and a lint or a `cargo fmt` result that differs between the two is
+# indistinguishable from a real failure.
+#
+# This is NOT the MSRV. `workspace.package.rust-version` is the floor a consumer may build
+# from and it moves only by hand; this pin is free to run ahead of it, which is exactly what
+# the CI `msrv` job exists to catch — it runs `cargo +<rust-version>` so an explicit toolchain
+# on the command line overrides this file rather than being silently replaced by it.
+[toolchain]
+channel = "1.97.1"
+# Declared here rather than only as CI action inputs: rustup installs a component with the
+# toolchain it belongs to, so a `components:` input naming `stable` would leave the pinned
+# 1.97.1 without rustfmt the moment this file selects it.
+components = ["rustfmt", "clippy"]

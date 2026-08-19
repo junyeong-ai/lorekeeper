@@ -41,10 +41,12 @@ jobs:
     name: tag names the declared version
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
       - name: Compare
         shell: bash
         env:
@@ -62,6 +64,15 @@ jobs:
     name: build ${{ matrix.target }}
     needs: [verify, version]
     runs-on: ${{ matrix.os }}
+    # The sha256 sidecar travels the same channel as the archive it describes, so it proves the
+    # bytes arrived intact and nothing about who produced them — a compromised release channel
+    # rewrites both. An attestation signs the archive against THIS workflow's run, which is the
+    # link `lore self update --verify-attestations` checks and the sidecar cannot make. Declared
+    # per-job so the wider `contents: write` at the top of this file does not reach the builders.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -84,21 +95,22 @@ jobs:
             archive: zip
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: ${{ matrix.target }}
 
       - name: Install cross
         if: matrix.cross
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2.86.3
         with:
           tool: cross
 
@@ -129,15 +141,16 @@ jobs:
         run: |
           set -euo pipefail
           stage="lore-v${VERSION}-${TARGET}"
-          mkdir -p "$stage/templates"
+          mkdir -p "$stage"
           if [ "$ARCHIVE_EXT" = "zip" ]; then
             cp "target/${TARGET}/release/lore.exe" "$stage/"
           else
             cp "target/${TARGET}/release/lore" "$stage/"
           fi
-          cp templates/*.md.jinja "$stage/templates/"
-          cp config.example.yaml "$stage/"
-          cp README.md LICENSE 2>/dev/null "$stage/" || cp README.md "$stage/"
+          # The binary carries the templates, the skills, the pipeline scripts and the config
+          # example, and `lore self deploy` writes them — so an archive holding copies would
+          # publish a second set that nothing installs and that could disagree with the first.
+          cp README.md LICENSE "$stage/"
           archive="${stage}.${ARCHIVE_EXT}"
           if [ "$ARCHIVE_EXT" = "zip" ]; then
             powershell -Command "Compress-Archive -Path '$stage' -DestinationPath '$archive' -Force"
@@ -151,8 +164,13 @@ jobs:
           fi
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
 
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ steps.package.outputs.archive }}
+
       - name: Upload artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ steps.package.outputs.archive }}
           path: |
@@ -160,46 +178,17 @@ jobs:
             ${{ steps.package.outputs.archive }}.sha256
           if-no-files-found: error
 
-  skill:
-    name: package skill
-    needs: [verify, version]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
-      - name: Resolve version
-        id: version
-        env:
-          REF: ${{ github.event.inputs.tag || github.ref_name }}
-        run: echo "version=${REF#v}" >> "$GITHUB_OUTPUT"
-      - name: Package skill tarballs and pipeline scripts
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: scripts/package-release-assets.sh "$VERSION"
-      - uses: actions/upload-artifact@v7
-        with:
-          name: skills
-          path: |
-            *-skill-v*.tar.gz
-            *-skill-v*.tar.gz.sha256
-            lore-pipeline.sh
-            lore-daily.sh
-            lore-weekly.sh
-            lore-*.sh.sha256
-          if-no-files-found: error
-
   release:
     name: publish release
-    needs: [build, skill]
+    needs: [build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: artifacts
           merge-multiple: true
