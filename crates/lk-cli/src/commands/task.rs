@@ -489,7 +489,10 @@ impl IntentPlane {
 
         // Claimed BEFORE the board is read, so the read and the write it decides are one
         // critical section rather than two.
-        let guard = exclusive.then(|| claim(&vault_root)).flatten();
+        let guard = match exclusive {
+            true => Some(claim(&vault_root)?),
+            false => None,
+        };
 
         // An absent board is an empty one, not an error: the first `lore task add` creates the
         // page, exactly as the first ingest creates a daily page.
@@ -1044,35 +1047,40 @@ impl IntentPlane {
     }
 }
 
-fn claim(vault_root: &std::path::Path) -> Option<std::fs::File> {
+/// Hold the intent plane for a mutation, or refuse it.
+///
+/// `File::lock` BLOCKS until it is granted, so an error here is never contention — it is a
+/// filesystem that cannot lock at all, and it will not start being able to on the next run.
+/// Without it two overlapping `lore task` commands lose board lines and transition records, and
+/// the history is the only thing the archive reads: a measured run of eight concurrent adds on
+/// such a vault reported eight successes and left two lines and four records.
+///
+/// Refused rather than approximated, which is the standing rule wherever this tool cannot keep
+/// a promise — a cron schedule launchd cannot express, a release whose archive will not verify,
+/// a swap that cannot rename over a running binary. Silent loss reported as success is that
+/// shape exactly, and warning about it does not make the loss less silent to whatever read the
+/// exit code. Reads are unaffected: they take no lock, because every write is atomic and a
+/// reader sees a whole file or the previous one.
+fn claim(vault_root: &std::path::Path) -> miette::Result<std::fs::File> {
     let dir = vault_root.join(".lorekeeper");
     let path = dir.join("tasks.lock");
-    let opened = std::fs::create_dir_all(&dir).and_then(|()| {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&path)
-    });
-    match opened.and_then(|file| file.lock().map(|()| file)) {
-        Ok(file) => Some(file),
-        Err(e) => {
-            // Named for what it costs, because the run PROCEEDS. `File::lock` blocks until it
-            // is granted, so an error is not contention — it is a filesystem that cannot lock at
-            // all, and it will not start being able to on the next run. Two `lore task` commands
-            // overlapping there lose board lines AND transition records, and the history is the
-            // only thing the archive reads. Refusing instead would make an unlockable vault
-            // unusable with no way out, which is worse than the race for the one person on one
-            // machine who is the ordinary case.
-            eprintln!(
-                "warning: could not claim {} ({e}) — this filesystem cannot lock, so a second \
-                 `lore task` running at the same time as this one will silently lose changes to \
-                 the board AND to the history. Run them one at a time.",
+    std::fs::create_dir_all(&dir)
+        .and_then(|()| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&path)
+        })
+        .and_then(|file| file.lock().map(|()| file))
+        .map_err(|e| {
+            miette::miette!(
+                "cannot hold {} ({e}), so nothing here can be changed safely — two commands \
+                 overlapping would lose board lines and history with nothing to say so. Reading \
+                 the board is unaffected. Move the vault to a filesystem that supports locking.",
                 path.display()
-            );
-            None
-        }
-    }
+            )
+        })
 }
 
 fn tasks_config(config: &Config) -> miette::Result<TasksConfig> {
