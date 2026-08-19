@@ -263,11 +263,11 @@ pub async fn run(
             && config.personal.as_ref().is_some_and(|p| p.tasks.is_some())
         {
             let appointments: Vec<_> = result
-                .events
+                .appointments
                 .iter()
-                .map(|event| lk_task::Appointment {
-                    at: event.timestamp,
-                    title: event.title.clone(),
+                .map(|(at, title)| lk_task::Appointment {
+                    at: *at,
+                    title: title.clone(),
                 })
                 .collect();
             if let Err(e) = lk_task::Schedule::new(&vault_root).record(id, &appointments) {

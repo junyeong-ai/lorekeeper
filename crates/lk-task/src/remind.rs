@@ -74,22 +74,37 @@ impl Reminders {
         Ok(true)
     }
 
-    /// Everything due at or before `now`, retired in the same call.
+    /// Everything due at or before `now`. A READ — nothing is removed here.
     ///
-    /// Retired by the FIRING rather than by a later acknowledgement, for the same reason a wake
-    /// date is cleared by arriving: it was a promise to say something once, and one that
-    /// survived would be said again every few minutes for the rest of the day. A reminder due
-    /// while the machine slept is late rather than lost — the timer's next run finds it still
-    /// waiting, because nothing but firing removes it.
+    /// Retiring is [`Self::answered`], which the caller reaches only once it has decided what
+    /// each one is. Doing both in this call put the write BEFORE the decision: a caller that
+    /// then dropped a reminder — because a board it could not parse could not say the task was
+    /// still open — had already written it out of the store, so a promise this guarantees is
+    /// late became one that was gone.
     pub fn due(&self, now: jiff::Timestamp) -> Result<Vec<Reminder>, TaskError> {
-        let (due, keep): (Vec<_>, Vec<_>) = self
+        Ok(self
             .read()?
             .into_iter()
-            .partition(|reminder| reminder.at <= now);
-        if !due.is_empty() {
-            self.file.replace(&keep)?;
+            .filter(|reminder| reminder.at <= now)
+            .collect())
+    }
+
+    /// Retire the reminders that have been ANSWERED — said out loud, or established as moot.
+    ///
+    /// The same rule a wake date follows: it was a promise to say something once, and one that
+    /// survived would be said again every few minutes for the rest of the day. What is NOT
+    /// answered stays, so a reminder due while the machine slept, or while the board could not
+    /// say whether its task is still open, is late rather than lost.
+    pub fn answered(&self, ids: &[TaskId]) -> Result<(), TaskError> {
+        if ids.is_empty() {
+            return Ok(());
         }
-        Ok(due)
+        let keep: Vec<_> = self
+            .read()?
+            .into_iter()
+            .filter(|reminder| !ids.contains(&reminder.id))
+            .collect();
+        self.file.replace(&keep)
     }
 }
 
@@ -115,7 +130,7 @@ mod tests {
     }
 
     #[test]
-    fn what_is_due_fires_once_and_the_rest_waits() {
+    fn what_is_due_is_read_and_retired_only_once_answered() {
         let tmp = tempfile::tempdir().unwrap();
         let reminders = Reminders::new(tmp.path());
         reminders.add(reminder("7k2p", 9)).unwrap();
@@ -125,18 +140,32 @@ mod tests {
         assert_eq!(fired.len(), 1);
         assert_eq!(fired[0].id.as_str(), "7k2p");
 
-        // Said once. The next timer tick finds nothing of it.
+        // Reading decides nothing. A caller that could not answer leaves it waiting.
+        assert_eq!(reminders.due(at(10)).unwrap().len(), 1);
+        assert_eq!(reminders.read().unwrap().len(), 2);
+
+        reminders.answered(&["7k2p".parse().unwrap()]).unwrap();
         assert!(reminders.due(at(10)).unwrap().is_empty());
         assert_eq!(reminders.read().unwrap().len(), 1);
-
-        assert_eq!(reminders.due(at(15)).unwrap().len(), 1);
-        assert!(reminders.read().unwrap().is_empty());
     }
 
-    /// A machine asleep at 14:00 wakes at 17:00 and the reminder is still there: nothing but
-    /// firing removes one, so late is the worst it gets.
+    /// The guarantee this store exists to keep: nothing but being ANSWERED removes one.
     #[test]
-    fn one_due_while_the_machine_slept_is_late_rather_than_lost() {
+    fn one_nobody_could_answer_is_late_rather_than_lost() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reminders = Reminders::new(tmp.path());
+        reminders.add(reminder("7k2p", 9)).unwrap();
+
+        // Three ticks where the caller could decide nothing.
+        for _ in 0..3 {
+            assert_eq!(reminders.due(at(17)).unwrap().len(), 1);
+        }
+        assert_eq!(reminders.read().unwrap().len(), 1);
+    }
+
+    /// A machine asleep at 14:00 wakes at 17:00 and the reminder is still there.
+    #[test]
+    fn one_due_while_the_machine_slept_is_still_due() {
         let tmp = tempfile::tempdir().unwrap();
         let reminders = Reminders::new(tmp.path());
         reminders.add(reminder("7k2p", 14)).unwrap();

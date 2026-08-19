@@ -88,11 +88,21 @@ impl Judged {
             let file = self.shelf.file(&key);
             match file.read::<Candidate>() {
                 Ok(held) => {
-                    all.extend(
-                        held.into_iter()
-                            .filter(|candidate| permitted.contains(&candidate.source_id)),
-                    );
-                    paths.push(file.path().to_path_buf());
+                    let before = held.len();
+                    let taken: Vec<_> = held
+                        .into_iter()
+                        .filter(|candidate| permitted.contains(&candidate.source_id))
+                        .collect();
+                    // Retired only where the file was taken WHOLE. A judgment the filter passed
+                    // over is as unseen as one in a file that would not read, and that one is
+                    // deliberately left on disk — deleting this one loses a proposal nobody saw,
+                    // for a source that is paused rather than gone. `add` keys by DATE, so one
+                    // day's file holds every source's judgments and a mixed file is the
+                    // ordinary shape.
+                    if taken.len() == before {
+                        paths.push(file.path().to_path_buf());
+                    }
+                    all.extend(taken);
                 }
                 Err(e) => unreadable.push(e),
             }
@@ -350,6 +360,32 @@ mod tests {
             select(vec![one, two], &BTreeSet::new(), &BTreeSet::new()).len(),
             2
         );
+    }
+
+    /// A file the filter passed over holds judgments nobody has seen. Retiring it deletes them
+    /// for a source that is paused rather than gone — and one day's file holds every source's
+    /// judgments, so a mixed file is the ordinary shape rather than the corner.
+    #[test]
+    fn a_file_not_taken_whole_is_left_where_it_is() {
+        let tmp = tempfile::tempdir().unwrap();
+        let judged = Judged::new(tmp.path());
+        let day = jiff::civil::date(2026, 8, 19);
+        judged
+            .add(day, &candidate("alpha", "one", "https://x/alpha-1"))
+            .unwrap();
+        judged
+            .add(day, &candidate("beta", "two", "https://x/beta-2"))
+            .unwrap();
+
+        let mixed = judged.take(&["alpha".to_string()]).unwrap();
+        assert_eq!(mixed.candidates.len(), 1);
+        assert!(mixed.consumed.is_empty(), "beta's judgment is not seen yet");
+
+        let whole = judged
+            .take(&["alpha".to_string(), "beta".to_string()])
+            .unwrap();
+        assert_eq!(whole.candidates.len(), 2);
+        assert_eq!(whole.consumed.len(), 1);
     }
 
     #[test]

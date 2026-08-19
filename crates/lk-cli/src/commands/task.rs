@@ -392,7 +392,7 @@ pub(crate) struct IntentPlane {
     recorded: lk_task::Recorded,
     /// The page exactly as it was read, so a write can refuse to land on top of a version it
     /// never saw. `None` where there was no page yet.
-    read_as: Option<Vec<u8>>,
+    pub(crate) read_as: Option<Vec<u8>>,
     /// Held for a mutation, from before the board is read until after it and the log are
     /// written. Dropping the file releases it.
     _guard: Option<std::fs::File>,
@@ -577,12 +577,23 @@ impl IntentPlane {
         Ok((offered.len(), consumed))
     }
 
-    /// Whether `reminder` is about a task the board no longer holds open.
-    pub(crate) fn is_moot(&self, reminder: &lk_task::Reminder) -> bool {
-        reminder
-            .task
-            .as_ref()
-            .is_some_and(|id| !self.board.tasks().any(|task| &task.id == id))
+    /// Whether `reminder` is about a task the board no longer holds open — `None` where the
+    /// board cannot answer.
+    ///
+    /// It cannot answer when there is no page at all (renamed, moved, or a sync client's
+    /// placeholder not yet materialized) or when a code fence that never closes has made every
+    /// task invisible to the parse. In both, `tasks()` is empty and every task-linked reminder
+    /// reads as moot — so a caller that acted on that would drop exactly the promises it exists
+    /// to keep. A duplicated id is not one of these: both lines parse, so the question is still
+    /// answerable.
+    pub(crate) fn is_moot(&self, reminder: &lk_task::Reminder) -> Option<bool> {
+        let Some(id) = reminder.task.as_ref() else {
+            return Some(false);
+        };
+        if self.read_as.is_none() || self.board.unterminated_fence().is_some() {
+            return None;
+        }
+        Some(!self.board.tasks().any(|task| &task.id == id))
     }
 
     /// One line of the board's state, for the front door.
@@ -1086,14 +1097,23 @@ fn remind(plane: &IntentPlane, cmd: RemindCommand) -> miette::Result<()> {
             // A reminder about a task that is no longer OPEN is moot however the task left the
             // board — finished, dropped, or a line deleted in an editor, which records nothing
             // and so no completion could retire it. The board is the truth about what is open,
-            // so it is what decides, and firing is where the last word is said.
+            // so it is what decides — and where it cannot decide, NOTHING is said and nothing is
+            // retired. A promise this store guarantees is late is not one to lose to a page that
+            // did not parse.
+            let mut answered = Vec::new();
             for reminder in store.due(plane.now).map_err(|e| miette::miette!("{e}"))? {
-                if plane.is_moot(&reminder) {
-                    continue;
+                match plane.is_moot(&reminder) {
+                    Some(false) => {
+                        println!("{}", reminder.text);
+                        answered.push(reminder.id);
+                    }
+                    Some(true) => answered.push(reminder.id),
+                    None => {}
                 }
-                println!("{}", reminder.text);
             }
-            Ok(())
+            store
+                .answered(&answered)
+                .map_err(|e| miette::miette!("{e}"))
         }
     }
 }

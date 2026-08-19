@@ -63,7 +63,10 @@ the commands in `lk-cli` are the only thing that decides when to apply them.
   so reading only what this pass recorded left the reminder standing for a task the board had
   just let go. Deleted in an editor, nothing is recorded and no completion could — so firing
   asks the board, which is the truth about what is open. One rule at each moment a reminder
-  changes hands.
+  changes hands. Where it CANNOT decide — no board file at all, or a fence that never closes
+  and hides every task — nothing is said and nothing is retired: reading what is due and
+  retiring it in one call put the write before the decision, and a promise this store guarantees
+  is late became one that was gone.
 - **A reminder about work that is finished is retired, at the moment it finishes.** A task
   leaves the board by being done or dropped, and the reminder someone attached to it is moot the
   same instant — so `commit` drops it there rather than leaving the timer to say it. A
@@ -83,7 +86,10 @@ the commands in `lk-cli` are the only thing that decides when to apply them.
   cleared — a date with no events produced no entry, so the writer was never called for it and a
   day whose every meeting was cancelled went on showing them. Keyed by source, cancelling them
   all is an empty snapshot, which is an answer; and a snapshot holds one window rather than one
-  file per day forever, so there is nothing left for a retention horizon to prune.
+  file per day forever, so there is nothing left for a retention horizon to prune. What it holds
+  comes off the FETCH rather than off the rendered events, for the reason `open_work` does:
+  `lore ingest --date <past>` narrows what is rendered to one day, and a whole-snapshot write
+  from that blanked every other day the calendar holds.
 - **Only a completion is an observation.** A dropped task belongs in the history and not on a
   daily page: the archive answers "what did I do", and deciding not to do a thing is not doing
   it. `TransitionKind::is_observation` is the one place that judgment lives.
@@ -110,7 +116,9 @@ the commands in `lk-cli` are the only thing that decides when to apply them.
   while the read asks what is enabled. The same rule reaches the judged candidates through
   `propose_from`, because validating a judgment only when it is WRITTEN answers for the moment
   it was made and not for the moment it is acted on — a file five months old was still putting
-  work from a dropped source onto the board.
+  work from a dropped source onto the board. A file is retired only where it was taken WHOLE: a
+  judgment the filter passed over is as unseen as one in a file that would not read, and `add`
+  keys by DATE so one day's file holds every source's judgments.
 - **The board file is the TRUTH, not a rendering of a store kept elsewhere.** The vault is the
   product: a box ticked on a phone has to count, and a design that keeps state somewhere else
   discards that edit in silence — worse than any parsing risk. What keeps the parsing risk small

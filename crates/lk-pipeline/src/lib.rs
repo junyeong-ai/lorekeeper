@@ -47,6 +47,13 @@ pub struct IngestResult {
     /// Collected from the RAW items, before normalization drops what the vault has no page for
     /// — an open issue is a fact about now, not an event on a date.
     pub open_work: Vec<lk_core::event::OpenWork>,
+    /// What a SCHEDULED source observed, for the agenda to report beside the day's tasks.
+    ///
+    /// Taken from the raw items for the same reason `open_work` is: it is a fact about the
+    /// FETCH, not about the dates this run happened to render. Read off the rendered events
+    /// instead, `lore ingest --date <past>` — a repair of one day — narrowed them to that date
+    /// and the whole-snapshot write then blanked every other day the calendar holds.
+    pub appointments: Vec<(jiff::Timestamp, String)>,
     pub events: Vec<Event>,
     pub concepts: Vec<ExtractedConcept>,
     pub daily_pages: Vec<RenderResult>,
@@ -152,8 +159,17 @@ impl Pipeline {
         // exit, because a source can declare open work in a run that renders nothing: an issue
         // still assigned and unfinished is a fact about now, not an event on a date.
         let open_work: Vec<_> = items.iter().filter_map(|i| i.open_work.clone()).collect();
+        let appointments: Vec<_> = if config.source_type.descriptor().scheduled {
+            items
+                .iter()
+                .map(|item| (item.timestamp, item.title.clone()))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let mut result = self.plan_pages(source_id, config, items, options).await?;
         result.open_work = open_work;
+        result.appointments = appointments;
         Ok(result)
     }
 
@@ -533,6 +549,7 @@ impl Pipeline {
         Ok(IngestResult {
             source_id: source_id.into(),
             open_work: vec![],
+            appointments: vec![],
             events,
             concepts: all_concepts,
             daily_pages,
@@ -990,6 +1007,7 @@ impl Pipeline {
         Ok(IngestResult {
             source_id: source_id.into(),
             open_work: vec![],
+            appointments: vec![],
             events,
             concepts: all_concepts,
             daily_pages: vec![],
@@ -1002,6 +1020,7 @@ fn empty_result(source_id: &str) -> IngestResult {
     IngestResult {
         source_id: source_id.into(),
         open_work: vec![],
+        appointments: vec![],
         events: vec![],
         concepts: vec![],
         daily_pages: vec![],
