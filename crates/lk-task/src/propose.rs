@@ -67,16 +67,41 @@ impl Judged {
         file.replace(&held)
     }
 
-    /// Everything judged so far, with the files it came from so a caller can retire them.
-    pub fn take(&self) -> Result<(Vec<Candidate>, Vec<PathBuf>), TaskError> {
+    /// Everything judged so far that `permitted` still names, with the files it came from.
+    ///
+    /// Filtered by the same opt-in the write is validated against, because a source dropped
+    /// from `propose_from` — or from `config.yaml` outright — leaves judgments behind, and a
+    /// file dated five months ago went on putting work from a system nobody reads onto the
+    /// board. Validating only at the write answers for the moment it was made, not for the
+    /// moment it is acted on.
+    ///
+    /// A file that will NOT read is reported and skipped rather than failing the whole run, and
+    /// is left where it is: it holds judgments nobody has seen, so dropping them loses a
+    /// proposal, while refusing everything blocks every other one for as long as the file sits
+    /// there. Skipped, it is named on every run until a person deals with it — the same
+    /// per-item isolation an adapter uses when one feed of many is broken.
+    pub fn take(&self, permitted: &[String]) -> Result<Gathered, TaskError> {
         let mut all = Vec::new();
         let mut paths = Vec::new();
+        let mut unreadable = Vec::new();
         for key in self.shelf.keys()? {
             let file = self.shelf.file(&key);
-            all.extend(file.read::<Candidate>()?);
-            paths.push(file.path().to_path_buf());
+            match file.read::<Candidate>() {
+                Ok(held) => {
+                    all.extend(
+                        held.into_iter()
+                            .filter(|candidate| permitted.contains(&candidate.source_id)),
+                    );
+                    paths.push(file.path().to_path_buf());
+                }
+                Err(e) => unreadable.push(e),
+            }
         }
-        Ok((all, paths))
+        Ok(Gathered {
+            candidates: all,
+            consumed: paths,
+            unreadable,
+        })
     }
 
     /// Drop the files a proposal run consumed.
@@ -89,6 +114,19 @@ impl Judged {
         }
         Ok(())
     }
+}
+
+/// What a read of the candidate stores yielded.
+///
+/// The unreadable files travel WITH the candidates rather than as an error that replaces them:
+/// a store damaged in one place must not cost the rest their day, and the caller says what it
+/// could not read while acting on what it could.
+pub struct Gathered {
+    pub candidates: Vec<Candidate>,
+    /// Files whose contents are now the board's, for a caller to retire once the write lands.
+    /// Empty for a snapshot, which is re-declared rather than consumed.
+    pub consumed: Vec<PathBuf>,
+    pub unreadable: Vec<TaskError>,
 }
 
 /// The candidates nobody has answered about yet, one per origin.
@@ -158,15 +196,26 @@ impl Candidates {
     /// removed from `config.yaml` leaves its snapshot behind and would go on proposing work
     /// from a system this vault no longer reads. `lore maintenance` is what removes the file;
     /// this is what stops it mattering in the meantime.
-    pub fn read_all(&self, configured: &[String]) -> Result<Vec<Candidate>, TaskError> {
+    pub fn read_all(&self, configured: &[String]) -> Result<Gathered, TaskError> {
         let mut all = Vec::new();
+        let mut unreadable = Vec::new();
         for key in self.shelf.keys()? {
             if !configured.contains(&key) {
                 continue;
             }
-            all.extend(self.shelf.file(&key).read::<Candidate>()?);
+            // Reported and skipped rather than fatal: a snapshot is rewritten whole by the next
+            // ingest, so a damaged one heals on its own and refusing every other source's
+            // proposals in the meantime buys nothing.
+            match self.shelf.file(&key).read::<Candidate>() {
+                Ok(held) => all.extend(held),
+                Err(e) => unreadable.push(e),
+            }
         }
-        Ok(all)
+        Ok(Gathered {
+            candidates: all,
+            consumed: Vec::new(),
+            unreadable,
+        })
     }
 
     /// The snapshots no configured source answers for.
@@ -217,6 +266,7 @@ mod tests {
             candidates
                 .read_all(&["jira".into(), "mail".into()])
                 .unwrap()
+                .candidates
                 .len(),
             2
         );
@@ -227,7 +277,8 @@ mod tests {
             .unwrap();
         let held = candidates
             .read_all(&["jira".into(), "mail".into()])
-            .unwrap();
+            .unwrap()
+            .candidates;
         assert_eq!(held.len(), 1);
         assert_eq!(held[0].summary, "[PLAT-2] two");
     }
@@ -246,6 +297,7 @@ mod tests {
             candidates
                 .read_all(&["jira".into(), "mail".into()])
                 .unwrap()
+                .candidates
                 .is_empty()
         );
     }
@@ -308,6 +360,7 @@ mod tests {
             Candidates::new(tmp.path())
                 .read_all(&configured)
                 .unwrap()
+                .candidates
                 .is_empty()
         );
     }
@@ -327,7 +380,9 @@ mod tests {
             .unwrap();
 
         let configured = vec!["jira".to_string()];
-        let held = candidates.read_all(&configured).unwrap();
+        let gathered = candidates.read_all(&configured).unwrap();
+        assert!(gathered.unreadable.is_empty());
+        let held = gathered.candidates;
         assert_eq!(held.len(), 1);
         assert_eq!(held[0].source_id, "jira");
 

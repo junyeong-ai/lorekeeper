@@ -355,6 +355,9 @@ pub(crate) struct IntentPlane {
     /// The enabled sources this vault reads, so a snapshot left by one that was removed from
     /// the configuration cannot go on proposing work from a system nobody ingests any more.
     sources: Vec<String>,
+    /// Why the board cannot be written, where it cannot. Reported when the plane is opened and
+    /// refused when a write is attempted — never before.
+    unwritable: Option<String>,
     pending: Vec<Transition>,
     /// The history this pass read. Kept because a command acting AFTER the reconcile asks the
     /// same question over the same window, and the board it was computed from — whose ticked
@@ -430,14 +433,19 @@ impl IntentPlane {
         // A page whose fence never closes is not a page this can write back. Everything below
         // that line is code to CommonMark, so the headings the render just emitted are read
         // back as code and a fresh set is emitted after them — a board that grows every night
-        // and, where the fence opens above the first heading, one whose every task is invisible
-        // while sitting in plain sight. Reading it is still useful and says why; writing it is
-        // refused, at the point the board is claimed, so nothing is half-done.
-        // An id addresses a task and every rule reaches a task through one, so two lines
-        // answering to one id make every rule ambiguous — and the ambiguity is settled by file
-        // order, which deleted the wrong line in one arrangement and swallowed a completion in
-        // the other. Reported rather than repaired, and refused before anything is written,
-        // because which of the two the person meant is not knowable from the page.
+        // A page a write cannot land on. Reported when the plane is OPENED and refused when a
+        // write is attempted, which are two different moments: reading is always safe, and a
+        // command that touches none of the board — a reminder firing, a judgment being noted —
+        // has no business being turned away by a defect in a page it never opens. Coupled to
+        // one flag, an unterminated fence silenced the reminder timer.
+        //
+        // An id addresses a task and every rule reaches one through it, so two lines answering
+        // to one id make every rule ambiguous, and the ambiguity is settled by file order —
+        // which deleted the wrong line in one arrangement and swallowed a completion in the
+        // other. A fence that never closes makes every heading below it code. Both are
+        // reported rather than repaired: which of two lines a person meant, and where they
+        // meant a code block to end, are not knowable from the page.
+        let mut unwritable = None;
         if !board.duplicated().is_empty() {
             let lines = board
                 .duplicated()
@@ -448,25 +456,19 @@ impl IntentPlane {
             // EVERY one of them, because a sync conflict duplicates a block rather than a line
             // and naming only the first would be repaired one line per run by anyone following
             // the message.
-            let notice = format!(
+            unwritable = Some(format!(
                 "{board_path}: {lines} carry an id an earlier line already claims — delete the \
                  `<!--t:…-->` comment from each copy and the next pass adopts it as its own task."
-            );
-            if exclusive {
-                return Err(miette::miette!("{notice}"));
-            }
-            eprintln!("warning: {notice}");
+            ));
         }
         if let Some(line) = board.unterminated_fence() {
-            let notice = format!(
-                "{} L{line} opens a code fence that nothing closes — every line below it is code, \
-                 so the sections this reads and writes are not there. Close the fence with the \
-                 same marker it opened with.",
-                board_path,
-            );
-            if exclusive {
-                return Err(miette::miette!("{notice}"));
-            }
+            unwritable = Some(format!(
+                "{board_path} L{line} opens a code fence that nothing closes — every line below \
+                 it is code, so the sections this reads and writes are not there. Close the \
+                 fence with the same marker it opened with."
+            ));
+        }
+        if let Some(notice) = &unwritable {
             eprintln!("warning: {notice}");
         }
 
@@ -479,6 +481,7 @@ impl IntentPlane {
             vault_root,
             board_path: PathBuf::from(board_path),
             zone,
+            unwritable,
             sources: config
                 .sources
                 .iter()
@@ -505,13 +508,18 @@ impl IntentPlane {
     /// has, and a proposal that comes back is a smaller cost than one suppressed by a rule
     /// guessing at what a deletion meant.
     fn propose(&mut self) -> miette::Result<(usize, Vec<std::path::PathBuf>)> {
-        let mut candidates = lk_task::Candidates::new(&self.vault_root)
+        let snapshots = lk_task::Candidates::new(&self.vault_root)
             .read_all(&self.sources)
             .map_err(|e| miette::miette!("{e}"))?;
-        let (judged, consumed) = lk_task::Judged::new(&self.vault_root)
-            .take()
+        let judged = lk_task::Judged::new(&self.vault_root)
+            .take(&self.config.propose_from)
             .map_err(|e| miette::miette!("{e}"))?;
-        candidates.extend(judged);
+        for e in snapshots.unreadable.iter().chain(&judged.unreadable) {
+            eprintln!("warning: {e}");
+        }
+        let consumed = judged.consumed;
+        let mut candidates = snapshots.candidates;
+        candidates.extend(judged.candidates);
         if candidates.is_empty() {
             return Ok((0, consumed));
         }
@@ -539,6 +547,14 @@ impl IntentPlane {
             self.board.insert(task);
         }
         Ok((offered.len(), consumed))
+    }
+
+    /// Whether `reminder` is about a task the board no longer holds open.
+    pub(crate) fn is_moot(&self, reminder: &lk_task::Reminder) -> bool {
+        reminder
+            .task
+            .as_ref()
+            .is_some_and(|id| !self.board.tasks().any(|task| &task.id == id))
     }
 
     /// One line of the board's state, for the front door.
@@ -575,10 +591,19 @@ impl IntentPlane {
         if stale > 0 {
             let _ = write!(state, " · {stale} {}", strings.status_board_carried);
         }
-        if let Some(unrecorded) = plane.unrecorded(plane.today)
-            && unrecorded > 0
-        {
-            let _ = write!(state, " · {unrecorded} {}", strings.status_board_unrecorded);
+        match plane.unrecorded(plane.today) {
+            Some(0) => {}
+            Some(n) => {
+                let _ = write!(state, " · {n} {}", strings.status_board_unrecorded);
+            }
+            // The row a front door prints must not read the same whether the history is caught
+            // up or unreadable, which is the difference the whole rule is about.
+            None => {
+                return Some(BoardSurvey {
+                    state: strings.status_board_unreadable.to_string(),
+                    writable: false,
+                });
+            }
         }
         Some(BoardSurvey {
             state,
@@ -683,6 +708,14 @@ impl IntentPlane {
     /// harmlessly by the next reconcile, while a board written without its transition is work
     /// that happened and left no record — and the log is the only thing the archive reads.
     async fn commit(&mut self) -> miette::Result<()> {
+        // A page a write cannot land on is refused HERE, where the write is, and nowhere
+        // earlier. Nothing has been written at this point, so a refusal leaves nothing
+        // half-done — and a command that never reaches this line was never the board's
+        // business to turn away.
+        if let Some(notice) = &self.unwritable {
+            return Err(miette::miette!("{notice}"));
+        }
+
         // Asked BEFORE anything is written. The lock keeps two `lore task` runs apart, but an
         // editor or a sync client is not holding it, and this command's board was read before
         // theirs landed — writing it back would erase their edit wholesale. Checked ahead of
@@ -779,22 +812,23 @@ impl IntentPlane {
             .map_err(|e| miette::miette!("{e}"))
     }
 
-    pub(crate) fn recorded_on(&self, date: jiff::civil::Date) -> Vec<Transition> {
-        match TransitionLog::new(&self.vault_root).read(date) {
-            Ok(transitions) => transitions,
-            Err(e) => {
-                eprintln!("warning: {date}'s task record could not be read ({e})");
-                Vec::new()
-            }
-        }
+    pub(crate) fn recorded_on(
+        &self,
+        date: jiff::civil::Date,
+    ) -> Result<Vec<Transition>, lk_task::TaskError> {
+        TransitionLog::new(&self.vault_root).read(date)
     }
 
     /// Completions already recorded for `date` — what the day has to show for itself.
-    pub(crate) fn closed_on(&self, date: jiff::civil::Date) -> Vec<Transition> {
-        self.recorded_on(date)
+    pub(crate) fn closed_on(
+        &self,
+        date: jiff::civil::Date,
+    ) -> Result<Vec<Transition>, lk_task::TaskError> {
+        Ok(self
+            .recorded_on(date)?
             .into_iter()
             .filter(|transition| transition.kind.is_observation())
-            .collect()
+            .collect())
     }
 
     /// What an editor changed that no pass has recorded yet.
@@ -988,7 +1022,15 @@ fn remind(plane: &IntentPlane, cmd: RemindCommand) -> miette::Result<()> {
         RemindCommand::Due => {
             // To STDOUT, because this is the one output another program consumes — the same
             // contract `queue count` and `config vault-root` keep.
+            //
+            // A reminder about a task that is no longer OPEN is moot however the task left the
+            // board — finished, dropped, or a line deleted in an editor, which records nothing
+            // and so no completion could retire it. The board is the truth about what is open,
+            // so it is what decides, and firing is where the last word is said.
             for reminder in store.due(plane.now).map_err(|e| miette::miette!("{e}"))? {
+                if plane.is_moot(&reminder) {
+                    continue;
+                }
                 println!("{}", reminder.text);
             }
             Ok(())

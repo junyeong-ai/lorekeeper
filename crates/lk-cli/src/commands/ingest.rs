@@ -255,29 +255,24 @@ pub async fn run(
         }
 
         // A scheduled source's items are appointments, which the agenda reports beside the
-        // day's tasks and nothing ever proposes. Written per DATE the run observed, replacing
-        // that date whole, so a cancelled meeting stops appearing with nothing to reconcile.
+        // day's tasks and nothing ever proposes. One SNAPSHOT per source, replaced whole and
+        // written even when EMPTY — that is the answer that clears a day whose every meeting
+        // was cancelled, which a file per date could not say.
         if !dry_run
             && sc.source_type.descriptor().scheduled
             && config.personal.as_ref().is_some_and(|p| p.tasks.is_some())
         {
-            let schedule = lk_task::Schedule::new(&vault_root);
-            let mut by_date: std::collections::BTreeMap<_, Vec<lk_task::Appointment>> =
-                std::collections::BTreeMap::new();
-            for event in &result.events {
-                by_date
-                    .entry(event.date)
-                    .or_default()
-                    .push(lk_task::Appointment {
-                        at: event.timestamp,
-                        title: event.title.clone(),
-                    });
-            }
-            for (date, appointments) in by_date {
-                if let Err(e) = schedule.record(date, &appointments) {
-                    eprintln!("  ✗ agenda: {e}");
-                    had_failure = true;
-                }
+            let appointments: Vec<_> = result
+                .events
+                .iter()
+                .map(|event| lk_task::Appointment {
+                    at: event.timestamp,
+                    title: event.title.clone(),
+                })
+                .collect();
+            if let Err(e) = lk_task::Schedule::new(&vault_root).record(id, &appointments) {
+                eprintln!("  ✗ agenda: {e}");
+                had_failure = true;
             }
         }
 

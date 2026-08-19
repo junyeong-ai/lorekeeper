@@ -170,50 +170,35 @@ pub async fn run(opts: &super::GlobalOptions, dry_run: bool) -> miette::Result<(
     // the standing reminders are STATE, not history: pruning them would retract what a source
     // said is open and what a person asked to be told.
     //
-    // The day's schedule is the one that is neither. It is a rendering aid for `lore agenda`,
-    // and the calendar's own daily page holds the durable record — so it is operational history
-    // and is pruned on the same horizon as the ingest log. Left alone it gains a file a day,
-    // forever, for a view that only ever asks about one of them.
+    // The intent plane's stores are STATE, not history: pruning them would retract what a
+    // source says is open, what a person asked to be told, and what a calendar holds. Each is a
+    // snapshot of a window rather than a file per day, so none of them grows without bound —
+    // there is nothing here for a horizon to answer.
+    //
+    // What is removed is a snapshot no CONFIGURED source answers for. A source deleted from
+    // `config.yaml` leaves a file that can never be read again, and a file nothing can read is
+    // not state. Disabling a source is not deleting it: `enabled: false` is a pause, and its
+    // snapshot is kept for the day it comes back.
     if let Some(personal) = &config.personal
         && personal.tasks.is_some()
     {
-        let cutoff = jiff::Timestamp::from_second(cutoff_secs)
-            .map_err(|e| miette::miette!("{e}"))?
-            .to_zoned(config.vault.timezone())
-            .date();
-        let schedule = lk_task::Schedule::new(&vault_root);
-        let expired = schedule
-            .expired(cutoff)
-            .map_err(|e| miette::miette!("{e}"))?;
-        if !expired.is_empty() {
-            if !dry_run {
-                lk_task::Schedule::retire(&expired).map_err(|e| miette::miette!("{e}"))?;
-            }
-            eprintln!(
-                "{prefix}agenda: pruned {} day(s) of schedule older than {retention_days}d.",
-                expired.len()
-            );
-        }
-
-        // A source removed from `config.yaml` leaves its snapshot behind. `lore task propose`
-        // already refuses to read one no configured source answers for, so this is tidying
-        // rather than a correctness fix — but a file that can never be read again is not state.
-        let configured: Vec<String> = config
-            .sources
-            .iter()
-            .filter(|(_, source)| source.enabled)
-            .map(|(id, _)| id.clone())
-            .collect();
+        let configured: Vec<String> = config.sources.keys().cloned().collect();
         let candidates = lk_task::Candidates::new(&vault_root);
-        let orphans = candidates
+        let schedule = lk_task::Schedule::new(&vault_root);
+        let mut orphans = candidates
             .orphans(&configured)
             .map_err(|e| miette::miette!("{e}"))?;
+        orphans.extend(
+            schedule
+                .orphans(&configured)
+                .map_err(|e| miette::miette!("{e}"))?,
+        );
         if !orphans.is_empty() {
             if !dry_run {
                 lk_task::Candidates::retire(&orphans).map_err(|e| miette::miette!("{e}"))?;
             }
             eprintln!(
-                "{prefix}proposals: removed {} snapshot(s) no configured source answers for.",
+                "{prefix}intent: removed {} snapshot(s) no configured source answers for.",
                 orphans.len()
             );
         }

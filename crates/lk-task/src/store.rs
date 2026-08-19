@@ -139,15 +139,6 @@ impl Shelf {
         keys.sort();
         Ok(keys)
     }
-
-    /// Every key that reads as a date, sorted.
-    pub(crate) fn dates(&self) -> Result<Vec<jiff::civil::Date>, TaskError> {
-        Ok(self
-            .keys()?
-            .into_iter()
-            .filter_map(|key| key.parse().ok())
-            .collect())
-    }
 }
 
 #[cfg(test)]
@@ -204,12 +195,5 @@ mod tests {
         std::fs::write(shelf.file("notes").path().with_extension("md"), "").unwrap();
 
         assert_eq!(shelf.keys().unwrap(), ["2026-08-17", "2026-08-19", "jira"]);
-        assert_eq!(
-            shelf.dates().unwrap(),
-            [
-                jiff::civil::date(2026, 8, 17),
-                jiff::civil::date(2026, 8, 19)
-            ]
-        );
     }
 }

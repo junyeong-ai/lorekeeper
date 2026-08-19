@@ -20,10 +20,18 @@ pub struct Appointment {
     pub title: String,
 }
 
-/// One date's appointments, replaced whole by each ingest that reaches the source.
+/// One source's appointments, replaced whole by each ingest that reaches it.
 ///
-/// A calendar re-fetches its window on demand, so what a run did not observe for a date is no
-/// longer on it — a cancelled meeting stops appearing with nothing to reconcile.
+/// A SNAPSHOT per source rather than a file per date, which is the shape of the thing: a
+/// calendar re-fetches its whole window on demand, so what it did not observe this time is not
+/// on the calendar. Keyed by date it could not say that — a date with no events produced no
+/// entry, so `record` was never called for it and a day whose every meeting was cancelled kept
+/// showing them until the retention horizon. Keyed by source, cancelling them all is an empty
+/// snapshot, which is an answer.
+///
+/// It also stops being something to prune. A snapshot holds one window rather than one file per
+/// day forever, and a date outside that window has no schedule here — the calendar's own daily
+/// page is the durable record of a day that has passed.
 pub struct Schedule {
     shelf: crate::store::Shelf,
 }
@@ -35,37 +43,44 @@ impl Schedule {
         }
     }
 
-    pub fn record(
-        &self,
-        date: jiff::civil::Date,
-        appointments: &[Appointment],
-    ) -> Result<(), TaskError> {
+    pub fn record(&self, source_id: &str, appointments: &[Appointment]) -> Result<(), TaskError> {
         let mut held = appointments.to_vec();
         held.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.title.cmp(&b.title)));
-        self.shelf.file(&date.to_string()).replace(&held)
+        self.shelf.file(source_id).replace(&held)
     }
 
-    /// What `date` holds, earliest first.
+    /// What `date` holds, earliest first, across every source.
     ///
-    /// A date that was never ingested has none, which is not an error: the agenda is a view and
-    /// answers with what it can see.
-    pub fn read(&self, date: jiff::civil::Date) -> Result<Vec<Appointment>, TaskError> {
-        self.shelf.file(&date.to_string()).read()
+    /// A source whose snapshot will not read is REPORTED by the error rather than skipped: the
+    /// agenda would otherwise show a day with a meeting missing from it, which reads exactly
+    /// like a day that has none.
+    pub fn read(
+        &self,
+        date: jiff::civil::Date,
+        zone: &jiff::tz::TimeZone,
+    ) -> Result<Vec<Appointment>, TaskError> {
+        let mut held = Vec::new();
+        for key in self.shelf.keys()? {
+            held.extend(
+                self.shelf
+                    .file(&key)
+                    .read::<Appointment>()?
+                    .into_iter()
+                    .filter(|a| a.at.to_zoned(zone.clone()).date() == date),
+            );
+        }
+        held.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.title.cmp(&b.title)));
+        Ok(held)
     }
 
-    /// The dates whose appointments are older than `cutoff`.
-    ///
-    /// A rendering aid rather than a record: the vault's own daily page holds what a calendar
-    /// observed, so a schedule past the retention horizon is operational history and is pruned
-    /// exactly as the ingest log is. Without this the directory gains a file a day, forever,
-    /// for a view that only ever asks about one of them.
-    pub fn expired(&self, cutoff: jiff::civil::Date) -> Result<Vec<PathBuf>, TaskError> {
+    /// The snapshots no configured source answers for.
+    pub fn orphans(&self, configured: &[String]) -> Result<Vec<PathBuf>, TaskError> {
         Ok(self
             .shelf
-            .dates()?
+            .keys()?
             .into_iter()
-            .filter(|date| *date < cutoff)
-            .map(|date| self.shelf.file(&date.to_string()).path().to_path_buf())
+            .filter(|key| !configured.contains(key))
+            .map(|key| self.shelf.file(&key).path().to_path_buf())
             .collect())
     }
 
@@ -90,14 +105,15 @@ mod tests {
     }
 
     #[test]
-    fn a_date_is_replaced_whole_and_read_in_order() {
+    fn a_source_is_replaced_whole_and_read_by_date() {
         let tmp = tempfile::tempdir().unwrap();
         let schedule = Schedule::new(tmp.path());
+        let utc = jiff::tz::TimeZone::UTC;
         let day = jiff::civil::date(2026, 8, 19);
 
         schedule
             .record(
-                day,
+                "calendar",
                 &[
                     Appointment {
                         at: at(15),
@@ -110,32 +126,62 @@ mod tests {
                 ],
             )
             .unwrap();
-        let held = schedule.read(day).unwrap();
         assert_eq!(
-            held.iter().map(|a| a.title.as_str()).collect::<Vec<_>>(),
+            schedule
+                .read(day, &utc)
+                .unwrap()
+                .iter()
+                .map(|a| a.title.as_str())
+                .collect::<Vec<_>>(),
             ["standup", "retro"]
         );
 
-        // The retro was cancelled, so the next ingest simply does not observe it.
+        // Every meeting on the day was cancelled. Keyed by date this could not be said, so the
+        // day went on showing them.
+        schedule.record("calendar", &[]).unwrap();
+        assert!(schedule.read(day, &utc).unwrap().is_empty());
+    }
+
+    #[test]
+    fn two_calendars_are_one_day() {
+        let tmp = tempfile::tempdir().unwrap();
+        let schedule = Schedule::new(tmp.path());
+        let utc = jiff::tz::TimeZone::UTC;
         schedule
             .record(
-                day,
+                "work",
                 &[Appointment {
                     at: at(9),
                     title: "standup".into(),
                 }],
             )
             .unwrap();
-        assert_eq!(schedule.read(day).unwrap().len(), 1);
+        schedule
+            .record(
+                "personal",
+                &[Appointment {
+                    at: at(7),
+                    title: "gym".into(),
+                }],
+            )
+            .unwrap();
+        assert_eq!(
+            schedule
+                .read(jiff::civil::date(2026, 8, 19), &utc)
+                .unwrap()
+                .iter()
+                .map(|a| a.title.as_str())
+                .collect::<Vec<_>>(),
+            ["gym", "standup"]
+        );
     }
 
     #[test]
     fn a_date_never_ingested_has_none() {
         let tmp = tempfile::tempdir().unwrap();
-        let schedule = Schedule::new(tmp.path());
         assert!(
-            schedule
-                .read(jiff::civil::date(2026, 8, 19))
+            Schedule::new(tmp.path())
+                .read(jiff::civil::date(2026, 8, 19), &jiff::tz::TimeZone::UTC)
                 .unwrap()
                 .is_empty()
         );

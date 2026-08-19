@@ -30,6 +30,14 @@ the commands in `lk-cli` are the only thing that decides when to apply them.
   gap is a proposal DELETED in an editor rather than dropped, which returns tomorrow; that is
   the same silence deleting any task line already has, and a proposal that comes back costs
   less than one suppressed by a rule guessing at what a deletion meant.
+- **A store damaged in ONE place does not cost the rest their day.** A snapshot or a judged
+  file that will not read is named and skipped, and left where it is; the run proceeds with what
+  it could read. Refusing everything blocked every proposal for as long as one hidden file sat
+  there — nightly, with no path back — while dropping the file would lose judgments nobody has
+  seen. This is the isolation an adapter already uses when one feed of many is broken, and it
+  stops exactly where nothing was reached. The TRANSITION LOG is the exception at every level:
+  a line that will not read and a filename that is not a date are both hard errors there,
+  because passing over either re-proposes work the unreadable half says was answered.
 - **What re-declares gets a snapshot; what is observed once gets consumed.** A source that
   re-fetches its window can say what is still open every morning, so `Candidates` is replaced
   whole per source and a closed issue simply stops appearing — including the EMPTY write, which
@@ -46,6 +54,10 @@ the commands in `lk-cli` are the only thing that decides when to apply them.
   resolutions. Firing retires it, for the same reason arriving clears a wake date: it was a
   promise to say something once. Nothing else retires one, so a reminder due while the machine
   slept is said late rather than lost.
+- **A reminder about a task the board no longer holds open is moot, however it left.** Finished
+  or dropped, `commit` retires it at the moment the transition is recorded and says so. Deleted
+  in an editor, nothing is recorded and no completion could — so firing asks the board, which is
+  the truth about what is open. One rule at the two moments a reminder changes hands.
 - **A reminder about work that is finished is retired, at the moment it finishes.** A task
   leaves the board by being done or dropped, and the reminder someone attached to it is moot the
   same instant — so `commit` drops it there rather than leaving the timer to say it. A
@@ -58,10 +70,14 @@ the commands in `lk-cli` are the only thing that decides when to apply them.
   from two stores and became two lines about one piece of work. The set grows as the run goes,
   so a second candidate for an origin this pass just offered is caught too. A person answers
   about the WORK, and two decisions with one right answer is one decision too many.
-- **An appointment is reported, never proposed.** `SourceDescriptor::scheduled` marks a source
-  whose items are times already committed to. `lore agenda` shows them beside the day's tasks
-  and the board never learns of them: a meeting happens whether or not a line is cleared, and
-  putting one there would hand a person something to tick every morning for nothing.
+- **An appointment is reported, never proposed, and its store is keyed by SOURCE.**
+  `SourceDescriptor::scheduled` marks a source whose items are times already committed to. `lore
+  agenda` shows them beside the day's tasks and the board never learns of them: a meeting
+  happens whether or not a line is cleared. Keyed by DATE the snapshot could not say a day was
+  cleared — a date with no events produced no entry, so the writer was never called for it and a
+  day whose every meeting was cancelled went on showing them. Keyed by source, cancelling them
+  all is an empty snapshot, which is an answer; and a snapshot holds one window rather than one
+  file per day forever, so there is nothing left for a retention horizon to prune.
 - **Only a completion is an observation.** A dropped task belongs in the history and not on a
   daily page: the archive answers "what did I do", and deciding not to do a thing is not doing
   it. `TransitionKind::is_observation` is the one place that judgment lives.
@@ -81,10 +97,14 @@ the commands in `lk-cli` are the only thing that decides when to apply them.
   asked to be told. The day's SCHEDULE is neither — a rendering aid whose durable record is the
   calendar's own daily page — so it is operational history and prunes on the ingest log's
   horizon. Without that it gained a file a day, forever, for a view that asks about one.
-- **A snapshot no configured source answers for is not read.** A source removed from
-  `config.yaml` leaves its file behind, and reading it goes on proposing work from a system this
-  vault no longer ingests. The configuration decides what is read, so removing the file is
-  tidying rather than the fix; `lore maintenance` does that.
+- **A snapshot no configured source answers for is not read, and `enabled: false` is not
+  removal.** A source deleted from `config.yaml` leaves a file that can never be read again, and
+  a file nothing can read is not state — `lore maintenance` removes it. Disabling a source is a
+  PAUSE: its snapshot is kept for the day it comes back, so the sweep asks what is configured
+  while the read asks what is enabled. The same rule reaches the judged candidates through
+  `propose_from`, because validating a judgment only when it is WRITTEN answers for the moment
+  it was made and not for the moment it is acted on — a file five months old was still putting
+  work from a dropped source onto the board.
 - **The board file is the TRUTH, not a rendering of a store kept elsewhere.** The vault is the
   product: a box ticked on a phone has to count, and a design that keeps state somewhere else
   discards that edit in silence — worse than any parsing risk. What keeps the parsing risk small
@@ -256,11 +276,19 @@ the commands in `lk-cli` are the only thing that decides when to apply them.
 - **A carry counts what the day BEGAN with.** The committed set is captured before `sync` runs,
   because a task the same pass woke or adopted arrived today — stamping it `carried:1` would have
   it claim to have survived a day-close its own `since` says it never saw.
+- **A page a write cannot land on is reported when the plane is OPENED and refused at the
+  WRITE.** Two different moments: reading is always safe, and a command touching none of the
+  board — a reminder firing, a judgment being noted — has no business being turned away by a
+  defect in a page it never opens. Coupled to one flag, an unterminated fence silenced the
+  reminder timer, and the shipped script's process substitution swallowed the non-zero exit so
+  the person got silence.
 - **A view says what it could not SEE.** Answering empty on an unreadable store is the one
   shape refused everywhere else here: a caller — the front door's board row, the JSON a session
   acts on — cannot tell "nothing is promised" from "I lost your promises", and the second is the
-  one that needs saying. `unrecorded` answers `Option`, the JSON carries `null`, and the reason
-  goes to stderr where it cannot corrupt the contract on stdout.
+  one that needs saying. Every one of them: `unrecorded`, `done_today`, the schedule and the
+  reminders each answer `null` rather than empty, the front door's row says the record cannot be
+  read, and the reason goes to stderr where it cannot corrupt the contract on stdout. Fixing one
+  of four left three saying the reassuring thing.
 - **Every mutating command holds a kernel lock** (`lk-cli`'s `IntentPlane`, `std::fs::File::lock`
   on `<vault>/.lorekeeper/tasks.lock`) from before the plane is read until after it is written — the PLANE, not the board. Every store beside it is a read-modify-write too, and scoping the guard to the board is what let `lore task candidate` and `lore task remind add` race each other on their own files: it was named for the first thing it happened to protect rather than for what it protects. The board and the log are each a read-modify-write, so the scheduled
   day-close and someone closing a task by hand could both read, both write, and drop one of the

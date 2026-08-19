@@ -36,7 +36,15 @@ notify() {
     printf '%s\n' "$text"
 }
 
+# Read the whole answer before saying any of it, so a non-zero exit is SEEN. Piped through
+# `done < <(…)` the status belongs to the loop and vanishes under `set -e` — the timer then
+# reports success while saying nothing, which is silence dressed as a quiet day.
+if ! due=$("$LORE_BIN" ${LORE_CONFIG:+--config "$LORE_CONFIG"} task remind due); then
+    echo "lore task remind due failed — no reminder was said" >&2
+    exit 1
+fi
+
 while IFS= read -r line; do
     [ -n "$line" ] || continue
     notify "$line"
-done < <("$LORE_BIN" ${LORE_CONFIG:+--config "$LORE_CONFIG"} task remind due)
+done <<<"$due"

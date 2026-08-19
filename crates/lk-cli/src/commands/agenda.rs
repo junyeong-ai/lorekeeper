@@ -51,7 +51,7 @@ pub async fn run(opts: &GlobalOptions, date: Option<String>, json: bool) -> miet
     // The day's appointments, which the agenda REPORTS and the board never learns of: a
     // meeting is a time already committed to, not work to decide about. A view answers with
     // what it can see, so an unreadable record costs the section rather than the command.
-    match lk_task::Schedule::new(&plane.vault_root).read(plane.today) {
+    match lk_task::Schedule::new(&plane.vault_root).read(plane.today, &plane.zone) {
         Ok(appointments) if !appointments.is_empty() => {
             eprintln!("\n{}", strings.agenda_schedule);
             for appointment in appointments {
@@ -99,9 +99,12 @@ pub async fn run(opts: &GlobalOptions, date: Option<String>, json: bool) -> miet
         eprintln!("\n{}", strings.agenda_empty);
     }
 
-    let closed = plane.closed_on(plane.today);
-    if !closed.is_empty() {
-        eprintln!("\n{} {}", strings.agenda_done_today, closed.len());
+    match plane.closed_on(plane.today) {
+        Ok(closed) if !closed.is_empty() => {
+            eprintln!("\n{} {}", strings.agenda_done_today, closed.len())
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!("\nwarning: today's record could not be read ({e})"),
     }
 
     match plane.unrecorded(actually_today) {
@@ -151,37 +154,33 @@ fn emit_json(plane: &IntentPlane, actually_today: jiff::civil::Date) -> miette::
         }
     }
 
-    let schedule: Vec<_> = read_or_warn(
-        lk_task::Schedule::new(&plane.vault_root).read(plane.today),
+    let schedule = read_or_null(
+        lk_task::Schedule::new(&plane.vault_root).read(plane.today, &plane.zone),
         "the day's schedule",
-    )
-    .into_iter()
-    .map(|appointment| {
-        serde_json::json!({
-            "at": appointment
-                .at
-                .to_zoned(plane.zone.clone())
-                .strftime("%FT%H:%M")
-                .to_string(),
-            "title": appointment.title,
-        })
-    })
-    .collect();
+        |appointment| {
+            serde_json::json!({
+                "at": appointment
+                    .at
+                    .to_zoned(plane.zone.clone())
+                    .strftime("%FT%H:%M")
+                    .to_string(),
+                "title": appointment.title,
+            })
+        },
+    );
 
-    let reminders: Vec<_> = read_or_warn(
+    let reminders = read_or_null(
         lk_task::Reminders::new(&plane.vault_root).read(),
         "the standing reminders",
-    )
-    .into_iter()
-    .map(|reminder| {
-        serde_json::json!({
-            "id": reminder.id.as_str(),
-            "at": reminder.at.to_zoned(plane.zone.clone()).strftime("%FT%H:%M").to_string(),
-            "text": reminder.text,
-            "task": reminder.task.as_ref().map(|id| id.as_str().to_string()),
-        })
-    })
-    .collect();
+        |reminder| {
+            serde_json::json!({
+                "id": reminder.id.as_str(),
+                "at": reminder.at.to_zoned(plane.zone.clone()).strftime("%FT%H:%M").to_string(),
+                "text": reminder.text,
+                "task": reminder.task.as_ref().map(|id| id.as_str().to_string()),
+            })
+        },
+    );
 
     println!(
         "{}",
@@ -193,7 +192,7 @@ fn emit_json(plane: &IntentPlane, actually_today: jiff::civil::Date) -> miette::
             "due": due,
             "proposed": proposed,
             "reminders": reminders,
-            "done_today": plane.closed_on(plane.today).len(),
+            "done_today": plane.closed_on(plane.today).ok().map(|closed| closed.len()),
             // What an editor changed that no pass has recorded — the one thing this view can
             // see and cannot fix. `null` where the record could not be read at all, which a
             // caller must not mistake for a board that is caught up.
@@ -204,19 +203,23 @@ fn emit_json(plane: &IntentPlane, actually_today: jiff::civil::Date) -> miette::
     Ok(())
 }
 
-/// What a store holds, or nothing plus a word about why.
+/// What a store holds as JSON, or `null` plus a word about why.
 ///
-/// A view answers with what it can SEE, and says when it cannot see — the contract on stdout
-/// stays whole and the reason goes to stderr, where it does not corrupt what a caller parses.
-/// Swallowing the error would make an unreadable store indistinguishable from an empty one,
-/// which for the reminders is the difference between "nothing is promised" and "I lost your
-/// promises".
-fn read_or_warn<T>(read: Result<Vec<T>, lk_task::TaskError>, what: &str) -> Vec<T> {
+/// `null` and `[]` are different answers and a session acts on the difference: an empty list is
+/// "nothing is promised", `null` is "I could not read your promises". Answering `[]` for both is
+/// the shape refused everywhere else here, and it reached three of the four things this document
+/// reports while only `unrecorded` had been fixed. The reason goes to stderr, where it cannot
+/// corrupt the contract on stdout.
+fn read_or_null<T>(
+    read: Result<Vec<T>, lk_task::TaskError>,
+    what: &str,
+    row: impl Fn(T) -> serde_json::Value,
+) -> serde_json::Value {
     match read {
-        Ok(held) => held,
+        Ok(held) => serde_json::Value::Array(held.into_iter().map(row).collect()),
         Err(e) => {
             eprintln!("warning: {what} could not be read ({e})");
-            Vec::new()
+            serde_json::Value::Null
         }
     }
 }

@@ -30,7 +30,7 @@ mod task;
 
 pub use board::{Board, Entry};
 pub use log::{Recorded, Transition, TransitionKind, TransitionLog};
-pub use propose::{Candidate, Candidates, Judged, select};
+pub use propose::{Candidate, Candidates, Gathered, Judged, select};
 pub use reconcile::{Reconciled, rollover, sync};
 pub use remind::{Reminder, Reminders};
 pub use schedule::{Appointment, Schedule};

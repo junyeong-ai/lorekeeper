@@ -346,7 +346,18 @@ impl TransitionLog {
     /// empty would re-propose exactly the work the unreadable half says was finished.
     pub fn answered_origins(&self) -> Result<std::collections::BTreeSet<String>, TaskError> {
         let mut answered = std::collections::BTreeSet::new();
-        for date in self.shelf.dates()? {
+        // Every key, and a key that is not a date is an ERROR rather than a file to skip. This
+        // directory is the transition log's alone, so a name that is not a date is damage — a
+        // sync client's conflict copy holds real completions, and passing over it silently
+        // would re-propose exactly the work it says was answered. `Jsonl::read` refuses a line
+        // it cannot read for the same reason; the strictness must not go quiet at the filename.
+        for key in self.shelf.keys()? {
+            let date: jiff::civil::Date = key.parse().map_err(|e| {
+                TaskError::Malformed(format!(
+                    "the task record holds `{key}.jsonl`, which is not a date: {e} (left intact \
+                     — a conflict copy holds completions this would otherwise pass over)"
+                ))
+            })?;
             for transition in self.read(date)? {
                 if let Some(src) = transition.src
                     && transition.kind.is_answer()
