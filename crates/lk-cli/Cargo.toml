@@ -21,6 +21,8 @@ lk-source = { workspace = true }
 lk-pipeline = { workspace = true }
 lk-queue = { workspace = true }
 lk-graph = { workspace = true }
+lk-dist = { workspace = true }
+lk-task = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 reqwest = { workspace = true }

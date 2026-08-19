@@ -29,6 +29,15 @@ pub mod field {
     /// that derives that set is the one that records it.
     pub const SYNTHESIS: &str = "synthesis";
 
+    /// The build that rendered a generated page, carried on the page itself.
+    ///
+    /// `<wiki>/AGENTS.md` is the contract every skill reads, and it is rendered from the
+    /// binary's page-format table — so a binary that gained a format and did not rewrite it
+    /// leaves the skills reading a contract that predates it. Nothing rejects that the way a
+    /// vault rejects a broken link, so the page states which build wrote it and the
+    /// installation check compares that rather than guessing from the prose.
+    pub const GENERATOR: &str = "generator";
+
     /// The `llm_inputs.<key>_done` marker naming the input a section was written from.
     ///
     /// Completion is uniformly marker-signalled, never inferred from a body being non-empty,

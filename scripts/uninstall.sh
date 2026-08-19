@@ -41,7 +41,7 @@ Usage:
 Removes:
   - <install-dir>/lore                             (binary)
   - <data-dir>/templates                           (installed templates)
-  - ~/.config/lorekeeper/config.example.yaml       (installed config template)
+  - ~/.config/lorekeeper/config.example.yaml       (installed config template + deploy records)
   - ~/.claude/skills/lore-*                        (user-level skills)
   - ./.claude/skills/lore-*                        (project-level skills, if present)
   - <data-dir>/pipelines                           (scheduled pipeline scripts)
@@ -96,22 +96,29 @@ if [ "$KEEP_DATA" != "1" ] && [ -d "${DATA_DIR}/templates" ]; then
     if prompt_yesno "Remove templates ${DATA_DIR}/templates?"; then
         render_step "Removing ${DATA_DIR}/templates"
         rm -rf "${DATA_DIR}/templates"
-        # Remove parent if now empty
-        rmdir "$DATA_DIR" 2>/dev/null || true
         log_ok "Templates removed"
         removed=$((removed + 1))
     fi
 fi
 
-# Config example (installed artifact; config.yaml itself is user data and never touched)
-config_example="${XDG_CONFIG_HOME:-$HOME/.config}/lorekeeper/config.example.yaml"
-if [ "$KEEP_DATA" != "1" ] && [ -f "$config_example" ]; then
-    if prompt_yesno "Remove installed config example $config_example?"; then
-        render_step "Removing $config_example"
-        rm -f "$config_example"
-        log_ok "Config example removed"
-        removed=$((removed + 1))
-    fi
+# What `lore self deploy` wrote into the config directory: the example, and the two records it
+# keeps beside it. `config.yaml` itself is user data and is never touched. Each is asked about
+# on its own presence — while the records rode on the example's, a user who tidied the example
+# away after copying it kept the `data-dir` record, and a later bare `lore self deploy`
+# resurrected the directory this had just removed, in preference to the default, with nothing
+# said.
+lore_config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/lorekeeper"
+if [ "$KEEP_DATA" != "1" ]; then
+    for artifact in config.example.yaml data-dir deployed-skills; do
+        path="${lore_config_dir}/${artifact}"
+        [ -f "$path" ] || continue
+        if prompt_yesno "Remove $path?"; then
+            render_step "Removing $path"
+            rm -f "$path"
+            log_ok "Removed: $artifact"
+            removed=$((removed + 1))
+        fi
+    done
 fi
 
 # Skills (user-level and project-level for each installed skill name)
@@ -154,6 +161,11 @@ if [ "$KEEP_DATA" != "1" ] && [ -d "$pipelines_dir" ]; then
         removed=$((removed + 1))
     fi
 fi
+# Last, because this is the point where everything this installed under it has been considered.
+# Asked from inside the templates block it ran while the pipelines were still there, so it
+# always failed and left an empty directory behind — which reads, to anyone looking afterwards,
+# exactly like an install that was not removed.
+[ "$KEEP_DATA" = "1" ] || rmdir "$DATA_DIR" 2>/dev/null || true
 printf '%sIf you registered them with launchd or cron, unload those jobs too.%s\n' "$C_DIM" "$C_RESET"
 
 # Scheduled tasks installed by versions up to 0.10, before the pipelines replaced them.

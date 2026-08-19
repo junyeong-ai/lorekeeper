@@ -4,8 +4,8 @@ set -euo pipefail
 
 REPO="junyeong-ai/lorekeeper"
 BINARY_NAME="lore"
-SKILL_NAME="lore-ingest"
 LATEST_URL="https://github.com/${REPO}/releases/latest"
+API_LATEST_URL="https://api.github.com/repos/${REPO}/releases/latest"
 RELEASE_BASE="https://github.com/${REPO}/releases/download"
 
 # ── settings (env wins over built-in default; flags win over env) ─────────
@@ -133,9 +133,22 @@ detect_platform() {
     esac
 }
 
+# The latest published release.
+#
+# Two sources answer this and they disagree for minutes at a time: the release page is a
+# cached view that trails the API right after a release is published, which is exactly when
+# someone runs this. Read in that window it names the release before, and the install lands on
+# it while reporting success. So the API settles it, and the page answers only where the API
+# could not — its rate limit counts against an IP a shared runner can exhaust, and the page has
+# no limit to exhaust.
 fetch_latest_version() {
-    # Resolve through GitHub's stable HTML redirect rather than api.github.com.
-    # The HTML path is auth-free and not subject to the 60-req/hr rate limit.
+    local tag
+    tag="$(curl -fsSL --retry 3 --retry-delay 2 \
+        -H 'Accept: application/vnd.github+json' "$API_LATEST_URL" 2>/dev/null \
+        | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\{0,1\}\([^"]*\)".*/\1/p' \
+        | head -n1)"
+    if [ -n "$tag" ]; then printf '%s\n' "$tag"; return 0; fi
+
     local final
     final="$(curl -fsSLI --retry 3 --retry-delay 2 -o /dev/null \
         -w '%{url_effective}' "$LATEST_URL")" || return 1
@@ -223,35 +236,10 @@ install_binary() {
     log_ok "$dest"
 }
 
-install_templates() {
-    local src_dir="$1"
-    local dest_dir="$2/templates"
-    [ -d "$src_dir" ] || { log_warn "Templates not found at $src_dir; skipping"; return; }
-    render_step "Installing templates to ${dest_dir}"
-    # Retired templates are removed rather than left behind: `TemplateEngine` prefers a user
-    # directory's copy over the embedded one, so a template this version no longer ships kept
-    # overriding an embedded default that had replaced it — a copy-over-the-top install could
-    # never undo that, not even with `--force`.
-    rm -rf "$dest_dir"
-    mkdir -p "$dest_dir"
-    # Copy every *.md.jinja file
-    find "$src_dir" -maxdepth 1 -name '*.md.jinja' -exec cp {} "$dest_dir/" \;
-    log_ok "Templates installed"
-}
-
 # Drop config.example.yaml into the XDG config dir so a binary-only install (no git
 # clone) has a template to copy to config.yaml. `lore` auto-discovers
 # ~/.config/lorekeeper/config.yaml, so this is where users should put their real config.
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/lorekeeper"
-install_config_example() {
-    local src="$1"
-    [ -f "$src" ] || return 0
-    render_step "Installing config example to ${CONFIG_DIR}"
-    mkdir -p "$CONFIG_DIR"
-    cp "$src" "${CONFIG_DIR}/config.example.yaml"
-    log_ok "Config example → ${CONFIG_DIR}/config.example.yaml"
-}
-
 build_from_source() {
     local repo_dir="$1"
     render_step "Building from source (cargo build --release --locked)"
@@ -290,27 +278,6 @@ compare_versions() {
     [ "$first" = "$a_pre" ] && echo "older" || echo "newer"
 }
 
-# Content hash of a whole skill DIRECTORY: every file's path and bytes, in a stable order.
-# Hashing SKILL.md alone read three skills' `references/` as unchanged forever — a
-# references-only edit left SKILL.md byte-identical, so the installer reported "already
-# current" and the stale reference files survived.
-skill_sha256() {
-    local skill_dir="$1"
-    [ -d "$skill_dir" ] || { echo ""; return; }
-    local hash
-    if command -v sha256sum >/dev/null 2>&1; then
-        hash=sha256sum
-    else
-        hash="shasum -a 256"
-    fi
-    # Paths are hashed with the bytes so a rename is a change, and relative to the skill dir so
-    # the answer does not depend on where the copy being compared happens to live.
-    (cd "$skill_dir" && find . -type f -print0 | LC_ALL=C sort -z | while IFS= read -r -d '' f; do
-        printf '%s\n' "$f"
-        $hash "$f" | awk '{print $1}'
-    done) | $hash | awk '{print $1}'
-}
-
 # The version a checkout declares, read from `[workspace.package]` — single-sourced there, so
 # every crate inherits it and `crates/*/Cargo.toml` no longer carries a literal.
 #
@@ -331,130 +298,25 @@ repo_version() {
          }' "$repo/Cargo.toml" 2>/dev/null
 }
 
-download_skill_tarball() {
-    local version="$1" skill_name="$2"
-    local archive="${skill_name}-skill-v${version}.tar.gz"
-    local url="${RELEASE_BASE}/v${version}/${archive}"
-    local extracted_dir="${TMP_DIR}/${skill_name}"
-
-    [ -d "$extracted_dir" ] && { echo "$extracted_dir"; return 0; }
-
-    render_step "Downloading skill ${archive}"
-    if ! curl -fsSL --retry 3 --retry-delay 2 -o "${TMP_DIR}/${archive}" "$url" 2>/dev/null; then
-        log_warn "Skill archive unavailable at $url; skipping skill install"
-        echo ""; return 0
-    fi
-    if ! curl -fsSL --retry 3 --retry-delay 2 -o "${TMP_DIR}/${archive}.sha256" "${url}.sha256" 2>/dev/null; then
-        log_warn "Skill checksum unavailable; skipping skill install"
-        echo ""; return 0
-    fi
-    ( cd "$TMP_DIR" && {
-        if command -v sha256sum >/dev/null 2>&1; then sha256sum -c "${archive}.sha256" >/dev/null
-        else shasum -a 256 -c "${archive}.sha256" >/dev/null
-        fi
-    } ) || { log_warn "Skill checksum mismatch; skipping skill install"; echo ""; return 0; }
-    tar -xzf "${TMP_DIR}/${archive}" -C "${TMP_DIR}"
-    echo "$extracted_dir"
-}
-
-install_skill() {
-    local level="$1" src="$2"
-    [ "$level" = "none" ] && { log_info "Skill install skipped"; return; }
-    [ -d "$src" ] || { log_warn "Skill source not found: $src (skipping)"; return; }
-
-    local target
-    case "$level" in
-        user)    target="$HOME/.claude/skills/${SKILL_NAME}" ;;
-        project) target="$(pwd)/.claude/skills/${SKILL_NAME}" ;;
-        *)       die "Invalid skill level: $level" ;;
-    esac
-
-    render_step "Installing skill → $target"
-    if [ -d "$target" ]; then
-        # SKILL.md carries a `version:` stamp (release provenance), but the content
-        # hash is the change signal — it catches every edit, stamped or not, including one
-        # confined to `references/`.
-        local existing new
-        existing="$(skill_sha256 "$target")"
-        new="$(skill_sha256 "$src")"
-        if [ -n "$existing" ] && [ "$existing" = "$new" ]; then
-            if [ "$LORE_INSTALL_FORCE" != "1" ] && ! prompt_yesno "Skill is already current. Reinstall?" "N"; then
-                log_info "Skill kept"
-                return
-            fi
-        fi
-        rm -rf "$target"
-    fi
-    mkdir -p "$(dirname "$target")"
-    cp -r "$src" "$target"
-    log_ok "Skill installed"
-}
-
-# The scheduled pipelines: one entry script per cadence plus the library they share.
+# Everything besides the binary is written by the binary.
 #
-# These are the deployment layer. `lore` exposes data and does the deterministic work; a
-# pipeline composes it into a run — ingest, then the LLM drain via `claude -p`, then the
-# graph sync — and a system scheduler fires the pipeline. Keeping the composition here
-# rather than inside `lore` is deliberate: the drain's invocation is a Claude Code CLI
-# detail, and binding the knowledge pipeline's own config to one CLI's flags would be the
-# worse coupling.
-#
-# They are POSIX shell and assume a system scheduler (launchd or cron), so they install on
-# Unix only.
-PIPELINES="lore-pipeline.sh lore-daily.sh lore-weekly.sh"
-
-install_pipelines() {
-    local dest_dir="$1/pipelines" checkout="$2"
-    local name src installed=0
-    mkdir -p "$dest_dir"
-    for name in $PIPELINES; do
-        src=""
-        if [ -n "$checkout" ]; then
-            # A source install takes everything from the checkout, so a missing file there is
-            # reported rather than fetched from a release: falling back would mix a downloaded
-            # pipeline in with a locally built binary, which is the provenance rule's whole point.
-            if [ -f "$checkout/scripts/${name}" ]; then
-                src="$checkout/scripts/${name}"
-            else
-                log_warn "Pipeline '${name}' missing from the checkout; skipping"
-                continue
-            fi
-        elif curl -fsSL --retry 3 --retry-delay 2 \
-            -o "${TMP_DIR}/${name}" "${RELEASE_BASE}/v${version}/${name}" 2>/dev/null; then
-            # A scheduler fires these unattended with the user's shell environment, so a
-            # substituted one is the most dangerous asset here — verified like the binary and
-            # every skill, and skipped rather than run when it cannot be.
-            if ! curl -fsSL --retry 3 --retry-delay 2 \
-                -o "${TMP_DIR}/${name}.sha256" "${RELEASE_BASE}/v${version}/${name}.sha256" 2>/dev/null; then
-                log_warn "Pipeline '${name}' checksum unavailable; skipping"
-                continue
-            fi
-            if ! ( cd "$TMP_DIR" && {
-                if command -v sha256sum >/dev/null 2>&1; then sha256sum -c "${name}.sha256" >/dev/null
-                else shasum -a 256 -c "${name}.sha256" >/dev/null
-                fi
-            } ); then
-                log_warn "Pipeline '${name}' checksum mismatch; skipping"
-                continue
-            fi
-            src="${TMP_DIR}/${name}"
-        else
-            log_warn "Pipeline '${name}' unavailable; skipping"
-            continue
-        fi
-        cp "$src" "${dest_dir}/${name}"
-        chmod +x "${dest_dir}/${name}"
-        installed=$((installed + 1))
-    done
-    # Not `[ "$installed" -gt 0 ] && log_ok …`: as the last command of the function that returns
-    # 1 when nothing installed, and under `set -e` it killed the whole installer AFTER the binary,
-    # templates and skills had landed — no completion message, no next steps, and an exit code
-    # saying the install failed.
-    if [ "$installed" -gt 0 ]; then
-        log_ok "Pipelines installed to ${dest_dir}"
-    else
-        log_warn "No pipelines installed; schedule them by hand or re-run once the release has them"
+# The skills, the pipeline scripts, the rendering templates and the config example are
+# compiled into `lore`, so the version that deploys them is the version that carries them —
+# there is no second artifact to fetch, verify, or find a stale copy of. This is also what a
+# later `lore self update` runs, so an install and an update leave the same directories.
+deploy_artifacts() {
+    local bin="$1" skill_level="$2"
+    # A release older than the one that introduced `lore self` carries none of this and cannot
+    # deploy it. `--version` is a documented flag, so pinning such a release must say what
+    # happened rather than fail on an unknown subcommand and then advise running it.
+    if ! "$bin" self --help >/dev/null 2>&1; then
+        log_warn "This version has no 'lore self' — its skills and pipelines were published as"
+        log_warn "separate release assets. Install a newer version to deploy them from the binary."
+        return 0
     fi
+    render_step "Deploying skills, pipelines and templates"
+    "$bin" self deploy --skills "$skill_level" --data-dir "$DATA_DIR" \
+        || die "Deploy failed; the binary is installed — run: $bin self deploy"
 }
 
 # Print how to schedule what was just installed, with this machine's paths resolved.
@@ -614,7 +476,7 @@ main() {
     TMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t lore-install)"
 
     detect_tty || true
-    local platform="" version method bin_dest skill_level binary_src templates_src config_example_src
+    local platform="" version method bin_dest skill_level binary_src
 
     local repo_dir=""
     if [ -f "$(dirname "$0")/../Cargo.toml" ]; then
@@ -724,58 +586,21 @@ main() {
                 verify_checksum "$archive"
                 extract_archive "$archive"
                 # The release archive contains a top-level `lore-v{ver}-{target}/` dir
-                # (see .github/workflows/release.yml), so the binary and templates live
-                # one level down from TMP_DIR.
+                # (see .github/workflows/release.yml), so the binary lives one level down
+                # from TMP_DIR.
                 local stage="${TMP_DIR}/${BINARY_NAME}-v${version}-${platform}"
                 binary_src="${stage}/${BINARY_NAME}"
-                templates_src="${stage}/templates"
-                config_example_src="${stage}/config.example.yaml"
                 ;;
             source)
                 [ -n "$repo_dir" ] || die "--from-source requires running from a cloned repo"
                 binary_src="$(build_from_source "$repo_dir")"
-                templates_src="${repo_dir}/templates"
-                config_example_src="${repo_dir}/config.example.yaml"
                 ;;
         esac
         install_binary "$binary_src" "$INSTALL_DIR"
-        install_templates "$templates_src" "$DATA_DIR"
-        install_config_example "$config_example_src"
     fi
 
-    # ONE provenance rule for every asset: a source install takes them all from the checkout it
-    # built from, a prebuilt install takes them all from the release it downloaded. The binary,
-    # templates and config example already worked this way; skills and pipelines each had their
-    # own rule, so `./scripts/install.sh` from a clone parked on an old commit installed a
-    # downloaded binary beside the working tree's skills and pipelines, with nothing saying so.
-    local checkout=""
-    [ "$method" = "source" ] && checkout="$repo_dir"
-
-    if [ "$skill_level" != "none" ]; then
-        # This list is pinned to `.claude/skills` by `install_scripts_list_every_skill`, because
-        # a skill added to the repo passed every gate and was then never packaged, published or
-        # installed — three separate literal lists each had to be remembered.
-        local skill
-        for skill in "lore-ingest" "lore-process" "lore-setup" "lore-wiki" "lore-capture" "lore-extract"; do
-            local skill_src=""
-            if [ -n "$checkout" ]; then
-                if [ -d "$checkout/.claude/skills/$skill" ]; then
-                    skill_src="$checkout/.claude/skills/$skill"
-                else
-                    log_warn "Skill '$skill' missing from the checkout; skipping"
-                fi
-            else
-                skill_src="$(download_skill_tarball "$version" "$skill")"
-            fi
-            if [ -n "$skill_src" ]; then
-                SKILL_NAME="$skill" install_skill "$skill_level" "$skill_src"
-            fi
-        done
-        remove_legacy_scheduled_tasks
-    fi
-    # Outside the skill branch: the review pane promises the pipelines unconditionally, and
-    # `--skill none` installed nothing while still printing that line.
-    install_pipelines "$DATA_DIR" "$checkout"
+    deploy_artifacts "${INSTALL_DIR}/${BINARY_NAME}" "$skill_level"
+    remove_legacy_scheduled_tasks
 
     printf '\n'
     check_path "$INSTALL_DIR"
@@ -789,7 +614,6 @@ main() {
     printf '  %s4.%s %slore ingest --dry-run%s   Preview ingest without writing\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
     printf '  %s5.%s Schedule the two pipelines, then the janitors:\n' "$C_BOLD" "$C_RESET"
     print_pipeline_schedule
-    printf '  %s/lore-setup%s · %s/lore-ingest%s · %s/lore-process%s · %s/lore-wiki%s · %s/lore-capture%s · %s/lore-extract%s\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
 }
 
 main "$@"

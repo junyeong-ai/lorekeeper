@@ -18,6 +18,8 @@ lk-source = { path = "crates/lk-source" }
 lk-pipeline = { path = "crates/lk-pipeline" }
 lk-queue = { path = "crates/lk-queue" }
 lk-graph = { path = "crates/lk-graph" }
+lk-dist = { path = "crates/lk-dist" }
+lk-task = { path = "crates/lk-task" }
 
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
@@ -34,6 +36,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 minijinja = { version = "2", features = ["loader", "json"] }
 blake3 = "1"
+semver = "1"
+tar = "0.4"
+flate2 = "1"
 htmd = "0.5"
 # Pinned to the rcdom instance htmd itself resolves — `htmd::Node` IS this crate's
 # `Node`, so a second copy would make the two types incompatible rather than merely

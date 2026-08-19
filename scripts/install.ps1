@@ -7,7 +7,6 @@ param(
     [string]$DataDir,
     [ValidateSet('user', 'project', 'none')] [string]$Skill = 'user',
     [switch]$FromSource,
-    [switch]$Force,
     [switch]$Yes,
     [switch]$DryRun
 )
@@ -17,18 +16,19 @@ Set-StrictMode -Version Latest
 
 $Repo = 'junyeong-ai/lorekeeper'
 $BinaryName = 'lore'
-# Pinned to `.claude/skills` by `install_scripts_list_every_skill`, because a skill added to the
-# repo passed every gate and was then never packaged, published or installed.
-$SkillNames = @('lore-ingest', 'lore-process', 'lore-setup', 'lore-wiki', 'lore-capture', 'lore-extract')
 $ReleaseBase = "https://github.com/$Repo/releases/download"
 $LatestUrl = "https://github.com/$Repo/releases/latest"
+$ApiLatestUrl = "https://api.github.com/repos/$Repo/releases/latest"
 
 if (-not $InstallDir) {
     $InstallDir = if ($env:LORE_INSTALL_DIR) { $env:LORE_INSTALL_DIR }
                   else { Join-Path $env:USERPROFILE '.local\bin' }
 }
+# The same order `lk_dist::layout::data_dir` reads, so `lore self status` looks where this
+# installer wrote. Checking only LOCALAPPDATA left an XDG_DATA_HOME install invisible to it.
 if (-not $DataDir) {
     $DataDir = if ($env:LORE_INSTALL_DATA_DIR) { $env:LORE_INSTALL_DATA_DIR }
+               elseif ($env:XDG_DATA_HOME) { Join-Path $env:XDG_DATA_HOME 'lorekeeper' }
                else { Join-Path $env:LOCALAPPDATA 'lorekeeper' }
 }
 
@@ -37,7 +37,18 @@ function Write-Ok($msg)    { Write-Host "✓  $msg" -ForegroundColor Green }
 function Write-Warn($msg)  { Write-Host "!  $msg" -ForegroundColor Yellow }
 function Die($msg)         { Write-Host "✗ $msg" -ForegroundColor Red; exit 1 }
 
+# The latest published release.
+#
+# Two sources answer this and they disagree for minutes at a time: the release page is a cached
+# view that trails the API right after a release is published, which is exactly when someone
+# runs this. Read in that window it names the release before, and the install lands on it while
+# reporting success. So the API settles it, and the page answers only where the API could not.
 function Get-LatestVersion {
+    try {
+        $tag = (Invoke-RestMethod -Uri $ApiLatestUrl -Headers @{ Accept = 'application/vnd.github+json' }).tag_name
+        if ($tag) { return ($tag -replace '^v', '') }
+    } catch { }
+
     $resp = Invoke-WebRequest -Uri $LatestUrl -MaximumRedirection 0 -ErrorAction SilentlyContinue
     $location = $resp.Headers.Location
     if (-not $location) {
@@ -50,8 +61,11 @@ function Get-LatestVersion {
 }
 
 function Resolve-Version {
-    if ($Version) { return $Version }
-    if ($env:LORE_INSTALL_VERSION) { return $env:LORE_INSTALL_VERSION }
+    # Every URL below is built as `v$version`, so the version here is the bare number. The tag
+    # on the releases page is `v0.21.0` and that is what a user copies, which made
+    # `-Version v0.21.0` request `.../vv0.21.0/lore-vv0.21.0-…` and 404.
+    if ($Version) { return ($Version -replace '^v', '') }
+    if ($env:LORE_INSTALL_VERSION) { return ($env:LORE_INSTALL_VERSION -replace '^v', '') }
     $v = Get-LatestVersion
     if (-not $v) { Die 'Cannot fetch latest version (network issue or no release exists yet)' }
     return $v
@@ -97,20 +111,6 @@ function Install-Binary($src, $destDir) {
     Write-Ok $dest
 }
 
-function Install-Templates($srcDir, $destBase) {
-    if (-not (Test-Path $srcDir)) { Write-Warn "Templates not found at $srcDir; skipping"; return }
-    $dest = Join-Path $destBase 'templates'
-    Write-Step "Installing templates to $dest"
-    # Retired templates are removed rather than left behind: `TemplateEngine` prefers a user
-    # directory's copy over the embedded one, so a template this version no longer ships kept
-    # overriding an embedded default that had replaced it — a copy-over-the-top install could
-    # never undo that, not even with `-Force`.
-    if (Test-Path $dest) { Remove-Item -Path $dest -Recurse -Force }
-    New-Item -ItemType Directory -Path $dest -Force | Out-Null
-    Copy-Item -Path (Join-Path $srcDir '*.md.jinja') -Destination $dest -Force
-    Write-Ok 'Templates installed'
-}
-
 # Drop config.example.yaml into the config dir `lore` auto-discovers on Windows
 # (`%XDG_CONFIG_HOME%\lorekeeper` else `%USERPROFILE%\.config\lorekeeper`), matching
 # install.sh — so a binary-only install gives the user a starting point to copy to config.yaml.
@@ -119,77 +119,35 @@ function Get-ConfigDir {
     else { Join-Path $env:USERPROFILE '.config\lorekeeper' }
 }
 
-function Install-ConfigExample($src) {
-    if (-not (Test-Path $src)) { return }
-    $dir = Get-ConfigDir
-    Write-Step "Installing config example to $dir"
-    New-Item -ItemType Directory -Path $dir -Force | Out-Null
-    Copy-Item -Path $src -Destination (Join-Path $dir 'config.example.yaml') -Force
-    Write-Ok "Config example -> $dir\config.example.yaml"
-}
-
-function Download-Skill($version, $skillName) {
-    # Mirrors scripts/install.sh download_skill_tarball: fetch and verify
-    # `{skill}-skill-v{version}.tar.gz`, extract, and return the skill dir path.
-    $archive = "$skillName-skill-v$version.tar.gz"
-    $url = "$ReleaseBase/v$version/$archive"
-    $tmp = New-TemporaryFile
-    Remove-Item $tmp
-    $tmpDir = New-Item -ItemType Directory -Path $tmp.FullName -Force
+# Everything besides the binary is written by the binary.
+#
+# The skills, the rendering templates and the config example are compiled into `lore`, so the
+# version that deploys them is the version that carries them — there is no second artifact to
+# fetch, verify, or find a stale copy of. The pipeline scripts are POSIX shell fired by a
+# system scheduler, so `self deploy` writes them and Windows simply has no scheduler to point
+# at them. This is also what a later `lore self update` runs.
+function Deploy-Artifacts($bin, $level) {
+    Write-Step 'Deploying skills, templates and the config example'
+    # `lore` reports progress on stderr, and under `$ErrorActionPreference = 'Stop'` Windows
+    # PowerShell turns a native command's stderr into a terminating NativeCommandError the
+    # moment the stream is redirected — throwing on a SUCCESSFUL deploy, before its exit code
+    # is ever read. The exit code is what decides here, so the preference is relaxed for
+    # exactly this call.
+    #
+    # `$exit` is seeded pessimistically because `Set-StrictMode` raises a TERMINATING error for
+    # an unset variable and the relaxed preference governs only non-terminating ones — so a
+    # binary that never ran at all still reaches the message naming the repair, instead of
+    # "$LASTEXITCODE cannot be retrieved because it has not been set".
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $exit = 1
     try {
-        Invoke-WebRequest -Uri $url -OutFile (Join-Path $tmpDir $archive)
-        Invoke-WebRequest -Uri "$url.sha256" -OutFile (Join-Path $tmpDir "$archive.sha256")
+        & $bin self deploy --skills $level --data-dir $DataDir
+        $exit = $LASTEXITCODE
     } catch {
-        Write-Warn "Skill archive unavailable for '$skillName'; skipping"
-        return $null
-    }
-    $expected = (Get-Content (Join-Path $tmpDir "$archive.sha256")).Split(' ')[0]
-    $actual = (Get-FileHash -Algorithm SHA256 (Join-Path $tmpDir $archive)).Hash.ToLower()
-    if ($expected -ne $actual) { Write-Warn "Skill checksum mismatch for '$skillName'; skipping"; return $null }
-    tar -xzf (Join-Path $tmpDir $archive) -C $tmpDir
-    return (Join-Path $tmpDir $skillName)
-}
-
-# Content hash of a whole skill DIRECTORY: every file's relative path and bytes, in a stable
-# order. Hashing SKILL.md alone read three skills' `references/` as unchanged forever — a
-# references-only edit leaves SKILL.md byte-identical, so the installer reported "already
-# current" and the stale reference files survived. Paths are included so a rename is a change,
-# and taken relative to the skill dir so the answer does not depend on where the copy lives.
-function Get-SkillHash($path) {
-    if (-not (Test-Path $path -PathType Container)) { return $null }
-    $root = (Resolve-Path $path).Path
-    # `-Force` so hidden files count: `find` includes them, and a hash that skipped them would
-    # answer "already current" for a change the other installer sees.
-    $lines = Get-ChildItem -Path $root -Recurse -File -Force | Sort-Object FullName | ForEach-Object {
-        $rel = $_.FullName.Substring($root.Length).TrimStart('\', '/')
-        "$rel`n$((Get-FileHash -Algorithm SHA256 $_.FullName).Hash)"
-    }
-    $stream = [System.IO.MemoryStream]::new([System.Text.Encoding]::UTF8.GetBytes(($lines -join "`n")))
-    (Get-FileHash -Algorithm SHA256 -InputStream $stream).Hash
-}
-
-function Install-Skill($level, $src, $skillName) {
-    if ($level -eq 'none') { Write-Host '  Skill install skipped' -ForegroundColor DarkGray; return }
-    if (-not (Test-Path $src)) { Write-Warn "Skill source not found: $src (skipping)"; return }
-    $target = switch ($level) {
-        'user'    { Join-Path $env:USERPROFILE ".claude\skills\$skillName" }
-        'project' { Join-Path (Get-Location) ".claude\skills\$skillName" }
-    }
-    Write-Step "Installing skill -> $target"
-    if (Test-Path $target) {
-        # SKILL.md carries a `version:` stamp (release provenance), but the content
-        # hash is the change signal — it catches every edit, stamped or not, including one
-        # confined to `references/`.
-        $existing = Get-SkillHash $target
-        if ($existing -and $existing -eq (Get-SkillHash $src) -and -not $Force) {
-            Write-Host "  Skill '$skillName' already current; kept" -ForegroundColor DarkGray
-            return
-        }
-        Remove-Item -Path $target -Recurse -Force
-    }
-    New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
-    Copy-Item -Path $src -Destination $target -Recurse -Force
-    Write-Ok 'Skill installed'
+        Write-Warn $_.Exception.Message
+    } finally { $ErrorActionPreference = $previous }
+    if ($exit -ne 0) { Die "Deploy failed; the binary is installed - run: $bin self deploy" }
 }
 
 # Scheduled-task definitions installed by versions up to 0.10. They drove `lore ingest`
@@ -262,8 +220,8 @@ Write-Host 'Review' -ForegroundColor White
 Write-Host "  binary    $(Join-Path $InstallDir "$BinaryName.exe") (v$version, $method)"
 Write-Host "  templates $(Join-Path $DataDir 'templates')"
 switch ($Skill) {
-    'user'    { Write-Host "  skills    $env:USERPROFILE\.claude\skills\{lore-ingest,lore-process,lore-setup,lore-wiki,lore-capture,lore-extract}" }
-    'project' { Write-Host "  skills    .\.claude\skills\{lore-ingest,lore-process,lore-setup,lore-wiki,lore-capture,lore-extract}" }
+    'user'    { Write-Host "  skills    $env:USERPROFILE\.claude\skills\lore-*" }
+    'project' { Write-Host "  skills    .\.claude\skills\lore-*" }
     'none'    { Write-Host '  skills    (skipped)' }
 }
 if ($Skill -ne 'none') {
@@ -286,8 +244,6 @@ if ($method -eq 'prebuilt') {
     Extract-Archive $tmpDir $archive
     $stage = Join-Path $tmpDir "$BinaryName-v$version-$target"
     $binSrc = Join-Path $stage "$BinaryName.exe"
-    $templatesSrc = Join-Path $stage 'templates'
-    $configExampleSrc = Join-Path $stage 'config.example.yaml'
 } else {
     if (-not $repoDir) { Die '--from-source requires running from a cloned repo' }
     Write-Step 'Building from source (cargo build --release --locked)'
@@ -295,38 +251,11 @@ if ($method -eq 'prebuilt') {
     try { cargo build --release --locked --quiet -p lore }
     finally { Pop-Location }
     $binSrc = Join-Path $repoDir 'target\release\lore.exe'
-    $templatesSrc = Join-Path $repoDir 'templates'
-    $configExampleSrc = Join-Path $repoDir 'config.example.yaml'
 }
 
 Install-Binary $binSrc $InstallDir
-Install-Templates $templatesSrc $DataDir
-Install-ConfigExample $configExampleSrc
-
-if ($Skill -ne 'none') {
-    # ONE provenance rule for every asset: a source install takes them all from the checkout it
-    # built from, a prebuilt install takes them all from the release it downloaded. The binary,
-    # templates and config example already worked this way; the skills had their own rule, so a
-    # clone parked on an old commit installed a downloaded binary beside the working tree's
-    # skills, with nothing saying so.
-    $repoSkills = if ($method -eq 'source' -and $repoDir) {
-        Join-Path $repoDir '.claude\skills'
-    } else { $null }
-    foreach ($skillName in $SkillNames) {
-        # A source install takes everything from the checkout, so a skill missing there is
-        # reported rather than fetched from a release: falling back would mix a downloaded skill
-        # in with a locally built binary, which is the provenance rule's whole point.
-        $skillSrc = if ($repoSkills) {
-            if (Test-Path (Join-Path $repoSkills $skillName)) { Join-Path $repoSkills $skillName }
-            else { Write-Warn "Skill '$skillName' missing from the checkout; skipping"; $null }
-        } else {
-            Download-Skill $version $skillName
-        }
-        if ($skillSrc) { Install-Skill $Skill $skillSrc $skillName }
-        else { Write-Warn "Skill '$skillName' unavailable; skipping" }
-    }
-    Remove-LegacyScheduledTasks
-}
+Deploy-Artifacts (Join-Path $InstallDir "$BinaryName.exe") $Skill
+Remove-LegacyScheduledTasks
 
 Write-Host ''
 $pathEnv = [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -348,4 +277,3 @@ Write-Host "  2. $BinaryName init credentials   Enter API tokens interactively"
 Write-Host "  3. $BinaryName validate           Verify config + credentials"
 Write-Host "  4. $BinaryName ingest --dry-run   Preview ingest without writing"
 Write-Host "  5. $BinaryName schedule           Print the cron cadences from your config"
-Write-Host "  /lore-setup  /lore-ingest  /lore-process  /lore-wiki  /lore-capture  /lore-extract"

@@ -1,6 +1,10 @@
 # Lorekeeper uninstaller for Windows
 [CmdletBinding()]
 param(
+    # The two path flags `install.ps1` takes. Without them an install made with -InstallDir was
+    # invisible here: this reported nothing to remove and left the binary where it was.
+    [string]$InstallDir,
+    [string]$DataDir,
     [switch]$Yes,
     [switch]$KeepData
 )
@@ -9,10 +13,16 @@ $ErrorActionPreference = 'Stop'
 
 $BinaryName = 'lore'
 $SkillNames = @('lore-ingest', 'lore-process', 'lore-setup', 'lore-wiki', 'lore-capture', 'lore-extract')
-$InstallDir = if ($env:LORE_INSTALL_DIR) { $env:LORE_INSTALL_DIR }
-              else { Join-Path $env:USERPROFILE '.local\bin' }
-$DataDir = if ($env:LORE_INSTALL_DATA_DIR) { $env:LORE_INSTALL_DATA_DIR }
-           else { Join-Path $env:LOCALAPPDATA 'lorekeeper' }
+if (-not $InstallDir) {
+    $InstallDir = if ($env:LORE_INSTALL_DIR) { $env:LORE_INSTALL_DIR }
+                  else { Join-Path $env:USERPROFILE '.local\bin' }
+}
+# The same order `install.ps1` and `lk_dist::layout::data_dir` read.
+if (-not $DataDir) {
+    $DataDir = if ($env:LORE_INSTALL_DATA_DIR) { $env:LORE_INSTALL_DATA_DIR }
+               elseif ($env:XDG_DATA_HOME) { Join-Path $env:XDG_DATA_HOME 'lorekeeper' }
+               else { Join-Path $env:LOCALAPPDATA 'lorekeeper' }
+}
 
 function Write-Step($msg) { Write-Host "▸  $msg" -ForegroundColor Yellow }
 function Write-Ok($msg)   { Write-Host "✓  $msg" -ForegroundColor Green }
@@ -52,16 +62,23 @@ if ((-not $KeepData) -and (Test-Path $templates)) {
     }
 }
 
-# Config example (installed artifact; config.yaml itself is user data and never touched)
+# What `lore self deploy` wrote into the config directory: the example, and the two records it
+# keeps beside it. config.yaml itself is user data and is never touched. Each is asked about on
+# its own presence — while the records rode on the example's, a user who tidied the example away
+# after copying it kept the `data-dir` record, and a later bare deploy resurrected the directory
+# this had just removed.
 $configDir = if ($env:XDG_CONFIG_HOME) { Join-Path $env:XDG_CONFIG_HOME 'lorekeeper' }
              else { Join-Path $env:USERPROFILE '.config\lorekeeper' }
-$configExample = Join-Path $configDir 'config.example.yaml'
-if ((-not $KeepData) -and (Test-Path $configExample)) {
-    if (Prompt-YesNo "Remove installed config example $configExample?") {
-        Write-Step "Removing $configExample"
-        Remove-Item -Force $configExample
-        Write-Ok 'Config example removed'
-        $removed++
+if (-not $KeepData) {
+    foreach ($artifact in @('config.example.yaml', 'data-dir', 'deployed-skills')) {
+        $path = Join-Path $configDir $artifact
+        if (-not (Test-Path $path)) { continue }
+        if (Prompt-YesNo "Remove $path?") {
+            Write-Step "Removing $path"
+            Remove-Item -Force $path
+            Write-Ok "Removed: $artifact"
+            $removed++
+        }
     }
 }
 
