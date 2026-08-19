@@ -508,6 +508,21 @@ fn read_line(line: &str) -> Result<Option<Entry>, TaskError> {
         return Ok(None);
     };
     let Some((title, stamp)) = split_stamp(rest) else {
+        // A line that CARRIES a stamp and does not end with it is not an unstamped line. Read
+        // as one it was adopted under a fresh id, and the task it names left the board with no
+        // transition of any kind — its carry count, its first day and the origin it answered to
+        // gone, so a proposal treated this way is never answered and returns every morning. The
+        // whole raw comment reached the archived title from there.
+        //
+        // A person typing a word after the stamp is how it happens, which is ordinary. So it is
+        // refused like any stamp this cannot read: kept exactly, reported, and left out of
+        // every rule until they move the text or delete the comment.
+        if rest.contains("<!--") {
+            return Err(TaskError::Malformed(
+                "a stamp must be the last thing on its line — text after it would be read as a                  new task and the one this names would leave the board unrecorded"
+                    .into(),
+            ));
+        }
         return Ok(Some(Entry::Unstamped {
             title: title_of(rest),
             done,
@@ -757,6 +772,27 @@ mod tests {
     fn distinct_ids_are_not_reported() {
         let board = board_of("## Today\n\n- [ ] one <!--t:7k2p-->\n- [ ] two <!--t:3b8q-->\n");
         assert!(board.duplicated().is_empty());
+    }
+
+    /// Text typed after the stamp is not an unstamped line. Read as one, the line was adopted
+    /// under a fresh id and the task it names left the board with NO transition — its carry
+    /// count, its first day and the origin it answered to gone, and the raw comment carried
+    /// into the archived title.
+    #[test]
+    fn a_stamp_that_is_not_last_on_its_line_is_refused_rather_than_adopted() {
+        let board = board_of(
+            "## Today\n\n- [x] done <!--t:7k2p since:2026-08-18--> and I typed this after\n",
+        );
+        assert_eq!(board.tasks().count(), 0, "not a task this can act on");
+        assert_eq!(board.malformed().len(), 1);
+        assert_eq!(
+            board
+                .render(Locale::En, date(2026, 8, 19))
+                .matches("t:7k2p")
+                .count(),
+            1,
+            "kept exactly once, not adopted beside itself"
+        );
     }
 
     /// A corrupted stamp is somebody's bytes and a guess at what a broken date meant is a task

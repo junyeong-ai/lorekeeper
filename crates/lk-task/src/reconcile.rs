@@ -561,4 +561,48 @@ mod tests {
         assert!(third.carried.is_empty());
         assert_eq!(board.tasks().next().unwrap().carried, 2);
     }
+
+    /// A close whose log write landed and whose board write did not is retried on a LATER
+    /// calendar day. The transition answering "already carried for this ended day" sits in the
+    /// file of the day the close first ran, so a guard that looked only at today's found
+    /// nothing and wrote a second carry for one day.
+    #[test]
+    fn a_carry_recorded_on_another_day_still_answers_for_its_ended_day() {
+        let mut board = Board::empty();
+        board.insert(Task::new(
+            "7k2p".parse().unwrap(),
+            "ship it",
+            TaskState::Today,
+            today(),
+        ));
+        let closing = jiff::civil::date(2026, 8, 16);
+        let stranded = [Transition::new(
+            "7k2p".parse().unwrap(),
+            TransitionKind::Carried,
+            "ship it",
+            now(),
+        )
+        .with_carried(1)
+        .with_closing(closing)];
+
+        let outcome = rollover(
+            &mut board,
+            now(),
+            today(),
+            closing,
+            &Recorded::from_day(&stranded),
+        );
+        assert!(outcome.carried.is_empty(), "one ended day closes once");
+        assert_eq!(board.tasks().next().unwrap().carried, 0);
+
+        // Another ended day is another close, whatever file its neighbour landed in.
+        let next = rollover(
+            &mut board,
+            now(),
+            today(),
+            jiff::civil::date(2026, 8, 17),
+            &Recorded::from_day(&stranded),
+        );
+        assert_eq!(next.carried.len(), 1);
+    }
 }

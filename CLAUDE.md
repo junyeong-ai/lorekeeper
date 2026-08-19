@@ -123,7 +123,7 @@ Auto-discovered: `./config.yaml` → `~/.config/lorekeeper/config.yaml`.
   terminal shows, with dates unformatted and the origin URL a task came from resolved, and
   `lore-day` is the skill that runs the day off it. Asking an agent to parse aligned columns is
   the same mistake `lore queue count` and `lore config vault-root` exist to prevent, and the
-  columns exist to be scanned by eye. `lk_core::link::first_external_dest` is the mirror of the
+  columns exist to be scanned by eye. A ticked line carries `done`, because a finished task reported as today's business is what the contract exists to prevent. `lk_core::link::first_external_dest` is the mirror of the
   graph's own extraction: a task's origin is external precisely so the graph never sees it,
   which means the graph's extractor cannot be what reads it back.
 - **Every column is padded by DISPLAY WIDTH.** `{:<n}` counts `char`s, and a Hangul syllable, a

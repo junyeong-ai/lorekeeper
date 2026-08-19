@@ -87,9 +87,9 @@ pub async fn run(opts: &GlobalOptions, date: Option<String>, json: bool) -> miet
         eprintln!("\n{heading}");
         for task in tasks.iter() {
             eprintln!(
-                "  {}  {}{}",
+                "  {}  {}  {}",
                 task.id,
-                super::pad(&lk_core::link::strip_links(&task.title), 48),
+                super::pad(&lk_core::link::strip_links(&task.title), 46),
                 annotation(task, &plane)
             );
         }
@@ -136,6 +136,10 @@ fn emit_json(plane: &IntentPlane, actually_today: jiff::civil::Date) -> miette::
             "wake": task.wake.map(|d| d.to_string()),
             "carried": task.carried,
             "overdue": task.is_overdue_on(plane.today),
+            // Ticked in an editor and not yet recorded. Without it the contract said a
+            // finished task was today's business — and where its completion is already in the
+            // history, `unrecorded` is 0, so nothing else in the document said otherwise.
+            "done": task.done,
             "origin": lk_core::link::first_external_dest(&task.title),
         })
     };

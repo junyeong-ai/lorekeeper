@@ -182,10 +182,10 @@ impl Transition {
 /// once. "Has this completion already been recorded?" must look PAST midnight: a board write
 /// that fails in the evening is repaired by the next morning's pass, and asking only that
 /// morning's record found nothing, harvested the tick again, and archived one completion on two
-/// dates — which two `EventId`s cannot collapse. "Was this task already carried?" must look at
-/// today alone: it is the guard that lets a run which stopped partway resume, and a carry seen
-/// from yesterday would suppress today's, which is the whole number this plane exists to
-/// produce.
+/// dates — which two `EventId`s cannot collapse. "Was this task already carried FOR THIS ENDED
+/// DAY?" is keyed on the PAIR, so it needs no window of its own and must be found wherever the
+/// transition was written: a carry for another day cannot suppress this one, and asked over
+/// today alone a close retried on a later calendar day wrote a second carry for one ended day.
 #[derive(Debug, Default, Clone)]
 pub struct Recorded {
     closed: std::collections::BTreeMap<TaskId, Transition>,
@@ -199,7 +199,7 @@ impl Recorded {
     pub fn from_day(transitions: &[Transition]) -> Self {
         let mut recorded = Self::default();
         for transition in transitions {
-            recorded.absorb(transition.clone(), true);
+            recorded.absorb(transition.clone());
         }
         recorded
     }
@@ -215,7 +215,7 @@ impl Recorded {
     /// be a completion recorded since that id's own most recent creation. Where the window holds
     /// no `Created` for an id — a stamp typed by hand, a task older than the window — there is
     /// nothing to clear and the window's own start is what bounds it.
-    fn absorb(&mut self, transition: Transition, carried_today: bool) {
+    fn absorb(&mut self, transition: Transition) {
         self.seen.insert(transition.id.clone());
         if let Some(src) = &transition.src
             && transition.kind.is_answer()
@@ -229,7 +229,11 @@ impl Recorded {
             TransitionKind::Done => {
                 self.closed.insert(transition.id.clone(), transition);
             }
-            TransitionKind::Carried if carried_today => {
+            // Absorbed wherever it was written, because the key is the PAIR: a carry for
+            // another ended day cannot suppress this one, so there is nothing for a window to
+            // protect against. Gated on the transition sitting in today's file, a close retried
+            // on a later calendar day found nothing and wrote a second carry for one day.
+            TransitionKind::Carried => {
                 if let Some(closing) = transition.closing {
                     self.carried.insert((transition.id, closing));
                 }
@@ -308,15 +312,24 @@ impl TransitionLog {
     /// task was written down, and a completion recorded on or after this task's own first day is
     /// this task's. A board holding no ticked line asks about today alone, which is every
     /// ordinary pass.
+    /// `floor` widens the window for a question the board cannot bound. A day-close asks "have
+    /// I already carried this task for the day I am closing", and the transition answering that
+    /// was written on whatever day the close first ran — at or after the closing day, and not
+    /// necessarily today. Asked over today alone, a close retried on a LATER calendar day found
+    /// nothing and wrote a second carry for one ended day.
     pub fn recorded_for(
         &self,
         board: &crate::Board,
         today: jiff::civil::Date,
+        floor: Option<jiff::civil::Date>,
     ) -> Result<Recorded, TaskError> {
         let mut day = board
             .tasks()
             .filter(|task| task.done)
             .map(|task| task.since)
+            .min()
+            .into_iter()
+            .chain(floor)
             .min()
             .unwrap_or(today)
             .min(today);
@@ -324,7 +337,7 @@ impl TransitionLog {
         let mut recorded = Recorded::default();
         while day <= today {
             for transition in self.read(day)? {
-                recorded.absorb(transition, day == today);
+                recorded.absorb(transition);
             }
             day = day
                 .tomorrow()

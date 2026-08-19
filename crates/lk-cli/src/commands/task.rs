@@ -185,7 +185,10 @@ pub async fn run(opts: &GlobalOptions, cmd: TaskCommand) -> miette::Result<()> {
             let title = one_line(text.join(" "), TASK_ONE_LINE)?;
             let title = origin_title(title, link.as_deref(), label.as_deref(), &plane)?;
             let state = parse_state(&state)?;
-            let due = due.as_deref().map(parse_date).transpose()?;
+            let due = due
+                .as_deref()
+                .map(|text| super::parse_date(Some(text), plane.today))
+                .transpose()?;
             plane.reconcile()?;
             let id = TaskId::mint(&format!("{title}{}", plane.now), &plane.taken());
             let mut task = Task::new(id.clone(), &title, state, plane.today);
@@ -248,6 +251,14 @@ pub async fn run(opts: &GlobalOptions, cmd: TaskCommand) -> miette::Result<()> {
                 .board
                 .move_to(&id, state)
                 .map_err(|_| plane.absent(&id, &pass))?;
+            // A wake date is a promise to resurface ONCE, and leaving Waiting is the resurfacing
+            // — kept, it fires again from a section it means nothing in, and the agenda prints
+            // "→ 2026-09-01" beside a task committed to today.
+            if state != TaskState::Waiting
+                && let Some(task) = plane.board.tasks_mut().find(|task| task.id == id)
+            {
+                task.wake = None;
+            }
             plane.record(
                 Transition::new(id, TransitionKind::Moved, &moved.title, plane.now)
                     .with_state(state),
@@ -258,7 +269,7 @@ pub async fn run(opts: &GlobalOptions, cmd: TaskCommand) -> miette::Result<()> {
         }
         TaskCommand::Wait { id, until } => {
             let id = parse_id(&id)?;
-            let until = parse_date(&until)?;
+            let until = super::parse_date(Some(&until), plane.today)?;
             let pass = plane.reconcile()?;
             let moved = plane
                 .board
@@ -325,11 +336,23 @@ pub async fn run(opts: &GlobalOptions, cmd: TaskCommand) -> miette::Result<()> {
         }
         TaskCommand::Rollover { closing } => {
             let closing = super::parse_date(closing.as_deref(), plane.today)?;
-            let recorded = plane.read_history()?;
+            // A day that has not ended cannot be closed. Left unbounded it stamped a future
+            // `carried-on:` onto a managed page — the one thing a realized-only vault forbids —
+            // and poisoned the guard for every close after it, since a later real day compares
+            // as older.
+            if closing > plane.today {
+                return Err(miette::miette!(
+                    "`{closing}` has not ended — a day is closed after it is over, and \
+                     `{}` is the vault's today",
+                    plane.today
+                ));
+            }
+            let recorded = plane.read_history_from(plane.today, Some(closing))?;
             // `rollover` reconciles internally, so this path does not call `reconcile()`.
             let outcome =
                 lk_task::rollover(&mut plane.board, plane.now, plane.today, closing, &recorded);
             report_reconcile(&outcome);
+            plane.answered.extend(outcome.settled.iter().cloned());
             plane.pending.extend(outcome.transitions);
             plane.commit().await
         }
@@ -358,6 +381,10 @@ pub(crate) struct IntentPlane {
     /// Why the board cannot be written, where it cannot. Reported when the plane is opened and
     /// refused when a write is attempted — never before.
     unwritable: Option<String>,
+    /// Ids this pass took off the board without recording a transition — a ticked line whose
+    /// completion the history already held. Answered as far as anything waiting on the task is
+    /// concerned, and `pending` cannot say so.
+    answered: Vec<TaskId>,
     pending: Vec<Transition>,
     /// The history this pass read. Kept because a command acting AFTER the reconcile asks the
     /// same question over the same window, and the board it was computed from — whose ticked
@@ -482,6 +509,7 @@ impl IntentPlane {
             board_path: PathBuf::from(board_path),
             zone,
             unwritable,
+            answered: Vec::new(),
             sources: config
                 .sources
                 .iter()
@@ -566,7 +594,23 @@ impl IntentPlane {
     /// rewrote the page a person is looking at would be a mutation wearing a reader's name,
     /// which is the same rule `lore agenda` follows.
     pub(crate) fn survey(opts: &GlobalOptions) -> Option<BoardSurvey> {
-        let plane = Self::open(opts).ok()?;
+        let tasks = load_config(&find_config(opts).ok()?)
+            .ok()?
+            .personal
+            .and_then(|personal| personal.tasks)?;
+        let _ = tasks;
+        // Past that point the plane is configured, so a failure to open it is a board this
+        // cannot read — which must not read as an install that never turned the plane on.
+        let plane = match Self::open(opts) {
+            Ok(plane) => plane,
+            Err(e) => {
+                eprintln!("warning: {e}");
+                return Some(BoardSurvey {
+                    state: Locale::En.strings().status_board_unreadable.to_string(),
+                    writable: false,
+                });
+            }
+        };
         let strings = plane.locale.strings();
         if !plane.board.duplicated().is_empty() || plane.board.unterminated_fence().is_some() {
             return Some(BoardSurvey {
@@ -578,10 +622,14 @@ impl IntentPlane {
         let count = |state| plane.board.tasks().filter(|t| t.state == state).count();
         let committed = count(TaskState::Today);
         let proposed = count(TaskState::Proposed);
+        // Only what is committed to TODAY: a carry count is a diagnosis about a task being
+        // asked for again, and one parked in Someday is not being asked for.
         let stale = plane
             .board
             .tasks()
-            .filter(|task| task.carried >= plane.config.carry_warn_after)
+            .filter(|task| {
+                task.state == TaskState::Today && task.carried >= plane.config.carry_warn_after
+            })
             .count();
 
         let mut state = format!("{committed} {}", strings.status_board_committed);
@@ -627,9 +675,10 @@ impl IntentPlane {
     }
 
     fn reconcile(&mut self) -> miette::Result<lk_task::Reconciled> {
-        self.recorded = self.read_history()?;
+        self.recorded = self.read_history(self.today)?;
         let outcome = lk_task::sync(&mut self.board, self.now, self.today, &self.recorded);
         self.pending.extend(outcome.transitions.clone());
+        self.answered.extend(outcome.settled.iter().cloned());
         Ok(outcome)
     }
 
@@ -733,12 +782,17 @@ impl IntentPlane {
             ));
         }
 
-        let answered: Vec<TaskId> = self
+        let mut answered: Vec<TaskId> = self
             .pending
             .iter()
             .filter(|transition| transition.kind.is_answer())
             .map(|transition| transition.id.clone())
             .collect();
+        // A SETTLED line answers too. Its completion was recorded by an earlier pass, so this
+        // one writes no transition — and reading only what this pass recorded left the reminder
+        // standing for a task the board had just let go. `Reconciled::closed` exists to say
+        // harvested and settled are one thing to anyone who was waiting on the task.
+        answered.append(&mut self.answered);
 
         if !self.pending.is_empty() {
             TransitionLog::new(&self.vault_root)
@@ -752,6 +806,7 @@ impl IntentPlane {
             .await
             .map_err(|e| miette::miette!("write {}: {e}", self.board_path.display()))?;
 
+        self.answered.clear();
         self.retire_reminders(&answered);
         Ok(())
     }
@@ -806,9 +861,19 @@ impl IntentPlane {
     /// a tick the missing half already recorded — a second copy of one completion, on a second
     /// date, which nothing downstream collapses. `lore ingest` fails on the same file, which is
     /// where the repair belongs.
-    fn read_history(&self) -> miette::Result<lk_task::Recorded> {
+    fn read_history(&self, on: jiff::civil::Date) -> miette::Result<lk_task::Recorded> {
+        self.read_history_from(on, None)
+    }
+
+    /// The history, widened to reach `floor` — the day a close is closing, whose carry
+    /// transition may have been written on any day since.
+    fn read_history_from(
+        &self,
+        on: jiff::civil::Date,
+        floor: Option<jiff::civil::Date>,
+    ) -> miette::Result<lk_task::Recorded> {
         TransitionLog::new(&self.vault_root)
-            .recorded_for(&self.board, self.today)
+            .recorded_for(&self.board, on, floor)
             .map_err(|e| miette::miette!("{e}"))
     }
 
@@ -842,10 +907,10 @@ impl IntentPlane {
     /// unreadable record was the one shape this codebase refuses everywhere else: a caller
     /// reading it — the front door's board row, the JSON a session acts on — cannot tell "your
     /// board is caught up" from "I could not look", and the second is the one that needs saying.
-    pub(crate) fn unrecorded(&self, today: jiff::civil::Date) -> Option<usize> {
+    pub(crate) fn unrecorded(&self, on: jiff::civil::Date) -> Option<usize> {
         let mut probe = self.board.clone();
-        let recorded = self.read_history().ok()?;
-        Some(lk_task::sync(&mut probe, self.now, today, &recorded).edits())
+        let recorded = self.read_history(on).ok()?;
+        Some(lk_task::sync(&mut probe, self.now, on, &recorded).edits())
     }
 }
 
@@ -941,11 +1006,6 @@ fn parse_state(text: &str) -> miette::Result<TaskState> {
 
 fn parse_id(text: &str) -> miette::Result<TaskId> {
     text.parse().map_err(|e| miette::miette!("{e}"))
-}
-
-fn parse_date(text: &str) -> miette::Result<jiff::civil::Date> {
-    text.parse()
-        .map_err(|e| miette::miette!("invalid date '{text}': {e}"))
 }
 
 /// `lore task remind` — the promises, and the half a timer fires.
@@ -1081,6 +1141,7 @@ fn list(plane: &IntentPlane, only: Option<TaskState>, json: bool) {
                     "due": task.due.map(|d| d.to_string()),
                     "wake": task.wake.map(|d| d.to_string()),
                     "carried": task.carried,
+                    "done": task.done,
                     "src": task.src,
                     "origin": lk_core::link::first_external_dest(&task.title),
                 })
@@ -1108,9 +1169,9 @@ fn list(plane: &IntentPlane, only: Option<TaskState>, json: bool) {
         eprintln!("\n{}", state.heading(plane.locale));
         for task in tasks {
             eprintln!(
-                "  {}  {}{}",
+                "  {}  {}  {}",
                 task.id,
-                super::pad(&lk_core::link::strip_links(&task.title), 48),
+                super::pad(&lk_core::link::strip_links(&task.title), 46),
                 annotation(task, plane)
             );
         }

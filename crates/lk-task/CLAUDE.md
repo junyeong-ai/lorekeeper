@@ -54,10 +54,16 @@ the commands in `lk-cli` are the only thing that decides when to apply them.
   resolutions. Firing retires it, for the same reason arriving clears a wake date: it was a
   promise to say something once. Nothing else retires one, so a reminder due while the machine
   slept is said late rather than lost.
+- **A day that has not ENDED cannot be closed.** `--closing` left unbounded stamped a future
+  `carried-on:` onto a managed page — the one thing a realized-only vault forbids — and poisoned
+  the guard for every close after it, since a later real day compares as older.
 - **A reminder about a task the board no longer holds open is moot, however it left.** Finished
-  or dropped, `commit` retires it at the moment the transition is recorded and says so. Deleted
-  in an editor, nothing is recorded and no completion could — so firing asks the board, which is
-  the truth about what is open. One rule at the two moments a reminder changes hands.
+  or dropped, `commit` retires it at the moment the transition is recorded and says so. SETTLED
+  counts as left: a ticked line whose completion an earlier pass recorded writes no transition,
+  so reading only what this pass recorded left the reminder standing for a task the board had
+  just let go. Deleted in an editor, nothing is recorded and no completion could — so firing
+  asks the board, which is the truth about what is open. One rule at each moment a reminder
+  changes hands.
 - **A reminder about work that is finished is retired, at the moment it finishes.** A task
   leaves the board by being done or dropped, and the reminder someone attached to it is moot the
   same instant — so `commit` drops it there rather than leaving the timer to say it. A
