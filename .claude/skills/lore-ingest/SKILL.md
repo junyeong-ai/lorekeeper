@@ -59,9 +59,9 @@ an Obsidian vault. All commands accept `--config <path>` to override.
 - "quarterly review" → `lore synthesis quarterly --previous`
 - "annual review" → `lore synthesis annual --previous`
 - "show performance" → `lore performance`
-- "오늘 뭐 하지" / "what's on today" → `lore agenda`
+- "오늘 뭐 하지" / "what's on today" → the `lore-day` skill, which runs the board off `lore agenda --json`
 - "이거 해야 해" / "add a task" → `lore task add`
-- "오늘 뭐 해야 하지" / "what should I pick up" → `lore agenda` (the board + what was proposed)
+- "오늘 뭐 해야 하지" / "what should I pick up" → the `lore-day` skill; the board and its proposals are its ground, not this one's
 - "check status" → `lore status`
 - "health check" → `lore health`
 - "generate cron" / "schedule it" → `lore schedule` (read the flag notes first)

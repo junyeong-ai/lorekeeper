@@ -163,12 +163,24 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   forward flags unable to say the one word they need, and guarded nothing — the same future day
   was always writable as a literal. What a day must BE is a bound stated where that command's
   meaning lives, which is where a reason can be given for it.
-- **`lore agenda --json` says what it could not SEE, both ways it can fail.** A store it could
-  not read answers `null` rather than `[]` — a caller cannot otherwise tell "nothing is promised"
-  from "I lost your promises" — and a task the page holds that no section could PLACE is named
-  in `unplaced` with its line and its reason. Without the second the contract reported a clean
-  empty morning over five tasks sitting in plain sight in the person's editor, because the only
-  thing that said otherwise was a warning on stderr and the skill is told not to read prose.
+- **`lore agenda --json` says what it could not SEE, and every way the day is not what it looks
+  like.** A store it could not read answers `null` rather than `[]` — a caller cannot otherwise
+  tell "nothing is promised" from "I lost your promises", and the reason goes to stderr for every
+  one of them, so a session knows WHICH file to have repaired. A task the page holds that no
+  section could PLACE is named in `unplaced` with its line and its reason; a board every write
+  will be REFUSED on says so in `unwritable`, because the duplicated id that refuses it is itself
+  PLACED and so reaches no other field. Each was reported to a person on stderr and to nobody on
+  stdout, which is the half the skill is told to read. The contract also carries the JUDGMENTS
+  the terminal renders rather than the numbers they come from — `carried_too_long` beside
+  `carried`, since the threshold is in `config.yaml` and a skill running on `Bash(lore *)` cannot
+  read it — the completions themselves rather than a count of them, since the notes are what
+  closing the day is FOR, and `timezone`, so a wall-clock time can be resolved without asking a
+  machine whose own zone may be a different day.
+- **"No task answers to `<id>`" is an ANSWER only where the parse placed everything.** Finding
+  an id is proof on its own; not finding one means nothing where a line naming a task was
+  dropped, and the id may be sitting on exactly that line. `is_moot` applied the rule and two
+  other sites asserted the negative flat, so a person was told their task does not exist while
+  they were looking at it — and the skill is told to report the message rather than retry.
 - **`lore config board-path`** exists so the scheduled day-close can ask whether the intent
   plane is configured at all instead of failing nightly on every install that never turned it
   on — the same machine contract `vault-root` and `queue count` are, for the same reason.

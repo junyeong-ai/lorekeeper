@@ -206,6 +206,12 @@ pub async fn run(opts: &GlobalOptions, cmd: TaskCommand) -> miette::Result<()> {
             );
             plane.commit().await?;
             eprintln!("{id}  {title}");
+            // The id on STDOUT, alone, because the next thing a session does with a task it
+            // just wrote down is address it — `--task <id>`, `move`, `done`. Left on stderr
+            // beside the title, the only way to reach it was to scrape a rendering or re-read
+            // the agenda and match on text, which is what every other machine contract here
+            // exists to prevent.
+            println!("{id}");
             Ok(())
         }
         TaskCommand::Done { id, note } => {
@@ -406,7 +412,7 @@ pub(crate) struct IntentPlane {
     sources: Vec<String>,
     /// Why the board cannot be written, where it cannot. Reported when the plane is opened and
     /// refused when a write is attempted — never before.
-    unwritable: Option<String>,
+    pub(crate) unwritable: Option<String>,
     /// Ids this pass took off the board without recording a transition — a ticked line whose
     /// completion the history already held. Answered as far as anything waiting on the task is
     /// concerned, and `pending` cannot say so.
@@ -595,7 +601,26 @@ impl IntentPlane {
         // morning is how the section stops being read.
         let standing = self.board.origins();
 
+        // What the sources still declare and this pass will not offer, because the record
+        // already holds a completion or a drop for it. Said out loud rather than folded into
+        // "nothing new to propose": an origin is answered ONCE and for good, so a Jira issue
+        // reopened weeks later never returns on its own — and reported as a quiet morning, every
+        // surface agreed the board was empty while a source was actively declaring open work.
+        // Counted, it is a fact a person can act on, and `lore task add --link <url>` is how.
+        let suppressed = candidates
+            .iter()
+            .map(lk_task::Candidate::origin)
+            .filter(|origin| answered.contains(origin) && !standing.contains(origin))
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+
         let offered = lk_task::select(candidates, &answered, &standing);
+        if suppressed > 0 {
+            eprintln!(
+                "{suppressed} the record already answers for — `lore task add --link <url>` \
+                 writes one down again"
+            );
+        }
         for candidate in &offered {
             let origin = candidate.origin();
             let title = format!(
@@ -802,9 +827,27 @@ impl IntentPlane {
     /// re-derived by the next pass from the same board and the same record.
     fn absent(&self, id: &TaskId, pass: &lk_task::Reconciled) -> miette::Report {
         if pass.closed(id) {
-            miette::miette!("`{id}` was already closed — this pass took it off the board")
-        } else {
-            miette::miette!("no task answers to `{id}`")
+            return miette::miette!("`{id}` was already closed — this pass took it off the board");
+        }
+        self.unfound(id)
+    }
+
+    /// Why `id` was not found — which is an ANSWER only where the parse placed every task the
+    /// page holds.
+    ///
+    /// Finding an id is proof on its own and needs no guard; not finding one means nothing where
+    /// a line naming a task was dropped, and the id may be sitting on exactly that line. Stated
+    /// flat, the message told a person their task does not exist while they were looking at it.
+    /// `Board::unplaced` already answers this; two call sites asked the raw question.
+    fn unfound(&self, id: &TaskId) -> miette::Report {
+        match self.board.unplaced().first() {
+            Some(held) => miette::miette!(
+                "`{id}` is not among the tasks this could read — and L{} holds one it could not \
+                 place ({}), which may be it. Repair that line and ask again",
+                held.line,
+                held.why
+            ),
+            None => miette::miette!("no task answers to `{id}`"),
         }
     }
 
@@ -965,7 +1008,16 @@ impl IntentPlane {
     /// board is caught up" from "I could not look", and the second is the one that needs saying.
     pub(crate) fn unrecorded(&self, on: jiff::civil::Date) -> Option<usize> {
         let mut probe = self.board.clone();
-        let recorded = self.read_history(on).ok()?;
+        // Said out loud, not only answered `None`. A caller reading a `null` knows it could not
+        // look and cannot know at WHICH file to look — and the reason costs nothing to carry,
+        // where deriving it a second time from the same store would be a second answer.
+        let recorded = match self.read_history(on) {
+            Ok(recorded) => recorded,
+            Err(e) => {
+                eprintln!("warning: the task record could not be read ({e})");
+                return None;
+            }
+        };
         Some(lk_task::sync(&mut probe, self.now, on, &recorded).edits())
     }
 }
@@ -1075,7 +1127,7 @@ fn remind(plane: &IntentPlane, cmd: RemindCommand) -> miette::Result<()> {
             if let Some(id) = &task
                 && !plane.board.tasks().any(|open| &open.id == id)
             {
-                return Err(miette::miette!("no task answers to `{id}`"));
+                return Err(plane.unfound(id));
             }
             let held = store.read().map_err(|e| miette::miette!("{e}"))?;
             let taken = held.iter().map(|r| r.id.clone()).collect();

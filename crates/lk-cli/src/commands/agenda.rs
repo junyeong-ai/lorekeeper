@@ -138,6 +138,11 @@ fn emit_json(plane: &IntentPlane, actually_today: jiff::civil::Date) -> miette::
             "due": task.due.map(|d| d.to_string()),
             "wake": task.wake.map(|d| d.to_string()),
             "carried": task.carried,
+            // The JUDGMENT the terminal shows, not the number it is computed from. The
+            // threshold lives in `config.yaml`, which a skill running on `Bash(lore *)` cannot
+            // read and no command prints — so shipping the count alone asked a caller to apply
+            // a rule it had no way to know, which is the aligned-columns mistake in another key.
+            "carried_too_long": task.carried >= plane.config.carry_warn_after,
             "overdue": task.is_overdue_on(plane.today),
             // Ticked in an editor and not yet recorded. Without it the contract said a
             // finished task was today's business — and where its completion is already in the
@@ -193,17 +198,41 @@ fn emit_json(plane: &IntentPlane, actually_today: jiff::civil::Date) -> miette::
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({
             "date": plane.today.to_string(),
+            // The zone every time in this document is a wall-clock reading in, named so a
+            // caller can resolve one without asking the machine — whose own zone is a different
+            // day whenever the vault's is set elsewhere.
+            "timezone": plane.zone.iana_name(),
             "schedule": schedule,
             "committed": committed,
             "woken": woken,
             "due": due,
             "proposed": proposed,
             "reminders": reminders,
-            "done_today": plane.closed_on(plane.today).ok().map(|closed| closed.len()),
+            // What was finished, not how much. "오늘 뭐 했지" and closing the day are the
+            // second joint's whole point, and a bare count answered neither — the notes are
+            // what reach the archive, and nothing else on this contract could reach them.
+            "done_today": read_or_null(
+                plane.closed_on(plane.today),
+                "today's record",
+                |transition| {
+                    serde_json::json!({
+                        "id": transition.id.as_str(),
+                        "title": lk_core::link::strip_links(&transition.title),
+                        "note": transition.note,
+                        "carried": transition.carried,
+                    })
+                },
+            ),
             // What an editor changed that no pass has recorded — the one thing this view can
             // see and cannot fix. `null` where the record could not be read at all, which a
             // caller must not mistake for a board that is caught up.
             "unrecorded": plane.unrecorded(actually_today),
+            // Why a write to the board will be REFUSED, where one will. `null` is the ordinary
+            // answer. Without it the document could report a clean, caught-up day over a board
+            // whose every mutation is turned away — two lines claiming one id is a sync client's
+            // ordinary conflict, and the id it duplicates is PLACED, so it never reaches
+            // `unplaced` and nothing else here said a word.
+            "unwritable": plane.unwritable,
             // Tasks the page holds that no section could place. Empty means every checkbox on
             // the page reached a list; anything here means the day this document describes is
             // INCOMPLETE, and a caller reading only the sections above would report a clean

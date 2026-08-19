@@ -335,10 +335,19 @@ impl Config {
         }
 
         if let Some(personal) = &self.personal {
+            // `propose_from` among them: it is the one source reference here that nothing
+            // checked, and a typo silently disabled the judgment half of the first joint — the
+            // write refuses the candidate, so the only symptom was proposals that never came.
             for src_id in personal
                 .tracked_sources
                 .iter()
                 .chain(personal.source_category_map.keys())
+                .chain(
+                    personal
+                        .tasks
+                        .iter()
+                        .flat_map(|tasks| tasks.propose_from.iter()),
+                )
             {
                 if !self.sources.contains_key(src_id) {
                     return Err(ConfigError::Validation(format!(

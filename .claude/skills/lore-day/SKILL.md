@@ -11,7 +11,6 @@ when_to_use: |
 argument-hint: "[what the user said]"
 allowed-tools: |
   Bash(lore *)
-  Bash(date *)
 ---
 
 # lore-day — the working day, spoken rather than typed
@@ -26,12 +25,16 @@ lore agenda --json
 ```
 
 That one call answers everything: `schedule` (appointments — reported, never actionable),
-`committed`, `woken`, `due`, `proposed`, `reminders`, `done_today`, `unrecorded` and `unplaced`.
-Use its `id` fields for every command below. Do NOT parse `lore agenda`'s human output — the
+`committed`, `woken`, `due`, `proposed`, `reminders`, `done_today`, `unrecorded`, `unplaced` and
+`unwritable`. Use its `id` fields for every command below. Do NOT parse `lore agenda`'s human output — the
 `--json` form is the contract and the columns are not.
 
 If `unrecorded` is non-zero the user changed the board in their editor and nothing has recorded
 it. Run `lore task sync` FIRST, then re-read, or you will act on a stale day.
+
+If `unwritable` is not null, every change to the board will be REFUSED until the page is
+repaired. Say so first, quote the reason — it names the line and the one-character fix — and do
+not run any `lore task` command that writes until it is cleared.
 
 If `unplaced` is not empty, the day above is INCOMPLETE — the page holds tasks no section could
 place, so they are in no list, no carry and no archive. Say so before you report anything else,
@@ -62,7 +65,8 @@ Say that too rather than reporting nothing promised.
 done, a mail an earlier session judged to be a request. Each carries `origin`, the URL it came
 from. Read them out, one line each, and ask for a decision on each. Then apply it:
 
-- accept → `lore task move <id> today` (or `next`)
+- accept → `lore task move <id> today` (or `next`) — MOVE it; retyping the line by hand loses
+  the origin and the source proposes it again tomorrow
 - decline → `lore task drop <id>` — this is what stops it being proposed again
 - not now → `lore task wait <id> --until <date>`
 
@@ -76,8 +80,9 @@ yourself with `lore task add "<what it is now>" --link <the same URL>`: the orig
 and the work is new.
 
 **When there are many** — a first run against a Jira board with thirty open issues is the normal
-case — do not read thirty lines out. Group them by what they are (project, prefix, age) and put
-the GROUPS to the person: "PLAT 에 12건, OPS 에 5건, 나머지 3건". Then apply their answer per
+case — do not read thirty lines out. Group them by what they are — the `origin` URL's host and path tell you which system and
+which project, and `since` tells you the age; both are fields, so no title needs parsing — and
+put the GROUPS to the person: "PLAT 에 12건, OPS 에 5건, 나머지 3건". Then apply their answer per
 group. A wall of individual questions is how a person stops reading the section, and the section
 only works if they read it.
 
@@ -106,8 +111,13 @@ was never real. Offer to split it or drop it.
 ## Reminders
 
 `lore task remind add "<text>" --at <HH:MM | YYYY-MM-DDTHH:MM>`. Times are read in the vault's
-timezone, so pass the wall-clock time they said. Compute absolute times yourself — the flag
-takes no relative form. `--task <id>` links it to a task when it is about one.
+timezone, so pass the wall-clock time they said. `--task <id>` links it to a task when it is
+about one.
+
+For anything but today, build the date from the agenda's own `date` — never from the machine's
+clock. `date` is the VAULT's today and the machine's may be a different day, which is the whole
+reason `--until` takes the words `today`/`tomorrow`/`yesterday`. The contract's `timezone` field
+names the zone every time in the document is a wall-clock reading in.
 
 A timer fires them (`lore-remind.sh`, installed by `lore schedule`). Do not run
 `lore task remind due` yourself: it RETIRES what it prints, so calling it would consume a
@@ -123,5 +133,11 @@ reminder the user never saw.
 
 ## Output semantics
 
-`lore task` writes what a person reads to stderr and machine output to stdout. Exit non-zero
-means nothing was written — report the message rather than retrying.
+`lore task` writes what a person reads to stderr and machine output to stdout. `lore task add`
+prints the new task's id on stdout, which is what `--task <id>` and `move` take next.
+
+A non-zero exit means the COMMAND failed, not that nothing happened. The history is written
+before the board deliberately — a transition without its board move is re-derived by the next
+pass, while a board written without its transition is work that left no record — so a failed
+board write can leave the completion already recorded. Report the message; do not tell them
+their work was lost, and do not re-run the same command to "make it stick".

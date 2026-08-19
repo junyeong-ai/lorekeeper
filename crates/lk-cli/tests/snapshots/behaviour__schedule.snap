@@ -14,3 +14,4 @@ exit: 0
 
 0 7 * * * cd <staged> && lore --config <staged>/corpus/config.yaml ingest
 --- stderr ---
+warning: the task board is configured but --pipeline-dir was not given, so no reminder timer is scheduled and nothing will say a reminder out loud. Re-run with --pipeline-dir <where lore-remind.sh was installed>.

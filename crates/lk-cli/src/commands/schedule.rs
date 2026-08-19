@@ -154,11 +154,29 @@ pub async fn run(
             }
             pipeline_env(bin, &config_path)
         }
-        None => Vec::new(),
+        None => {
+            // The reminder timer is a shipped SCRIPT, so without a pipeline dir there is
+            // nowhere to point it and no `com.lorekeeper.remind` is emitted. Silently: every
+            // reminder added afterwards never fires, and no row of `lore status` covers a timer
+            // that was never scheduled. Said here for the same reason a missing `claude` is —
+            // the one moment the answer is knowable is now.
+            if config
+                .personal
+                .as_ref()
+                .is_some_and(|personal| personal.tasks.is_some())
+            {
+                eprintln!(
+                    "warning: the task board is configured but --pipeline-dir was not given, so \
+                     no reminder timer is scheduled and nothing will say a reminder out loud. \
+                     Re-run with --pipeline-dir <where lore-remind.sh was installed>."
+                );
+            }
+            Vec::new()
+        }
     };
     match format {
         Format::Cron => print_cron(bin, &cwd, &jobs, &env)?,
-        Format::Launchd => print_launchd(bin, &cwd, &jobs, &env)?,
+        Format::Launchd => print_launchd(bin, &cwd, &jobs, &env, pipeline_dir)?,
     }
     Ok(())
 }
@@ -333,6 +351,7 @@ fn print_launchd(
     cwd: &std::path::Path,
     jobs: &[Job],
     env: &[(String, String)],
+    pipeline_dir: Option<&std::path::Path>,
 ) -> miette::Result<()> {
     // Every path in a plist must be absolute. launchd execs the program directly and does
     // NOT search a PATH, and it expands no shell syntax — neither a bare name nor a `~` nor
@@ -348,9 +367,16 @@ fn print_launchd(
         } else {
             format!("$(command -v {bin})")
         };
+        // The suggestion carries back every flag that was passed. Printing the bare form
+        // dropped `--pipeline-dir`, and following it verbatim produced exactly the silently
+        // broken install that flag exists to prevent: a bare `lore ingest` with no drain, no
+        // `queue apply`, no proposals, and no reminder timer.
+        let carried = pipeline_dir
+            .map(|dir| format!(" --pipeline-dir \"{}\"", dir.display()))
+            .unwrap_or_default();
         return Err(miette::miette!(
             "launchd needs an absolute path to the binary — it does not search PATH.\n\
-             Re-run with: lore schedule --format launchd --bin \"{absolute}\""
+             Re-run with: lore schedule --format launchd --bin \"{absolute}\"{carried}"
         ));
     }
     let home = std::env::var("HOME").map_err(|_| {
@@ -695,7 +721,7 @@ mod tests {
         let cwd = std::path::Path::new("/vault");
         for bin in ["lore", "./lore", "target/release/lore", "../bin/lore"] {
             assert!(
-                print_launchd(bin, cwd, &jobs, &[]).is_err(),
+                print_launchd(bin, cwd, &jobs, &[], None).is_err(),
                 "`{bin}` is not something launchd can exec"
             );
         }
