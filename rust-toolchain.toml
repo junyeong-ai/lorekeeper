@@ -8,7 +8,7 @@
 # the CI `msrv` job exists to catch — it runs `cargo +<rust-version>` so an explicit toolchain
 # on the command line overrides this file rather than being silently replaced by it.
 [toolchain]
-channel = "1.97.1"
+channel = "1.98.1"
 # Declared here rather than only as CI action inputs: rustup installs a component with the
 # toolchain it belongs to, so a `components:` input naming `stable` would leave the pinned
 # 1.97.1 without rustfmt the moment this file selects it.
