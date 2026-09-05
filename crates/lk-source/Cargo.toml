@@ -6,6 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 lk-core = { workspace = true }
 lk-task = { workspace = true }
@@ -36,6 +39,6 @@ emojis = "0.9"
 # and only for tests: the shipped binary keeps reading the OS tzdb, which stays current.
 jiff = { workspace = true, features = ["tzdb-bundle-always"] }
 strum = { workspace = true }
-tempfile = "3"
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
 proptest = { workspace = true }

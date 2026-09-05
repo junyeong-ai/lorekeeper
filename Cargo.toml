@@ -1,5 +1,5 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
@@ -10,6 +10,11 @@ version = "0.21.1"
 edition = "2024"
 rust-version = "1.97"
 license = "MIT"
+
+[workspace.lints.rust]
+# `forbid` rather than `deny`: this tool parses feeds, mail and HTML it did not write, and
+# there is no unsafe line anywhere in it. Needing one is a decision to take in this file.
+unsafe_code = "forbid"
 
 [workspace.dependencies]
 lk-core = { path = "crates/lk-core" }

@@ -1431,13 +1431,10 @@ dependencies = [
  "reqwest",
  "semver",
  "serde",
- "serde_json",
  "sha2",
  "tar",
  "tempfile",
  "thiserror",
- "tokio",
- "tracing",
  "walkdir",
 ]
 
@@ -1445,13 +1442,11 @@ dependencies = [
 name = "lk-graph"
 version = "0.21.1"
 dependencies = [
- "blake3",
  "globset",
  "lk-core",
  "lk-vault",
  "petgraph",
  "rayon",
- "regex",
  "serde",
  "serde_json",
  "tempfile",
@@ -1536,7 +1531,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
- "tracing",
 ]
 
 [[package]]
@@ -1591,7 +1585,6 @@ dependencies = [
  "lk-task",
  "lk-vault",
  "miette",
- "reqwest",
  "same-file",
  "serde",
  "serde_json",

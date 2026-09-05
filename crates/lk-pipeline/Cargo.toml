@@ -6,6 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 lk-core = { workspace = true }
 lk-vault = { workspace = true }
@@ -22,7 +25,7 @@ tracing = { workspace = true }
 # Bundled here rather than skipped, because the arithmetic is what those tests are for —
 # and only for tests: the shipped binary keeps reading the OS tzdb, which stays current.
 jiff = { workspace = true, features = ["tzdb-bundle-always"] }
-tempfile = "3"
+tempfile = { workspace = true }
 lk-queue = { workspace = true, features = ["test-util"] }
 proptest = { workspace = true }
 tracing-subscriber = { workspace = true }

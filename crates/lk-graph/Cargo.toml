@@ -6,6 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 lk-core = { workspace = true }
 unicode-normalization = { workspace = true }
@@ -17,8 +20,6 @@ globset = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-regex = { workspace = true }
-blake3 = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
