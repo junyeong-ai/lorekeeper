@@ -111,7 +111,7 @@ jobs:
       # checkout rather than restored from a store some other run wrote.
       - name: Install cross
         if: matrix.cross
-        uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2.86.3
+        uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
         with:
           tool: cross
 
