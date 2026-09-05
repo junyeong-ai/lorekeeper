@@ -1,0 +1,8 @@
+rules:
+  # The `$/` self-repository form this asks for is valid GitHub syntax, but actionlint — the
+  # other gate these files pass through — does not parse it yet and fails the workflow. A call
+  # to a reusable workflow in this same repository already resolves to the running commit, so
+  # `./` costs nothing; this entry goes when actionlint learns the newer spelling.
+  self-repository:
+    ignore:
+      - release.yml

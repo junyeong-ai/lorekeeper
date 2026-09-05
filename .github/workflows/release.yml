@@ -11,7 +11,7 @@ on:
         required: true
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -44,6 +44,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
@@ -67,8 +68,9 @@ jobs:
     # The sha256 sidecar travels the same channel as the archive it describes, so it proves the
     # bytes arrived intact and nothing about who produced them — a compromised release channel
     # rewrites both. An attestation signs the archive against THIS workflow's run, which is the
-    # link `lore self update --verify-attestations` checks and the sidecar cannot make. Declared
-    # per-job so the wider `contents: write` at the top of this file does not reach the builders.
+    # link `lore self update --verify-attestations` checks and the sidecar cannot make. The two
+    # write scopes it needs are declared here rather than at the top of the file, where they
+    # would also be handed to every job that only reads.
     permissions:
       contents: read
       id-token: write
@@ -98,16 +100,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          key: ${{ matrix.target }}
-
+      # No build cache: these are the bytes a user installs, so they are compiled from the
+      # checkout rather than restored from a store some other run wrote.
       - name: Install cross
         if: matrix.cross
         uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2.86.3
@@ -125,9 +126,10 @@ jobs:
       - name: Resolve version
         id: version
         shell: bash
+        env:
+          REF: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
-          ref="${{ github.event.inputs.tag || github.ref_name }}"
-          version="${ref#v}"
+          version="${REF#v}"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
 
@@ -188,6 +190,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
+          persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: artifacts

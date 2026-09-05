@@ -191,7 +191,9 @@ jobs:
       # `+<toolchain>` rather than a bare `cargo`: `rust-toolchain.toml` pins the build
       # toolchain for this checkout and would otherwise override the one installed above,
       # turning the only job that tests the declared floor into a duplicate of `doc`.
-      - run: cargo +${{ steps.msrv.outputs.version }} check --workspace --all-targets
+      - env:
+          MSRV: ${{ steps.msrv.outputs.version }}
+        run: cargo "+$MSRV" check --workspace --all-targets
 
   audit:
     name: cargo audit
