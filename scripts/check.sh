@@ -20,6 +20,7 @@ unrunnable() { printf '\033[2m· %s — %s\033[0m\n' "$1" "$2" >&2; }
 
 gate fmt
 cargo fmt --all --check
+taplo fmt --check
 
 gate clippy
 cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -32,6 +33,7 @@ gate shell
 bash -n scripts/*.sh
 shellcheck --severity=warning scripts/*.sh
 actionlint
+zizmor .github/workflows/
 
 gate doc
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
@@ -53,6 +55,9 @@ cargo audit --deny warnings
 
 gate deny
 cargo deny check
+
+gate machete
+cargo machete
 
 gate build
 cargo build --workspace --release --locked

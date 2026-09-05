@@ -52,7 +52,16 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt
+      # Pinned for the same reason `rust-toolchain.toml` pins rustfmt: a formatter that moves
+      # on its own turns this red on a commit that changed nothing. The auditors below are
+      # deliberately not pinned — for those, a new release finding something new is the point.
+      - uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2.86.3
+        with:
+          tool: taplo@0.10.0
       - run: cargo fmt --all --check
+      # The manifests are the other language this workspace is written in: a version, a
+      # feature and a lint level all live there.
+      - run: taplo fmt --check
 
   clippy:
     name: clippy
@@ -125,7 +134,7 @@ jobs:
   # workflows are the same shape — `actionlint` was run by hand while reviewing them, which means
   # it was run when someone remembered to, and these files now gate the release itself.
   shell:
-    name: shellcheck + actionlint
+    name: shellcheck + actionlint + zizmor
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -142,6 +151,13 @@ jobs:
       - run: go install github.com/rhysd/actionlint/cmd/actionlint@latest
       - run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - run: actionlint
+      # `actionlint` answers whether a workflow is well formed; `zizmor` answers whether it is
+      # safe — an input expanded into a `run:` block, a token left in a clone, a permission
+      # wider than the job needs.
+      - uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2.86.3
+        with:
+          tool: zizmor
+      - run: zizmor .github/workflows/
 
   doc:
     name: doc
@@ -226,6 +242,24 @@ jobs:
         with:
           tool: cargo-deny
       - run: cargo deny check
+
+  # A dependency that is declared and never reached still costs a version to resolve, a
+  # license to clear and an advisory to answer for.
+  machete:
+    name: cargo machete
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2.86.3
+        with:
+          tool: cargo-machete
+      - run: cargo machete
 
   build:
     name: build (${{ matrix.os }})
