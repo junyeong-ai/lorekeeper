@@ -8,6 +8,11 @@ updates:
       time: "06:00"
       timezone: Asia/Seoul
     open-pull-requests-limit: 10
+    ignore:
+      # `htmd::Node` IS this crate's `Node`, so the two have to resolve to one copy and the
+      # version is htmd's to choose. It moves when htmd moves; a bump proposed on its own is
+      # a type mismatch, which is why every such PR has been unmergeable.
+      - dependency-name: markup5ever_rcdom
     groups:
       patch-and-minor:
         update-types: [patch, minor]
