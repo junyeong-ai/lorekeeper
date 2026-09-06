@@ -131,7 +131,7 @@ async fn atlassian_instance(creds: &mut Credentials) -> miette::Result<()> {
     let existing = creds.atlassian.get(&name);
 
     let methods = [
-        "oauth — Cloud via the gateway; the only method an IP allowlist admits, needs an app",
+        "oauth — Cloud via the gateway; the one method an IP allowlist lets through, needs an app",
         "api-token — Cloud classic token, sent to the site; simplest to set up",
         "scoped-token — Cloud scoped token, sent to the gateway; no app needed",
         "pat — Data Center / Server personal access token",
@@ -286,11 +286,18 @@ async fn atlassian_instance(creds: &mut Credentials) -> miette::Result<()> {
             }
         }
         1 => {
-            let (email_default, token_default) = match existing.map(|e| &e.auth) {
-                Some(AtlassianAuthMethod::ApiToken { email, api_token }) => {
-                    (Some(email.clone()), Some(api_token.clone()))
-                }
-                _ => (None, None),
+            // As in the scoped branch: the account email carries across a switch, the token
+            // does not — the two shapes are refused in each other's place.
+            let email_default = match existing.map(|e| &e.auth) {
+                Some(
+                    AtlassianAuthMethod::ApiToken { email, .. }
+                    | AtlassianAuthMethod::ScopedToken { email, .. },
+                ) => Some(email.clone()),
+                _ => None,
+            };
+            let token_default = match existing.map(|e| &e.auth) {
+                Some(AtlassianAuthMethod::ApiToken { api_token, .. }) => Some(api_token.clone()),
+                _ => None,
             };
             AtlassianCredentials {
                 site_url: input(
@@ -304,14 +311,20 @@ async fn atlassian_instance(creds: &mut Credentials) -> miette::Result<()> {
             }
         }
         2 => {
-            let (email_default, token_default) = match existing.map(|e| &e.auth) {
-                Some(AtlassianAuthMethod::ScopedToken {
-                    email, api_token, ..
-                }) => (Some(email.clone()), Some(api_token.clone())),
-                Some(AtlassianAuthMethod::ApiToken { email, api_token }) => {
-                    (Some(email.clone()), Some(api_token.clone()))
-                }
-                _ => (None, None),
+            // The email names the account either way, but the TOKEN is offered back only by
+            // a scoped entry. Keeping a classic one on "enter to keep" would store it in the
+            // gateway variant, where it is refused for being the wrong shape — the switch
+            // is made precisely because the other token is the one that does not work.
+            let email_default = match existing.map(|e| &e.auth) {
+                Some(
+                    AtlassianAuthMethod::ScopedToken { email, .. }
+                    | AtlassianAuthMethod::ApiToken { email, .. },
+                ) => Some(email.clone()),
+                _ => None,
+            };
+            let token_default = match existing.map(|e| &e.auth) {
+                Some(AtlassianAuthMethod::ScopedToken { api_token, .. }) => Some(api_token.clone()),
+                _ => None,
             };
             // Both gateway methods carry one, so switching between them keeps it.
             let cloud_default = match existing.map(|e| &e.auth) {

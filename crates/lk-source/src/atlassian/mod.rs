@@ -26,11 +26,10 @@
 //!
 //! An **IP allowlist** cuts across this, and it is about the PRINCIPAL rather than the
 //! host: it answers `403 "your IP address is not listed in the IP allowlist"` to an account
-//! token from an unlisted address at either address — the site in HTML, the gateway in JSON
-//! — while admitting an org-approved OAuth app at the same moment from the same network. So
-//! on such an instance `oauth` is the only method that reaches the API from off the
-//! corporate network, and the token methods are for instances without a list, or for
-//! addresses on it.
+//! token from an unlisted address at EITHER host, while admitting an org-approved OAuth app
+//! at the same moment from the same network. So on such an instance `oauth` is the only
+//! method that reaches the API from an address the list does not name; from a listed
+//! address, and on an instance with no list, every method works.
 
 pub mod oauth;
 
@@ -285,7 +284,7 @@ impl AtlassianAuth {
     /// `site_url`.
     ///
     /// `/wiki` is the SITE's context path, so it belongs to the site base and not to the
-    /// gateway one, which already names the product. Both Confluence adapters address v1
+    /// gateway one, which already names the product. The Confluence adapter addresses v1
     /// (`/rest/api/…`); a v2 path spells the prefix itself (`/wiki/api/v2/…`) and would have
     /// to carry it here.
     pub fn api_base(&self, product: Product) -> String {
@@ -479,11 +478,12 @@ impl AtlassianAuth {
             // itself was rejected, where reissuing is exactly the fix — advising against it
             // would send the operator away from the one thing that works.
             (Method::ApiToken { .. }, 403) => Some(
-                "This instance refused an API token from this address. An IP allowlist \
-                 produces exactly this, and reissuing the token cannot help: such a list \
-                 admits an org-approved OAuth app and refuses an account token whichever \
-                 host it is sent to, so `scoped-token` does not answer it either. Run `lore \
-                 init credentials` to authorize a grant.",
+                "The site refused this resource. An IP allowlist produces exactly this, \
+                 and no reissued token answers one: such a list admits an org-approved OAuth \
+                 app and refuses an account token whichever host it is sent to, so \
+                 `scoped-token` is not the remedy either — `lore init credentials` \
+                 authorizes a grant. The account may instead lack access to the product or \
+                 space, which no change of method repairs.",
             ),
             (Method::ApiToken { .. }, 401) => Some(
                 "This instance rejected the API token itself — expired, revoked, or paired \
@@ -511,9 +511,10 @@ impl AtlassianAuth {
                  current and that the account can reach this project or space.",
             ),
             (Method::Oauth { .. }, 403) => Some(
-                "The OAuth grant authenticated but was refused this resource. The app's \
-                 registered scopes most likely do not cover it; re-run `lore init \
-                 credentials` and match the app's Permissions page.",
+                "The grant was refused this resource. Its app's registered scopes most \
+                 likely do not cover it — re-run `lore init credentials` and match the app's \
+                 Permissions page — though an account without access to the product or space \
+                 is refused the same way, and no scope repairs that.",
             ),
             _ => None,
         };

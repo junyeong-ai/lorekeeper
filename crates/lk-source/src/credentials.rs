@@ -85,8 +85,8 @@ impl SlackCredentials {
 pub struct AtlassianCredentials {
     /// Site root as a human would type it: `https://acme.atlassian.net` (Cloud) or
     /// `https://wiki.corp.example/confluence` (Data Center, context path included).
-    /// Always the basis for browse links; also the API host for everything except OAuth,
-    /// which routes through Atlassian's gateway instead.
+    /// Always the basis for browse links; also the API host for the methods addressed at
+    /// the site, while `oauth` and `scoped-token` route through Atlassian's gateway instead.
     pub site_url: String,
     #[serde(flatten)]
     pub auth: AtlassianAuthMethod,
