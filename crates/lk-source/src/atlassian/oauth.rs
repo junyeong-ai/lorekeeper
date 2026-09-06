@@ -182,13 +182,13 @@ pub async fn build_grant(
              differs from the app's registration by so much as a trailing slash. Re-run \
              `lore init credentials` and complete the consent without pausing."
         } else if body.contains("access_denied") {
-            "\n\nThe authorization server refused the exchange rather than the code. One \
-             cause is a scope set that does not match the app's registration — some apps \
-             grant only their exact registered list, not a subset — in which case re-running \
-             `lore init credentials` and pasting the app's full scope list at the scope \
-             prompt fixes it (developer.atlassian.com → your app → Permissions shows it). An \
-             org policy on who may consent, or on the app itself, refuses the same way and \
-             needs an admin."
+            "\n\nThe authorization server refused the exchange. Three things refuse it \
+             the same way. A client secret that does not match the app — a long one is easy \
+             to truncate on paste, and it is never checked before this point. A scope set \
+             that is a strict subset of the app's registration, where re-running `lore init \
+             credentials` and pasting the full list at the scope prompt fixes it \
+             (developer.atlassian.com → your app → Permissions shows it). Or an org policy \
+             on the app or on who may consent to it, which needs an admin."
         } else {
             ""
         };

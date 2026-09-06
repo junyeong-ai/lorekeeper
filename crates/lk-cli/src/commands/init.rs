@@ -238,9 +238,11 @@ async fn atlassian_instance(creds: &mut Credentials) -> miette::Result<()> {
             // read from the error alone. Editing this to match the app's Permissions page is
             // the fix. Lorekeeper only ever issues reads, whatever the grant permits.
             eprintln!(
-                "  Scopes default to the read-only set Lorekeeper needs. If authorization \
-                 fails\n  at the token-exchange step, replace this with the app's FULL \
-                 registered list\n  (developer.atlassian.com → your app → Permissions)."
+                "  Scopes default to the read-only set Lorekeeper needs. If the token \
+                 exchange is denied,\n  one cause is that this is a strict subset of the \
+                 app's registration — replace it with\n  the FULL registered list \
+                 (developer.atlassian.com → your app → Permissions). A mistyped\n  client \
+                 secret is refused the same way."
             );
             let scopes: Vec<String> = input(
                 "  scopes (space-separated)",

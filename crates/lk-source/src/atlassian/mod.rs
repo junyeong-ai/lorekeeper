@@ -475,10 +475,11 @@ impl AtlassianAuth {
     /// provider said is lost.
     pub fn explain_failure(&self, status: u16, body: &str) -> String {
         let remedy = match (&self.method, status) {
-            // 403 and 401 divide on WHO was refused. A 403 means the credential was
-            // understood and something about the caller — address, scope, access — was not
-            // accepted, none of which a new token repairs. A 401 means the credential itself
-            // was not accepted, where reissuing is exactly the fix.
+            // 403 and 401 divide on WHAT was refused. A 403 means the credential was
+            // understood and the request was not permitted — the address, the token's
+            // scopes, or the account's access — and only the scopes are repaired by a new
+            // token, since a token's scopes are fixed when it is minted. A 401 means the
+            // credential itself was not accepted, where reissuing is usually the fix.
             (Method::ApiToken { .. }, 403) => Some(
                 "The site refused this resource. An IP allowlist produces exactly this, \
                  and no reissued token answers one: from an address such a list does not \
@@ -499,7 +500,9 @@ impl AtlassianAuth {
                 "The gateway did not accept this token. It honors only a token carrying \
                  scopes, so the first thing to check is the SHAPE: a classic token is \
                  refused here and belongs on `api-token`, addressed at the site. Otherwise \
-                 the token is expired or revoked, or its scopes do not admit this endpoint.",
+                 the token is expired or revoked, its scopes do not admit this endpoint, or \
+                 the account behind it has no access to the product — the last needs an \
+                 admin rather than a new token.",
             ),
             (Method::ScopedToken { .. }, 403) => Some(
                 "The gateway refused this resource. Three causes look alike here: the \
