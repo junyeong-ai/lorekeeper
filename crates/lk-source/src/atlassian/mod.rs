@@ -24,11 +24,13 @@
 //! it — an anonymous 401 that names nothing. The method therefore fixes the host, and
 //! [`AtlassianAuth::explain_failure`] is where that shows up as a sentence.
 //!
-//! Which matters because an **IP allowlist** guards the site and not the gateway: it
-//! answers `403 "your IP address is not listed in the IP allowlist"` to a classic token
-//! from an unlisted address, while the same account reaches the API through the gateway. So
-//! off the corporate network the working methods are `oauth` and `scoped-token` — the
-//! latter being the one an individual can issue without an org-approved app.
+//! An **IP allowlist** cuts across this, and it is about the PRINCIPAL rather than the
+//! host: it answers `403 "your IP address is not listed in the IP allowlist"` to an account
+//! token from an unlisted address at either address — the site in HTML, the gateway in JSON
+//! — while admitting an org-approved OAuth app at the same moment from the same network. So
+//! on such an instance `oauth` is the only method that reaches the API from off the
+//! corporate network, and the token methods are for instances without a list, or for
+//! addresses on it.
 
 pub mod oauth;
 
@@ -477,12 +479,11 @@ impl AtlassianAuth {
             // itself was rejected, where reissuing is exactly the fix — advising against it
             // would send the operator away from the one thing that works.
             (Method::ApiToken { .. }, 403) => Some(
-                "This instance refused a classic API token from this address. An IP \
-                 allowlist produces exactly this, and reissuing the token cannot help — the \
-                 list guards the site, not api.atlassian.com. A credential that routes \
-                 through the gateway is honored from anywhere: switch this instance to \
-                 `scoped-token` (a scoped token needs no app), or to `oauth`. Run `lore \
-                 init credentials`.",
+                "This instance refused an API token from this address. An IP allowlist \
+                 produces exactly this, and reissuing the token cannot help: such a list \
+                 admits an org-approved OAuth app and refuses an account token whichever \
+                 host it is sent to, so `scoped-token` does not answer it either. Run `lore \
+                 init credentials` to authorize a grant.",
             ),
             (Method::ApiToken { .. }, 401) => Some(
                 "This instance rejected the API token itself — expired, revoked, or paired \
@@ -498,10 +499,11 @@ impl AtlassianAuth {
                  site. Check which shape the token is before reissuing it.",
             ),
             (Method::ScopedToken { .. }, 403) => Some(
-                "The token authenticated but was refused this resource — most likely its \
-                 scopes do not cover it, or the account it belongs to lacks access to this \
-                 product or space. An IP allowlist is not the cause: it guards the site, and \
-                 this request went through api.atlassian.com.",
+                "The gateway refused this resource. Three causes look alike here: the \
+                 token's scopes may not cover it, the account behind it may lack access to \
+                 the product or space, or an IP allowlist may be refusing the address — a \
+                 list admits an org-approved OAuth app, not an account token, and reaching \
+                 it through api.atlassian.com does not change that.",
             ),
             (Method::PersonalAccessToken { .. }, 401 | 403) => Some(
                 "This instance rejected a personal access token. Data Center expects a PAT as \
@@ -639,8 +641,22 @@ mod tests {
 
         let scoped = auth("https://acme.atlassian.net", scoped_token());
         assert!(scoped.explain_failure(401, "body").contains("api-token"));
-        // The gateway is not behind the allowlist, so a 403 there is about scopes.
-        assert!(scoped.explain_failure(403, "body").contains("scopes"));
+    }
+
+    #[test]
+    fn an_allowlist_stays_a_candidate_for_an_account_token_at_either_host() {
+        // The list admits an org-approved app and turns away the account whichever host it
+        // asks at, so reaching the gateway is not an exemption and neither 403 may say the
+        // address is cleared. Both name the remaining causes instead of choosing one.
+        for method in [api_token(), scoped_token()] {
+            let refused = auth("https://acme.atlassian.net", method).explain_failure(403, "body");
+            assert!(refused.contains("allowlist"), "{refused}");
+        }
+        assert!(
+            auth("https://acme.atlassian.net", scoped_token())
+                .explain_failure(403, "body")
+                .contains("scopes")
+        );
     }
 
     #[test]

@@ -107,8 +107,9 @@ pub struct AtlassianCredentials {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "kebab-case")]
 pub enum AtlassianAuthMethod {
-    /// OAuth 2.0 (3LO) — Cloud. The only method that survives an IP allowlist, which
-    /// rejects API-token traffic from unlisted addresses while honoring an org-approved app.
+    /// OAuth 2.0 (3LO) — Cloud, through the gateway. The only method an IP allowlist
+    /// admits from an unlisted address: such a list turns away an account token wherever it
+    /// is sent and lets an org-approved app through.
     ///
     /// **Give Lorekeeper its own OAuth app.** Atlassian ROTATES refresh tokens: each
     /// refresh mints a successor and invalidates the token just used, so two clients
@@ -123,8 +124,8 @@ pub enum AtlassianAuthMethod {
         cloud_id: String,
     },
     /// Classic (unscoped) account API token over HTTP Basic — Cloud, addressed at the site
-    /// host. Simple to set up, but an instance with an IP allowlist blocks it outright from
-    /// any unlisted address: the list guards the site, not the gateway.
+    /// host. Simple to set up, but an instance with an IP allowlist refuses it from any
+    /// unlisted address — and so it does the scoped form, so the remedy is `oauth`.
     ApiToken { email: String, api_token: String },
     /// Scoped account API token over HTTP Basic — Cloud, addressed through the gateway.
     ///
@@ -133,9 +134,9 @@ pub enum AtlassianAuthMethod {
     /// nothing. So this is the same credential *kind* as [`Self::ApiToken`] and a different
     /// route, and the two are not interchangeable in either direction.
     ///
-    /// It reaches the gateway the way OAuth does, so an IP allowlist honors it — without an
-    /// org-approved app, which is what makes it the one Cloud method an individual can set
-    /// up alone and still use from an unlisted address.
+    /// It reaches the gateway the way OAuth does but is still the ACCOUNT asking, so an IP
+    /// allowlist refuses it from an unlisted address exactly as it refuses the classic form.
+    /// What it buys over that form is the scoped token itself, not an exemption.
     ScopedToken {
         email: String,
         api_token: String,
