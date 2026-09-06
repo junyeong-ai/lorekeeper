@@ -133,13 +133,17 @@ map to `RawItem`.
   - **Atlassian (`atlassian/`)**: the shared auth + routing facade both Atlassian adapters
     use. `AtlassianAuth` answers three questions — `api_base(product)`, `header()`,
     `deployment()` — so no adapter branches on the credential form. `Deployment` is DERIVED
-    from the auth method (oauth/api-token ⇒ Cloud, pat ⇒ DataCenter) and owns every
-    Cloud/Server dialect difference in one place: search path, pagination style
+    from the auth method (oauth/scoped-token/api-token ⇒ Cloud, pat ⇒ DataCenter) and owns
+    every Cloud/Server dialect difference in one place: search path, pagination style
     (`JiraPaging::Token` vs `Offset`), and the user-identity key (`accountId` vs
-    `name`/`username`). OAuth routes through `api.atlassian.com/ex/{product}/{cloud_id}`;
-    everything else talks to `site_url` (Confluence Cloud adds `/wiki`, Data Center already
-    has its context path). A PAT authenticates as **Bearer, not Basic** — sending it as a
-    Basic password is the classic Data Center misconfiguration. Refresh tokens ROTATE, so
+    `name`/`username`). The method also fixes the HOST, because each credential is honored
+    by exactly one: `oauth` and `scoped-token` route through
+    `api.atlassian.com/ex/{product}/{cloud_id}`, while `api-token` and `pat` talk to
+    `site_url` (Confluence Cloud adds `/wiki`, Data Center already has its context path).
+    The two Cloud account-token shapes are therefore separate methods rather than one with a
+    routing flag — the site IGNORES a scoped token instead of refusing it, so a misrouted
+    one reads as an anonymous 401. A PAT authenticates as **Bearer, not Basic** — sending it
+    as a Basic password is the classic Data Center misconfiguration. Refresh tokens ROTATE, so
     the refresh is the one request deliberately NOT wrapped in `send_with_retry` (replaying
     a committed rotation strands the grant), the successor is persisted before returning,
     and the ONE `AtlassianAuth` per instance must be shared across adapters.

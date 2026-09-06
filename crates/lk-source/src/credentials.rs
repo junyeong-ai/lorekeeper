@@ -97,8 +97,13 @@ pub struct AtlassianCredentials {
 /// Each variant carries exactly the fields its method needs and no others, so an
 /// unusable combination — a PAT with a `cloud_id`, an OAuth grant with an `email` —
 /// cannot be expressed. The variant also determines the deployment (and therefore the
-/// REST dialect): OAuth and API tokens exist only on Cloud, personal access tokens only
-/// on Data Center/Server.
+/// REST dialect): OAuth and both account-token forms exist only on Cloud, personal access
+/// tokens only on Data Center/Server.
+///
+/// Cloud issues an account token in two shapes, and each is honored by exactly one host —
+/// a classic token at the site, a scoped one at the gateway. Sending either to the other
+/// place fails without saying so, which is why they are separate variants rather than one
+/// with a routing flag.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "kebab-case")]
 pub enum AtlassianAuthMethod {
@@ -117,9 +122,27 @@ pub enum AtlassianAuthMethod {
         /// `https://api.atlassian.com/ex/{product}/{cloud_id}`.
         cloud_id: String,
     },
-    /// Atlassian account API token over HTTP Basic — Cloud. Simple to set up, but an
-    /// instance with an IP allowlist blocks it outright from any unlisted address.
+    /// Classic (unscoped) account API token over HTTP Basic — Cloud, addressed at the site
+    /// host. Simple to set up, but an instance with an IP allowlist blocks it outright from
+    /// any unlisted address: the list guards the site, not the gateway.
     ApiToken { email: String, api_token: String },
+    /// Scoped account API token over HTTP Basic — Cloud, addressed through the gateway.
+    ///
+    /// A token carrying scopes is honored only at `api.atlassian.com`; the site host
+    /// ignores it rather than rejecting it, which surfaces as an anonymous 401 naming
+    /// nothing. So this is the same credential *kind* as [`Self::ApiToken`] and a different
+    /// route, and the two are not interchangeable in either direction.
+    ///
+    /// It reaches the gateway the way OAuth does, so an IP allowlist honors it — without an
+    /// org-approved app, which is what makes it the one Cloud method an individual can set
+    /// up alone and still use from an unlisted address.
+    ScopedToken {
+        email: String,
+        api_token: String,
+        /// Tenant id, as for OAuth — it selects the gateway path
+        /// `https://api.atlassian.com/ex/{product}/{cloud_id}`.
+        cloud_id: String,
+    },
     /// Personal access token over HTTP Bearer — Data Center / Server. These instances have
     /// no OAuth gateway and no account API tokens; a PAT issued from the user's profile is
     /// the supported programmatic credential.
@@ -133,6 +156,7 @@ impl AtlassianAuthMethod {
         match self {
             AtlassianAuthMethod::Oauth { .. } => "oauth",
             AtlassianAuthMethod::ApiToken { .. } => "api-token",
+            AtlassianAuthMethod::ScopedToken { .. } => "scoped-token",
             AtlassianAuthMethod::PersonalAccessToken { .. } => "pat",
         }
     }
@@ -158,6 +182,14 @@ impl std::fmt::Debug for AtlassianAuthMethod {
                 .debug_struct("ApiToken")
                 .field("email", email)
                 .field("api_token", &"<redacted>")
+                .finish(),
+            AtlassianAuthMethod::ScopedToken {
+                email, cloud_id, ..
+            } => f
+                .debug_struct("ScopedToken")
+                .field("email", email)
+                .field("api_token", &"<redacted>")
+                .field("cloud_id", cloud_id)
                 .finish(),
             AtlassianAuthMethod::PersonalAccessToken { .. } => f
                 .debug_struct("PersonalAccessToken")
@@ -339,8 +371,12 @@ impl Credentials {
             self.slack = Some(slack);
         }
 
-        // Env overlay targets the `default` instance, and covers the two methods whose
-        // credentials are stable strings: a Data Center PAT, and a Cloud email + API token.
+        // Env overlay targets the `default` instance, and covers the methods whose
+        // credentials are stable strings: a Data Center PAT, and a Cloud email + account
+        // token in either shape. Which variables are set is what selects the method, since
+        // each variant needs exactly its own fields — `LORE_ATLASSIAN_CLOUD_ID` is the
+        // scoped token's, and asks for the gateway.
+        //
         // OAuth is deliberately absent — its refresh token ROTATES, and
         // `persist_atlassian_refresh_token` has no file entry to write the successor to, so
         // an env-supplied grant would work for exactly one run. Grants live in the file,
@@ -350,9 +386,17 @@ impl Credentials {
                 std::env::var("LORE_ATLASSIAN_PAT"),
                 std::env::var("LORE_ATLASSIAN_EMAIL"),
                 std::env::var("LORE_ATLASSIAN_API_TOKEN"),
+                std::env::var("LORE_ATLASSIAN_CLOUD_ID"),
             ) {
-                (Ok(token), _, _) => Some(AtlassianAuthMethod::PersonalAccessToken { token }),
-                (_, Ok(email), Ok(api_token)) => {
+                (Ok(token), ..) => Some(AtlassianAuthMethod::PersonalAccessToken { token }),
+                (_, Ok(email), Ok(api_token), Ok(cloud_id)) => {
+                    Some(AtlassianAuthMethod::ScopedToken {
+                        email,
+                        api_token,
+                        cloud_id,
+                    })
+                }
+                (_, Ok(email), Ok(api_token), _) => {
                     Some(AtlassianAuthMethod::ApiToken { email, api_token })
                 }
                 _ => None,

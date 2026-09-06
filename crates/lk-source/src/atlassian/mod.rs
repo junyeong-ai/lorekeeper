@@ -9,17 +9,26 @@
 //!
 //! **How we authenticate** ([`AtlassianAuthMethod`]) and **which API dialect the instance
 //! speaks** ([`Deployment`]) are separate concerns, but they are not independently
-//! configurable: each credential form exists on exactly one deployment (OAuth and account
-//! API tokens are Cloud-only; personal access tokens are Data Center/Server-only). So the
-//! deployment is DERIVED from the method rather than configured, which makes an impossible
-//! pairing — a PAT against the Cloud gateway — unrepresentable instead of merely discouraged.
+//! configurable: each credential form exists on exactly one deployment (OAuth and both
+//! account-token forms are Cloud-only; personal access tokens are Data Center/Server-only).
+//! So the deployment is DERIVED from the method rather than configured, which makes an
+//! impossible pairing — a PAT against the Cloud gateway — unrepresentable instead of merely
+//! discouraged.
 //!
-//! # Why OAuth exists here at all
+//! # Two hosts, and why the method chooses one
 //!
-//! An instance with an **IP allowlist** rejects API-token (Basic auth) traffic from any
-//! address outside the list — `403 "your IP address is not listed in the IP allowlist"` —
-//! while still honoring an org-approved OAuth app. On a laptop off the corporate network,
-//! OAuth is the only Cloud auth that reaches the API at all.
+//! Cloud answers at two addresses and each honors a different set of credentials: the site
+//! (`{org}.atlassian.net`) takes a classic account token, while the gateway
+//! (`api.atlassian.com`) takes an OAuth grant or a SCOPED account token. Neither accepts
+//! the other's credential, and the site does not reject a scoped token so much as ignore
+//! it — an anonymous 401 that names nothing. The method therefore fixes the host, and
+//! [`AtlassianAuth::explain_failure`] is where that shows up as a sentence.
+//!
+//! Which matters because an **IP allowlist** guards the site and not the gateway: it
+//! answers `403 "your IP address is not listed in the IP allowlist"` to a classic token
+//! from an unlisted address, while the same account reaches the API through the gateway. So
+//! off the corporate network the working methods are `oauth` and `scoped-token` — the
+//! latter being the one an individual can issue without an org-approved app.
 
 pub mod oauth;
 
@@ -195,6 +204,11 @@ enum Method {
         email: String,
         api_token: String,
     },
+    ScopedToken {
+        email: String,
+        api_token: String,
+        cloud_id: String,
+    },
     PersonalAccessToken {
         token: String,
     },
@@ -224,6 +238,15 @@ impl AtlassianAuth {
                 email: email.clone(),
                 api_token: api_token.clone(),
             },
+            AtlassianAuthMethod::ScopedToken {
+                email,
+                api_token,
+                cloud_id,
+            } => Method::ScopedToken {
+                email: email.clone(),
+                api_token: api_token.clone(),
+                cloud_id: cloud_id.clone(),
+            },
             AtlassianAuthMethod::PersonalAccessToken { token } => Method::PersonalAccessToken {
                 token: token.clone(),
             },
@@ -244,19 +267,23 @@ impl AtlassianAuth {
     /// Derived, never configured — see the module docs on the two axes.
     pub fn deployment(&self) -> Deployment {
         match self.method {
-            Method::Oauth { .. } | Method::ApiToken { .. } => Deployment::Cloud,
+            Method::Oauth { .. } | Method::ApiToken { .. } | Method::ScopedToken { .. } => {
+                Deployment::Cloud
+            }
             Method::PersonalAccessToken { .. } => Deployment::DataCenter,
         }
     }
 
     /// Root the REST paths hang off.
     ///
-    /// OAuth addresses the tenant through the gateway; every other method talks to the site
-    /// directly. Confluence Cloud additionally lives under `/wiki`, while a Data Center
-    /// instance's context path is already part of `site_url`.
+    /// The host is a property of the credential, not a preference: a grant and a scoped
+    /// token are honored only by the gateway, which addresses tenants by id, while a
+    /// classic token and a PAT are honored only by the site. Confluence Cloud additionally
+    /// lives under `/wiki`, while a Data Center instance's context path is already part of
+    /// `site_url`.
     pub fn api_base(&self, product: Product) -> String {
         match &self.method {
-            Method::Oauth { cloud_id, .. } => {
+            Method::Oauth { cloud_id, .. } | Method::ScopedToken { cloud_id, .. } => {
                 format!("{GATEWAY}/ex/{}/{cloud_id}", product.segment())
             }
             Method::ApiToken { .. } => match product {
@@ -283,7 +310,10 @@ impl AtlassianAuth {
     pub async fn header(&self) -> Result<AuthHeader, SourceError> {
         match &self.method {
             Method::Oauth { .. } => Ok(AuthHeader::Bearer(self.access_token().await?)),
-            Method::ApiToken { email, api_token } => Ok(AuthHeader::Basic {
+            Method::ApiToken { email, api_token }
+            | Method::ScopedToken {
+                email, api_token, ..
+            } => Ok(AuthHeader::Basic {
                 user: email.clone(),
                 secret: api_token.clone(),
             }),
@@ -442,15 +472,30 @@ impl AtlassianAuth {
             // itself was rejected, where reissuing is exactly the fix — advising against it
             // would send the operator away from the one thing that works.
             (Method::ApiToken { .. }, 403) => Some(
-                "This instance refused an API token from this address. An IP allowlist \
-                 produces exactly this, and reissuing the token cannot help — only an OAuth \
-                 grant routes through api.atlassian.com, which such a list honors. Run \
-                 `lore init credentials` to authorize one.",
+                "This instance refused a classic API token from this address. An IP \
+                 allowlist produces exactly this, and reissuing the token cannot help — the \
+                 list guards the site, not api.atlassian.com. A credential that routes \
+                 through the gateway is honored from anywhere: switch this instance to \
+                 `scoped-token` (a scoped token needs no app), or to `oauth`. Run `lore \
+                 init credentials`.",
             ),
             (Method::ApiToken { .. }, 401) => Some(
                 "This instance rejected the API token itself — expired, revoked, or paired \
                  with a different account than `email`. Reissue it at \
-                 id.atlassian.com/manage-profile/security/api-tokens.",
+                 id.atlassian.com/manage-profile/security/api-tokens. One further cause \
+                 looks identical: the site host IGNORES a token carrying scopes rather than \
+                 refusing it, so a scoped token fails here exactly like a bad one — such a \
+                 token belongs on `scoped-token`.",
+            ),
+            (Method::ScopedToken { .. }, 401) => Some(
+                "The gateway rejected this token. It honors only a token carrying scopes — a \
+                 CLASSIC token is refused here and belongs on `api-token`, addressed at the \
+                 site. Check which shape the token is before reissuing it.",
+            ),
+            (Method::ScopedToken { .. }, 403) => Some(
+                "The token authenticated but was refused this resource, which for a scoped \
+                 token means its scopes do not cover it. An IP allowlist is not the cause: \
+                 it guards the site, and this request went through api.atlassian.com.",
             ),
             (Method::PersonalAccessToken { .. }, 401 | 403) => Some(
                 "This instance rejected a personal access token. Data Center expects a PAT as \
@@ -509,6 +554,14 @@ mod tests {
         }
     }
 
+    fn scoped_token() -> AtlassianAuthMethod {
+        AtlassianAuthMethod::ScopedToken {
+            email: "me@corp.example".into(),
+            api_token: "SCOPED".into(),
+            cloud_id: "cloud-1".into(),
+        }
+    }
+
     #[test]
     fn deployment_is_derived_from_the_credential_form() {
         assert_eq!(
@@ -520,9 +573,68 @@ mod tests {
             Deployment::Cloud
         );
         assert_eq!(
+            auth("https://acme.atlassian.net", scoped_token()).deployment(),
+            Deployment::Cloud
+        );
+        assert_eq!(
             auth("https://wiki.corp/confluence", pat()).deployment(),
             Deployment::DataCenter
         );
+    }
+
+    #[test]
+    fn a_scoped_token_routes_through_the_gateway_like_a_grant() {
+        // The site host ignores a scoped token rather than rejecting it, so addressing it
+        // there costs an anonymous 401 and no explanation. The gateway is the only host
+        // that honors one, which is what separates this method from `api-token`.
+        let a = auth("https://acme.atlassian.net", scoped_token());
+        assert_eq!(
+            a.api_base(Product::Jira),
+            "https://api.atlassian.com/ex/jira/cloud-1"
+        );
+        assert_eq!(
+            a.api_base(Product::Confluence),
+            "https://api.atlassian.com/ex/confluence/cloud-1"
+        );
+        // Browse links still address the site — the gateway serves the API, not pages.
+        assert_eq!(
+            a.browse_base(Product::Confluence).as_deref(),
+            Some("https://acme.atlassian.net/wiki")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_scoped_token_authenticates_as_basic_not_bearer() {
+        // It is an account token like the classic one, and differs only in where it is
+        // honored — sending it as a Bearer is the mistake the gateway path invites.
+        let header = auth("https://acme.atlassian.net", scoped_token())
+            .header()
+            .await
+            .unwrap();
+        assert!(matches!(header, AuthHeader::Basic { ref user, ref secret }
+                if user == "me@corp.example" && secret == "SCOPED"));
+    }
+
+    #[test]
+    fn each_token_shape_is_told_where_the_other_one_belongs() {
+        // The two shapes fail in each other's place without saying why, so the remedy has
+        // to name the sibling method rather than advise reissuing the token.
+        let classic = auth("https://acme.atlassian.net", api_token());
+        assert!(
+            classic
+                .explain_failure(401, "body")
+                .contains("scoped-token")
+        );
+        assert!(
+            classic
+                .explain_failure(403, "body")
+                .contains("scoped-token")
+        );
+
+        let scoped = auth("https://acme.atlassian.net", scoped_token());
+        assert!(scoped.explain_failure(401, "body").contains("api-token"));
+        // The gateway is not behind the allowlist, so a 403 there is about scopes.
+        assert!(scoped.explain_failure(403, "body").contains("scopes"));
     }
 
     #[test]

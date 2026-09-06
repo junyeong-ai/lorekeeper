@@ -131,13 +131,15 @@ async fn atlassian_instance(creds: &mut Credentials) -> miette::Result<()> {
     let existing = creds.atlassian.get(&name);
 
     let methods = [
-        "oauth  — Cloud; required if the site enforces an IP allowlist",
-        "api-token — Cloud; simplest, but an IP allowlist blocks it",
+        "oauth — Cloud via the gateway; survives an IP allowlist, needs an app",
+        "api-token — Cloud classic token at the site; simplest, an IP allowlist blocks it",
+        "scoped-token — Cloud scoped token via the gateway; survives an allowlist, no app",
         "pat — Data Center / Server personal access token",
     ];
     let default_method = match existing.map(|e| &e.auth) {
         Some(AtlassianAuthMethod::ApiToken { .. }) => 1,
-        Some(AtlassianAuthMethod::PersonalAccessToken { .. }) => 2,
+        Some(AtlassianAuthMethod::ScopedToken { .. }) => 2,
+        Some(AtlassianAuthMethod::PersonalAccessToken { .. }) => 3,
         _ => 0,
     };
     let choice = dialoguer::Select::new()
@@ -298,6 +300,42 @@ async fn atlassian_instance(creds: &mut Credentials) -> miette::Result<()> {
                 auth: AtlassianAuthMethod::ApiToken {
                     email: input("  email", email_default.as_deref())?,
                     api_token: secret("  api_token", token_default.as_deref())?,
+                },
+            }
+        }
+        2 => {
+            let (email_default, token_default) = match existing.map(|e| &e.auth) {
+                Some(AtlassianAuthMethod::ScopedToken {
+                    email, api_token, ..
+                }) => (Some(email.clone()), Some(api_token.clone())),
+                Some(AtlassianAuthMethod::ApiToken { email, api_token }) => {
+                    (Some(email.clone()), Some(api_token.clone()))
+                }
+                _ => (None, None),
+            };
+            // Both gateway methods carry one, so switching between them keeps it.
+            let cloud_default = match existing.map(|e| &e.auth) {
+                Some(
+                    AtlassianAuthMethod::ScopedToken { cloud_id, .. }
+                    | AtlassianAuthMethod::Oauth { cloud_id, .. },
+                ) => Some(cloud_id.clone()),
+                _ => None,
+            };
+            eprintln!(
+                "\n  Scoped token: https://id.atlassian.com/manage-profile/security/api-tokens\n  \
+                 • Grant it the same scopes an app would need for the products you read.\n  \
+                 • A CLASSIC token does not work here — the gateway honors only a scoped one.\n  \
+                 • cloud_id is served at https://<your-site>/_edge/tenant_info\n"
+            );
+            AtlassianCredentials {
+                site_url: input(
+                    "  site_url (https://org.atlassian.net)",
+                    site_default.as_deref(),
+                )?,
+                auth: AtlassianAuthMethod::ScopedToken {
+                    email: input("  email", email_default.as_deref())?,
+                    api_token: secret("  api_token (scoped)", token_default.as_deref())?,
+                    cloud_id: input("  cloud_id", cloud_default.as_deref())?,
                 },
             }
         }
