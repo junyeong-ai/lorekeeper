@@ -6,7 +6,7 @@ members = ["crates/*"]
 # Declared once and inherited by every member, so a release bumps one line rather than
 # seven that nothing compared: six of them fed no artifact, and only a mismatch on `lore`
 # was ever observable.
-version = "0.21.2"
+version = "0.22.0"
 edition = "2024"
 rust-version = "1.97"
 license = "MIT"
