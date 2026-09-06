@@ -252,7 +252,6 @@ impl Source for ConfluenceSource {
         tracing::debug!(cql = %cql, "confluence: query");
 
         let my_account_id = self.account_id().await?.to_string();
-        let header = self.auth.header().await?;
         let search_url = format!(
             "{}/rest/api/content/search",
             self.auth.api_base(Product::Confluence)
@@ -284,6 +283,11 @@ impl Source for ConfluenceSource {
         let mut pages_fetched = 0usize;
 
         loop {
+            // Re-resolved per page rather than once per extract: an OAuth access token
+            // lives about an hour, and a long pagination or a `Retry-After` wait can cross
+            // that. `header()` returns the cached value without a request while it is
+            // valid, so this costs nothing and cannot hand a stale bearer to the next page.
+            let header = self.auth.header().await?;
             let request_url = match &next_path {
                 // `_links.next` is site-root-relative (`/rest/api/...`); re-anchor it on the
                 // API gateway, which is a different host than the one that produced it.

@@ -131,7 +131,7 @@ async fn atlassian_instance(creds: &mut Credentials) -> miette::Result<()> {
     let existing = creds.atlassian.get(&name);
 
     let methods = [
-        "oauth — Cloud via the gateway; the one method an IP allowlist lets through, needs an app",
+        "oauth — Cloud via the gateway; reaches an IP-allowlisted site from any address, needs an app",
         "api-token — Cloud classic token, sent to the site; simplest to set up",
         "scoped-token — Cloud scoped token, sent to the gateway; no app needed",
         "pat — Data Center / Server personal access token",

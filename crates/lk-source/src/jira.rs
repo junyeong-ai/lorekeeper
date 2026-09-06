@@ -259,7 +259,6 @@ impl Source for JiraSource {
         let fields_csv = fields.join(",");
 
         let my_account_id = self.account_id().await?;
-        let header = self.auth.header().await?;
 
         // Paginate to the end of the JQL result (complete-refetch contract: the daily page
         // is re-rendered from this fetch, so an issue beyond one page is silently lost
@@ -276,6 +275,11 @@ impl Source for JiraSource {
         let mut pages_fetched = 0usize;
 
         loop {
+            // Re-resolved per page rather than once per extract: an OAuth access token
+            // lives about an hour, and a long pagination or a `Retry-After` wait can cross
+            // that. `header()` returns the cached value without a request while it is
+            // valid, so this costs nothing and cannot hand a stale bearer to the next page.
+            let header = self.auth.header().await?;
             let start_at = issues.len().to_string();
             let resp = crate::retry::send_with_retry(|| {
                 let mut req = header.apply(self.http.get(&url)).query(&[

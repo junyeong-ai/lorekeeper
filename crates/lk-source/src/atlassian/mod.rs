@@ -466,24 +466,25 @@ impl AtlassianAuth {
     /// Annotate a failed response with the remedy this instance's auth method admits.
     ///
     /// The annotation is derived from what is KNOWN — the configured method and the HTTP
-    /// status — never from matching text in the provider's body. A `403` to an API token is
-    /// the signature of an IP allowlist, and the remedy for it is a different auth method,
-    /// so saying that is useful; guessing the same thing from the presence of a phrase or an
-    /// HTML doctype would mislabel every unrelated `403` an allowlist problem. The body is
-    /// passed through verbatim either way, so nothing the provider said is lost.
+    /// status — never from matching text in the provider's body, which would make every
+    /// `403` carrying an HTML doctype an allowlist problem. Those two facts narrow the
+    /// causes without choosing between them, so the annotation NAMES them: a token's `403`
+    /// is an allowlist, a missing scope or an account without access, and only the operator
+    /// can tell which. The body is passed through verbatim either way, so nothing the
+    /// provider said is lost.
     pub fn explain_failure(&self, status: u16, body: &str) -> String {
         let remedy = match (&self.method, status) {
-            // 403 is the allowlist signature: the credential was understood and the
-            // ADDRESS was refused, which no new token can fix. 401 means the credential
-            // itself was rejected, where reissuing is exactly the fix — advising against it
-            // would send the operator away from the one thing that works.
+            // 403 and 401 divide on WHO was refused. A 403 means the credential was
+            // understood and something about the caller — address, scope, access — was not
+            // accepted, none of which a new token repairs. A 401 means the credential itself
+            // was not accepted, where reissuing is exactly the fix.
             (Method::ApiToken { .. }, 403) => Some(
                 "The site refused this resource. An IP allowlist produces exactly this, \
-                 and no reissued token answers one: such a list admits an org-approved OAuth \
-                 app and refuses an account token whichever host it is sent to, so \
-                 `scoped-token` is not the remedy either — `lore init credentials` \
-                 authorizes a grant. The account may instead lack access to the product or \
-                 space, which no change of method repairs.",
+                 and no reissued token answers one: from an address such a list does not \
+                 name it admits an org-approved OAuth app and refuses an account token at \
+                 either host, so `scoped-token` is not the remedy either — `lore init \
+                 credentials` authorizes a grant. The account may instead lack access to the \
+                 product or space, which no change of method repairs.",
             ),
             (Method::ApiToken { .. }, 401) => Some(
                 "This instance rejected the API token itself — expired, revoked, or paired \
@@ -494,21 +495,23 @@ impl AtlassianAuth {
                  token belongs on `scoped-token`.",
             ),
             (Method::ScopedToken { .. }, 401) => Some(
-                "The gateway rejected this token. It honors only a token carrying scopes — a \
-                 CLASSIC token is refused here and belongs on `api-token`, addressed at the \
-                 site. Check which shape the token is before reissuing it.",
+                "The gateway did not accept this token. It honors only a token carrying \
+                 scopes, so the first thing to check is the SHAPE: a classic token is \
+                 refused here and belongs on `api-token`, addressed at the site. Otherwise \
+                 the token is expired or revoked, or its scopes do not admit this endpoint.",
             ),
             (Method::ScopedToken { .. }, 403) => Some(
                 "The gateway refused this resource. Three causes look alike here: the \
                  token's scopes may not cover it, the account behind it may lack access to \
-                 the product or space, or an IP allowlist may be refusing the address — a \
-                 list admits an org-approved OAuth app, not an account token, and reaching \
-                 it through api.atlassian.com does not change that.",
+                 the product or space, or an IP allowlist may not name this address — such \
+                 a list admits an org-approved OAuth app where it refuses an account token, \
+                 and reaching it through api.atlassian.com does not change that.",
             ),
             (Method::PersonalAccessToken { .. }, 401 | 403) => Some(
-                "This instance rejected a personal access token. Data Center expects a PAT as \
-                 `Authorization: Bearer` (which Lorekeeper sends) — confirm the token is \
-                 current and that the account can reach this project or space.",
+                "This instance refused a personal access token request. Data Center expects \
+                 a PAT as `Authorization: Bearer` (which Lorekeeper sends), so confirm the \
+                 token is current — and, for a 403, that the account behind it can reach \
+                 this project or space, which no reissued token changes.",
             ),
             (Method::Oauth { .. }, 403) => Some(
                 "The grant was refused this resource. Its app's registered scopes most \
@@ -646,9 +649,9 @@ mod tests {
 
     #[test]
     fn an_allowlist_stays_a_candidate_for_an_account_token_at_either_host() {
-        // The list admits an org-approved app and turns away the account whichever host it
-        // asks at, so reaching the gateway is not an exemption and neither 403 may say the
-        // address is cleared. Both name the remaining causes instead of choosing one.
+        // From an address the list does not name it admits an org-approved app and turns
+        // away the account at either host, so reaching the gateway is not an exemption and
+        // neither 403 may rule the address out. Both name the causes rather than pick one.
         for method in [api_token(), scoped_token()] {
             let refused = auth("https://acme.atlassian.net", method).explain_failure(403, "body");
             assert!(refused.contains("allowlist"), "{refused}");

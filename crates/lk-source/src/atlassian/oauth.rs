@@ -170,12 +170,19 @@ pub async fn build_grant(
         .await?;
     if !resp.status().is_success() {
         let body = resp.text().await.unwrap_or_default();
-        // Consent succeeded (we hold a code) but the exchange was refused. The causes that
-        // survive to this point are narrow, and naming them beats a bare provider string:
-        // the code is minted for one exact (client, redirect_uri, verifier) triple.
-        let hint = if body.contains("access_denied") || body.contains("invalid_grant") {
-            "\n\nThe consent succeeded and the code was accepted, so the app, callback URL \
-             and client secret are all correct — the exchange was refused on policy. The usual \
+        // Consent succeeded (we hold a code) but the exchange was refused, and the two
+        // errors that reach here mean opposite things. `invalid_grant` is the code itself
+        // being rejected — it is minted for one exact (client, redirect_uri, verifier)
+        // triple and is single-use and short-lived — while `access_denied` is a code the
+        // server accepted and a policy that refused the result.
+        let hint = if body.contains("invalid_grant") {
+            "\n\nThe authorization code was not accepted. It is single-use and expires in \
+             minutes, and it is bound to one exact client id, callback URL and PKCE verifier \
+             — so a retried, reused or stale code fails here, as does a callback URL that \
+             differs from the app's registration by so much as a trailing slash. Re-run \
+             `lore init credentials` and complete the consent without pausing."
+        } else if body.contains("access_denied") {
+            "\n\nThe code was accepted and the exchange was refused on policy. The usual \
              cause is a scope set that does not match the app's registration: some apps grant \
              only their exact registered list, not a subset. Re-run `lore init credentials` \
              and paste the app's full scope list at the scope prompt (developer.atlassian.com \
