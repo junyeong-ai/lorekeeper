@@ -281,6 +281,11 @@ impl AtlassianAuth {
     /// classic token and a PAT are honored only by the site. Confluence Cloud additionally
     /// lives under `/wiki`, while a Data Center instance's context path is already part of
     /// `site_url`.
+    ///
+    /// `/wiki` is the SITE's context path, so it belongs to the site base and not to the
+    /// gateway one, which already names the product. Both Confluence adapters address v1
+    /// (`/rest/api/…`); a v2 path spells the prefix itself (`/wiki/api/v2/…`) and would have
+    /// to carry it here.
     pub fn api_base(&self, product: Product) -> String {
         match &self.method {
             Method::Oauth { cloud_id, .. } | Method::ScopedToken { cloud_id, .. } => {
@@ -493,9 +498,10 @@ impl AtlassianAuth {
                  site. Check which shape the token is before reissuing it.",
             ),
             (Method::ScopedToken { .. }, 403) => Some(
-                "The token authenticated but was refused this resource, which for a scoped \
-                 token means its scopes do not cover it. An IP allowlist is not the cause: \
-                 it guards the site, and this request went through api.atlassian.com.",
+                "The token authenticated but was refused this resource — most likely its \
+                 scopes do not cover it, or the account it belongs to lacks access to this \
+                 product or space. An IP allowlist is not the cause: it guards the site, and \
+                 this request went through api.atlassian.com.",
             ),
             (Method::PersonalAccessToken { .. }, 401 | 403) => Some(
                 "This instance rejected a personal access token. Data Center expects a PAT as \

@@ -199,6 +199,16 @@ impl std::fmt::Debug for AtlassianAuthMethod {
     }
 }
 
+/// A credential from the environment, where a variable that is set but blank is absent.
+///
+/// A wrapper exporting `LORE_SLACK_TOKEN="$MAYBE_TOKEN"` unconditionally sets the variable
+/// whether or not it holds anything, and an empty string taken as a credential overwrites a
+/// working file entry with one that cannot authenticate — surfacing as a provider rejecting
+/// the account rather than as configuration.
+fn env_credential(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|v| !v.trim().is_empty())
+}
+
 impl std::fmt::Debug for AtlassianCredentials {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AtlassianCredentials")
@@ -346,10 +356,10 @@ impl Credentials {
     }
 
     fn override_from_env(&mut self) {
-        if let (Ok(id), Ok(secret), Ok(refresh)) = (
-            std::env::var("LORE_GOOGLE_CLIENT_ID"),
-            std::env::var("LORE_GOOGLE_CLIENT_SECRET"),
-            std::env::var("LORE_GOOGLE_REFRESH_TOKEN"),
+        if let (Some(id), Some(secret), Some(refresh)) = (
+            env_credential("LORE_GOOGLE_CLIENT_ID"),
+            env_credential("LORE_GOOGLE_CLIENT_SECRET"),
+            env_credential("LORE_GOOGLE_REFRESH_TOKEN"),
         ) {
             self.google = Some(GoogleCredentials {
                 client_id: id,
@@ -358,8 +368,8 @@ impl Credentials {
             });
         }
 
-        let bot = std::env::var("LORE_SLACK_TOKEN").ok();
-        let user = std::env::var("LORE_SLACK_USER_TOKEN").ok();
+        let bot = env_credential("LORE_SLACK_TOKEN");
+        let user = env_credential("LORE_SLACK_USER_TOKEN");
         if bot.is_some() || user.is_some() {
             let mut slack = self.slack.clone().unwrap_or_default();
             if let Some(b) = bot {
@@ -381,22 +391,22 @@ impl Credentials {
         // `persist_atlassian_refresh_token` has no file entry to write the successor to, so
         // an env-supplied grant would work for exactly one run. Grants live in the file,
         // where their rotation can be recorded.
-        if let Ok(site_url) = std::env::var("LORE_ATLASSIAN_SITE_URL") {
+        if let Some(site_url) = env_credential("LORE_ATLASSIAN_SITE_URL") {
             let auth = match (
-                std::env::var("LORE_ATLASSIAN_PAT"),
-                std::env::var("LORE_ATLASSIAN_EMAIL"),
-                std::env::var("LORE_ATLASSIAN_API_TOKEN"),
-                std::env::var("LORE_ATLASSIAN_CLOUD_ID"),
+                env_credential("LORE_ATLASSIAN_PAT"),
+                env_credential("LORE_ATLASSIAN_EMAIL"),
+                env_credential("LORE_ATLASSIAN_API_TOKEN"),
+                env_credential("LORE_ATLASSIAN_CLOUD_ID"),
             ) {
-                (Ok(token), ..) => Some(AtlassianAuthMethod::PersonalAccessToken { token }),
-                (_, Ok(email), Ok(api_token), Ok(cloud_id)) => {
+                (Some(token), ..) => Some(AtlassianAuthMethod::PersonalAccessToken { token }),
+                (_, Some(email), Some(api_token), Some(cloud_id)) => {
                     Some(AtlassianAuthMethod::ScopedToken {
                         email,
                         api_token,
                         cloud_id,
                     })
                 }
-                (_, Ok(email), Ok(api_token), _) => {
+                (_, Some(email), Some(api_token), None) => {
                     Some(AtlassianAuthMethod::ApiToken { email, api_token })
                 }
                 _ => None,
