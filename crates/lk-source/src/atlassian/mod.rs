@@ -356,12 +356,13 @@ impl AtlassianAuth {
         let current = lock(refresh_token, "refresh token").clone();
 
         // Deliberately NOT wrapped in `retry::send_with_retry`, unlike every other request
-        // in this crate. A rotating refresh token is single-use: if the server commits the
-        // rotation and the response is then lost to a timeout, a retry replays a token that
-        // is already dead and Atlassian answers `invalid_grant` — permanently stranding the
-        // grant until a human re-authorizes. Failing this run instead is self-healing (the
-        // next run refreshes from the token still on disk), so the asymmetry is the point:
-        // a cheap missed ingest beats an unattended pipeline that needs manual rescue.
+        // in this crate. A rotating refresh token is single-use, and a lost response leaves
+        // two indistinguishable states: the rotation was never committed, or it was and the
+        // successor is gone. Failing keeps the predecessor on disk, which is the token the
+        // next run needs in the first case and the only case either choice can recover —
+        // when the rotation did commit, the grant needs re-authorizing whatever happens
+        // here. So the asymmetry is between a missed ingest and a retry that adds nothing:
+        // failing costs one run in the recoverable case and nothing in the other.
         let resp = self
             .http
             .post(token_endpoint())
