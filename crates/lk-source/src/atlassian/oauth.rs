@@ -171,10 +171,10 @@ pub async fn build_grant(
     if !resp.status().is_success() {
         let body = resp.text().await.unwrap_or_default();
         // Consent succeeded (we hold a code) but the exchange was refused, and the two
-        // errors that reach here mean opposite things. `invalid_grant` is the code itself
+        // errors that reach here mean different things. `invalid_grant` is the code itself
         // being rejected — it is minted for one exact (client, redirect_uri, verifier)
-        // triple and is single-use and short-lived — while `access_denied` is a code the
-        // server accepted and a policy that refused the result.
+        // triple and is single-use and short-lived. `access_denied` is a refusal by the
+        // authorization server or the resource owner, which says nothing about the code.
         let hint = if body.contains("invalid_grant") {
             "\n\nThe authorization code was not accepted. It is single-use and expires in \
              minutes, and it is bound to one exact client id, callback URL and PKCE verifier \
@@ -182,11 +182,13 @@ pub async fn build_grant(
              differs from the app's registration by so much as a trailing slash. Re-run \
              `lore init credentials` and complete the consent without pausing."
         } else if body.contains("access_denied") {
-            "\n\nThe code was accepted and the exchange was refused on policy. The usual \
-             cause is a scope set that does not match the app's registration: some apps grant \
-             only their exact registered list, not a subset. Re-run `lore init credentials` \
-             and paste the app's full scope list at the scope prompt (developer.atlassian.com \
-             → your app → Permissions shows it)."
+            "\n\nThe authorization server refused the exchange rather than the code. One \
+             cause is a scope set that does not match the app's registration — some apps \
+             grant only their exact registered list, not a subset — in which case re-running \
+             `lore init credentials` and pasting the app's full scope list at the scope \
+             prompt fixes it (developer.atlassian.com → your app → Permissions shows it). An \
+             org policy on who may consent, or on the app itself, refuses the same way and \
+             needs an admin."
         } else {
             ""
         };

@@ -27,9 +27,9 @@
 //! An **IP allowlist** cuts across this, and it is about the PRINCIPAL rather than the
 //! host: it answers `403 "your IP address is not listed in the IP allowlist"` to an account
 //! token from an unlisted address at EITHER host, while admitting an org-approved OAuth app
-//! at the same moment from the same network. So on such an instance `oauth` is the only
-//! method that reaches the API from an address the list does not name; from a listed
-//! address, and on an instance with no list, every method works.
+//! at the same moment from the same address. So on such an instance `oauth` is the only
+//! method that reaches the API from an address the list does not name; from one it does,
+//! and on an instance with no list, every method works.
 
 pub mod oauth;
 
@@ -140,9 +140,10 @@ pub enum JiraPaging {
 
 /// A resolved credential for one batch of requests.
 ///
-/// Materialized ONCE per extract and then reused: `retry::send_with_retry` rebuilds its
-/// request synchronously on every attempt and cannot await a token refresh inside the
-/// closure, so the header must already be a plain value by then.
+/// Resolved before a request and reused for its retries: `send_with_retry`'s closure
+/// returns a future typed on `reqwest::Error`, which cannot carry an auth failure, so the
+/// header has to be a plain value by then. Callers that paginate re-resolve per page, which
+/// bounds how long one value is held to a single page and its retries.
 #[derive(Clone)]
 pub enum AuthHeader {
     Bearer(String),
@@ -379,15 +380,15 @@ impl AtlassianAuth {
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
-            // `invalid_grant` means the stored token was already spent or revoked — the
-            // signature of a grant shared with another client, which rotation makes mutually
-            // destructive. Say so, because the generic message sends operators hunting for
-            // an expired token instead of a second consumer.
+            // `invalid_grant` covers a refresh token that is spent, revoked, expired or
+            // issued to another client. Name the shared grant among them: rotation makes
+            // that case self-inflicted and recurring, and it is the one an operator hunting
+            // for an expired token will not think of.
             let hint = if body.contains("invalid_grant") {
-                " — the stored refresh token was already used or revoked. Atlassian rotates \
-                 refresh tokens, so sharing this grant with another client invalidates it on \
-                 every run; give Lorekeeper its own OAuth app, then re-run \
-                 `lore init credentials`."
+                " — the stored refresh token was not accepted: spent, revoked, expired, or \
+                 issued to a different client. Atlassian rotates refresh tokens, so a grant \
+                 shared with another tool is invalidated on every run and comes back daily; \
+                 give Lorekeeper its own OAuth app, then re-run `lore init credentials`."
             } else {
                 ""
             };
@@ -750,8 +751,8 @@ mod tests {
     fn failure_advice_follows_the_configured_method_not_the_response_text() {
         let body = r#"{"errorMessages":["nope"]}"#;
 
-        // An API token meeting 403 is the allowlist signature, and the remedy is a different
-        // auth method — worth saying.
+        // An API token meeting 403 may be the allowlist, and that remedy is a different
+        // auth method — worth naming beside the alternatives.
         let token_403 = auth("https://acme.atlassian.net", api_token()).explain_failure(403, body);
         assert!(token_403.contains("IP allowlist"));
         assert!(token_403.contains("lore init credentials"));
