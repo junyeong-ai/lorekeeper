@@ -39,6 +39,18 @@ the work-log), apply the generic guidance without a type bias.
 - Long pages carry headings, tables and code — keep the load-bearing specifics
   (names, values, thresholds, endpoints) and drop navigation scaffolding
 
+### `nodex`
+- A decision record, learning or guide the project wrote for itself, already
+  edited prose. The repository remains its home and the vault is the layer above,
+  so summarize it for a reader who does not work on this project: the problem, the
+  judgment, and what the judgment turns on
+- Keep the specifics that make it checkable — error text, values, thresholds, API
+  and platform names — and drop the project's internal coordinates (ticket ids,
+  environment and module names, its own file paths). The `🔗` link is what reaches
+  the full record, so nothing is lost by leaving the project's own vocabulary in it
+- A document arguing four attempts at one fix is about where the boundary goes,
+  not about four attempts. Summarize the judgment, never the narrative
+
 ### `google-drive`, `manual`
 - Treat as curated documents: preserve the author's structure, distill to the
   core argument and supporting detail
@@ -62,6 +74,14 @@ Use `input.source_type` to scope what counts as a concept:
 - `confluence` → the systems, contracts and decisions the page documents; a page
   the user authored is usually the definitive statement of them, so prefer its
   naming over a synonym seen elsewhere
+- `nodex` → the transferable half, and only that. The repository already holds and
+  searches the project-specific half, so a concept earns a page here when a
+  DIFFERENT project could cite it: a pattern, a failure mode, a platform or
+  framework constraint, a method. Never this repository's module names, ticket ids,
+  environments, config keys or file paths — those name one codebase and no second
+  source can ever cite them. Where a document states a general insight in project
+  terms, name the concept in the general terms and leave the project's word out
+  unless another source would plausibly write it, in which case it is an alias
 - `google-drive` / `manual` → document subject matter
 - `tasks` → what the closing note established: the systems touched, the
   constraint found, the decision taken. The task's title names an intention and

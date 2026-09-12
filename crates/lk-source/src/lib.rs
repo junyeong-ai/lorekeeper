@@ -5,6 +5,7 @@ mod google;
 mod jira;
 mod manual;
 pub(crate) mod markdown;
+mod nodex;
 pub(crate) mod paging;
 pub(crate) mod retry;
 mod rss;
@@ -239,6 +240,7 @@ pub fn validate_params(
         SourceType::Confluence => confluence::validate_params(params),
         SourceType::Rss => rss::validate_params(params),
         SourceType::Manual => manual::validate_params(params),
+        SourceType::Nodex => nodex::validate_params(params),
         SourceType::Tasks => tasks::validate_params(params),
     }
 }
@@ -390,6 +392,8 @@ pub fn build_source(
         // RSS feeds are public HTTP — no credentials.
         SourceType::Rss => Ok(Box::new(rss::RssSource::new(http))),
         SourceType::Manual => Ok(Box::new(manual::ManualSource::new())),
+        // A local repository read through its own CLI — no credentials, no network.
+        SourceType::Nodex => Ok(Box::new(nodex::NodexSource)),
         SourceType::Tasks => Ok(Box::new(tasks::TasksSource)),
     }
 }
@@ -482,6 +486,10 @@ mod tests {
             (
                 SourceType::Manual,
                 serde_json::json!({"inbox_dir": "inbox", "extensions": ["md"]}),
+            ),
+            (
+                SourceType::Nodex,
+                serde_json::json!({"repo": "/srv/projects/platform", "kinds": ["learning"]}),
             ),
             (SourceType::Tasks, serde_json::json!({})),
             (

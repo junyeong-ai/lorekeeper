@@ -256,6 +256,7 @@ flowchart LR
 | `google-calendar` | 일정 + 회의록(Drive 링크 자동 추출) | Google OAuth |
 | `google-drive` | Drive 폴더의 큐레이션 문서 | Google OAuth |
 | `rss` | 벤더 블로그·뉴스 → 개념 (인증 불필요, 다중 피드) | 없음 |
+| `nodex` | 프로젝트 저장소가 직접 쓴 결정·학습 기록 → 개념 (`nodex.toml`과 `nodex` 바이너리 필요) | 없음 |
 | `manual` | `inbox/`에 드롭한 마크다운·텍스트·HTML 파일 | 없음 |
 | `tasks` | 내가 끝낸 작업 — `lore task`로 닫은 항목이 그날의 페이지가 됨 | 없음 |
 

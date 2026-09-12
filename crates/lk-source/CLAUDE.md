@@ -191,6 +191,22 @@ map to `RawItem`.
     `markdown::readable_html_to_markdown`, which returns `None` when readability finds no
     article core; on `None` (or a result shorter than the summary) the known-clean feed
     summary is kept, so boilerplate never overwrites it.
+  - **nodex** (`nodex.rs`): a project repository's DECLARED document graph, read by running
+    `nodex query recent` in it. The documents are not copied — the repository remains their
+    store — so each day's documents become events on a daily page and only the CONCEPTS they
+    name reach the wiki, which is what makes one insight found in three projects converge on
+    one page. Admission is structural because `nodex` answers structurally: `status` is not
+    `active` (superseded/archived) excludes a document as a FACT rather than a heuristic
+    reading its prose, and `kind` is the repository's own vocabulary. `--today` pins the
+    clock so `--date` backfill asks the day's own question; `--since` is a lower bound only,
+    so the upper one is applied here against the same declared date. `is_self` is always
+    false and `author` carries the document KIND: a repository records no author per
+    document, and the commit that last touched a file is not a claim about who wrote what is
+    in it. `base_url` is configured rather than derived from `git remote` — deriving it needs
+    three guesses (remote form, default branch, host layout) where one config line is exact,
+    and a repo without a remote states no URL at all rather than a local path that resolves
+    nowhere else. A repository with no `nodex.toml` is NOT this adapter's case and no
+    fallback discovery exists for it: `/lore-extract` is the path, under a person's judgment.
   - **Error isolation**: individual item failures (thread fetch, file download, timestamp
     parse) are caught with `tracing::warn!` and skipped — one inaccessible thread or file
     does not abort the entire source.

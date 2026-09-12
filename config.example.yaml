@@ -273,6 +273,38 @@ sources:
     labels: [ai-tech]
     extract_concepts: true
 
+  # Your project repositories' own knowledge — the ADRs, learnings and guides they already
+  # keep. The documents stay where they are: the repository stores, validates and searches
+  # them, and a copy in the vault would only be a second store to keep in step. What reaches
+  # the vault is the CONCEPTS they name, which accumulate evidence from every project and
+  # every feed that names them too — that cross-project synthesis is the whole reason this
+  # source exists, and it is the existing concept machinery, not a new one.
+  #
+  # Requires `nodex` on PATH and a `nodex.toml` in the repo: this source reads a DECLARED
+  # document graph rather than guessing at a layout, which is what lets `status` exclude a
+  # superseded decision as a fact rather than a heuristic. A repo without one is
+  # `/lore-extract`'s case — a one-off pass under a person's judgment.
+  # One source per repository (the source id is its directory under <daily>/).
+  platform-docs:
+    type: nodex
+    enabled: false
+    params:
+      repo: /absolute/path/to/your/repo   # absolute: a scheduled run starts nowhere in particular
+      kinds: [learning, adr, guide]       # from the repo's own kinds.allowed; omit for every kind
+      lookback_hours: 24
+      # max_documents: 200
+      # The prefix a document's repo-relative path is appended to, so a citation links back
+      # to the real record. Omit it for a repo with no remote — a local path is provenance
+      # that resolves nowhere but this machine.
+      base_url: "https://github.com/org/repo/blob/main"
+    labels: [project-knowledge]
+    extract_concepts: true
+    # The focus is what keeps the graph general. The repository already holds the
+    # project-specific half, so only what a DIFFERENT project could cite earns a page.
+    focus: >
+      여러 프로젝트에 옮겨 쓸 수 있는 패턴·실패 모드·플랫폼 제약·방법론만 개념화할 것.
+      이 저장소에만 해당하는 모듈명·티켓 번호·환경명·설정 키·파일 경로는 개념화하지 말 것.
+
   # Manual curation — drop files into the <vault>/inbox/ directory and they become
   # individual wiki/documents/{slug}.md document pages (LLM summary + concept extraction included).
   # HTML is run through a readability extractor to extract the body, then converted to Markdown.

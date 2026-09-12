@@ -49,6 +49,10 @@ const EMBEDDED: &[(&str, &str)] = &[
         include_str!("../../../templates/monthly-review.md.jinja"),
     ),
     (
+        "nodex.md.jinja",
+        include_str!("../../../templates/nodex.md.jinja"),
+    ),
+    (
         "quarterly-review.md.jinja",
         include_str!("../../../templates/quarterly-review.md.jinja"),
     ),

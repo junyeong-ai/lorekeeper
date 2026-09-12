@@ -159,6 +159,7 @@ Auto-discovered: `./config.yaml` → `~/.config/lorekeeper/config.yaml`.
 | `confluence` | Confluence REST API | Wiki pages I wrote/edited (CQL, storage-format→Markdown); version-keyed so an edit re-enters the pipeline |
 | `google-calendar` | Calendar API | Schedule tracking (HTML→Markdown) |
 | `rss` | RSS/Atom (`feed-rs`) | External knowledge feeds (vendor blogs, news) → concepts; no auth, multi-feed, per-feed error isolation (but a source that reached NO feed fails) |
+| `nodex` | `nodex` CLI | A project repository's declared document graph — its ADRs, learnings and guides stay in the repo; the concepts they name reach the vault |
 | `manual` | Local inbox | User-curated files dropped in `inbox/` (md/txt/markdown/html/htm by default; archives consumed files once this source's vault writes and the queue flush succeed) |
 | `tasks` | The intent plane's transition log | The user's own completed tasks — what `lore task` closed becomes that day's page, the work-log and a review |
 

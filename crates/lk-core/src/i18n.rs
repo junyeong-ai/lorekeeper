@@ -134,6 +134,7 @@ pub struct Strings {
     pub jira_title: &'static str,
     pub confluence_title: &'static str,
     pub rss_title: &'static str,
+    pub nodex_title: &'static str,
     pub work_log_title: &'static str,
     pub weekly_synthesis_title: &'static str,
     // Work-log sections
@@ -228,6 +229,7 @@ static KO: Strings = Strings {
     jira_title: "내 Jira 업무",
     confluence_title: "내 위키 문서",
     rss_title: "뉴스",
+    nodex_title: "프로젝트 기록",
     work_log_title: "업무 기록",
     weekly_synthesis_title: "주간 종합",
     topic_summary: "주제별 요약",
@@ -309,6 +311,7 @@ static EN: Strings = Strings {
     jira_title: "My Jira",
     confluence_title: "My Wiki Pages",
     rss_title: "News",
+    nodex_title: "Project record",
     work_log_title: "Work Log",
     weekly_synthesis_title: "Weekly Synthesis",
     topic_summary: "Topics",

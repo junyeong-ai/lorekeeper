@@ -1,0 +1,13 @@
+{% extends "_daily_base.md.jinja" %}
+{% block title %}{{ i18n.nodex_title }}{% endblock %}
+{# A project document leads with which kind of record it is, then its body. #}
+{% block events %}
+{% for item in events -%}
+### {{ item.title }}
+
+{% if item.author %}*{{ item.author }}*{% endif %}{% if item.url %} · 🔗 {{ item.url }}{% endif %}
+
+{{ item.body }}
+
+{% endfor %}
+{% endblock %}

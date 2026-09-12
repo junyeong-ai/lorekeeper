@@ -838,6 +838,10 @@ pub enum SourceType {
     /// User-curated inbox: files dropped into `<vault>/inbox/` are picked up,
     /// processed through the same pipeline as automated sources, and archived.
     Manual,
+    /// A project repository's own document graph, read through `nodex`. The documents stay in
+    /// the repository that already stores and validates them; what reaches the vault is the
+    /// concepts they name, which accumulate evidence across every project that names them too.
+    Nodex,
     /// The user's own completed tasks, read from the intent plane's transition log.
     ///
     /// The one source whose items this tool produced itself: a task finished on the board is
@@ -954,6 +958,14 @@ impl SourceType {
             SourceType::Manual => SourceDescriptor {
                 streaming: false,
                 default_template: "document.md.jinja",
+                scheduled: false,
+                item_kind: ItemKind::Event,
+            },
+            // Not streaming: a repository's documents declare their own dates and stay where
+            // they are, so a past day re-queries complete.
+            SourceType::Nodex => SourceDescriptor {
+                streaming: false,
+                default_template: "nodex.md.jinja",
                 scheduled: false,
                 item_kind: ItemKind::Event,
             },
