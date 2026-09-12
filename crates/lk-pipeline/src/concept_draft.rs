@@ -141,9 +141,9 @@ impl ConceptDrafts {
     /// [`Self::render_pages`] emits the accumulator unconditionally — a half-folded result
     /// would write concept pages whose origin page was never updated to cite them.
     ///
-    /// The drafts are what that protects. Resolving a name does record it in the alias index
-    /// (see [`Self::resolve_identity`]), so a `stage` that fails afterwards leaves that entry
-    /// behind. Deliberately, but it is not a no-op: the entry fixes the SLUG for the rest of
+    /// The drafts are what that protects. Resolving a name — and adopting the extraction's
+    /// other names — does record them in the alias index (see [`Self::resolve_identity`]), so
+    /// a `stage` that fails afterwards leaves those entries behind. Deliberately, but it is not a no-op: the entry fixes the SLUG for the rest of
     /// the run, so a run whose first mention was `VectorDB` writes `vectordb.md` where one
     /// that saw `Vector DB` first would write `vector-db.md`. Only the address is inherited
     /// — the page's title is whichever spelling created the draft, and the display name in a
@@ -187,9 +187,10 @@ impl ConceptDrafts {
     /// conflict is reported and the alias dropped — never routed by preference, and never
     /// matched approximately, since an alias exists precisely to make an exact lookup succeed.
     fn adopt_aliases(&mut self, identity: &ConceptIdentity, proposed: &[String]) -> Vec<String> {
-        let Some(registry) = self.registry.as_mut() else {
-            return Vec::new();
-        };
+        let registry = self
+            .registry
+            .as_mut()
+            .expect("stage resolves the name first, which builds the registry");
         let mut adopted = Vec::new();
         for alias in proposed {
             let alias = alias.trim();

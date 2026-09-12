@@ -139,8 +139,31 @@ impl Source for NodexSource {
         let first_day = start.to_zoned(ctx.timezone.clone()).date();
         let last_day = ctx.target_date;
 
-        let items = query_recent(&p.repo, first_day, last_day, p.max_documents).await?;
+        // Asked per FIELD rather than through nodex's `any`, which also matches a review
+        // stamp. A review is not an edit: the document is unchanged, so re-admitting it on the
+        // day it was re-read would put a second copy of knowledge the vault already holds onto
+        // a later page and run the extraction over it again. Two queries rather than one
+        // answer plus a guess at which field nodex reports when several match.
+        let mut items: Vec<RecentItem> = Vec::new();
+        let mut capped = false;
+        for field in ["created", "updated"] {
+            let page = query_recent(&p.repo, field, first_day, last_day, p.max_documents).await?;
+            // `--limit` is applied by the query, BEFORE this filters by status, kind and date,
+            // so whether the cap bit is a question about what the query returned. Asking it of
+            // the kept count instead can never be true while any document is filtered out,
+            // which is the normal case — the warning would be silent exactly when documents
+            // were dropped.
+            capped |= page.len() == p.max_documents;
+            items.extend(page);
+        }
+        items.sort_by(|a, b| a.id.cmp(&b.id));
+        items.dedup_by(|a, b| a.id == b.id);
         let mut kept = Vec::new();
+        // What the query said belongs to this window, after the declared fields decided it. A
+        // document excluded by `status`, `kind` or its date was never attempted, so it cannot
+        // stand for a read that failed — the count has to be taken here rather than from the
+        // query's own length.
+        let mut attempted = 0;
         for item in items {
             if item.status != ACTIVE
                 || item.date < first_day
@@ -149,12 +172,23 @@ impl Source for NodexSource {
             {
                 continue;
             }
+            // A path that leaves the repository is refused before it is read, and refusing it
+            // ends the SOURCE rather than skipping the document. A read that failed is one
+            // document missing; a path the query had no business naming is the answer itself
+            // being wrong, and the next one cannot be trusted either.
+            contained(&item.path).map_err(|why| {
+                SourceError::Parse(format!(
+                    "{} names '{}', which {why} — a document graph addresses files inside the \
+                     repository it describes",
+                    item.id, item.path
+                ))
+            })?;
+            attempted += 1;
             match read_document(&p.repo, &item, p.base_url.as_deref(), ctx) {
                 Ok(raw) => kept.push(raw),
                 // One unreadable file must not cost the others their day: the repository is
                 // the store, and a document this cannot read is still there to be read
-                // tomorrow. A run that reached NOTHING is the case the caller's own
-                // `require_any_observation` answers.
+                // tomorrow.
                 Err(e) => tracing::warn!(
                     document = %item.id,
                     error = %e,
@@ -162,11 +196,16 @@ impl Source for NodexSource {
                 ),
             }
         }
+        // A repository whose working tree moved out from under the query answers with
+        // documents and yields none of them. `lore health` reads the ingest log as its only
+        // evidence a source is alive, and that log records one bit, so an empty success here
+        // would let the source report fresh every morning while collecting nothing.
+        crate::require_any_observation("document", kept.len(), attempted)?;
 
-        if kept.len() == p.max_documents {
+        if capped {
             tracing::warn!(
                 cap = p.max_documents,
-                "nodex: `max_documents` reached — raise it or narrow `kinds`, or documents are being dropped"
+                "nodex: `max_documents` reached — raise it, or documents this day wrote are being dropped"
             );
         }
         Ok(kept)
@@ -180,6 +219,7 @@ impl Source for NodexSource {
 /// the caller's, against the same declared date this reports.
 async fn query_recent(
     repo: &Path,
+    field: &str,
     first_day: jiff::civil::Date,
     last_day: jiff::civil::Date,
     limit: usize,
@@ -189,7 +229,9 @@ async fn query_recent(
         .arg(repo)
         .arg("--today")
         .arg(last_day.to_string())
-        .args(["query", "recent", "--since"])
+        .args(["query", "recent", "--field"])
+        .arg(field)
+        .arg("--since")
         .arg(first_day.to_string())
         .arg("--limit")
         .arg(limit.to_string())
@@ -222,6 +264,30 @@ async fn query_recent(
         )));
     }
     Ok(envelope.data.map(|d| d.items).unwrap_or_default())
+}
+
+/// Refuse a path that does not stay inside the repository it is relative to.
+///
+/// `Path::join` DISCARDS its base when the second operand is absolute, and resolves `..`
+/// lexically against whatever is above the repository — so the two shapes that escape are the
+/// two this names, and the check is on path COMPONENTS rather than on the string, which is the
+/// same discipline `manual`'s inbox validation uses and closes the whole class rather than the
+/// spellings someone thought of.
+///
+/// Symlinks are deliberately NOT chased here. A repository's own files are its author's, and
+/// `nodex` has already parsed this one to report it — a rule refusing what the document graph
+/// already accepted would put the two at odds over which files the repository contains.
+fn contained(path: &str) -> Result<(), &'static str> {
+    use std::path::Component;
+
+    let path = Path::new(path);
+    if path.is_absolute() || matches!(path.components().next(), Some(Component::Prefix(_))) {
+        return Err("is an absolute path");
+    }
+    if path.components().any(|c| c == Component::ParentDir) {
+        return Err("climbs out of the repository with `..`");
+    }
+    Ok(())
 }
 
 /// Read one document's prose. The frontmatter is dropped: it is `nodex`'s own record of the
@@ -291,6 +357,36 @@ mod tests {
     #[test]
     fn a_zero_document_cap_is_refused() {
         assert!(validate_params(&params(serde_json::json!({ "max_documents": 0 }))).is_err());
+    }
+
+    /// `Path::join` discards its base when handed an absolute path and resolves `..` against
+    /// whatever sits above the repository, so an answer naming either reads a file the
+    /// repository does not contain — straight into a vault page and from there into concept
+    /// extraction. The subprocess is a boundary like any other: what it says is checked, not
+    /// trusted.
+    #[test]
+    fn a_path_that_leaves_the_repository_is_refused() {
+        assert!(contained("docs/learnings/a.md").is_ok());
+        assert!(contained("/etc/passwd").is_err());
+        assert!(contained("../../.ssh/id_rsa").is_err());
+        assert!(contained("docs/../../../etc/passwd").is_err());
+        assert!(
+            contained("docs/./a.md").is_ok(),
+            "a no-op component is not an escape"
+        );
+    }
+
+    /// A document the query named and this could not read is a document that yielded nothing,
+    /// whatever the reason — and a run that read NONE of them is an outage wearing the shape
+    /// of a quiet day. The ingest log records one bit, so an empty success would let the
+    /// source read fresh every morning while collecting nothing.
+    #[test]
+    fn reading_none_of_the_documents_the_query_named_is_an_error() {
+        assert!(crate::require_any_observation("document", 0, 4).is_err());
+        assert!(
+            crate::require_any_observation("document", 0, 0).is_ok(),
+            "a window the repository declared nothing for is a quiet day, not an outage"
+        );
     }
 
     /// The refusal has to reach the caller as an error rather than an empty day: `lore health`

@@ -190,6 +190,10 @@ const GUARD_ONLY: &[(&[&str], &str)] = &[
         "reads `me/work-log`; the corpus vault carries no work-log page, so the category distribution is never computed",
     ),
     (
+        &["brief", "--date", "2026-06-09", "--json"],
+        "reads the concepts a day's own daily and document pages cite; the corpus has neither, so the split into learned and revisited is never reached",
+    ),
+    (
         &["queue", "status"],
         "classifies pending tasks against their target pages; the corpus queue is empty, so none of the five categories is exercised",
     ),

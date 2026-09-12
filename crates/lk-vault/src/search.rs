@@ -36,7 +36,9 @@ pub enum MatchField {
     /// Every term appears in the page's opening statement — the first line of its first
     /// section, which is what every format leads with and what the catalog shows.
     Summary,
-    /// Every term appears somewhere in the page's prose.
+    /// Every term appears somewhere in the page's prose. Link destinations are not prose: a
+    /// concept page carries one per citation, so matching them would make every page in the
+    /// vault answer to `daily` or to any source id.
     Text,
 }
 
@@ -102,7 +104,10 @@ pub fn search(
                 .unwrap_or(&id)
                 .to_string();
             let aliases = string_array(&page, "aliases");
-            let rel_path = rel_dir.join(path.file_name().unwrap_or_default());
+            // Taken from where the file actually sits rather than assembled from the directory
+            // and the name: the walk is recursive, so a page a person filed in a subdirectory
+            // would otherwise be reported at an address that resolves nowhere.
+            let rel_path = path.strip_prefix(vault_root).unwrap_or(&path).to_path_buf();
 
             let names: Vec<&str> = std::iter::once(id.as_str())
                 .chain(std::iter::once(title.as_str()))
@@ -171,13 +176,18 @@ fn match_page(
     {
         return Some(MatchField::Identity);
     }
+    // Link DESTINATIONS are addresses rather than prose, and a concept page carries one per
+    // citation — so matching them makes every page in the vault answer to `daily`, to any
+    // source id, and to a date fragment. What a reader sees is the display text, which is what
+    // `strip_links` leaves.
+    let prose = link::strip_links(body);
     let fields = [
         (MatchField::Name, fold(&names.join(" "))),
         (
             MatchField::Summary,
-            fold(&opening_statement(body).unwrap_or_default()),
+            fold(&opening_statement(&prose).unwrap_or_default()),
         ),
-        (MatchField::Text, fold(body)),
+        (MatchField::Text, fold(&prose)),
     ];
     terms
         .iter()
@@ -194,9 +204,11 @@ fn match_page(
 /// one matched in its prose is shown the line that matched, because the title already failed
 /// to explain why it is here.
 fn excerpt(body: &str, matched: MatchField, terms: &[String]) -> String {
+    // The same prose the match was taken over, so the line shown is the line that matched.
+    let prose = link::strip_links(body);
     let text = match matched {
-        MatchField::Identity | MatchField::Name | MatchField::Summary => opening_statement(body),
-        MatchField::Text => body
+        MatchField::Identity | MatchField::Name | MatchField::Summary => opening_statement(&prose),
+        MatchField::Text => prose
             .lines()
             .map(str::trim)
             .find(|line| {
@@ -204,9 +216,9 @@ fn excerpt(body: &str, matched: MatchField, terms: &[String]) -> String {
                 terms.iter().all(|t| folded.contains(t.as_str()))
             })
             .map(str::to_owned)
-            .or_else(|| opening_statement(body)),
+            .or_else(|| opening_statement(&prose)),
     };
-    text.map(|t| crate::index::truncate_summary(&link::strip_links(&t)))
+    text.map(|t| crate::index::truncate_summary(&t))
         .unwrap_or_default()
 }
 

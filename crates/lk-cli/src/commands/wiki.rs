@@ -82,14 +82,20 @@ async fn run_search(
     limit: usize,
     json: bool,
 ) -> miette::Result<()> {
+    // Neither is approximated. A cap of zero admits no page from the first one on, which is
+    // every other cap's rule in this workspace, and a query of no terms has no answer to give
+    // — reporting that nothing holds it would read as a fact about the vault.
+    if query.trim().is_empty() {
+        return Err(miette::miette!(
+            "`lore wiki search` needs something to look for"
+        ));
+    }
+    if limit == 0 {
+        return Err(miette::miette!("`--limit` must be > 0"));
+    }
     let config = load_config(&find_config(opts)?)?;
-    let hits = lk_vault::search(
-        &config.vault.root_path(),
-        &config.vault.dirs,
-        query,
-        limit.max(1),
-    )
-    .map_err(|e| miette::miette!("{e}"))?;
+    let hits = lk_vault::search(&config.vault.root_path(), &config.vault.dirs, query, limit)
+        .map_err(|e| miette::miette!("{e}"))?;
 
     if json {
         println!(

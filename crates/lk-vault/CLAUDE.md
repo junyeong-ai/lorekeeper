@@ -115,12 +115,18 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   daily pages under it — those are the bulk material a concept was read out of, so admitting
   them buries every page that ANSWERS a query under the pages that mentioned it once.
 - **`brief::build_brief` splits a day by whether the vault already held the concept.** Ten
-  concepts enter a day and thirty are touched again; what it did not hold is what was learned
+  concepts enter a day and thirty are named again; what it did not hold is what was learned
   and carries the line its page opens with, while what it already held carries names only —
-  the reader knows those, and restating them is the flood this reduces. Both halves are read
-  off the pages' own `created`/`updated`, so re-reading a day answers the same way however
-  long afterwards: a view of what the vault records, not of when it was run. `learned` is
-  grouped by `category` so a reader skips a group whole; `revisited` is ordered by evidence.
+  the reader knows those, and restating them is the flood this reduces. `learned` is grouped
+  by `category` so a reader skips a group whole; `revisited` is ordered by evidence.
+  **Which concepts a day named is read off THAT DAY'S PAGES — its daily pages and the document
+  pages `created` on it — never off `updated` on the concept.** A concept page records when it
+  was LAST cited and not every day it was, so a concept introduced on Tuesday and named again
+  on Wednesday fell out of Tuesday's `learned` and, no longer new on Wednesday, out of every
+  day: measured at 1 in 13 on one day of the reference vault, and it is the recurring concepts
+  — the interesting ones — that vanish. A day's own links do not move. The correct source is
+  also the cheap one: eight pages and their concepts rather than a scan of all 2689, which took
+  the command from 230ms to 16ms. Citations are gated exactly as the graph gates an edge.
 - **`VaultWriter::write_page_sync`** calls `lk_core::fs::write_atomic` directly (no tokio
   runtime). Used by graph commands — the same single atomic-write implementation as the
   async path, not a separate one.

@@ -120,14 +120,40 @@ fn listing(manual: &[(&String, &lk_core::config::SourceConfig)]) -> String {
 /// matter: re-fetching one article always resolves to the one path it already occupies, and
 /// two articles sharing a title never overwrite each other. A counter would satisfy the
 /// second and break the first, minting a file per re-fetch.
+/// A name is taken by anything that is not this same article as a regular file. The inbox
+/// scanner refuses a symlink, so writing under one would leave an article nothing ever
+/// ingests — and the comparison itself must not read through one, since what it would compare
+/// is a file somewhere else entirely.
 fn free_path(inbox: &Path, title: &str, content: &str) -> PathBuf {
-    let stem = slugify(title).unwrap_or_else(|| "article".into());
+    let stem = bounded(&slugify(title).unwrap_or_else(|| "article".into()));
     let candidate = inbox.join(format!("{stem}.md"));
-    match std::fs::read_to_string(&candidate) {
-        Ok(held) if held != content => {
-            let fingerprint = &blake3::hash(content.as_bytes()).to_hex()[..8];
-            inbox.join(format!("{stem}-{fingerprint}.md"))
+    let free = match candidate.symlink_metadata() {
+        Err(_) => true,
+        Ok(held) => {
+            held.file_type().is_file()
+                && std::fs::read_to_string(&candidate).is_ok_and(|on_disk| on_disk == content)
         }
-        _ => candidate,
+    };
+    if free {
+        return candidate;
     }
+    let fingerprint = &blake3::hash(content.as_bytes()).to_hex()[..8];
+    inbox.join(format!("{stem}-{fingerprint}.md"))
+}
+
+/// A filename a filesystem will accept. The title is the page's, not the user's, and Linux
+/// bounds one name at 255 BYTES — a long Korean or Japanese headline reaches that in a third
+/// of its characters, so a fetch would succeed and the write fail. Cut on a character
+/// boundary, leaving room for the fingerprint suffix and the extension.
+fn bounded(stem: &str) -> String {
+    const MAX_STEM_BYTES: usize = 200;
+
+    if stem.len() <= MAX_STEM_BYTES {
+        return stem.to_owned();
+    }
+    let mut cut = MAX_STEM_BYTES;
+    while cut > 0 && !stem.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    stem[..cut].trim_end_matches('-').to_owned()
 }

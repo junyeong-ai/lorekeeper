@@ -302,6 +302,14 @@ fn read_item(path: &Path) -> Result<RawItem, SourceError> {
         )));
     };
 
+    // Fingerprint everything the file contributes to the vault — its frontmatter as well as
+    // its prose — so re-dropping a file with the SAME name but EDITED content on the same day
+    // yields a distinct `EventId` (a distinct document page) rather than re-rendering the same
+    // one; an unchanged re-drop keeps a stable id. Taken before the split because the title and
+    // the source address reach the page too: a re-fetch that corrected only the title would
+    // otherwise dedup away and leave the page stating the old one.
+    let fingerprint = blake3::hash(body.as_bytes()).to_hex()[..8].to_string();
+
     let (front, body) = split_frontmatter(&body, path);
     let (title, content) = match front
         .as_ref()
@@ -317,11 +325,6 @@ fn read_item(path: &Path) -> Result<RawItem, SourceError> {
         .and_then(|s| s.to_str())
         .unwrap_or("manual")
         .to_string();
-    // Fingerprint the content into the external_id so re-dropping a file with the SAME name
-    // but EDITED content on the same day yields a distinct `EventId` (a distinct document
-    // page) rather than re-rendering the same one; an unchanged re-drop keeps a stable id.
-    let fingerprint = &blake3::hash(body.as_bytes()).to_hex()[..8];
-
     Ok(RawItem {
         external_id: Some(format!("manual:{file_name}:{fingerprint}")),
         title,
@@ -477,6 +480,70 @@ mod tests {
 
     fn write(path: &Path, body: &str) {
         std::fs::write(path, body).unwrap();
+    }
+
+    async fn one_item(dir: &Path) -> RawItem {
+        let ctx = ExtractContext {
+            target_date: jiff::civil::date(2026, 5, 24),
+            timezone: jiff::tz::TimeZone::UTC,
+            locale: lk_core::i18n::Locale::default(),
+            identity: lk_core::config::Identity::default(),
+            vault_root: std::path::PathBuf::new(),
+        };
+        let params = serde_json::json!({ "inbox_dir": dir, "archive_after_ingest": false });
+        let mut items = ManualSource::new().extract(&params, &ctx).await.unwrap();
+        assert_eq!(items.len(), 1);
+        items.remove(0)
+    }
+
+    /// What a file states about itself belongs in the fields the page is built from, not in
+    /// the prose it renders — an Obsidian note dropped here used to have its whole frontmatter
+    /// block read into the vault as body text.
+    #[tokio::test]
+    async fn a_files_frontmatter_states_its_title_and_address_rather_than_becoming_prose() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            &tmp.path().join("note.md"),
+            "---\ntitle: \"Stated title\"\nsource_url: \"https://example.com/a\"\n---\n\nbody line\n",
+        );
+        let item = one_item(tmp.path()).await;
+        assert_eq!(item.title, "Stated title");
+        assert_eq!(item.url.as_deref(), Some("https://example.com/a"));
+        assert_eq!(item.body.trim(), "body line");
+    }
+
+    /// Whether a file HAS frontmatter is `parse_page`'s question and no other — every vault
+    /// page is read by it, and a second rule here would be a second answer. So a block that
+    /// will not parse is not frontmatter, and the file is prose that happens to open with a
+    /// rule: kept whole rather than costing the user the lines above the fence.
+    #[tokio::test]
+    async fn a_leading_block_that_will_not_parse_is_not_frontmatter() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            &tmp.path().join("note.md"),
+            "---\ntitle: \"unterminated\n: also broken\n---\n\nbody\n",
+        );
+        let item = one_item(tmp.path()).await;
+        assert!(
+            item.body.contains(": also broken"),
+            "nothing above the fence may be dropped: {}",
+            item.body
+        );
+        assert!(item.url.is_none());
+    }
+
+    /// The id has to move when anything the page will state moves. A re-fetch that corrected
+    /// only the title leaves the prose identical, and an id taken over the prose alone would
+    /// dedup it away against the page still stating the old one.
+    #[tokio::test]
+    async fn correcting_only_the_title_is_a_distinct_observation() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("note.md");
+        write(&path, "---\ntitle: \"Old\"\n---\n\nsame body\n");
+        let before = one_item(tmp.path()).await.external_id;
+        write(&path, "---\ntitle: \"Corrected\"\n---\n\nsame body\n");
+        let after = one_item(tmp.path()).await.external_id;
+        assert_ne!(before, after);
     }
 
     #[tokio::test]

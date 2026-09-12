@@ -133,7 +133,10 @@ Auto-discovered: `./config.yaml` → `~/.config/lorekeeper/config.yaml`.
   other half of the same day and a view on the same terms: the board says what was promised,
   it says what was learned. Its split is a FACT about the pages — whether the vault already
   held the concept — never a judgment about importance, so what was learned carries the line
-  each page opens with and what was merely seen again carries names only.
+  each page opens with and what was merely named again carries names only. Which concepts a
+  day named is read off THAT DAY'S PAGES, never off `updated` on the concept: a concept page
+  records when it was LAST cited and not every day it was, so reading it there loses every
+  concept that was named again later — which is to say every concept worth having.
 - **Every column is padded by DISPLAY WIDTH.** `{:<n}` counts `char`s, and a Hangul syllable, a
   CJK ideograph, a kana and an emoji each take two columns — so a Korean vault's every list came
   out ragged, with the annotation landing wherever the titles happened to end. `commands::pad`

@@ -199,7 +199,20 @@ map to `RawItem`.
     `active` (superseded/archived) excludes a document as a FACT rather than a heuristic
     reading its prose, and `kind` is the repository's own vocabulary. `--today` pins the
     clock so `--date` backfill asks the day's own question; `--since` is a lower bound only,
-    so the upper one is applied here against the same declared date. `is_self` is always
+    so the upper one is applied here against the same declared date. The query is made once
+    per FIELD (`created`, then `updated`) and unioned by id, never through nodex's `any`: that
+    also matches a REVIEW stamp, and a review is not an edit — re-admitting an unchanged
+    document on the day it was re-read would put a second copy of knowledge the vault holds
+    onto a later page and run the extraction over it again. Two queries rather than one answer
+    plus a guess at which field nodex reports when several match. **What nodex returns is
+    CHECKED, not trusted**: `--limit` is applied by the query before this filters, so whether
+    the cap bit is asked of the returned count and never of the kept one (asked of the kept
+    count it can only be true when nothing was filtered, which is to say never); and a `path`
+    that is absolute or climbs with `..` is refused — `Path::join` DISCARDS its base for an
+    absolute operand, so such an answer reads a file the repository does not contain straight
+    onto a vault page. That refusal ends the SOURCE rather than skipping the document: a read
+    that failed is one document missing, while a path the query had no business naming is the
+    answer itself being wrong. `is_self` is always
     false and `author` carries the document KIND: a repository records no author per
     document, and the commit that last touched a file is not a claim about who wrote what is
     in it. `base_url` is configured rather than derived from `git remote` — deriving it needs
