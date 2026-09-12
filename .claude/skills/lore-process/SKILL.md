@@ -339,8 +339,20 @@ lore task candidate --source <source-id> --summary "<what to do>" --url "<absolu
 ```
 
 The URL is the thing itself — the mail, the thread, the issue — never a vault path: it is copied
-onto the archive page when the task closes, and it is what stops the same work being proposed
-again tomorrow.
+onto the archive page when the task closes, and it is what stops that OBSERVATION being proposed
+twice.
+
+It does not stop the same WORK being proposed twice, and nothing in Rust can: a condition that
+is still true is reported again tomorrow from a new mail with a new address, and only a reader
+of both can say they ask for one thing. So read the board before you name anything —
+
+```
+lore agenda --json
+```
+
+— and where `proposed` or `committed` already carries the work, say nothing. One line is one
+decision; eight lines for one broken log sink is eight, and its `since` already tells the person
+how long it has been asking.
 
 This is a proposal and never a commitment. Do not judge priority, do not guess a due date, and
 do not name something merely because it was mentioned: a person answers every line by moving it
