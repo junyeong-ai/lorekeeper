@@ -285,6 +285,9 @@ lore synthesis weekly         # 주간 합성 + 개인 리뷰 (monthly/quarterly
 lore status                   # 하위시스템별 한 줄 요약 (소스별 시각은 lore health)
 lore health                   # 수집이 밀린 소스 경고 (ingest.schedule 기준)
 lore schedule | crontab -     # cron 발행
+lore brief --date yesterday   # 그날의 지식 — 새로 안 것(한 줄씩)과 다시 본 것(이름만)
+lore fetch <url>              # 링크 하나를 읽어 inbox에 저장(출처 주소를 달아서)
+lore wiki search <질의>       # 질의가 닿는 페이지 — 이름으로 맞았는지 본문에서 맞았는지까지
 lore wiki concepts            # 개념 목록
 lore resolve <name>           # 어떤 개념 페이지가 그 이름을 갖는지 (0 소유 / 1 없음 / 2 중복)
 lore wiki index / log / map   # 주제별 인덱스 / 시간순 타임라인 / 인용 클러스터 맵 재생성

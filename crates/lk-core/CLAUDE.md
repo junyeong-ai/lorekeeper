@@ -102,6 +102,13 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   many pages claim the name. Ambiguity is REPORTED rather than settled — routing still has to
   pick, and `Resolution::Ambiguous` carries both the pick and every claimant, because a
   citation landing on the page a reader did not expect is otherwise unexplainable.
+- **`ExtractedConcept` carries the name and the OTHER names separately.** `identity_key` is
+  exact, so a `name` holding a gloss (`Agent Capability (에이전트 호출 가능 애플리케이션 단위)`)
+  answers to neither the term nor the gloss: the page is unreachable by anything a person or a
+  later extraction would write, and the next mention of the bare term mints a rival beside it.
+  326 of 2689 pages in the reference vault reached that state because the struct had one field
+  for it. `aliases` is where a translation, an expanded acronym or an original-language term
+  goes; `lk-pipeline` decides which of them this vault can actually answer with.
 - **`citation_digest`** is the identity of a concept's EVIDENCE: BLAKE3-128 over the sorted,
   deduplicated set of pages citing it, serialized as a JSON array so no id is confusable with
   a pair of shorter ones. The SET, never the rendered citation list — a source page that is

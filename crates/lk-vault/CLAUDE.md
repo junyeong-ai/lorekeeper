@@ -101,6 +101,26 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   span, so a block-style value never outlives the key it belonged to. And `set_llm_input`
   reads the child indentation from the first REAL child, never from the span's first line,
   which may be a comment indented past them.
+- **`search::search` ranks by WHERE a query matched, never by a score.** `index.md` holds
+  every page and grows with the vault — 685KB at 2689 concepts, with no way to read part of
+  it — so the catalog stopped being an entry point at the size that made one necessary. A hit
+  is ordered by `MatchField` (`Identity` → `Name` → `Summary` → `Text`, the derived enum
+  ordering IS the ranking) and then by `source_count`: both are facts a page states, so an
+  answer is explainable hit by hit, which a weighted blend of the two would not be. Every term
+  must appear, and a page is ranked by the WEAKEST field it needed — ranking by the strongest
+  lets one common word in a title outrank a page discussing the whole phrase. `Summary` is the
+  page's OPENING STATEMENT rather than its whole first section: a concept cited a hundred
+  times accumulates a synthesis long enough to hold any three common words, and ordered by
+  evidence it would otherwise answer every query in the vault. Scope is the wiki, never the
+  daily pages under it — those are the bulk material a concept was read out of, so admitting
+  them buries every page that ANSWERS a query under the pages that mentioned it once.
+- **`brief::build_brief` splits a day by whether the vault already held the concept.** Ten
+  concepts enter a day and thirty are touched again; what it did not hold is what was learned
+  and carries the line its page opens with, while what it already held carries names only —
+  the reader knows those, and restating them is the flood this reduces. Both halves are read
+  off the pages' own `created`/`updated`, so re-reading a day answers the same way however
+  long afterwards: a view of what the vault records, not of when it was run. `learned` is
+  grouped by `category` so a reader skips a group whole; `revisited` is ordered by evidence.
 - **`VaultWriter::write_page_sync`** calls `lk_core::fs::write_atomic` directly (no tokio
   runtime). Used by graph commands — the same single atomic-write implementation as the
   async path, not a separate one.

@@ -287,6 +287,9 @@ lore synthesis weekly         # weekly synthesis + personal review (monthly/quar
 lore status                   # one line per subsystem (per-source times: lore health)
 lore health                   # warn when a source is overdue vs ingest.schedule
 lore schedule | crontab -     # emit cron lines
+lore brief --date yesterday   # a day's knowledge — what was learned (a line each), what was seen again (names)
+lore fetch <url>              # read a link into the inbox, carrying its address
+lore wiki search <query>      # the pages a query reaches, and whether they NAME it or merely mention it
 lore wiki concepts            # list concepts
 lore resolve <name>           # which concept page owns a name (0 owned / 1 absent / 2 ambiguous)
 lore wiki index / log / map   # rebuild by-topic index / by-time timeline / citation-cluster map

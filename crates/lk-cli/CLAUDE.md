@@ -184,6 +184,20 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
 - **`lore config board-path`** exists so the scheduled day-close can ask whether the intent
   plane is configured at all instead of failing nightly on every install that never turned it
   on — the same machine contract `vault-root` and `queue count` are, for the same reason.
+- **`lore fetch <url>`** (`commands/fetch.rs`) writes an article into the `manual` source's
+  inbox and stops — the next ingest reads it as it reads anything a person dropped there, so
+  nothing downstream learns a new case. The inbox is resolved through
+  `lk_source::manual_inbox_dir` rather than joined here, because that resolution expands `~`,
+  anchors a relative path at the vault root rather than the CWD, and refuses one reaching the
+  vault root. Several enabled `manual` sources is a REFUSAL naming them, not a pick: two
+  inboxes are two deliberately separate streams. The file carries `title` and `source_url` as
+  frontmatter because the address has to reach the document page, or the citation points at a
+  copy nobody can check. A page with no article body is refused rather than absorbed as
+  boilerplate — the same judgment RSS makes when it keeps the feed summary.
+- **`lore brief`** (`commands/brief.rs`) is a VIEW like `lore agenda`, and the other half of
+  the day: the board says what was promised, this says what was learned. It writes nothing and
+  derives nothing — the concept pages already record when each entered and when it was last
+  cited. `/lore-day` reads both.
 - **`lore init credentials`** (in `init.rs`) is the interactive credential wizard. UX
   (dialoguer prompts, masked secrets, TTY guard) lives here; the JSON shape + atomic
   `0600` write live in `lk_source::credentials` (`load_file`/`load`/`save`). The Google branch
