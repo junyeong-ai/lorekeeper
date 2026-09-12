@@ -331,13 +331,16 @@ fn quoted(line: &str) -> Option<Quoted<'_>> {
     let mut rest = start.strip_prefix('>')?;
     let mut depth = 1;
     loop {
-        // A NESTED marker carries an indent of its own, up to CommonMark's three columns —
-        // reading exactly one space is what made `>  > x` parse as depth 1 and leave the
-        // second marker in the text. Where no marker follows, one space is the marker's own
-        // and whatever remains is the content's, which is why it is not trimmed away.
-        let (spacing, probe) = indent_of(rest);
+        // The columns here belong to two things: ONE is the marker's own optional space, and
+        // what remains is a NESTED marker's indent, which CommonMark allows up to three of.
+        // Charging all of them to the nested marker is off by one column, so `>    > x` —
+        // four spaces, three of them the nested marker's — was declined as nesting and its
+        // marker line fell through as the outer callout's prose. Where no marker follows,
+        // that one space is still the marker's and the rest is the content's indentation,
+        // which is why it is not trimmed away.
+        let (columns, probe) = indent_of(rest);
         match probe.strip_prefix('>') {
-            Some(next) if spacing <= 3 => {
+            Some(next) if columns.saturating_sub(1) <= 3 => {
                 depth += 1;
                 rest = next;
             }
@@ -856,6 +859,13 @@ mod tests {
             "wide-marker",
             "id: wide-marker\n---\n\n## 핵심\n\n> [!conflict]\n>  > [!note] 참고\n>  > 중첩 본문이다.\n> 진술이다.\n",
         );
+        // Four spaces: ONE is the outer marker's own, three are the nested marker's, which is
+        // the most CommonMark allows. Charging all four to the nested marker declined it.
+        write_concept(
+            tmp.path(),
+            "wide-marker-4",
+            "id: wide-marker-4\n---\n\n## 핵심\n\n> [!conflict]\n>    > [!note] 참고\n>    > 중첩 본문이다.\n> 진술이다.\n",
+        );
         write_concept(
             tmp.path(),
             "tab-marker",
@@ -887,6 +897,11 @@ mod tests {
             by_slug.get("wide-marker").map(String::as_str),
             Some("진술이다."),
             "two spaces between markers is still a nested marker"
+        );
+        assert_eq!(
+            by_slug.get("wide-marker-4").map(String::as_str),
+            Some("진술이다."),
+            "three of the four columns are the nested marker's own indent"
         );
         assert_eq!(
             by_slug.get("tab-marker").map(String::as_str),
