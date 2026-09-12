@@ -346,6 +346,72 @@ async fn query_recent(
     Ok(envelope.data.map(|d| d.items).unwrap_or_default())
 }
 
+/// Point a document's own links back at the repository they resolve in.
+///
+/// A repository document cites its siblings by a relative path, which means something only
+/// inside that repository: carried into the vault verbatim it addresses a page that is not
+/// there, and `lore graph lint` reports a broken link on a destination the vault never had any
+/// business resolving. Where the repository states a `base_url`, the reference is preserved as
+/// the absolute address it has there — `lk_core::link::is_external` keeps a scheme-bearing
+/// destination out of the graph, so it reads as a citation without becoming an edge.
+///
+/// A destination is rewritten only when the repository actually HOLDS that file, which is read
+/// from disk rather than assumed. Markdown resolves a relative path against the containing
+/// document, and a repository whose links are written from its ROOT instead is common enough to
+/// have produced the first one seen here — so the document-relative reading is tried first
+/// because it is what the format means, and the root-relative one second because a link that
+/// names an existing file was written to mean it. A path neither reading finds is broken where
+/// it was written, and becomes its own text: a URL that 404s asserts a record that is not there.
+///
+/// An ANCHOR-only link (`#section`) addresses the document itself and is left alone, as is a
+/// link that already names its own host.
+fn repoint_links(body: &str, repo: &Path, doc_path: &str, base_url: Option<&str>) -> String {
+    let dir = Path::new(doc_path).parent().unwrap_or(Path::new(""));
+    lk_core::link::rewrite_links_outside_code(body, |text, raw| {
+        let (dest, anchor) = lk_core::link::split_raw_dest(raw);
+        if dest.is_empty() || lk_core::link::is_external(dest) {
+            return None;
+        }
+        let decoded = lk_core::link::decode_dest(dest);
+        let held = [dir.join(&decoded), PathBuf::from(&decoded)]
+            .into_iter()
+            .filter_map(|candidate| normalize(&candidate))
+            .find(|rel| repo.join(rel).is_file());
+        match (held, base_url) {
+            (Some(rel), Some(base)) => Some(format!(
+                "[{text}]({}/{rel}{anchor})",
+                base.trim_end_matches('/')
+            )),
+            _ => Some(text.to_owned()),
+        }
+    })
+}
+
+/// A repository-relative path with `.` and `..` resolved, or `None` where it leaves the
+/// repository — a destination above the root has no address under `base_url` to be rewritten to.
+fn normalize(path: &Path) -> Option<String> {
+    use std::path::Component;
+
+    let mut parts: Vec<&std::ffi::OsStr> = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                parts.pop()?;
+            }
+            Component::Normal(part) => parts.push(part),
+            Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(
+        parts
+            .iter()
+            .map(|p| p.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/"),
+    )
+}
+
 /// Refuse a path that does not stay inside the repository it is relative to.
 ///
 /// `Path::join` DISCARDS its base for a rooted operand and resolves `..` lexically against
@@ -386,7 +452,12 @@ fn read_document(
     let path = repo.join(&item.path);
     let content = std::fs::read_to_string(&path)
         .map_err(|e| SourceError::Parse(format!("read {}: {e}", path.display())))?;
-    let body = lk_core::frontmatter::split_page(&content).body.to_string();
+    let body = repoint_links(
+        &lk_core::frontmatter::split_page(&content).body,
+        repo,
+        &item.path,
+        base_url,
+    );
 
     Ok(RawItem {
         // The repository's own vocabulary, carried so a reader can ask for decision records
@@ -543,6 +614,82 @@ mod tests {
             spans_window(&[], 500, first_day),
             "a repository declaring nothing since the cut-off is a quiet window, not a short read"
         );
+    }
+
+    fn repo_with(files: &[&str]) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        for f in files {
+            let path = tmp.path().join(f);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "x").unwrap();
+        }
+        tmp
+    }
+
+    /// A repository document cites its siblings by a relative path, which addresses nothing
+    /// once the body is in the vault — `lore graph lint` reported exactly that as a broken link
+    /// on a destination the vault never had any business resolving.
+    #[test]
+    fn a_link_the_repository_holds_is_repointed_at_the_repository() {
+        let repo = repo_with(&["docs/learnings/b.md", "docs/decisions/x.md"]);
+        let out = repoint_links(
+            "see [b](b.md) and [x](../decisions/x.md#why)",
+            repo.path(),
+            "docs/learnings/a.md",
+            Some("https://host/org/repo/blob/main/"),
+        );
+        assert_eq!(
+            out,
+            "see [b](https://host/org/repo/blob/main/docs/learnings/b.md) and \
+             [x](https://host/org/repo/blob/main/docs/decisions/x.md#why)"
+        );
+    }
+
+    /// Markdown resolves a relative path against the containing document, and this repository
+    /// writes several from its ROOT instead — a form already broken in the repository's own
+    /// renderer. Neither reading is guessed at: the file the repository HOLDS is what decides,
+    /// and the format's own reading is tried first.
+    #[test]
+    fn a_root_relative_link_is_found_where_the_repository_actually_holds_it() {
+        let repo = repo_with(&["docs/learnings/b.md"]);
+        let base = Some("https://host/r");
+        assert_eq!(
+            repoint_links(
+                "[b](docs/learnings/b.md)",
+                repo.path(),
+                "docs/learnings/a.md",
+                base
+            ),
+            "[b](https://host/r/docs/learnings/b.md)"
+        );
+        assert_eq!(
+            repoint_links(
+                "[gone](nowhere.md)",
+                repo.path(),
+                "docs/learnings/a.md",
+                base
+            ),
+            "gone",
+            "a URL that 404s asserts a record that is not there"
+        );
+        assert_eq!(
+            repoint_links("[b](b.md)", repo.path(), "docs/learnings/a.md", None),
+            "b",
+            "with no address to point at, a destination that resolves nowhere is worse than none"
+        );
+    }
+
+    /// What must NOT be rewritten: a link that already names its own host, and one addressing
+    /// the document itself.
+    #[test]
+    fn an_external_or_anchor_only_link_is_left_alone() {
+        let repo = repo_with(&[]);
+        let body = "[a](https://example.com/x) [b](#section)";
+        assert_eq!(
+            repoint_links(body, repo.path(), "docs/a.md", Some("https://host/r")),
+            body
+        );
+        assert_eq!(repoint_links(body, repo.path(), "docs/a.md", None), body);
     }
 
     /// A document the query named and this could not read is a document that yielded nothing,
