@@ -1,3 +1,4 @@
+mod brief;
 mod index;
 mod log;
 mod search;
@@ -11,6 +12,7 @@ mod writer;
 // public surface exposes the page types alongside the I/O that produces them.
 pub use lk_core::frontmatter::{Frontmatter, VaultPage, parse_page};
 
+pub use self::brief::{Brief, BriefEntry, build_brief};
 pub use self::index::{build_index, write_index};
 pub use self::log::{IngestLog, LogEntry, LogStatus};
 pub use self::search::{MatchField, SearchHit, search};

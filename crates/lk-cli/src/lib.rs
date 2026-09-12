@@ -71,6 +71,15 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// The day's knowledge — what the vault learned, and what it saw again
+    Brief {
+        /// Read the day against this date instead of today (YYYY-MM-DD)
+        #[arg(long)]
+        date: Option<String>,
+        /// Emit the day as JSON — the contract a skill reads
+        #[arg(long)]
+        json: bool,
+    },
     /// Generate synthesis reports
     Synthesis {
         #[command(subcommand)]
@@ -232,6 +241,7 @@ pub async fn run() -> miette::Result<()> {
         } => commands::ingest::run(&opts, source, date, dry_run).await,
         Command::Task { cmd } => commands::task::run(&opts, cmd).await,
         Command::Fetch { url, source } => commands::fetch::run(&opts, &url, source).await,
+        Command::Brief { date, json } => commands::brief::run(&opts, date, json).await,
         Command::Agenda { date, json } => commands::agenda::run(&opts, date, json).await,
         Command::Synthesis { period } => commands::synthesis::run(&opts, period).await,
         Command::Health { strict } => commands::health::run(&opts, strict).await,

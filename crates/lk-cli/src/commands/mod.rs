@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub mod agenda;
+pub mod brief;
 pub mod config;
 pub mod doctor;
 pub mod fetch;

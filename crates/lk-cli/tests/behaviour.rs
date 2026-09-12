@@ -52,6 +52,9 @@ const SWEEP: &[&[&str]] = &[
     // dates are compared to it, and reading the real clock would make this a snapshot that
     // changes at midnight rather than when the behaviour does.
     &["agenda", "--date", "2026-08-19"],
+    // Against a fixed day for the same reason the agenda is: what a day taught is compared to
+    // the dates the corpus's pages carry, not to the clock.
+    &["brief", "--date", "2026-06-09", "--json"],
     &["wiki", "concepts"],
     &["wiki", "index"],
     &["wiki", "log"],

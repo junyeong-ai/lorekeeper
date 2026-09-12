@@ -234,7 +234,7 @@ fn first_section(body: &str) -> Option<&str> {
 /// A paragraph rather than a line, because a hard-wrapped page would otherwise have its
 /// opening sentence split across two of them — the terms of a query landing on either side of
 /// a break that carries no meaning.
-fn opening_statement(body: &str) -> Option<String> {
+pub(crate) fn opening_statement(body: &str) -> Option<String> {
     let mut paragraph: Vec<&str> = Vec::new();
     for line in first_section(body)?.lines().map(str::trim) {
         if line.is_empty() || line.starts_with('#') {
@@ -268,7 +268,7 @@ fn string_array(page: &lk_core::frontmatter::VaultPage, key: &str) -> Vec<String
         .unwrap_or_default()
 }
 
-fn markdown_files(dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn markdown_files(dir: &Path) -> Vec<PathBuf> {
     if !dir.is_dir() {
         return Vec::new();
     }

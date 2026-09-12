@@ -1,9 +1,10 @@
 ---
 name: lore-day
 version: 0.22.1
-description: Run the user's working day off the Lorekeeper task board — what is on today, what the sources proposed, what an editor changed, what to remind them of, and closing the day so what they did becomes knowledge. The user speaks; this maps it to `lore task` and never asks them to type a command.
+description: Run the user's working day off the Lorekeeper task board and the day's knowledge — what is on today, what the vault learned overnight, what the sources proposed, what an editor changed, what to remind them of, and closing the day so what they did becomes knowledge. The user speaks; this maps it to `lore task` and never asks them to type a command.
 when_to_use: |
   오늘 뭐 해야 해, 오늘 할 일, 뭐부터 하지, 이거 해야 해, 이거 할 일로 넣어줘,
+  어제 뭐 들어왔어, 새로운 소식, 읽을 거 있어, 이거 좀 더 설명해줘,
   그거 끝냈어, 다 했어, 이건 안 해도 돼, 내일 다시 알려줘, 3시에 알려줘,
   오늘 뭐 했지, 하루 정리, 마감하자, 리마인더, 제안 정리,
   what's on today, add a task, I finished that, drop that, remind me at,
@@ -47,11 +48,40 @@ tasks: they have no id this can reach.
 the same as empty or zero. Say so rather than reporting nothing promised, and read the command's
 stderr — it names the file.
 
+## The morning also has knowledge in it
+
+```
+lore brief --date yesterday --json
+```
+
+`learned` is what the vault did not hold before — each with the one line its page opens with.
+`revisited` is what it already held and saw again, and carries NAMES ONLY on purpose: the
+reader knows those already, and restating them is the flood this reduces. Read the learned
+ones out in their own words, grouped as the answer groups them, and name the revisited ones
+only when the user asks what else moved.
+
+Ten lines, not thirty. If `learned` is long, say which groups it holds and read out the ones
+whose category touches what is on their board today — the agenda is in hand, so that is a
+judgment you can make and they cannot skim.
+
+**When they want more, dig rather than summarize again.** `path` addresses the concept page:
+read it, follow its `## 출처` to the daily pages behind the claim, and answer from those. A
+question the vault cannot answer is a question to say it cannot answer — `lore wiki search
+"<terms>" --json` says whether any page even reaches it — never one to fill from your own
+background knowledge, which is how a vault stops being evidence.
+
+Explain in the user's language, and explain the thing rather than the term: name what it is
+for and what it changes before naming what it is called. A concept page's own sentence is a
+definition written for the graph; a person asking about it wants to know why it is on their
+screen.
+
 ## Mapping what they say
 
 | They say | You run |
 |---|---|
 | "오늘 뭐 해야 해" | `lore agenda --json`, then tell them in their own words |
+| "어제 뭐 들어왔어" / "읽을 거 있어" | `lore brief --date yesterday --json` |
+| "그거 좀 더 설명해줘" | read the concept page at its `path`, then its `## 출처` pages |
 | "이거 해야 해" / a request in a thread | `lore task add <text> --state today` (`--link <url> --label <what it reads as>` whenever the thing came from somewhere) |
 | "그거 오늘 할게" | `lore task move <id> today` |
 | "그건 나중에" | `lore task move <id> next` (or `someday`) |
