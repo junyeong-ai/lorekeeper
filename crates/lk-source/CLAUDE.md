@@ -212,14 +212,24 @@ map to `RawItem`.
     reading its prose, and `kind` is the repository's own vocabulary. `--today` pins the
     clock so `--date` backfill asks the day's own question; `--since` is a lower bound only,
     so the upper one is applied here against the same declared date. The query is made once
-    per FIELD (`created`, then `updated`) and unioned by id, never through nodex's `any`: that
-    also matches a REVIEW stamp, and a review is not an edit — re-admitting an unchanged
+    per FIELD (`created`, then `updated`) and unioned by (id, DECLARED DATE), never through
+    nodex's `any`: that also matches a REVIEW stamp, and a review is not an edit — re-admitting an unchanged
     document on the day it was re-read would put a second copy of knowledge the vault holds
     onto a later page and run the extraction over it again. Two queries rather than one answer
-    plus a guess at which field nodex reports when several match. **What nodex returns is
-    CHECKED, not trusted**: `--limit` is applied by the query before this filters, so whether
-    the cap bit is asked of the returned count and never of the kept one (asked of the kept
-    count it can only be true when nothing was filtered, which is to say never); and a `path`
+    plus a guess at which field nodex reports when several match. The union keeps one
+    observation per date a document DECLARES, so a document written inside the window and
+    edited inside it belongs to both days — folding onto the id let the WINDOW'S WIDTH decide,
+    placing it on the day it was written when both rows fit and on the day it was changed a
+    run later, and a backfill of the edit's day reproduced neither. **The window is read WHOLE.** `nodex`
+    bounds a query from below (`--since`) and answers newest-first, so `--limit` cuts at the
+    RECENT end — ahead of the window whenever the window is not the newest days. A single
+    capped query therefore left a backfill holding only documents newer than the day it asked
+    about, filtered every one of them out and reported a quiet day: measured at 2 events where
+    11 belonged. `query_window` grows the reach until the answer spans the window or the
+    repository runs out, and `max_documents` caps what the WINDOW yields — refusing the run
+    whole rather than ingesting a part, since which documents a partial run kept would be
+    decided by the order the index listed them. **What nodex returns is
+    CHECKED, not trusted**: a `path`
     that is absolute or climbs with `..` is refused — `Path::join` DISCARDS its base for an
     absolute operand, so such an answer reads a file the repository does not contain straight
     onto a vault page. That refusal ends the SOURCE rather than skipping the document: a read

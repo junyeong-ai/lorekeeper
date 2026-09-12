@@ -45,10 +45,10 @@ struct NodexParams {
     kinds: Vec<String>,
     #[serde(default = "default_lookback")]
     lookback_hours: u32,
-    /// What each query asks for. The window is asked once per date field and the answers are
-    /// unioned, so a run can return up to twice this — which drops nothing and is the point:
-    /// the cap exists to make TRUNCATION observable, and a query that came back holding
-    /// exactly its limit says so.
+    /// How many of the window's documents this source will ingest in one run. A guard against
+    /// a window wide enough to pull a repository's whole history at once, never a bound on the
+    /// query: a query that stops short of the window reports a quiet day, which is the one
+    /// answer a cap must not produce.
     #[serde(default = "default_max_documents")]
     max_documents: usize,
     /// Prefix a document's repository-relative path is appended to, to form the URL a
@@ -67,6 +67,22 @@ fn default_lookback() -> u32 {
 fn default_max_documents() -> usize {
     200
 }
+
+/// How much of the index one query asks for before the next asks for more.
+///
+/// `nodex` bounds a query from BELOW (`--since`) and answers newest-first, so `--limit` cuts
+/// at the RECENT end — ahead of the window whenever the window is not the newest days. A
+/// backfill of an older day therefore came back holding only documents newer than the day it
+/// asked about, filtered every one of them out, and reported a quiet day: `lore ingest --date`
+/// is the repair path for a lost or wrong page, and it repaired nothing, in silence. So the
+/// reach GROWS until the answer spans the window, which is the same "read to the end of the
+/// window" rule every other windowed adapter here follows.
+const INITIAL_REACH: usize = 500;
+
+/// Where growing stops and the source fails rather than reading further. Seven queries at
+/// most, and a window holding this many documents is a `lookback_hours` the operator meant
+/// differently — not something the adapter can settle by asking again.
+const MAX_REACH: usize = 64_000;
 
 /// One document, as `nodex query recent` reports it.
 #[derive(Debug, Deserialize)]
@@ -147,38 +163,37 @@ impl Source for NodexSource {
         // a later page and run the extraction over it again. Two queries rather than one
         // answer plus a guess at which field nodex reports when several match.
         let mut items: Vec<RecentItem> = Vec::new();
-        let mut capped = false;
         for field in ["created", "updated"] {
-            let page = query_recent(&p.repo, field, first_day, last_day, p.max_documents).await?;
-            // `--limit` is applied by the query, BEFORE this filters by status, kind and date,
-            // so whether the cap bit is a question about what the query returned. Asking it of
-            // the kept count instead can never be true while any document is filtered out,
-            // which is the normal case — the warning would be silent exactly when documents
-            // were dropped.
-            capped |= page.len() == p.max_documents;
-            items.extend(page);
+            items.extend(query_window(&p.repo, field, first_day, last_day).await?);
         }
-        // Stable, so a document matching both fields keeps its `created` row and is dated by
-        // the day it was written. A document created before the window and edited inside it
-        // keeps only its `updated` row and is dated by the edit — so an edited document
-        // appears on the day it was written AND on the day it was changed, which is the same
-        // "an edit re-enters the pipeline" rule a living Confluence page follows.
-        items.sort_by(|a, b| a.id.cmp(&b.id));
-        items.dedup_by(|a, b| a.id == b.id);
+        // What the declared fields say belongs to this window. A document excluded by
+        // `status`, `kind` or its date was never attempted, so it cannot stand for a read that
+        // failed — the count of attempts is taken from here rather than from what the query
+        // returned, which reaches past the window on both sides.
+        let admitted: Vec<RecentItem> = union_by_declared_date(items)
+            .into_iter()
+            .filter(|item| {
+                item.status == ACTIVE
+                    && (first_day..=last_day).contains(&item.date)
+                    && (p.kinds.is_empty() || p.kinds.iter().any(|k| k == &item.kind))
+            })
+            .collect();
+        // Refused whole rather than ingested in part. Which documents a partial run kept would
+        // be decided by the order the index happened to list them, so the vault would differ
+        // between two runs asking the same question — and the operator would have no way to
+        // see that from the pages.
+        if admitted.len() > p.max_documents {
+            return Err(SourceError::InvalidParams(format!(
+                "{first_day}..={last_day} holds {} documents, past `max_documents` ({}) — \
+                 narrow `lookback_hours`, or raise the cap for a deliberate backfill",
+                admitted.len(),
+                p.max_documents
+            )));
+        }
+
+        let attempted = admitted.len();
         let mut kept = Vec::new();
-        // What the query said belongs to this window, after the declared fields decided it. A
-        // document excluded by `status`, `kind` or its date was never attempted, so it cannot
-        // stand for a read that failed — the count has to be taken here rather than from the
-        // query's own length.
-        let mut attempted = 0;
-        for item in items {
-            if item.status != ACTIVE
-                || item.date < first_day
-                || item.date > last_day
-                || (!p.kinds.is_empty() && !p.kinds.iter().any(|k| k == &item.kind))
-            {
-                continue;
-            }
+        for item in admitted {
             // A path that leaves the repository is refused before it is read, and refusing it
             // ends the SOURCE rather than skipping the document. A read that failed is one
             // document missing; a path the query had no business naming is the answer itself
@@ -190,7 +205,6 @@ impl Source for NodexSource {
                     item.id, item.path
                 ))
             })?;
-            attempted += 1;
             match read_document(&p.repo, &item, p.base_url.as_deref(), ctx) {
                 Ok(raw) => kept.push(raw),
                 // One unreadable file must not cost the others their day: the repository is
@@ -208,22 +222,77 @@ impl Source for NodexSource {
         // evidence a source is alive, and that log records one bit, so an empty success here
         // would let the source report fresh every morning while collecting nothing.
         crate::require_any_observation("document", kept.len(), attempted)?;
-
-        if capped {
-            tracing::warn!(
-                cap = p.max_documents,
-                "nodex: `max_documents` reached — raise it, or documents this day wrote are being dropped"
-            );
-        }
         Ok(kept)
     }
+}
+
+/// One observation per date a document DECLARES, which is what the two queries answer
+/// separately: a document written inside the window and edited inside it later declares both
+/// days and belongs to both, the same rule a living Confluence page follows when an edit
+/// re-enters the pipeline. Only the same date reported by both queries is one observation.
+///
+/// Folding the answers onto the id instead would let the WINDOW'S WIDTH decide which day a
+/// document lands on. A document written Sunday and edited Monday falls in one window on
+/// Monday and in two separate ones by Tuesday, so the run that happened to see both rows
+/// placed it on Sunday while the run a day later placed it on Monday — and a backfill of
+/// Monday reproduced neither. `EventId` is `source:date:hash`, so two declared dates are
+/// already two events downstream; nothing but this fold stood between them.
+fn union_by_declared_date(mut items: Vec<RecentItem>) -> Vec<RecentItem> {
+    items.sort_by(|a, b| a.id.cmp(&b.id).then(a.date.cmp(&b.date)));
+    items.dedup_by(|a, b| a.id == b.id && a.date == b.date);
+    items
+}
+
+/// Read the window whole, growing the query's reach until it spans the window.
+///
+/// The upper bound is the caller's: `nodex` answers everything on or after `--since`, newest
+/// first, so a limit that stops before the window leaves the answer entirely outside it — and
+/// the filter downstream then drops every row and reports a day on which nothing happened.
+async fn query_window(
+    repo: &Path,
+    field: &str,
+    first_day: jiff::civil::Date,
+    last_day: jiff::civil::Date,
+) -> Result<Vec<RecentItem>, SourceError> {
+    let mut reach = INITIAL_REACH;
+    loop {
+        let page = query_recent(repo, field, first_day, last_day, reach).await?;
+        if spans_window(&page, reach, first_day) {
+            return Ok(page);
+        }
+        reach = reach.saturating_mul(2);
+        if reach > MAX_REACH {
+            return Err(SourceError::Parse(format!(
+                "{}: more than {MAX_REACH} documents declare a {field} date on or after \
+                 {first_day}, so the query never reached the window ending {last_day}",
+                repo.display()
+            )));
+        }
+    }
+}
+
+/// Does this answer reach back to the window's first day?
+///
+/// Either the repository ran out of documents — it answered with fewer than it was asked for —
+/// or the oldest row it did answer with is at or before the day the window opens. An empty
+/// answer is the first case. The oldest is taken by MINIMUM rather than from the last row,
+/// so nothing here rests on the order `nodex` chose to list them in.
+fn spans_window(page: &[RecentItem], reach: usize, first_day: jiff::civil::Date) -> bool {
+    page.len() < reach
+        || page
+            .iter()
+            .map(|item| item.date)
+            .min()
+            .is_none_or(|oldest| oldest <= first_day)
 }
 
 /// Ask the repository which documents declare a date in the window.
 ///
 /// `--today` pins the clock so a backfill (`lore ingest --date <past>`) asks the same
 /// question the day itself would have, and `--since` is a lower bound only — the upper one is
-/// the caller's, against the same declared date this reports.
+/// the caller's, against the same declared date this reports. `limit` is therefore how far
+/// back this one call reaches and not how many documents the window holds; [`query_window`]
+/// owns the difference.
 async fn query_recent(
     repo: &Path,
     field: &str,
@@ -392,6 +461,80 @@ mod tests {
         assert!(
             contained("docs/./a.md").is_ok(),
             "a no-op component is not an escape"
+        );
+    }
+
+    fn item(id: &str, date: &str) -> RecentItem {
+        RecentItem {
+            id: id.into(),
+            title: id.into(),
+            kind: "learning".into(),
+            status: ACTIVE.into(),
+            path: format!("docs/{id}.md"),
+            date: date.parse().unwrap(),
+        }
+    }
+
+    /// A document belongs to every day it declares. Folding the two queries onto the id made
+    /// the answer depend on how wide the window happened to be: with both rows inside it the
+    /// document landed on the day it was written, and with only the later row inside it — the
+    /// same document, one day on — it landed on the day it was changed. A backfill of the
+    /// edit's day therefore did not reproduce what the live run had written.
+    #[test]
+    fn a_document_belongs_to_every_day_it_declares() {
+        let union = union_by_declared_date(vec![
+            item("learning-a", "2026-06-14"),
+            item("learning-b", "2026-06-14"),
+            item("learning-a", "2026-06-15"),
+        ]);
+        assert_eq!(
+            union
+                .iter()
+                .map(|i| (i.id.as_str(), i.date.to_string()))
+                .collect::<Vec<_>>(),
+            [
+                ("learning-a", "2026-06-14".to_string()),
+                ("learning-a", "2026-06-15".to_string()),
+                ("learning-b", "2026-06-14".to_string()),
+            ]
+        );
+    }
+
+    /// The same date answered by both queries is one observation — a document written and
+    /// edited on one day is one thing that happened, not two.
+    #[test]
+    fn one_date_answered_twice_is_one_observation() {
+        let union = union_by_declared_date(vec![
+            item("learning-a", "2026-06-14"),
+            item("learning-a", "2026-06-14"),
+        ]);
+        assert_eq!(union.len(), 1);
+    }
+
+    /// The silent one. `nodex` answers everything on or after `--since`, newest first, so a
+    /// query that stops at its limit stops at the RECENT end — and a backfill of an older day
+    /// came home holding only documents newer than the day it asked about, filtered every one
+    /// of them out, and reported a day on which the project wrote nothing.
+    #[test]
+    fn an_answer_that_stops_before_the_window_is_asked_again() {
+        let first_day = "2026-06-13".parse().unwrap();
+        let newer_than_the_window = [item("a", "2026-09-12"), item("b", "2026-09-11")];
+        assert!(
+            !spans_window(&newer_than_the_window, 2, first_day),
+            "a full answer whose oldest row is still newer than the window has not reached it"
+        );
+        assert!(
+            spans_window(&newer_than_the_window, 3, first_day),
+            "an answer short of what was asked for is the whole of what the repository holds"
+        );
+        assert!(spans_window(
+            &[item("a", "2026-09-12"), item("b", "2026-06-13")],
+            2,
+            first_day
+        ));
+        assert!(
+            spans_window(&[], 500, first_day),
+            "a repository declaring nothing since the cut-off is a quiet window, not a short read"
         );
     }
 

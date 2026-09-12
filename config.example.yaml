@@ -292,6 +292,9 @@ sources:
       repo: /absolute/path/to/your/repo   # absolute: a scheduled run starts nowhere in particular
       kinds: [learning, adr, guide]       # from the repo's own kinds.allowed; omit for every kind
       lookback_hours: 24
+      # How many of the window's documents one run may ingest. A wide lookback_hours
+      # for a deliberate backfill needs this raised — the run is refused, never
+      # trimmed, so a page never holds part of a day.
       # max_documents: 200
       # The prefix a document's repo-relative path is appended to, so a citation links back
       # to the real record. Omit it for a repo with no remote — a local path is provenance
