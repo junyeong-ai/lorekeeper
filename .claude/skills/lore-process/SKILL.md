@@ -49,7 +49,8 @@ you last read them.
    `missing-target` task. It answers three questions per task: is the page still
    the one this task was made for (`cache_hash` vs `llm_inputs.<key>`), has this
    exact input already been answered (`llm_inputs.<key>_done`), and does the page
-   still carry the section the task's `anchor` names. Only a task that passes the
+   still carry EVERY section the task names — two for a `synthesize-concept` task,
+   one for the rest. Only a task that passes the
    first, fails the second, and has somewhere to land is work — an anchor the page
    no longer carries means the heading vocabulary changed (a locale switch), which
    no amount of waiting undoes. A task you filled and
@@ -100,8 +101,8 @@ The pipeline decides what needs work before the queue file exists: a task is
 enqueued only when its section is missing or its inputs changed. This skill's
 sole obligation to that machinery is to write **only** LLM-produced content
 into the target sections, never structural artifacts, and to stamp the section's
-`llm_inputs.<key>_done` completion marker when finished (step 3c) — the concept
-kinds excepted, whose section and marker both belong to `lore queue apply`. Completion is
+`llm_inputs.<key>_done` completion marker when finished (step 3c) —
+`extract-concepts` excepted, whose section and marker both belong to `lore queue apply`. Completion is
 uniformly marker-signalled — a non-empty body never signals done — so a section
 that is legitimately empty (a focus-filtered summary, an extraction that found
 nothing, a trivial-only work-log, an empty-period review) stays done instead of

@@ -173,6 +173,29 @@ fn skill_documents_the_result_protocol_it_must_produce() {
     }
 }
 
+/// "the concept kinds" names two kinds where three exist, and the drain reads it as covering
+/// `synthesize-concept` — whose section and marker are its own. The phrase was removed from
+/// three safety rules and survived in a fourth sentence, invisible to a grep because the line
+/// wrapped between the two words. A prohibition that a search cannot find is one that comes
+/// back, so it is a test: matching across whitespace is what the greps could not do.
+#[test]
+fn no_skill_file_calls_a_set_of_kinds_the_concept_kinds() {
+    for name in [
+        "SKILL.md",
+        "references/processing-kinds.md",
+        "references/queue-format.md",
+    ] {
+        let doc = read_skill_file(name);
+        let words: Vec<&str> = doc.split_whitespace().collect();
+        assert!(
+            !words.windows(2).any(|w| w == ["concept", "kinds"]),
+            "{name} says \"concept kinds\": name `extract-concepts`, or say which kinds are \
+             meant — `synthesize-concept` writes a concept page's sections and stamps its own \
+             marker, so the phrase reads as a rule against the work the drain is handed"
+        );
+    }
+}
+
 /// The whole point of routing EXTRACTED concepts through `queue apply` is that ONE
 /// implementation merges them, and a skill that created concept pages would restore the
 /// second one. What the rule may not do is forbid concept pages wholesale: a
