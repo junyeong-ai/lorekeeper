@@ -759,6 +759,7 @@ mod tests {
         let synthesis = crate::ConceptSynthesisRequest {
             citations: vec!["daily/src/2026-01-01".into()],
             locale: Locale::Ko,
+            related_anchor: None,
             target: TaskTarget {
                 vault_path: "wiki/concepts/rag.md".into(),
                 kind: TargetKind::ConceptSynthesis,
@@ -772,6 +773,47 @@ mod tests {
                 ..synthesis.clone()
             }
             .cache_hash()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_concept_task_carries_both_headings_and_is_keyed_on_neither() {
+        // One task writes the synthesis AND the relations, because both answer to the same
+        // citation set, so it carries both headings for the reason `target.anchor` exists: the
+        // writer must not resolve a heading from the locale table. Neither belongs in the
+        // cache identity — a heading is not part of what the answer would be, and a
+        // `vault.locale` switch renaming every heading in the vault must not re-queue every
+        // concept in it.
+        let dir = TempDir::new().unwrap();
+        let client = QueueLlmClient::new(dir.path().to_path_buf());
+        let req = crate::ConceptSynthesisRequest {
+            citations: vec!["daily/src/2026-01-01".into()],
+            locale: Locale::Ko,
+            related_anchor: Some("## 관련".into()),
+            target: TaskTarget {
+                vault_path: "wiki/concepts/rag.md".into(),
+                kind: TargetKind::ConceptSynthesis,
+                anchor: "## 핵심".into(),
+            },
+        };
+        assert_eq!(
+            req.cache_hash(),
+            crate::ConceptSynthesisRequest {
+                related_anchor: None,
+                ..req.clone()
+            }
+            .cache_hash(),
+            "the headings a result lands under cannot change what the answer would be"
+        );
+
+        client.synthesize_concept(req).await.unwrap();
+        client.flush().await.unwrap();
+        let queued = std::fs::read_to_string(client.queue_path()).unwrap();
+        let task: QueueTask = serde_json::from_str(queued.trim()).unwrap();
+        assert_eq!(task.target.anchor, "## 핵심");
+        assert_eq!(
+            task.input.get("related_anchor").and_then(|v| v.as_str()),
+            Some("## 관련")
         );
     }
 
@@ -817,6 +859,7 @@ mod tests {
             .synthesize_concept(crate::ConceptSynthesisRequest {
                 citations: vec!["daily/src/2026-01-01".into()],
                 locale: Locale::En,
+                related_anchor: None,
                 target: target(TargetKind::ConceptSynthesis),
             })
             .await

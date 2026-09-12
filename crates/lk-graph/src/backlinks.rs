@@ -62,6 +62,17 @@ pub struct ConceptResynthesis {
     /// The synthesis heading as the page spells it, so a result lands where the page can
     /// receive it even when `vault.locale` has moved since the page was written.
     pub anchor: String,
+    /// The related-concepts heading, spelled the same way, or `None` where the page carries
+    /// none.
+    ///
+    /// A concept's relations answer to the same evidence its synthesis does — which other
+    /// concepts the citing material relates this one to — so they are owed by the same move
+    /// and written by the same act. Carrying the heading here is what lets one task fill both
+    /// sections under one marker; without it the writer would have to resolve a heading from
+    /// the locale table, which is the coupling `anchor` exists to remove. `None` where the
+    /// page has no such section: `replace_section` leaves a page unchanged when the heading is
+    /// absent, so a writer handed one would report a write that never happened.
+    pub related_anchor: Option<String>,
     /// The pages citing this concept, sorted — the evidence the rewritten synthesis
     /// answers to.
     pub citations: Vec<String>,
@@ -322,6 +333,8 @@ pub fn sync_concept_backlinks(
             report.resynthesize.push(ConceptResynthesis {
                 path: page.path.clone(),
                 anchor: format!("## {}", section.heading),
+                related_anchor: resolve_section(&raw, |s| s.related)
+                    .map(|section| format!("## {}", section.heading)),
                 citations: sources.clone(),
                 discarding: (!section.body.trim().is_empty())
                     .then(|| section.body.trim().to_string()),
@@ -1091,6 +1104,60 @@ mod tests {
         .unwrap();
         assert_eq!(report.skipped, vec![PathBuf::from("wiki/concepts/bare.md")]);
         assert!(report.adopted.is_empty(), "{report:?}");
+    }
+
+    /// A concept's relations answer to the same evidence its synthesis does, so one task
+    /// writes both and the sweep hands it both headings — each spelled as the page spells it,
+    /// since a `vault.locale` switch renames them and the digest deliberately ignores locale.
+    /// A page without the section gets `None`: `replace_section` leaves a page unchanged when
+    /// the heading is absent, so a writer handed an anchor the page lacks would report a write
+    /// that never happened.
+    #[test]
+    fn what_is_owed_carries_both_headings_as_the_page_spells_them() {
+        for (body, expected) in [
+            ("## 핵심\n\n## 출처\n\n## 관련\n", Some("## 관련")),
+            (
+                "## Synthesis\n\n## Sources\n\n## Related\n",
+                Some("## Related"),
+            ),
+            ("## 핵심\n\n## 출처\n", None),
+        ] {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("wiki/concepts/rag.md");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(
+                &path,
+                format!("---\nid: rag\nsource_count: 0\nllm_inputs:\n---\n\n# RAG\n\n{body}"),
+            )
+            .unwrap();
+
+            let pages = vec![
+                build_page("wiki/concepts/rag", "wiki/concepts/rag.md", &[]),
+                build_page(
+                    "daily/slack/2026-05-20",
+                    "daily/slack/2026-05-20.md",
+                    &["wiki/concepts/rag"],
+                ),
+            ];
+
+            let report = sync_concept_backlinks(
+                &pages,
+                dir.path(),
+                false,
+                &VaultDirs::default(),
+                SynthesisPolicy::Record,
+            )
+            .unwrap();
+
+            let owed = report.resynthesize.first().unwrap_or_else(|| {
+                panic!("a cited page with a synthesis heading is owed one: {report:?}")
+            });
+            assert_eq!(
+                owed.related_anchor.as_deref(),
+                expected,
+                "body was:\n{body}"
+            );
+        }
     }
 
     /// What is adopted has to BE an answer. A body of nothing but a callout is a marker

@@ -187,6 +187,15 @@ pub struct ConceptSynthesisRequest {
     /// sentence says nothing, and inferring a language from the sources would write the
     /// vault in whatever language its inputs happened to arrive in.
     pub locale: Locale,
+    /// The page's related-concepts heading, or `None` where it carries none.
+    ///
+    /// A concept's relations answer to the same evidence its synthesis does, so they are owed
+    /// by the same move and written by the same act — one task, one input, one marker. This
+    /// carries the second heading for the same reason [`TaskTarget::anchor`] carries the
+    /// first: the writer must not resolve a heading from the locale table. Payload only, like
+    /// `source_type` on the other requests — a heading is not part of what the answer would
+    /// be, and `vault.locale` renaming one must not re-queue every concept in the vault.
+    pub related_anchor: Option<String>,
     pub target: TaskTarget,
 }
 
@@ -207,7 +216,11 @@ impl TaskRequest for ConceptSynthesisRequest {
     }
 
     fn task_input(&self) -> Identity {
-        self.cache_identity()
+        let mut v = self.cache_identity();
+        if let Some(anchor) = &self.related_anchor {
+            v.insert("related_anchor".into(), anchor.clone().into());
+        }
+        v
     }
 
     /// The evidence digest, computed by the one function `lore graph backlinks-sync` records

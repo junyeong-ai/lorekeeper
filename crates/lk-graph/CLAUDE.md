@@ -126,9 +126,14 @@ on-disk state, never from a cached snapshot.
 - **`backlinks::sync_concept_backlinks` is the sole deriver of every evidence-dependent
   field on a concept page**: the `## Sources` body (`- [title](relative-path)` entries,
   destinations relative to the concept page), the frontmatter `source_count`, AND the
-  `llm_inputs.synthesis` input its `## Synthesis` is owed against. One sweep because they are
-  one fact — the set of pages citing the concept — and a page that could not record all three
-  records none of them. Uses full-vault scope (not `graph.scope.dirs`) so
+  `llm_inputs.synthesis` input both its `## Synthesis` and its `## Related` are owed against.
+  One sweep because they are one fact — the set of pages citing the concept — and a page that
+  could not record all three records none of them. What is owed therefore carries BOTH
+  headings (`ConceptResynthesis::anchor` and `related_anchor`), each spelled as the page
+  spells it: the relations are the same evidence asked a different question, so one task
+  writes both and one marker answers for the pair. `related_anchor` is `None` where the page
+  has no such section, because `replace_section` leaves a page unchanged when the heading is
+  absent and a writer handed one would report a write that never happened. Uses full-vault scope (not `graph.scope.dirs`) so
   `<daily>`/`<personal>`/`<synthesis>` pages are included.
   **The verdict is the candidate page against the page on disk**, not a field-by-field
   comparison: everything derived is rendered into the candidate, so whatever differs is by

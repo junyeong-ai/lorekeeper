@@ -72,7 +72,7 @@ and descriptions in `input.locale`.
 
 ## `kind: synthesize-concept`
 
-Rewrite one concept page's synthesis from the pages that currently cite it.
+Rewrite one concept page's synthesis, and its relations, from the pages that currently cite it.
 
 `input.citations` lists those pages by id, and the concept page's own sources
 section links every one of them. Read the sources — that is the whole input;
@@ -103,6 +103,36 @@ the task carries no text.
    before is not evidence either way — read the sources, not the previous body.
 6. Length follows the evidence: one or two sentences for a concept with a
    single citation, a short paragraph for one with many. Never pad.
+7. **Write the concept's relations under `input.related_anchor`.** The same evidence
+   answers both sections, which is why one task writes them: the pages citing this
+   concept name others alongside it, and which of those the material actually relates
+   to this one is what this section states. One link per line, in the form AGENTS.md
+   § Links defines — a concept's relations are its siblings, so the destination is the
+   bare `slug.md` and the display text is that page's title:
+
+   ```
+   - [Speculative Decoding](speculative-decoding.md)
+   ```
+
+   Four rules, and the first two are what keep this section worth reading:
+
+   - **A relation is a claim the evidence supports, never a co-occurrence.** A day's
+     news names twenty concepts and relates almost none of them; a document about one
+     subject relates the three it names. Write nothing rather than fill the section —
+     an empty relations section is a true statement about thin evidence, and a padded
+     one costs every later reader the work of telling the two apart.
+   - **Every destination must be a page that exists**, confirmed with
+     `lore resolve <name>`. A link to a page nothing answers to is the broken link
+     `lore graph lint` reports, and this is the one section a rewrite could mint one in.
+     Resolve by NAME rather than guessing a slug: a renamed or merged concept keeps its
+     original address.
+   - **REWRITE it, like the synthesis** — it states the relations the current evidence
+     supports, so one the evidence has moved past is replaced rather than kept beside.
+   - **A task carrying no `related_anchor` has no section to write.** The page does not
+     have one; writing anyway would edit nothing and report success.
+
+   `synthesis_done` answers for BOTH sections — one input, one act, one marker — so
+   stamp it once, after writing both.
 
 A concept with no citations left keeps whatever the page says — write the
 section from the sources you have; if there are none, leave the existing body

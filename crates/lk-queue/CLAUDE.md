@@ -59,6 +59,10 @@ knows about; provider choice is config-driven (`build_llm_client` in lk-cli).
     body accumulates across every source citing it. Hashing the locale into
     `extract-concepts` would re-enqueue an extraction for every daily page and document in
     the vault to produce the same concepts under a different grounding sentence.
+    A `concept-synthesis` task carries the page's `## Related` heading beside its synthesis
+    heading (`related_anchor`, `None` where the page has no such section) because both sections
+    answer to that one citation set and one act writes them; like `source_type` it is payload
+    only, since a heading is not part of what the answer would be.
     `concept-synthesis` hashes the citation SET alone, through
     `lk_core::concept::citation_digest`, so the page's recorded input and the task's
     `cache_hash` are the same string by construction rather than by two implementations
