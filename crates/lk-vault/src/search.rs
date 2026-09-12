@@ -226,13 +226,27 @@ impl Page {
 /// Empty when the query names nothing, which leaves the term-by-term match as the only path
 /// and is the answer for a query that is a phrase rather than a name.
 ///
-/// Where this reaches too far: an alias that is ALSO a common word in another sense. Querying
-/// the concept then reads every page using that word in the other sense — `측정 모집단` reads
-/// the pages saying `분모`, which is the alias and is also just the word for a denominator.
-/// The reach belongs to the alias rather than to the matching, which is where it can be
-/// fixed: the excerpt shows the line and the name that reached it, and judging whether a name
-/// belongs to a concept is `/lore-wiki audit`'s. What is ruled out is the other failure, the
-/// one no edit can reach — a page matched by a spelling nobody wrote down.
+/// Where this reaches too far, in two shapes. An alias that is ALSO a common word in another
+/// sense: querying the concept then reads every page using that word in the other sense —
+/// `측정 모집단` reads the pages saying `분모`, which is the alias and is also just the word for
+/// a denominator. That reach belongs to the alias rather than to the matching, which is where
+/// it can be fixed, and judging whether a name belongs to a concept is `/lore-wiki audit`'s.
+///
+/// The second shape is not the alias's fault and no audit of it would find one: a borrowed
+/// spelling CONTAINED in an unrelated page's own name promotes that page to `Name`, because
+/// Korean requires plain containment (`contains_term`) and a title is matched like any other
+/// text. Left as it is, measured rather than assumed: across the vault's concepts carrying a
+/// short Korean alias, the pages this promotes are pages genuinely named for the subject —
+/// `Attention` reaching `어텐션 시각화`, `Artificial Superintelligence` reaching `개인용 초지능` —
+/// which is the reach the route exists to provide and which no term of the query could make.
+/// Requiring the borrowed spelling to EQUAL a name would drop every one of them, and would
+/// also break what the two routes agree on: `MCP` and `Model Context Protocol` rank the same
+/// 17 pages at `Name`, so the asker's choice among a concept's names would start deciding the
+/// rank. The residual is a title that merely happens to contain the alias, which the excerpt
+/// exposes by showing the line and the name that reached it.
+///
+/// What is ruled out in every shape is the other failure, the one no edit can reach — a page
+/// matched by a spelling nobody wrote down.
 fn spellings_of(query_identity: Option<&str>, pages: &[Page]) -> Vec<String> {
     let Some(key) = query_identity else {
         return Vec::new();
