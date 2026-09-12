@@ -284,7 +284,8 @@ sources:
   # document graph rather than guessing at a layout, which is what lets `status` exclude a
   # superseded decision as a fact rather than a heuristic. A repo without one is
   # `/lore-extract`'s case — a one-off pass under a person's judgment.
-  # One source per repository (the source id is its directory under <daily>/).
+  # One source per repository. Each document becomes its own page under <wiki>/documents/,
+  # tagged with the kind the repository gave it and linked back to the file it came from.
   platform-docs:
     type: nodex
     enabled: false

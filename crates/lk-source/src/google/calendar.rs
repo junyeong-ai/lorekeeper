@@ -421,6 +421,7 @@ fn map_event(
             }));
 
     let item = RawItem {
+        labels: Vec::new(),
         external_id: Some(id),
         title: summary,
         body: body_parts.join("\n\n"),

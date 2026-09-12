@@ -278,6 +278,7 @@ impl Source for SlackSearchSource {
                 });
 
                 all_items.push(RawItem {
+                    labels: Vec::new(),
                     external_id: Some(format!("search:{ch}/{}", m.ts)),
                     title,
                     body,

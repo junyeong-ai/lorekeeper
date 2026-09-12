@@ -877,20 +877,40 @@ impl ItemKind {
 /// adding a `SourceType` fills one struct literal the compiler forces complete — a
 /// new variant can never silently inherit a default (e.g. a streaming source quietly
 /// flagged non-streaming would lose scrolled-out items).
+/// What one observation from a source is, and therefore where it lands in the vault.
+///
+/// A mail, a message, an issue update and a feed entry are each too small to stand alone —
+/// what makes them legible is the day that groups them, so they aggregate onto a daily page.
+/// A file handed to the vault and a repository's decision record are whole documents their
+/// authors wrote and maintain, each with its own title, so each becomes its own page under
+/// `<wiki>/documents/` where the search reaches it by name.
+///
+/// This is a static trait of the source TYPE, so it lives here: a new source answers it
+/// because the match is exhaustive, rather than inheriting whichever branch a condition
+/// elsewhere happened to fall through to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObservationUnit {
+    /// One item among the many a day holds. Aggregates onto `<daily>/{source-id}/{date}.md`.
+    Day,
+    /// A whole document. Becomes one page under `<wiki>/documents/`.
+    Document,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct SourceDescriptor {
     /// A rolling/capped feed that CANNOT completely re-fetch a past day (RSS). Such a
     /// source projects its daily pages from the per-date event log (accumulate, never
     /// deplete): an item observed on day N is gone from the feed before a later run
     /// re-renders page N, so rendering from the fetch alone would silently lose it.
-    /// Complete-refetch sources reproduce their whole window on demand and keep no log;
-    /// `Manual` produces document pages (one per inbox file), not a daily aggregation.
+    /// Complete-refetch sources reproduce their whole window on demand and keep no log.
     pub streaming: bool,
     /// Type-level fallback Jinja template. A user `{source-id}.md.jinja` overrides it at
     /// render time.
     pub default_template: &'static str,
     /// Whether items read as messages or events (daily-page heading terminology).
     pub item_kind: ItemKind,
+    /// What one observation from this source IS, which decides the page it becomes.
+    pub unit: ObservationUnit,
     /// A source whose items are APPOINTMENTS — a time already committed to rather than work to
     /// decide about.
     ///
@@ -910,30 +930,35 @@ impl SourceType {
                 default_template: "google-drive.md.jinja",
                 scheduled: false,
                 item_kind: ItemKind::Event,
+                unit: ObservationUnit::Day,
             },
             SourceType::Gmail => SourceDescriptor {
                 streaming: false,
                 default_template: "gmail.md.jinja",
                 scheduled: false,
                 item_kind: ItemKind::Event,
+                unit: ObservationUnit::Day,
             },
             SourceType::SlackChannel => SourceDescriptor {
                 streaming: false,
                 default_template: "slack-channel.md.jinja",
                 scheduled: false,
                 item_kind: ItemKind::Message,
+                unit: ObservationUnit::Day,
             },
             SourceType::SlackSearch => SourceDescriptor {
                 streaming: false,
                 default_template: "slack-search.md.jinja",
                 scheduled: false,
                 item_kind: ItemKind::Message,
+                unit: ObservationUnit::Day,
             },
             SourceType::Jira => SourceDescriptor {
                 streaming: false,
                 default_template: "jira.md.jinja",
                 scheduled: false,
                 item_kind: ItemKind::Event,
+                unit: ObservationUnit::Day,
             },
             // Not streaming: a CQL window re-queries any past day completely, so a daily
             // page rebuilds from the fetch alone — no event-log projection needed.
@@ -942,32 +967,37 @@ impl SourceType {
                 default_template: "confluence.md.jinja",
                 scheduled: false,
                 item_kind: ItemKind::Event,
+                unit: ObservationUnit::Day,
             },
             SourceType::GoogleCalendar => SourceDescriptor {
                 streaming: false,
                 default_template: "google-calendar.md.jinja",
                 scheduled: true,
                 item_kind: ItemKind::Event,
+                unit: ObservationUnit::Day,
             },
             SourceType::Rss => SourceDescriptor {
                 streaming: true,
                 default_template: "rss.md.jinja",
                 scheduled: false,
                 item_kind: ItemKind::Event,
+                unit: ObservationUnit::Day,
             },
             SourceType::Manual => SourceDescriptor {
                 streaming: false,
                 default_template: "document.md.jinja",
                 scheduled: false,
                 item_kind: ItemKind::Event,
+                unit: ObservationUnit::Document,
             },
             // Not streaming: a repository's documents declare their own dates and stay where
             // they are, so a past day re-queries complete.
             SourceType::Nodex => SourceDescriptor {
                 streaming: false,
-                default_template: "nodex.md.jinja",
+                default_template: "document.md.jinja",
                 scheduled: false,
                 item_kind: ItemKind::Event,
+                unit: ObservationUnit::Document,
             },
             // Not streaming: a date's transition log is a closed, durable record, so a past
             // day re-reads complete and the page rebuilds from the read alone.
@@ -976,6 +1006,7 @@ impl SourceType {
                 default_template: "tasks.md.jinja",
                 scheduled: false,
                 item_kind: ItemKind::Event,
+                unit: ObservationUnit::Day,
             },
         }
     }
@@ -1406,6 +1437,26 @@ fn fold_current_dir(path: &Path) -> PathBuf {
     path.components()
         .filter(|component| !matches!(component, std::path::Component::CurDir))
         .collect()
+}
+
+#[cfg(test)]
+mod observation_unit_tests {
+    use super::*;
+
+    /// A source whose observation is a whole document writes document pages, and the answer
+    /// lives in the descriptor rather than in a condition that names one source: `nodex` was
+    /// added while the question was a hardcoded equality on `Manual`, so it inherited the
+    /// daily branch in silence and a repository's decision records landed in a dated page the
+    /// vault search does not read.
+    #[test]
+    fn a_document_source_renders_the_document_template() {
+        for source in [SourceType::Manual, SourceType::Nodex] {
+            let d = source.descriptor();
+            assert_eq!(d.unit, ObservationUnit::Document, "{source:?}");
+            assert_eq!(d.default_template, "document.md.jinja", "{source:?}");
+        }
+        assert_eq!(SourceType::Rss.descriptor().unit, ObservationUnit::Day);
+    }
 }
 
 #[cfg(test)]

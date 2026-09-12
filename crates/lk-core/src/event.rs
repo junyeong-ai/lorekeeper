@@ -133,6 +133,11 @@ pub struct RawItem {
     pub is_self: bool,
     /// Set only by an adapter whose provider gives it a structured answer. See [`OpenWork`].
     pub open_work: Option<OpenWork>,
+    /// How the SOURCE itself classifies this item, where it declares one — a repository's
+    /// document kind, never a reading of the text. They join the source's configured labels
+    /// as the page's tags, which is what lets a reader ask for decision records without
+    /// asking the source that wrote them.
+    pub labels: Vec<String>,
     pub metadata: serde_json::Value,
 }
 

@@ -153,6 +153,7 @@ impl Transition {
             body.push_str(&format!("(carried {} day(s))", self.carried));
         }
         Some(RawItem {
+            labels: Vec::new(),
             // The task, and nothing else. `EventId` already carries the date, so this is one
             // observation per task per day: a completion recorded twice — the log written, the
             // board write failing, the reconcile finding the box still ticked — collapses in the

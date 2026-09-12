@@ -320,6 +320,7 @@ fn map_entry(
     let categories: Vec<String> = entry.categories.into_iter().map(|c| c.term).collect();
 
     Some(RawItem {
+        labels: Vec::new(),
         external_id: Some(external_id),
         title,
         body,

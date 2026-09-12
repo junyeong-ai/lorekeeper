@@ -20,7 +20,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use lk_core::concept::ExtractedConcept;
-use lk_core::config::{SourceConfig, SourceType};
+use lk_core::config::{ObservationUnit, SourceConfig};
 use lk_core::event::{Event, RawItem};
 use lk_vault::{FsVault, VaultStore};
 
@@ -197,9 +197,9 @@ impl Pipeline {
             tracing::info!(source = source_id, kept = events.len(), "intra-batch dedup");
         }
 
-        // Manual is a document source (one page per inbox file, archived after ingest), not
-        // a daily aggregation — it doesn't project from the per-date event log.
-        if config.source_type == SourceType::Manual {
+        // A document source writes one page per observation and keeps no per-date log: what it
+        // reads is a whole document, so the day that carried it is not what makes it legible.
+        if config.source_type.descriptor().unit == ObservationUnit::Document {
             if events.is_empty() {
                 return Ok(empty_result(source_id));
             }

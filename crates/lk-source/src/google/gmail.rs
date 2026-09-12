@@ -390,6 +390,7 @@ fn map_message(
         !identity_email.is_empty() && header_email(from).eq_ignore_ascii_case(identity_email);
 
     Some(RawItem {
+        labels: Vec::new(),
         external_id: Some(msg.id.clone()),
         title: subject.to_string(),
         body,

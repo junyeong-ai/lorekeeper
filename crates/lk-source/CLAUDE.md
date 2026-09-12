@@ -205,9 +205,12 @@ map to `RawItem`.
     the reader's own vault on their own machine.
   - **nodex** (`nodex.rs`): a project repository's DECLARED document graph, read by running
     `nodex query recent` in it. The documents are not copied — the repository remains their
-    store — so each day's documents become events on a daily page and only the CONCEPTS they
-    name reach the wiki, which is what makes one insight found in three projects converge on
-    one page. Admission is structural because `nodex` answers structurally: `status` is not
+    store — but each document becomes its own page under `<wiki>/documents/`, because a
+    decision record is a whole document rather than one item among the many a day holds, and
+    the vault search reads the wiki and never the daily pages under it. Its `kind` rides as a
+    TAG, so a reader asks for decision records across every project without naming a source.
+    The CONCEPTS those documents name are what makes one insight found in three projects
+    converge on one page. Admission is structural because `nodex` answers structurally: `status` is not
     `active` (superseded/archived) excludes a document as a FACT rather than a heuristic
     reading its prose, and `kind` is the repository's own vocabulary. `--today` pins the
     clock so `--date` backfill asks the day's own question; `--since` is a lower bound only,

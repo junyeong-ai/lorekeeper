@@ -326,6 +326,7 @@ fn read_item(path: &Path) -> Result<RawItem, SourceError> {
         .unwrap_or("manual")
         .to_string();
     Ok(RawItem {
+        labels: Vec::new(),
         external_id: Some(format!("manual:{file_name}:{fingerprint}")),
         title,
         body: content,

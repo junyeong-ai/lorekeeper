@@ -53,6 +53,7 @@ fn base_config(vault_root: &std::path::Path) -> Config {
 
 fn raw_item(title: &str, body: &str, external_id: &str, when: jiff::Timestamp) -> RawItem {
     RawItem {
+        labels: Vec::new(),
         external_id: Some(external_id.into()),
         title: title.into(),
         body: body.into(),

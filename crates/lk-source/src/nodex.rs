@@ -1,11 +1,15 @@
 //! A project's own document graph, read through `nodex`.
 //!
-//! A repository's ADRs, learnings and guides are knowledge, and copying them into the vault
-//! would only give them a second home: the repository already stores, validates and searches
-//! them. What the vault is for is the layer above — the concept a document names, which
-//! accumulates evidence from every project and every feed that names it too. So this source
-//! puts each day's documents on a daily page like any feed's articles, and the concept
-//! extraction does the rest.
+//! A repository's ADRs, learnings and guides are knowledge, and what the vault adds is the
+//! layer above — the concept a document names, which accumulates evidence from every project
+//! and every feed that names it too.
+//!
+//! Each document becomes its own page, because a decision record is a whole document its
+//! author wrote and maintains rather than one item among the many a day holds. That is what
+//! makes it reachable by name: the vault search reads the wiki, never the daily pages under
+//! it, so a document aggregated onto a dated page is findable only through the concepts it
+//! happens to have named. The repository stays its store — the page carries its address —
+//! and the document's own `kind` rides along as a tag.
 //!
 //! `nodex` is what makes admission structural rather than a guess at a repository's layout.
 //! It answers with a document's `kind`, its `status`, and the date it declares — the same
@@ -385,6 +389,9 @@ fn read_document(
     let body = lk_core::frontmatter::split_page(&content).body.to_string();
 
     Ok(RawItem {
+        // The repository's own vocabulary, carried so a reader can ask for decision records
+        // across every project at once.
+        labels: vec![item.kind.clone()],
         external_id: Some(item.id.clone()),
         title: item.title.clone(),
         body,

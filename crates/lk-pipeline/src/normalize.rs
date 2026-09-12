@@ -53,7 +53,7 @@ pub fn normalize_events(
                 body,
                 url: item.url,
                 author: item.author,
-                labels: vec![],
+                labels: item.labels,
                 category: None,
                 performance_category: None,
                 is_self: item.is_self,
@@ -71,6 +71,7 @@ mod tests {
     #[test]
     fn normalize_assigns_event_id() {
         let items = vec![RawItem {
+            labels: Vec::new(),
             external_id: Some("MSG-001".into()),
             title: "Test".into(),
             body: "body".into(),
@@ -93,6 +94,7 @@ mod tests {
         let tz = jiff::tz::TimeZone::UTC;
         let ts = jiff::Timestamp::now();
         let mk = |title: &str, body: &str| RawItem {
+            labels: Vec::new(),
             external_id: None,
             title: title.into(),
             body: body.into(),
@@ -113,6 +115,7 @@ mod tests {
     fn stable_id_for_same_external_id() {
         let ts = jiff::Timestamp::now();
         let make = || RawItem {
+            labels: Vec::new(),
             external_id: Some("JIRA-123".into()),
             title: "Title".into(),
             body: "different body".into(),
@@ -136,6 +139,7 @@ mod tests {
         // the `## {section}` page structure. Normalize must demote it below H3.
         let tz = jiff::tz::TimeZone::UTC;
         let item = RawItem {
+            labels: Vec::new(),
             external_id: Some("X".into()),
             title: "Issue".into(),
             body: "## Plan\n\nstep one\n\n### Sub\n\ndetail\n".into(),
@@ -166,6 +170,7 @@ mod tests {
         // Normalize owns title hygiene for every adapter.
         let tz = jiff::tz::TimeZone::UTC;
         let item = RawItem {
+            labels: Vec::new(),
             external_id: Some("X".into()),
             title: "  [Action] subject \n".into(),
             body: String::new(),
@@ -187,6 +192,7 @@ mod tests {
         let tz = jiff::tz::TimeZone::UTC;
         let ts = jiff::Timestamp::now();
         let mk = |title: &str| RawItem {
+            labels: Vec::new(),
             external_id: None,
             title: title.into(),
             body: "b".into(),
@@ -211,6 +217,7 @@ mod tests {
 
         fn raw(title: &str, body: &str) -> RawItem {
             RawItem {
+                labels: Vec::new(),
                 external_id: None,
                 title: title.into(),
                 body: body.into(),
@@ -264,6 +271,7 @@ mod tests {
         // 2026-05-22T23:00:00Z is 2026-05-23T08:00:00 KST
         let ts: jiff::Timestamp = "2026-05-22T23:00:00Z".parse().unwrap();
         let item = RawItem {
+            labels: Vec::new(),
             external_id: Some("X".into()),
             title: "X".into(),
             body: String::new(),

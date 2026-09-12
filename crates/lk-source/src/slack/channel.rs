@@ -318,6 +318,7 @@ impl Source for SlackChannelSource {
                     .is_some_and(|me| root.user.as_deref() == Some(me));
 
                 items.push(RawItem {
+                    labels: Vec::new(),
                     external_id: Some(format!("{channel_id}/{}", root.ts)),
                     title,
                     body,

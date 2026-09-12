@@ -11,7 +11,7 @@ structural health.
 Data Sources              lore (Rust CLI)            Obsidian Vault (vault.dirs.*)
 ────────────              ───────────────            ──────────────────────────────
 Google Drive ──┐          ┌─ Extract (per-source)    <daily>/{source-id}/
-Project repos ─┤ (nodex)   │
+Project repos ─┤ (nodex)  │
 Gmail ─────────┤          ├─ Normalize → Event       <personal>/work-log/
 Slack ─────────┼─ config ─┤  Collapse dup (intra-batch)<personal>/{weekly,monthly,quarterly,annual}/
 Jira ──────────┤  .yaml   ├─ Classify (labels)       <synthesis>/{weekly}/
@@ -90,6 +90,7 @@ Auto-discovered: `./config.yaml` → `~/.config/lorekeeper/config.yaml`.
 ## Cross-cutting invariants
 
 - **Source ID = vault directory**: the key under `sources:` becomes `<daily>/{id}/`. Must not contain `/` or `\`, and must not be `.` or `..`.
+- **What one observation IS decides the page it becomes**, and `SourceType::descriptor().unit` is where that is declared. A mail, a message, an issue update and a feed entry are each too small to stand alone — the day that groups them is what makes them legible, so they aggregate onto a daily page. A file handed to the vault and a repository's decision record are whole documents their authors wrote, so each becomes its own `<wiki>/documents/` page, where `lore wiki search` reaches it by name: the search reads the wiki and never the daily pages under it, so a document aggregated onto a dated page is findable only through whichever concepts it happened to name. The trait lives in the descriptor rather than in a condition naming one source, because the match is exhaustive — asked as `== SourceType::Manual`, the question went unasked when `nodex` was added and a repository's ADRs landed in dated pages the search does not read.
 - **Vault directories configurable**: all top-level vault paths (`<daily>`, `<personal>`, `<synthesis>`, `<wiki>`) are set via `vault.dirs.*` in config.yaml. Their fixed leaf subdirectories (`concepts`, `documents`, `explorations`, `work-log`) are single-sourced as `lk_core::vault_path` constants. Every crate builds paths through `VaultPath` builders or those constants — never an inline string literal.
 - **Date derivation**: `timestamp.to_zoned(vault.timezone()).date()` — always via configured timezone, never UTC.
 - **Multi-date batches**: events spanning several dates produce one `<daily>/` page per date.
@@ -170,7 +171,7 @@ Auto-discovered: `./config.yaml` → `~/.config/lorekeeper/config.yaml`.
 | `confluence` | Confluence REST API | Wiki pages I wrote/edited (CQL, storage-format→Markdown); version-keyed so an edit re-enters the pipeline |
 | `google-calendar` | Calendar API | Schedule tracking (HTML→Markdown) |
 | `rss` | RSS/Atom (`feed-rs`) | External knowledge feeds (vendor blogs, news) → concepts; no auth, multi-feed, per-feed error isolation (but a source that reached NO feed fails) |
-| `nodex` | `nodex` CLI | A project repository's declared document graph — its ADRs, learnings and guides stay in the repo; the concepts they name reach the vault |
+| `nodex` | `nodex` CLI | A project repository's declared document graph — each ADR, learning or guide becomes a `<wiki>/documents/` page tagged with its own kind, linked back to the repository that stores it |
 | `manual` | Local inbox | User-curated files dropped in `inbox/` (md/txt/markdown/html/htm by default; archives consumed files once this source's vault writes and the queue flush succeed) |
 | `tasks` | The intent plane's transition log | The user's own completed tasks — what `lore task` closed becomes that day's page, the work-log and a review |
 

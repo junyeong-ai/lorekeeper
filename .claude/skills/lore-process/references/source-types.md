@@ -46,8 +46,9 @@ the work-log), apply the generic guidance without a type bias.
   judgment, and what the judgment turns on
 - Keep the specifics that make it checkable — error text, values, thresholds, API
   and platform names — and drop the project's internal coordinates (ticket ids,
-  environment and module names, its own file paths). The `🔗` link is what reaches
-  the full record, so nothing is lost by leaving the project's own vocabulary in it
+  environment and module names, its own file paths). The page's `source_url` is what
+  reaches the full record, so nothing is lost by leaving the project's own vocabulary
+  out of the summary
 - A document arguing four attempts at one fix is about where the boundary goes,
   not about four attempts. Summarize the judgment, never the narrative
 

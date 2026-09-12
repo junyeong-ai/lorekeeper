@@ -470,6 +470,7 @@ fn map_issue(
         .and_then(|a| a.identity().map(str::to_string));
 
     Some(RawItem {
+        labels: Vec::new(),
         external_id: Some(issue.key.clone()),
         title: format!("[{}] {}", issue.key, summary),
         body,

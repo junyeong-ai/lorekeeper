@@ -251,6 +251,7 @@ impl Source for GoogleDriveSource {
             };
 
             items.push(RawItem {
+                labels: Vec::new(),
                 external_id: Some(file.id.clone()),
                 title: file.name.clone(),
                 body: content,

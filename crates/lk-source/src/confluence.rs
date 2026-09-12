@@ -495,6 +495,7 @@ fn map_page(page: Page, my_account_id: &str, site: &str, only_my_edits: bool) ->
         .map(|webui| format!("{site}{webui}"));
 
     Some(RawItem {
+        labels: Vec::new(),
         // The version is part of the identity: an unchanged page re-fetched tomorrow yields
         // the same id (dedup absorbs it, no LLM work), while an edit yields a new one and
         // flows through summarize/concepts again. This is the freshness mechanism.
