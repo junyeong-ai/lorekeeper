@@ -48,6 +48,24 @@ tasks: they have no id this can reach.
 the same as empty or zero. Say so rather than reporting nothing promised, and read the command's
 stderr — it names the file.
 
+## Reporting the day is half of it; the other half is what is waiting on them
+
+Two things in the document are WAITING FOR A DECISION, and both are raised every morning
+without being asked. A person who has to remember to ask is a person whose backlog grows in
+silence — which is what 42 unanswered proposals and a task carried seventeen times look like
+from the inside.
+
+- **`proposed`** — work the sources say is open that they have never answered. One line, not
+  one line each: the count, the age of the oldest, and the offer. *"제안이 42건 밀려 있다.
+  가장 오래된 건 8월 20일 것이다. 정리할까?"* The grouping comes on a yes, not before.
+- **`committed` where `carried_too_long`** — a task that has survived more day-closes than the
+  vault's threshold is not asking for another one. Name how many and offer the two real
+  answers: split it, or drop it.
+
+Raise them AFTER the day itself, so the report leads with what they actually have on. And
+raise them as one line each even when the counts are large: the offer is what must not be
+skipped, and the enumeration is what they will not read.
+
 ## The morning also has knowledge in it
 
 ```
@@ -69,6 +87,19 @@ Ten lines, not thirty. If `learned` is long, say which groups it holds and read 
 whose category touches what is on their board today — the agenda is in hand, so that is a
 judgment you can make and they cannot skim.
 
+**A thin brief can mean a source stopped talking rather than a quiet day**, and the two read
+alike from here:
+
+```
+lore health --json
+```
+
+Name any source whose `stale` is true, with `hours_ago` in days — *"my-wiki가 23일째 아무것도
+못 읽고 있다"* — and say nothing at all when none is. It is a dead pipeline, not a quiet one,
+and the knowledge half of this morning is wrong for as long as nobody knows. The command's
+exit code is non-zero exactly when it has something to say, so a run that says nothing needs
+no reading.
+
 **When they want more, dig rather than summarize again.** `path` addresses the concept page:
 read it, follow its `## 출처` to the daily pages behind the claim, and answer from those. A
 question the vault cannot answer is a question to say it cannot answer — `lore wiki search
@@ -84,7 +115,8 @@ screen.
 
 | They say | You run |
 |---|---|
-| "오늘 뭐 해야 해" | `lore agenda --json`, then tell them in their own words |
+| "오늘 뭐 해야 해" | `lore agenda --json`, then tell them in their own words — and raise the two decisions above |
+| "제안 정리" / "제안 봐줘" | group `proposed` and work through it, one group at a time |
 | "어제 뭐 들어왔어" / "읽을 거 있어" | `lore brief --date yesterday --json` |
 | "그거 좀 더 설명해줘" | read the concept page at its `path`, then its `## 출처` pages |
 | "이거 해야 해" / a request in a thread | `lore task add <text> --state today` (`--link <url> --label <what it reads as>` whenever the thing came from somewhere) |
@@ -100,7 +132,8 @@ screen.
 
 `proposed` holds work the sources say is still open — a Jira issue assigned to them and not
 done, a mail an earlier session judged to be a request. Each carries `origin`, the URL it came
-from. Read them out, one line each, and ask for a decision on each. Then apply it:
+from. Every one is a question they have not answered, so the morning raises the section whether
+or not they ask for it. Then apply what they say:
 
 - accept → `lore task move <id> today` (or `next`) — MOVE it; retyping the line by hand loses
   the origin and the source proposes it again tomorrow
@@ -116,13 +149,24 @@ what changed. When the user says something they already closed is live again, wr
 yourself with `lore task add "<what it is now>" --link <the same URL>`: the origin is the same
 and the work is new.
 
-**When there are many** — a first run against a Jira board with thirty open issues is the normal
-case — do not read thirty lines out. Group them by what they are — the `origin` URL's host and path tell you which system and
-which project, and `since` tells you the age; both are fields, so no title needs parsing. A
-proposal whose `origin` is `null` is one whose title the person has rewritten past its link:
-group it by its text and say the link is gone. Put the GROUPS to the person: "PLAT에 12건, OPS에 5건, 나머지 3건". Then apply their answer per
-group. A wall of individual questions is how a person stops reading the section, and the section
-only works if they read it.
+**When there are many** — thirty open issues on a first run, or weeks of a morning nobody
+answered — do not read thirty lines out. A wall of individual questions is how a person stops
+reading the section, and the section only works if they read it.
+
+Group them by the WORK, not by where it came from. A host tells you Jira from mail and nothing
+else: nineteen mails are nineteen unrelated things, and "메일 19건" asks for a decision nobody
+can make. Read the titles and put groups the person recognises — *"MDW 이슈 11건, GCP 알림 8건,
+문서 검토 4건, 나머지 5건"* — with the oldest date on each, since age is what tells them which
+group has been waiting.
+
+**A group that is one thing REPEATED is not a group.** A condition still true is reported again
+every day from a new address, so eight alerts about one broken log sink arrive as eight
+proposals. Say it as what it is — *"같은 알림 8건"* — and offer the answer that fits: keep the
+newest, drop the rest. One decision, and the work stays on the board.
+
+Before applying a DROP to a group, name what is in it. Accepting a group moves everything and
+loses nothing; dropping answers each origin for good, and one wrong member is work that never
+comes back.
 
 ## The note is the whole point of closing a task
 
