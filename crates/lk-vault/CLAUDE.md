@@ -114,6 +114,18 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   evidence it would otherwise answer every query in the vault. Scope is the wiki, never the
   daily pages under it — those are the bulk material a concept was read out of, so admitting
   them buries every page that ANSWERS a query under the pages that mentioned it once.
+  **A page is reached two ways and keeps the better one**: every term of the query appearing
+  on it, or — when the query IS a concept's name — any OTHER name that concept answers to
+  appearing on it. `identity_key` folds spelling while prose matching is literal, so without
+  the second route one question asked in one spelling read a quarter of its own answer
+  (`지식그래프` 4 pages, `지식 그래프` 29) and an English query read almost none of the Korean
+  prose about the same subject (`Model Context Protocol` 9, `MCP` 202). `spellings_of` reads
+  only names the vault WROTE DOWN — a concept page's title and aliases — so a hit is always
+  reachable by a recorded name and the excerpt shows the line carrying it; where it reaches
+  too far is an alias that is also a common word in another sense, which belongs to the alias
+  rather than to the matching. A query naming no concept has no other spellings and is matched
+  term by term alone, which is what keeps the expansion bounded. Pages are therefore READ
+  before any is judged, since the vocabulary the query is read against lives on them.
   **A term is matched as a word where the term itself is Latin, and anywhere where it is
   not.** Plain containment is what Korean needs — a noun carries its particle inside the same
   word (`에이전트를`), so a boundary requirement makes the vault's own language unsearchable —

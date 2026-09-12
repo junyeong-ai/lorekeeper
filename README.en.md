@@ -272,6 +272,7 @@ The source key becomes the vault subfolder name. You can define several of the s
 - **Materialized views** — a page has two layers. The **structural layer** (frontmatter, raw items, headings) re-renders every ingest; the **semantic layer** (summary, concepts, synthesis) is LLM-owned and preserved across re-renders. Unchanged input enqueues zero LLM work (a BLAKE3 hash decides).
 - **No data loss** — re-runs are idempotent (byte-identical). Streaming sources (RSS) keep a permanent event log, so scrolled-out items are never lost.
 - **Realized-only** — a future date materializes no page (a forecast isn't knowledge yet). It becomes knowledge once the date arrives.
+- **Config decides the vault's language** — `vault.locale` (ko | en) is not a label switch but **the language of every sentence Lorekeeper adds**: summaries, weekly themes, concept definitions, explorations. A concept's NAME follows whatever form the field actually uses, so a term standard in another language keeps its spelling. Source content is never translated.
 - **The graph does the bookkeeping** — `backlinks-sync` (re-derive each concept's citations, count and synthesis input, queueing a rewrite when the evidence moves), `lint` (orphans, broken links, duplicate concepts), `merge` (fold duplicate concepts), `cluster` / `suggest-links` (discover relationships).
 
 ---
@@ -290,6 +291,8 @@ lore schedule | crontab -     # emit cron lines
 lore brief --date yesterday   # a day's knowledge — what was learned (a line each), what was seen again (names)
 lore fetch <url>              # read a link into the inbox, carrying its address
 lore wiki search <query>      # the pages a query reaches, and whether they NAME it or merely mention it
+                              #   asked by a concept's name, it also reads the prose written
+                              #   under that concept's other names (MCP <-> Model Context Protocol)
 lore wiki concepts            # list concepts
 lore resolve <name>           # which concept page owns a name (0 owned / 1 absent / 2 ambiguous)
 lore wiki index / log / map   # rebuild by-topic index / by-time timeline / citation-cluster map

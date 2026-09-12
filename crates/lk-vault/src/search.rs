@@ -206,10 +206,10 @@ impl Page {
 /// the page, so a hit reached this way was reached by a declared name and the line shown
 /// contains it.
 ///
-/// It matters most in a Korean vault and it is not a Korean feature. 띄어쓰기 genuinely
-/// varies, so `지식그래프` and `지식 그래프` are ONE name to `identity_key` and two strings to
-/// prose matching; `RAG` and `Retrieval-Augmented Generation` are the same gap in an English
-/// one. Both close here, and in both directions — a query in either language reaches the
+/// It matters most in a Korean vault and it is not a Korean feature. Korean word spacing
+/// genuinely varies, so `지식그래프` and `지식 그래프` are ONE name to `identity_key` and two
+/// strings to prose matching; `RAG` and `Retrieval-Augmented Generation` are the same gap in
+/// an English one. Both close here, and in both directions — a query in either language reaches the
 /// pages written in the other, which is what a vault holding one language's prose about
 /// another language's terms needs.
 ///
@@ -507,9 +507,9 @@ mod tests {
         assert_eq!(hits[0].matched, MatchField::Identity);
     }
 
-    /// The reason a Korean vault needed the query read against its own vocabulary. 띄어쓰기
-    /// varies, so the same name is written both ways, and `identity_key` folds the two while
-    /// prose matching cannot. On the reference vault `지식그래프` reached 4 pages where
+    /// The reason a Korean vault needed the query read against its own vocabulary. Korean word
+    /// spacing varies, so the same name is written both ways, and `identity_key` folds the two
+    /// while prose matching cannot. On the reference vault `지식그래프` reached 4 pages where
     /// `지식 그래프` reached 29 — the same question, the same subject, a quarter of the answer.
     #[test]
     fn a_query_spelled_solid_reaches_the_prose_spelled_with_a_space() {
