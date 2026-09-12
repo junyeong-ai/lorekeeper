@@ -367,6 +367,12 @@ pub struct DocumentLlmInputHashes<'a> {
 pub struct DocumentRenderContext<'a> {
     pub slug: &'a str,
     pub event: &'a Event,
+    /// When the vault first held this document, read off the page it already has. A document
+    /// source re-observes — a repository document edited later is the same document on the
+    /// same page — so the date the page was created is not the date of the observation that
+    /// re-rendered it. `lore brief` places a document on a day by this field, and rewriting it
+    /// moved an edited document out of the day it was learned and into the day it changed.
+    pub created: Option<&'a str>,
     pub summary: &'a str,
     pub concepts: &'a [ConceptIdentity],
     pub extract_concepts: bool,
@@ -387,6 +393,7 @@ pub fn render_document_page(
         extract_concepts,
         locale,
         llm_inputs,
+        created,
     } = ctx;
     let strings = locale.strings();
 
@@ -403,6 +410,7 @@ pub fn render_document_page(
     );
 
     let date = event.date;
+    let created = created.unwrap_or(&date.to_string()).to_string();
 
     let mut tags = vec!["document".to_string()];
     tags.extend(event.labels.iter().cloned());
@@ -423,7 +431,7 @@ pub fn render_document_page(
     let context = serde_json::json!({
         "slug": slug,
         "title": event.title,
-        "created": date.to_string(),
+        "created": created,
         "updated": date.to_string(),
         "document_type": document_type,
         "source_url": event.url,

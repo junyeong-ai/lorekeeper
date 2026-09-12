@@ -276,19 +276,21 @@ async fn query_window(
     }
 }
 
-/// Does this answer reach back to the window's first day?
+/// Has this answer read PAST the window's first day?
 ///
 /// Either the repository ran out of documents — it answered with fewer than it was asked for —
-/// or the oldest row it did answer with is at or before the day the window opens. An empty
-/// answer is the first case. The oldest is taken by MINIMUM rather than from the last row,
-/// so nothing here rests on the order `nodex` chose to list them in.
+/// or it answered with a row dated BEFORE the window opens, which happens only once that day's
+/// own documents are all behind it. `at` the first day would not do: the query is bounded one
+/// day below the window precisely so a page cut in the middle of the first day's documents
+/// cannot pass for one that read them all. The oldest is taken by MINIMUM rather than from the
+/// last row, so nothing here rests on the order `nodex` listed them in.
 fn spans_window(page: &[RecentItem], reach: usize, first_day: jiff::civil::Date) -> bool {
     page.len() < reach
         || page
             .iter()
             .map(|item| item.date)
             .min()
-            .is_none_or(|oldest| oldest <= first_day)
+            .is_some_and(|oldest| oldest < first_day)
 }
 
 /// Ask the repository which documents declare a date in the window.
@@ -298,6 +300,11 @@ fn spans_window(page: &[RecentItem], reach: usize, first_day: jiff::civil::Date)
 /// the caller's, against the same declared date this reports. `limit` is therefore how far
 /// back this one call reaches and not how many documents the window holds; [`query_window`]
 /// owns the difference.
+///
+/// The lower bound is asked one day BEFORE the window opens. An answer reaching only as far as
+/// the window's first day proves nothing — the query cannot return anything older, so a page
+/// cut in the middle of that day's documents looks exactly like one that read them all. A row
+/// dated before the window is the proof, and the caller's own date filter drops it.
 async fn query_recent(
     repo: &Path,
     field: &str,
@@ -313,7 +320,7 @@ async fn query_recent(
         .args(["query", "recent", "--field"])
         .arg(field)
         .arg("--since")
-        .arg(first_day.to_string())
+        .arg(first_day.yesterday().unwrap_or(first_day).to_string())
         .arg("--limit")
         .arg(limit.to_string())
         .stdin(Stdio::null())
@@ -380,8 +387,9 @@ fn repoint_links(body: &str, repo: &Path, doc_path: &str, base_url: Option<&str>
             .find(|rel| holds(repo, rel));
         match (held, base_url) {
             (Some(rel), Some(base)) => Some(format!(
-                "[{text}]({}/{rel}{anchor})",
-                base.trim_end_matches('/')
+                "[{text}]({}/{}{anchor})",
+                base.trim_end_matches('/'),
+                lk_core::link::encode_dest(&rel)
             )),
             _ => Some(text.to_owned()),
         }
@@ -396,6 +404,11 @@ fn repoint_links(body: &str, repo: &Path, doc_path: &str, base_url: Option<&str>
 /// the one outcome [`repoint_links`] exists to avoid. `canonicalize` answers with the name the
 /// filesystem actually stores, so comparing its answer to the path asked for settles the case
 /// without a rule about which filesystems fold.
+///
+/// It also refuses a symlinked destination — canonicalize resolves the link, so the answer is
+/// not the path asked for — and one spelled in a different Unicode normal form than the stored
+/// name. Both become plain text, which is the safe direction: the alternative is a URL that may
+/// or may not resolve at a host this cannot ask.
 fn holds(repo: &Path, rel: &str) -> bool {
     let (Ok(real), Ok(root)) = (repo.join(rel).canonicalize(), repo.canonicalize()) else {
         return false;
@@ -482,7 +495,13 @@ fn read_document(
         external_id: Some(item.id.clone()),
         title: item.title.clone(),
         body,
-        url: base_url.map(|base| format!("{}/{}", base.trim_end_matches('/'), item.path)),
+        url: base_url.map(|base| {
+            format!(
+                "{}/{}",
+                base.trim_end_matches('/'),
+                lk_core::link::encode_dest(&item.path)
+            )
+        }),
         timestamp: item
             .date
             .to_zoned(ctx.timezone.clone())
@@ -498,6 +517,10 @@ fn read_document(
         open_work: None,
         metadata: serde_json::json!({
             "kind": item.kind,
+            // Where the document IS, which is what makes the page findable as THIS document on
+            // the next run. It cannot be the URL: `base_url` is optional, and without one a
+            // page carried no identity at all, so every run minted a new one beside yesterday's.
+            "source_file": path.to_string_lossy(),
             "path": item.path,
         }),
     })
@@ -606,6 +629,47 @@ mod tests {
         assert_eq!(both[0].date, later_only[0].date);
     }
 
+    /// The query is bounded one day BELOW the window, so an answer whose oldest row is dated
+    /// the window's first day proves nothing — nodex cannot return anything older than the
+    /// bound, and a page cut in the middle of that day's documents looks identical to one that
+    /// read them all. Only a row dated before the window is proof.
+    #[test]
+    fn stopping_inside_the_first_days_documents_is_not_spanning_the_window() {
+        let first_day: jiff::civil::Date = "2026-06-13".parse().unwrap();
+        let all_on_the_first_day: Vec<RecentItem> = (0..3)
+            .map(|i| item(&format!("learning-{i}"), "2026-06-13"))
+            .collect();
+        assert!(
+            !spans_window(&all_on_the_first_day, 3, first_day),
+            "a full page holding only the first day's rows may have been cut inside it"
+        );
+        assert!(
+            spans_window(&all_on_the_first_day, 4, first_day),
+            "an answer short of what was asked for is the whole of what the repository holds"
+        );
+        assert!(spans_window(
+            &[item("a", "2026-06-13"), item("b", "2026-06-12")],
+            2,
+            first_day
+        ));
+    }
+
+    /// A rewritten destination is a link's destination and has to be written as one. A path
+    /// holding a space is not a link at all, and one holding `)` ends the link early.
+    #[test]
+    fn a_rewritten_destination_is_encoded() {
+        let repo = repo_with(&["docs/my file.md", "docs/a (1).md"]);
+        let base = Some("https://host/r");
+        assert_eq!(
+            repoint_links("[s](my%20file.md)", repo.path(), "docs/a.md", base),
+            "[s](https://host/r/docs/my%20file.md)"
+        );
+        assert_eq!(
+            repoint_links("[p](a%20%281%29.md)", repo.path(), "docs/a.md", base),
+            "[p](https://host/r/docs/a%20%281%29.md)"
+        );
+    }
+
     /// The silent one. `nodex` answers everything on or after `--since`, newest first, so a
     /// query that stops at its limit stops at the RECENT end — and a backfill of an older day
     /// came home holding only documents newer than the day it asked about, filtered every one
@@ -622,11 +686,14 @@ mod tests {
             spans_window(&newer_than_the_window, 3, first_day),
             "an answer short of what was asked for is the whole of what the repository holds"
         );
-        assert!(spans_window(
-            &[item("a", "2026-09-12"), item("b", "2026-06-13")],
-            2,
-            first_day
-        ));
+        assert!(
+            spans_window(
+                &[item("a", "2026-09-12"), item("b", "2026-06-12")],
+                2,
+                first_day
+            ),
+            "a row dated before the window is proof the window's own documents are behind it"
+        );
         assert!(
             spans_window(&[], 500, first_day),
             "a repository declaring nothing since the cut-off is a quiet window, not a short read"

@@ -215,21 +215,30 @@ map to `RawItem`.
     reading its prose, and `kind` is the repository's own vocabulary. `--today` pins the
     clock so `--date` backfill asks the day's own question; `--since` is a lower bound only,
     so the upper one is applied here against the same declared date. The query is made once
-    per FIELD (`created`, then `updated`) and unioned by (id, DECLARED DATE), never through
+    per FIELD (`created`, then `updated`) and folded to ONE observation per document, never through
     nodex's `any`: that also matches a REVIEW stamp, and a review is not an edit — re-admitting an unchanged
     document on the day it was re-read would put a second copy of knowledge the vault holds
     onto a later page and run the extraction over it again. Two queries rather than one answer
-    plus a guess at which field nodex reports when several match. The union keeps one
-    observation per date a document DECLARES, so a document written inside the window and
-    edited inside it belongs to both days — folding onto the id let the WINDOW'S WIDTH decide,
-    placing it on the day it was written when both rows fit and on the day it was changed a
-    run later, and a backfill of the edit's day reproduced neither. **The window is read WHOLE.** `nodex`
+    plus a guess at which field nodex reports when several match. The answers fold to ONE
+    observation per document, dated by the NEWEST date it declares inside the window: a
+    document source writes one page per document, so two rows about one document are two facts
+    about one thing — kept as two they put its prose, its concepts and its citations on two
+    pages, the second taking a content-hash suffix as though it were a different document that
+    shared a title. Keyed on the DATE rather than on which query answered, so the window's
+    width cannot decide it and a backfill reproduces what the live run wrote.
+    **A document source RE-OBSERVES, so a page has to be findable as its own next run.**
+    `metadata.source_file` carries the document's absolute path for exactly that: identity is
+    read from `source_file`/`source_url`, and a source setting neither — which `base_url` being
+    optional makes the documented case — found a page it could not prove was its own and
+    disambiguated around it, minting the whole corpus again every run. **The window is read WHOLE.** `nodex`
     bounds a query from below (`--since`) and answers newest-first, so `--limit` cuts at the
     RECENT end — ahead of the window whenever the window is not the newest days. A single
     capped query therefore left a backfill holding only documents newer than the day it asked
     about, filtered every one of them out and reported a quiet day: measured at 2 events where
-    11 belonged. `query_window` grows the reach until the answer spans the window or the
-    repository runs out, and `max_documents` caps what the WINDOW yields — refusing the run
+    11 belonged. `query_window` grows the reach until the answer reads PAST the window's first
+    day or the repository runs out — the query is bounded one day BELOW the window so that
+    proof exists at all, since an answer reaching only as far as the first day is exactly what
+    a page cut in the middle of that day's documents looks like, and `max_documents` caps what the WINDOW yields — refusing the run
     whole rather than ingesting a part, since which documents a partial run kept would be
     decided by the order the index listed them. **What nodex returns is
     CHECKED, not trusted**: a document's own relative links are rewritten to `base_url`

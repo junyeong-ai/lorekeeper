@@ -954,6 +954,10 @@ impl Pipeline {
                 &render::DocumentRenderContext {
                     slug: &slug,
                     event,
+                    created: existing
+                        .as_ref()
+                        .and_then(|pg| pg.frontmatter.get("created"))
+                        .and_then(|v| v.as_str()),
                     summary: &summary,
                     concepts: &concept_names,
                     extract_concepts: config.extract_concepts,

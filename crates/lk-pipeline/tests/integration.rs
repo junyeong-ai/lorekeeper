@@ -4046,3 +4046,82 @@ async fn a_re_extracted_document_keeps_the_citations_the_one_before_it_created()
          leaves it asserting knowledge with no evidence: {rendered}"
     );
 }
+
+/// A document source RE-OBSERVES: a repository document edited later is the same document, so
+/// the same page. Two things made that fail. A document's cross-run identity is read from
+/// `source_file`/`source_url`, and a nodex source without `base_url` set neither — so every run
+/// found a page it could not prove was its own and disambiguated around it, minting the whole
+/// corpus again daily (measured: three runs, three pages per document). And the render wrote
+/// `created` from the observation's own date, so an edited document left the brief of the day
+/// it was learned and reappeared on the edit day as newly learned.
+#[tokio::test]
+async fn a_re_observed_document_keeps_its_page_and_its_created_date() {
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let mut config = base_config(vault);
+    config.sources.get_mut("test-source").unwrap().source_type = SourceType::Nodex;
+    let sc = config.sources.get("test-source").unwrap().clone();
+
+    let mut first = raw_item(
+        "Slot bindings",
+        "body",
+        "adr-slot",
+        "2026-06-14T00:00:00Z".parse().unwrap(),
+    );
+    first.url = None;
+    first.metadata = serde_json::json!({ "source_file": "/repo/docs/decisions/slot.md" });
+    let mut second = raw_item(
+        "Slot bindings",
+        "edited",
+        "adr-slot",
+        "2026-06-20T00:00:00Z".parse().unwrap(),
+    );
+    second.url = None;
+    second.metadata = first.metadata.clone();
+
+    let queue_dir = vault.join(".lorekeeper").join("queue");
+    let llm: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir));
+    let opts = IngestOptions {
+        target_date: None,
+        today: far_future(),
+        dry_run: false,
+    };
+
+    for item in [first, second] {
+        // A fresh pipeline per run: each `lore ingest` is its own process, and the slug claims
+        // one holds are for the sources of that run alone.
+        let mut pipeline = Pipeline::new(vault, build_ctx(&config, llm.clone()));
+        let r = pipeline
+            .plan("test-source", &sc, vec![item], &opts)
+            .await
+            .unwrap();
+        assert_eq!(r.document_pages.len(), 1);
+        let writer = lk_vault::VaultWriter::new(vault);
+        for out in &r.document_pages {
+            writer
+                .write_page(out.path.as_ref(), &out.content)
+                .await
+                .unwrap();
+        }
+    }
+
+    let pages: Vec<_> = std::fs::read_dir(vault.join("wiki").join("documents"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        pages,
+        ["slot-bindings.md"],
+        "a re-observed document is the same page"
+    );
+
+    let page = std::fs::read_to_string(vault.join("wiki/documents/slot-bindings.md")).unwrap();
+    assert!(
+        page.contains("created: 2026-06-14"),
+        "created is when the vault first held it"
+    );
+    assert!(
+        page.contains("updated: 2026-06-20"),
+        "updated is what moves"
+    );
+}
