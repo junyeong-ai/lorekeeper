@@ -194,10 +194,38 @@ fn match_page(
         .map(|term| {
             fields
                 .iter()
-                .find(|(_, text)| text.contains(term.as_str()))
+                .find(|(_, text)| contains_term(text, term))
                 .map(|(field, _)| *field)
         })
         .try_fold(MatchField::Name, |worst, field| Some(worst.max(field?)))
+}
+
+/// Does `text` hold `term` as a word of its own, rather than inside a longer one?
+///
+/// Plain containment is what a Korean query needs: a noun carries its particle inside the same
+/// word (`에이전트를`, `게이트가`), so requiring a boundary there would make the language's
+/// ordinary spelling unsearchable. A Latin-script query needs the opposite, because spaces do
+/// separate words there — `ai` matched `daily`, `chain` and `guardrail`, and did so at the
+/// second-strongest rank, since those spellings are page NAMES.
+///
+/// So a boundary is required per EDGE and decided by the TERM: where a term begins or ends
+/// with an ASCII letter or digit, the character beside the match may not be one. Nothing here
+/// inspects the page's language, and a query mixing the two scripts is judged edge by edge.
+/// The limit is the other scripts that DO separate words — Cyrillic, Greek, an accented Latin
+/// word — which keep plain containment: unconstrained rather than wrongly constrained, which
+/// is the state this started from.
+fn contains_term(text: &str, term: &str) -> bool {
+    let (Some(first), Some(last)) = (term.chars().next(), term.chars().last()) else {
+        return false;
+    };
+    let open_anywhere = !first.is_ascii_alphanumeric();
+    let close_anywhere = !last.is_ascii_alphanumeric();
+    text.match_indices(term).any(|(at, _)| {
+        let before = text[..at].chars().next_back();
+        let after = text[at + term.len()..].chars().next();
+        (open_anywhere || !before.is_some_and(|c| c.is_ascii_alphanumeric()))
+            && (close_anywhere || !after.is_some_and(|c| c.is_ascii_alphanumeric()))
+    })
 }
 
 /// What to show beside the hit. A page matched by name is introduced by what it says first;
@@ -213,7 +241,7 @@ fn excerpt(body: &str, matched: MatchField, terms: &[String]) -> String {
             .map(str::trim)
             .find(|line| {
                 let folded = fold(line);
-                terms.iter().all(|t| folded.contains(t.as_str()))
+                terms.iter().all(|t| contains_term(&folded, t))
             })
             .map(str::to_owned)
             .or_else(|| opening_statement(&prose)),
@@ -377,6 +405,38 @@ mod tests {
         let hits = search(tmp.path(), &VaultDirs::default(), "AgentCapability", 10).unwrap();
         assert_eq!(hits[0].id, "agent-capability");
         assert_eq!(hits[0].matched, MatchField::Identity);
+    }
+
+    /// The acronym is the commonest shape a technical query takes, and plain containment made
+    /// it the noisiest: on the reference vault `ai` reached `md-wisely-daily-scrum`,
+    /// `supply-chain-attack` and `pure-code-guardrail-chain` — all at the NAME rank, above
+    /// every page that actually discusses the subject.
+    #[test]
+    fn a_latin_term_matches_a_word_and_not_the_middle_of_one() {
+        assert!(contains_term("ai-slop", "ai"));
+        assert!(contains_term("amazon sagemaker ai", "ai"));
+        assert!(
+            contains_term("ai기반 파이프라인", "ai"),
+            "no space is needed where the neighbouring script separates words on its own"
+        );
+        assert!(!contains_term("md-wisely-daily-scrum", "ai"));
+        assert!(!contains_term("supply-chain-attack", "ai"));
+        assert!(
+            !contains_term("openai-codex", "ai"),
+            "a longer name is a different name"
+        );
+        assert!(
+            !contains_term("claude-35", "5"),
+            "a numeral inside a number is not the number"
+        );
+    }
+
+    /// The other half of the same rule: Korean writes a noun and its particle as one word, so
+    /// a boundary requirement would leave the vault's own language unsearchable.
+    #[test]
+    fn a_korean_term_still_matches_inside_an_inflected_word() {
+        assert!(contains_term("호출자는 대체로 에이전트이고", "에이전트"));
+        assert!(contains_term("게이트가 실패하면", "게이트"));
     }
 
     /// Every term has to land somewhere, so a query is narrowed by adding words rather than

@@ -114,7 +114,15 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   evidence it would otherwise answer every query in the vault. Scope is the wiki, never the
   daily pages under it — those are the bulk material a concept was read out of, so admitting
   them buries every page that ANSWERS a query under the pages that mentioned it once.
-  **Matching is over `link::strip_links(body)`, never the raw body.** A link DESTINATION is an
+  **A term is matched as a word where the term itself is Latin, and anywhere where it is
+  not.** Plain containment is what Korean needs — a noun carries its particle inside the same
+  word (`에이전트를`), so a boundary requirement makes the vault's own language unsearchable —
+  while Latin script separates words with spaces, so `ai` reached `daily`, `chain` and
+  `guardrail` at the NAME rank, above every page that discusses the subject. `contains_term`
+  therefore requires a boundary per EDGE, decided by the TERM: where a term begins or ends
+  with an ASCII letter or digit, the character beside the match may not be one. Nothing
+  inspects the page's language. **Matching is over `link::strip_links(body)`, never the raw
+  body.** A link DESTINATION is an
   address rather than prose and a concept page carries one per citation, so matching them made
   every page in the vault answer to `daily`, to any source id and to a date fragment — 2700
   hits for one word, against 5 once stripped. The excerpt comes from the same stripped prose,
