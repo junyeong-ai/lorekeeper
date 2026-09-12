@@ -62,9 +62,11 @@ you last read them.
    `done` like every other kind. **Never loop
    on "until nothing reads `current`"** — the "this run is finished" signal is
    the queue file moving to `processed/`, not `queue status` reaching zero.
-2. **Locate sections only by `target.anchor`** (the exact `## …` heading the
-   pipeline wrote, resolved from i18n at queue time). Never hardcode a
-   heading per `target.kind`.
+2. **Locate a section only by a heading the TASK carries** — `target.anchor`, and
+   `input.related_anchor` for the second section a `synthesize-concept` task fills. Each is
+   the exact `## …` heading the pipeline wrote, resolved from i18n at queue time. Never
+   hardcode a heading per `target.kind`, and never derive one from the locale yourself: the
+   page may have been written under a different `vault.locale` than the one set now.
 3. **Never hand-write a concept's sources-section body or `source_count`** —
    both are machine-owned; `lore graph backlinks-sync` re-derives them from
    forward concept links on origin pages.
