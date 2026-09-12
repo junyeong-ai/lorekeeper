@@ -190,8 +190,10 @@ fn no_skill_file_calls_a_set_of_kinds_the_concept_kinds() {
         // measured against the file this phrase was removed from, splitting on whitespace
         // alone found ONE of its three occurrences — `concept kinds**,` and `concept\n
         // kinds,` each carry a trailing character, and a guard a comma defeats is the grep
-        // it was written to replace.
+        // it was written to replace. A hyphen counts as the space it stands in for, since
+        // `the concept-kinds exception` is how the phrase comes back compressed.
         let words: Vec<String> = doc
+            .replace('-', " ")
             .split_whitespace()
             .map(|w| {
                 w.trim_matches(|c: char| !c.is_alphanumeric())
