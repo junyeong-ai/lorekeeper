@@ -273,11 +273,15 @@ async fn query_recent(
 
 /// Refuse a path that does not stay inside the repository it is relative to.
 ///
-/// `Path::join` DISCARDS its base when the second operand is absolute, and resolves `..`
-/// lexically against whatever is above the repository — so the two shapes that escape are the
-/// two this names, and the check is on path COMPONENTS rather than on the string, which is the
-/// same discipline `manual`'s inbox validation uses and closes the whole class rather than the
-/// spellings someone thought of.
+/// `Path::join` DISCARDS its base for a rooted operand and resolves `..` lexically against
+/// whatever is above the repository, so those are the two shapes that escape. The check is on
+/// path COMPONENTS rather than on the string — the same discipline `manual`'s inbox validation
+/// uses — which closes the whole class rather than the spellings someone thought of.
+///
+/// `has_root`, not `is_absolute`: on Windows a path is absolute only WITH a prefix, so `\foo`
+/// is relative by that test while `join` still replaces everything but the drive — an escape
+/// the stricter-sounding predicate would admit. `Prefix` is checked beside it for `C:foo`,
+/// which carries a prefix and no root and replaces the drive the same way.
 ///
 /// Symlinks are deliberately NOT chased here. A repository's own files are its author's, and
 /// `nodex` has already parsed this one to report it — a rule refusing what the document graph
@@ -286,8 +290,8 @@ fn contained(path: &str) -> Result<(), &'static str> {
     use std::path::Component;
 
     let path = Path::new(path);
-    if path.is_absolute() || matches!(path.components().next(), Some(Component::Prefix(_))) {
-        return Err("is an absolute path");
+    if path.has_root() || matches!(path.components().next(), Some(Component::Prefix(_))) {
+        return Err("is a rooted path");
     }
     if path.components().any(|c| c == Component::ParentDir) {
         return Err("climbs out of the repository with `..`");
@@ -373,6 +377,14 @@ mod tests {
     fn a_path_that_leaves_the_repository_is_refused() {
         assert!(contained("docs/learnings/a.md").is_ok());
         assert!(contained("/etc/passwd").is_err());
+        // Windows spells the same escape two more ways, and the one CI compiles is the one a
+        // Unix test cannot make: `\one\two` is rooted with no prefix, which `is_absolute`
+        // calls relative there while `join` still replaces everything but the drive.
+        #[cfg(windows)]
+        {
+            assert!(contained(r"\one\two").is_err());
+            assert!(contained(r"C:docs\a.md").is_err());
+        }
         assert!(contained("../../.ssh/id_rsa").is_err());
         assert!(contained("docs/../../../etc/passwd").is_err());
         assert!(
