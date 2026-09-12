@@ -292,30 +292,61 @@ pub struct UnresolvedConflict {
 ///
 /// Both fields exist because flattening them lost a callout's structure and the reader needed
 /// it back. `depth` separates the callout's own lines from a callout NESTED inside it, whose
-/// body was being reported as the outer one's statement. `text` keeps its own indentation —
-/// CommonMark consumes ONE space after each marker and the rest is content — because trimming
-/// made `>     ``` ` read as a fence opener where it is an indented code line, which swallowed
-/// every statement after it.
+/// body was being reported as the outer one's statement. `text` keeps its own indentation,
+/// because trimming made `>     ``` ` read as a fence opener where it is an indented code
+/// line, which swallowed every statement after it.
 struct Quoted<'a> {
     depth: usize,
     text: &'a str,
 }
 
+/// How far a line is indented, in COLUMNS, with the text that follows.
+///
+/// Counted in columns rather than characters because a tab advances to the next four-column
+/// stop, which is the whole of CommonMark's 0–3 rule: `\t> x` is an indented code block where
+/// `   > x` is a blockquote, and both are one or three CHARACTERS. Counting characters made
+/// `>\t> x` read as depth 1 with the second marker left in the text — the same defect as
+/// `>  > x`, in the spelling an editor produces rather than a person.
+fn indent_of(text: &str) -> (usize, &str) {
+    let mut columns = 0;
+    let rest = text.trim_start_matches(|c| match c {
+        ' ' => {
+            columns += 1;
+            true
+        }
+        '\t' => {
+            columns = columns / 4 * 4 + 4;
+            true
+        }
+        _ => false,
+    });
+    (columns, rest)
+}
+
 fn quoted(line: &str) -> Option<Quoted<'_>> {
-    let indent = line.len() - line.trim_start().len();
+    let (indent, start) = indent_of(line);
     if indent > 3 {
         return None;
     }
-    let mut text = line.trim_start().strip_prefix('>')?;
+    let mut rest = start.strip_prefix('>')?;
     let mut depth = 1;
     loop {
-        text = text.strip_prefix(' ').unwrap_or(text);
-        match text.strip_prefix('>') {
-            Some(rest) => {
+        // A NESTED marker carries an indent of its own, up to CommonMark's three columns —
+        // reading exactly one space is what made `>  > x` parse as depth 1 and leave the
+        // second marker in the text. Where no marker follows, one space is the marker's own
+        // and whatever remains is the content's, which is why it is not trimmed away.
+        let (spacing, probe) = indent_of(rest);
+        match probe.strip_prefix('>') {
+            Some(next) if spacing <= 3 => {
                 depth += 1;
-                text = rest;
+                rest = next;
             }
-            None => return Some(Quoted { depth, text }),
+            _ => {
+                return Some(Quoted {
+                    depth,
+                    text: rest.strip_prefix(' ').unwrap_or(rest),
+                });
+            }
         }
     }
 }
@@ -373,6 +404,15 @@ fn parse_conflict_callout(line: &str) -> Option<(usize, &str)> {
 /// line beginning with `>`, so the raw-line state cannot see a fence a blockquote carries —
 /// which is how a `[!conflict]` inside `> ``` … > ``` ` was reported as a disagreement the
 /// page does not record, against this very sentence's promise.
+///
+/// The two layers END differently, and conflating that suppressed real conflicts. A fenced
+/// block closes with its CONTAINER, so one opened inside a blockquote ends where the
+/// blockquote does whether or not a closing delimiter was written, and the next `> …` block
+/// is a new quote holding no fence. A top-level fence has no container but the document, so
+/// it does run to the end. Carried across the boundary, one sloppily quoted snippet — or a
+/// decorative `> ~~~~~ … ~~~~~` line, which parses as an opener because a tilde fence accepts
+/// any info string — hid every `[!conflict]` later on the page, silently and with no reading
+/// in which the page had stopped asserting one.
 pub fn find_unresolved_conflicts(pages: &[ConceptPage]) -> Vec<UnresolvedConflict> {
     pages
         .iter()
@@ -384,8 +424,12 @@ pub fn find_unresolved_conflicts(pages: &[ConceptPage]) -> Vec<UnresolvedConflic
                 if fence.apply(line) || !fence.is_closed() {
                     continue;
                 }
-                let inside_quote = quoted(line).is_some_and(|q| quoted_fence.apply(q.text));
-                if inside_quote || !quoted_fence.is_closed() {
+                let Some(in_quote) = quoted(line) else {
+                    // The blockquote container ended, and a fence it held ended with it.
+                    quoted_fence = FenceState::new();
+                    continue;
+                };
+                if quoted_fence.apply(in_quote.text) || !quoted_fence.is_closed() {
                     continue;
                 }
                 let Some((depth, title)) = parse_conflict_callout(line) else {
@@ -398,30 +442,33 @@ pub fn find_unresolved_conflicts(pages: &[ConceptPage]) -> Vec<UnresolvedConflic
                 // the first of them that states something stands in. Nothing is inferred:
                 // what is reported is a line the page carries, and a callout that says
                 // nothing anywhere still reports nothing. The walk ends at the first line
-                // that is not a blockquote, which is also where the callout ends, so it can
-                // never reach into the block that follows.
+                // that is not a blockquote, and equally at the first that leaves the quote
+                // this callout sits in, so it can never reach into the block that follows.
                 let note = match title.is_empty() {
                     false => title.to_owned(),
                     true => {
-                        // Two things the walk must not mistake for the callout's own statement.
-                        // A fenced block inside its body is data, so the walk runs its own
-                        // fence state over the quoted text. And a callout NESTED inside this
-                        // one has a body of its own, which was being reported as the outer
-                        // callout's statement while the outer callout's real statement sat on
-                        // a later line, never reached — so only lines at THIS callout's depth
-                        // answer, and a deeper line is skipped without ending the walk.
+                        // The walk answers from the callout's OWN lines, which is three
+                        // conditions rather than one. It ends where the callout's container
+                        // ends — a shallower line closes it, and the depth-2 lines after a
+                        // depth-1 line are a different nested quote. A DEEPER line belongs to
+                        // a callout nested inside this one, whose body was being reported as
+                        // this callout's statement while this one's real statement sat on a
+                        // later line, never reached — so it is skipped without ending the
+                        // walk, and it is never fed to the fence state either, because a
+                        // fence it opens closes with the nested quote and not with this one.
                         let mut inner = FenceState::new();
                         lines[at + 1..]
                             .iter()
                             .map_while(|line| quoted(line))
+                            .take_while(|q| q.depth >= depth)
+                            .filter(|q| q.depth == depth)
                             .filter(|q| !inner.apply(q.text) && inner.is_closed())
                             // A line the quote indents four spaces or more is an indented code
                             // block, the other way markdown writes data — so its content is no
                             // more the callout's statement than a fenced line's is. This is why
                             // `Quoted::text` keeps its indentation: trimmed, `>     ``` ` read
                             // as a fence opener, and the statement after it was never reached.
-                            .filter(|q| q.text.len() - q.text.trim_start().len() < 4)
-                            .filter(|q| q.depth == depth)
+                            .filter(|q| indent_of(q.text).0 < 4)
                             .map(|q| q.text.trim())
                             .find(|text| states_something(text))
                             .unwrap_or_default()
@@ -746,6 +793,117 @@ mod tests {
     /// callout title is optional — so a callout that stated its case in the body and left the
     /// title empty reported nothing at all. Two of the reference vault's 24 open conflicts
     /// were invisible that way.
+    /// A fenced block ends with its CONTAINER, and carrying a quoted fence past the
+    /// blockquote that held it SUPPRESSED every later conflict on the page — the one failure
+    /// direction worse than a false report, since the page goes on asserting a disagreement
+    /// nothing tells anyone about. A decorative `> ~~~~~ … ~~~~~` line reaches it too: a
+    /// tilde fence accepts any info string, so an ordinary separator in a quote opens one.
+    #[test]
+    fn a_fence_inside_a_quote_ends_with_the_quote_and_suppresses_nothing_after_it() {
+        let tmp = TempDir::new().unwrap();
+        write_concept(
+            tmp.path(),
+            "unclosed",
+            "id: unclosed\n---\n\n## 핵심\n\n> ```\n> 닫히지 않은 코드\n\n평문 단락.\n\n> [!conflict] 진짜 갈등이다.\n",
+        );
+        write_concept(
+            tmp.path(),
+            "separator",
+            "id: separator\n---\n\n## 핵심\n\n> ~~~~~ 구분선 ~~~~~\n\n> [!conflict] 진짜 갈등이다.\n",
+        );
+        // A fence at the TOP level has no container but the document, so it does run to the
+        // end — the two layers must not be reset by the same event.
+        write_concept(
+            tmp.path(),
+            "toplevel",
+            "id: toplevel\n---\n\n## 핵심\n\n```\n> [!conflict] 코드 안의 가짜 갈등\n",
+        );
+        let by_slug: std::collections::BTreeMap<String, String> =
+            find_unresolved_conflicts(&scan(tmp.path()))
+                .into_iter()
+                .map(|c| (c.slug, c.note))
+                .collect();
+        assert_eq!(
+            by_slug.get("unclosed").map(String::as_str),
+            Some("진짜 갈등이다."),
+            "the quote ended, so the fence it held ended with it"
+        );
+        assert_eq!(
+            by_slug.get("separator").map(String::as_str),
+            Some("진짜 갈등이다."),
+            "a tilde separator opens a fence that the quote's end closes"
+        );
+        assert!(
+            !by_slug.contains_key("toplevel"),
+            "an unclosed fence at the top level still runs to the end of the page"
+        );
+    }
+
+    /// A callout answers from its OWN lines: a shallower line ends its container, and the
+    /// depth-2 lines after a depth-1 line are a different nested quote rather than more of
+    /// this callout. A nested marker also carries an indent of its own, up to three spaces,
+    /// which reading exactly one space made `>  > x` parse as depth 1.
+    #[test]
+    fn a_callout_answers_at_its_own_depth_and_stops_where_its_quote_does() {
+        let tmp = TempDir::new().unwrap();
+        write_concept(
+            tmp.path(),
+            "nested-fence",
+            "id: nested-fence\n---\n\n## 핵심\n\n> [!conflict]\n> > ```\n> > 코드\n> 진술이다.\n",
+        );
+        write_concept(
+            tmp.path(),
+            "wide-marker",
+            "id: wide-marker\n---\n\n## 핵심\n\n> [!conflict]\n>  > [!note] 참고\n>  > 중첩 본문이다.\n> 진술이다.\n",
+        );
+        write_concept(
+            tmp.path(),
+            "tab-marker",
+            "id: tab-marker\n---\n\n## 핵심\n\n> [!conflict]\n>\t> [!note] 참고\n>\t> 중첩 본문이다.\n> 진술이다.\n",
+        );
+        // A tab advances to the next four-column stop, so this one is an indented code block
+        // and the callout inside it is content — the same rule, answering the other way.
+        write_concept(
+            tmp.path(),
+            "tab-indent",
+            "id: tab-indent\n---\n\n## 핵심\n\n\t> [!conflict] 코드블록 안이다\n",
+        );
+        write_concept(
+            tmp.path(),
+            "other-block",
+            "id: other-block\n---\n\n## 핵심\n\n> 바깥 인용.\n> > [!conflict]\n> 바깥 이어짐.\n> > 다른 중첩 인용의 본문이다.\n",
+        );
+        let by_slug: std::collections::BTreeMap<String, String> =
+            find_unresolved_conflicts(&scan(tmp.path()))
+                .into_iter()
+                .map(|c| (c.slug, c.note))
+                .collect();
+        assert_eq!(
+            by_slug.get("nested-fence").map(String::as_str),
+            Some("진술이다."),
+            "a fence the NESTED quote opened closes with it, not with the callout"
+        );
+        assert_eq!(
+            by_slug.get("wide-marker").map(String::as_str),
+            Some("진술이다."),
+            "two spaces between markers is still a nested marker"
+        );
+        assert_eq!(
+            by_slug.get("tab-marker").map(String::as_str),
+            Some("진술이다."),
+            "a tab between markers is a nested marker's indent, measured in columns"
+        );
+        assert!(
+            !by_slug.contains_key("tab-indent"),
+            "one tab is four columns, which is an indented code block and not a blockquote"
+        );
+        assert_eq!(
+            by_slug.get("other-block").map(String::as_str),
+            Some(""),
+            "the callout's quote ended at the shallower line; what follows is another block"
+        );
+    }
+
     /// Three shapes where the reader had thrown away the structure it needed. A callout
     /// NESTED in the conflict had its own body reported as the outer callout's statement,
     /// while the outer callout's real statement sat on a later line and was never reached.
