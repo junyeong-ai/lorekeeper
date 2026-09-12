@@ -45,8 +45,10 @@ struct NodexParams {
     kinds: Vec<String>,
     #[serde(default = "default_lookback")]
     lookback_hours: u32,
-    /// Per-run cap. A repository that adds more documents in one day than this warns rather
-    /// than dropping them in silence.
+    /// What each query asks for. The window is asked once per date field and the answers are
+    /// unioned, so a run can return up to twice this — which drops nothing and is the point:
+    /// the cap exists to make TRUNCATION observable, and a query that came back holding
+    /// exactly its limit says so.
     #[serde(default = "default_max_documents")]
     max_documents: usize,
     /// Prefix a document's repository-relative path is appended to, to form the URL a

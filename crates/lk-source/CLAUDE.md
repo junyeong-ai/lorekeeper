@@ -191,6 +191,18 @@ map to `RawItem`.
     `markdown::readable_html_to_markdown`, which returns `None` when readability finds no
     article core; on `None` (or a result shorter than the summary) the known-clean feed
     summary is kept, so boilerplate never overwrites it.
+  - **`fetch::readable`** is the one page fetcher, shared by RSS's full-text leg and `lore
+    fetch`. It streams the body and REFUSES past `MAX_BODY_BYTES` rather than truncating —
+    readability would extract whatever a prefix held and the page would assert an article
+    nobody published — and a timeout bounds a stalled response, never a fast enormous one.
+    Streaming costs `Response::text`'s charset handling, so `declared_charset` reads the
+    `Content-Type` charset and `encoding_rs` applies it: reading a EUC-KR page as UTF-8
+    replaces every Korean character rather than degrading, and the garbage would enter the
+    vault with no error. Header only — a `<meta charset>` means decoding twice, which is a
+    browser's job. Redirects are followed wherever they lead, private addresses included: a
+    rule refusing those breaks an on-prem Atlassian instance and an intranet-hosted feed to
+    close a shape with no channel back, since what a redirected fetch returns is written into
+    the reader's own vault on their own machine.
   - **nodex** (`nodex.rs`): a project repository's DECLARED document graph, read by running
     `nodex query recent` in it. The documents are not copied — the repository remains their
     store — so each day's documents become events on a daily page and only the CONCEPTS they
