@@ -734,7 +734,7 @@ impl Pipeline {
         // (which returns `Err` and is rolled back by the CLI) never poisons the shared slug
         // namespace nor leaks half a source's concepts — the same commit-on-success contract
         // the queue's begin_source/rollback_source gives buffered tasks.
-        let mut claimed_slugs: Vec<String> = Vec::new();
+        let mut claimed_slugs: Vec<(String, Option<String>)> = Vec::new();
         let mut staged_concepts: Vec<(lk_core::concept::ExtractedConcept, jiff::civil::Date)> =
             Vec::new();
         // Two documents can share a title — and therefore a base slug — whether in one batch
@@ -800,7 +800,26 @@ impl Pipeline {
                     // the candidate never saturates, so the loop always reaches a free slug.
                     Some(n) => format!("{base_slug}-{hash}-{}", n - hash.len()),
                 };
-                if !self.document_slugs.contains(&candidate) && !claimed_slugs.contains(&candidate)
+                // A slug claimed earlier in this run belongs to a DIFFERENT document — that
+                // is what the claim asserts, and the disambiguation below rests on it. Two
+                // events carrying one identity break it, and the page split that follows is
+                // invisible in the vault, so this says so rather than holding silently.
+                // Nothing constructs that today: a document source yields one event per
+                // document (`manual` by having one file, `nodex` by folding its two queries),
+                // which is where the rule belongs and where it is tested.
+                if let Some((_, claimant)) = claimed_slugs.iter().find(|(s, _)| *s == candidate)
+                    && claimant.is_some()
+                    && *claimant == identity
+                {
+                    tracing::warn!(
+                        source = source_id,
+                        slug = %candidate,
+                        document = ?identity,
+                        "two events in one batch are the same document; each is getting its own page"
+                    );
+                }
+                if !self.document_slugs.contains(&candidate)
+                    && !claimed_slugs.iter().any(|(s, _)| *s == candidate)
                 {
                     let path = lk_core::vault_path::VaultPath::document(&self.ctx.dirs, &candidate)
                         .to_string();
@@ -822,7 +841,7 @@ impl Pipeline {
                 }
                 suffix_len = Some(suffix_len.map_or(6, |n| n + 2));
             };
-            claimed_slugs.push(slug.clone());
+            claimed_slugs.push((slug.clone(), identity.clone()));
 
             let vault_path =
                 lk_core::vault_path::VaultPath::document(&self.ctx.dirs, &slug).to_string();
@@ -1006,7 +1025,8 @@ impl Pipeline {
             self.concept_drafts.commit(staged, date);
         }
         let all_concepts: Vec<_> = staged_concepts.into_iter().map(|(c, _)| c).collect();
-        self.document_slugs.extend(claimed_slugs);
+        self.document_slugs
+            .extend(claimed_slugs.into_iter().map(|(slug, _)| slug));
 
         Ok(IngestResult {
             source_id: source_id.into(),
