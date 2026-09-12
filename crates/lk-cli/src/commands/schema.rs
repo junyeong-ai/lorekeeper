@@ -612,9 +612,10 @@ pub fn render_agents_md(
          title is not it, that name belongs on the page. A reader who does not already know \
          the title searches in the language the vault is written in, and without the alias \
          they reach nothing while the page holds every citation on the subject — and the \
-         next extraction that writes the term mints a rival page. A concept the field names \
-         only in the original term needs no alias: this asks for the names that exist, never \
-         for a translation coined to fill the field."
+         next extraction that writes the term mints a rival page. The evidence is the material \
+         you just read: an alias is a name that material WRITES, never one recognized from \
+         elsewhere, so a concept the sources only ever name in the original term gets none. \
+         A translation nobody in the field writes is a spelling nobody will search for."
     )
     .unwrap();
     writeln!(out).unwrap();

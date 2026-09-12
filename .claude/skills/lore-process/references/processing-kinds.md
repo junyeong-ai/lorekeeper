@@ -154,9 +154,10 @@ source's reading, and the page that earned the name by being cited under it keep
 alias — the one entry this kind requires rather than invites. A reader who does not yet know
 the title searches in the language the vault is written in, and without it they reach nothing
 while the page holds every citation on the subject, and the next source writing the term
-mints a rival page beside it. This asks for the names that exist: a concept the field names
-only in the original term needs no alias, and a translation coined to fill the field is
-exactly what the paragraph above forbids.
+mints a rival page beside it. The evidence is the text you just read: an alias is a name that
+text WRITES, never one you recognize from elsewhere. A concept the sources only ever name in
+the original term gets none, and a translation nobody in the field writes is a spelling nobody
+will search for.
 
 `concepts` may be empty — that is a valid answer for a page with nothing durable in it, and
 it still records that the task was answered. Copy `target` and `cache_hash` through
