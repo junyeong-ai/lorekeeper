@@ -232,7 +232,10 @@ map to `RawItem`.
     repository runs out, and `max_documents` caps what the WINDOW yields — refusing the run
     whole rather than ingesting a part, since which documents a partial run kept would be
     decided by the order the index listed them. **What nodex returns is
-    CHECKED, not trusted**: a `path`
+    CHECKED, not trusted**: a document's own relative links are rewritten to `base_url`
+    addresses only where the repository HOLDS that file — asked through `canonicalize` rather
+    than `is_file`, which folds case on macOS and Windows and so would mint a URL a
+    case-sensitive host answers 404 to; and a `path`
     that is absolute or climbs with `..` is refused — `Path::join` DISCARDS its base for an
     absolute operand, so such an answer reads a file the repository does not contain straight
     onto a vault page. That refusal ends the SOURCE rather than skipping the document: a read

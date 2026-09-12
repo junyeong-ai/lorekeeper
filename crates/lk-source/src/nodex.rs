@@ -83,9 +83,10 @@ fn default_max_documents() -> usize {
 /// window" rule every other windowed adapter here follows.
 const INITIAL_REACH: usize = 500;
 
-/// Where growing stops and the source fails rather than reading further. Seven queries at
-/// most, and a window holding this many documents is a `lookback_hours` the operator meant
-/// differently — not something the adapter can settle by asking again.
+/// Where growing stops and the source fails rather than reading further. Eight queries at
+/// most (500 doubling to 64_000), and a window holding this many documents is a
+/// `lookback_hours` the operator meant differently — not something the adapter can settle
+/// by asking again.
 const MAX_REACH: usize = 64_000;
 
 /// One document, as `nodex query recent` reports it.
@@ -174,7 +175,7 @@ impl Source for NodexSource {
         // `status`, `kind` or its date was never attempted, so it cannot stand for a read that
         // failed — the count of attempts is taken from here rather than from what the query
         // returned, which reaches past the window on both sides.
-        let admitted: Vec<RecentItem> = union_by_declared_date(items)
+        let admitted: Vec<RecentItem> = latest_per_document(items)
             .into_iter()
             .filter(|item| {
                 item.status == ACTIVE
@@ -230,20 +231,20 @@ impl Source for NodexSource {
     }
 }
 
-/// One observation per date a document DECLARES, which is what the two queries answer
-/// separately: a document written inside the window and edited inside it later declares both
-/// days and belongs to both, the same rule a living Confluence page follows when an edit
-/// re-enters the pipeline. Only the same date reported by both queries is one observation.
+/// One observation per document, dated by the newest date it declares inside the window.
 ///
-/// Folding the answers onto the id instead would let the WINDOW'S WIDTH decide which day a
-/// document lands on. A document written Sunday and edited Monday falls in one window on
-/// Monday and in two separate ones by Tuesday, so the run that happened to see both rows
-/// placed it on Sunday while the run a day later placed it on Monday — and a backfill of
-/// Monday reproduced neither. `EventId` is `source:date:hash`, so two declared dates are
-/// already two events downstream; nothing but this fold stood between them.
-fn union_by_declared_date(mut items: Vec<RecentItem>) -> Vec<RecentItem> {
-    items.sort_by(|a, b| a.id.cmp(&b.id).then(a.date.cmp(&b.date)));
-    items.dedup_by(|a, b| a.id == b.id && a.date == b.date);
+/// The two queries answer about the same document twice when it was written and edited in one
+/// window, and a document source writes ONE page per document — so the rows are not two
+/// observations, they are two facts about one. The newest is what the page is dated by: the
+/// day the vault last saw this document change.
+///
+/// Keyed on the date rather than on which query answered, so the window's WIDTH cannot decide
+/// it. A document written Sunday and edited Monday is dated Monday whether both rows fit in
+/// one window or only the later one does, and a backfill of Monday reproduces what the live
+/// run wrote.
+fn latest_per_document(mut items: Vec<RecentItem>) -> Vec<RecentItem> {
+    items.sort_by(|a, b| a.id.cmp(&b.id).then(b.date.cmp(&a.date)));
+    items.dedup_by(|a, b| a.id == b.id);
     items
 }
 
@@ -376,7 +377,7 @@ fn repoint_links(body: &str, repo: &Path, doc_path: &str, base_url: Option<&str>
         let held = [dir.join(&decoded), PathBuf::from(&decoded)]
             .into_iter()
             .filter_map(|candidate| normalize(&candidate))
-            .find(|rel| repo.join(rel).is_file());
+            .find(|rel| holds(repo, rel));
         match (held, base_url) {
             (Some(rel), Some(base)) => Some(format!(
                 "[{text}]({}/{rel}{anchor})",
@@ -385,6 +386,21 @@ fn repoint_links(body: &str, repo: &Path, doc_path: &str, base_url: Option<&str>
             _ => Some(text.to_owned()),
         }
     })
+}
+
+/// Does the repository hold this exact file, under this exact name?
+///
+/// `Path::is_file` answers yes to a name differing only in case on macOS and Windows, which are
+/// the filesystems a repository is commonly checked out on — so a link written `file.md` against
+/// a stored `File.md` would be rewritten to a URL a case-sensitive host answers 404 to, which is
+/// the one outcome [`repoint_links`] exists to avoid. `canonicalize` answers with the name the
+/// filesystem actually stores, so comparing its answer to the path asked for settles the case
+/// without a rule about which filesystems fold.
+fn holds(repo: &Path, rel: &str) -> bool {
+    let (Ok(real), Ok(root)) = (repo.join(rel).canonicalize(), repo.canonicalize()) else {
+        return false;
+    };
+    real.is_file() && real == root.join(rel)
 }
 
 /// A repository-relative path with `.` and `..` resolved, or `None` where it leaves the
@@ -553,40 +569,41 @@ mod tests {
         }
     }
 
-    /// A document belongs to every day it declares. Folding the two queries onto the id made
-    /// the answer depend on how wide the window happened to be: with both rows inside it the
-    /// document landed on the day it was written, and with only the later row inside it — the
-    /// same document, one day on — it landed on the day it was changed. A backfill of the
-    /// edit's day therefore did not reproduce what the live run had written.
+    /// A document source writes ONE page per document, so the two queries answering about the
+    /// same document are two facts about one thing rather than two observations. Keeping both
+    /// put one document on two pages — the second disambiguated by a content hash as though it
+    /// were a different document that happened to share a title, with its prose, its concept
+    /// extraction and its citations permanently split.
     #[test]
-    fn a_document_belongs_to_every_day_it_declares() {
-        let union = union_by_declared_date(vec![
+    fn a_document_edited_inside_its_own_window_is_one_observation() {
+        let kept = latest_per_document(vec![
             item("learning-a", "2026-06-14"),
             item("learning-b", "2026-06-14"),
             item("learning-a", "2026-06-15"),
         ]);
         assert_eq!(
-            union
-                .iter()
+            kept.iter()
                 .map(|i| (i.id.as_str(), i.date.to_string()))
                 .collect::<Vec<_>>(),
             [
-                ("learning-a", "2026-06-14".to_string()),
                 ("learning-a", "2026-06-15".to_string()),
                 ("learning-b", "2026-06-14".to_string()),
-            ]
+            ],
+            "the newest declared date is the day the vault last saw the document change"
         );
     }
 
-    /// The same date answered by both queries is one observation — a document written and
-    /// edited on one day is one thing that happened, not two.
+    /// The date must not be decided by how wide the window happened to be: a document written
+    /// Sunday and edited Monday falls in one window on Monday and in two separate ones by
+    /// Tuesday, and a backfill has to reproduce what the live run wrote.
     #[test]
-    fn one_date_answered_twice_is_one_observation() {
-        let union = union_by_declared_date(vec![
+    fn the_windows_width_does_not_decide_a_documents_date() {
+        let both = latest_per_document(vec![
             item("learning-a", "2026-06-14"),
-            item("learning-a", "2026-06-14"),
+            item("learning-a", "2026-06-15"),
         ]);
-        assert_eq!(union.len(), 1);
+        let later_only = latest_per_document(vec![item("learning-a", "2026-06-15")]);
+        assert_eq!(both[0].date, later_only[0].date);
     }
 
     /// The silent one. `nodex` answers everything on or after `--since`, newest first, so a
@@ -676,6 +693,23 @@ mod tests {
             repoint_links("[b](b.md)", repo.path(), "docs/learnings/a.md", None),
             "b",
             "with no address to point at, a destination that resolves nowhere is worse than none"
+        );
+    }
+
+    /// `Path::is_file` folds case on macOS and Windows, so a link whose casing differs from the
+    /// stored name read as held and was rewritten to a URL a case-sensitive host answers 404 to
+    /// — the one outcome this rewriting exists to avoid.
+    #[test]
+    fn a_link_whose_casing_differs_from_the_stored_name_is_not_held() {
+        let repo = repo_with(&["docs/File.md"]);
+        let base = Some("https://host/r");
+        assert_eq!(
+            repoint_links("[x](file.md)", repo.path(), "docs/a.md", base),
+            "x"
+        );
+        assert_eq!(
+            repoint_links("[x](File.md)", repo.path(), "docs/a.md", base),
+            "[x](https://host/r/docs/File.md)"
         );
     }
 
