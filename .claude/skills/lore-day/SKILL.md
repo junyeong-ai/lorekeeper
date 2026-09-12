@@ -1,6 +1,6 @@
 ---
 name: lore-day
-version: 0.24.0
+version: 0.24.1
 description: Run the user's working day off the Lorekeeper task board and the day's knowledge — what is on today, what the vault learned overnight, what the sources proposed, what an editor changed, what to remind them of, and closing the day so what they did becomes knowledge. The user speaks; this maps it to `lore task` and never asks them to type a command.
 when_to_use: |
   오늘 뭐 해야 해, 오늘 할 일, 뭐부터 하지, 이거 해야 해, 이거 할 일로 넣어줘,
@@ -120,7 +120,7 @@ and the work is new.
 case — do not read thirty lines out. Group them by what they are — the `origin` URL's host and path tell you which system and
 which project, and `since` tells you the age; both are fields, so no title needs parsing. A
 proposal whose `origin` is `null` is one whose title the person has rewritten past its link:
-group it by its text and say the link is gone. Put the GROUPS to the person: "PLAT 에 12건, OPS 에 5건, 나머지 3건". Then apply their answer per
+group it by its text and say the link is gone. Put the GROUPS to the person: "PLAT에 12건, OPS에 5건, 나머지 3건". Then apply their answer per
 group. A wall of individual questions is how a person stops reading the section, and the section
 only works if they read it.
 
@@ -134,7 +134,7 @@ and write what they answer. Not a status ("done", "완료"), not a restatement o
 thing they now know that they did not this morning.
 
 ```
-lore task done h3t6 --note "결제 타임아웃은 PG 가 아니라 커넥션 풀 고갈. max_idle 을 늘려도 재현됨"
+lore task done h3t6 --note "결제 타임아웃은 PG가 아니라 커넥션 풀 고갈. max_idle을 늘려도 재현됨"
 ```
 
 If they have nothing to say, close it without a note rather than inventing one. A fabricated
