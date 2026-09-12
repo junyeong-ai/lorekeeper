@@ -79,7 +79,7 @@ mod tests {
             author: None,
             timestamp: jiff::Timestamp::now(),
             is_self: false,
-            open_work: None,
+            work: None,
             metadata: serde_json::Value::Null,
         }];
 
@@ -102,7 +102,7 @@ mod tests {
             author: None,
             timestamp: ts,
             is_self: false,
-            open_work: None,
+            work: None,
             metadata: serde_json::Value::Null,
         };
         // "ab"+"c" must not hash to the same id as "a"+"bc".
@@ -123,7 +123,7 @@ mod tests {
             author: None,
             timestamp: ts,
             is_self: false,
-            open_work: None,
+            work: None,
             metadata: serde_json::Value::Null,
         };
 
@@ -147,7 +147,7 @@ mod tests {
             author: None,
             timestamp: jiff::Timestamp::now(),
             is_self: false,
-            open_work: None,
+            work: None,
             metadata: serde_json::Value::Null,
         };
         let events = normalize_events("my-tasks", SourceType::Jira, vec![item], &tz);
@@ -178,7 +178,7 @@ mod tests {
             author: None,
             timestamp: jiff::Timestamp::now(),
             is_self: false,
-            open_work: None,
+            work: None,
             metadata: serde_json::Value::Null,
         };
         let events = normalize_events("s", SourceType::Gmail, vec![item], &tz);
@@ -200,7 +200,7 @@ mod tests {
             author: None,
             timestamp: ts,
             is_self: false,
-            open_work: None,
+            work: None,
             metadata: serde_json::Value::Null,
         };
         let a = normalize_events("s", SourceType::Gmail, vec![mk("T")], &tz);
@@ -225,7 +225,7 @@ mod tests {
                 author: None,
                 timestamp: jiff::Timestamp::UNIX_EPOCH,
                 is_self: false,
-                open_work: None,
+                work: None,
                 metadata: serde_json::Value::Null,
             }
         }
@@ -279,7 +279,7 @@ mod tests {
             author: None,
             timestamp: ts,
             is_self: false,
-            open_work: None,
+            work: None,
             metadata: serde_json::Value::Null,
         };
 

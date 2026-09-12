@@ -9,7 +9,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use lk_core::event::OpenWork;
+use lk_core::event::WorkObserved;
 use serde::{Deserialize, Serialize};
 
 use crate::TaskError;
@@ -220,30 +220,70 @@ pub fn select(
 /// a run keeps the answer it last gave, which is the only honest one available.
 pub struct Candidates {
     shelf: crate::store::Shelf,
+    settled: crate::store::Shelf,
 }
 
 impl Candidates {
     pub fn new(vault_root: &Path) -> Self {
+        let root = vault_root.join(".lorekeeper").join("proposals");
         Self {
-            shelf: crate::store::Shelf::at(vault_root.join(".lorekeeper").join("proposals")),
+            settled: crate::store::Shelf::at(root.join("settled")),
+            shelf: crate::store::Shelf::at(root),
         }
     }
 
-    /// Replace `source_id`'s snapshot with what this run declared.
+    /// Fold what `source_id` OBSERVED into its snapshot, and keep what it settled.
     ///
-    /// Writes even when the list is EMPTY — that is the answer that retires yesterday's
-    /// proposals for a source whose work is all finished, and skipping it would leave them
-    /// standing forever.
-    pub fn record(&self, source_id: &str, open: &[OpenWork]) -> Result<(), TaskError> {
-        let rows: Vec<Candidate> = open
-            .iter()
-            .map(|work| Candidate {
-                source_id: source_id.to_string(),
-                summary: work.summary.clone(),
-                url: work.url.clone(),
-            })
-            .collect();
-        self.shelf.file(source_id).replace(&rows)
+    /// Open work is recorded, work seen to have left it is retired, and what the fetch did not
+    /// reach is left standing. Absence is not an answer: a query bounded by time returns
+    /// nothing on a quiet day, and replacing the snapshot with that emptied it of proposals the
+    /// source still held open.
+    ///
+    /// The settled addresses are kept rather than dropped because a snapshot entry is not the
+    /// only place a proposal lives — one already offered stands on the BOARD, and a line there
+    /// is withdrawn by `lore task propose` reading these.
+    pub fn record(&self, source_id: &str, observed: &WorkObserved) -> Result<(), TaskError> {
+        let file = self.shelf.file(source_id);
+        let mut held: Vec<Candidate> = file.read()?;
+        let settled: BTreeSet<&str> = observed.settled.iter().map(String::as_str).collect();
+        held.retain(|candidate| !settled.contains(candidate.url.as_str()));
+        for work in &observed.open {
+            match held.iter_mut().find(|held| held.url == work.url) {
+                Some(held) => held.summary.clone_from(&work.summary),
+                None => held.push(Candidate {
+                    source_id: source_id.to_string(),
+                    summary: work.summary.clone(),
+                    url: work.url.clone(),
+                }),
+            }
+        }
+        file.replace(&held)?;
+        if observed.settled.is_empty() {
+            return Ok(());
+        }
+        let file = self.settled.file(source_id);
+        let mut standing: Vec<String> = file.read()?;
+        standing.extend(observed.settled.iter().cloned());
+        standing.sort_unstable();
+        standing.dedup();
+        file.replace(&standing)
+    }
+
+    /// Every address the sources have settled since this was last read, and the files holding
+    /// them.
+    ///
+    /// Consumed like a judgment rather than re-read like a snapshot: a settlement is an event,
+    /// and one left in place would withdraw the same line every morning — including one a
+    /// person wrote down again by hand.
+    pub fn settled(&self) -> Result<(Vec<String>, Vec<PathBuf>), TaskError> {
+        let mut addresses = Vec::new();
+        let mut files = Vec::new();
+        for key in self.settled.keys()? {
+            let file = self.settled.file(&key);
+            addresses.extend(file.read::<String>()?);
+            files.push(file.path().to_path_buf());
+        }
+        Ok((addresses, files))
     }
 
     /// The snapshots of the sources `configured` names, in a stable order.
@@ -296,6 +336,7 @@ impl Candidates {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lk_core::event::OpenWork;
 
     fn work(summary: &str, url: &str) -> OpenWork {
         OpenWork {
@@ -304,57 +345,86 @@ mod tests {
         }
     }
 
+    fn observed(open: &[OpenWork], settled: &[&str]) -> WorkObserved {
+        WorkObserved {
+            open: open.to_vec(),
+            settled: settled.iter().map(|url| (*url).to_string()).collect(),
+        }
+    }
+
+    fn held(candidates: &Candidates) -> Vec<Candidate> {
+        candidates
+            .read_all(&["jira".into(), "mail".into()])
+            .unwrap()
+            .candidates
+    }
+
     #[test]
-    fn a_snapshot_is_replaced_whole() {
+    fn work_seen_to_have_left_is_retired() {
         let tmp = tempfile::tempdir().unwrap();
         let candidates = Candidates::new(tmp.path());
+        candidates
+            .record(
+                "jira",
+                &observed(
+                    &[
+                        work("[PLAT-1] one", "https://j/browse/PLAT-1"),
+                        work("[PLAT-2] two", "https://j/browse/PLAT-2"),
+                    ],
+                    &[],
+                ),
+            )
+            .unwrap();
+        assert_eq!(held(&candidates).len(), 2);
 
         candidates
             .record(
                 "jira",
-                &[
-                    work("[PLAT-1] one", "https://j/browse/PLAT-1"),
-                    work("[PLAT-2] two", "https://j/browse/PLAT-2"),
-                ],
+                &observed(
+                    &[work("[PLAT-2] two", "https://j/browse/PLAT-2")],
+                    &["https://j/browse/PLAT-1"],
+                ),
             )
             .unwrap();
-        assert_eq!(
-            candidates
-                .read_all(&["jira".into(), "mail".into()])
-                .unwrap()
-                .candidates
-                .len(),
-            2
-        );
-
-        // PLAT-1 was closed, so the next ingest simply does not declare it.
-        candidates
-            .record("jira", &[work("[PLAT-2] two", "https://j/browse/PLAT-2")])
-            .unwrap();
-        let held = candidates
-            .read_all(&["jira".into(), "mail".into()])
-            .unwrap()
-            .candidates;
-        assert_eq!(held.len(), 1);
-        assert_eq!(held[0].summary, "[PLAT-2] two");
+        let standing = held(&candidates);
+        assert_eq!(standing.len(), 1);
+        assert_eq!(standing[0].summary, "[PLAT-2] two");
     }
 
-    /// The answer that retires every proposal a source had standing. Skipping the write would
-    /// leave them there forever.
+    /// The failure this design exists to prevent. A query bounded by time — the shape the
+    /// adapter's own example uses — returns nothing on a day when nothing changed, and a
+    /// snapshot replaced with that emptiness retired every proposal the source still held open.
     #[test]
-    fn a_source_with_nothing_open_says_so() {
+    fn a_quiet_fetch_leaves_every_proposal_standing() {
         let tmp = tempfile::tempdir().unwrap();
         let candidates = Candidates::new(tmp.path());
         candidates
-            .record("jira", &[work("[PLAT-1] one", "https://j/browse/PLAT-1")])
+            .record(
+                "jira",
+                &observed(&[work("[PLAT-1] one", "https://j/browse/PLAT-1")], &[]),
+            )
             .unwrap();
-        candidates.record("jira", &[]).unwrap();
+        candidates.record("jira", &WorkObserved::default()).unwrap();
+        assert_eq!(held(&candidates).len(), 1, "nothing was observed about it");
+        assert!(candidates.settled().unwrap().0.is_empty());
+    }
+
+    /// A proposal already OFFERED lives on the board rather than in the snapshot, so retiring
+    /// the snapshot entry cannot reach it. The settlement is kept as an event for the board.
+    #[test]
+    fn a_settlement_is_kept_for_the_board_to_act_on() {
+        let tmp = tempfile::tempdir().unwrap();
+        let candidates = Candidates::new(tmp.path());
+        candidates
+            .record("jira", &observed(&[], &["https://j/browse/PLAT-1"]))
+            .unwrap();
+        let (addresses, files) = candidates.settled().unwrap();
+        assert_eq!(addresses, vec!["https://j/browse/PLAT-1".to_string()]);
+
+        Candidates::retire(&files).unwrap();
         assert!(
-            candidates
-                .read_all(&["jira".into(), "mail".into()])
-                .unwrap()
-                .candidates
-                .is_empty()
+            candidates.settled().unwrap().0.is_empty(),
+            "consumed like a judgment: one left standing withdraws the same line every morning"
         );
     }
 
@@ -500,10 +570,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let candidates = Candidates::new(tmp.path());
         candidates
-            .record("jira", &[work("[PLAT-1] one", "https://j/browse/PLAT-1")])
+            .record(
+                "jira",
+                &observed(&[work("[PLAT-1] one", "https://j/browse/PLAT-1")], &[]),
+            )
             .unwrap();
         candidates
-            .record("gone", &[work("[OLD-1] two", "https://j/browse/OLD-1")])
+            .record(
+                "gone",
+                &observed(&[work("[OLD-1] two", "https://j/browse/OLD-1")], &[]),
+            )
             .unwrap();
 
         let configured = vec!["jira".to_string()];

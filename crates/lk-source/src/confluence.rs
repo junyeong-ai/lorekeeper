@@ -506,7 +506,7 @@ fn map_page(page: Page, my_account_id: &str, site: &str, only_my_edits: bool) ->
         author,
         timestamp: ts,
         is_self,
-        open_work: None,
+        work: None,
         metadata: serde_json::json!({
             "page_id": page.id,
             "version": version_number,

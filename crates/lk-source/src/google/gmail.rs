@@ -401,7 +401,7 @@ fn map_message(
         author: Some(from.to_string()),
         timestamp: ts,
         is_self,
-        open_work: None,
+        work: None,
         metadata: serde_json::json!({
             "to": GmailSource::header(&msg, "To"),
             "labels": msg.label_ids,

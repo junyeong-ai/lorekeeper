@@ -330,6 +330,12 @@ pub async fn run(opts: &GlobalOptions, cmd: TaskCommand) -> miette::Result<()> {
                 0 => eprintln!("nothing new to propose"),
                 n => eprintln!("{n} proposed"),
             }
+            if pass.withdrawn > 0 {
+                eprintln!(
+                    "{} withdrawn — the source no longer calls the work open",
+                    pass.withdrawn
+                );
+            }
             if pass.recoverable > 0 {
                 eprintln!(
                     "{} finished earlier that the sources still call open — `lore task add \
@@ -340,7 +346,8 @@ pub async fn run(opts: &GlobalOptions, cmd: TaskCommand) -> miette::Result<()> {
             plane.commit().await?;
             // Only once the board holds them. A failure here re-reads the same files next
             // time, where the board already names what they hold and nothing is offered twice.
-            lk_task::Judged::retire(&pass.consumed).map_err(|e| miette::miette!("{e}"))
+            lk_task::Judged::retire(&pass.consumed).map_err(|e| miette::miette!("{e}"))?;
+            lk_task::Candidates::retire(&pass.settled).map_err(|e| miette::miette!("{e}"))
         }
         TaskCommand::Sync => {
             let outcome = plane.reconcile()?;
@@ -394,10 +401,13 @@ fn group_by_reason(unplaced: &[lk_task::Unplaced]) -> Vec<(&str, String)> {
 /// What a proposal pass put on the board, and what it declined to.
 struct Proposed {
     offered: usize,
+    /// Proposals taken off the board because their source stopped declaring the work open.
+    withdrawn: usize,
     /// Origins the sources still call open that this pass will not offer, because the history
     /// holds a completion for them and no decision against.
     recoverable: usize,
     consumed: Vec<lk_task::Consumed>,
+    settled: Vec<PathBuf>,
 }
 
 /// One line of the board's state, as `lore status` prints it.
@@ -609,7 +619,43 @@ impl IntentPlane {
     /// that, so it returns tomorrow. That is the same silence deleting any task line already
     /// has, and a proposal that comes back is a smaller cost than one suppressed by a rule
     /// guessing at what a deletion meant.
+    /// Take off the board every PROPOSED line whose source has stopped declaring its work open.
+    ///
+    /// Scoped to proposals on purpose. A task a person MOVED is their commitment, and a source
+    /// going quiet about it says nothing about whether they still mean to do it — only they can
+    /// answer that. Nothing is recorded against the origin either, so an issue reopened later is
+    /// offered again rather than suppressed as already settled.
+    fn withdraw(&mut self, settled: &[String]) -> usize {
+        let settled: std::collections::BTreeSet<String> = settled
+            .iter()
+            .map(|url| lk_core::origin::identity(url))
+            .collect();
+        let taken: Vec<(TaskId, String)> = self
+            .board
+            .tasks()
+            .filter(|task| task.state == TaskState::Proposed)
+            .filter(|task| task.src.as_ref().is_some_and(|src| settled.contains(src)))
+            .map(|task| (task.id.clone(), task.title.clone()))
+            .collect();
+        for (id, title) in &taken {
+            self.board.remove(id);
+            self.record(Transition::new(
+                id.clone(),
+                TransitionKind::Withdrawn,
+                title,
+                self.now,
+            ));
+        }
+        taken.len()
+    }
+
     fn propose(&mut self) -> miette::Result<Proposed> {
+        // Before anything is offered, because a settlement arrives on exactly the runs that
+        // offer nothing: the source answered about work it had already proposed.
+        let (addresses, settled) = lk_task::Candidates::new(&self.vault_root)
+            .settled()
+            .map_err(|e| miette::miette!("{e}"))?;
+        let withdrawn = self.withdraw(&addresses);
         let snapshots = lk_task::Candidates::new(&self.vault_root)
             .read_all(&self.sources)
             .map_err(|e| miette::miette!("{e}"))?;
@@ -625,8 +671,10 @@ impl IntentPlane {
         if candidates.is_empty() {
             return Ok(Proposed {
                 offered: 0,
+                withdrawn,
                 recoverable: 0,
                 consumed,
+                settled,
             });
         }
 
@@ -681,8 +729,10 @@ impl IntentPlane {
         }
         Ok(Proposed {
             offered: offered.len(),
+            withdrawn,
             recoverable,
             consumed,
+            settled,
         })
     }
 

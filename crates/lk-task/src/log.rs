@@ -20,6 +20,12 @@ pub enum TransitionKind {
     Carried,
     Done,
     Dropped,
+    /// The SOURCE stopped declaring the work a proposal came from.
+    ///
+    /// Not an answer, and deliberately outside both `is_answer` and `absorb`: the person never
+    /// decided anything, so an issue reopened later is offered again rather than suppressed as
+    /// already settled.
+    Withdrawn,
 }
 
 impl TransitionKind {
@@ -168,7 +174,7 @@ impl Transition {
             // A task on this board is the user's own by construction; there is no other author
             // it could have, so ownership is not inferred, it is structural.
             is_self: true,
-            open_work: None,
+            work: None,
             metadata: serde_json::json!({
                 "task_id": self.id.as_str(),
                 "carried": self.carried,

@@ -428,19 +428,27 @@ fn map_issue(
     // Declared from the provider's own structured fields and nothing else: the issue is
     // assigned to the authenticated account, and Jira's own status category says it is not
     // finished. No text is read, so there is no reading in which this is a false positive.
-    let open_work = issue
-        .fields
-        .status
-        .as_ref()
-        .filter(|_| is_me)
-        .filter(|status| status.is_open())
-        .and_then(|_| {
-            let url = (!base.is_empty()).then(|| format!("{base}/browse/{}", issue.key))?;
-            Some(lk_core::event::OpenWork {
+    //
+    // Answered for every issue the query returned, `Settled` included — an issue reassigned or
+    // moved to a done category was SEEN to leave the user's open work, which is what retires
+    // its proposal. Without an address there is no answer to give: a proposal is addressed by
+    // its URL, so an instance with no base URL can neither offer one nor retire one.
+    let browse = (!base.is_empty()).then(|| format!("{base}/browse/{}", issue.key));
+    let work = browse.map(|url| {
+        let open = is_me
+            && issue
+                .fields
+                .status
+                .as_ref()
+                .is_some_and(StatusField::is_open);
+        match open {
+            true => lk_core::event::WorkState::Open(lk_core::event::OpenWork {
                 summary: format!("[{}] {}", issue.key, summary),
                 url,
-            })
-        });
+            }),
+            false => lk_core::event::WorkState::Settled,
+        }
+    });
 
     let status = issue.fields.status.and_then(|s| s.name);
     let description = issue
@@ -478,7 +486,7 @@ fn map_issue(
         author,
         timestamp: ts,
         is_self: is_me,
-        open_work,
+        work,
         metadata: serde_json::json!({
             "status": status,
             "priority": issue.fields.priority.and_then(|p| p.name),
@@ -526,6 +534,7 @@ fn with_status_header(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lk_core::event::WorkState;
 
     /// Jira returns only the fields asked for, and `IssueFields` deserializes with every named
     /// field `Option`al — so a field dropped from the request arrives as `None` and the mapper
@@ -686,47 +695,50 @@ mod tests {
     /// it would turn finished work back into open work the day a project renamed a column.
     /// Jira's own category is fixed in every language and every workflow maps to it.
     #[test]
-    fn open_work_is_declared_from_the_status_category_never_the_name() {
+    fn work_is_declared_from_the_status_category_never_the_name() {
         for (key, open) in [("new", true), ("indeterminate", true), ("done", false)] {
             let item = mapped(
                 "acc-123",
                 serde_json::json!({"name": "배포완료", "statusCategory": {"key": key}}),
             );
             assert_eq!(
-                item.open_work.is_some(),
+                matches!(item.work, Some(WorkState::Open(_))),
                 open,
                 "category `{key}` under a name that reads finished"
             );
         }
 
-        let open = mapped(
+        let Some(WorkState::Open(open)) = mapped(
             "acc-123",
             serde_json::json!({"name": "In Progress", "statusCategory": {"key": "indeterminate"}}),
         )
-        .open_work
-        .expect("declared");
+        .work
+        else {
+            panic!("declared")
+        };
         assert_eq!(open.summary, "[PROJ-1] Ship the thing");
         assert_eq!(open.url, "https://x.atlassian.net/browse/PROJ-1");
     }
 
-    /// Someone else's open issue is not the user's work, and an issue whose category Jira did
-    /// not send is not declared open — the answer would be a guess, and a guess proposes work
-    /// every morning that may already be finished.
+    /// Every issue the query returned gets an answer, and an issue that is not the user's open
+    /// work is SETTLED rather than silent — that is what retires the proposal it once made.
+    /// A missing category is settled for the same reason it was never opened: the answer would
+    /// be a guess, and here a guess only ever retires a proposal the person can write down again.
     #[test]
-    fn open_work_needs_the_users_own_issue_and_a_category_to_read() {
-        assert!(
-            mapped(
-                "someone-else",
-                serde_json::json!({"name": "In Progress", "statusCategory": {"key": "indeterminate"}})
-            )
-            .open_work
-            .is_none()
-        );
-        assert!(
-            mapped("acc-123", serde_json::json!({"name": "In Progress"}))
-                .open_work
-                .is_none()
-        );
+    fn work_that_is_not_the_users_own_and_open_is_settled() {
+        for status in [
+            serde_json::json!({"name": "In Progress", "statusCategory": {"key": "indeterminate"}}),
+            serde_json::json!({"name": "In Progress"}),
+        ] {
+            assert!(matches!(
+                mapped("someone-else", status).work,
+                Some(WorkState::Settled)
+            ));
+        }
+        assert!(matches!(
+            mapped("acc-123", serde_json::json!({"name": "In Progress"})).work,
+            Some(WorkState::Settled)
+        ));
     }
 
     #[test]

@@ -41,13 +41,13 @@ pub enum PipelineError {
 
 pub struct IngestResult {
     pub source_id: String,
-    /// Work this source declared UNFINISHED, from its own structured fields.
+    /// What this source OBSERVED about the user's unfinished work.
     ///
     /// Carried out of the pipeline rather than acted on inside it: an observation may propose
     /// a task and never creates one, so the plane that owns intent decides what to do with it.
     /// Collected from the RAW items, before normalization drops what the vault has no page for
     /// — an open issue is a fact about now, not an event on a date.
-    pub open_work: Vec<lk_core::event::OpenWork>,
+    pub work: lk_core::event::WorkObserved,
     /// What a SCHEDULED source observed, for the agenda to report beside the day's tasks.
     ///
     /// Taken from the raw items for the same reason `open_work` is: it is a fact about the
@@ -159,7 +159,7 @@ impl Pipeline {
         // something the vault will render and a proposal is not a page — and taken on every
         // exit, because a source can declare open work in a run that renders nothing: an issue
         // still assigned and unfinished is a fact about now, not an event on a date.
-        let open_work: Vec<_> = items.iter().filter_map(|i| i.open_work.clone()).collect();
+        let work = lk_core::event::WorkObserved::from_items(&items);
         let appointments: Vec<_> = if config.source_type.descriptor().scheduled {
             items
                 .iter()
@@ -169,7 +169,7 @@ impl Pipeline {
             Vec::new()
         };
         let mut result = self.plan_pages(source_id, config, items, options).await?;
-        result.open_work = open_work;
+        result.work = work;
         result.appointments = appointments;
         Ok(result)
     }
@@ -550,7 +550,7 @@ impl Pipeline {
 
         Ok(IngestResult {
             source_id: source_id.into(),
-            open_work: vec![],
+            work: lk_core::event::WorkObserved::default(),
             appointments: vec![],
             events,
             concepts: all_concepts,
@@ -1033,7 +1033,7 @@ impl Pipeline {
 
         Ok(IngestResult {
             source_id: source_id.into(),
-            open_work: vec![],
+            work: lk_core::event::WorkObserved::default(),
             appointments: vec![],
             events,
             concepts: all_concepts,
@@ -1046,7 +1046,7 @@ impl Pipeline {
 fn empty_result(source_id: &str) -> IngestResult {
     IngestResult {
         source_id: source_id.into(),
-        open_work: vec![],
+        work: lk_core::event::WorkObserved::default(),
         appointments: vec![],
         events: vec![],
         concepts: vec![],

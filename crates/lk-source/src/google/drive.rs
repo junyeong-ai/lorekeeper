@@ -259,7 +259,7 @@ impl Source for GoogleDriveSource {
                 author: None,
                 timestamp: ts,
                 is_self: false,
-                open_work: None,
+                work: None,
                 metadata: serde_json::json!({
                     "mime_type": file.mime_type,
                 }),

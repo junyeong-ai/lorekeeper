@@ -254,9 +254,7 @@ pub async fn run(
             // minutes would lock a person out of their own board for those minutes.
             if let Err(e) = lk_task::PlaneLock::hold(&vault_root)
                 .map_err(|why| lk_task::TaskError::Malformed(why.to_string()))
-                .and_then(|_held| {
-                    lk_task::Candidates::new(&vault_root).record(id, &result.open_work)
-                })
+                .and_then(|_held| lk_task::Candidates::new(&vault_root).record(id, &result.work))
             {
                 eprintln!("  ✗ proposals: {e}");
                 had_failure = true;

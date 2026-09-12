@@ -116,6 +116,52 @@ pub struct OpenWork {
     pub url: String,
 }
 
+/// What a source's own fields say about one item AS WORK.
+///
+/// The outer `Option` on [`RawItem::work`] is whether the source can answer at all; this is
+/// the answer. Both halves are needed because a proposal is retired by OBSERVING that the work
+/// is no longer open, never by its absence from a fetch: a query bounded by time returns
+/// nothing on a quiet day, and reading that as "everything is finished" retires every proposal
+/// the source still holds open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkState {
+    /// The user's, and unfinished.
+    Open(OpenWork),
+    /// Seen, and not the user's unfinished work — finished, or no longer theirs.
+    Settled,
+}
+
+/// What one fetch saw of the user's unfinished work, in both directions.
+///
+/// A proposal is retired by OBSERVING that its work is no longer open, never by its absence
+/// here: a query bounded by time returns nothing on a quiet day, and reading that as "all
+/// finished" retires every proposal the source still holds open. So the settled half travels
+/// beside the open half, and what neither mentions is left standing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkObserved {
+    pub open: Vec<OpenWork>,
+    /// Addresses seen to be no longer the user's unfinished work.
+    pub settled: Vec<String>,
+}
+
+impl WorkObserved {
+    pub fn from_items(items: &[RawItem]) -> Self {
+        let mut observed = Self::default();
+        for item in items {
+            match &item.work {
+                Some(WorkState::Open(work)) => observed.open.push(work.clone()),
+                Some(WorkState::Settled) => observed.settled.extend(item.url.clone()),
+                None => {}
+            }
+        }
+        observed
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.open.is_empty() && self.settled.is_empty()
+    }
+}
+
 /// Intermediate representation produced by source adapters before normalization.
 /// Each adapter maps its API response into one or more `RawItem`s, which
 /// `lk-pipeline::normalize` then converts into `Event`s (assigning date and id).
@@ -131,8 +177,9 @@ pub struct RawItem {
     /// structured authorship fields; the pipeline never re-derives ownership
     /// from free-form text.
     pub is_self: bool,
-    /// Set only by an adapter whose provider gives it a structured answer. See [`OpenWork`].
-    pub open_work: Option<OpenWork>,
+    /// What this item is as WORK, where the source's fields answer. `None` is a source that
+    /// cannot say — never an answer that the work is finished. See [`WorkState`].
+    pub work: Option<WorkState>,
     /// How the SOURCE itself classifies this item, where it declares one — a repository's
     /// document kind, never a reading of the text. They join the source's configured labels
     /// as the page's tags, which is what lets a reader ask for decision records without

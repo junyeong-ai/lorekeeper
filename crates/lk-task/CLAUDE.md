@@ -14,8 +14,16 @@ the commands in `lk-cli` are the only thing that decides when to apply them.
   because the two halves cannot be right in the same way. A source's STRUCTURED field answers
   "is this unfinished" with no reading of prose — a Jira issue assigned to the user whose
   `statusCategory` is not `done` — so no false positive is reachable and the layer needs no
-  opting in; `RawItem::open_work` is where an adapter says so, the same discipline `is_self`
-  follows. Free text has no such field: "does this mail ask me to do something" is a judgment,
+  opting in; `RawItem::work` is where an adapter says so, the same discipline `is_self`
+  follows. It answers for every item the fetch returned, `Settled` included, because a proposal
+  is retired by OBSERVING that its work has left the open set and never by its absence: a query
+  bounded by time — the shape a daily source is written in — returns nothing on a quiet day, and
+  a snapshot replaced with that emptiness retired every proposal the source still held open. So
+  `Candidates::record` folds rather than replaces, and a settlement is kept as an event because
+  a proposal already OFFERED lives on the board, where only `lore task propose` can withdraw it.
+  A withdrawal answers nothing on the origin's behalf: the person never decided, so an issue
+  reopened later is offered again, and a task they had already ACCEPTED is left alone — a source
+  going quiet says nothing about whether they still mean to do it. Free text has no such field: "does this mail ask me to do something" is a judgment,
   a rule over subject lines would fire on every newsletter, so it is made where judgments are
   already made and declared as one through `lore task candidate`, for the sources
   `personal.tasks.propose_from` names and no others. What lands is a `TaskState::Proposed` line
@@ -94,7 +102,7 @@ the commands in `lk-cli` are the only thing that decides when to apply them.
   day whose every meeting was cancelled went on showing them. Keyed by source, cancelling them
   all is an empty snapshot, which is an answer; and a snapshot holds one window rather than one
   file per day forever, so there is nothing left for a retention horizon to prune. What it holds
-  comes off the FETCH rather than off the rendered events, for the reason `open_work` does:
+  comes off the FETCH rather than off the rendered events, for the reason `work` does:
   `lore ingest --date <past>` narrows what is rendered to one day, and a whole-snapshot write
   from that blanked every other day the calendar holds.
 - **Only a completion is an observation.** A dropped task belongs in the history and not on a

@@ -514,7 +514,7 @@ fn read_document(
         // that touched a file is not a claim about who wrote what is in it.
         author: Some(item.kind.clone()),
         is_self: false,
-        open_work: None,
+        work: None,
         metadata: serde_json::json!({
             "kind": item.kind,
             // Where the document IS, which is what makes the page findable as THIS document on
