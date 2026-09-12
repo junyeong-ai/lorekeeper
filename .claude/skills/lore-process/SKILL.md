@@ -54,9 +54,11 @@ you last read them.
    no longer carries means the heading vocabulary changed (a locale switch), which
    no amount of waiting undoes. A task you filled and
    stamped earlier in this run therefore reads `done` if you re-classify — that
-   is correct, and it is skipped, not failed. A CONCEPT task never does: its
-   marker is `queue apply`'s, so it still reads `current` after you have written
-   its result, and re-running it would only rewrite the same file. **Never loop
+   is correct, and it is skipped, not failed. An `extract-concepts` task never does:
+   its marker is `queue apply`'s, so it still reads `current` after you have written
+   its result, and re-running it would only rewrite the same file. A
+   `synthesize-concept` task is not that case — it stamps its own marker, so it reads
+   `done` like every other kind. **Never loop
    on "until nothing reads `current`"** — the "this run is finished" signal is
    the queue file moving to `processed/`, not `queue status` reaching zero.
 2. **Locate sections only by `target.anchor`** (the exact `## …` heading the
@@ -70,13 +72,18 @@ you last read them.
    that file.
 5. **The target page's frontmatter is read-only**, except for the one
    `llm_inputs.<key>_done` completion marker you own and MUST stamp when a task
-   finishes (the per-kind key is in the step 3c table) — **except the concept
-   kinds, whose marker is `lore queue apply`'s** and which you never stamp.
-6. **Never write a concept page, and never write a related-concepts section.**
-   `extract-concepts` emits a result file; `lore queue apply` materializes both.
-   Concept pages are shared between origin pages and merge under rules that
-   already exist as tested Rust — restating them here would be a second
-   implementation, and a drain that wrote them could not run two pages at once.
+   finishes (the per-kind key is in the step 3c table) — **except
+   `extract-concepts`, whose marker is `lore queue apply`'s** and which you never
+   stamp. A `synthesize-concept` task stamps its own `synthesis_done` once, and that
+   one marker answers for BOTH sections it fills.
+6. **Never create or merge a concept page, and never write an ORIGIN page's
+   related-concepts section.** `extract-concepts` emits a result file; `lore queue
+   apply` materializes both. Concept pages are shared between origin pages and merge
+   under rules that already exist as tested Rust — restating them here would be a
+   second implementation, and a drain that wrote them could not run two pages at once.
+   That argument is about extraction and does not reach `synthesize-concept`: it names
+   ONE concept page that already exists, it is the only task in the run that writes
+   that page, and both headings it fills are its own. Writing them is the task.
 
 ## Materialized-view contract
 
@@ -194,7 +201,7 @@ The essentials: a visible `.jsonl` is fully written and every
          `task.cache_hash`, copied verbatim (a 32-char hex string). Leave the
          pipeline-owned input key untouched.
 
-         **Except the concept kinds**, whose marker row says "not yours": their
+         **Except `extract-concepts`**, whose marker row says "not yours": their
          value goes to a result file and `lore queue apply` writes the links and
          the marker in one edit. Stamping it yourself claims the section is
          answered while it is still empty, which is what `llm_cache` believes —
@@ -217,6 +224,15 @@ The essentials: a visible `.jsonl` is fully written and every
          (or EOF) with the generated content
       4. Preserve frontmatter and every other section unchanged, then stamp the
          task's `llm_inputs.<key>_done` completion marker (the table under 3c)
+
+      A `synthesize-concept` task fills TWO sections in that one edit: `target.anchor`
+      and `input.related_anchor`. Write both, then stamp `synthesis_done` once — it
+      answers for the pair, so stamping it with only one section written leaves the
+      other permanently unanswered, since `backlinks-sync` re-queues the task only
+      when the citation set moves. A task whose `input.related_anchor` is absent has
+      no second section to write. One naming a heading the page does not carry never
+      reaches you as work: `queue status` validates EVERY heading a task names, so such a
+      task classifies `missing-target` and is skipped under rule 1.
 
    e. **On task failure** (page not found, edit error, malformed task):
       record the failed `task_id` and the reason. **Abort processing of

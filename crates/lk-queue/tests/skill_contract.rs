@@ -173,17 +173,27 @@ fn skill_documents_the_result_protocol_it_must_produce() {
     }
 }
 
-/// The whole point of routing concepts through `queue apply` is that ONE implementation
-/// merges them. A skill that still writes concept pages would restore the second one.
+/// The whole point of routing EXTRACTED concepts through `queue apply` is that ONE
+/// implementation merges them, and a skill that created concept pages would restore the
+/// second one. What the rule may not do is forbid concept pages wholesale: a
+/// `synthesize-concept` task writes an existing page's own two sections, so a rule stated
+/// that broadly reads as forbidding the work the drain is handed, and an agent obeying it
+/// stamps `synthesis_done` over a relations section nothing will ever write. The pair is
+/// pinned together for that reason — narrowing the prohibition without naming the exemption
+/// leaves the same contradiction one edit away.
 #[test]
-fn skill_forbids_writing_concept_pages_directly() {
+fn skill_forbids_creating_concept_pages_and_names_the_kind_that_writes_one() {
     let skill = read_skill_file("SKILL.md");
     assert!(
-        skill.contains("Never write a concept page"),
-        "SKILL.md must forbid the drain from writing concept pages"
+        skill.contains("Never create or merge a concept page"),
+        "SKILL.md must forbid the drain from creating or merging concept pages"
     );
     assert!(
         skill.contains("queue apply"),
         "SKILL.md must point at `lore queue apply` as the materializer"
+    );
+    assert!(
+        skill.contains("synthesize-concept"),
+        "SKILL.md must name the kind that does write a concept page's own sections"
     );
 }

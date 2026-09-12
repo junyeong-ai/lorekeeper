@@ -72,6 +72,12 @@ vault is authored in, and it is what every word the drain adds gets written in. 
 AGENTS.md) the pipeline wrote, resolved from i18n at queue time. Always use this as the
 locate key — never hardcode headings per `target.kind`.
 
+`input.related_anchor` is on a `synthesize-concept` task only, and holds the concept page's
+related-concepts heading as THAT page spells it (absent where the page carries no such
+section). One citation set is what both sections answer to, so one task fills both and one
+`synthesis_done` answers for the pair. It is payload rather than cache identity: a heading
+says where an answer lands, not what the answer would be.
+
 `cache_hash` is BLAKE3-128 (32 hex chars) of the cache-identity subset of `input` — the
 fields that decide whether the output would differ, which is narrower than the payload. It
 excludes `source_type`, which scopes extraction without shaping its answer, and it includes
