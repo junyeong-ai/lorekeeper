@@ -76,15 +76,27 @@ pub struct ConceptResynthesis {
     /// The pages citing this concept, sorted — the evidence the rewritten synthesis
     /// answers to.
     pub citations: Vec<String>,
-    /// The body the rewrite will REPLACE, when the section holds one.
+    /// The bodies the rewrite will REPLACE — one entry per section it writes that holds
+    /// one, in the order it writes them.
     ///
     /// Every other LLM-owned section names what a re-render is about to discard
     /// (`llm_cache::SectionDecision::discarding`), because a body somebody wrote without
-    /// recording it is not recoverable once the page is rewritten — and a concept's synthesis
-    /// is the section most likely to hold exactly that, since a human or `/lore-wiki add`
-    /// authors it at creation. Reported rather than left to be noticed afterwards.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub discarding: Option<String>,
+    /// recording it is not recoverable once the page is rewritten — and these two are the
+    /// sections most likely to hold exactly that, since a human or `/lore-wiki add` authors
+    /// them at creation. One act writes both, so both are reported: naming only the
+    /// synthesis left an authored relations body to be replaced in silence, which is the
+    /// loss the report exists to prevent.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub discarding: Vec<DiscardedBody>,
+}
+
+/// A section body a rewrite will replace, under the heading the page spells it with.
+#[derive(Debug, Clone, Serialize)]
+pub struct DiscardedBody {
+    /// The heading as the page spells it, without the `## ` marker.
+    pub heading: String,
+    /// The body text, trimmed. The page is the only copy.
+    pub body: String,
 }
 
 /// Outcome of a backlinks-sync run (a mutating operation), mirroring `MergeResult`:
@@ -330,14 +342,25 @@ pub fn sync_concept_backlinks(
             && !adopting
             && recorded_answer != Some(digest.as_str())
         {
+            let related = resolve_section(&raw, |s| s.related);
             report.resynthesize.push(ConceptResynthesis {
                 path: page.path.clone(),
                 anchor: format!("## {}", section.heading),
-                related_anchor: resolve_section(&raw, |s| s.related)
+                related_anchor: related
+                    .as_ref()
                     .map(|section| format!("## {}", section.heading)),
                 citations: sources.clone(),
-                discarding: (!section.body.trim().is_empty())
-                    .then(|| section.body.trim().to_string()),
+                discarding: [Some(section), related.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|section| {
+                        let body = section.body.trim();
+                        (!body.is_empty()).then(|| DiscardedBody {
+                            heading: section.heading.to_string(),
+                            body: body.to_string(),
+                        })
+                    })
+                    .collect(),
             });
         }
 

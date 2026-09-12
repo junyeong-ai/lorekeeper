@@ -133,7 +133,11 @@ on-disk state, never from a cached snapshot.
   spells it: the relations are the same evidence asked a different question, so one task
   writes both and one marker answers for the pair. `related_anchor` is `None` where the page
   has no such section, because `replace_section` leaves a page unchanged when the heading is
-  absent and a writer handed one would report a write that never happened. Uses full-vault scope (not `graph.scope.dirs`) so
+  absent and a writer handed one would report a write that never happened.
+  **`discarding` names what the rewrite replaces in BOTH sections**, one `DiscardedBody` per
+  section that holds one: an authored relations body is exactly as unrecoverable as an
+  authored synthesis, and naming only the latter let the former be replaced in a scheduled
+  run with nothing printed about it. Uses full-vault scope (not `graph.scope.dirs`) so
   `<daily>`/`<personal>`/`<synthesis>` pages are included.
   **The verdict is the candidate page against the page on disk**, not a field-by-field
   comparison: everything derived is rendered into the candidate, so whatever differs is by

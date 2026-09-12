@@ -566,15 +566,23 @@ pub fn print_backlinks(r: &BacklinksSyncReport) {
             .sync
             .resynthesize
             .iter()
-            .filter(|entry| entry.discarding.is_some())
+            .filter(|entry| !entry.discarding.is_empty())
             .count();
         if replacing > 0 {
             // Named for the same reason every other LLM-owned section names it: a body
             // somebody wrote without recording it does not survive the rewrite, and the page
-            // is the only copy.
+            // is the only copy. Counted over BOTH sections the one act writes, because a page
+            // whose relations were authored and whose synthesis is empty is a page this line
+            // used to pass over in silence.
+            let sections: usize = r
+                .sync
+                .resynthesize
+                .iter()
+                .map(|entry| entry.discarding.len())
+                .sum();
             println!(
-                "  of those, {replacing} already hold a written synthesis, which the rewrite \
-                 REPLACES — copy anything you need out first"
+                "  of those, {replacing} already hold written prose in {sections} section(s), \
+                 which the rewrite REPLACES — copy anything you need out first"
             );
         }
         // The relations answer to the same evidence and are written by the same act, so a page
