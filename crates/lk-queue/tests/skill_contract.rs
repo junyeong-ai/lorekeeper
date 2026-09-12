@@ -173,6 +173,61 @@ fn skill_documents_the_result_protocol_it_must_produce() {
     }
 }
 
+/// Whether `doc` joins "concept" to "kinds" as one phrase.
+///
+/// Comparing whitespace-split words missed two of the three occurrences in the file this
+/// guard was written for, because a trailing comma or `**` defeats an equality test; peeling
+/// punctuation off each word fixed those and then missed every OTHER joining character in
+/// turn (`concept-kinds`, `concept/kinds`, `concept_kinds`). Chasing them one at a time is
+/// the losing half of the trade — the other half is that adjacency across a SENTENCE
+/// boundary is not the phrase at all, and "a new concept. Kinds of task differ" would have
+/// failed this guard for a sentence with nothing to do with it.
+///
+/// So the separator decides, once: whitespace or a character that JOINS two words into one
+/// phrase, and never one that ends a clause. A period, a semicolon and a colon are therefore
+/// absent from the class on purpose, which is what tells the phrase from two sentences that
+/// happen to meet.
+fn holds_the_phrase(doc: &str) -> bool {
+    const JOINS: [char; 5] = ['-', '_', '/', '—', '*'];
+    let lower = doc.to_ascii_lowercase();
+    lower.match_indices("concept").any(|(at, word)| {
+        let after = &lower[at + word.len()..];
+        let joined = after.trim_start_matches(|c: char| c.is_whitespace() || JOINS.contains(&c));
+        after.len() > joined.len() && joined.starts_with("kinds")
+    })
+}
+
+/// The guard itself was unguarded, and it shipped twice unable to do its job: first missing
+/// two of the three occurrences it was written for, then missing every joining character but
+/// the hyphen while newly rejecting two ordinary sentences. Both directions are pinned here,
+/// because the next edit to `holds_the_phrase` has no other way to know what it must keep.
+#[test]
+fn the_phrase_is_found_however_it_is_joined_and_not_across_a_clause_boundary() {
+    for joined in [
+        "the concept kinds are three",
+        "the concept\n   kinds, being three",
+        "the concept kinds**, three of them",
+        "the **concept kinds** exception",
+        "the concept-kinds exception",
+        "the concept_kinds exception",
+        "concept/kinds",
+        "the concept—kinds exception",
+        "Concept Kinds",
+    ] {
+        assert!(holds_the_phrase(joined), "should be found: {joined:?}");
+    }
+    for apart in [
+        // A clause boundary is not a join, and this is a sentence about something else.
+        "the drain never invents a new concept. Kinds of task differ only in payload",
+        "it is not a concept; kinds of relation vary widely across pages",
+        "a concept: kinds follow below",
+        "misconception kinds",
+        "concepts kinds",
+    ] {
+        assert!(!holds_the_phrase(apart), "should be left alone: {apart:?}");
+    }
+}
+
 /// "the concept kinds" names two kinds where three exist, and the drain reads it as covering
 /// `synthesize-concept` — whose section and marker are its own. The phrase was removed from
 /// three safety rules and survived in a fourth sentence, invisible to a grep because the line
@@ -186,22 +241,8 @@ fn no_skill_file_calls_a_set_of_kinds_the_concept_kinds() {
         "references/queue-format.md",
     ] {
         let doc = read_skill_file(name);
-        // Over the WORDS with punctuation and markup peeled off each, not the bare split:
-        // measured against the file this phrase was removed from, splitting on whitespace
-        // alone found ONE of its three occurrences — `concept kinds**,` and `concept\n
-        // kinds,` each carry a trailing character, and a guard a comma defeats is the grep
-        // it was written to replace. A hyphen counts as the space it stands in for, since
-        // `the concept-kinds exception` is how the phrase comes back compressed.
-        let words: Vec<String> = doc
-            .replace('-', " ")
-            .split_whitespace()
-            .map(|w| {
-                w.trim_matches(|c: char| !c.is_alphanumeric())
-                    .to_ascii_lowercase()
-            })
-            .collect();
         assert!(
-            !words.windows(2).any(|w| w == ["concept", "kinds"]),
+            !holds_the_phrase(&doc),
             "{name} says \"concept kinds\": name `extract-concepts`, or say which kinds are \
              meant — `synthesize-concept` writes a concept page's sections and stamps its own \
              marker, so the phrase reads as a rule against the work the drain is handed"
