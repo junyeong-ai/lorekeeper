@@ -520,6 +520,13 @@ fn read_document(
             // Where the document IS, which is what makes the page findable as THIS document on
             // the next run. It cannot be the URL: `base_url` is optional, and without one a
             // page carried no identity at all, so every run minted a new one beside yesterday's.
+            //
+            // The path is ABSOLUTE, the same convention `manual` uses, and it is therefore tied
+            // to `params.repo`: moving the checkout, renaming its directory, or ingesting one
+            // vault from a second machine re-mints every page once, since each existing page
+            // keeps the path it was written with. A repo-relative path would survive that and
+            // collide instead — two repositories both holding `docs/adr/001.md` would answer to
+            // one page, which loses a document where this duplicates one.
             "source_file": path.to_string_lossy(),
             "path": item.path,
         }),
