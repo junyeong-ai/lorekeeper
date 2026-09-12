@@ -193,7 +193,15 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   inboxes are two deliberately separate streams. The file carries `title` and `source_url` as
   frontmatter because the address has to reach the document page, or the citation points at a
   copy nobody can check. A page with no article body is refused rather than absorbed as
-  boilerplate — the same judgment RSS makes when it keeps the feed summary.
+  boilerplate — the same judgment RSS makes when it keeps the feed summary. `free_path` decides
+  the name against what the FILESYSTEM holds, not what a read returns: a name is taken unless it
+  is a regular file already holding these bytes, so the check never follows a symlink the inbox
+  scanner would refuse anyway, and the stem is bounded at 200 bytes on a char boundary because
+  the title is the publisher's and Linux stops a name at 255 (a Korean headline reaches that in
+  a third of its characters, and the fetch would succeed while the write failed).
+- **`lore wiki search` refuses rather than approximates.** An empty query has no answer to give
+  — reporting that nothing holds it would read as a fact about the vault — and a `--limit 0`
+  admits no page from the first one on, which is every other cap's rule in this workspace.
 - **`lore brief`** (`commands/brief.rs`) is a VIEW like `lore agenda`, and the other half of
   the day: the board says what was promised, this says what was learned. It writes nothing and
   derives nothing — the concept pages already record when each entered and when it was last

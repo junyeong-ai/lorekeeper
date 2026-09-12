@@ -55,8 +55,13 @@ lore brief --date yesterday --json
 ```
 
 `learned` is what the vault did not hold before — each with the one line its page opens with.
-`revisited` is what it already held and saw again, and carries NAMES ONLY on purpose: the
-reader knows those already, and restating them is the flood this reduces. Read the learned
+`revisited` is what it already held and named again, and carries NAMES ONLY on purpose: the
+reader knows those already, and restating them is the flood this reduces.
+
+Both are read off the pages THAT DAY wrote — its daily pages, and the documents and
+explorations created on it. So a concept no page cites appears in no day's brief, which is the
+rule working rather than a loss: it is the orphan `lore graph lint` already reports. If the
+user says something they captured is missing, that is what to check, not the brief. Read the learned
 ones out in their own words, grouped as the answer groups them, and name the revisited ones
 only when the user asks what else moved.
 

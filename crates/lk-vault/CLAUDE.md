@@ -114,6 +114,11 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   evidence it would otherwise answer every query in the vault. Scope is the wiki, never the
   daily pages under it — those are the bulk material a concept was read out of, so admitting
   them buries every page that ANSWERS a query under the pages that mentioned it once.
+  **Matching is over `link::strip_links(body)`, never the raw body.** A link DESTINATION is an
+  address rather than prose and a concept page carries one per citation, so matching them made
+  every page in the vault answer to `daily`, to any source id and to a date fragment — 2700
+  hits for one word, against 5 once stripped. The excerpt comes from the same stripped prose,
+  so the line shown is the line that matched.
 - **`brief::build_brief` splits a day by whether the vault already held the concept.** Ten
   concepts enter a day and thirty are named again; what it did not hold is what was learned
   and carries the line its page opens with, while what it already held carries names only —
