@@ -183,16 +183,11 @@ fn pages_of(vault_root: &Path, dirs: &VaultDirs, date: jiff::civil::Date) -> Vec
     }
 
     // Neither a document nor an exploration carries a date in its address, so its own
-    // `created` is what places it.
+    // `created` is what places it. Walked rather than listed, and by the same walker the
+    // search uses: a page filed into a subdirectory is one the reader can find, so a day that
+    // could not see it would report a different vault than the one they search.
     for rel_dir in [documents_dir(dirs), explorations_dir(dirs)] {
-        let Ok(entries) = std::fs::read_dir(vault_root.join(&rel_dir)) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_none_or(|e| e != "md") {
-                continue;
-            }
+        for path in crate::search::markdown_files(&vault_root.join(&rel_dir)) {
             let Ok(content) = std::fs::read_to_string(&path) else {
                 continue;
             };
@@ -202,8 +197,10 @@ fn pages_of(vault_root: &Path, dirs: &VaultDirs, date: jiff::civil::Date) -> Vec
                     .and_then(|v| v.as_str())
                     .and_then(|s| s.parse::<jiff::civil::Date>().ok())
             });
-            if created == Some(date) {
-                pages.push(rel_dir.join(entry.file_name()));
+            if created == Some(date)
+                && let Ok(rel) = path.strip_prefix(vault_root)
+            {
+                pages.push(rel.to_path_buf());
             }
         }
     }
