@@ -156,6 +156,11 @@ impl Source for NodexSource {
             capped |= page.len() == p.max_documents;
             items.extend(page);
         }
+        // Stable, so a document matching both fields keeps its `created` row and is dated by
+        // the day it was written. A document created before the window and edited inside it
+        // keeps only its `updated` row and is dated by the edit — so an edited document
+        // appears on the day it was written AND on the day it was changed, which is the same
+        // "an edit re-enters the pipeline" rule a living Confluence page follows.
         items.sort_by(|a, b| a.id.cmp(&b.id));
         items.dedup_by(|a, b| a.id == b.id);
         let mut kept = Vec::new();

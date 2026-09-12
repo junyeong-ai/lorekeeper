@@ -186,6 +186,13 @@ impl ConceptDrafts {
     /// under it, while this is one source's reading of what a term also means. So the
     /// conflict is reported and the alias dropped — never routed by preference, and never
     /// matched approximately, since an alias exists precisely to make an exact lookup succeed.
+    ///
+    /// Within ONE extraction the outcome therefore depends on the order it reports concepts in:
+    /// `{name: X, aliases: [Y]}` ahead of `{name: Y}` converges both on X, while the reverse
+    /// order mints `y.md` first and then refuses the alias. Deterministic for a given result
+    /// and the same rule either way — a name is kept by whoever answered to it first — but it
+    /// means two spellings of one concept converge or split by where the extraction happened
+    /// to put them, which is what a reader looking at a split concept has to know.
     fn adopt_aliases(&mut self, identity: &ConceptIdentity, proposed: &[String]) -> Vec<String> {
         let registry = self
             .registry

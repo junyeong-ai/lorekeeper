@@ -150,11 +150,16 @@ domain-neutral engine — then no work-log, reviews, or `is_personal` are produc
   name is its address and its lookup key and the lookup is exact, so a name carrying a gloss
   answers to neither half — `ConceptDrafts::stage` takes the other spellings as data instead,
   resolves each against the registry, and registers only those that are `Absent` or already
-  route to this page. A name an established page answers to is REFUSED and warned: the
+  route to this page — where "already" includes a name resolved EARLIER IN THE SAME RESULT,
+  since resolution records its decision as it goes. A name an established page answers to is REFUSED and warned: the
   extraction is one source's reading of what a term also means, while the page earned that
   name by being cited under it. Never matched approximately — an alias exists precisely to
   make an exact lookup succeed. A draft's `aliases` are only ever added to, because a citation
-  somewhere may already address the page through one.
+  somewhere may already address the page through one. Within ONE extraction the outcome depends
+  on the order concepts are reported in — `{name: X, aliases: [Y]}` before `{name: Y}` converges
+  both on X, the reverse mints `y.md` and refuses the alias — which is the same
+  first-answerer-keeps-the-name rule either way, and deterministic for a given result, but it is
+  what a reader looking at a split concept has to know.
 - **Name resolution is `lk_core::concept::ConceptRegistry`, not a local index.** `build_registry`
   reads the vault's concept pages into it; `lore resolve` builds the same registry from a
   directory read, so the routing decision this crate ACTS on and the answer a skill gets

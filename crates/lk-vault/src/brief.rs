@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use lk_core::config::VaultDirs;
 use lk_core::frontmatter::parse_page;
 use lk_core::link;
-use lk_core::vault_path::{concepts_dir, documents_dir};
+use lk_core::vault_path::{concepts_dir, documents_dir, explorations_dir};
 
 use crate::VaultError;
 
@@ -127,10 +127,14 @@ pub fn build_brief(
 
 /// Every concept the day's own pages cite, by page id.
 ///
-/// A day writes two kinds of page: one per source under `<daily>/{source}/{date}.md`, and a
-/// document page for each file a person handed the vault that day. Both carry their concept
-/// links in the body, so both are read — a link answers for the page that wrote it, which a
-/// date on the concept cannot.
+/// A day writes three kinds of page: one per source under `<daily>/{source}/{date}.md`, a
+/// document page for each file handed to the vault, and an exploration for each question
+/// answered from it. Each carries its concept links in the body, so each is read — a link
+/// answers for the page that wrote it, which a date on the concept cannot.
+///
+/// A concept page NOTHING cites is absent from every day by construction, which is the rule
+/// working rather than a gap: the day reports what its own material named, and a page with no
+/// citation was named by nothing. Such a page is `lore graph lint`'s orphan finding.
 fn named_on(vault_root: &Path, dirs: &VaultDirs, date: jiff::civil::Date) -> BTreeSet<String> {
     let concepts_rel = concepts_dir(dirs);
     let mut named = BTreeSet::new();
@@ -178,9 +182,12 @@ fn pages_of(vault_root: &Path, dirs: &VaultDirs, date: jiff::civil::Date) -> Vec
         }
     }
 
-    // A document page carries no date in its address, so its own `created` is what places it.
-    let documents_rel = documents_dir(dirs);
-    if let Ok(entries) = std::fs::read_dir(vault_root.join(&documents_rel)) {
+    // Neither a document nor an exploration carries a date in its address, so its own
+    // `created` is what places it.
+    for rel_dir in [documents_dir(dirs), explorations_dir(dirs)] {
+        let Ok(entries) = std::fs::read_dir(vault_root.join(&rel_dir)) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().is_none_or(|e| e != "md") {
@@ -196,7 +203,7 @@ fn pages_of(vault_root: &Path, dirs: &VaultDirs, date: jiff::civil::Date) -> Vec
                     .and_then(|s| s.parse::<jiff::civil::Date>().ok())
             });
             if created == Some(date) {
-                pages.push(documents_rel.join(entry.file_name()));
+                pages.push(rel_dir.join(entry.file_name()));
             }
         }
     }
@@ -286,21 +293,26 @@ mod tests {
         );
     }
 
-    /// A document page carries no date in its address, so a file handed to the vault on a day
-    /// would go unread if only the daily directories were consulted.
+    /// Neither a document nor an exploration carries a date in its address, so a file handed
+    /// to the vault and a question answered from it would both go unread if only the daily
+    /// directories were consulted — and a skill that writes one directly is exactly the case
+    /// with no daily page behind it.
     #[test]
-    fn a_document_written_that_day_contributes_its_concepts() {
+    fn a_document_or_exploration_written_that_day_contributes_its_concepts() {
         let tmp = tempfile::tempdir().unwrap();
         let dirs = VaultDirs::default();
-        concept(
-            &tmp.path().join(concepts_dir(&dirs)),
-            "datasette",
-            "2026-09-10",
-            1,
-        );
+        let concepts = tmp.path().join(concepts_dir(&dirs));
+        concept(&concepts, "datasette", "2026-09-10", 1);
+        concept(&concepts, "nl2sql", "2026-09-10", 1);
         write(
             &tmp.path().join(documents_dir(&dirs)).join("an-article.md"),
             "---\ntype: document\ncreated: 2026-09-10\n---\n\n## 관련 개념\n\n- [Datasette](../concepts/datasette.md)\n",
+        );
+        write(
+            &tmp.path()
+                .join(explorations_dir(&dirs))
+                .join("a-question.md"),
+            "---\ntype: exploration\ncreated: 2026-09-10\n---\n\n## 근거\n\n- [NL2SQL](../concepts/nl2sql.md)\n",
         );
 
         let brief = build_brief(tmp.path(), &dirs, jiff::civil::date(2026, 9, 10)).unwrap();
@@ -310,7 +322,7 @@ mod tests {
                 .iter()
                 .map(|e| e.id.as_str())
                 .collect::<Vec<_>>(),
-            ["datasette"]
+            ["datasette", "nl2sql"]
         );
     }
 }

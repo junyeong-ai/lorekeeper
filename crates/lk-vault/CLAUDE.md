@@ -119,8 +119,12 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   and carries the line its page opens with, while what it already held carries names only —
   the reader knows those, and restating them is the flood this reduces. `learned` is grouped
   by `category` so a reader skips a group whole; `revisited` is ordered by evidence.
-  **Which concepts a day named is read off THAT DAY'S PAGES — its daily pages and the document
-  pages `created` on it — never off `updated` on the concept.** A concept page records when it
+  **Which concepts a day named is read off THAT DAY'S PAGES — its daily pages, and the document
+  and exploration pages `created` on it — never off `updated` on the concept.** All three are
+  read because the last two are what a skill writes DIRECTLY, with no daily page behind them.
+  A concept page nothing cites is absent from every day by construction, which is the rule
+  working rather than a gap: a page named by nothing was named on no day, and it is `lore graph
+  lint`'s orphan finding. A concept page records when it
   was LAST cited and not every day it was, so a concept introduced on Tuesday and named again
   on Wednesday fell out of Tuesday's `learned` and, no longer new on Wednesday, out of every
   day: measured at 1 in 13 on one day of the reference vault, and it is the recurring concepts
