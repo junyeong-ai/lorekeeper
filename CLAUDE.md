@@ -11,6 +11,7 @@ structural health.
 Data Sources              lore (Rust CLI)            Obsidian Vault (vault.dirs.*)
 ────────────              ───────────────            ──────────────────────────────
 Google Drive ──┐          ┌─ Extract (per-source)    <daily>/{source-id}/
+Project repos ─┤ (nodex)   │
 Gmail ─────────┤          ├─ Normalize → Event       <personal>/work-log/
 Slack ─────────┼─ config ─┤  Collapse dup (intra-batch)<personal>/{weekly,monthly,quarterly,annual}/
 Jira ──────────┤  .yaml   ├─ Classify (labels)       <synthesis>/{weekly}/
@@ -57,6 +58,9 @@ lore validate                      # verify config.yaml + source params
 lore ingest ai-news                # run a single source
 lore schema                        # generate <wiki>/AGENTS.md
 lore wiki concepts                 # list all concept pages
+lore wiki search <query> --json    # which pages a query reaches, and whether they NAME it or merely mention it
+lore brief --date yesterday        # a day's knowledge: what the vault learned, and what it saw again
+lore fetch <url>                   # save a page's article into the manual inbox, with its address
 lore resolve <name>                # which concept page a name addresses (0 owned/1 absent/2 ambiguous)
 lore graph lint                    # structural health check
 lore doctor                        # page contracts: text cleanliness, unanswered sections, credentials
