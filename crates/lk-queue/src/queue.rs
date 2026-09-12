@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use lk_core::concept::ExtractedConcept;
 
 use crate::{
-    ExtractConceptsRequest, LlmClient, QueueError, SummarizeRequest, TaskTarget, Theme,
-    ThemeRequest,
+    ExtractConceptsRequest, LlmClient, QueueError, SummarizeRequest, TaskRequest, TaskTarget,
+    Theme, ThemeRequest,
 };
 
 /// LlmClient that defers semantic work to a Claude Code skill. Buffers task records
@@ -57,7 +57,7 @@ pub struct QueueTask {
     /// carries the originating `source_type`, which intentionally does not participate
     /// in cache identity.
     pub cache_hash: String,
-    pub input: serde_json::Value,
+    pub input: crate::Identity,
     pub target: TaskTarget,
 }
 
@@ -236,7 +236,22 @@ impl QueueLlmClient {
         format!("{prefix}-{}-{:03}", self.run_id, n)
     }
 
-    async fn enqueue(&self, task: QueueTask) {
+    /// Buffer one request as a task.
+    ///
+    /// The single place a `QueueTask` is built, which is what lets the vault's language be
+    /// written into every payload exactly once. `TaskRequest::locale` is the guarantee there
+    /// is one to write: a new request kind cannot reach this function without answering it.
+    async fn enqueue<R: TaskRequest + Send>(&self, prefix: &str, kind: TaskKind, req: R) {
+        let mut input = req.task_input();
+        input.insert("locale".into(), req.locale().tag().into());
+        let task = QueueTask {
+            task_id: self.next_id(prefix),
+            kind,
+            created_at: jiff::Timestamp::now(),
+            cache_hash: req.cache_hash(),
+            input,
+            target: req.into_target(),
+        };
         self.buffer.lock().await.tasks.push(task);
     }
 }
@@ -255,25 +270,12 @@ impl LlmClient for QueueLlmClient {
     }
 
     async fn summarize(&self, req: SummarizeRequest) -> Result<String, QueueError> {
-        let kind = if req.target.kind == crate::TargetKind::DailyRefineEvents {
-            TaskKind::RefineEvents
+        let (kind, prefix) = if req.target.kind == crate::TargetKind::DailyRefineEvents {
+            (TaskKind::RefineEvents, "ref")
         } else {
-            TaskKind::Summarize
+            (TaskKind::Summarize, "sum")
         };
-        let prefix = if kind == TaskKind::RefineEvents {
-            "ref"
-        } else {
-            "sum"
-        };
-        let task = QueueTask {
-            task_id: self.next_id(prefix),
-            kind,
-            created_at: jiff::Timestamp::now(),
-            cache_hash: req.cache_hash(),
-            input: req.task_input(),
-            target: req.target,
-        };
-        self.enqueue(task).await;
+        self.enqueue(prefix, kind, req).await;
         Ok(String::new())
     }
 
@@ -281,15 +283,7 @@ impl LlmClient for QueueLlmClient {
         &self,
         req: ExtractConceptsRequest,
     ) -> Result<Vec<ExtractedConcept>, QueueError> {
-        let task = QueueTask {
-            task_id: self.next_id("ext"),
-            kind: TaskKind::ExtractConcepts,
-            created_at: jiff::Timestamp::now(),
-            cache_hash: req.cache_hash(),
-            input: req.task_input(),
-            target: req.target,
-        };
-        self.enqueue(task).await;
+        self.enqueue("ext", TaskKind::ExtractConcepts, req).await;
         Ok(vec![])
     }
 
@@ -297,28 +291,12 @@ impl LlmClient for QueueLlmClient {
         &self,
         req: crate::ConceptSynthesisRequest,
     ) -> Result<String, QueueError> {
-        let task = QueueTask {
-            task_id: self.next_id("syn"),
-            kind: TaskKind::SynthesizeConcept,
-            created_at: jiff::Timestamp::now(),
-            cache_hash: req.cache_hash(),
-            input: req.task_input(),
-            target: req.target,
-        };
-        self.enqueue(task).await;
+        self.enqueue("syn", TaskKind::SynthesizeConcept, req).await;
         Ok(String::new())
     }
 
     async fn identify_themes(&self, req: ThemeRequest) -> Result<Vec<Theme>, QueueError> {
-        let task = QueueTask {
-            task_id: self.next_id("thm"),
-            kind: TaskKind::IdentifyThemes,
-            created_at: jiff::Timestamp::now(),
-            cache_hash: req.cache_hash(),
-            input: req.task_input(),
-            target: req.target,
-        };
-        self.enqueue(task).await;
+        self.enqueue("thm", TaskKind::IdentifyThemes, req).await;
         Ok(vec![])
     }
 
@@ -344,6 +322,7 @@ impl LlmClient for QueueLlmClient {
 mod tests {
     use super::*;
     use crate::TargetKind;
+    use lk_core::i18n::Locale;
     use tempfile::TempDir;
 
     #[test]
@@ -420,7 +399,7 @@ mod tests {
         let req = SummarizeRequest {
             text: "Some content".into(),
             max_sentences: 5,
-            locale: "ko".into(),
+            locale: Locale::Ko,
             source_type: None,
             focus: None,
             target: TaskTarget {
@@ -458,7 +437,7 @@ mod tests {
             let req = SummarizeRequest {
                 text: "x".into(),
                 max_sentences: 5,
-                locale: "ko".into(),
+                locale: Locale::Ko,
                 source_type: None,
                 focus: None,
                 target: TaskTarget {
@@ -486,7 +465,7 @@ mod tests {
             SummarizeRequest {
                 text: "x".into(),
                 max_sentences: 5,
-                locale: "ko".into(),
+                locale: Locale::Ko,
                 source_type: None,
                 focus: None,
                 target: TaskTarget {
@@ -540,6 +519,7 @@ mod tests {
             source_type: lk_core::config::SourceType::Gmail,
             date: jiff::civil::date(2026, 5, 23),
             focus: None,
+            locale: Locale::Ko,
             target: TaskTarget {
                 vault_path: "daily/ai-news/2026-05-23.md".into(),
                 kind: TargetKind::DailyConcepts,
@@ -571,6 +551,7 @@ mod tests {
                 source_type: lk_core::config::SourceType::Gmail,
                 date: jiff::civil::date(2026, 5, 23),
                 focus: Some("software engineering and AI/ML only".into()),
+                locale: Locale::Ko,
                 target: TaskTarget {
                     vault_path: "daily/tech-news/2026-05-23.md".into(),
                     kind: TargetKind::DailyConcepts,
@@ -616,7 +597,7 @@ mod tests {
         let req = SummarizeRequest {
             text: "x".into(),
             max_sentences: 5,
-            locale: "ko".into(),
+            locale: Locale::Ko,
             source_type: None,
             focus: None,
             target: TaskTarget {
@@ -648,6 +629,7 @@ mod tests {
             source_type: lk_core::config::SourceType::Gmail,
             date,
             focus: None,
+            locale: Locale::Ko,
             target: TaskTarget {
                 vault_path: "p".into(),
                 kind: TargetKind::DailyConcepts,
@@ -679,7 +661,7 @@ mod tests {
         let a = SummarizeRequest {
             text: "v1".into(),
             max_sentences: 5,
-            locale: "ko".into(),
+            locale: Locale::Ko,
             source_type: None,
             focus: None,
             target: target.clone(),
@@ -698,7 +680,7 @@ mod tests {
         let a = SummarizeRequest {
             text: "x".into(),
             max_sentences: 5,
-            locale: "ko".into(),
+            locale: Locale::Ko,
             source_type: None,
             focus: None,
             target: TaskTarget {
@@ -731,14 +713,140 @@ mod tests {
         let ko = ThemeRequest {
             text: "combined source text".into(),
             max_themes: 5,
-            locale: "ko".into(),
+            locale: Locale::Ko,
             target: target.clone(),
         };
         let en = ThemeRequest {
-            locale: "en".into(),
+            locale: Locale::En,
             ..ko.clone()
         };
         assert_ne!(ko.cache_hash(), en.cache_hash());
+    }
+
+    #[tokio::test]
+    async fn a_locale_switch_leaves_the_concept_kinds_cache_hashes_alone() {
+        // The other half of `theme_cache_hash_changes_when_locale_changes`, and the half
+        // that is easy to get wrong by making it consistent. What a summary or a week's
+        // themes states is re-derived from an input, so a locale switch has to re-derive it.
+        // What an extraction and a synthesis state ends on a CONCEPT page — an authored body
+        // that accumulates across every source citing it, and that a switch deliberately does
+        // not retranslate. Hashing the locale into these two would re-enqueue an extraction
+        // for every daily page and document in the vault, and a rewrite for every concept,
+        // the first time `vault.locale` moved.
+        let extract = ExtractConceptsRequest {
+            text: "combined source text".into(),
+            source_id: "src".into(),
+            source_type: lk_core::config::SourceType::Rss,
+            date: jiff::civil::date(2026, 1, 1),
+            focus: None,
+            locale: Locale::Ko,
+            target: TaskTarget {
+                vault_path: "daily/src/2026-01-01.md".into(),
+                kind: TargetKind::DailyConcepts,
+                anchor: "## 관련 개념".into(),
+            },
+            categories: vec![],
+        };
+        assert_eq!(
+            extract.cache_hash(),
+            ExtractConceptsRequest {
+                locale: Locale::En,
+                ..extract.clone()
+            }
+            .cache_hash()
+        );
+
+        let synthesis = crate::ConceptSynthesisRequest {
+            citations: vec!["daily/src/2026-01-01".into()],
+            locale: Locale::Ko,
+            target: TaskTarget {
+                vault_path: "wiki/concepts/rag.md".into(),
+                kind: TargetKind::ConceptSynthesis,
+                anchor: "## 핵심".into(),
+            },
+        };
+        assert_eq!(
+            synthesis.cache_hash(),
+            crate::ConceptSynthesisRequest {
+                locale: Locale::En,
+                ..synthesis.clone()
+            }
+            .cache_hash()
+        );
+    }
+
+    #[tokio::test]
+    async fn every_queued_task_states_the_vault_language() {
+        // Every task ends as prose on a page, so every one of them has to say which language
+        // to write it in. Two kinds shipped without the field and the drain inferred a
+        // language from the pages around the target — which reads correctly in an established
+        // vault and has nothing to read in a new one, so the first concept page a vault wrote
+        // got whatever language its source happened to be in.
+        let dir = TempDir::new().unwrap();
+        let client = QueueLlmClient::new(dir.path().to_path_buf());
+        let target = |kind| TaskTarget {
+            vault_path: "p.md".into(),
+            kind,
+            anchor: "## a".into(),
+        };
+        client
+            .summarize(SummarizeRequest {
+                text: "t".into(),
+                max_sentences: 3,
+                focus: None,
+                locale: Locale::En,
+                source_type: None,
+                target: target(TargetKind::DailySummary),
+            })
+            .await
+            .unwrap();
+        client
+            .extract_concepts(ExtractConceptsRequest {
+                text: "t".into(),
+                source_id: "src".into(),
+                source_type: lk_core::config::SourceType::Rss,
+                date: jiff::civil::date(2026, 1, 1),
+                focus: None,
+                locale: Locale::En,
+                target: target(TargetKind::DailyConcepts),
+                categories: vec![],
+            })
+            .await
+            .unwrap();
+        client
+            .synthesize_concept(crate::ConceptSynthesisRequest {
+                citations: vec!["daily/src/2026-01-01".into()],
+                locale: Locale::En,
+                target: target(TargetKind::ConceptSynthesis),
+            })
+            .await
+            .unwrap();
+        client
+            .identify_themes(ThemeRequest {
+                text: "t".into(),
+                max_themes: 3,
+                locale: Locale::En,
+                target: target(TargetKind::WeeklySynthesisThemes),
+            })
+            .await
+            .unwrap();
+        client.flush().await.unwrap();
+
+        let queued = std::fs::read_to_string(client.queue_path()).unwrap();
+        let tasks: Vec<QueueTask> = queued
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(tasks.len(), 4, "one task per kind enqueued");
+        for task in tasks {
+            assert_eq!(
+                task.input.get("locale").and_then(|v| v.as_str()),
+                Some("en"),
+                "task {} ({:?}) carries no vault language",
+                task.task_id,
+                task.kind
+            );
+        }
     }
 
     #[tokio::test]
@@ -793,7 +901,7 @@ mod tests {
             .summarize(SummarizeRequest {
                 text: "x".into(),
                 max_sentences: 5,
-                locale: "ko".into(),
+                locale: Locale::Ko,
                 source_type: None,
                 focus: None,
                 target: TaskTarget {

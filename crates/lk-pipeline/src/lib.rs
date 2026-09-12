@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use lk_queue::TaskRequest;
 use thiserror::Error;
 
 use lk_core::concept::ExtractedConcept;
@@ -306,7 +307,7 @@ impl Pipeline {
                 text: combined.clone(),
                 max_sentences: 5,
                 focus: focus.clone(),
-                locale: self.ctx.locale.tag().to_string(),
+                locale: self.ctx.locale,
                 source_type: Some(config.source_type),
                 target: lk_queue::TaskTarget {
                     vault_path: daily_path.clone(),
@@ -329,7 +330,7 @@ impl Pipeline {
                 // churn the cache hash every time a same-day source gains an event.
                 max_sentences: 20,
                 focus: focus.clone(),
-                locale: self.ctx.locale.tag().to_string(),
+                locale: self.ctx.locale,
                 source_type: Some(config.source_type),
                 target: lk_queue::TaskTarget {
                     vault_path: daily_path.clone(),
@@ -381,6 +382,7 @@ impl Pipeline {
                     source_type: config.source_type,
                     date: *date,
                     focus: focus.clone(),
+                    locale: self.ctx.locale,
                     target: lk_queue::TaskTarget {
                         vault_path: daily_path.clone(),
                         kind: lk_queue::TargetKind::DailyConcepts,
@@ -852,7 +854,7 @@ impl Pipeline {
                 text: combined.clone(),
                 max_sentences: 5,
                 focus: focus.clone(),
-                locale: self.ctx.locale.tag().to_string(),
+                locale: self.ctx.locale,
                 source_type: Some(config.source_type),
                 target: lk_queue::TaskTarget {
                     vault_path: vault_path.clone(),
@@ -893,6 +895,7 @@ impl Pipeline {
                     source_type: config.source_type,
                     date: event.date,
                     focus: focus.clone(),
+                    locale: self.ctx.locale,
                     target: lk_queue::TaskTarget {
                         vault_path: vault_path.clone(),
                         kind: lk_queue::TargetKind::DocumentConcepts,

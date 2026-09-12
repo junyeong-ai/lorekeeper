@@ -6,7 +6,7 @@ use lk_core::config::Config;
 use lk_core::frontmatter::field;
 use lk_core::i18n::Strings;
 use lk_core::vault_path::{VaultPath, work_log_dir};
-use lk_queue::TargetKind;
+use lk_queue::{TargetKind, TaskRequest};
 use lk_vault::{FsVault, VaultPage, VaultStore};
 
 use crate::PipelineError;
@@ -114,7 +114,7 @@ impl Synthesizer {
             text,
             max_sentences,
             focus: None,
-            locale: self.ctx.locale.tag().to_string(),
+            locale: self.ctx.locale,
             // Period synthesis rolls up pre-summarized pages across sources/time;
             // no single source_type applies.
             source_type: None,
@@ -239,7 +239,7 @@ impl Synthesizer {
         let req = lk_queue::ThemeRequest {
             text: combined,
             max_themes: 5,
-            locale: self.ctx.locale.tag().to_string(),
+            locale: self.ctx.locale,
             target: lk_queue::TaskTarget {
                 vault_path: path.to_string(),
                 kind,

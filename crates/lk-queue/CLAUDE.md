@@ -38,13 +38,27 @@ knows about; provider choice is config-driven (`build_llm_client` in lk-cli).
   `concepts_dir` for the skill to concatenate concept links from; concept extraction now
   returns VALUES and `lore queue apply` renders the links itself, so the field had no
   reader and is gone. A target says where a result lands, not how to write one.
+- **`TaskRequest` is what the four request types have in common**, and the reason
+  `QueueLlmClient` builds every task in one function: a request answers `locale`,
+  `task_input`, `cache_hash` and `into_target`, and the builder writes the locale into the
+  payload. Every task ends as prose on a page, so every task states the language the vault
+  is authored in — `vault.locale`, and nothing else. The two concept kinds shipped without
+  the field and the drain inferred a language from the pages around the target, which reads
+  correctly in an established vault and has nothing to read in a new one. Asking for it on
+  the trait is what makes a new request type unable to omit it.
 - **Each request type exposes two JSON projections.**
   - `task_input()` — payload serialized into the queue file. Carries every field
-    `/lore-process` needs to do its work (`source_type` plus the cache-identity fields).
+    `/lore-process` needs to do its work (`source_type` plus the cache-identity fields);
+    the vault's language is added by the queue builder rather than by each impl.
   - `cache_identity()` — the subset hashed for caching. Restricted to fields that
     actually shape the LLM's output: `summarize` hashes `text` + `max_sentences` +
     `locale` + `focus`; `extract-concepts` hashes `text` + `source_id` + `date` + `focus`
     + `categories` (`source_id`/`date` scope a concept extraction to one source+day).
+    A locale switch therefore re-derives a summary and a week's themes — they are views
+    over an input — and leaves the two kinds that write onto a concept page alone, whose
+    body accumulates across every source citing it. Hashing the locale into
+    `extract-concepts` would re-enqueue an extraction for every daily page and document in
+    the vault to produce the same concepts under a different grounding sentence.
     `concept-synthesis` hashes the citation SET alone, through
     `lk_core::concept::citation_digest`, so the page's recorded input and the task's
     `cache_hash` are the same string by construction rather than by two implementations

@@ -45,6 +45,20 @@ impl Locale {
         }
     }
 
+    /// The language's own name, in English.
+    ///
+    /// The agent-facing specs are English prose by design — `<wiki>/AGENTS.md` and the queue
+    /// task payloads instruct an agent rather than address the vault's reader — and they
+    /// still have to NAME the language the vault is authored in, because a rule like
+    /// "prefer the established Korean term" is wrong in an English vault and right in a
+    /// Korean one. Stating it per locale is what makes one sentence serve both.
+    pub fn english_name(self) -> &'static str {
+        match self {
+            Locale::Ko => "Korean",
+            Locale::En => "English",
+        }
+    }
+
     pub fn strings(self) -> &'static Strings {
         match self {
             Locale::Ko => &KO,

@@ -486,6 +486,7 @@ async fn enqueue_syntheses(
         client
             .synthesize_concept(lk_queue::ConceptSynthesisRequest {
                 citations: entry.citations.clone(),
+                locale: rc.locale,
                 target: lk_queue::TaskTarget {
                     vault_path: entry.path.to_string_lossy().into_owned(),
                     kind: lk_queue::TargetKind::ConceptSynthesis,

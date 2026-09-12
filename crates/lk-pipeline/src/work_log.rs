@@ -6,7 +6,7 @@ use lk_core::event::Event;
 use lk_core::frontmatter::field;
 use lk_core::i18n::Locale;
 use lk_core::vault_path::VaultPath;
-use lk_queue::{SummarizeRequest, TargetKind, TaskTarget};
+use lk_queue::{SummarizeRequest, TargetKind, TaskRequest, TaskTarget};
 use lk_vault::VaultStore;
 
 use crate::PipelineContext;
@@ -80,7 +80,7 @@ pub async fn render_work_log(
             text: synthesis_input,
             max_sentences: 10,
             focus: None,
-            locale: locale.tag().to_string(),
+            locale,
             // Work-log topic synthesis is cross-source by design (it groups personal
             // events from many sources), so no single source_type applies.
             source_type: None,

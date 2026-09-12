@@ -1246,7 +1246,7 @@ mod tests {
             kind: TaskKind::Summarize,
             created_at: "2026-05-23T10:00:00Z".parse().unwrap(),
             cache_hash: hash.into(),
-            input: serde_json::Value::Null,
+            input: lk_queue::Identity::new(),
             target: TaskTarget {
                 vault_path: vault_path.into(),
                 kind: TargetKind::DailySummary,

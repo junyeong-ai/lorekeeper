@@ -64,12 +64,20 @@ path patterns from AGENTS.md.
 `quarterly-review-narrative` | `annual-review-narrative` | `work-log-synthesis` |
 `concept-synthesis`
 
+`input.locale` is on EVERY task, whatever its kind: it is `vault.locale`, the language the
+vault is authored in, and it is what every word the drain adds gets written in. See
+[processing-kinds.md](processing-kinds.md) § Output language.
+
 `target.anchor`: the exact section heading (e.g. `"## Summary"`, or its localized form per
 AGENTS.md) the pipeline wrote, resolved from i18n at queue time. Always use this as the
 locate key — never hardcode headings per `target.kind`.
 
-`cache_hash` is BLAKE3-128 (32 hex chars) of the cache-identity subset of `input`
-(it excludes `source_type`, which scopes extraction but doesn't shape output). It equals the value the pipeline wrote
+`cache_hash` is BLAKE3-128 (32 hex chars) of the cache-identity subset of `input` — the
+fields that decide whether the output would differ, which is narrower than the payload. It
+excludes `source_type`, which scopes extraction without shaping its answer, and it includes
+`locale` for the kinds writing a section that is re-derived from its input (a summary, a
+week's themes) while excluding it for the two that write onto a concept page, whose authored
+body a locale switch deliberately leaves standing. It equals the value the pipeline wrote
 into `target.vault_path`'s `llm_inputs.<key>` frontmatter at queue time. The skill MUST
 verify the page's current frontmatter matches before writing — see the Stale-task guard in
 the skill body.

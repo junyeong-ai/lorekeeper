@@ -396,6 +396,18 @@ pub fn render_agents_md(
     writeln!(out).unwrap();
     writeln!(
         out,
+        "**This vault is written in {}.** Every word added to a page goes in that language — a \
+         summary, a theme, a concept's synthesis, an exploration — whatever language the \
+         source arrived in. Two things are not translated by it. Source content is quoted as \
+         it stands, and a NAME is not prose: a concept's name is whichever form the field \
+         actually uses, so a term the field writes in another language keeps its spelling \
+         here (§ Concept convergence says what follows from that).",
+        locale.english_name()
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
         "Pages with an LLM-owned section also carry an `llm_inputs` frontmatter block, and it \
          is a two-part contract, not an opaque cache. `lore ingest` and `lore synthesis` record \
          `<key>` — the hash of the input enqueued — and whoever ANSWERS the section records \
@@ -579,15 +591,30 @@ pub fn render_agents_md(
     )
     .unwrap();
     writeln!(out).unwrap();
+    let language = locale.english_name();
     writeln!(
         out,
         "**A concept's title is its name and nothing else.** The title is the address and the \
          lookup key, and the lookup is exact — so a title carrying a parenthetical gloss \
          answers to neither the term nor the gloss, and the next mention of the bare term \
          mints a rival page beside it. Choose the form the field actually uses: the \
-         established Korean where the concept has one, the original term where it does not. \
-         Every other spelling — the translation, the expanded acronym, the abbreviation — \
-         goes in `aliases`, which is what makes a citation written in any of them resolve here."
+         established {language} where the concept has one, the original term where it does \
+         not. Every other spelling — the translation, the expanded acronym, the abbreviation \
+         — goes in `aliases`, which is what makes a citation written in any of them resolve \
+         here."
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "**This vault is written in {language}, and its own language is not optional in \
+         `aliases`.** Where the field has an established {language} name for a concept whose \
+         title is not it, that name belongs on the page. A reader who does not already know \
+         the title searches in the language the vault is written in, and without the alias \
+         they reach nothing while the page holds every citation on the subject — and the \
+         next extraction that writes the term mints a rival page. A concept the field names \
+         only in the original term needs no alias: this asks for the names that exist, never \
+         for a translation coined to fill the field."
     )
     .unwrap();
     writeln!(out).unwrap();
@@ -716,6 +743,41 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The spec an agent writes a page from must name the language that vault is written in,
+    /// and must name only that one. The naming policy read "the established Korean" in every
+    /// vault, so an English vault's spec instructed its own agents to prefer Korean names —
+    /// the half of `vault.locale` that switched headings and left the writing behind.
+    #[test]
+    fn agents_md_names_the_vault_language_and_no_other() {
+        use strum::IntoEnumIterator;
+        for locale in Locale::iter() {
+            let md = render_agents_md(
+                locale,
+                &lk_core::config::VaultDirs::default(),
+                true,
+                Some("tasks.md"),
+            );
+            assert!(
+                md.contains(&format!(
+                    "This vault is written in {}.",
+                    locale.english_name()
+                )),
+                "{locale:?}: AGENTS.md never states the language pages are authored in"
+            );
+            assert!(
+                md.contains(&format!("the established {}", locale.english_name())),
+                "{locale:?}: the concept naming policy does not name this vault's language"
+            );
+            for other in Locale::iter().filter(|l| *l != locale) {
+                assert!(
+                    !md.contains(&format!("the established {}", other.english_name())),
+                    "{locale:?}: the spec instructs an agent to prefer {} names",
+                    other.english_name()
+                );
+            }
+        }
+    }
 
     #[test]
     fn agents_md_uses_locale_strings() {

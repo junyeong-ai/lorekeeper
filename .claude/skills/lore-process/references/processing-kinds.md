@@ -14,11 +14,25 @@ concepts ONLY from items matching the focus and skip off-topic items entirely
 aggregator that also surfaces human-interest or politics) contributes focused
 knowledge without polluting the graph. No `focus` → no filtering.
 
+## Output language (all kinds)
+
+`input.locale` is the language the vault is authored in — `vault.locale`, carried on every
+task — and everything you WRITE goes in it: a summary, a refined event body, a theme title
+and its description, a concept's grounding sentence, a synthesis. It is always present. A
+task arriving without one is a defect to report, not a case to guess from the pages around
+the target: a vault that stays in its language by inference stays in it only while there is
+something to infer from, and the first page a new vault writes has nothing.
+
+Two things it does not reach. Source content is never translated — a quoted line, a title
+you preserve, a link stay as they are. And a NAME is not prose: a concept's name is whichever
+form the field actually uses, so an English term keeps its spelling on a page written in
+Korean and a Korean product name keeps its on one written in English (see
+`kind: extract-concepts`).
+
 ## `kind: summarize`
 
-Synthesize a knowledge-rich summary. Use the language specified in
-`input.locale` (e.g. `"ko"` → Korean, `"en"` → English); default to Korean if
-absent. Aim for `input.max_sentences` substantive points. No preamble.
+Synthesize a knowledge-rich summary in `input.locale`. Aim for
+`input.max_sentences` substantive points. No preamble.
 
 **Source-type-aware synthesis.** Adapt the strategy to `input.source_type`
 (the adapter type verbatim from config; never guess it from the vault path).
@@ -54,7 +68,7 @@ is part of the protocol contract in SKILL.md.
 Extract structured themes from the combined multi-source text. Identify the
 top N themes (`input.max_themes`). Write each theme as a numbered subsection
 (`### 1. Theme Title\n\nDescription`) under `target.anchor`. Write the titles
-and descriptions in `input.locale` language; default to Korean if absent.
+and descriptions in `input.locale`.
 
 ## `kind: synthesize-concept`
 
@@ -66,8 +80,13 @@ the task carries no text.
 
 1. Open `target.vault_path` and follow every link in its sources section.
 2. Write, under `target.anchor`, what the vault now knows about this concept:
-   what it is, and what the citing material establishes about it. Use the
-   language the page is already written in.
+   what it is, and what the citing material establishes about it. Write it in the
+   language the page is already written in — a `vault.locale` switch renames
+   headings and leaves authored bodies alone, so an established page keeps the
+   language it was written in rather than being retranslated section by section.
+   A page carrying no prose yet answers nothing, and there `input.locale` is the
+   language: inferring one from the sources would write the vault in whichever
+   language its inputs happened to arrive in.
 3. **REWRITE the section, never append.** The synthesis states current
    understanding, so an older reading that the evidence has moved past is
    replaced, not kept beside the new one. (Its citations are the opposite —
@@ -120,15 +139,24 @@ empty heading.
 lookup key, and the lookup is exact — so a name carrying a gloss
 (`Agent Capability (에이전트 호출 가능 애플리케이션 단위)`) answers to neither the term nor
 the gloss, and the next source naming the bare term mints a rival page beside it. Pick the
-form the field actually uses: the established Korean where the concept has one, the original
-term where it does not. Never translate a term to have translated it, and never append a
-translation to one.
+form the field actually uses: the established form in `input.locale` where the concept has
+one, the original term where it does not. Never translate a term to have translated it, and
+never append a translation to one.
 
 `aliases` is where every other name goes — the translation, the expanded acronym, the
 original-language term, the abbreviation a team uses. Each is registered against the page, so
 a later citation written in any of them resolves to it rather than forking the concept. An
 alias an established page already answers to is dropped with a warning: the extraction is one
 source's reading, and the page that earned the name by being cited under it keeps it.
+
+**The vault's own language is not optional there.** Where the field has an established
+`input.locale` name for a concept and it is not the one you chose as `name`, that name is an
+alias — the one entry this kind requires rather than invites. A reader who does not yet know
+the title searches in the language the vault is written in, and without it they reach nothing
+while the page holds every citation on the subject, and the next source writing the term
+mints a rival page beside it. This asks for the names that exist: a concept the field names
+only in the original term needs no alias, and a translation coined to fill the field is
+exactly what the paragraph above forbids.
 
 `concepts` may be empty — that is a valid answer for a page with nothing durable in it, and
 it still records that the task was answered. Copy `target` and `cache_hash` through

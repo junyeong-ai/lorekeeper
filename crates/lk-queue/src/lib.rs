@@ -17,6 +17,7 @@ use thiserror::Error;
 
 use lk_core::concept::ExtractedConcept;
 use lk_core::config::SourceType;
+use lk_core::i18n::Locale;
 
 #[derive(Debug, Error)]
 pub enum QueueError {
@@ -128,11 +129,11 @@ pub struct TaskTarget {
 pub struct ThemeRequest {
     pub text: String,
     pub max_themes: usize,
-    /// Output language for the theme titles/descriptions (e.g. "ko", "en"). Derived
-    /// from vault.locale. Part of the cache identity because the themes are prose
-    /// written into a localized synthesis page — a locale switch must invalidate the
-    /// cache, or the stale-task guard would freeze wrong-language themes forever.
-    pub locale: String,
+    /// Part of the cache identity, because a week's themes are a materialized view: they
+    /// are re-derived from the same text whenever that text moves, so a locale switch must
+    /// re-derive them in the new language. Without that the stale-task guard would freeze
+    /// wrong-language themes forever.
+    pub locale: Locale,
     pub target: TaskTarget,
 }
 
@@ -151,8 +152,9 @@ pub struct SummarizeRequest {
     /// set, the summary covers only content matching it and ignores off-topic
     /// items — so a broad source (e.g. a news aggregator) yields a focused digest.
     pub focus: Option<String>,
-    /// Output language for the summary (e.g. "ko", "en"). Derived from vault.locale.
-    pub locale: String,
+    /// Part of the cache identity, for the reason [`ThemeRequest::locale`] records: a
+    /// summary is a view over its input, so a locale switch re-derives it.
+    pub locale: Locale,
     /// Originating source type, when the task summarizes a single source's content
     /// (daily / document). `None` for cross-source or derived tasks (work-log topic
     /// synthesis, period synthesis) where no single type applies. Lets the skill
@@ -179,21 +181,33 @@ pub struct SummarizeRequest {
 pub struct ConceptSynthesisRequest {
     /// Page ids citing this concept, as `lore graph backlinks-sync` derived them.
     pub citations: Vec<String>,
+    /// The language to write in when the page carries no prose to answer the question
+    /// itself. A rewrite normally matches what the page already says, which is why a locale
+    /// switch leaves an authored synthesis alone — but a page created with no grounding
+    /// sentence says nothing, and inferring a language from the sources would write the
+    /// vault in whatever language its inputs happened to arrive in.
+    pub locale: Locale,
     pub target: TaskTarget,
 }
 
 impl ConceptSynthesisRequest {
-    pub fn task_input(&self) -> serde_json::Value {
-        self.cache_identity()
-    }
-
-    pub fn cache_identity(&self) -> serde_json::Value {
-        let mut v = serde_json::Map::new();
+    pub fn cache_identity(&self) -> Identity {
+        let mut v = Identity::new();
         v.insert(
             "citations".into(),
             serde_json::to_value(&self.citations).expect("serializable"),
         );
-        serde_json::Value::Object(v)
+        v
+    }
+}
+
+impl TaskRequest for ConceptSynthesisRequest {
+    fn locale(&self) -> Locale {
+        self.locale
+    }
+
+    fn task_input(&self) -> Identity {
+        self.cache_identity()
     }
 
     /// The evidence digest, computed by the one function `lore graph backlinks-sync` records
@@ -204,8 +218,12 @@ impl ConceptSynthesisRequest {
     /// translated by a locale switch — `capture_section` finds it under every locale's
     /// heading precisely so a switch renames the heading and leaves the prose — so folding
     /// the locale in here would rewrite every synthesis in the vault the first time it moved.
-    pub fn cache_hash(&self) -> String {
+    fn cache_hash(&self) -> String {
         lk_core::concept::citation_digest(&self.citations)
+    }
+
+    fn into_target(self) -> TaskTarget {
+        self.target
     }
 }
 
@@ -229,10 +247,23 @@ pub struct ExtractConceptsRequest {
     /// set, concepts are extracted only from content matching it, so off-topic
     /// items in a broad source never pollute the knowledge graph.
     pub focus: Option<String>,
+    /// Deliberately OUTSIDE the cache identity, unlike a summary's. What an extraction
+    /// writes is a concept page — an authored body that accumulates across every source
+    /// that ever cites it — and a locale switch does not retranslate those, so hashing the
+    /// locale here would re-enqueue an extraction for every daily page and document in the
+    /// vault to produce the same concepts under a different grounding sentence.
+    pub locale: Locale,
     pub target: TaskTarget,
     /// Valid category IDs the LLM may assign to each concept. Empty = no categorization.
     pub categories: Vec<CategoryReference>,
 }
+
+/// The JSON object a request projects itself into — both the payload the queue serializes
+/// and the identity it hashes. A `Map` rather than a `Value` so every projection is an
+/// object by construction: the queue writes the vault's language into each one, and a
+/// projection that could be a bare scalar would make that write a conditional with a
+/// silent no-op branch.
+pub type Identity = serde_json::Map<String, serde_json::Value>;
 
 /// Content-addressable hash of an LLM task's cache identity. The page-side
 /// frontmatter (`llm_inputs.<key>`) records the same value, so a re-ingest whose
@@ -242,10 +273,45 @@ pub struct ExtractConceptsRequest {
 /// 128 bits is overkill for per-page collision avoidance, but a single false
 /// positive preserves stale LLM content forever under a colliding new hash, so
 /// the extra 16 bytes per cache key is trivial insurance against a severe failure.
-pub fn cache_hash(identity: &serde_json::Value) -> String {
+pub fn cache_hash(identity: &Identity) -> String {
     let bytes = serde_json::to_vec(identity).expect("serde_json::Value always serializes");
     let hex = blake3::hash(&bytes).to_hex();
     hex[..32].to_string()
+}
+
+/// What every semantic task has in common, and the reason the queue can treat them alike.
+///
+/// All of them end as prose on a page — a day's summary, a week's themes, a concept's
+/// grounding sentence, a concept's synthesis — so all of them need to know the language the
+/// vault is authored in. `vault.locale` is that one declaration. Two kinds carried no field
+/// for it and the drain inferred a language from whatever the surrounding pages happened to
+/// be written in, which keeps a vault in its language by accident rather than by contract
+/// and fails outright where there is nothing to infer from: the first concept page a new
+/// vault writes. Asking for the locale HERE is what makes the answer unforgettable — a
+/// request type that cannot be enqueued without one — and the queue writes it into every
+/// payload from the single place that builds them.
+///
+/// Whether the locale ALSO belongs in `cache_identity` is a separate question, and each type
+/// answers it from what its section is rather than from a shared rule. A materialized view
+/// is re-derived from its input, so a locale switch has to re-derive it in the new language.
+/// An authored body that accumulates across sources is never retranslated by a switch, so
+/// hashing the locale there would rewrite every concept page in the vault the first time it
+/// moved.
+pub trait TaskRequest {
+    /// The language the vault is authored in.
+    fn locale(&self) -> Locale;
+
+    /// What the queue serializes for `/lore-process`: the cache identity plus the fields
+    /// that steer HOW the drain works without changing what its answer would be. The
+    /// vault's language is added by the queue, not here.
+    fn task_input(&self) -> Identity;
+
+    /// BLAKE3-128 over the fields that decide WHETHER the answer would differ.
+    fn cache_hash(&self) -> String;
+
+    /// Where the result lands. Consumes the request, which is the last thing the queue
+    /// does with it.
+    fn into_target(self) -> TaskTarget;
 }
 
 // Each request type exposes two JSON projections:
@@ -261,58 +327,51 @@ pub fn cache_hash(identity: &serde_json::Value) -> String {
 //   never varies per page.
 
 impl SummarizeRequest {
-    pub fn task_input(&self) -> serde_json::Value {
-        let mut v = match self.cache_identity() {
-            serde_json::Value::Object(m) => m,
-            _ => unreachable!("cache_identity always returns an object"),
-        };
+    pub fn cache_identity(&self) -> Identity {
+        let mut v = Identity::new();
+        v.insert("text".into(), self.text.clone().into());
+        v.insert("max_sentences".into(), self.max_sentences.into());
+        v.insert("locale".into(), self.locale.tag().into());
+        if let Some(focus) = &self.focus {
+            v.insert("focus".into(), focus.clone().into());
+        }
+        v
+    }
+}
+
+impl TaskRequest for SummarizeRequest {
+    fn locale(&self) -> Locale {
+        self.locale
+    }
+
+    fn task_input(&self) -> Identity {
+        let mut v = self.cache_identity();
         if let Some(st) = self.source_type {
             v.insert(
                 "source_type".into(),
                 serde_json::to_value(st).expect("serializable"),
             );
         }
-        serde_json::Value::Object(v)
+        v
     }
 
-    pub fn cache_identity(&self) -> serde_json::Value {
-        let mut v = serde_json::Map::new();
-        v.insert("text".into(), self.text.clone().into());
-        v.insert("max_sentences".into(), self.max_sentences.into());
-        v.insert("locale".into(), self.locale.clone().into());
-        if let Some(focus) = &self.focus {
-            v.insert("focus".into(), focus.clone().into());
-        }
-        serde_json::Value::Object(v)
-    }
-
-    pub fn cache_hash(&self) -> String {
+    fn cache_hash(&self) -> String {
         cache_hash(&self.cache_identity())
+    }
+
+    fn into_target(self) -> TaskTarget {
+        self.target
     }
 }
 
 impl ExtractConceptsRequest {
-    /// Queue payload: identity fields PLUS the source type the skill needs to apply
-    /// source-type-aware extraction.
-    pub fn task_input(&self) -> serde_json::Value {
-        let mut v = match self.cache_identity() {
-            serde_json::Value::Object(m) => m,
-            _ => unreachable!("cache_identity always returns an object"),
-        };
-        v.insert(
-            "source_type".into(),
-            serde_json::to_value(self.source_type).expect("serializable"),
-        );
-        serde_json::Value::Object(v)
-    }
-
     /// Hashable identity. `categories` is sorted by `id` so configuration ordering
     /// can't perturb the hash.
-    pub fn cache_identity(&self) -> serde_json::Value {
+    pub fn cache_identity(&self) -> Identity {
         let mut categories = self.categories.clone();
         categories.sort_by(|a, b| a.id.cmp(&b.id));
 
-        let mut v = serde_json::Map::new();
+        let mut v = Identity::new();
         v.insert("text".into(), self.text.clone().into());
         v.insert("source_id".into(), self.source_id.clone().into());
         v.insert("date".into(), self.date.to_string().into());
@@ -325,29 +384,60 @@ impl ExtractConceptsRequest {
                 serde_json::to_value(&categories).expect("serializable"),
             );
         }
-        serde_json::Value::Object(v)
+        v
+    }
+}
+
+impl TaskRequest for ExtractConceptsRequest {
+    fn locale(&self) -> Locale {
+        self.locale
     }
 
-    pub fn cache_hash(&self) -> String {
+    /// Queue payload: identity fields PLUS the source type the skill needs to apply
+    /// source-type-aware extraction.
+    fn task_input(&self) -> Identity {
+        let mut v = self.cache_identity();
+        v.insert(
+            "source_type".into(),
+            serde_json::to_value(self.source_type).expect("serializable"),
+        );
+        v
+    }
+
+    fn cache_hash(&self) -> String {
         cache_hash(&self.cache_identity())
+    }
+
+    fn into_target(self) -> TaskTarget {
+        self.target
     }
 }
 
 impl ThemeRequest {
-    pub fn task_input(&self) -> serde_json::Value {
+    pub fn cache_identity(&self) -> Identity {
+        let mut v = Identity::new();
+        v.insert("text".into(), self.text.clone().into());
+        v.insert("max_themes".into(), self.max_themes.into());
+        v.insert("locale".into(), self.locale.tag().into());
+        v
+    }
+}
+
+impl TaskRequest for ThemeRequest {
+    fn locale(&self) -> Locale {
+        self.locale
+    }
+
+    fn task_input(&self) -> Identity {
         self.cache_identity()
     }
 
-    pub fn cache_identity(&self) -> serde_json::Value {
-        let mut v = serde_json::Map::new();
-        v.insert("text".into(), self.text.clone().into());
-        v.insert("max_themes".into(), self.max_themes.into());
-        v.insert("locale".into(), self.locale.clone().into());
-        serde_json::Value::Object(v)
+    fn cache_hash(&self) -> String {
+        cache_hash(&self.cache_identity())
     }
 
-    pub fn cache_hash(&self) -> String {
-        cache_hash(&self.cache_identity())
+    fn into_target(self) -> TaskTarget {
+        self.target
     }
 }
 
