@@ -186,7 +186,18 @@ fn no_skill_file_calls_a_set_of_kinds_the_concept_kinds() {
         "references/queue-format.md",
     ] {
         let doc = read_skill_file(name);
-        let words: Vec<&str> = doc.split_whitespace().collect();
+        // Over the WORDS with punctuation and markup peeled off each, not the bare split:
+        // measured against the file this phrase was removed from, splitting on whitespace
+        // alone found ONE of its three occurrences — `concept kinds**,` and `concept\n
+        // kinds,` each carry a trailing character, and a guard a comma defeats is the grep
+        // it was written to replace.
+        let words: Vec<String> = doc
+            .split_whitespace()
+            .map(|w| {
+                w.trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_ascii_lowercase()
+            })
+            .collect();
         assert!(
             !words.windows(2).any(|w| w == ["concept", "kinds"]),
             "{name} says \"concept kinds\": name `extract-concepts`, or say which kinds are \
