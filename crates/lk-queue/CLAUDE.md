@@ -59,6 +59,14 @@ knows about; provider choice is config-driven (`build_llm_client` in lk-cli).
     body accumulates across every source citing it. Hashing the locale into
     `extract-concepts` would re-enqueue an extraction for every daily page and document in
     the vault to produce the same concepts under a different grounding sentence.
+    The condition that breaks: a task's `locale` is stamped at enqueue and nothing revisits a
+    task already flushed, so a locale switch BETWEEN an enqueue and its drain leaves that task
+    carrying the old language — and a second ingest of the same page before the drain enqueues
+    a second task with the same `cache_hash` and the new one, since `llm_cache` gates on the
+    `_done` marker and not on a pending task. `queue apply` fills only an empty section, so
+    the older result wins and the newer is dropped. What is at stake is one grounding sentence
+    on one created page, correctable by hand; what a fix would cost is cross-run pending-task
+    state in a funnel that deliberately holds none.
     A `concept-synthesis` task carries the page's `## Related` heading beside its synthesis
     heading (`related_anchor`, `None` where the page has no such section) because both sections
     answer to that one citation set and one act writes them; like `source_type` it is payload
