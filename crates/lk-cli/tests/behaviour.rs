@@ -60,6 +60,12 @@ const SWEEP: &[&[&str]] = &[
     // answers are the whole contract, and each is a different exit code.
     &["resolve", "BehaviourSnapshot"],
     &["resolve", "nothing-answers-to-this"],
+    // The ranking is the whole contract: a name the corpus answers to, spelled as neither its
+    // address nor its title, ahead of every page that merely says the words. And a query
+    // nothing holds, because returning the nearest thing instead is the one answer a lookup
+    // before writing a page must never give.
+    &["wiki", "search", "deterministic clock", "--json"],
+    &["wiki", "search", "nothing-answers-to-this"],
     &["wiki", "map"],
     &["wiki", "refresh"],
     &["graph", "lint"],

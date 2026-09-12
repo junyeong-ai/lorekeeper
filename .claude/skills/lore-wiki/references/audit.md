@@ -72,6 +72,17 @@ resolve section headings before inspecting pages.
      page owns it, and the loser silently accumulates none of its own mentions. Giving
      them distinct names is what makes every later citation land correctly, and it is why
      an encyclopedia disambiguates rather than tolerating the collision.
+   - **A title holding a name the page does not answer to**: a title of the form
+     `Term (풀이)` is two names written as one, and `lore resolve` answers for neither —
+     so the page is unreachable by anything a person or a later extraction would type, and
+     the next source naming the bare term mints a rival page beside it. Run `lore resolve`
+     on both halves to confirm before reporting; a compound title whose halves already
+     resolve here is fine.
+     The repair is `aliases`, not a rename: the slug is what existing citations address, and
+     adding names only makes more of them land. Which half is the TITLE is a separate
+     judgment and usually not worth making — the exception is a parenthetical that
+     disambiguates rather than glosses (`Go (programming language)`), where the bare term
+     must NOT become an alias, because it belongs to whichever sibling page claims it next.
    - **Synonyms, abbreviations, plurals, and short forms**: layer 1 compares names, so by
      construction it cannot see two DIFFERENT names for one thing — an acronym and its
      expansion (`rag` ↔ `retrieval-augmented-generation`, `k8s` ↔ `kubernetes`), a plural

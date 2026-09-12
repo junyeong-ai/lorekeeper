@@ -42,6 +42,19 @@ pub enum WikiCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Find the knowledge pages a query reaches — pages the query NAMES first, then pages
+    /// whose prose holds it. The lookup `index.md` stopped being able to answer once the
+    /// vault outgrew one readable file
+    Search {
+        /// What to look for. Every whitespace-separated term must appear on a page
+        query: Vec<String>,
+        /// Maximum hits to return
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Emit the hits as JSON — the contract a skill reads
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Result<()> {
@@ -51,7 +64,58 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
         WikiCommand::Map { root } => run_map(opts, root).await,
         WikiCommand::Refresh { root } => run_refresh(opts, root).await,
         WikiCommand::Concepts { json } => run_concepts(opts, json).await,
+        WikiCommand::Search { query, limit, json } => {
+            run_search(opts, &query.join(" "), limit, json).await
+        }
     }
+}
+
+/// Answer which pages a query reaches, in the order the match itself decides.
+///
+/// The terminal form is columns for an eye; `--json` is the contract, carrying `matched` so a
+/// caller can act on the DIFFERENCE between a page the query names and one that mentions it —
+/// which is exactly the judgment a skill makes before deciding whether a concept already
+/// exists.
+async fn run_search(
+    opts: &super::GlobalOptions,
+    query: &str,
+    limit: usize,
+    json: bool,
+) -> miette::Result<()> {
+    let config = load_config(&find_config(opts)?)?;
+    let hits = lk_vault::search(
+        &config.vault.root_path(),
+        &config.vault.dirs,
+        query,
+        limit.max(1),
+    )
+    .map_err(|e| miette::miette!("{e}"))?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "query": query,
+                "hits": hits,
+            }))
+            .map_err(|e| miette::miette!("{e}"))?
+        );
+        return Ok(());
+    }
+
+    if hits.is_empty() {
+        eprintln!("no page holds every term of `{query}`");
+        return Ok(());
+    }
+    for hit in &hits {
+        println!(
+            "{}  {}  {}",
+            super::pad(&hit.id, 44),
+            super::pad(&format!("{} sources", hit.source_count), 11),
+            hit.excerpt
+        );
+    }
+    Ok(())
 }
 
 /// Regenerate every page derived from the vault's contents, in one call.

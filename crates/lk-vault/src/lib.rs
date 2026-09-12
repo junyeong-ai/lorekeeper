@@ -1,5 +1,6 @@
 mod index;
 mod log;
+mod search;
 mod section;
 mod store;
 mod template;
@@ -12,6 +13,7 @@ pub use lk_core::frontmatter::{Frontmatter, VaultPage, parse_page};
 
 pub use self::index::{build_index, write_index};
 pub use self::log::{IngestLog, LogEntry, LogStatus};
+pub use self::search::{MatchField, SearchHit, search};
 pub use self::section::{
     PageSection, SectionKey, clear_llm_input, record_llm_input, replace_section, resolve_section,
     section_body, section_headings, set_frontmatter_field, set_llm_input,

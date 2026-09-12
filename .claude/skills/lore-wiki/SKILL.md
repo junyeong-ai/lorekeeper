@@ -82,9 +82,13 @@ each as an independent source, and report the aggregate results.
 
 Answer a question grounded in vault content, with compounding.
 
-1. **Gather context.** Run `lore wiki concepts` to get the concept registry.
-   Search the vault (concepts, daily pages, explorations) for relevant pages.
-   Read the most relevant pages to ground the answer.
+1. **Gather context.** Run `lore wiki search "<terms>" --json` — it answers which pages the
+   question reaches and, in `matched`, whether each ANSWERS to it (`identity`/`name`), opens
+   by stating it (`summary`), or merely mentions it (`text`). Query the question's terms
+   separately when it spans several; a query narrows as terms are added, since every term
+   must appear. Read the pages it names, and follow their `## Sources` to the daily pages
+   behind a claim. `lore wiki concepts` is the registry for convergence decisions, not a
+   lookup — reading all of it to find one page is what search exists to replace.
 2. Synthesize an answer grounded in vault content. Cite sources using
    link format (AGENTS.md § Links).
 3. **Concept enrichment.** If the answer reveals connections between concepts

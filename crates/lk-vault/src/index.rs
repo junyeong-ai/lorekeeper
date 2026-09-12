@@ -459,7 +459,7 @@ fn write_entry_line(
 /// `…다.`/`…음.` terminals). If no boundary falls within `MAX_SUMMARY_BYTES`, cut at the last
 /// word boundary under the budget and append an ellipsis, so an unbounded first line can't
 /// bloat the index (the bloat the single-file catalog is designed to avoid).
-fn truncate_summary(s: &str) -> String {
+pub(crate) fn truncate_summary(s: &str) -> String {
     let s = s.trim();
     let first = first_sentence(s);
     if first.len() <= MAX_SUMMARY_BYTES {

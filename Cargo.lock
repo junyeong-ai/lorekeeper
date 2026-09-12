@@ -1542,6 +1542,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "unicode-normalization",
  "walkdir",
 ]
 

@@ -478,21 +478,30 @@ pub fn render_agents_md(
     writeln!(out).unwrap();
     writeln!(
         out,
-        "Start from a navigation entry point and drill in — navigate, don't scan every file:"
+        "Ask for what you need and drill in from the answer — navigate, don't scan every file:"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "- `lore wiki search <query> --json` — the pages a query reaches, best match first. \
+         `matched` says WHY each is here: `identity`/`name` is a page the query names, \
+         `summary` one that opens by stating it, `text` one that merely mentions it. Start \
+         here for any topic you can phrase; it is the only entry point whose cost does not \
+         grow with the vault."
     )
     .unwrap();
     writeln!(
         out,
         "- `{}/map.md` — concepts grouped by citation cluster (the graph's emergent \
-         structure); start here to see what relates to a topic.",
+         structure); read it to see what a topic sits beside once you have found it.",
         dirs.wiki
     )
     .unwrap();
     writeln!(
         out,
         "- `{}/index.md` — catalog of every page, grouped by category, each with a \
-         first-sentence summary. Read it first to locate relevant concepts in one pass \
-         without opening each page.",
+         first-sentence summary. It holds every page and grows with the vault, so read a \
+         category's section to survey what exists there — not the whole file to find one page.",
         dirs.wiki
     )
     .unwrap();

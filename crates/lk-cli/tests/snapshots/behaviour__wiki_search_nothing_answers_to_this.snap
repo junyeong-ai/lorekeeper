@@ -1,0 +1,8 @@
+---
+source: crates/lk-cli/tests/behaviour.rs
+expression: "observe(staged.path(), argv)"
+---
+exit: 0
+--- stdout ---
+--- stderr ---
+no page holds every term of `nothing-answers-to-this`

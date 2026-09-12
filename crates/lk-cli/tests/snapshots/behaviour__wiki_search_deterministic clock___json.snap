@@ -1,0 +1,35 @@
+---
+source: crates/lk-cli/tests/behaviour.rs
+expression: "observe(staged.path(), argv)"
+---
+exit: 0
+--- stdout ---
+{
+  "hits": [
+    {
+      "aliases": [
+        "injected clock"
+      ],
+      "category": "engineering",
+      "excerpt": "A reference date supplied as an argument rather than read from the host, so a date-relative answer is a function of its inputs.",
+      "format": "concept",
+      "id": "deterministic-clock",
+      "matched": "identity",
+      "path": "wiki/concepts/deterministic-clock.md",
+      "source_count": 2,
+      "title": "Deterministic clock"
+    },
+    {
+      "category": "engineering",
+      "excerpt": "- deterministic-clock",
+      "format": "concept",
+      "id": "behaviour-snapshot",
+      "matched": "text",
+      "path": "wiki/concepts/behaviour-snapshot.md",
+      "source_count": 3,
+      "title": "Behaviour snapshot"
+    }
+  ],
+  "query": "deterministic clock"
+}
+--- stderr ---
