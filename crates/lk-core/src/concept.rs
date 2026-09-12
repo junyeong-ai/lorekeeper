@@ -6,11 +6,22 @@ use unicode_normalization::UnicodeNormalization;
 /// A concept the LLM surfaced from a source. The page filename is always
 /// `slugify(name)`, so the address a concept link points at is derivable from the
 /// name alone — a citation and its page can never disagree on the slug.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExtractedConcept {
+    /// The concept's name, and nothing else. [`identity_key`] is exact, so a name carrying a
+    /// parenthetical gloss (`Agent Capability (에이전트 호출 가능 애플리케이션 단위)`) answers
+    /// to neither the term nor the gloss: the page becomes unreachable by anything a person
+    /// or a later extraction would write, and the next mention of the bare term mints a rival
+    /// page beside it. The other spellings belong in [`Self::aliases`].
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
+    /// Every other name this concept answers to — a translation, an expanded acronym, the
+    /// original-language term. Each is registered against the page so a citation written in
+    /// any of them resolves to it, which is what lets one concept named differently in two
+    /// projects converge on a single page instead of accumulating a synthesis per spelling.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
 }
 
 /// The concept page a name resolves to: the ADDRESS it is written at and the TITLE it

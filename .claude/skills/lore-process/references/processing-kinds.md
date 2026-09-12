@@ -107,7 +107,7 @@ Write one file per task to `<vault>/.lorekeeper/queue/results/{task_id}.json`:
   "cache_hash": "<task.cache_hash>",
   "target": <task.target verbatim>,
   "date": "<task.input.date>",
-  "concepts": [{ "name": "…", "category": "…", "synthesis": "…" }]
+  "concepts": [{ "name": "…", "category": "…", "aliases": ["…"], "synthesis": "…" }]
 }
 ```
 
@@ -115,6 +115,20 @@ Write one file per task to `<vault>/.lorekeeper/queue/results/{task_id}.json`:
 is being CREATED — an established page's synthesis is its accumulated meaning across every
 source that cited it, so a single mention never overwrites it. Omit it and a new page is an
 empty heading.
+
+**`name` is the concept's name and nothing else.** The name is also the address and the
+lookup key, and the lookup is exact — so a name carrying a gloss
+(`Agent Capability (에이전트 호출 가능 애플리케이션 단위)`) answers to neither the term nor
+the gloss, and the next source naming the bare term mints a rival page beside it. Pick the
+form the field actually uses: the established Korean where the concept has one, the original
+term where it does not. Never translate a term to have translated it, and never append a
+translation to one.
+
+`aliases` is where every other name goes — the translation, the expanded acronym, the
+original-language term, the abbreviation a team uses. Each is registered against the page, so
+a later citation written in any of them resolves to it rather than forking the concept. An
+alias an established page already answers to is dropped with a warning: the extraction is one
+source's reading, and the page that earned the name by being cited under it keeps it.
 
 `concepts` may be empty — that is a valid answer for a page with nothing durable in it, and
 it still records that the task was answered. Copy `target` and `cache_hash` through

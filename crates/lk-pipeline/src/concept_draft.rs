@@ -34,6 +34,9 @@ pub struct StagedConcept {
     slug: String,
     existing: Option<lk_core::frontmatter::VaultPage>,
     synthesis: Option<String>,
+    /// The extraction's aliases this vault can actually adopt, decided in [`ConceptDrafts::stage`]
+    /// and already registered there.
+    aliases: Vec<String>,
 }
 
 struct ConceptDraft {
@@ -64,14 +67,12 @@ struct ConceptDraft {
     preserved_synthesis: Option<String>,
     preserved_sources: Option<String>,
     preserved_related: Option<String>,
-    /// Extra `aliases` (beyond the page title itself) carried verbatim from the existing
-    /// page. Aliases are established identity, not regenerated content: a human or
-    /// `/lore-wiki audit` registers a synonym/abbreviation (e.g. `RAG` →
-    /// `retrieval-augmented-generation`) so every citation addresses the one page.
-    /// An ingest re-render that re-emitted only `[title]` would silently erase them and
-    /// break every link that relied on the alias — so they are preserved exactly like the
-    /// title and category. The title seed is dropped here and re-added first at render.
-    preserved_aliases: Vec<String>,
+    /// Every name this page answers to beyond its own title: the ones already on disk, plus
+    /// the ones this run's extractions contributed. Aliases are established identity, not
+    /// regenerated content — a re-render that re-emitted only `[title]` would erase a synonym
+    /// a human registered and break every citation relying on it. Only ever added to, never
+    /// dropped. The title seed is kept out here and re-added first at render.
+    aliases: Vec<String>,
 }
 
 impl ConceptDrafts {
@@ -158,6 +159,7 @@ impl ConceptDrafts {
         dirs: &VaultDirs,
     ) -> Result<StagedConcept, PipelineError> {
         let identity = self.resolve_identity(&concept.name, reader, dirs).await?;
+        let aliases = self.adopt_aliases(&identity, &concept.aliases);
         // A slug already staged this run needs no read: the draft in hand is newer than the
         // page on disk, and `commit` folds into it.
         let existing = if self.drafts.contains_key(&identity.slug) {
@@ -172,7 +174,46 @@ impl ConceptDrafts {
             slug: identity.slug,
             existing,
             synthesis: synthesis.map(str::to_string),
+            aliases,
         })
+    }
+
+    /// Register the aliases this vault can answer with, and report which they were.
+    ///
+    /// An alias is adopted only where nothing else claims it. A name another page already
+    /// answers to is the vault's duplicate-concept defect if registered here, and the
+    /// extraction is the weaker claim: the established page earned the name by being cited
+    /// under it, while this is one source's reading of what a term also means. So the
+    /// conflict is reported and the alias dropped — never routed by preference, and never
+    /// matched approximately, since an alias exists precisely to make an exact lookup succeed.
+    fn adopt_aliases(&mut self, identity: &ConceptIdentity, proposed: &[String]) -> Vec<String> {
+        let Some(registry) = self.registry.as_mut() else {
+            return Vec::new();
+        };
+        let mut adopted = Vec::new();
+        for alias in proposed {
+            let alias = alias.trim();
+            if alias.is_empty() || slugify(alias).is_none() {
+                continue;
+            }
+            match registry.resolve(alias) {
+                Resolution::Absent => {}
+                held if held.routed().is_some_and(|r| r.slug == identity.slug) => continue,
+                held => {
+                    tracing::warn!(
+                        alias,
+                        proposed_for = %identity.slug,
+                        answered_by = %held.routed().map(|r| r.slug.as_str()).unwrap_or_default(),
+                        "alias already answers to another concept page; not adopted"
+                    );
+                    continue;
+                }
+            }
+            let alias = alias.to_string();
+            registry.register(identity.clone(), std::slice::from_ref(&alias));
+            adopted.push(alias);
+        }
+        adopted
     }
 
     /// Fold a staged concept into the run's drafts and return the page identity it resolved
@@ -192,12 +233,14 @@ impl ConceptDrafts {
             slug: safe_slug,
             existing,
             synthesis,
+            aliases,
         } = staged;
         let synthesis = synthesis.as_deref();
 
         if let Some(draft) = self.drafts.get_mut(&safe_slug) {
             draft.observe(date);
             draft.seed_synthesis(synthesis);
+            draft.adopt_aliases(aliases);
             warn_category_conflict(
                 &safe_slug,
                 draft.category.as_deref(),
@@ -252,7 +295,7 @@ impl ConceptDrafts {
                 let source_count = page.frontmatter.source_count().unwrap_or(0);
                 // Keep every alias except the title seed (`render` re-adds the title first),
                 // so a synonym a human/audit registered survives this re-render.
-                let preserved_aliases = page
+                let aliases = page
                     .frontmatter
                     .get("aliases")
                     .and_then(|v| v.as_array())
@@ -276,7 +319,7 @@ impl ConceptDrafts {
                     preserved_synthesis: capture_section(&page.body, |s| s.concept_synthesis),
                     preserved_sources: capture_section(&page.body, |s| s.concept_sources),
                     preserved_related: capture_section(&page.body, |s| s.related),
-                    preserved_aliases,
+                    aliases,
                 }
             }
             None => ConceptDraft {
@@ -290,12 +333,13 @@ impl ConceptDrafts {
                 preserved_synthesis: None,
                 preserved_sources: None,
                 preserved_related: None,
-                preserved_aliases: Vec::new(),
+                aliases: Vec::new(),
             },
         };
 
         draft.observe(date);
         draft.seed_synthesis(synthesis);
+        draft.adopt_aliases(aliases);
         let identity = ConceptIdentity {
             slug: safe_slug.clone(),
             title: draft.name.clone(),
@@ -348,6 +392,16 @@ impl ConceptDraft {
         }
     }
 
+    /// Add names the page did not already answer to. A name is only ever added, because a
+    /// citation somewhere may already address the page through it.
+    fn adopt_aliases(&mut self, aliases: Vec<String>) {
+        for alias in aliases {
+            if alias != self.name && !self.aliases.contains(&alias) {
+                self.aliases.push(alias);
+            }
+        }
+    }
+
     fn render(
         &self,
         engine: &TemplateEngine,
@@ -361,7 +415,7 @@ impl ConceptDraft {
         // follow, deduped. Single list, so the template never hardcodes `[name]` and a
         // re-render can't drop a registered alias.
         let mut aliases = vec![self.name.clone()];
-        for a in &self.preserved_aliases {
+        for a in &self.aliases {
             if !aliases.contains(a) {
                 aliases.push(a.clone());
             }
@@ -606,6 +660,7 @@ mod tests {
                     &ExtractedConcept {
                         name: "VectorDB".into(),
                         category: None,
+                        aliases: Vec::new(),
                     },
                     None,
                     &unparseable,
@@ -626,6 +681,74 @@ mod tests {
         );
     }
 
+    /// What the alias field on an extraction buys: a concept named differently by a second
+    /// source lands on the page the first one created, instead of a rival page carrying half
+    /// the citations and a synthesis of its own.
+    ///
+    /// The rejection half is the same property from the other side. An alias is a claim to
+    /// answer to a name, and a name an established page already answers to is not a claim an
+    /// extraction gets to make — granting it would be the duplicate-concept defect written
+    /// deliberately, with citations of that name routed by read order afterwards.
+    #[tokio::test]
+    async fn an_alias_routes_a_later_name_and_never_takes_one_already_answered() {
+        let dirs = VaultDirs::default();
+        let empty = FailsOn("nothing reads this");
+        let date = jiff::civil::date(2026, 1, 1);
+        let mut drafts = ConceptDrafts::new();
+
+        let staged = drafts
+            .stage(
+                &ExtractedConcept {
+                    name: "Agent Capability".into(),
+                    category: None,
+                    aliases: vec!["에이전트 호출 가능 애플리케이션 단위".into()],
+                },
+                None,
+                &empty,
+                &dirs,
+            )
+            .await
+            .expect("an empty vault stages cleanly");
+        drafts.commit(staged, date);
+
+        let by_alias = drafts
+            .resolve_identity("에이전트 호출 가능 애플리케이션 단위", &empty, &dirs)
+            .await
+            .expect("resolving a registered alias reads nothing new");
+        assert_eq!(
+            by_alias.slug, "agent-capability",
+            "the alias addresses the page the name created"
+        );
+
+        let staged = drafts
+            .stage(
+                &ExtractedConcept {
+                    name: "Tool Exposure".into(),
+                    category: None,
+                    aliases: vec!["Agent Capability".into()],
+                },
+                None,
+                &empty,
+                &dirs,
+            )
+            .await
+            .expect("an empty vault stages cleanly");
+        assert!(
+            staged.aliases.is_empty(),
+            "a name an established page answers to is not an alias this may take"
+        );
+        drafts.commit(staged, date);
+        assert_eq!(
+            drafts
+                .resolve_identity("Agent Capability", &empty, &dirs)
+                .await
+                .expect("resolving reads nothing new")
+                .slug,
+            "agent-capability",
+            "the established page keeps the name"
+        );
+    }
+
     /// The property every caller that stages a batch before folding it relies on — and the
     /// reason `Pipeline::plan`, `plan_documents` and `apply_concept_result` all read every
     /// concept before committing any. `render_pages` emits the accumulator unconditionally,
@@ -640,10 +763,12 @@ mod tests {
         let first = ExtractedConcept {
             name: "First".into(),
             category: None,
+            aliases: Vec::new(),
         };
         let second = ExtractedConcept {
             name: "Second".into(),
             category: None,
+            aliases: Vec::new(),
         };
         let staged = drafts.stage(&first, None, &reader, &dirs).await.unwrap();
         assert!(drafts.stage(&second, None, &reader, &dirs).await.is_err());
@@ -695,7 +820,7 @@ mod tests {
             preserved_synthesis: None,
             preserved_sources: None,
             preserved_related: None,
-            preserved_aliases: Vec::new(),
+            aliases: Vec::new(),
         };
         let engine = TemplateEngine::build(None).unwrap();
         let page = draft
@@ -734,7 +859,7 @@ mod tests {
                 "- [d1](../../daily/x/2026-05-01.md)\n- [d2](../../daily/x/2026-05-02.md)".into(),
             ),
             preserved_related: Some("- [Vector Search](vector-search.md)".into()),
-            preserved_aliases: Vec::new(),
+            aliases: Vec::new(),
         };
         let engine = TemplateEngine::build(None).unwrap();
         let page = draft
@@ -777,7 +902,7 @@ mod tests {
             preserved_synthesis: None,
             preserved_sources: None,
             preserved_related: None,
-            preserved_aliases: Vec::new(),
+            aliases: Vec::new(),
         };
         let engine = TemplateEngine::build(None).unwrap();
         let page = draft
@@ -796,7 +921,7 @@ mod tests {
     }
 
     #[test]
-    fn preserved_aliases_survive_render() {
+    fn aliases_survive_render() {
         // A synonym registered by a human or `/lore-wiki audit` (so the concept registry
         // resolves to the canonical page) must NOT be wiped when a later ingest re-renders
         // the concept. The title is always the first alias; preserved synonyms follow.
@@ -811,7 +936,7 @@ mod tests {
             preserved_synthesis: None,
             preserved_sources: None,
             preserved_related: None,
-            preserved_aliases: vec!["RAG".into()],
+            aliases: vec!["RAG".into()],
         };
         let engine = TemplateEngine::build(None).unwrap();
         let page = draft

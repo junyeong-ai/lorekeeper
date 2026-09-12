@@ -84,6 +84,7 @@ async fn concept_pages_written_with_merge() {
     let concepts = vec![ExtractedConcept {
         name: "Claude Code".into(),
         category: None,
+        aliases: Vec::new(),
     }];
 
     let llm: Arc<dyn LlmClient> = Arc::new(MockLlmClient::build_with_concepts(concepts));
@@ -131,6 +132,7 @@ async fn concept_pages_written_with_merge() {
         Arc::new(MockLlmClient::build_with_concepts(vec![ExtractedConcept {
             name: "Claude Code".into(),
             category: None,
+            aliases: Vec::new(),
         }]));
     let mut pipeline2 = Pipeline::new(vault, build_ctx(&config, llm2));
     let ts2: jiff::Timestamp = "2026-05-24T10:00:00Z".parse().unwrap();
@@ -318,6 +320,7 @@ async fn concept_accumulates_across_sources_in_one_run() {
         Arc::new(MockLlmClient::build_with_concepts(vec![ExtractedConcept {
             name: "Shared Concept".into(),
             category: None,
+            aliases: Vec::new(),
         }]));
     let mut pipeline = Pipeline::new(vault, build_ctx(&config, llm));
 
@@ -1429,6 +1432,7 @@ async fn forecast_date_is_not_materialized() {
         Arc::new(MockLlmClient::build_with_concepts(vec![ExtractedConcept {
             name: "Future Topic".into(),
             category: None,
+            aliases: Vec::new(),
         }]));
     let mut pipeline = Pipeline::new(vault, build_ctx(&config, llm));
 
@@ -2867,6 +2871,7 @@ async fn queue_results_materialize_through_the_same_merge_path() {
                 concept: ExtractedConcept {
                     name: "Retrieval Augmented Generation".into(),
                     category: None,
+                    aliases: Vec::new(),
                 },
                 synthesis: Some("Grounding a generation step in retrieved documents.".into()),
             },
@@ -2876,6 +2881,7 @@ async fn queue_results_materialize_through_the_same_merge_path() {
                 concept: ExtractedConcept {
                     name: "Vector Database".into(),
                     category: Some("not-a-real-category".into()),
+                    aliases: Vec::new(),
                 },
                 synthesis: None,
             },
@@ -2966,6 +2972,7 @@ async fn a_page_without_the_concepts_section_is_an_error_not_a_silent_no_op() {
             concept: ExtractedConcept {
                 name: "Retrieval Augmented Generation".into(),
                 category: None,
+                aliases: Vec::new(),
             },
             synthesis: None,
         }],
@@ -3008,6 +3015,7 @@ async fn a_page_that_cannot_record_completion_is_an_error() {
             concept: ExtractedConcept {
                 name: "Retrieval Augmented Generation".into(),
                 category: None,
+                aliases: Vec::new(),
             },
             synthesis: None,
         }],
@@ -3050,6 +3058,7 @@ async fn a_concept_that_fails_to_stage_takes_its_whole_result_with_it() {
         concept: ExtractedConcept {
             name: name.into(),
             category: None,
+            aliases: Vec::new(),
         },
         synthesis: None,
     };
@@ -3137,6 +3146,7 @@ async fn a_grounding_from_a_later_result_still_seeds_a_new_concept_page() {
             concept: ExtractedConcept {
                 name: "Retrieval Augmented Generation".into(),
                 category: None,
+                aliases: Vec::new(),
             },
             synthesis: synthesis.map(str::to_string),
         }],
@@ -3231,6 +3241,7 @@ async fn two_pages_claiming_one_address_resolve_deterministically() {
             concept: ExtractedConcept {
                 name: "claude 35".into(),
                 category: None,
+                aliases: Vec::new(),
             },
             synthesis: None,
         }],
@@ -3289,6 +3300,7 @@ async fn two_spellings_in_one_extraction_resolve_to_one_page() {
         concept: ExtractedConcept {
             name: name.into(),
             category: None,
+            aliases: Vec::new(),
         },
         synthesis: Some("Seeded on creation.".into()),
     };
@@ -3343,6 +3355,7 @@ async fn a_page_created_earlier_in_the_run_is_found_by_a_later_spelling() {
             concept: ExtractedConcept {
                 name: name.into(),
                 category: None,
+                aliases: Vec::new(),
             },
             synthesis: Some("Seeded on creation.".into()),
         }],
@@ -3405,6 +3418,7 @@ async fn a_break_between_digits_does_not_fold_one_version_onto_another() {
             concept: ExtractedConcept {
                 name: "Claude 3.5".into(),
                 category: None,
+                aliases: Vec::new(),
             },
             synthesis: Some("Anthropic's model release.".into()),
         }],
@@ -3445,6 +3459,7 @@ impl ConceptsPerCall {
                         .map(|name| ExtractedConcept {
                             name: name.into(),
                             category: None,
+                            aliases: Vec::new(),
                         })
                         .collect()
                 })
@@ -3650,6 +3665,7 @@ async fn a_name_spelled_without_separators_lands_on_the_established_page() {
             concept: ExtractedConcept {
                 name: "VectorDB".into(),
                 category: None,
+                aliases: Vec::new(),
             },
             synthesis: Some("A later mention must not overwrite the established body.".into()),
         }],
@@ -3733,6 +3749,7 @@ async fn stale_alias_loses_to_the_address_owner(claimant: &str) {
             concept: ExtractedConcept {
                 name: "access-ingress-2axis-model".into(),
                 category: None,
+                aliases: Vec::new(),
             },
             synthesis: Some("A later mention must not overwrite the established body.".into()),
         }],
@@ -3805,6 +3822,7 @@ async fn an_extraction_naming_an_alias_lands_on_the_established_page() {
                 // An alias, not the title — its slugify differs from the page's id.
                 name: "Pre-Build Design Refutation".into(),
                 category: None,
+                aliases: Vec::new(),
             },
             synthesis: Some("A later mention must not overwrite the established body.".into()),
         }],
@@ -3927,6 +3945,7 @@ async fn applying_a_result_adds_to_a_pages_citations_rather_than_replacing_them(
             concept: ExtractedConcept {
                 name: "Reported Now".into(),
                 category: None,
+                aliases: Vec::new(),
             },
             synthesis: None,
         }],

@@ -56,6 +56,7 @@ impl Workspace {
                 concept: lk_core::concept::ExtractedConcept {
                     name: concept.into(),
                     category: None,
+                    aliases: Vec::new(),
                 },
                 synthesis: None,
             }],

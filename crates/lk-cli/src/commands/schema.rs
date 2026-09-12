@@ -572,6 +572,18 @@ pub fn render_agents_md(
     writeln!(out).unwrap();
     writeln!(
         out,
+        "**A concept's title is its name and nothing else.** The title is the address and the \
+         lookup key, and the lookup is exact — so a title carrying a parenthetical gloss \
+         answers to neither the term nor the gloss, and the next mention of the bare term \
+         mints a rival page beside it. Choose the form the field actually uses: the \
+         established Korean where the concept has one, the original term where it does not. \
+         Every other spelling — the translation, the expanded acronym, the abbreviation — \
+         goes in `aliases`, which is what makes a citation written in any of them resolve here."
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
         "1. **Ask which page owns the name**: `lore resolve <name>` answers with the page a \
          citation of it addresses, by the same rule the ingest pipeline routes an extraction \
          by — so the two cannot disagree about what an existing name is. Exit 0 names the \
