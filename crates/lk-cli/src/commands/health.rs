@@ -91,10 +91,51 @@ pub(crate) async fn freshness(
     Ok(Freshness { sources })
 }
 
-pub async fn run(opts: &super::GlobalOptions, strict: bool) -> miette::Result<()> {
+impl Freshness {
+    /// The contract a skill reads, as `lore health --json`.
+    ///
+    /// `hours_ago` is resolved here rather than left as a timestamp to subtract, for the reason
+    /// every other view resolves what it reports: the reader is deciding whether to say
+    /// something, not doing arithmetic.
+    /// The exit code answers for the subsystem whichever form was asked for: a caller that
+    /// reads the JSON still learns the verdict from the code, and one that reads neither still
+    /// fails its pipeline.
+    fn verdict(&self, strict: bool) -> miette::Result<()> {
+        if self.stale() > 0 || (strict && self.never() > 0) {
+            std::process::exit(1);
+        }
+        Ok(())
+    }
+
+    fn as_json(&self, now: jiff::Timestamp) -> serde_json::Value {
+        serde_json::json!({
+            "fresh": self.fresh(),
+            "stale": self.stale(),
+            "never": self.never(),
+            "sources": self.sources.iter().map(|source| serde_json::json!({
+                "id": source.id,
+                "type": source.source_type.to_string(),
+                "last": source.last.map(|at| at.to_string()),
+                "hours_ago": source.hours_ago(now),
+                "stale": source.stale,
+            })).collect::<Vec<_>>(),
+        })
+    }
+}
+
+pub async fn run(opts: &super::GlobalOptions, strict: bool, json: bool) -> miette::Result<()> {
     let config = load_config(&find_config(opts)?)?;
     let now = jiff::Timestamp::now();
     let report = freshness(&config, &config.vault.root_path(), now).await?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report.as_json(now))
+                .map_err(|e| miette::miette!("{e}"))?
+        );
+        return report.verdict(strict);
+    }
 
     for source in &report.sources {
         match source.hours_ago(now) {
@@ -111,9 +152,5 @@ pub async fn run(opts: &super::GlobalOptions, strict: bool) -> miette::Result<()
 
     let (fresh, stale, never) = (report.fresh(), report.stale(), report.never());
     eprintln!("\n{fresh} fresh, {stale} stale, {never} never");
-
-    if stale > 0 || (strict && never > 0) {
-        std::process::exit(1);
-    }
-    Ok(())
+    report.verdict(strict)
 }

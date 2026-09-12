@@ -93,6 +93,9 @@ pub enum Command {
         /// Treat first-install (all "never") as failure as well
         #[arg(long)]
         strict: bool,
+        /// Emit the report as JSON — the contract a skill reads
+        #[arg(long)]
+        json: bool,
     },
     /// Audit materialized vault pages against their contracts — text cleanliness, and a section
     /// whose input was recorded and never answered (exits non-zero on any defect, or on a page
@@ -244,7 +247,7 @@ pub async fn run() -> miette::Result<()> {
         Command::Brief { date, json } => commands::brief::run(&opts, date, json).await,
         Command::Agenda { date, json } => commands::agenda::run(&opts, date, json).await,
         Command::Synthesis { period } => commands::synthesis::run(&opts, period).await,
-        Command::Health { strict } => commands::health::run(&opts, strict).await,
+        Command::Health { strict, json } => commands::health::run(&opts, strict, json).await,
         Command::Doctor => commands::doctor::run(&opts).await,
         Command::Performance => commands::performance::run(&opts).await,
         Command::Schedule {

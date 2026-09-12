@@ -285,6 +285,7 @@ lore ingest --date 2026-06-01 # 특정 날짜 재실체화(백필/복구)
 lore synthesis weekly         # 주간 합성 + 개인 리뷰 (monthly/quarterly/annual)
 lore status                   # 하위시스템별 한 줄 요약 (소스별 시각은 lore health)
 lore health                   # 수집이 밀린 소스 경고 (ingest.schedule 기준)
+lore health --json            # 같은 판정을 계약으로 — 스킬이 읽는 형태
 lore schedule | crontab -     # cron 발행
 lore brief --date yesterday   # 그날의 지식 — 새로 안 것(한 줄씩)과 다시 본 것(이름만)
 lore fetch <url>              # 링크 하나를 읽어 inbox에 저장(출처 주소를 달아서)

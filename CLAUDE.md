@@ -78,6 +78,7 @@ lore task add "…" / done / sync    # the board: intent in, completed work out
 lore task propose                  # what the sources say is still open, offered — never committed
 lore task remind add "…" --at 15:00  # say something at a time (fired by a timer, off the board)
 lore agenda --json                 # the day as a contract, for a skill rather than an eye
+lore health --json                 # source currency as a contract — a dead source reads like a quiet day
 lore task rollover --closing yesterday  # close the day that ended — carry what is still committed
 ```
 
@@ -132,8 +133,10 @@ Auto-discovered: `./config.yaml` → `~/.config/lorekeeper/config.yaml`.
   graph's own extraction: a task's origin is external precisely so the graph never sees it,
   which means the graph's extractor cannot be what reads it back. `lore brief --json` is the
   other half of the same day and a view on the same terms: the board says what was promised,
-  it says what was learned. Its split is a FACT about the pages — whether the vault already
-  held the concept — never a judgment about importance, so what was learned carries the line
+  it says what was learned, and `lore health --json` is what keeps the second honest: a source
+  that stopped talking and a quiet day read alike from a brief, so the morning asks the command
+  that owns source currency rather than inferring it from a thin one. Its split is a FACT about
+  the pages — whether the vault already held the concept — never a judgment about importance, so what was learned carries the line
   each page opens with and what was merely named again carries names only. Which concepts a
   day named is read off THAT DAY'S PAGES, never off `updated` on the concept: a concept page
   records when it was LAST cited and not every day it was, so reading it there loses every

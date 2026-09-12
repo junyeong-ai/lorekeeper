@@ -287,6 +287,7 @@ lore ingest --date 2026-06-01 # re-materialize a specific day (backfill / repair
 lore synthesis weekly         # weekly synthesis + personal review (monthly/quarterly/annual too)
 lore status                   # one line per subsystem (per-source times: lore health)
 lore health                   # warn when a source is overdue vs ingest.schedule
+lore health --json            # the same verdict as a contract, for a skill rather than an eye
 lore schedule | crontab -     # emit cron lines
 lore brief --date yesterday   # a day's knowledge — what was learned (a line each), what was seen again (names)
 lore fetch <url>              # read a link into the inbox, carrying its address
