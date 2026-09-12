@@ -11,9 +11,6 @@ use lk_core::event::RawItem;
 
 use crate::{ExtractContext, Source, SourceError};
 
-/// Some feeds reject requests with an empty User-Agent (HTTP 403); identify ourselves.
-const USER_AGENT: &str = concat!("lorekeeper/", env!("CARGO_PKG_VERSION"));
-
 pub struct RssSource {
     http: reqwest::Client,
 }
@@ -100,37 +97,21 @@ impl RssSource {
         Self { http }
     }
 
-    /// Fetch the full article from `url` and extract its readable core as Markdown.
-    /// Returns `None` when readability can't isolate an article (the caller then keeps
-    /// the known-clean feed summary rather than adopting boilerplate).
+    /// The article behind a feed entry, as Markdown.
+    ///
+    /// `None` when readability finds no article core: the caller then keeps the known-clean
+    /// feed summary rather than adopting the page's boilerplate.
     async fn fetch_article(&self, article_url: &str) -> Result<Option<String>, SourceError> {
-        let resp = self
-            .http
-            .get(article_url)
-            .header(reqwest::header::USER_AGENT, USER_AGENT)
-            .timeout(std::time::Duration::from_secs(15))
-            .send()
-            .await?;
-        if !resp.status().is_success() {
-            return Err(SourceError::Api {
-                status: resp.status().as_u16(),
-                message: format!("fetching article: {article_url}"),
-            });
-        }
-        let html = resp.text().await?;
-        let parsed_url = url::Url::parse(article_url)
-            .map_err(|e| SourceError::Parse(format!("invalid article URL: {e}")))?;
-        Ok(crate::markdown::readable_html_to_markdown(
-            &html,
-            &parsed_url,
-        ))
+        Ok(crate::fetch::readable(&self.http, article_url)
+            .await?
+            .map(|a| a.markdown))
     }
 
     async fn fetch_feed(&self, url: &str) -> Result<feed_rs::model::Feed, SourceError> {
         let resp = self
             .http
             .get(url)
-            .header(reqwest::header::USER_AGENT, USER_AGENT)
+            .header(reqwest::header::USER_AGENT, crate::fetch::USER_AGENT)
             .send()
             .await?;
         if !resp.status().is_success() {

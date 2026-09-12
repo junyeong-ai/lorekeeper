@@ -62,6 +62,17 @@ pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
     crate::parse_validated::<ManualParams>(params).map(|_| ())
 }
 
+/// Where a `manual` source reads from, resolved the way the adapter itself resolves it.
+///
+/// `lore fetch` writes into the same directory this scans, and the resolution is not a path
+/// join: a `~` expands, a relative path anchors at the vault root rather than the process
+/// CWD, and a path that reaches the vault root is refused. A caller re-deriving it would get
+/// a different directory under a scheduler than under a shell.
+pub fn inbox_dir(params: &serde_json::Value, vault_root: &Path) -> Result<PathBuf, SourceError> {
+    let p: ManualParams = crate::parse_validated(params)?;
+    resolve_inbox_dir(&p.inbox_dir, vault_root)
+}
+
 impl crate::ValidatedParams for ManualParams {
     fn validate(&self) -> Result<(), SourceError> {
         // Enforced at consumption (both `extract` and `archive_consumed_files` route through
@@ -291,7 +302,15 @@ fn read_item(path: &Path) -> Result<RawItem, SourceError> {
         )));
     };
 
-    let (title, content) = split_title(&body, path);
+    let (front, body) = split_frontmatter(&body, path);
+    let (title, content) = match front
+        .as_ref()
+        .and_then(|f| f.get("title"))
+        .and_then(|v| v.as_str())
+    {
+        Some(stated) => (stated.trim().to_string(), body.clone()),
+        None => split_title(&body, path),
+    };
     // Full filename (with extension) so `note.md` and `note.txt` get distinct ids.
     let file_name = path
         .file_name()
@@ -307,7 +326,14 @@ fn read_item(path: &Path) -> Result<RawItem, SourceError> {
         external_id: Some(format!("manual:{file_name}:{fingerprint}")),
         title,
         body: content,
-        url: None,
+        // Where the document came from, where it says so. A file the user saved from the web
+        // carries the page's address, and it is the citation a reader follows back — deriving
+        // one from the filename instead would invent provenance.
+        url: front
+            .as_ref()
+            .and_then(|f| f.get("source_url"))
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
         author: None,
         timestamp: mtime,
         is_self: false,
@@ -317,6 +343,33 @@ fn read_item(path: &Path) -> Result<RawItem, SourceError> {
             "source_hash": source_hash,
         }),
     })
+}
+
+/// Separate a dropped file's frontmatter from its prose.
+///
+/// A note written in Obsidian carries frontmatter, and reading it as prose would render the
+/// block into the vault page as text. A file whose leading `---` is not YAML has no
+/// frontmatter — it is prose that happens to start with a rule — so it is kept whole and the
+/// mismatch is reported rather than costing the user the file.
+fn split_frontmatter(
+    raw: &str,
+    path: &Path,
+) -> (Option<lk_core::frontmatter::Frontmatter>, String) {
+    let parts = lk_core::frontmatter::split_page(raw);
+    if !parts.closed || parts.yaml.trim().is_empty() {
+        return (None, raw.to_string());
+    }
+    match lk_core::frontmatter::parse_page(raw) {
+        Ok(page) => (Some(page.frontmatter), page.body),
+        Err(e) => {
+            tracing::warn!(
+                file = %path.display(),
+                error = %e,
+                "manual: leading `---` block is not YAML, reading the file as prose"
+            );
+            (None, raw.to_string())
+        }
+    }
 }
 
 /// Split a markdown body into (title, content) — the leading `# Title` line is

@@ -96,6 +96,10 @@ const EXEMPT: &[(&[&str], &str)] = &[
         "reaches the configured sources, so its answer is a property of the network rather than of the vault",
     ),
     (
+        &["fetch"],
+        "reads the page at a URL, so its answer is a property of the network rather than of the vault",
+    ),
+    (
         &["init", "credentials"],
         "prompts interactively and writes a secret; it has no non-interactive form to observe",
     ),

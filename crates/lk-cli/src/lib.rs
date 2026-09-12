@@ -48,6 +48,15 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Save a web page's article into the manual source's inbox, so a link someone sent
+    /// becomes vault knowledge on the next ingest
+    Fetch {
+        /// The page to read
+        url: String,
+        /// Which `manual` source's inbox to write into. Needed only when several are enabled
+        #[arg(long)]
+        source: Option<String>,
+    },
     /// Manage the task board: what is meant to be done, and what carried into today
     Task {
         #[command(subcommand)]
@@ -222,6 +231,7 @@ pub async fn run() -> miette::Result<()> {
             dry_run,
         } => commands::ingest::run(&opts, source, date, dry_run).await,
         Command::Task { cmd } => commands::task::run(&opts, cmd).await,
+        Command::Fetch { url, source } => commands::fetch::run(&opts, &url, source).await,
         Command::Agenda { date, json } => commands::agenda::run(&opts, date, json).await,
         Command::Synthesis { period } => commands::synthesis::run(&opts, period).await,
         Command::Health { strict } => commands::health::run(&opts, strict).await,

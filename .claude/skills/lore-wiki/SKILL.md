@@ -41,10 +41,17 @@ If AGENTS.md is missing, run `lore schema` first.
 
 ### `/lore-wiki add <source>`
 
-Manual ad-hoc ingest of a file, **folder**, or pasted text. A URL is not one of them: no
-`lore` subcommand fetches one and this skill's tools cannot reach the network, so paste the
-content or save it to a file first. When given a
-folder path, scan it recursively for `.md`, `.txt`, and `.pdf` files, process
+Manual ad-hoc ingest of a file, **folder**, pasted text, or a URL.
+
+A URL goes through `lore fetch <url>`, which reads the page, keeps its readable core, and
+writes it into the `manual` source's inbox with the address as `source_url` — so the document
+page cites the original rather than a copy nobody can check. Then run `lore ingest <that
+source>` and report where it landed; do NOT also create the page here, or the same article
+exists twice. A page with no article body (a listing, or one the browser assembles) is
+refused rather than absorbed: say so and ask for the underlying article's URL, or for the
+page saved as HTML into the inbox.
+
+When given a folder path, scan it recursively for `.md`, `.txt`, and `.pdf` files, process
 each as an independent source, and report the aggregate results.
 
 1. Read AGENTS.md for the document AND concept page formats.

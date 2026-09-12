@@ -666,6 +666,15 @@ fn img_without_data_uris(
 /// Folding a full-page fallback in here would let boilerplate longer than a clean
 /// summary silently replace it.
 pub fn readable_html_to_markdown(html: &str, base_url: &url::Url) -> Option<String> {
+    readable_article(html, base_url).map(|a| a.markdown)
+}
+
+/// The readable core of a page, with the title it stated.
+///
+/// A page names itself in places a Markdown conversion cannot recover — `<title>`, Open Graph,
+/// the heading readability discards as chrome — so the title is taken here, where those are
+/// still visible, rather than guessed at afterwards from the first line of the prose.
+pub fn readable_article(html: &str, base_url: &url::Url) -> Option<crate::fetch::ReadableArticle> {
     let mut readability = match dom_smoothie::Readability::new(html, Some(base_url.as_str()), None)
     {
         Ok(r) => r,
@@ -676,13 +685,13 @@ pub fn readable_html_to_markdown(html: &str, base_url: &url::Url) -> Option<Stri
     };
     match readability.parse() {
         Ok(article) => {
-            let extracted = html_to_markdown(&article.content);
-            if extracted.trim().is_empty() {
+            let markdown = html_to_markdown(&article.content);
+            if markdown.trim().is_empty() {
                 tracing::warn!(url = %base_url, "readability extracted empty content");
-                None
-            } else {
-                Some(extracted)
+                return None;
             }
+            let title = Some(article.title.trim().to_string()).filter(|t| !t.is_empty());
+            Some(crate::fetch::ReadableArticle { title, markdown })
         }
         Err(e) => {
             tracing::warn!(url = %base_url, error = %e, "readability extraction failed");

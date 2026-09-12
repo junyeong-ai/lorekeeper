@@ -4,6 +4,7 @@ use std::sync::Arc;
 pub mod agenda;
 pub mod config;
 pub mod doctor;
+pub mod fetch;
 pub mod graph;
 pub mod health;
 pub mod ingest;
