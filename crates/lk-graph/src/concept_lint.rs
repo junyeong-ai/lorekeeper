@@ -301,6 +301,28 @@ fn quoted_text(line: &str) -> Option<&str> {
     Some(s.trim())
 }
 
+/// Whether a callout's continuation line STATES something, as opposed to opening another
+/// callout inside it.
+///
+/// The empty-title fallback below reports the first line that does. A fence is not asked
+/// about here: the walk runs `FenceState` and a fenced line never reaches this, which is
+/// what keeps the answer the prose rather than a delimiter or the code between two.
+///
+/// FALSE POSITIVES that remain, each of which reads as prose and none of which can be told
+/// from a statement without parsing the block: an HTML comment, a table row, a list marker
+/// carrying its item. Each surfaces as itself, so the report shows a line the page carries
+/// rather than a wrong claim about the concept.
+///
+/// FALSE NEGATIVE, in the other direction: a real statement that opens by quoting bracket-bang
+/// notation (`[!important] 를 쓰라는 지침과 충돌한다`) reads as a nested callout and is passed
+/// over, and the line after it answers instead — emptily, where it was the only one. Accepted
+/// because the shapes are identical in text and the cost is asymmetric: a skipped statement
+/// leaves a conflict reported by its page alone, while a marker reported as a statement makes
+/// `lore graph lint` assert something about the concept that nobody wrote.
+fn states_something(text: &str) -> bool {
+    !text.is_empty() && !text.starts_with("[!")
+}
+
 /// If `line` is an Obsidian conflict callout (`> [!conflict] <title>`, allowing
 /// nested blockquote markers and an optional `-`/`+` fold flag), return its title
 /// (possibly empty). The callout type is matched case-insensitively against
@@ -337,17 +359,29 @@ pub fn find_unresolved_conflicts(pages: &[ConceptPage]) -> Vec<UnresolvedConflic
                 // callout written without one stated its disagreement in the body and said
                 // nothing here — an open conflict invisible in the one report that exists to
                 // surface it. The callout's own continuation lines ARE that statement, so
-                // the first of them stands in. Nothing is inferred: what is reported is a
-                // line the page carries, and a callout that says nothing anywhere still
-                // reports nothing.
+                // the first of them that states something stands in. Nothing is inferred:
+                // what is reported is a line the page carries, and a callout that says
+                // nothing anywhere still reports nothing. The walk ends at the first line
+                // that is not a blockquote, which is also where the callout ends, so it can
+                // never reach into the block that follows.
                 let note = match title.is_empty() {
                     false => title.to_owned(),
-                    true => lines[at + 1..]
-                        .iter()
-                        .map_while(|line| quoted_text(line))
-                        .find(|text| !text.is_empty())
-                        .unwrap_or_default()
-                        .to_owned(),
+                    true => {
+                        // The callout's own body can hold a fenced block, and the lines inside
+                        // one are data rather than a statement about the concept — so the walk
+                        // carries its own fence state, the same parser the outer scan uses.
+                        // Without it the answer was whichever line the fence happened to open
+                        // with, and the sentence after the closing delimiter never got asked.
+                        let mut inner = FenceState::new();
+                        lines[at + 1..]
+                            .iter()
+                            .map_while(|line| quoted_text(line))
+                            .find(|text| {
+                                !inner.apply(text) && inner.is_closed() && states_something(text)
+                            })
+                            .unwrap_or_default()
+                            .to_owned()
+                    }
                 };
                 return Some(UnresolvedConflict {
                     path: page.path.clone(),
@@ -667,6 +701,49 @@ mod tests {
     /// callout title is optional — so a callout that stated its case in the body and left the
     /// title empty reported nothing at all. Two of the reference vault's 24 open conflicts
     /// were invisible that way.
+    #[test]
+    fn a_callout_is_reported_by_its_statement_not_by_the_markup_around_it() {
+        // The fallback reports a line the page carries, and a fence opener or a nested
+        // callout's marker is a line the page carries — so without a statement test the
+        // report showed "```" where the disagreement should be.
+        let tmp = TempDir::new().unwrap();
+        write_concept(
+            tmp.path(),
+            "fenced",
+            "id: fenced\n---\n\n## 핵심\n\n> [!conflict]\n> ```\n> 284B\n> ```\n> 총 파라미터 수가 갈린다.\n\nbody",
+        );
+        write_concept(
+            tmp.path(),
+            "nested",
+            "id: nested\n---\n\n## 핵심\n\n> [!conflict]\n> [!note] 참고\n> 두 출처가 엇갈린다.\n\nbody",
+        );
+        write_concept(
+            tmp.path(),
+            "markup-only",
+            "id: markup-only\n---\n\n## 핵심\n\n> [!conflict]\n> ```\n\nbody",
+        );
+        let by_slug: std::collections::BTreeMap<String, String> =
+            find_unresolved_conflicts(&scan(tmp.path()))
+                .into_iter()
+                .map(|c| (c.slug, c.note))
+                .collect();
+        assert_eq!(
+            by_slug.get("fenced").map(String::as_str),
+            Some("총 파라미터 수가 갈린다."),
+            "the fenced block is data; the statement after it is what the callout says"
+        );
+        assert_eq!(
+            by_slug.get("nested").map(String::as_str),
+            Some("두 출처가 엇갈린다."),
+            "a nested callout's own marker is not the disagreement"
+        );
+        assert_eq!(
+            by_slug.get("markup-only").map(String::as_str),
+            Some(""),
+            "a callout whose body is an unclosed fence states nothing this can read"
+        );
+    }
+
     #[test]
     fn a_callout_without_a_title_is_reported_by_what_it_says() {
         let tmp = TempDir::new().unwrap();
