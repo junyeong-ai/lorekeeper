@@ -577,6 +577,27 @@ pub fn print_backlinks(r: &BacklinksSyncReport) {
                  REPLACES — copy anything you need out first"
             );
         }
+        // The relations answer to the same evidence and are written by the same act, so a page
+        // carrying no heading for them loses half of what it is owed — and loses it silently,
+        // since the synthesis still lands and the task still succeeds. Named here because this
+        // is the only moment anything knows.
+        let unrelatable: Vec<&std::path::Path> = r
+            .sync
+            .resynthesize
+            .iter()
+            .filter(|entry| entry.related_anchor.is_none())
+            .map(|entry| entry.path.as_path())
+            .collect();
+        if !unrelatable.is_empty() {
+            println!(
+                "  of those, {} carry no related-concepts heading, so their relations cannot be \
+                 written — add the section and the next rewrite fills it:",
+                unrelatable.len()
+            );
+            for path in unrelatable {
+                println!("    {}", path.display());
+            }
+        }
     }
 
     if !r.sync.adopted.is_empty() {
