@@ -283,26 +283,31 @@ pub struct UnresolvedConflict {
     pub note: String,
 }
 
-/// If `line` is an Obsidian conflict callout (`> [!conflict] <title>`, allowing
-/// nested blockquote markers and an optional `-`/`+` fold flag), return its title
-/// (possibly empty). The callout type is matched case-insensitively against
-/// `conflict` exactly — a callout of any other type is `None`, so an ordinary
-/// `> [!note]` never trips the lint. A real blockquote marker (`>`) is required
-/// and may carry only CommonMark's 0–3 spaces of leading indent (4+ is an indented
-/// code block, so a callout copied into one is content, not a live marker) — this
-/// keeps a bare `[!conflict]` text line or an indented example from false-firing.
-fn parse_conflict_callout(line: &str) -> Option<&str> {
+/// The text inside a blockquote line, with the indent and every `>` marker peeled, or
+/// `None` where the line is not one — which is also where a callout ENDS.
+///
+/// A real blockquote marker is required and may carry only CommonMark's 0–3 spaces of
+/// leading indent: 4 or more is an indented code block, so a callout copied into one is
+/// content rather than a live marker, and a bare `[!conflict]` text line is neither.
+fn quoted_text(line: &str) -> Option<&str> {
     let indent = line.len() - line.trim_start().len();
     if indent > 3 {
         return None;
     }
-    let mut s = line.trim_start();
-    // Require at least one blockquote marker, then peel any nested ones.
-    s = s.strip_prefix('>')?.trim_start();
+    let mut s = line.trim_start().strip_prefix('>')?.trim_start();
     while let Some(rest) = s.strip_prefix('>') {
         s = rest.trim_start();
     }
-    let inner = s.strip_prefix("[!")?;
+    Some(s.trim())
+}
+
+/// If `line` is an Obsidian conflict callout (`> [!conflict] <title>`, allowing
+/// nested blockquote markers and an optional `-`/`+` fold flag), return its title
+/// (possibly empty). The callout type is matched case-insensitively against
+/// `conflict` exactly — a callout of any other type is `None`, so an ordinary
+/// `> [!note]` never trips the lint.
+fn parse_conflict_callout(line: &str) -> Option<&str> {
+    let inner = quoted_text(line)?.strip_prefix("[!")?;
     let close = inner.find(']')?;
     if !inner[..close].trim().eq_ignore_ascii_case(CONFLICT_CALLOUT) {
         return None;
@@ -319,18 +324,36 @@ pub fn find_unresolved_conflicts(pages: &[ConceptPage]) -> Vec<UnresolvedConflic
     pages
         .iter()
         .filter_map(|page| {
+            let lines: Vec<&str> = page.body.lines().collect();
             let mut fence = FenceState::new();
-            for line in page.body.lines() {
+            for (at, line) in lines.iter().enumerate() {
                 if fence.apply(line) || !fence.is_closed() {
                     continue;
                 }
-                if let Some(title) = parse_conflict_callout(line) {
-                    return Some(UnresolvedConflict {
-                        path: page.path.clone(),
-                        slug: page.slug.clone(),
-                        note: title.to_owned(),
-                    });
-                }
+                let Some(title) = parse_conflict_callout(line) else {
+                    continue;
+                };
+                // Obsidian's title is optional and it is what this report SHOWS, so a
+                // callout written without one stated its disagreement in the body and said
+                // nothing here — an open conflict invisible in the one report that exists to
+                // surface it. The callout's own continuation lines ARE that statement, so
+                // the first of them stands in. Nothing is inferred: what is reported is a
+                // line the page carries, and a callout that says nothing anywhere still
+                // reports nothing.
+                let note = match title.is_empty() {
+                    false => title.to_owned(),
+                    true => lines[at + 1..]
+                        .iter()
+                        .map_while(|line| quoted_text(line))
+                        .find(|text| !text.is_empty())
+                        .unwrap_or_default()
+                        .to_owned(),
+                };
+                return Some(UnresolvedConflict {
+                    path: page.path.clone(),
+                    slug: page.slug.clone(),
+                    note,
+                });
             }
             None
         })
@@ -638,6 +661,40 @@ mod tests {
         assert_ne!(identity_key("doc-hub"), identity_key("docs-hub"));
         assert_ne!(identity_key("Claude 3.5"), identity_key("Claude 35"));
         assert_eq!(identity_key("!!!"), None);
+    }
+
+    /// The report is the only place an open disagreement is machine-visible, and Obsidian's
+    /// callout title is optional — so a callout that stated its case in the body and left the
+    /// title empty reported nothing at all. Two of the reference vault's 24 open conflicts
+    /// were invisible that way.
+    #[test]
+    fn a_callout_without_a_title_is_reported_by_what_it_says() {
+        let tmp = TempDir::new().unwrap();
+        write_concept(
+            tmp.path(),
+            "spec",
+            "id: spec\n---\n\n## 핵심\n\n> [!conflict]\n> 총 파라미터 수가 출처마다 다르다.\n> 753B 과 744B 로 갈린다.\n\nbody",
+        );
+        write_concept(
+            tmp.path(),
+            "silent",
+            "id: silent\n---\n\n## 핵심\n\n> [!conflict]\n\nbody",
+        );
+        let by_slug: std::collections::BTreeMap<String, String> =
+            find_unresolved_conflicts(&scan(tmp.path()))
+                .into_iter()
+                .map(|c| (c.slug, c.note))
+                .collect();
+        assert_eq!(
+            by_slug.get("spec").map(String::as_str),
+            Some("총 파라미터 수가 출처마다 다르다."),
+            "the callout's first statement stands in for the missing title"
+        );
+        assert_eq!(
+            by_slug.get("silent").map(String::as_str),
+            Some(""),
+            "a callout that says nothing anywhere still reports nothing"
+        );
     }
 
     #[test]
