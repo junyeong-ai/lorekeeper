@@ -101,6 +101,21 @@ the task carries no text.
    this section, so a callout exists only where THIS rewrite puts one: if the
    sources you just read still disagree, write it again. A page that carried one
    before is not evidence either way — read the sources, not the previous body.
+
+   Three things decide whether a callout is worth the reader's time:
+   - **Put the statement on the callout's own line** (`> [!conflict] <what differs>`).
+     That line is what `lore graph lint` reports, so it is where a reader who has not
+     opened the page meets the disagreement.
+   - **Do not record what the evidence settles.** A figure two sources give differently
+     is a disagreement; a figure one source computes wrongly from a number both of them
+     carry is an error, and there the synthesis states the supported value and writes no
+     callout. Check before recording — `261 of 367` is 71%, so a source calling it "over
+     80%" is not a second reading of the evidence.
+   - **Say which kind it is when the answer is not in the vault.** Where both sides are
+     REPORTS of an external fact — a model's parameter count, a funding round's stage —
+     no observation this vault will ever hold settles it, and a callout that says so is
+     answered. One that does not has every later reader, and every audit, re-derive the
+     same judgment from nothing.
 6. Length follows the evidence: one or two sentences for a concept with a
    single citation, a short paragraph for one with many. Never pad.
 7. **Write the concept's relations under `input.related_anchor`.** The same evidence

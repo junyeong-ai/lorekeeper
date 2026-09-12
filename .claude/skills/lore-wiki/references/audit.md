@@ -32,6 +32,14 @@ resolve section headings before inspecting pages.
    stands, has been settled by later evidence, or was never a contradiction at
    all (a difference in emphasis, a gap). Never choose a side.
 
+   There is a fourth answer and it is the commonest one: the disagreement stands and
+   nothing this vault will ever observe can settle it, because both sides are REPORTS of
+   an external fact — a model's parameter count, a funding round's stage — and the vault
+   holds no primary source for it. That is a permanent, correct state rather than an open
+   question, and the callout is answered once it says so. Report those separately from the
+   ones a later observation could close; asking every audit to re-derive the split is what
+   makes this layer read the same 24 findings forever.
+
    A callout is NOT durable, and treating it as a permanent record is the one
    mistake to avoid here. It lives in `## Synthesis`, which is rewritten from the
    sources whenever the citation set moves, so it survives only by being written
