@@ -38,15 +38,25 @@ pub enum MatchField {
     /// The query IS one of the page's names, by the same exact fold `lore resolve` uses. The
     /// page does not merely discuss the subject; it is the page the name addresses.
     Identity,
-    /// Every term appears among the page's names — its title, its aliases, or its address.
+    /// The subject is named among the page's names — its title, its aliases, or its address.
     Name,
-    /// Every term appears in the page's opening statement — the first line of its first
+    /// The subject is named in the page's opening statement — the first line of its first
     /// section, which is what every format leads with and what the catalog shows.
     Summary,
-    /// Every term appears somewhere in the page's prose. Link destinations are not prose: a
+    /// The subject is named somewhere in the page's prose. Link destinations are not prose: a
     /// concept page carries one per citation, so matching them would make every page in the
     /// vault answer to `daily` or to any source id.
     Text,
+    // Each of the three is reached two ways and states the same thing either way: every term
+    // of the query appearing there, or — where the query IS a concept's name — another name
+    // that concept answers to appearing there. Phrased as the terms alone, the ranks read as
+    // a claim about the spelling that was typed, and the rank a page gets would then depend
+    // on which of a concept's names the asker happened to know. It does not: `MCP` and
+    // `Model Context Protocol` reach the same 17 pages at `Name`, the same 63 at `Summary`.
+    // What a rank does NOT claim is that the page is ABOUT the subject — a name that is also
+    // a common word in another sense reaches the pages using it in that sense, at whichever
+    // rank they carry it. That reach belongs to the alias, and `spellings_of` names where it
+    // is fixed.
 }
 
 /// One page a query reached.
