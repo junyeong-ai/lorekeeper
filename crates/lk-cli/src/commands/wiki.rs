@@ -46,7 +46,8 @@ pub enum WikiCommand {
     /// whose prose holds it. The lookup `index.md` stopped being able to answer once the
     /// vault outgrew one readable file
     Search {
-        /// What to look for. Every whitespace-separated term must appear on a page
+        /// What to look for. Every whitespace-separated term must appear on a page — or, when
+        /// the query is a concept's name, any other name that concept answers to
         query: Vec<String>,
         /// Maximum hits to return
         #[arg(long, default_value_t = 20)]

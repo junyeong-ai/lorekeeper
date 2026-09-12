@@ -10,6 +10,13 @@
 //! line it opens with, then anywhere in its prose — and within that by how much evidence the
 //! page carries. Both are facts the page states, so the ordering is explainable hit by hit and
 //! reproducible across runs, which a weighted blend of the two would not be.
+//!
+//! A page is reached two ways and keeps the better one: every term of the query appearing on
+//! it, or — when the query IS a concept's name — any of that concept's OTHER declared names
+//! appearing on it. The second is what lets one question be asked in one spelling and answered
+//! from prose written in another, which a vault holding one language's writing about another
+//! language's terms needs in both directions. It reads only names the vault wrote down, so it
+//! is not morphology and not a guess; see [`spellings_of`].
 
 use std::path::{Path, PathBuf};
 
@@ -78,12 +85,13 @@ pub fn search(
     }
     let query_identity = identity_key(query);
 
-    let mut hits: Vec<SearchHit> = Vec::new();
+    let mut pages: Vec<Page> = Vec::new();
     for rel_dir in [
         concepts_dir(dirs),
         documents_dir(dirs),
         explorations_dir(dirs),
     ] {
+        let concept = rel_dir == concepts_dir(dirs);
         for path in markdown_files(&vault_root.join(&rel_dir)) {
             let Ok(content) = std::fs::read_to_string(&path) else {
                 tracing::warn!(path = %path.display(), "skipping unreadable page");
@@ -103,42 +111,56 @@ pub fn search(
                 .and_then(|v| v.as_str())
                 .unwrap_or(&id)
                 .to_string();
-            let aliases = string_array(&page, "aliases");
-            // Taken from where the file actually sits rather than assembled from the directory
-            // and the name: the walk is recursive, so a page a person filed in a subdirectory
-            // would otherwise be reported at an address that resolves nowhere.
-            let rel_path = path.strip_prefix(vault_root).unwrap_or(&path).to_path_buf();
-
-            let names: Vec<&str> = std::iter::once(id.as_str())
-                .chain(std::iter::once(title.as_str()))
-                .chain(aliases.iter().map(String::as_str))
-                .collect();
-            let Some(matched) = match_page(&terms, query_identity.as_deref(), &names, &page.body)
-            else {
-                continue;
-            };
-
-            hits.push(SearchHit {
-                excerpt: excerpt(&page.body, matched, &terms),
+            pages.push(Page {
+                // Taken from where the file actually sits rather than assembled from the
+                // directory and the name: the walk is recursive, so a page filed in a
+                // subdirectory would otherwise be reported at an address resolving nowhere.
+                rel_path: path.strip_prefix(vault_root).unwrap_or(&path).to_path_buf(),
+                aliases: string_array(&page, "aliases"),
                 id,
-                path: rel_path.to_string_lossy().into_owned(),
                 title,
-                aliases,
-                format: page
-                    .frontmatter
-                    .get("type")
-                    .and_then(|v| v.as_str())
-                    .map(String::from),
-                category: page
-                    .frontmatter
-                    .get("category")
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    .map(String::from),
-                source_count: page.frontmatter.source_count().unwrap_or(0),
-                matched,
+                concept,
+                page,
             });
         }
+    }
+
+    let spellings = spellings_of(query_identity.as_deref(), &pages);
+
+    let mut hits: Vec<SearchHit> = Vec::new();
+    for entry in &pages {
+        let names: Vec<&str> = entry.names().collect();
+        let Some(matched) = match_page(
+            &terms,
+            query_identity.as_deref(),
+            &spellings,
+            &names,
+            &entry.page.body,
+        ) else {
+            continue;
+        };
+        hits.push(SearchHit {
+            excerpt: excerpt(&entry.page.body, matched, &terms, &spellings),
+            id: entry.id.clone(),
+            path: entry.rel_path.to_string_lossy().into_owned(),
+            title: entry.title.clone(),
+            aliases: entry.aliases.clone(),
+            format: entry
+                .page
+                .frontmatter
+                .get("type")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            category: entry
+                .page
+                .frontmatter
+                .get("category")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from),
+            source_count: entry.page.frontmatter.source_count().unwrap_or(0),
+            matched,
+        });
     }
 
     hits.sort_by(|a, b| {
@@ -149,6 +171,73 @@ pub fn search(
     });
     hits.truncate(limit);
     Ok(hits)
+}
+
+/// One knowledge page, read and parsed once.
+///
+/// Buffered rather than matched as it is read, because the query has to be read against the
+/// vault's vocabulary before any page is judged, and that vocabulary is on the pages.
+struct Page {
+    id: String,
+    title: String,
+    aliases: Vec<String>,
+    rel_path: PathBuf,
+    /// Whether this page is a concept. Concepts are the vault's vocabulary — the pages a name
+    /// addresses, and the only ones [`spellings_of`] reads a query's other spellings from.
+    concept: bool,
+    page: lk_core::frontmatter::VaultPage,
+}
+
+impl Page {
+    fn names(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.id.as_str())
+            .chain(std::iter::once(self.title.as_str()))
+            .chain(self.aliases.iter().map(String::as_str))
+    }
+}
+
+/// Every spelling the vault declares for the concept the QUERY names, folded for matching.
+///
+/// A query that IS a concept's name asks what the vault knows about that concept, and what
+/// that concept is CALLED is already written down: the page's title and its aliases. So the
+/// prose search runs under those spellings too, and a page discussing the subject under
+/// another of its names is reached rather than missed. Nothing here folds a space, stems a
+/// word or matches a pattern — every spelling is one a person or an extraction recorded on
+/// the page, so a hit reached this way was reached by a declared name and the line shown
+/// contains it.
+///
+/// It matters most in a Korean vault and it is not a Korean feature. 띄어쓰기 genuinely
+/// varies, so `지식그래프` and `지식 그래프` are ONE name to `identity_key` and two strings to
+/// prose matching; `RAG` and `Retrieval-Augmented Generation` are the same gap in an English
+/// one. Both close here, and in both directions — a query in either language reaches the
+/// pages written in the other, which is what a vault holding one language's prose about
+/// another language's terms needs.
+///
+/// Empty when the query names nothing, which leaves the term-by-term match as the only path
+/// and is the answer for a query that is a phrase rather than a name.
+///
+/// Where this reaches too far: an alias that is ALSO a common word in another sense. Querying
+/// the concept then reads every page using that word in the other sense — `측정 모집단` reads
+/// the pages saying `분모`, which is the alias and is also just the word for a denominator.
+/// The reach belongs to the alias rather than to the matching, which is where it can be
+/// fixed: the excerpt shows the line and the name that reached it, and judging whether a name
+/// belongs to a concept is `/lore-wiki audit`'s. What is ruled out is the other failure, the
+/// one no edit can reach — a page matched by a spelling nobody wrote down.
+fn spellings_of(query_identity: Option<&str>, pages: &[Page]) -> Vec<String> {
+    let Some(key) = query_identity else {
+        return Vec::new();
+    };
+    pages
+        .iter()
+        .filter(|p| p.concept)
+        .filter(|p| {
+            p.names()
+                .any(|name| identity_key(name).as_deref() == Some(key))
+        })
+        .flat_map(Page::names)
+        .map(fold)
+        .filter(|name| !name.is_empty())
+        .collect()
 }
 
 /// The strongest claim this page has on the query, or `None` when some term is nowhere on it.
@@ -166,6 +255,7 @@ pub fn search(
 fn match_page(
     terms: &[String],
     query_identity: Option<&str>,
+    spellings: &[String],
     names: &[&str],
     body: &str,
 ) -> Option<MatchField> {
@@ -189,15 +279,22 @@ fn match_page(
         ),
         (MatchField::Text, fold(&prose)),
     ];
-    terms
+    let field_of = |needle: &str| {
+        fields
+            .iter()
+            .find(|(_, text)| contains_term(text, needle))
+            .map(|(field, _)| *field)
+    };
+    // Two independent routes to the page, and the page keeps the better of them. Every term
+    // appearing is the general answer; the query's own name appearing as a whole is the answer
+    // for a page that spells the concept differently, where the terms it was typed as are
+    // nowhere on the page.
+    let by_terms = terms
         .iter()
-        .map(|term| {
-            fields
-                .iter()
-                .find(|(_, text)| contains_term(text, term))
-                .map(|(field, _)| *field)
-        })
-        .try_fold(MatchField::Name, |worst, field| Some(worst.max(field?)))
+        .map(|term| field_of(term))
+        .try_fold(MatchField::Name, |worst, field| Some(worst.max(field?)));
+    let by_name = spellings.iter().filter_map(|name| field_of(name)).min();
+    by_terms.into_iter().chain(by_name).min()
 }
 
 /// Does `text` hold `term` as a word of its own, rather than inside a longer one?
@@ -231,8 +328,10 @@ fn contains_term(text: &str, term: &str) -> bool {
 /// What to show beside the hit. A page matched by name is introduced by what it says first;
 /// one matched in its prose is shown the line that matched, because the title already failed
 /// to explain why it is here.
-fn excerpt(body: &str, matched: MatchField, terms: &[String]) -> String {
-    // The same prose the match was taken over, so the line shown is the line that matched.
+fn excerpt(body: &str, matched: MatchField, terms: &[String], spellings: &[String]) -> String {
+    // The same prose the match was taken over, so the line shown is the line that matched —
+    // under whichever of the two routes reached the page, so a page found by another of the
+    // concept's names shows the line carrying that name rather than the page's opening.
     let prose = link::strip_links(body);
     let text = match matched {
         MatchField::Identity | MatchField::Name | MatchField::Summary => opening_statement(&prose),
@@ -242,6 +341,7 @@ fn excerpt(body: &str, matched: MatchField, terms: &[String]) -> String {
             .find(|line| {
                 let folded = fold(line);
                 terms.iter().all(|t| contains_term(&folded, t))
+                    || spellings.iter().any(|n| contains_term(&folded, n))
             })
             .map(str::to_owned)
             .or_else(|| opening_statement(&prose)),
@@ -405,6 +505,94 @@ mod tests {
         let hits = search(tmp.path(), &VaultDirs::default(), "AgentCapability", 10).unwrap();
         assert_eq!(hits[0].id, "agent-capability");
         assert_eq!(hits[0].matched, MatchField::Identity);
+    }
+
+    /// The reason a Korean vault needed the query read against its own vocabulary. 띄어쓰기
+    /// varies, so the same name is written both ways, and `identity_key` folds the two while
+    /// prose matching cannot. On the reference vault `지식그래프` reached 4 pages where
+    /// `지식 그래프` reached 29 — the same question, the same subject, a quarter of the answer.
+    #[test]
+    fn a_query_spelled_solid_reaches_the_prose_spelled_with_a_space() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let concepts = tmp.path().join(concepts_dir(&dirs));
+        write(
+            &concepts,
+            "knowledge-graph.md",
+            "---\ntype: concept\ntitle: \"지식 그래프\"\naliases: [\"Knowledge Graph\"]\nsource_count: 9\n---\n\n## 핵심\n\n개체와 관계를 그래프로 구조화한 지식 표현.\n",
+        );
+        write(
+            &concepts,
+            "graphrag.md",
+            "---\ntype: concept\ntitle: \"GraphRAG\"\nsource_count: 5\n---\n\n## 핵심\n\n검색 단계에서 지식 그래프의 구조를 활용하는 RAG 계열 접근이다.\n",
+        );
+        let ids = |q: &str| {
+            search(tmp.path(), &dirs, q, 10)
+                .unwrap()
+                .into_iter()
+                .map(|h| h.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids("지식 그래프"), ["knowledge-graph", "graphrag"]);
+        assert_eq!(
+            ids("지식그래프"),
+            ["knowledge-graph", "graphrag"],
+            "the solid spelling names the same concept, so it reads the same prose"
+        );
+        assert!(
+            search(tmp.path(), &dirs, "지식그래프", 10).unwrap()[1]
+                .excerpt
+                .contains("지식 그래프"),
+            "the line shown carries the declared name that reached the page"
+        );
+    }
+
+    /// The same mechanism in the other direction, which is what makes it not a Korean feature:
+    /// an English query reaches prose written in Korean, and a full name reaches the prose that
+    /// only ever writes the acronym. On the reference vault `Model Context Protocol` reached 9
+    /// pages where `MCP` reached 202.
+    #[test]
+    fn a_query_reaches_the_prose_written_under_the_concepts_other_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let concepts = tmp.path().join(concepts_dir(&dirs));
+        write(
+            &concepts,
+            "prompt-injection.md",
+            "---\ntype: concept\ntitle: \"Prompt Injection\"\naliases: [\"프롬프트 인젝션\"]\nsource_count: 31\n---\n\n## 핵심\n\n외부 입력이 모델의 지시로 읽히는 취약점.\n",
+        );
+        write(
+            &concepts,
+            "agent-sandbox.md",
+            "---\ntype: concept\ntitle: \"Agent Sandbox\"\nsource_count: 4\n---\n\n## 핵심\n\n에이전트 실행을 격리하는 방식이다.\n\n프롬프트 인젝션이 성립해도 피해를 가둔다.\n",
+        );
+        let hits = search(tmp.path(), &dirs, "prompt injection", 10).unwrap();
+        assert_eq!(
+            hits.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
+            ["prompt-injection", "agent-sandbox"],
+            "the English query reaches the page that only writes the Korean name"
+        );
+        assert_eq!(hits[1].matched, MatchField::Text);
+    }
+
+    /// A query that names nothing is a phrase, and a phrase has no other spellings to read —
+    /// so it is matched term by term exactly as before. Without this the expansion would be
+    /// unbounded: every query would look for a concept to borrow names from.
+    #[test]
+    fn a_query_that_names_no_concept_is_matched_term_by_term() {
+        let tmp = vault();
+        let hits = search(
+            tmp.path(),
+            &VaultDirs::default(),
+            "호출 가능한 단위로 여는 권한",
+            10,
+        )
+        .unwrap();
+        assert_eq!(
+            hits.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
+            ["tool-exposure"]
+        );
+        assert_eq!(hits[0].matched, MatchField::Text);
     }
 
     /// The acronym is the commonest shape a technical query takes, and plain containment made
