@@ -283,30 +283,51 @@ pub struct UnresolvedConflict {
     pub note: String,
 }
 
-/// The text inside a blockquote line, with the indent and every `>` marker peeled, or
-/// `None` where the line is not one — which is also where a callout ENDS.
+/// One blockquote line, read rather than flattened: how deep its quote nests, and the text
+/// inside it. `None` where the line is not a blockquote — which is also where a callout ENDS.
 ///
-/// A real blockquote marker is required and may carry only CommonMark's 0–3 spaces of
-/// leading indent: 4 or more is an indented code block, so a callout copied into one is
-/// content rather than a live marker, and a bare `[!conflict]` text line is neither.
-fn quoted_text(line: &str) -> Option<&str> {
+/// A real blockquote marker is required and may carry only CommonMark's 0–3 spaces of leading
+/// indent: 4 or more is an indented code block, so a callout copied into one is content rather
+/// than a live marker, and a bare `[!conflict]` text line is neither.
+///
+/// Both fields exist because flattening them lost a callout's structure and the reader needed
+/// it back. `depth` separates the callout's own lines from a callout NESTED inside it, whose
+/// body was being reported as the outer one's statement. `text` keeps its own indentation —
+/// CommonMark consumes ONE space after each marker and the rest is content — because trimming
+/// made `>     ``` ` read as a fence opener where it is an indented code line, which swallowed
+/// every statement after it.
+struct Quoted<'a> {
+    depth: usize,
+    text: &'a str,
+}
+
+fn quoted(line: &str) -> Option<Quoted<'_>> {
     let indent = line.len() - line.trim_start().len();
     if indent > 3 {
         return None;
     }
-    let mut s = line.trim_start().strip_prefix('>')?.trim_start();
-    while let Some(rest) = s.strip_prefix('>') {
-        s = rest.trim_start();
+    let mut text = line.trim_start().strip_prefix('>')?;
+    let mut depth = 1;
+    loop {
+        text = text.strip_prefix(' ').unwrap_or(text);
+        match text.strip_prefix('>') {
+            Some(rest) => {
+                depth += 1;
+                text = rest;
+            }
+            None => return Some(Quoted { depth, text }),
+        }
     }
-    Some(s.trim())
 }
 
 /// Whether a callout's continuation line STATES something, as opposed to opening another
 /// callout inside it.
 ///
-/// The empty-title fallback below reports the first line that does. A fence is not asked
-/// about here: the walk runs `FenceState` and a fenced line never reaches this, which is
-/// what keeps the answer the prose rather than a delimiter or the code between two.
+/// The empty-title fallback below reports the first line that does. Three things it never has
+/// to judge, because the walk answers them from structure before asking: a fenced line (the
+/// walk carries its own `FenceState`), a line the quote indents four spaces or more, and a
+/// line belonging to a callout NESTED in this one (it answers only at the callout's own
+/// depth). What is left is a question about text, and this is the whole of it.
 ///
 /// FALSE POSITIVES that remain, each of which reads as prose and none of which can be told
 /// from a statement without parsing the block: an HTML comment, a table row, a list marker
@@ -328,31 +349,46 @@ fn states_something(text: &str) -> bool {
 /// (possibly empty). The callout type is matched case-insensitively against
 /// `conflict` exactly — a callout of any other type is `None`, so an ordinary
 /// `> [!note]` never trips the lint.
-fn parse_conflict_callout(line: &str) -> Option<&str> {
-    let inner = quoted_text(line)?.strip_prefix("[!")?;
+fn parse_conflict_callout(line: &str) -> Option<(usize, &str)> {
+    let quoted = quoted(line)?;
+    let inner = quoted.text.trim().strip_prefix("[!")?;
     let close = inner.find(']')?;
     if !inner[..close].trim().eq_ignore_ascii_case(CONFLICT_CALLOUT) {
         return None;
     }
     let after = inner[close + 1..].trim_start();
-    Some(after.strip_prefix(['-', '+']).unwrap_or(after).trim())
+    Some((
+        quoted.depth,
+        after.strip_prefix(['-', '+']).unwrap_or(after).trim(),
+    ))
 }
 
 /// Concept pages whose body carries an unresolved `> [!conflict]` callout. The scan
 /// is fence-aware (a callout quoted inside a code block is content, not a live marker)
 /// and reports each page once, keyed on the first marker's title. Read-only; the lint
 /// reports, a human resolves the contradiction and deletes the callout to clear it.
+///
+/// Fence-aware at BOTH layers, because a fence can be written outside the quote or inside it
+/// and only the second is how a callout gets quoted for illustration. `parse_fence` refuses a
+/// line beginning with `>`, so the raw-line state cannot see a fence a blockquote carries —
+/// which is how a `[!conflict]` inside `> ``` … > ``` ` was reported as a disagreement the
+/// page does not record, against this very sentence's promise.
 pub fn find_unresolved_conflicts(pages: &[ConceptPage]) -> Vec<UnresolvedConflict> {
     pages
         .iter()
         .filter_map(|page| {
             let lines: Vec<&str> = page.body.lines().collect();
             let mut fence = FenceState::new();
+            let mut quoted_fence = FenceState::new();
             for (at, line) in lines.iter().enumerate() {
                 if fence.apply(line) || !fence.is_closed() {
                     continue;
                 }
-                let Some(title) = parse_conflict_callout(line) else {
+                let inside_quote = quoted(line).is_some_and(|q| quoted_fence.apply(q.text));
+                if inside_quote || !quoted_fence.is_closed() {
+                    continue;
+                }
+                let Some((depth, title)) = parse_conflict_callout(line) else {
                     continue;
                 };
                 // Obsidian's title is optional and it is what this report SHOWS, so a
@@ -367,18 +403,27 @@ pub fn find_unresolved_conflicts(pages: &[ConceptPage]) -> Vec<UnresolvedConflic
                 let note = match title.is_empty() {
                     false => title.to_owned(),
                     true => {
-                        // The callout's own body can hold a fenced block, and the lines inside
-                        // one are data rather than a statement about the concept — so the walk
-                        // carries its own fence state, the same parser the outer scan uses.
-                        // Without it the answer was whichever line the fence happened to open
-                        // with, and the sentence after the closing delimiter never got asked.
+                        // Two things the walk must not mistake for the callout's own statement.
+                        // A fenced block inside its body is data, so the walk runs its own
+                        // fence state over the quoted text. And a callout NESTED inside this
+                        // one has a body of its own, which was being reported as the outer
+                        // callout's statement while the outer callout's real statement sat on
+                        // a later line, never reached — so only lines at THIS callout's depth
+                        // answer, and a deeper line is skipped without ending the walk.
                         let mut inner = FenceState::new();
                         lines[at + 1..]
                             .iter()
-                            .map_while(|line| quoted_text(line))
-                            .find(|text| {
-                                !inner.apply(text) && inner.is_closed() && states_something(text)
-                            })
+                            .map_while(|line| quoted(line))
+                            .filter(|q| !inner.apply(q.text) && inner.is_closed())
+                            // A line the quote indents four spaces or more is an indented code
+                            // block, the other way markdown writes data — so its content is no
+                            // more the callout's statement than a fenced line's is. This is why
+                            // `Quoted::text` keeps its indentation: trimmed, `>     ``` ` read
+                            // as a fence opener, and the statement after it was never reached.
+                            .filter(|q| q.text.len() - q.text.trim_start().len() < 4)
+                            .filter(|q| q.depth == depth)
+                            .map(|q| q.text.trim())
+                            .find(|text| states_something(text))
                             .unwrap_or_default()
                             .to_owned()
                     }
@@ -701,6 +746,53 @@ mod tests {
     /// callout title is optional — so a callout that stated its case in the body and left the
     /// title empty reported nothing at all. Two of the reference vault's 24 open conflicts
     /// were invisible that way.
+    /// Three shapes where the reader had thrown away the structure it needed. A callout
+    /// NESTED in the conflict had its own body reported as the outer callout's statement,
+    /// while the outer callout's real statement sat on a later line and was never reached.
+    /// An indented code line inside the body read as a fence opener once trimmed, which
+    /// swallowed every statement after it. And a `[!conflict]` quoted inside a BLOCKQUOTED
+    /// fence was reported as a disagreement the page does not record — `parse_fence` refuses
+    /// a line beginning with `>`, so the raw-line fence state could not see that fence at all.
+    #[test]
+    fn a_callouts_statement_is_its_own_at_its_own_depth_and_outside_every_code_block() {
+        let tmp = TempDir::new().unwrap();
+        write_concept(
+            tmp.path(),
+            "nested",
+            "id: nested\n---\n\n## 핵심\n\n> [!conflict]\n> > [!note] 참고\n> > 중첩 콜아웃의 본문이다.\n> 진짜 진술이다.\n\nbody",
+        );
+        write_concept(
+            tmp.path(),
+            "indented",
+            "id: indented\n---\n\n## 핵심\n\n> [!conflict]\n>     ```\n> 진술이다.\n\nbody",
+        );
+        write_concept(
+            tmp.path(),
+            "quoted-fence",
+            "id: quoted-fence\n---\n\n## 핵심\n\n> ```\n> [!conflict] 코드블록 안의 가짜 갈등\n> ```\n\nbody",
+        );
+        let by_slug: std::collections::BTreeMap<String, String> =
+            find_unresolved_conflicts(&scan(tmp.path()))
+                .into_iter()
+                .map(|c| (c.slug, c.note))
+                .collect();
+        assert_eq!(
+            by_slug.get("nested").map(String::as_str),
+            Some("진짜 진술이다."),
+            "a nested callout's body is its own; the outer callout's statement is on a later line"
+        );
+        assert_eq!(
+            by_slug.get("indented").map(String::as_str),
+            Some("진술이다."),
+            "an indented code line is data, and trimming it made it read as a fence opener"
+        );
+        assert!(
+            !by_slug.contains_key("quoted-fence"),
+            "a callout quoted inside a blockquoted fence is content, which is what the scan's \
+             own doc comment promises"
+        );
+    }
+
     #[test]
     fn a_callout_is_reported_by_its_statement_not_by_the_markup_around_it() {
         // The fallback reports a line the page carries, and a fence opener or a nested
@@ -807,10 +899,15 @@ mod tests {
     fn conflict_callout_parser_handles_fold_flag_and_nested_quote() {
         assert_eq!(
             parse_conflict_callout("> [!conflict]- folded title"),
-            Some("folded title")
+            Some((1, "folded title"))
         );
-        assert_eq!(parse_conflict_callout("> > [!CONFLICT]"), Some(""));
-        assert_eq!(parse_conflict_callout("  > [!conflict] ok"), Some("ok")); // 0-3 indent ok
+        // The depth travels with the title: it is what tells the callout's own continuation
+        // lines from those of a callout nested inside it.
+        assert_eq!(parse_conflict_callout("> > [!CONFLICT]"), Some((2, "")));
+        assert_eq!(
+            parse_conflict_callout("  > [!conflict] ok"),
+            Some((1, "ok"))
+        ); // 0-3 indent ok
         assert_eq!(parse_conflict_callout("> [!note] x"), None);
         assert_eq!(parse_conflict_callout("plain text"), None);
         // A blockquote marker is REQUIRED — a bare callout-shaped text line is not a marker.
