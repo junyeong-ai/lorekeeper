@@ -62,7 +62,12 @@ knows about; provider choice is config-driven (`build_llm_client` in lk-cli).
     A `concept-synthesis` task carries the page's `## Related` heading beside its synthesis
     heading (`related_anchor`, `None` where the page has no such section) because both sections
     answer to that one citation set and one act writes them; like `source_type` it is payload
-    only, since a heading is not part of what the answer would be.
+    only, since a heading is not part of what the answer would be. **`QueueTask::anchors`
+    answers with every heading a task writes**, and it is what `classify_task` checks against
+    the page, so the second one cannot be validated in one command and forgotten in the next:
+    one marker answers for the pair, so a task judged work on the strength of the synthesis
+    heading alone would have the drain fill one section and stamp both answered — with no
+    re-queue until the citation set next moves.
     `concept-synthesis` hashes the citation SET alone, through
     `lk_core::concept::citation_digest`, so the page's recorded input and the task's
     `cache_hash` are the same string by construction rather than by two implementations

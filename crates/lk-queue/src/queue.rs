@@ -61,6 +61,37 @@ pub struct QueueTask {
     pub target: TaskTarget,
 }
 
+/// The payload key naming a second section the task fills, written by
+/// `ConceptSynthesisRequest::task_input` and read back by `QueueTask::anchors`.
+///
+/// One producer, by convention rather than by a type: `anchors` reads the key whatever the
+/// task's kind, so a future request type spending this name on anything but "a heading the
+/// drain must find" would silently acquire a second required-heading check. The name is
+/// declared here, beside the only reader, so that reuse has to pass through this line.
+const RELATED_ANCHOR: &str = "related_anchor";
+
+impl QueueTask {
+    /// Every section heading this task writes, in the order it writes them.
+    ///
+    /// Most kinds name one. A `synthesize-concept` task names two — the synthesis heading
+    /// and the page's related-concepts heading — because one citation set is what both
+    /// answer to. Both must exist on the target page for the task to be work: the drain
+    /// locates a section by heading, and a heading the page lacks receives nothing while
+    /// reporting success. Asking the task rather than reading its payload at the call site
+    /// is what keeps the second heading from being validated in one command and forgotten
+    /// in the next.
+    pub fn anchors(&self) -> Vec<&str> {
+        std::iter::once(self.target.anchor.as_str())
+            .chain(
+                self.input
+                    .get(RELATED_ANCHOR)
+                    .and_then(|v| v.as_str())
+                    .filter(|a| !a.is_empty()),
+            )
+            .collect()
+    }
+}
+
 /// What a drained task produced, for the kinds whose output Lorekeeper materializes itself.
 ///
 /// Most tasks write one section of one page, and the drain writes it directly — there is
@@ -812,7 +843,7 @@ mod tests {
         let task: QueueTask = serde_json::from_str(queued.trim()).unwrap();
         assert_eq!(task.target.anchor, "## 핵심");
         assert_eq!(
-            task.input.get("related_anchor").and_then(|v| v.as_str()),
+            task.input.get(RELATED_ANCHOR).and_then(|v| v.as_str()),
             Some("## 관련")
         );
     }

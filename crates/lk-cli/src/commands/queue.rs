@@ -321,7 +321,10 @@ async fn apply(
             &rel_path,
             result.target.kind,
             &result.cache_hash,
-            &result.target.anchor,
+            // One section, because `TaskResult` carries `concepts` and nothing else: a result
+            // from any other kind would arrive with no payload to apply, so the single anchor
+            // is what the type can express rather than what the protocol asks for.
+            &[result.target.anchor.as_str()],
             Artifact::Result,
         ) {
             Ok(TaskStatus::Current) => {}
@@ -1005,7 +1008,7 @@ fn classify_task(vault_root: &Path, task: &QueueTask) -> miette::Result<TaskStat
         &rel_path,
         task.target.kind,
         &task.cache_hash,
-        &task.target.anchor,
+        &task.anchors(),
         Artifact::Task,
     )
 }
@@ -1028,7 +1031,7 @@ fn classify_against_page(
     rel_path: &Path,
     kind: lk_queue::TargetKind,
     cache_hash: &str,
-    anchor: &str,
+    anchors: &[&str],
     artifact: Artifact,
 ) -> miette::Result<TaskStatus> {
     let page_path = vault_root.join(rel_path);
@@ -1057,17 +1060,23 @@ fn classify_against_page(
     if artifact == Artifact::Task && field(&kind.completion_key()).as_deref() == Some(cache_hash) {
         return Ok(TaskStatus::Done);
     }
-    // Asked last, because it only decides the fate of work still to be written: the
-    // section named here must exist on the page to receive it. An anchor the page does
-    // not carry cannot come back — see `MissingTarget`.
-    let Some(heading) = anchor.strip_prefix("## ") else {
-        return Ok(TaskStatus::MissingTarget);
-    };
-    Ok(if lk_vault::section_body(&page.body, heading).is_some() {
-        TaskStatus::Current
-    } else {
-        TaskStatus::MissingTarget
-    })
+    // Asked last, because it only decides the fate of work still to be written: EVERY
+    // section the task names must exist on the page to receive it. An anchor the page does
+    // not carry cannot come back — see `MissingTarget`. A `synthesize-concept` task names
+    // two, and one marker answers for both, so a task classified `current` on the strength
+    // of the heading it happens to check first would have the drain fill one section and
+    // stamp the pair answered.
+    Ok(
+        if anchors.iter().all(|anchor| {
+            anchor
+                .strip_prefix("## ")
+                .is_some_and(|heading| lk_vault::section_body(&page.body, heading).is_some())
+        }) {
+            TaskStatus::Current
+        } else {
+            TaskStatus::MissingTarget
+        },
+    )
 }
 
 #[cfg(test)]
@@ -1253,6 +1262,57 @@ mod tests {
                 anchor: "## 요약".into(),
             },
         }
+    }
+
+    /// One marker answers for both sections a `synthesize-concept` task fills, so the task
+    /// is work only while the page can receive BOTH. Checking the synthesis heading alone
+    /// had the drain write it, find no relations heading, and stamp the pair answered —
+    /// after which `backlinks-sync` re-queues nothing until the citation set moves.
+    #[test]
+    fn a_synthesis_task_is_not_work_while_the_relations_heading_is_missing() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("wiki/concepts")).unwrap();
+        let page = |body: &str| format!("---\nllm_inputs:\n  synthesis: live\n---\n{body}");
+        let synthesis_task = |vault_path: &str| QueueTask {
+            task_id: "syn-1".into(),
+            kind: TaskKind::SynthesizeConcept,
+            created_at: "2026-05-23T10:00:00Z".parse().unwrap(),
+            cache_hash: "live".into(),
+            input: [("related_anchor".to_string(), "## 관련".into())]
+                .into_iter()
+                .collect(),
+            target: TaskTarget {
+                vault_path: vault_path.into(),
+                kind: TargetKind::ConceptSynthesis,
+                anchor: "## 핵심".into(),
+            },
+        };
+
+        // Both headings present: work.
+        std::fs::write(
+            dir.path().join("wiki/concepts/whole.md"),
+            page("\n## 핵심\n\nbody\n\n## 관련\n\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            classify_task(dir.path(), &synthesis_task("wiki/concepts/whole.md"))
+                .unwrap()
+                .as_str(),
+            "current"
+        );
+
+        // The relations heading deleted between the sweep and the drain: not work.
+        std::fs::write(
+            dir.path().join("wiki/concepts/half.md"),
+            page("\n## 핵심\n\nbody\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            classify_task(dir.path(), &synthesis_task("wiki/concepts/half.md"))
+                .unwrap()
+                .as_str(),
+            "missing-target"
+        );
     }
 
     fn write_page(root: &Path, rel: &str, frontmatter: &str) {
