@@ -383,7 +383,8 @@ fn language_banner(language: &str) -> String {
 /// reworded judgment ship past.
 const TITLE_RULE: &str = "**A concept's title is its name and nothing else.** The title is the address and the \
          lookup key, and the lookup is exact — so a title carrying a parenthetical gloss \
-         answers to neither the term nor the gloss, and the next mention of the bare term \
+         — `Agent Capability (the unit an agent can call)` — answers to neither the term nor \
+         the gloss, and the next mention of the bare term \
          mints a rival page beside it. The name is COPIED from the material you just read, \
          never composed: whether a field has settled on a form in one language or another is a \
          judgment with no stable answer for a term the material is introducing, and two \
