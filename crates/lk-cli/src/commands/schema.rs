@@ -362,6 +362,23 @@ fn page_schemas(
     schemas
 }
 
+/// The rule a concept's title follows, named so a test reads the rule itself rather than
+/// slicing it out of the rendered document. Every boundary a slice could use — a blank line,
+/// a bolded lead-in — is a token the rule's own prose may legitimately contain, so each one a
+/// check picked ended it early and let a reworded judgment ship past the guard. What must not
+/// carry that judgment is this string, and this string is what the test reads.
+const TITLE_RULE: &str = "**A concept's title is its name and nothing else.** The title is the address and the \
+         lookup key, and the lookup is exact — so a title carrying a parenthetical gloss \
+         answers to neither the term nor the gloss, and the next mention of the bare term \
+         mints a rival page beside it. The name is COPIED from the material you just read, \
+         never composed: whether a field has settled on a form in one language or another is a \
+         judgment with no stable answer for a term the material is introducing, and two \
+         answers to it in one batch is exactly how one concept becomes two pages. Where the \
+         material writes several forms, the title is the one it uses AS the term and every \
+         other — the gloss, the translation, the expanded acronym, the abbreviation — goes in \
+         `aliases`, which is what makes a citation written in any of them resolve here. A form \
+         the material does not write is a name no later extraction reproduces.";
+
 /// Render the AGENTS.md content for a given locale and directory layout.
 pub fn render_agents_md(
     locale: Locale,
@@ -592,21 +609,7 @@ pub fn render_agents_md(
     .unwrap();
     writeln!(out).unwrap();
     let language = locale.english_name();
-    writeln!(
-        out,
-        "**A concept's title is its name and nothing else.** The title is the address and the \
-         lookup key, and the lookup is exact — so a title carrying a parenthetical gloss \
-         answers to neither the term nor the gloss, and the next mention of the bare term \
-         mints a rival page beside it. The name is COPIED from the material you just read, \
-         never composed: whether a field has settled on a form in one language or another is a \
-         judgment with no stable answer for a term the material is introducing, and two \
-         answers to it in one batch is exactly how one concept becomes two pages. Where the \
-         material writes several forms, the title is the one it uses AS the term and every \
-         other — the gloss, the translation, the expanded acronym, the abbreviation — goes in \
-         `aliases`, which is what makes a citation written in any of them resolve here. A form \
-         the material does not write is a name no later extraction reproduces."
-    )
-    .unwrap();
+    writeln!(out, "{TITLE_RULE}").unwrap();
     writeln!(out).unwrap();
     writeln!(
         out,
@@ -1198,22 +1201,16 @@ mod tests {
                 .split_once("## Concept convergence")
                 .expect("the spec carries the convergence contract")
                 .1;
-            // The title rule runs from its own opening to the next thing the section starts —
-            // another bolded paragraph, or the numbered algorithm. Bounding it at the next
-            // blank line instead would end the check at the first paragraph break, and
-            // splitting a long paragraph for readability is a likelier edit than moving it:
-            // the half below the break would ship unchecked.
-            let rule = convergence
-                .split_once("**A concept's title is its name")
-                .expect("the convergence contract opens on the title rule")
-                .1;
-            let title_rule = ["\n\n**", "\n\n1. "]
-                .iter()
-                .filter_map(|end| rule.find(end))
-                .min()
-                .map_or(rule, |at| &rule[..at]);
+            // The named rule is only the rule while the document carries it verbatim. Without
+            // this the constant could be left behind by an edit that goes back to writing the
+            // paragraph inline, and every check below would read a string nothing ships.
             assert!(
-                title_rule.contains("COPIED"),
+                md.contains(TITLE_RULE),
+                "{locale:?}: the rendered contract does not carry TITLE_RULE, so the checks \
+                 below read a string this vault never sees"
+            );
+            assert!(
+                TITLE_RULE.contains("COPIED"),
                 "{locale:?}: the title rule no longer says a name is copied rather than composed"
             );
             for judged in [
@@ -1221,13 +1218,13 @@ mod tests {
                 format!("established {}", locale.english_name()),
             ] {
                 assert!(
-                    !title_rule.contains(&judged),
+                    !TITLE_RULE.contains(&judged),
                     "{locale:?}: the title rule says `{judged}`, which asks which form a field \
                      settled on — the judgment a name is copied to avoid"
                 );
             }
             assert!(
-                title_rule.contains("EVERY form") || convergence.contains("EVERY form"),
+                convergence.contains("EVERY form"),
                 "{locale:?}: convergence no longer asks the resolver for every form the \
                  material writes, so a page written in another language is unreachable from \
                  the one name an extraction happens to carry"
