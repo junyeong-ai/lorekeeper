@@ -432,8 +432,9 @@ pub fn render_agents_md(
         "A page's `llm_inputs` map is machine-coordination state: each key records the input \
          a section is owed against and its `_done` companion the input a section was written \
          from. Never author or edit those values — the writer of a section stamps its own \
-         marker in the same edit. `aliases` appears only when the page actually has synonyms; \
-         omit it when first authoring a page."
+         marker in the same edit. A concept page's `aliases` is renderer-written and always \
+         present, carrying the title and every other name the page answers to; on a page you \
+         author yourself, write `aliases` only where the page really does answer to another name."
     )
     .unwrap();
     writeln!(out).unwrap();
