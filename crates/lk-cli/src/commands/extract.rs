@@ -461,7 +461,9 @@ fn repo_state(repo: &Path, baseline: Option<&str>, declared: &[String]) -> RepoS
         return RepoState::Unanswered(if n > 0 {
             format!("the declared paths reach {n} file(s), every one of them ignored by git")
         } else {
-            "the declared paths match no file in this repository".into()
+            "the declared paths match no file this repository holds — a submodule's files \
+             belong to its own"
+                .into()
         });
     }
     // Commits are context beside the file count, asked as a symmetric difference so a rolled
@@ -933,8 +935,12 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let repo = dir.path().join("repo");
         git_repo(&repo);
-        std::fs::write(repo.join(".gitignore"), "drafts/\n").expect("write");
+        // The ignored draft sits UNDER the pattern the first case declares. Outside it, the
+        // first assertion holds for any gate that asks the ignore list at all, including the
+        // one this replaced — a fixture that cannot tell the two apart proves neither.
+        std::fs::write(repo.join(".gitignore"), "docs/draft-*.md\ndrafts/\n").expect("write");
         let base = commit(&repo, "docs/a.md", "one");
+        std::fs::write(repo.join("docs/draft-x.md"), "draft").expect("write");
         std::fs::create_dir_all(repo.join("drafts")).expect("mkdir");
         std::fs::write(repo.join("drafts/d.md"), "draft").expect("write");
 
