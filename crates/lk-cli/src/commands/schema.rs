@@ -448,10 +448,14 @@ fn convergence_body(language: &str, strings: &Strings) -> Vec<String> {
          established page answers to is REFUSED as an alias on a new page, so the one form \
          that would have joined them is dropped by the act of creating the rival."
             .to_string(),
-        "2. **Maintain a created-this-run set.** Every minted page or newly registered alias \
-         joins your in-context set BEFORE the next item is processed. `lore resolve` reads \
-         what is on disk, so it cannot see a page this run has not written yet — without the \
-         running set, two items independently mint `RAG` and `Retrieval-Augmented-Generation`."
+        "2. **Keep a created-this-run set, and keep it small.** `lore resolve` reads what is \
+         on disk, so a page this run has minted but not yet materialized is one it answers \
+         `absent` for — and two items then mint `RAG` and `Retrieval-Augmented-Generation` \
+         independently. That set is a second answer to the question `lore resolve` exists to \
+         answer, which is why it is kept short-lived rather than accumulated: materialize \
+         each batch as it lands, and the set carries only the batch in hand. Written down \
+         rather than remembered — a long run is compacted mid-way, and a set held in context \
+         goes with it."
             .to_string(),
         "3. **Judge the names `resolve` cannot.** An exit 1 is the answer for a name nothing \
          answers to, not for a concept the vault lacks: an acronym and its expansion, a \

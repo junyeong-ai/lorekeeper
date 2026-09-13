@@ -55,9 +55,10 @@ you last read them.
    no longer carries means the heading vocabulary changed (a locale switch), which
    no amount of waiting undoes. A task you filled and
    stamped earlier in this run therefore reads `done` if you re-classify — that
-   is correct, and it is skipped, not failed. An `extract-concepts` task never does:
-   its marker is `queue apply`'s, so it still reads `current` after you have written
-   its result, and re-running it would only rewrite the same file. A
+   is correct, and it is skipped, not failed. An `extract-concepts` task reads
+   `current` until `lore queue apply` materializes its result and stamps the marker —
+   which is step 4b, not only the Finalize, so a task covered by an earlier apply reads
+   `done` and is skipped like any other. A
    `synthesize-concept` task is not that case — it stamps its own marker, so it reads
    `done` like every other kind. **Never loop
    on "until nothing reads `current`"** — the "this run is finished" signal is
@@ -257,6 +258,14 @@ The essentials: a visible `.jsonl` is fully written and every
    mv "$file" "$VAULT/.lorekeeper/queue/processed/" 2>/dev/null \
      || [ -f "$VAULT/.lorekeeper/queue/processed/$(basename "$file")" ]
    ```
+   Then run `lore queue apply`, before opening the next file. Concept pages are what
+   `lore resolve` reads, and a result that has not been applied is a concept the resolver
+   cannot see — which is why a long run otherwise needs a second answer to the naming
+   question carried alongside the first. Applying per file keeps `lore resolve`
+   authoritative across files and shrinks the created-this-run set to the file in hand.
+   A failing apply stops the run: everything after it would be deciding names against a
+   vault that is missing what this run already found.
+
    The fallback is not error-swallowing: `lore queue prune` runs on its own
    schedule and retires a run whose every task is already answered, so it can
    archive this file while you are working through it (you read every task in
@@ -264,7 +273,9 @@ The essentials: a visible `.jsonl` is fully written and every
    outcome this step wanted — treat it as success. Any other `mv` failure leaves
    neither file present and fails the check, which is a real failure to report.
 
-5. **Finalize (mandatory — do not skip).** Concept `## Sources` sections and
+5. **Finalize (mandatory — do not skip).** The apply here covers whatever the last file
+   left pending; `lore graph backlinks-sync` and `lore wiki refresh` are owed once, at the
+   end, over everything this run wrote. Concept `## Sources` sections and
    `source_count` are deliberately left empty during processing; they are
    machine-owned and reconciled here from the link graph, then the catalog
    is refreshed. Run both and confirm each exits 0:
