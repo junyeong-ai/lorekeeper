@@ -559,7 +559,7 @@ fn render(reports: &[ProjectState]) {
 /// beside it says what to do, and one word serving as both would let a reader take either for
 /// the other and be right by accident.
 fn state_json(state: &RepoState) -> serde_json::Value {
-    match state {
+    let value = match state {
         RepoState::Missing(at) => {
             serde_json::json!({"kind": "repo-missing", "at": at})
         }
@@ -584,7 +584,20 @@ fn state_json(state: &RepoState) -> serde_json::Value {
         RepoState::Moved { commits, files } => serde_json::json!({
             "kind": "moved", "commits": commits, "files": files,
         }),
-    }
+    };
+    // A `kind` names one of the states and the `verdict` beside it says what to do about one,
+    // so spelling a state with a verdict's word lets a reader take either field for the other
+    // and be right by accident. Checked here, where no state added later can miss it, rather
+    // than against a list somebody has to remember to grow.
+    debug_assert!(
+        !matches!(
+            value["kind"].as_str(),
+            Some("behind" | "current" | "unmeasured")
+        ),
+        "state `{}` is spelled with a verdict's word",
+        value["kind"]
+    );
+    value
 }
 
 fn as_json(reports: &[ProjectState]) -> serde_json::Value {
@@ -1047,9 +1060,8 @@ mod tests {
         let p = &json["projects"][0];
         assert_eq!(p["verdict"], "behind");
         assert_eq!(p["state"]["kind"], "baseline-not-recorded");
-        // The two fields answer different questions, so no state's kind may be spelled with a
-        // verdict's word.
-        let verdicts = ["behind", "current", "unmeasured"];
+        // `state_json` refuses a kind spelled with a verdict's word on every state it is
+        // handed, so what this list adds is that each of the eight is handed to it once.
         for state in [
             RepoState::Missing("x".into()),
             RepoState::NoBaseline,
@@ -1063,13 +1075,9 @@ mod tests {
             RepoState::Unanswered("x".into()),
             RepoState::NothingDeclared,
         ] {
-            let kind = state_json(&state)["kind"]
-                .as_str()
-                .expect("kind")
-                .to_string();
             assert!(
-                !verdicts.contains(&kind.as_str()),
-                "`{kind}` names a verdict rather than the state it is"
+                state_json(&state)["kind"].is_string(),
+                "every state names itself"
             );
         }
         assert_eq!(json["behind"], 1);
