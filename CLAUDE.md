@@ -69,6 +69,7 @@ lore queue count                   # bare integer: current tasks (machine contra
 lore queue apply                   # materialize drained concept results into pages + links
 lore config vault-root             # bare path (machine contract for scripts)
 lore config schema-path            # bare path to the vault's AGENTS.md (the wiki dir is configurable)
+lore extract status                # how far each project's knowledge extraction has fallen behind its repository
 lore status                        # one line per subsystem, each naming the command that owns it
 lore self status                   # is every deployed copy still the one this binary carries
 lore self deploy                   # rewrite the skills, pipelines, templates and config example

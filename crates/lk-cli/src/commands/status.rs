@@ -66,6 +66,27 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
     }
     line("sources", currency, stale == 0, "lore health");
 
+    // Project knowledge, where any has been extracted. The manifests already declare the
+    // commit each scan was taken against; until this row existed nothing read that back, so an
+    // extraction could fall a quarter and a thousand documents behind with every other row
+    // green. What is reported is the deterministic half — has the repository moved under the
+    // paths the scan declared — because the other half needs a reader and `/lore-extract audit`
+    // is where it lives.
+    let extracts =
+        super::extract::survey(&vault_root, now.to_zoned(config.vault.timezone()).date())?;
+    if !extracts.is_empty() {
+        let behind = super::extract::behind(&extracts);
+        line(
+            "extract",
+            match behind {
+                0 => format!("{} project(s) current", extracts.len()),
+                n => format!("{n} of {} project(s) moved since scan", extracts.len()),
+            },
+            behind == 0,
+            "lore extract status",
+        );
+    }
+
     let queue = super::queue::queue_load(&vault_root)?;
     line(
         "queue",

@@ -101,6 +101,12 @@ pub enum Command {
     /// whose input was recorded and never answered (exits non-zero on any defect, or on a page
     /// it could not read)
     Doctor,
+    /// How far each project's knowledge extraction has fallen behind its repository — the
+    /// manifests `/lore-extract` writes declare when they were taken and against which commit
+    Extract {
+        #[command(subcommand)]
+        cmd: commands::extract::ExtractCommand,
+    },
     /// Show personal performance category distribution
     Performance,
     /// Validate config file
@@ -249,6 +255,7 @@ pub async fn run() -> miette::Result<()> {
         Command::Synthesis { period } => commands::synthesis::run(&opts, period).await,
         Command::Health { strict, json } => commands::health::run(&opts, strict, json).await,
         Command::Doctor => commands::doctor::run(&opts).await,
+        Command::Extract { cmd } => commands::extract::run(&opts, cmd).await,
         Command::Performance => commands::performance::run(&opts).await,
         Command::Schedule {
             bin,

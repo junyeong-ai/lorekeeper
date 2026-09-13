@@ -43,6 +43,11 @@ const SWEEP: &[&[&str]] = &[
     &["schedule"],
     &["schema"],
     &["maintenance", "--dry-run"],
+    // The empty case is the contract worth pinning: a vault that has never extracted must read
+    // as an install without that plane rather than as one behind on it, and must still name what
+    // starts it. A fixture cannot carry the other case — the verdict is a git range against a
+    // real repository, and a recorded HEAD is not reproducible from a checked-in tree.
+    &["extract", "status"],
     &["queue", "status"],
     &["queue", "count"],
     &["queue", "prune"],
