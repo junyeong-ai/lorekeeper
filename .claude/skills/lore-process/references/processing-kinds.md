@@ -188,7 +188,11 @@ empty heading.
 **`name` and `aliases` follow § Concept convergence in the vault's `AGENTS.md`**
 (`lore config schema-path`), which states what a name may be, which form is the name where the
 text writes several, and what belongs in `aliases` instead. It is stated there and not here:
-a second copy is how the two come to disagree, and step 1 reads that file before this one.
+a second copy is how the two come to disagree, and step 1 has you read it before this one.
+Read its rule about the vault's language against `input.locale`, which this payload carries:
+the contract names the language it was RENDERED with, so between a `vault.locale` switch and
+the `lore schema` that follows it, the task in your hand is the current answer and the file is
+not.
 
 An alias an established page already answers to is dropped with a warning rather than taken —
 the extraction is one source's reading, and the page that earned the name by being cited under

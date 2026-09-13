@@ -166,7 +166,9 @@ domain-neutral engine — then no work-log, reviews, or `is_personal` are produc
   later check to compare — so the record travels on the `RenderResult` of whichever of the two
   this run writes LAST, and the writer says it in the same step. Anchored there rather than
   reported per batch because a write failing part-way through would lose every record whose
-  page was already on disk: the retry finds those established and records nothing. A record is
+  page THIS RUN HAD ALREADY WRITTEN: the retry finds those established and records nothing. A
+  page that was on disk before the run is the case that is never at risk, and telling the two
+  apart is the whole of the rule — a concept cited again today is a draft as well. A record is
   carried only where both pages exist — an owner this run claimed for a name and never wrote a
   page for is a resolution an abandoned batch left behind, and the merge it would name could
   not be run. Reported, never gated: folding two concept pages is a judgment, and the page is

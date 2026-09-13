@@ -31,9 +31,11 @@ pub struct ConceptDrafts {
     drafts: BTreeMap<String, ConceptDraft>,
     /// Recorded at [`Self::commit`] rather than where the refusal happens, so a batch
     /// abandoned before it commits names no page. [`Self::render_pages`] hands each record to
-    /// the page whose write establishes it, which is where the caller reports it; the ingest
-    /// path accumulates them too and says nothing, because a queue-backed ingest extracts no
-    /// concepts of its own.
+    /// the page whose write establishes it, and both writers of a concept page report what
+    /// the page carries. The ingest writer never has anything to report: no shipped provider
+    /// extracts a concept during ingest — `queue` and `noop` both answer `extract_concepts`
+    /// with nothing — so the records are the queue applier's in practice, and the call on the
+    /// ingest side is what a third provider would need rather than a path to test end to end.
     refused: Vec<RefusedAlias>,
     /// Slugs this run claimed for a name nothing answered to. A claim routes every later
     /// spelling of that name to one page; whether the page is ever WRITTEN is a separate
@@ -269,11 +271,18 @@ impl ConceptDrafts {
                 Resolution::Absent => {}
                 held if held.routed().is_some_and(|r| r.slug == identity.slug) => continue,
                 held => {
-                    let owner = held
-                        .routed()
-                        .map(|r| r.slug.as_str())
-                        .unwrap_or_default()
-                        .to_string();
+                    // Only `Absent` routes nowhere and the arm above took it, so this is
+                    // unreachable — but a record carrying an empty owner would print a merge
+                    // with a missing argument, and a variant added to `Resolution` later is
+                    // how it would get one. The alias is simply not adopted.
+                    let Some(owner) = held.routed().map(|r| r.slug.clone()) else {
+                        tracing::warn!(
+                            alias,
+                            proposed_for = %identity.slug,
+                            "alias resolves to no page and is not adopted"
+                        );
+                        continue;
+                    };
                     tracing::warn!(
                         alias,
                         proposed_for = %identity.slug,
@@ -462,12 +471,19 @@ impl ConceptDrafts {
                             return false;
                         }
                         // It rides on whichever of the two this run writes LAST, so neither
-                        // is missing when the line prints. Pages are written in the order
-                        // returned, which for this map is slug order, so that is the greater
-                        // key — but only where the owner is one this run WRITES. An owner
-                        // read from disk is written by nobody and is already there, which is
-                        // what `drafts` alone could not tell: a page cited again this run is
-                        // a draft too, and waiting for it put the rival on disk first.
+                        // is missing when the line prints. That is the greater key, because
+                        // the order returned is this `BTreeMap`'s — but only where the owner
+                        // is one this run WRITES. An owner read from disk is written by
+                        // nobody and is already there, which is what `drafts` alone could not
+                        // tell: a page cited again this run is a draft too, and waiting for
+                        // it put the rival on disk first.
+                        //
+                        // The order is load-bearing and the callers are the only ones who can
+                        // break it: `commands::ingest` and `commands::queue::apply` each
+                        // iterate this `Vec` in order and report after each write. Made
+                        // concurrent, or reordered, the line prints before the page it names
+                        // exists — which is the defect the filter above removes, returning
+                        // through a door no test watches.
                         let owner_awaits_its_own_write =
                             owner_minted_here && !self.established.contains(&record.owner);
                         let anchor = if owner_awaits_its_own_write {

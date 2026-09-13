@@ -127,8 +127,13 @@ The essentials: a visible `.jsonl` is fully written and every
    file's directory (not the CWD), and the config file itself is auto-discovered
    (`./config.yaml` → `~/.config/lorekeeper/config.yaml`), so parsing the YAML
    reproduces two resolution rules that already exist in the binary. `lore config schema-path` prints the
-   absolute path of the vault's `AGENTS.md`, which carries the page formats and the Concept
-   convergence contract — the wiki dir is configurable, so never assume `wiki/`. Ask
+   absolute path of the vault's `AGENTS.md` — the wiki dir is configurable, so never assume
+   `wiki/`. **READ that file's `## Concept convergence` section before you extract a single
+   concept**: it carries the page formats and the naming rule this run answers to, stated
+   there and nowhere else, so a drain that works from memory is working from whatever the
+   last vault taught it. The path is computed rather than checked — on an install where
+   `lore schema` has never run it names a file that is not there, and the answer is to run
+   `lore schema` rather than to proceed without the rule. Ask
    `lore resolve` which page owns each extracted name, asked for EVERY form the text
    writes: it answers by the same rule the ingest pipeline routes by, so the two cannot
    disagree about an existing name, and a hit on any form is the owner. The queue task
