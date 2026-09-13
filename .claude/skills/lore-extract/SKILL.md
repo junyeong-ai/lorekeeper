@@ -267,15 +267,28 @@ Extract knowledge using the manifest. Requires a prior scan.
 
 Verify extraction quality and coverage.
 
-1. **Coverage** — manifest `discovered_sources` vs `extracted` list.
-   Flag unharvested high-T sources.
-2. **Quality** — per-document: empty sections, missing concept links,
+Start with `lore extract status --json`, which answers the deterministic half for
+every project at once: when each manifest was taken, how far the repository has
+moved under the paths that scan declared, and how many sources reached a page.
+Re-deriving that from `git log` here would be a second implementation of a
+question the binary already answers, and the two would disagree the first time
+either changed.
+
+What is left is what needs a reader:
+
+1. **Quality** — per-document: empty sections, missing concept links,
    leaked project identifiers (grep for `strip_patterns` in vault).
-3. **Cross-project** — concepts appearing in multiple project
+2. **Cross-project** — concepts appearing in multiple project
    manifests. Suggest synthesis enrichment.
-4. **Staleness** — under git, `git log --since=<extracted_at>` on each
-   source; without git, compare source mtime against `extracted_at`.
-   Flag for re-extraction if changed.
+3. **Unharvested sources** — which declared sources have no `extracted`
+   entry, and whether each is worth harvesting. The status command counts
+   both sides; deciding that a T1 source was rightly skipped is judgment,
+   and a `coverage_note` is where that judgment is recorded so the next
+   audit does not re-ask it.
+
+A project the status command reports as moved is re-scanned (`/lore-extract scan`)
+before it is re-run: the manifest is what `run` reads, so running against a stale
+one harvests the source list as it was.
 
 ## Git history mining
 
