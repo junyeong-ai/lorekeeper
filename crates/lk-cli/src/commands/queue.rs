@@ -241,6 +241,31 @@ async fn apply(
     let vault_root = root.unwrap_or_else(|| config.vault.root_path());
     let queue_dir = vault_root.join(".lorekeeper").join("queue");
 
+    // Held across the read, the writes and the deletes, and only for a run that performs
+    // them: a dry run writes nothing, so claiming would block a real apply for the length of
+    // a report.
+    let _claim = match dry_run {
+        true => None,
+        false => match lk_queue::claim_queue(&queue_dir)
+            .map_err(|e| miette::miette!("claim queue: {e}"))?
+        {
+            lk_queue::QueueClaim::Held(file) => Some(file),
+            lk_queue::QueueClaim::Busy => {
+                return Err(miette::miette!(
+                    "another `lore queue apply` is materializing this queue — these results \
+                     stay staged for it, or for the next run"
+                ));
+            }
+            lk_queue::QueueClaim::Unavailable(e) => {
+                eprintln!(
+                    "  this filesystem does not carry the queue lock ({e}); a second apply \
+                     running now is not prevented"
+                );
+                None
+            }
+        },
+    };
+
     let batch = lk_queue::read_results(&queue_dir)
         .map_err(|e| miette::miette!("read queue results: {e}"))?;
 

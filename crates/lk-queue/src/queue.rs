@@ -137,6 +137,46 @@ pub const RESULTS_SUBDIR: &str = "results";
 /// Subdirectory results that cannot be parsed are moved to, out of the apply path.
 pub const CORRUPT_SUBDIR: &str = "corrupt";
 
+/// The file whose advisory lock says who is materializing the queue's results.
+const LOCK_FILE: &str = ".lock";
+
+/// What [`claim_queue`] found: this process holds the queue, another one does, or the
+/// filesystem will not answer the question.
+pub enum QueueClaim {
+    /// Held until this value drops or the process dies, whichever comes first.
+    Held(std::fs::File),
+    /// Another process is materializing results right now.
+    Busy,
+    /// The lock could not be taken for a reason that is not contention — a network or
+    /// synced filesystem that does not carry advisory locks. Said out loud rather than
+    /// read as either answer.
+    Unavailable(std::io::Error),
+}
+
+/// Claim the queue for the duration of a run that materializes its results.
+///
+/// Applying a result is a read-modify-write across several files that ends in deleting the
+/// result: two runs at once each read an origin page before the other writes it, so the
+/// second write drops the citations the first added, and both then delete the evidence. The
+/// claim is an advisory lock rather than a lock file with a pid, because the kernel releases
+/// it when the holder dies — a killed run leaves nothing for the next one to time out on.
+///
+/// Scoped to that write, never to a drain session: a session spans many processes and hours,
+/// and an exclusive claim held that long needs a liveness answer nothing here can give.
+pub fn claim_queue(queue_dir: &Path) -> std::io::Result<QueueClaim> {
+    std::fs::create_dir_all(queue_dir)?;
+    let file = std::fs::File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(queue_dir.join(LOCK_FILE))?;
+    match file.try_lock() {
+        Ok(()) => Ok(QueueClaim::Held(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(QueueClaim::Busy),
+        Err(std::fs::TryLockError::Error(e)) => Ok(QueueClaim::Unavailable(e)),
+    }
+}
+
 /// Every result file in `<queue_dir>/results/`, oldest first, split by whether it parses.
 pub struct ResultBatch {
     /// Results ready to apply, in filename order.
@@ -355,6 +395,31 @@ mod tests {
     use crate::TargetKind;
     use lk_core::i18n::Locale;
     use tempfile::TempDir;
+
+    /// The claim is what makes applying results one-at-a-time, and it has to answer three
+    /// ways: held, taken, and unaskable. The third is a filesystem that carries no advisory
+    /// lock, which cannot be produced here — what is pinned is that the first two are
+    /// distinct and that releasing needs no cleanup, since a lock file left on disk is
+    /// exactly what a pid file would have made permanent.
+    #[test]
+    fn the_queue_is_claimed_by_one_run_at_a_time() {
+        let dir = TempDir::new().unwrap();
+        let queue = dir.path().join("queue");
+
+        let first = claim_queue(&queue).unwrap();
+        assert!(matches!(first, QueueClaim::Held(_)));
+        assert!(
+            matches!(claim_queue(&queue).unwrap(), QueueClaim::Busy),
+            "a second run must find the queue taken"
+        );
+
+        drop(first);
+        assert!(
+            matches!(claim_queue(&queue).unwrap(), QueueClaim::Held(_)),
+            "the claim is released by dropping it, with the file still on disk"
+        );
+        assert!(queue.join(LOCK_FILE).exists());
+    }
 
     #[test]
     fn one_unreadable_result_does_not_hide_the_readable_ones() {

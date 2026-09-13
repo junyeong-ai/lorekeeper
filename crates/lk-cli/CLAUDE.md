@@ -119,7 +119,20 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   `unreadable` task makes prune exit 1 and its `--json` envelope's `ok` false: both leave
   work nothing can drain, both need a human, and the janitor is the only place either
   surfaces (`queue count` omits them so a session is never spent on work no session can do).
-- **`lore queue apply`** materializes the concept extractions a drain wrote to
+- **`lore queue apply` holds the queue while it materializes it.** Applying is a
+  read-modify-write across several files ending in a delete, so two runs at once each read an
+  origin page before the other writes it: the second write drops the citations the first added,
+  and both then delete the evidence. `lk_queue::claim_queue` is an ADVISORY lock rather than a
+  pid file, because the kernel releases it when the holder dies — a killed run leaves nothing
+  to time out on, which is the whole reason a lock file is the wrong shape here. Contention is
+  REFUSED rather than queued: the results stay staged for whichever run gets there. A
+  filesystem that carries no advisory lock (a synced or network vault) is said out loud and the
+  run proceeds, the way a project without git has its staleness reported unasked. The claim is
+  scoped to that write and never to a drain SESSION — a session spans many processes and hours,
+  and an exclusive claim held that long needs a liveness answer nothing here can give, which is
+  where timeouts and their false positives come in. `--dry-run` writes nothing and so claims
+  nothing.
+  It materializes the concept extractions a drain wrote to
   `queue/results/*.json` through the same `ConceptDrafts` merge the ingest path uses, then
   deletes each result it consumed — so an empty `results/` after a pipeline run is evidence
   of success, not of a drain that produced nothing. A result file that fails to PARSE is not
