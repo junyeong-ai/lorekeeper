@@ -6,7 +6,7 @@ when_to_use: |
   lore extract, batch extract, extract project knowledge,
   docs to vault, extract ADRs, extract learnings, repo knowledge,
   project knowledge extraction, harvest docs, scan project
-argument-hint: "scan|run|audit <repo-path> [--domain <name>] [--transferability T1|T2|T3] [--include-git]"
+argument-hint: "scan|run|audit <repo-path> [--domain <name>] [--transferability T1|T2|T3] [--include-git] [--full]"
 allowed-tools: |
   Bash(lore *)
   Bash(ls *)
@@ -69,9 +69,13 @@ project:
 
 discovered_sources:
   - path: "docs/adr/*.md"
-    kind: adr           # adr | learning | rule | guide | spec | other
+    kind: adr           # adr | learning | rule | guide | spec | module-doc | git-history | other
     count: <discovered>
     transferability_default: T1
+  - path: "."           # layer D: the history is the source, so every commit ages it
+    kind: git-history
+    count: <commits with a body>
+    transferability_default: T3
 
 domains:
   <domain-name>: [<tag>, <tag>, ...]
@@ -122,43 +126,83 @@ Discover knowledge sources and persist a manifest.
      `last_scan`. Present incremental changes. Preserve previous
      `strip_patterns`, `concept_mapping`, user overrides.
 
-3. Discover sources in priority order:
+3. Discover sources across four layers. A repository with no `docs/` at all still carries
+   most of what transfers, so discovery is by layer rather than by directory.
 
-   | Priority | Patterns |
-   |----------|----------|
-   | 1 | `docs/adr/*.md`, `docs/decisions/*.md`, `docs/learnings/*.md` |
-   | 2 | `docs/guides/*.md`, `docs/operators/*.md`, `.claude/rules/*.md` |
-   | 3 | `specs/*/spec.md`, `specs/*/plan.md` |
-   | 4 | `**/CLAUDE.md`, `deploy/**/*.tf` |
+   | Layer | What | Unit it comes partitioned by |
+   |---|---|---|
+   | **A. Declared invariants** | `docs/adr/*.md`, `docs/decisions/*.md`, `docs/learnings/*.md`, `.claude/rules/*.md`, `**/CLAUDE.md`, `specs/*/spec.md` | one decision or one rule, already distilled with its mechanism |
+   | **B. Module boundaries** | each module's own doc comment (`//!` in Rust, a module's leading docstring elsewhere) and the declarations it names | the boundary — which is the unit a knowledge page wants, and which states what holds NOW where a decision record states what held once |
+   | **C. Enforcement** | what holds A and B up: the type, test, lint or single module each invariant names | the invariant, paired with the reach of the check that confirmed it (step 4) |
+   | **D. The record** | commit bodies, reverts — `--include-git` only | the change, which is not a knowledge unit; read for themes |
 
-   Adapt to the repo's actual structure. Look for analogous paths
-   (`architecture/`, `notes/`, `rfcs/`, `terraform/`, `infra/`).
+   Adapt to the repository's actual structure — `architecture/`, `notes/`, `rfcs/`,
+   `terraform/`, `infra/` are the same layer A under other names.
 
-   Record each `discovered_sources.path` EXACTLY as `find`/`ls` reports it
-   (verbatim relative path), never derived from the document's title or heading.
-   The re-scan diff (step 2) and the Phase-3 audit compare manifest paths against
-   the filesystem; a title-derived path that doesn't exist makes every source look
-   deleted-then-re-added on the next scan, corrupting incremental tracking.
+   In layer B the module doc is the entry point and the declarations it names are the rest of
+   it. Item doc comments the module doc does not reach are out of scope: their unit is a
+   signature, so what they carry is how to call this rather than why the boundary is here.
 
-4. For each source, classify transferability (T1–T4):
+   Layer D is last rather than absent because these repositories move the durable half of a
+   change into the code and leave provenance in the commit. The module holds what survived;
+   the commit holds what was tried and reverted. Extraction wants what survived, so a
+   rejected approach earns a citation rather than a page. Body length does not separate them:
+   across six repositories under this discipline 89–99% of commits carry a real body, so
+   "has a body" identifies nothing.
+
+   **Which layers a project uses is discovered, never configured.** The scan reads what the
+   repository has and records it; a `mode` key would make the operator restate a fact the
+   scan can see, and the two would disagree the first time the repository changed. The one
+   choice that is not a fact about the repository is layer D, whose cost is the operator's to
+   spend — that is what `--include-git` spells, and it is the only layer switch there is.
+
+   **Scope is derived, not configured either.** A manifest with no `git_head_at_scan` has no
+   baseline and every source is read whole; one with a baseline reads what changed, and a
+   source with no `extracted` entry is read whole whatever the baseline says — which is what
+   makes adding a layer to an established project work with no new machinery. `--full` re-reads
+   every source while keeping `strip_patterns` and `concept_mapping`, for a refactor that moved
+   everything; deleting the manifest would do it too, and would throw away the operator's own
+   overrides.
+
+4. **Verify what A and B claim, before writing either down** (layer C). A stated invariant
+   and a holding one are different facts, and the pair is the knowledge.
+
+   a. Ask what ENFORCES each invariant that names a mechanism — a type that makes the
+      violation unrepresentable, a test that fails on it, a lint, or one module every caller
+      routes through. The answer is in the repository, not inferred.
+   b. Verify by the strongest method the repository offers, and **record which method
+      answered.** A failing test or a type is a verdict. A language server's reference set
+      (`symora refs`, when `symora doctor <lang>` says it can answer) is a verdict for
+      "who calls this". A text search is a LOWER BOUND, never a verdict: an invariant of the
+      form "nothing outside X does Y" is a negative over a set, and a search's scope is not
+      the invariant's scope. One pass over a write-path article returned twelve violations,
+      all inside test modules, against a real count of three.
+   c. Write the claim with its exceptions and its reach. Those three were a telemetry lock
+      file, and a comment beside them carried the reason — rotation renames the data file's
+      inode, so a lock held on it would be invalidated. The constitution states no exception;
+      the code does not say it is one. Neither half alone is the knowledge.
+   d. **An invariant nothing enforces is a finding, not a page.** Report it; write no page
+      asserting either half.
+
+5. For each source, classify transferability (T1–T4):
    - **T1**: "constraint", "workaround", "gotcha", cloud platforms
    - **T2**: framework-specific (ADK, OpenTofu, Langfuse)
    - **T3**: `[PROMOTES:]`, "Pattern", "Discipline", "Methodology"
    - **T4**: internal registries, domain business logic
 
-5. Group into thematic domains from content analysis.
+6. Group into thematic domains from content analysis.
 
-6. Infer `strip_patterns` from project config/README (project names,
+7. Infer `strip_patterns` from project config/README (project names,
    GCP project IDs, internal URLs).
 
-7. Infer `concept_mapping` from discovered tags → vault categories. Read the vocabulary
+8. Infer `concept_mapping` from discovered tags → vault categories. Read the vocabulary
    with `lore config categories` (one `id\tlabel` per line) — never out of `config.yaml`, for
    the same reason `vault.root` is not read there. A category outside it is a lint violation on
    the page this run writes; if none fits, omit the field.
 
-8. **Persist manifest** to `<vault>/.lorekeeper/extracts/<project>/`.
+9. **Persist manifest** to `<vault>/.lorekeeper/extracts/<project>/`.
 
-9. Output scan report and tell the user:
+10. Output scan report and tell the user:
    - Review and edit manifest if needed (strip_patterns, T-levels)
    - Then run `/lore-extract run <repo-path>`
 
@@ -176,10 +220,12 @@ Extract knowledge using the manifest. Requires a prior scan.
 
 5. For each discovered source (filtered by `--domain` / `--transferability`):
 
-   a. **Skip if already extracted** and source unchanged: compare
+    a. **Skip if already extracted** and source unchanged: compare
       `extracted_at` with `git log` (when under git) or source file mtime
-      (when not). A T4 skip is recorded in `extracted` with `vault_page: null`
-      and a `coverage_note`, so the Phase 3 coverage check stays complete.
+      (when not) — unless `--full`, which re-reads every source. A source with no
+      `extracted` entry is read whole whatever the baseline says. A T4 skip is recorded in
+      `extracted` with `vault_page: null` and a `coverage_note`, so the Phase 3 coverage
+      check stays complete.
 
    b. Read the full source document.
 
@@ -200,7 +246,10 @@ Extract knowledge using the manifest. Requires a prior scan.
       | Learning `[PROMOTES:]` | → Transferable Patterns |
       | Rule invariants | → Key Findings |
       | Spec problem statement | → Background & Constraints |
-      | Guide / CLAUDE.md / code doc-comment | → context to Background & Constraints, invariants/rules to Key Findings, reusable design to Transferable Patterns |
+      | Guide / CLAUDE.md / rule | → context to Background & Constraints, invariants/rules to Key Findings, reusable design to Transferable Patterns |
+      | Module doc comment | → what the module is and where its boundary sits to Background & Constraints; the failure mode it was built against to Troubleshooting Sequence; why the boundary is HERE and not one level in to Transferable Patterns |
+      | Enforcement verdict | → Key Findings, as the claim with its exceptions and the reach of the check — never the claim alone |
+      | Commit body | → a citation under whichever sub-section it supports, never a section of its own |
 
    e. **Generalise** using manifest `strip_patterns` — applied to the BODY prose only,
       not to `id`/slug (the page id is `{project}-{slug}`, so the project name necessarily
@@ -292,14 +341,27 @@ one harvests the source list as it was.
 
 ## Git history mining
 
-With `--include-git`, also mine commit messages:
+`--include-git` adds layer D. Read BODIES rather than subjects — the subject names the
+change and the body carries the reasoning:
 
 ```bash
-git log --all --format="%H %s" --grep="<keyword>" | head -30
+git log --no-merges --format='%x00%H%x09%ad%x09%s%x01%b' --date=short
 ```
 
-Keywords from manifest `domains`. Significant commits (reverts,
-multi-paragraph bodies) extracted with `source_file: ["git:{sha}"]`.
+Read it in windows and extract THEMES. A revert and the commit it reverted are one piece of
+knowledge; five commits converging on one shape are another. Never one page per commit — a
+commit is a change, and a change is not a unit of knowledge.
+
+Layer D's whole scope is what A–C cannot carry: an approach tried and abandoned, a
+measurement that settled an argument, a reversal and its reason. An invariant that still
+holds is read from the module that holds it and verified against the code; taking it from
+the commit that introduced it yields a weaker statement of something already covered, and
+risks stating a shape later commits replaced.
+
+Cite as `source_file: ["git:{sha}", …]`, several shas per page. Declare the source in the
+manifest as `kind: git-history` with `path: "."` — that pathspec is what makes
+`lore extract status` measure this project against every commit, which is what "the history
+is the source" means.
 
 ## Transferability levels
 
