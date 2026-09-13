@@ -89,6 +89,7 @@ extracted:               # per-document tracking (written by run)
     vault_page: "<wiki>/documents/proj-some-adr.md"  # vault-relative; <wiki> is the configured wiki dir
     domain: cloud-platform
     extracted_at: <ISO-date>
+    extracted_at_commit: <short-sha>   # what THIS page was written from; null without git
     transferability: T1
   - source: "README.md"     # a T4 skip is recorded too, so audit coverage is complete
     vault_page: null
@@ -142,6 +143,11 @@ Discover knowledge sources and persist a manifest.
    of them: a forbidden lint, a strict type preset, a test named for the thing it rejects —
    each is a decision recorded in a form that cannot go stale, and reading the set of them is
    reading what the project decided to make impossible.
+
+   A declared gate is a decision; whether it REACHES a given file is a second question with
+   its own answer. A workspace member can decline to inherit a workspace lint, a test can be
+   marked ignored, and a job can be excluded from the run. So a gate carries the scope it was
+   found at, and a claim resting on one is confirmed only over the files the gate covers.
 
    **Ask the format's own parser or the ecosystem's own tool, never a line pattern.** A regex
    over a TOML section reports zero dependencies for a project that declares dozens, because
@@ -361,11 +367,18 @@ either changed.
 
 What is left is what needs a reader:
 
-1. **Quality** — per-document: empty sections, missing concept links,
+1. **Per-source staleness** — `lore extract status` answers whether the PROJECT has moved
+   since its last scan, which is a different question: a re-scan alone advances
+   `git_head_at_scan`, so a project reads current while a page still holds what its source
+   said three commits ago. Ask it per entry, with the same anchor and the same content
+   question: `git diff --name-only <extracted_at_commit> -- <source>`. Non-empty means the
+   page is behind its own source. Without git, compare the source's mtime with `extracted_at`.
+
+2. **Quality** — per-document: empty sections, missing concept links,
    leaked project identifiers (grep for `strip_patterns` in vault).
-2. **Cross-project** — concepts appearing in multiple project
+3. **Cross-project** — concepts appearing in multiple project
    manifests. Suggest synthesis enrichment.
-3. **Unharvested sources** — which declared sources have no `extracted`
+4. **Unharvested sources** — which declared sources have no `extracted`
    entry, and whether each is worth harvesting. The status command counts
    both sides; deciding that a T1 source was rightly skipped is judgment,
    and a `coverage_note` is where that judgment is recorded so the next

@@ -120,14 +120,17 @@ enum RepoState {
 }
 
 impl RepoState {
-    fn is_current(&self) -> bool {
-        matches!(self, RepoState::Unmoved)
+    /// Is there something here for a person to do? A project whose staleness cannot be
+    /// measured is not one — it is reported and left alone, because marking a row nobody can
+    /// clear teaches the reader to skip the column.
+    fn needs_attention(&self) -> bool {
+        !matches!(self, RepoState::Unmoved | RepoState::NoBaseline)
     }
 
     fn describe(&self) -> String {
         match self {
             RepoState::Missing(at) => format!("no repository at {at}"),
-            RepoState::NoBaseline => "no git baseline".into(),
+            RepoState::NoBaseline => "not measured — no git baseline".into(),
             RepoState::BaselineGone => "baseline commit is gone".into(),
             RepoState::Unmoved => "sources unchanged".into(),
             RepoState::Moved { commits, files } => {
@@ -164,10 +167,10 @@ struct Facts {
 }
 
 impl ProjectState {
-    fn is_current(&self) -> bool {
+    fn needs_attention(&self) -> bool {
         match &self.detail {
-            Detail::Read(f) => f.state.is_current(),
-            Detail::Unreadable(_) => false,
+            Detail::Read(f) => f.state.needs_attention(),
+            Detail::Unreadable(_) => true,
         }
     }
 }
@@ -286,13 +289,17 @@ fn build_facts(manifest: Manifest, today: jiff::civil::Date) -> Facts {
     }
 }
 
-/// Ask git what moved under the paths the scan declared it was reading.
+/// Ask git whether the declared sources differ from what the scan read.
 ///
-/// The declared paths go through as pathspecs, which is what they already are — the skill
-/// records them verbatim from `find`/`ls`, so a glob stays a glob and a file stays a file.
-/// git's pathspec wildcards reach across directory separators where the scan's would not, so
-/// this can only over-report, and over-reporting a change is the direction that sends someone
-/// to look rather than the one that keeps them away.
+/// The question is a CONTENT difference against the working tree, not a commit range. A range
+/// is one-directional: a checkout rolled back to an ancestor of the baseline makes
+/// `baseline..HEAD` empty while the files genuinely differ, and uncommitted edits are outside
+/// a range entirely. Both report "unchanged" over a source that has moved.
+///
+/// Declared paths carry explicit glob magic. git's DEFAULT pathspec syntax is not the one the
+/// scan wrote its patterns in: `**/CLAUDE.md` sent bare matches an unrelated set of files and
+/// says nothing about the ones it was meant to name, which is a wrong answer rather than a
+/// refusal. `:(glob)` is the magic that gives `*` and `**` the meaning a scan means by them.
 fn repo_state(repo: &Path, baseline: Option<&str>, declared: &[String]) -> RepoState {
     if !repo.is_dir() {
         return RepoState::Missing(repo.display().to_string());
@@ -304,14 +311,14 @@ fn repo_state(repo: &Path, baseline: Option<&str>, declared: &[String]) -> RepoS
     let Some(baseline) = baseline else {
         return RepoState::NoBaseline;
     };
-    // A declared path is a pathspec git reads from the repository root. One that is absolute
-    // or home-relative names something else, and git answers zero for it with exit 0 — a
-    // green row over a source that has moved. Refused here rather than trusted.
-    if let Some(bad) = declared
-        .iter()
-        .find(|p| p.starts_with('/') || p.starts_with('~'))
-    {
-        return RepoState::Unanswered(format!("`{bad}` is not a path inside the repository"));
+    // git refuses a pathspec that leaves the repository and that refusal reaches `Unanswered`
+    // below. A `~` prefix is the one it does NOT refuse: nothing expands it, so it names a
+    // directory called `~`, matches nothing, and answers zero with exit 0 — a green row over a
+    // source that has moved. Only what git would silently accept is checked here.
+    if let Some(bad) = declared.iter().find(|p| p.starts_with('~')) {
+        return RepoState::Unanswered(format!(
+            "`{bad}` is home-relative; a declared path is relative to the repository root"
+        ));
     }
     if declared.is_empty() {
         return RepoState::Unanswered("the manifest declares no source to measure".into());
@@ -327,25 +334,25 @@ fn repo_state(repo: &Path, baseline: Option<&str>, declared: &[String]) -> RepoS
     {
         return RepoState::BaselineGone;
     }
-    let range = format!("{baseline}..HEAD");
-    let mut args = vec!["rev-list", "--count", &range, "--"];
-    args.extend(declared.iter().map(String::as_str));
-    let Some(log) = git(repo, &args) else {
-        return RepoState::Unanswered("git refused the declared paths".into());
-    };
-    let commits: usize = log.trim().parse().unwrap_or(0);
-    if commits == 0 {
-        return RepoState::Unmoved;
-    }
-    let mut args = vec!["diff", "--name-only", &range, "--"];
-    args.extend(declared.iter().map(String::as_str));
+    let specs: Vec<String> = declared.iter().map(|p| format!(":(glob){p}")).collect();
+    let mut args = vec!["diff", "--name-only", baseline, "--"];
+    args.extend(specs.iter().map(String::as_str));
     let Some(diff) = git(repo, &args) else {
         return RepoState::Unanswered("git refused the declared paths".into());
     };
-    RepoState::Moved {
-        commits,
-        files: diff.lines().count(),
+    let files = diff.lines().count();
+    if files == 0 {
+        return RepoState::Unmoved;
     }
+    // Commits are context beside the file count, asked as a symmetric difference so a rolled
+    // back checkout counts what it lost as well as what it gained.
+    let range = format!("{baseline}...HEAD");
+    let mut args = vec!["rev-list", "--count", &range, "--"];
+    args.extend(specs.iter().map(String::as_str));
+    let commits = git(repo, &args)
+        .and_then(|o| o.trim().parse().ok())
+        .unwrap_or(0);
+    RepoState::Moved { commits, files }
 }
 
 fn git(repo: &Path, args: &[&str]) -> Option<String> {
@@ -372,7 +379,7 @@ fn render(reports: &[ProjectState]) {
         .max()
         .unwrap_or(0);
     for r in reports {
-        let mark = if r.is_current() { ' ' } else { '!' };
+        let mark = if r.needs_attention() { '!' } else { ' ' };
         let name = super::pad(&r.name, width);
         match &r.detail {
             Detail::Unreadable(why) => {
@@ -447,7 +454,7 @@ fn as_json(reports: &[ProjectState]) -> serde_json::Value {
 
 /// How many projects have moved since their scan, for the `lore status` row.
 pub(crate) fn behind(reports: &[ProjectState]) -> usize {
-    reports.iter().filter(|r| !r.is_current()).count()
+    reports.iter().filter(|r| r.needs_attention()).count()
 }
 
 #[cfg(test)]
@@ -529,14 +536,14 @@ mod tests {
         write_manifest(&vault, "quiet", &manifest_for(&repo, &base, "docs/*.md"));
         let quiet = survey(&vault, TODAY).expect("survey");
         assert!(
-            quiet[0].is_current(),
+            !quiet[0].needs_attention(),
             "a commit outside the declared paths must not age an extraction"
         );
 
         commit(&repo, "docs/b.md", "two");
         let moved = survey(&vault, TODAY).expect("survey");
         assert!(
-            !moved[0].is_current(),
+            moved[0].needs_attention(),
             "a changed declared path must age it"
         );
         assert!(matches!(
@@ -570,7 +577,7 @@ mod tests {
             report[0].detail,
             Detail::Read(ref f) if matches!(f.state, RepoState::BaselineGone)
         ));
-        assert!(!report[0].is_current());
+        assert!(report[0].needs_attention());
     }
 
     /// One source folding into several pages and several folding into one are both the skill's
@@ -616,15 +623,92 @@ mod tests {
             Detail::Read(ref f) if matches!(f.state, RepoState::Moved { .. })
         ));
 
-        // `:(bogus)` is pathspec magic git rejects, so the log call fails rather than
+        // A path outside the repository is one git refuses, so the call fails rather than
         // answering zero.
-        write_manifest(&vault, "ok", &manifest_for(&repo, &base, ":(bogus)x"));
+        write_manifest(&vault, "ok", &manifest_for(&repo, &base, "../outside/*.md"));
         let report = survey(&vault, TODAY).expect("survey");
         assert!(
             matches!(report[0].detail, Detail::Read(ref f) if matches!(f.state, RepoState::Unanswered(_))),
-            "a refused pathspec must not report the project current"
+            "a refused pathspec must not report the project unchanged"
         );
-        assert!(!report[0].is_current());
+        assert!(report[0].needs_attention());
+    }
+
+    /// A recursive glob means what the scan meant by it. Under git's DEFAULT pathspec magic
+    /// `**/` requires at least one directory, so `**/NOTES.md` silently skips the one at the
+    /// repository root — a wrong answer rather than a refusal, over a pattern a discovery pass
+    /// would plausibly record. Proven by moving the root file and requiring it to be seen; the
+    /// nested one is there so the pattern matches something either way and only the root file
+    /// decides the verdict.
+    #[test]
+    fn a_recursive_glob_reaches_the_root_the_scan_meant_to_include() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        let vault = dir.path().join("vault");
+        git_repo(&repo);
+        commit(&repo, "NOTES.md", "one");
+        commit(&repo, "crates/a/NOTES.md", "nested");
+        let base = commit(&repo, "unrelated/other.txt", "x");
+        commit(&repo, "NOTES.md", "two");
+
+        write_manifest(&vault, "p", &manifest_for(&repo, &base, "**/NOTES.md"));
+        let r = survey(&vault, TODAY).expect("survey");
+        let Detail::Read(f) = &r[0].detail else {
+            panic!("expected a read manifest")
+        };
+        assert!(
+            matches!(f.state, RepoState::Moved { files: 1, .. }),
+            "the root file the pattern names moved and was not seen: {}",
+            f.state.describe()
+        );
+    }
+
+    /// A checkout rolled back below the baseline, and an edit never committed, are both
+    /// differences a forward commit range cannot see. The question is what the sources say
+    /// now against what the scan read, so it is asked as a content difference.
+    #[test]
+    fn a_rollback_and_an_uncommitted_edit_are_both_seen() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        let vault = dir.path().join("vault");
+        git_repo(&repo);
+        commit(&repo, "docs/a.md", "one");
+        let base = commit(&repo, "docs/a.md", "two");
+
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["checkout", "-q", "HEAD~1"])
+            .output()
+            .expect("checkout");
+        write_manifest(
+            &vault,
+            "rolled-back",
+            &manifest_for(&repo, &base, "docs/*.md"),
+        );
+        let r = survey(&vault, TODAY).expect("survey");
+        assert!(
+            r[0].needs_attention(),
+            "a checkout below the baseline differs from what was scanned"
+        );
+
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["checkout", "-q", "-"])
+            .output()
+            .expect("checkout back");
+        let vault2 = dir.path().join("vault2");
+        write_manifest(&vault2, "dirty", &manifest_for(&repo, &base, "docs/*.md"));
+        assert!(
+            !survey(&vault2, TODAY).expect("survey")[0].needs_attention(),
+            "restored to the baseline, nothing differs"
+        );
+        std::fs::write(repo.join("docs/a.md"), "three").expect("write");
+        assert!(
+            survey(&vault2, TODAY).expect("survey")[0].needs_attention(),
+            "an uncommitted edit to a declared source is a difference"
+        );
     }
 
     /// A manifest that is present and unusable is reported, not dropped and not fatal. Both
@@ -655,7 +739,7 @@ mod tests {
         );
         assert_eq!(report[0].name, "broken");
         assert!(matches!(report[0].detail, Detail::Unreadable(_)));
-        assert!(!report[0].is_current());
+        assert!(report[0].needs_attention());
         assert!(matches!(report[1].detail, Detail::Read(_)));
     }
 
@@ -711,7 +795,7 @@ mod tests {
         };
         let r = survey(&vault, TODAY).expect("survey");
         assert!(by("gone", &r).contains("no repository at"));
-        assert_eq!(by("no-baseline", &r), "no git baseline");
+        assert_eq!(by("no-baseline", &r), "not measured — no git baseline");
         assert!(
             by("not-a-repo", &r).contains("git does not answer"),
             "a directory git does not answer for is not a missing one: {}",
@@ -731,11 +815,11 @@ mod tests {
         let base = commit(&repo, "docs/a.md", "one");
         commit(&repo, "docs/b.md", "two");
 
-        for bad in ["~/docs/*.md", "/etc/*.md"] {
+        for bad in ["~/docs/*.md", "/etc/*.md", "../elsewhere/*.md"] {
             write_manifest(&vault, "p", &manifest_for(&repo, &base, bad));
             let r = survey(&vault, TODAY).expect("survey");
             assert!(
-                !r[0].is_current(),
+                r[0].needs_attention(),
                 "`{bad}` must not report the project current"
             );
             let Detail::Read(f) = &r[0].detail else {
