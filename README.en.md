@@ -84,8 +84,9 @@ lore validate
 lore ingest                       # collect sources, write structural pages, queue LLM tasks
 #    then, in Claude Code:        /lore-process     ← fills summaries & concepts
 
-# 6) On autopilot
-lore schedule | crontab -         # project the config's cron into crontab
+# 6) On autopilot — schedules the pipeline that fills summaries and concepts, not just ingest
+lore schedule --pipeline-dir ~/.local/share/lorekeeper/pipelines | crontab -
+#    on macOS use launchd — see "Scheduling" below
 ```
 
 > You don't need Obsidian — the output is plain markdown + folders, readable as text. Obsidian just makes the graph nicer to browse.
@@ -344,7 +345,7 @@ Skills that pair with the deterministic `lore` binary — the *judgment* parts r
 | `queue` | ✓ | Queues JSONL tasks under `<vault>/.lorekeeper/queue/`; `/lore-process` drains them with Claude Code's session — **no API key, no separate billing** |
 | `noop` | | No LLM work — for development, CI, or template-only runs |
 
-Unattended cron: `lore ingest; claude -p "/lore-process"` (`;` not `&&`, so a partial source failure still lets the healthy sources' tasks drain).
+Unattended operation is what `lore-daily.sh` is for. The drain runs as a `claude -p` session, and `-p` mode cannot ask — anything that would prompt is simply denied — so the tools the protocol spells must be named with `--allowedTools`; the script passes that list along with a preamble telling the session nobody is watching. A failing stage never skips the ones after it: one source failing to collect is no reason to leave the other sources' tasks unanswered.
 
 ---
 

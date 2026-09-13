@@ -84,8 +84,9 @@ lore validate
 lore ingest                       # 소스 수집 + 구조 페이지 작성 + LLM 작업 큐잉
 #    이어서 Claude Code에서:  /lore-process     ← 요약·개념을 채움
 
-# 6) 매일 자동으로
-lore schedule | crontab -         # config의 cron을 crontab으로
+# 6) 매일 자동으로 — 수집만이 아니라 요약·개념까지 채우는 파이프라인 등록
+lore schedule --pipeline-dir ~/.local/share/lorekeeper/pipelines | crontab -
+#    macOS는 launchd 권장 — 아래 "스케줄링" 절 참고
 ```
 
 > Obsidian이 없어도 됩니다 — 결과물은 평범한 마크다운 + 폴더라 그냥 텍스트로 읽힙니다. Obsidian은 그래프 탐색을 예쁘게 보여줄 뿐.
@@ -342,7 +343,7 @@ lore schema                   # wiki/AGENTS.md(페이지 포맷 스키마) 생�
 | `queue` | ✓ | `<vault>/.lorekeeper/queue/`에 JSONL 작업을 쌓고, `/lore-process`가 Claude Code 세션으로 처리 — **API 키·별도 과금 없음** |
 | `noop` | | LLM 작업 없음 — 개발·CI·템플릿만 필요할 때 |
 
-무인 cron: `lore ingest; claude -p "/lore-process"` (`&&`가 아닌 `;` — 일부 소스 실패해도 정상 소스의 큐는 처리되도록).
+무인 운영은 `lore-daily.sh`가 맡습니다. 드레인은 `claude -p` 세션으로 도는데, `-p` 모드는 물어볼 수 없어 프롬프트가 필요한 동작은 그냥 거부되므로 프로토콜이 쓰는 도구를 `--allowedTools`로 명시해야 합니다 — 스크립트가 그 목록과 무인 실행임을 알리는 프리앰블을 함께 넘깁니다. 스크립트는 단계 하나가 실패해도 다음 단계를 건너뛰지 않습니다: 한 소스의 수집 실패는 나머지 소스의 큐를 처리하지 않을 이유가 되지 않기 때문입니다.
 
 ---
 
