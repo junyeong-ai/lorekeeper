@@ -69,10 +69,14 @@ project:
 
 discovered_sources:
   - path: "docs/adr/*.md"
-    kind: adr           # adr | learning | rule | guide | spec | module-doc | git-history | other
+    kind: adr           # adr | learning | rule | guide | spec | structure | gate | module-doc | git-history | other
     count: <discovered>
     transferability_default: T1
-  - path: "."           # layer D: the history is the source, so every commit ages it
+  - path: "Cargo.toml"  # the build manifest answers what the project is made of and refuses
+    kind: structure
+    count: 1
+    transferability_default: T2
+  - path: "."           # history as a source: every commit ages this project
     kind: git-history
     count: <commits with a body>
     transferability_default: T3
@@ -126,63 +130,64 @@ Discover knowledge sources and persist a manifest.
      `last_scan`. Present incremental changes. Preserve previous
      `strip_patterns`, `concept_mapping`, user overrides.
 
-3. Discover sources across four layers. A repository with no `docs/` at all still carries
-   most of what transfers, so discovery is by layer rather than by directory.
+3. **Read the facts.** These are the current state rather than a statement about it, so they
+   are neither absent nor stale, and they are the same questions in every ecosystem even
+   though the file that answers them differs.
 
-   | Layer | What | Unit it comes partitioned by |
-   |---|---|---|
-   | **A. Declared invariants** | `docs/adr/*.md`, `docs/decisions/*.md`, `docs/learnings/*.md`, `.claude/rules/*.md`, `**/CLAUDE.md`, `specs/*/spec.md` | one decision or one rule, already distilled with its mechanism |
-   | **B. Module boundaries** | each module's own doc comment (`//!` in Rust, a module's leading docstring elsewhere) and the declarations it names | the boundary — which is the unit a knowledge page wants, and which states what holds NOW where a decision record states what held once |
-   | **C. Enforcement** | what holds A and B up: the type, test, lint or single module each invariant names | the invariant, paired with the reach of the check that confirmed it (step 4) |
-   | **D. The record** | commit bodies, reverts — `--include-git` only | the change, which is not a knowledge unit; read for themes |
+   | Fact | Where it is answered |
+   |---|---|
+   | What the project is made of | the build manifest's members/packages, and the module tree under each |
+   | What it depends on | DIRECT declarations, kept apart from the transitive graph |
+   | Where its boundaries are | the public surface — exported types, traits/interfaces/protocols, the types that cross |
+   | What it refuses | declared lints, type-level constraints, the commands CI actually runs, and the names of the tests that fail on a violation |
+   | What moves together | which paths change in the same commit, and what was reverted |
 
-   Adapt to the repository's actual structure — `architecture/`, `notes/`, `rfcs/`,
-   `terraform/`, `infra/` are the same layer A under other names.
+   A repository that documents nothing still answers all five. What it refuses is the richest
+   of them: a forbidden lint, a strict type preset, a test named for the thing it rejects —
+   each is a decision recorded in a form that cannot go stale, and reading the set of them is
+   reading what the project decided to make impossible.
 
-   In layer B the module doc is the entry point and the declarations it names are the rest of
-   it. Item doc comments the module doc does not reach are out of scope: their unit is a
-   signature, so what they carry is how to call this rather than why the boundary is here.
+4. **Read the claims, and check each one against the facts.** CLAUDE.md, `.claude/rules/`,
+   ADRs, learnings, READMEs, and doc comments are all one tier: a claim ABOUT the code, which
+   may be absent, may have been true once, or may never have been true.
 
-   Layer D is last rather than absent because these repositories move the durable half of a
-   change into the code and leave provenance in the commit. The module holds what survived;
-   the commit holds what was tried and reverted. Extraction wants what survived, so a
-   rejected approach earns a citation rather than a page. Body length does not separate them:
-   across six repositories under this discipline 89–99% of commits carry a real body, so
-   "has a body" identifies nothing.
+   a. **Scope every check to the population the claim names.** This is where checks go wrong,
+      and both ways were measured on live repositories. A write-path article reading "every
+      mutation routes through one module" checked with a text search over the repository
+      returned twelve violations that were all inside test modules, against a real count of
+      three. A dependency article reading "no `once_cell`" checked against the transitive
+      graph returned a violation that came in through a test-only package, against zero in
+      the project's own declarations. Both claims are about what the project itself writes;
+      both checks ran over everything reachable.
+   b. **Carry the population into the verdict.** A test that fails on the violation, or a type
+      that makes it unrepresentable, is a verdict. A language server's reference set answers
+      "who calls this". A text search over a negative — "nothing outside X does Y" — is a
+      LOWER BOUND and says so.
+   c. Four outcomes, and three of them are knowledge:
+      - **Confirmed** → the page states the claim, its exceptions, and the check's reach. The
+        exceptions are the part neither half holds alone: three writes outside that module
+        were a telemetry lock file, and a comment beside them carried the reason — rotation
+        renames the data file's inode. The article states no exception; the code does not say
+        it is one.
+      - **Contradicted** → a finding for the repository, reported to the user. Never a page.
+      - **Unenforceable** → recorded as an intention, labelled as one.
+      - **A fact no claim covers** → an invariant nobody wrote down. Confirm it holds over its
+        whole population before writing it, and say so when it does.
 
-   **Which layers a project uses is discovered, never configured.** The scan reads what the
-   repository has and records it; a `mode` key would make the operator restate a fact the
-   scan can see, and the two would disagree the first time the repository changed. The one
-   choice that is not a fact about the repository is layer D, whose cost is the operator's to
-   spend — that is what `--include-git` spells, and it is the only layer switch there is.
+   Sample to form the hypothesis, search to establish the population. Reading every line costs
+   an order of magnitude more and yields the same claim without its reach.
 
-   **Scope is derived, not configured either.** A manifest with no `git_head_at_scan` has no
-   baseline and every source is read whole; one with a baseline reads what changed, and a
-   source with no `extracted` entry is read whole whatever the baseline says — which is what
-   makes adding a layer to an established project work with no new machinery. `--full` re-reads
-   every source while keeping `strip_patterns` and `concept_mapping`, for a refactor that moved
-   everything; deleting the manifest would do it too, and would throw away the operator's own
-   overrides.
+   What facts cannot give is what was tried first. That is the commit history's, and it is why
+   `--include-git` exists rather than being folded in here.
 
-4. **Verify what A and B claim, before writing either down** (layer C). A stated invariant
-   and a holding one are different facts, and the pair is the knowledge.
-
-   a. Ask what ENFORCES each invariant that names a mechanism — a type that makes the
-      violation unrepresentable, a test that fails on it, a lint, or one module every caller
-      routes through. The answer is in the repository, not inferred.
-   b. Verify by the strongest method the repository offers, and **record which method
-      answered.** A failing test or a type is a verdict. A language server's reference set
-      (`symora refs`, when `symora doctor <lang>` says it can answer) is a verdict for
-      "who calls this". A text search is a LOWER BOUND, never a verdict: an invariant of the
-      form "nothing outside X does Y" is a negative over a set, and a search's scope is not
-      the invariant's scope. One pass over a write-path article returned twelve violations,
-      all inside test modules, against a real count of three.
-   c. Write the claim with its exceptions and its reach. Those three were a telemetry lock
-      file, and a comment beside them carried the reason — rotation renames the data file's
-      inode, so a lock held on it would be invalidated. The constitution states no exception;
-      the code does not say it is one. Neither half alone is the knowledge.
-   d. **An invariant nothing enforces is a finding, not a page.** Report it; write no page
-      asserting either half.
+   **Nothing here is a mode to configure.** Which questions a repository can answer is read
+   from the repository; a `mode` key would make the operator restate it, and the two would
+   disagree at the first change. Scope is derived the same way: a manifest with no
+   `git_head_at_scan` has no baseline and every source is read whole, one with a baseline
+   reads what changed, and a source with no `extracted` entry is read whole whatever the
+   baseline says — which is what lets a project extracted before this was written pick up the
+   facts pass with no new machinery. `--full` re-reads every source while keeping
+   `strip_patterns` and `concept_mapping`, for a refactor that moved everything.
 
 5. For each source, classify transferability (T1–T4):
    - **T1**: "constraint", "workaround", "gotcha", cloud platforms
@@ -239,6 +244,8 @@ Extract knowledge using the manifest. Requires a prior scan.
 
       | Source kind | `###` sub-section under the content section |
       |------------|----------------|
+      | Structure and boundaries | → Background & Constraints, as what the project is made of and where data crosses between its parts |
+      | What the build refuses | → Key Findings. Each declared lint, type-level constraint and gate command is a decision recorded where it cannot go stale; state it as a decision, not as configuration |
       | ADR Context | → Background & Constraints |
       | ADR Decision | → Key Findings |
       | ADR Consequences | → Transferable Patterns |
@@ -341,8 +348,8 @@ one harvests the source list as it was.
 
 ## Git history mining
 
-`--include-git` adds layer D. Read BODIES rather than subjects — the subject names the
-change and the body carries the reasoning:
+Read BODIES rather than subjects — the subject names the change and the body carries the
+reasoning:
 
 ```bash
 git log --no-merges --format='%x00%H%x09%ad%x09%s%x01%b' --date=short
@@ -352,11 +359,16 @@ Read it in windows and extract THEMES. A revert and the commit it reverted are o
 knowledge; five commits converging on one shape are another. Never one page per commit — a
 commit is a change, and a change is not a unit of knowledge.
 
-Layer D's whole scope is what A–C cannot carry: an approach tried and abandoned, a
+The history's whole scope is what the facts cannot carry: an approach tried and abandoned, a
 measurement that settled an argument, a reversal and its reason. An invariant that still
-holds is read from the module that holds it and verified against the code; taking it from
-the commit that introduced it yields a weaker statement of something already covered, and
-risks stating a shape later commits replaced.
+holds is read from the code that holds it and checked there; taking it from the commit that
+introduced it yields a weaker statement of something already covered, and risks stating a
+shape later commits replaced.
+
+It is a separate switch because its cost is a choice rather than a fact about the repository
+— across six repositories under a record-depth discipline, commit bodies ran 356k words, as
+much as every doc comment in them put together. Body length does not narrow it: 89–99% of
+commits there carry a real body, so "has a body" identifies nothing.
 
 Cite as `source_file: ["git:{sha}", …]`, several shas per page. Declare the source in the
 manifest as `kind: git-history` with `path: "."` — that pathspec is what makes
