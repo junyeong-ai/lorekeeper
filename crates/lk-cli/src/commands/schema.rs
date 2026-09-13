@@ -362,25 +362,10 @@ fn page_schemas(
     schemas
 }
 
-/// The rule a concept's title follows, named so a test reads the rule itself rather than
-/// slicing it out of the rendered document. Every boundary a slice could use — a blank line,
-/// a bolded lead-in — is a token the rule's own prose may legitimately contain, so each one a
-/// check picked ended it early and let a reworded judgment ship past the guard. What must not
-/// carry that judgment is this string, and this string is what the test reads.
-/// The other half of the naming rule, named for the same reason as [`TITLE_RULE`]: the
-/// superseded wording lived here, telling an agent to add a name the field was said to have
-/// established, and a check bounded at this paragraph's own opening left it outside.
-/// `{language}` is substituted at render.
-const ALIAS_RULE: &str = "**This vault is written in {language}, and where the material writes the concept in \
-         {language} too that form is not optional in `aliases`.** A reader who does not know \
-         the title searches in the language the vault is written in, and without the alias \
-         they reach nothing while the page holds every citation on the subject — after which \
-         the next extraction writing that form mints a rival page. What bounds this is the \
-         same rule the title follows: an alias is a name the material WRITES, so a concept the \
-         sources only ever name one way gets one name. A translation nobody writes is a \
-         spelling nobody searches for, and inventing one costs a rival page rather than \
-         preventing it.";
-
+/// The rule a concept's title follows, named so a test asserts on the rule itself. Every
+/// boundary a check could slice the rendered paragraph at — a blank line, a bolded lead-in —
+/// is a token the rule's own prose may carry, so each one ends the rule early and lets a
+/// reworded judgment ship past.
 const TITLE_RULE: &str = "**A concept's title is its name and nothing else.** The title is the address and the \
          lookup key, and the lookup is exact — so a title carrying a parenthetical gloss \
          answers to neither the term nor the gloss, and the next mention of the bare term \
@@ -392,6 +377,107 @@ const TITLE_RULE: &str = "**A concept's title is its name and nothing else.** Th
          other — the gloss, the translation, the expanded acronym, the abbreviation — goes in \
          `aliases`, which is what makes a citation written in any of them resolve here. A form \
          the material does not write is a name no later extraction reproduces.";
+
+/// The other half of the naming rule, named for the same reason. The superseded wording lived
+/// here: it told an agent to add a name the field was said to have established, which is a
+/// judgment, and two answers to it in one batch is two pages of one concept. `{language}` is
+/// substituted at render.
+const ALIAS_RULE: &str = "**This vault is written in {language}, and where the material writes the concept in \
+         {language} too that form is not optional in `aliases`.** A reader who does not know \
+         the title searches in the language the vault is written in, and without the alias \
+         they reach nothing while the page holds every citation on the subject — after which \
+         the next extraction writing that form mints a rival page. What bounds this is the \
+         same rule the title follows: an alias is a name the material WRITES, so a concept the \
+         sources only ever name one way gets one name. A translation nobody writes is a \
+         spelling nobody searches for, and inventing one costs a rival page rather than \
+         preventing it.";
+
+/// The body of `## Concept convergence`, one entry per rendered line and `""` a blank one.
+///
+/// The section is a contract that several skills restate and that `lore self deploy` ships,
+/// so it is composed here and emitted whole rather than written line by line into the render.
+/// That is what a test can hold it to: the rendered section is these entries and nothing
+/// else, so a sentence cannot reach the vault's contract without joining this list.
+fn convergence_body(language: &str, strings: &Strings) -> Vec<String> {
+    // The contract is schema rather than skill lore: it states binary-owned invariants
+    // (slugify, backlinks-sync field ownership) and names the LOCALIZED headings.
+    let sources_heading = strings.concept_sources;
+    let related_concepts_heading = strings.related_concepts;
+    vec![
+        String::new(),
+        "One concept = one page. Every agent that creates or merges concept pages \
+         follows this exact algorithm, so the wiki converges instead of accumulating \
+         variants."
+            .to_string(),
+        String::new(),
+        TITLE_RULE.to_string(),
+        String::new(),
+        ALIAS_RULE.replace("{language}", language),
+        String::new(),
+        "1. **Ask which page owns the name**: `lore resolve <name>` answers with the page a \
+         citation of it addresses, by the same rule the ingest pipeline routes an extraction \
+         by — so the two cannot disagree about what an existing name is. Exit 0 names the \
+         page (reuse its slug and title, never a variant), exit 1 means no page answers to \
+         it, exit 2 means more than one does and `lore graph lint` already reports the pair. \
+         The match is EXACT on identity, which folds spelling and nothing else: `VectorDB` \
+         finds `vector-db`, `k8s` does not find `kubernetes`.\n\n   Ask it for EVERY form the \
+         material writes, never the title alone. The other forms are what a page written from \
+         a source in another language already answers to, and a hit on ANY of them is the \
+         owner — reuse that page and register the forms it does not yet carry. Asking only the \
+         title is what mints a rival beside the page that already holds the subject: a name an \
+         established page answers to is REFUSED as an alias on a new page, so the one form \
+         that would have joined them is dropped by the act of creating the rival."
+            .to_string(),
+        "2. **Maintain a created-this-run set.** Every minted page or newly registered alias \
+         joins your in-context set BEFORE the next item is processed. `lore resolve` reads \
+         what is on disk, so it cannot see a page this run has not written yet — without the \
+         running set, two items independently mint `RAG` and `Retrieval-Augmented-Generation`."
+            .to_string(),
+        "3. **Judge the names `resolve` cannot.** An exit 1 is the answer for a name nothing \
+         answers to, not for a concept the vault lacks: an acronym and its expansion, a \
+         plural, a team's shorthand are DIFFERENT names for one thing, and no rule about \
+         spelling can see it. Ask `lore wiki search` for two or three distinguishing terms of \
+         EACH form the material writes — never a whole multi-word name, since every term must \
+         appear and a long query narrows past the very page it is looking for, while a \
+         one-word form is the only term it has and is asked whole — then read the hits and \
+         judge. In `--json`, `format` says whether a hit is even a concept and `matched` how \
+         it was reached: one reached at `text` sits behind every name and summary hit and is \
+         the one a limit drops. Reuse the established page and register the surface form as an \
+         alias when one matches, and when in doubt prefer the established broader concept over \
+         a narrow variant. Two things a query cannot reach: a rival sharing no word with any \
+         form the material writes, and another inflection of a one-word name — `guardrails` \
+         does not find `guardrail` — which is worth asking for explicitly. The registry (`lore \
+         wiki concepts`) is where the rest would show, and it is a read whose cost grows with \
+         the vault while a query's does not."
+            .to_string(),
+        "4. **Register surface forms as aliases.** When a source's surface form differs \
+         from the canonical name, append it to the concept's `aliases` frontmatter — \
+         `lore resolve` answers with this page for an alias, so the next run's first \
+         question lands here instead of minting a variant. Links are unaffected \
+         (they address the slug path; the display text is free-form). An alias edit is \
+         metadata-only: it never renames the page and is not, by itself, a reason to \
+         rewrite the body (whether a merge also enriches the synthesis body is the \
+         consuming workflow's own judgment)."
+            .to_string(),
+        "5. **Slug normalization** is `lore`'s slugify, exactly: NFKC → lowercase → \
+         non-alphanumeric to hyphen → collapse runs → trim edges."
+            .to_string(),
+        String::new(),
+        format!(
+            "Machine-owned evidence fields — never hand-write them: a NEW concept page \
+         starts with an empty `## {sources_heading}` body and `source_count: 0`; on an \
+         EXISTING page leave both exactly as found. Record citations as forward \
+         markdown links to the concept page on the ORIGIN page (its \
+         `## {related_concepts_heading}` section, link form per `## Links` above); \
+         `lore graph backlinks-sync` re-derives every concept's \
+         `## {sources_heading}` + `source_count` from those forward links wholesale — \
+         an entry not backed by a forward link is wiped, and a concept cited by several \
+         pages in one batch is counted correctly where hand-written one-ref-per-item \
+         entries would undercount. Finish any batch that created concept pages OR \
+         citations with `lore graph backlinks-sync`, then `lore wiki refresh`."
+        ),
+    ]
+}
 
 /// Render the AGENTS.md content for a given locale and directory layout.
 pub fn render_agents_md(
@@ -606,106 +692,11 @@ pub fn render_agents_md(
         }
     }
 
-    // The convergence contract is schema, not skill lore: it states binary-owned
-    // invariants (slugify, backlinks-sync field ownership) and must reference the
-    // LOCALIZED headings, so it is generated here rather than shipped as prose.
-    let sources_heading = strings.concept_sources;
-    let related_concepts_heading = strings.related_concepts;
     writeln!(out).unwrap();
     writeln!(out, "## Concept convergence").unwrap();
-    writeln!(out).unwrap();
-    writeln!(
-        out,
-        "One concept = one page. Every agent that creates or merges concept pages \
-         follows this exact algorithm, so the wiki converges instead of accumulating \
-         variants."
-    )
-    .unwrap();
-    writeln!(out).unwrap();
-    let language = locale.english_name();
-    writeln!(out, "{TITLE_RULE}").unwrap();
-    writeln!(out).unwrap();
-    writeln!(out, "{}", ALIAS_RULE.replace("{language}", language)).unwrap();
-    writeln!(out).unwrap();
-    writeln!(
-        out,
-        "1. **Ask which page owns the name**: `lore resolve <name>` answers with the page a \
-         citation of it addresses, by the same rule the ingest pipeline routes an extraction \
-         by — so the two cannot disagree about what an existing name is. Exit 0 names the \
-         page (reuse its slug and title, never a variant), exit 1 means no page answers to \
-         it, exit 2 means more than one does and `lore graph lint` already reports the pair. \
-         The match is EXACT on identity, which folds spelling and nothing else: `VectorDB` \
-         finds `vector-db`, `k8s` does not find `kubernetes`.\n\n   Ask it for EVERY form the \
-         material writes, never the title alone. The other forms are what a page written from \
-         a source in another language already answers to, and a hit on ANY of them is the \
-         owner — reuse that page and register the forms it does not yet carry. Asking only the \
-         title is what mints a rival beside the page that already holds the subject: a name an \
-         established page answers to is REFUSED as an alias on a new page, so the one form \
-         that would have joined them is dropped by the act of creating the rival."
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "2. **Maintain a created-this-run set.** Every minted page or newly registered alias \
-         joins your in-context set BEFORE the next item is processed. `lore resolve` reads \
-         what is on disk, so it cannot see a page this run has not written yet — without the \
-         running set, two items independently mint `RAG` and `Retrieval-Augmented-Generation`."
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "3. **Judge the names `resolve` cannot.** An exit 1 is the answer for a name nothing \
-         answers to, not for a concept the vault lacks: an acronym and its expansion, a \
-         plural, a team's shorthand are DIFFERENT names for one thing, and no rule about \
-         spelling can see it. Ask `lore wiki search` for two or three distinguishing terms of \
-         EACH form the material writes — never a whole multi-word name, since every term must \
-         appear and a long query narrows past the very page it is looking for, while a \
-         one-word form is the only term it has and is asked whole — then read the hits and \
-         judge. In `--json`, `format` says whether a hit is even a concept and `matched` how \
-         it was reached: one reached at `text` sits behind every name and summary hit and is \
-         the one a limit drops. Reuse the established page and register the surface form as an \
-         alias when one matches, and when in doubt prefer the established broader concept over \
-         a narrow variant. Two things a query cannot reach: a rival sharing no word with any \
-         form the material writes, and another inflection of a one-word name — `guardrails` \
-         does not find `guardrail` — which is worth asking for explicitly. The registry (`lore \
-         wiki concepts`) is where the rest would show, and it is a read whose cost grows with \
-         the vault while a query's does not."
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "4. **Register surface forms as aliases.** When a source's surface form differs \
-         from the canonical name, append it to the concept's `aliases` frontmatter — \
-         `lore resolve` answers with this page for an alias, so the next run's first \
-         question lands here instead of minting a variant. Links are unaffected \
-         (they address the slug path; the display text is free-form). An alias edit is \
-         metadata-only: it never renames the page and is not, by itself, a reason to \
-         rewrite the body (whether a merge also enriches the synthesis body is the \
-         consuming workflow's own judgment)."
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "5. **Slug normalization** is `lore`'s slugify, exactly: NFKC → lowercase → \
-         non-alphanumeric to hyphen → collapse runs → trim edges."
-    )
-    .unwrap();
-    writeln!(out).unwrap();
-    writeln!(
-        out,
-        "Machine-owned evidence fields — never hand-write them: a NEW concept page \
-         starts with an empty `## {sources_heading}` body and `source_count: 0`; on an \
-         EXISTING page leave both exactly as found. Record citations as forward \
-         markdown links to the concept page on the ORIGIN page (its \
-         `## {related_concepts_heading}` section, link form per `## Links` above); \
-         `lore graph backlinks-sync` re-derives every concept's \
-         `## {sources_heading}` + `source_count` from those forward links wholesale — \
-         an entry not backed by a forward link is wiped, and a concept cited by several \
-         pages in one batch is counted correctly where hand-written one-ref-per-item \
-         entries would undercount. Finish any batch that created concept pages OR \
-         citations with `lore graph backlinks-sync`, then `lore wiki refresh`."
-    )
-    .unwrap();
+    for line in convergence_body(locale.english_name(), strings) {
+        writeln!(out, "{line}").unwrap();
+    }
 
     out
 }
@@ -1199,13 +1190,25 @@ mod tests {
                 true,
                 Some("tasks.md"),
             );
-            let convergence = md
-                .split_once("## Concept convergence")
-                .expect("the spec carries the convergence contract")
-                .1;
-            // The named rule is only the rule while the document carries it verbatim. Without
-            // this the constant could be left behind by an edit that goes back to writing the
-            // paragraph inline, and every check below would read a string nothing ships.
+            let (_, section) = md
+                .split_once("\n## Concept convergence\n")
+                .expect("the spec carries the convergence contract");
+            let composed = convergence_body(locale.english_name(), locale.strings());
+
+            // The section IS what `convergence_body` composes, not a text those lines appear
+            // somewhere inside. Containment answers whether a rule is in there and nothing
+            // about what was written beside it, and a clause appended to a rule reads as part
+            // of the rule to every agent downstream.
+            assert_eq!(
+                section,
+                format!("{}\n", composed.join("\n")),
+                "{locale:?}: the rendered section is not what `convergence_body` composes, so \
+                 the contract carries a sentence no check here reads"
+            );
+
+            // The named rules are the rules only while the section is composed FROM them: a
+            // paragraph written back inline leaves the constant intact for the checks below
+            // to read while the vault reads something else.
             for (name, rule) in [
                 ("TITLE_RULE", TITLE_RULE.to_string()),
                 (
@@ -1214,32 +1217,38 @@ mod tests {
                 ),
             ] {
                 assert!(
-                    md.contains(&rule),
-                    "{locale:?}: the rendered contract does not carry {name}, so the checks \
-                     below read a string this vault never sees"
+                    composed.contains(&rule),
+                    "{locale:?}: no line of the contract is {name}, so the rule it states is \
+                     not the rule this vault ships"
                 );
             }
             assert!(
                 TITLE_RULE.contains("COPIED"),
                 "{locale:?}: the title rule no longer says a name is copied rather than composed"
             );
-            // Both halves. The superseded rule had one sentence in each, and a check that
-            // read only the title rule left the half that told an agent to add a name the
-            // field was said to have established — which is the defect that split a concept
-            // across two pages.
-            for judged in [
+
+            // The superseded wording told an agent to prefer whichever form a field had
+            // established, and it cost a concept two pages. Every language is banned rather
+            // than the rendered one, because that wording named a language outright. Scoped to
+            // this section: `an established Korean vault` is ordinary prose elsewhere in the
+            // document, and here the same words are the judgment itself.
+            let judgments = [
                 "the field actually uses".to_string(),
                 "established {language}".to_string(),
-                format!("established {}", locale.english_name()),
-            ] {
-                for (name, rule) in [("title rule", TITLE_RULE), ("alias rule", ALIAS_RULE)] {
+            ]
+            .into_iter()
+            .chain(Locale::iter().map(|l| format!("established {}", l.english_name())));
+            for judgment in judgments {
+                for line in &composed {
                     assert!(
-                        !rule.contains(&judged),
-                        "{locale:?}: the {name} says `{judged}`, which asks which form a field \
-                         settled on — the judgment a name is copied to avoid"
+                        !line.contains(&judgment),
+                        "{locale:?}: the contract says `{judgment}`, which asks which form a \
+                         field settled on — the judgment a copied name exists to avoid"
                     );
                 }
             }
+
+            let convergence = composed.join("\n");
             assert!(
                 convergence.contains("EVERY form"),
                 "{locale:?}: convergence no longer asks the resolver for every form the \
@@ -1281,12 +1290,16 @@ mod tests {
                     continue;
                 }
                 stated += 1;
+                // The literal phrase, deliberately: the rule lives in one contract and
+                // several restatements, and a shared spelling is what makes the set of them
+                // findable. A rewording that means the same thing fails here, and the message
+                // says so rather than accusing the text of dropping the rule.
                 assert!(
                     prose.contains("EVERY form"),
-                    "{skill}/{}: states the dedup baseline without asking every form the \
-                     source writes — a page written from a source in another language \
-                     answers to none of the forms this one carries, so the title alone \
-                     mints a rival beside it",
+                    "{skill}/{}: states the dedup baseline without the words `EVERY form`. \
+                     The copies of this rule are kept together by that spelling, so a \
+                     rewording keeps it — and if the rule itself changed, `convergence_body` \
+                     is what changes first",
                     file.relative
                 );
             }
