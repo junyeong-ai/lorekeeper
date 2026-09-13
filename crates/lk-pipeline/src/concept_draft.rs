@@ -440,13 +440,6 @@ impl ConceptDraft {
             // recomputes or resets it (new pages start at 0).
             "source_count": self.source_count,
             "llm_inputs": self.preserved_llm_inputs,
-            // Tag with the category id when set, else the literal "concept" — the same
-            // invariant `/lore-process` writes, so every concept page carries at least
-            // one tag for Obsidian filtering.
-            "tags": match self.category.as_deref().filter(|c| !c.is_empty()) {
-                Some(cat) => vec![cat],
-                None => vec!["concept"],
-            },
             "i18n": strings,
         });
 

@@ -7,7 +7,6 @@ created: 2026-05-10
 updated: 2026-06-03
 category: "engineering"
 source_count: 3
-tags: ["determinism", "testing"]
 ---
 
 # Behaviour snapshot

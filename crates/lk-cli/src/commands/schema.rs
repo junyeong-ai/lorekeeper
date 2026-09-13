@@ -117,7 +117,6 @@ fn page_schemas(
                 "category",
                 lk_core::frontmatter::field::SOURCE_COUNT,
                 lk_core::frontmatter::field::LLM_INPUTS,
-                "tags",
             ],
             sections: vec![
                 s("Synthesis", |i| i.concept_synthesis.to_string(), Owner::Llm),

@@ -6,7 +6,6 @@ aliases: []
 created: 2026-06-09
 updated: 2026-06-09
 source_count: 0
-tags: []
 ---
 
 # Unlinked note

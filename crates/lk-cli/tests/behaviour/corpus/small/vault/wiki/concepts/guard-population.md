@@ -6,7 +6,6 @@ aliases: []
 created: 2026-05-18
 updated: 2026-05-18
 source_count: 1
-tags: ["review"]
 ---
 
 # Guard population

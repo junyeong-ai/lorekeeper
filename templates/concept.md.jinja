@@ -14,7 +14,6 @@ llm_inputs:
 {%- if llm_inputs.synthesis_done %}
   synthesis_done: {{ llm_inputs.synthesis_done | tojson }}
 {%- endif %}
-tags: {{ tags | tojson }}
 ---
 
 # {{ name }}

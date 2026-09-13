@@ -7,7 +7,6 @@ created: 2026-05-02
 updated: 2026-06-01
 category: "engineering"
 source_count: 2
-tags: ["determinism"]
 ---
 
 # Deterministic clock
