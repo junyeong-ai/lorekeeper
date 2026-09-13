@@ -424,11 +424,28 @@ fn repo_state(repo: &Path, baseline: Option<&str>, declared: &[String]) -> RepoS
         .collect::<BTreeSet<_>>()
         .len();
     if files == 0 {
-        // Nothing answered — which is the right answer only if every declared path is one git
-        // can answer for. A path git IGNORES is reached by neither probe, so it reads
-        // unchanged however it moves, and this is the one place that reading is produced. The
-        // scan is told not to declare such a path; this is the check on the scan, because a
-        // rule that lives only in prose is one nothing enforces.
+        // Nothing DIFFERED, which is the same as "nothing changed" only where git knows the
+        // files the declared patterns name. So the population is asked for rather than
+        // assumed: `--cached --others --exclude-standard` is exactly what the two probes
+        // above can answer for, and the scan lists its candidates the same way.
+        let mut args = vec![
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--",
+        ];
+        args.extend(specs.iter().map(String::as_str));
+        let Some(known) = git(repo, &args) else {
+            return RepoState::Unanswered("git refused the declared paths".into());
+        };
+        if known.lines().next().is_some() {
+            return RepoState::Unmoved;
+        }
+        // Git knows nothing under these patterns, so "unchanged" would be a statement about
+        // files nothing looked at. A pattern that also happens to cover an ignored draft is
+        // NOT this case — its population is the files git knows, and the draft was never a
+        // declared source — which is why the population is asked before the ignore list.
         let mut args = vec![
             "ls-files",
             "--others",
@@ -441,12 +458,11 @@ fn repo_state(repo: &Path, baseline: Option<&str>, declared: &[String]) -> RepoS
             return RepoState::Unanswered("git refused the declared paths".into());
         };
         let n = ignored.lines().count();
-        if n > 0 {
-            return RepoState::Unanswered(format!(
-                "{n} declared file(s) are ignored by git, which cannot answer for them"
-            ));
-        }
-        return RepoState::Unmoved;
+        return RepoState::Unanswered(if n > 0 {
+            format!("the declared paths reach {n} file(s), every one of them ignored by git")
+        } else {
+            "the declared paths match no file in this repository".into()
+        });
     }
     // Commits are context beside the file count, asked as a symmetric difference so a rolled
     // back checkout counts what it lost as well as what it gained. A count that did not answer
@@ -906,36 +922,47 @@ mod tests {
         assert!(matches!(f.state, RepoState::Moved { files: 1, .. }));
     }
 
-    /// A source git is told to ignore answers to neither probe, so "sources unchanged" over
-    /// one is a statement about a file nothing looked at. The scan is told not to declare
-    /// such a path, and this is what holds the scan to it: a rule kept only in prose is a
-    /// rule a single skipped step removes.
+    /// "Nothing differed" is the same as "nothing changed" only where git knows the files the
+    /// patterns name. Three shapes, and only the middle one is a finding: a pattern whose
+    /// population git knows is measured however many ignored drafts it also covers; a pattern
+    /// whose every file git ignores can never be measured at all; and one matching nothing is
+    /// a manifest describing a repository that no longer holds what it declared. Reporting
+    /// the last two as unchanged is a statement about files nothing looked at.
     #[test]
-    fn a_declared_path_git_ignores_cannot_be_reported_unchanged() {
+    fn unchanged_is_said_only_of_files_git_can_answer_for() {
         let dir = tempfile::tempdir().expect("tempdir");
         let repo = dir.path().join("repo");
-        let vault = dir.path().join("vault");
         git_repo(&repo);
-        std::fs::write(repo.join(".gitignore"), "docs/gen*.md\n").expect("write");
+        std::fs::write(repo.join(".gitignore"), "drafts/\n").expect("write");
         let base = commit(&repo, "docs/a.md", "one");
+        std::fs::create_dir_all(repo.join("drafts")).expect("mkdir");
+        std::fs::write(repo.join("drafts/d.md"), "draft").expect("write");
 
-        write_manifest(&vault, "p", &manifest_for(&repo, &base, "docs/*.md"));
-        assert!(
-            !survey(&vault, TODAY).expect("survey")[0].needs_attention(),
-            "nothing ignored yet, and nothing has moved"
-        );
-
-        std::fs::write(repo.join("docs/gen1.md"), "generated").expect("write");
-        let r = survey(&vault, TODAY).expect("survey");
-        let Detail::Read(f) = &r[0].detail else {
-            panic!("expected a read manifest")
+        let state = |name: &str, declared: &str| {
+            let vault = dir.path().join(name);
+            write_manifest(&vault, name, &manifest_for(&repo, &base, declared));
+            let r = survey(&vault, TODAY).expect("survey");
+            let Detail::Read(f) = &r[0].detail else {
+                panic!("expected a read manifest")
+            };
+            (f.state.describe(), r[0].needs_attention())
         };
-        assert!(
-            f.state.describe().contains("ignored by git"),
-            "an ignored declared file is unmeasurable, not unchanged: {}",
-            f.state.describe()
+
+        // An ignored file merely COVERED by a pattern was never a declared source: the
+        // population is what git knows, and marking this row would be an alarm no repair
+        // clears, since the ignore rule is deliberate.
+        assert_eq!(
+            state("incidental", "docs/*.md"),
+            ("sources unchanged".into(), false)
         );
-        assert!(r[0].needs_attention());
+
+        let (why, marked) = state("all-ignored", "drafts/*.md");
+        assert!(why.contains("every one of them ignored by git"), "{why}");
+        assert!(marked);
+
+        let (why, marked) = state("matches-nothing", "adr/*.md");
+        assert!(why.contains("match no file"), "{why}");
+        assert!(marked);
     }
 
     /// A manifest with no baseline AND no declared source used to be told to anchor a
@@ -1027,9 +1054,10 @@ mod tests {
         assert_eq!(coverage(&t), "4 current");
     }
 
-    /// The tally is a partition, and the proof is that it counts every project exactly once
-    /// whatever state each is in. Two independent conditions — one for "behind", one for
-    /// "not measured" — held this before, and a state left out of both read as current.
+    /// Which count each state falls into, stated once. That the three SUM to the project
+    /// count proves nothing — `tally` increments exactly one counter per project whatever
+    /// `verdict` answers — so the tuple is the assertion, and the fixture carries one project
+    /// of each kind so that moving any state between counts fails here.
     #[test]
     fn every_project_falls_into_exactly_one_of_the_three_counts() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1048,14 +1076,18 @@ mod tests {
         );
         write_manifest(&vault, "not-a-repo", &manifest_for(&plain, "a", "d/*"));
         write_manifest(&vault, "broken", "project: [this is not a manifest\n");
+        write_manifest(
+            &vault,
+            "plain-dir",
+            &format!(
+                "project:\n  repo_path: {}\n  last_scan: 2026-09-01\ndiscovered_sources:\n  \
+                 - path: \"d/*\"\n    count: 1\nextracted: []\n",
+                plain.display()
+            ),
+        );
         let r = survey(&vault, TODAY).expect("survey");
         let t = tally(&r);
-        assert_eq!(
-            t.behind + t.current + t.unmeasured,
-            r.len(),
-            "every project is counted once and only once"
-        );
-        assert_eq!((t.behind, t.current, t.unmeasured), (3, 1, 0));
+        assert_eq!((t.behind, t.current, t.unmeasured), (3, 1, 1));
     }
 
     /// The other half of `:(glob)`, and the half that only a test states: `*` covers one

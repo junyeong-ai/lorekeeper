@@ -415,7 +415,10 @@ What is left is what needs a reader:
    entry names. Non-empty means the page is behind its own source. An entry
    written before this field existed carries none, and there the question has no anchor: report
    it as un-checked beside the entries that answered, never as current — the next extraction
-   run records the field and the check starts working from there.
+   run records the field and the check starts working from there. An entry whose
+   `coverage_note` says the source is outside git is the same answer for the same reason: both
+   commands are silent over a file git ignores, and reading that silence as "current" is what
+   the note exists to prevent.
 
 2. **Quality** — per-document: empty sections, missing concept links,
    leaked project identifiers (grep for `strip_patterns` in vault).
