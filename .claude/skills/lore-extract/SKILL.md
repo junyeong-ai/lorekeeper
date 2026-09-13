@@ -193,6 +193,21 @@ Discover knowledge sources and persist a manifest.
    pattern that matches what the scan actually read — `count` is the check on this, since a
    pattern reaching further than the scan did will not reproduce the number beside it.
 
+   **In a git repository, list the candidates through git**, so that what is declared and what
+   can be measured are one population:
+
+   ```bash
+   git -C <path> ls-files --cached --others --exclude-standard -- ':(glob)<pattern>'
+   ```
+
+   A file the filesystem holds and git IGNORES is invisible to every question `lore extract
+   status` can ask — no diff reaches it and no untracked listing admits it — so declaring one
+   makes a source that reads "unchanged" forever, whatever happens to it. Such a file is
+   generated rather than authored anyway, which is the reason it is ignored; extract it if it
+   carries knowledge, and record `vault_page` with a `coverage_note` saying the source is
+   outside git, rather than adding it to `discovered_sources` where it would answer green in
+   perpetuity.
+
 4. **Read the claims, and check each one against the facts.** CLAUDE.md, `.claude/rules/`,
    ADRs, learnings, READMEs, and doc comments are all one tier: a claim ABOUT the code, which
    may be absent, may have been true once, or may never have been true.
@@ -393,8 +408,11 @@ What is left is what needs a reader:
    since its last scan, which is a different question: a re-scan alone advances
    `git_head_at_scan`, so a project reads current while a page still holds what its source
    said three commits ago. Ask it per entry, with the same anchor and the same content
-   question: `git diff --name-only <extracted_at_commit> -- ':(glob)<source>'`, plus the
-   `ls-files --others` half above. Non-empty means the page is behind its own source. An entry
+   question: `git diff --name-only <extracted_at_commit> -- ':(literal)<source>'`, plus the
+   `ls-files --others` half above. `:(literal)` and not `:(glob)` — an `extracted[].source` is
+   a concrete path rather than a pattern, and under glob magic a name containing `[`, `*` or
+   `?` is read as one: `docs/a[1].md` then answers for `docs/a1.md` and not for the file the
+   entry names. Non-empty means the page is behind its own source. An entry
    written before this field existed carries none, and there the question has no anchor: report
    it as un-checked beside the entries that answered, never as current — the next extraction
    run records the field and the check starts working from there.

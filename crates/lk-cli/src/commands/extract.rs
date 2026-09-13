@@ -127,15 +127,36 @@ enum RepoState {
     NothingDeclared,
 }
 
+/// What a project's row amounts to, decided once.
+///
+/// Three surfaces report this set — the terminal, the JSON contract and the `lore status` row
+/// — and each used to partition it with its own condition. Two lists that happen to agree are
+/// not a partition: a state left out of one and forgotten by the other reads as measured and
+/// current, which is the one answer none of them may give by accident.
+#[derive(PartialEq, Eq)]
+pub(crate) enum Verdict {
+    /// Something for a person to do.
+    Behind,
+    /// Measured, and the declared sources have not moved.
+    Current,
+    /// No question could be put, and no repair changes that. Reported and left unmarked,
+    /// because marking a row nobody can clear teaches the reader to skip the column.
+    Unmeasured,
+}
+
 impl RepoState {
-    /// Is there something here for a person to do? A project whose staleness cannot be
-    /// measured is not one — it is reported and left alone, because marking a row nobody can
-    /// clear teaches the reader to skip the column.
-    fn needs_attention(&self) -> bool {
-        !matches!(
-            self,
-            RepoState::Unmoved | RepoState::NoBaseline | RepoState::NothingDeclared
-        )
+    /// Spelled arm by arm rather than with a wildcard, so a state added later cannot inherit
+    /// a verdict nobody chose for it.
+    fn verdict(&self) -> Verdict {
+        match self {
+            RepoState::Unmoved => Verdict::Current,
+            RepoState::NoBaseline | RepoState::NothingDeclared => Verdict::Unmeasured,
+            RepoState::Missing(_)
+            | RepoState::Unanchored
+            | RepoState::BaselineGone
+            | RepoState::Moved { .. }
+            | RepoState::Unanswered(_) => Verdict::Behind,
+        }
     }
 
     fn describe(&self) -> String {
@@ -181,11 +202,17 @@ struct Facts {
 }
 
 impl ProjectState {
-    fn needs_attention(&self) -> bool {
+    /// A manifest nobody can read is a project whose extraction state is unknown, which is
+    /// work rather than the absence of it.
+    fn verdict(&self) -> Verdict {
         match &self.detail {
-            Detail::Read(f) => f.state.needs_attention(),
-            Detail::Unreadable(_) => true,
+            Detail::Read(f) => f.state.verdict(),
+            Detail::Unreadable(_) => Verdict::Behind,
         }
+    }
+
+    fn needs_attention(&self) -> bool {
+        self.verdict() == Verdict::Behind
     }
 }
 
@@ -208,7 +235,7 @@ pub async fn run(opts: &super::GlobalOptions, cmd: ExtractCommand) -> miette::Re
     // The command that owns a subsystem is the one whose exit code answers for it, so a
     // project a person has to act on fails this the way an overdue source fails `lore health`.
     // `lore status` composes the verdict without gating on it.
-    if behind(&reports) > 0 {
+    if tally(&reports).behind > 0 {
         std::process::exit(1);
     }
     Ok(())
@@ -365,9 +392,12 @@ fn repo_state(repo: &Path, baseline: Option<&str>, declared: &[String]) -> RepoS
     };
     // `git diff` lists tracked paths only, and a scan reads the working tree — so a source
     // written since and not yet staged differs from what was scanned while the diff is silent.
-    // `--exclude-standard` keeps the repository's own ignore rules: a path git is told to
-    // ignore is not a source the extraction declared, and without it every build artefact
-    // under a declared directory would answer.
+    // `--exclude-standard` keeps the repository's own ignore rules. What it costs: a declared
+    // path git ignores is reached by neither probe, so it reads unchanged however it moves —
+    // which is why the scan lists its candidates through git rather than the filesystem, and
+    // refuses to declare an ignored file. Dropping the flag is not the alternative: every
+    // build artefact under a declared directory would then answer, and the row would be red
+    // for good.
     let mut args = vec!["ls-files", "--others", "--exclude-standard", "--"];
     args.extend(specs.iter().map(String::as_str));
     let Some(untracked) = git(repo, &args) else {
@@ -385,7 +415,9 @@ fn repo_state(repo: &Path, baseline: Option<&str>, declared: &[String]) -> RepoS
     }
     // Commits are context beside the file count, asked as a symmetric difference so a rolled
     // back checkout counts what it lost as well as what it gained. A count that did not answer
-    // is absent rather than zero — the files are the verdict either way.
+    // is absent rather than zero — the files are the verdict either way. No repository shape
+    // is known to reach that branch once `rev-parse` and `diff` have both answered, so no test
+    // pins it; it is here because a parse can fail, not because a shape produces it.
     let range = format!("{baseline}...HEAD");
     let mut args = vec!["rev-list", "--count", &range, "--"];
     args.extend(specs.iter().map(String::as_str));
@@ -446,20 +478,21 @@ fn render(reports: &[ProjectState]) {
             }
         }
     }
-    let behind = behind(reports);
+    let t = tally(reports);
     println!();
-    if behind == 0 {
-        println!("Every manifest is current with its repository.");
+    print!("{}", coverage(&t));
+    if t.behind == 0 {
+        println!();
     } else {
         println!(
-            "{behind} of {} project(s) need attention — `/lore-extract scan <repo>` then \
-             `/lore-extract run <repo>`; `/lore-extract audit` judges what is already there.",
-            reports.len()
+            " — `/lore-extract scan <repo>` then `/lore-extract run <repo>`; \
+             `/lore-extract audit` judges what is already there."
         );
     }
 }
 
 fn as_json(reports: &[ProjectState]) -> serde_json::Value {
+    let t = tally(reports);
     serde_json::json!({
         "projects": reports.iter().map(|r| match &r.detail {
             Detail::Unreadable(why) => serde_json::json!({
@@ -495,32 +528,54 @@ fn as_json(reports: &[ProjectState]) -> serde_json::Value {
                 "skipped_sources": f.skipped,
             }),
         }).collect::<Vec<_>>(),
-        "behind": behind(reports),
+        "behind": t.behind,
+        "current": t.current,
         // Beside it because the two are a different answer: a project nothing could ask a
         // question about is neither behind nor current, and a reader given only `behind`
         // would report the rest current — the fold the terminal row stopped making.
-        "unmeasured": unmeasured(reports),
+        "unmeasured": t.unmeasured,
     })
 }
 
 /// How many projects have moved since their scan, for the `lore status` row.
-pub(crate) fn behind(reports: &[ProjectState]) -> usize {
-    reports.iter().filter(|r| r.needs_attention()).count()
+/// The three counts, summing to the number of projects by construction.
+pub(crate) struct Tally {
+    pub behind: usize,
+    pub current: usize,
+    pub unmeasured: usize,
 }
 
-/// How many projects the check could put no question to — a directory that is not a
-/// repository, a manifest naming no source. They are neither behind nor current, and counting
-/// them as current is how a summary reports coverage it never had.
-pub(crate) fn unmeasured(reports: &[ProjectState]) -> usize {
-    reports
-        .iter()
-        .filter(|r| match &r.detail {
-            Detail::Read(f) => {
-                matches!(f.state, RepoState::NoBaseline | RepoState::NothingDeclared)
-            }
-            Detail::Unreadable(_) => false,
-        })
-        .count()
+pub(crate) fn tally(reports: &[ProjectState]) -> Tally {
+    let mut t = Tally {
+        behind: 0,
+        current: 0,
+        unmeasured: 0,
+    };
+    for r in reports {
+        match r.verdict() {
+            Verdict::Behind => t.behind += 1,
+            Verdict::Current => t.current += 1,
+            Verdict::Unmeasured => t.unmeasured += 1,
+        }
+    }
+    t
+}
+
+/// The one phrase both the terminal and the `lore status` row state their coverage with.
+/// Written from the tally rather than from the project count, because a project no question
+/// reached must never be spoken for by the ones that were measured.
+pub(crate) fn coverage(t: &Tally) -> String {
+    let mut parts = Vec::new();
+    if t.behind > 0 {
+        parts.push(format!("{} need attention", t.behind));
+    }
+    if t.current > 0 {
+        parts.push(format!("{} current", t.current));
+    }
+    if t.unmeasured > 0 {
+        parts.push(format!("{} not measured", t.unmeasured));
+    }
+    parts.join(" · ")
 }
 
 #[cfg(test)]
@@ -807,6 +862,66 @@ mod tests {
         assert!(matches!(f.state, RepoState::Moved { files: 1, .. }));
     }
 
+    /// The closing line of the command's own terminal made the fold the `lore status` row
+    /// had stopped making: with nothing behind it said every manifest was current, over
+    /// projects no question had reached. Both surfaces now speak from the same tally, so the
+    /// phrase is tested once and neither can drift from it.
+    #[test]
+    fn coverage_never_speaks_for_a_project_no_question_reached() {
+        let t = Tally {
+            behind: 0,
+            current: 0,
+            unmeasured: 2,
+        };
+        assert_eq!(coverage(&t), "2 not measured");
+        let t = Tally {
+            behind: 1,
+            current: 2,
+            unmeasured: 3,
+        };
+        assert_eq!(
+            coverage(&t),
+            "1 need attention · 2 current · 3 not measured"
+        );
+        let t = Tally {
+            behind: 0,
+            current: 4,
+            unmeasured: 0,
+        };
+        assert_eq!(coverage(&t), "4 current");
+    }
+
+    /// The tally is a partition, and the proof is that it counts every project exactly once
+    /// whatever state each is in. Two independent conditions — one for "behind", one for
+    /// "not measured" — held this before, and a state left out of both read as current.
+    #[test]
+    fn every_project_falls_into_exactly_one_of_the_three_counts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = dir.path().join("vault");
+        let plain = dir.path().join("plain");
+        std::fs::create_dir_all(&plain).expect("mkdir");
+        let repo = dir.path().join("repo");
+        git_repo(&repo);
+        let base = commit(&repo, "docs/a.md", "one");
+
+        write_manifest(&vault, "unmoved", &manifest_for(&repo, &base, "docs/*.md"));
+        write_manifest(
+            &vault,
+            "gone",
+            &manifest_for(Path::new("/nonexistent"), "a", "d/*"),
+        );
+        write_manifest(&vault, "not-a-repo", &manifest_for(&plain, "a", "d/*"));
+        write_manifest(&vault, "broken", "project: [this is not a manifest\n");
+        let r = survey(&vault, TODAY).expect("survey");
+        let t = tally(&r);
+        assert_eq!(
+            t.behind + t.current + t.unmeasured,
+            r.len(),
+            "every project is counted once and only once"
+        );
+        assert_eq!((t.behind, t.current, t.unmeasured), (3, 1, 0));
+    }
+
     /// The other half of `:(glob)`, and the half that only a test states: `*` covers one
     /// directory level. Git's DEFAULT pathspec magic lets a bare `*` cross `/`, so
     /// `docs/*.md` would answer for `docs/sub/b.md` — a file the scan never read, since the
@@ -899,6 +1014,16 @@ mod tests {
                 repo.display()
             ),
         );
+        write_manifest(
+            &vault,
+            "mixed",
+            &format!(
+                "project:\n  repo_path: {}\n  last_scan: 2026-09-03\n  git_head_at_scan: \
+                 {base}\ndiscovered_sources:\n  - path: \"docs/*.md\"\n    count: 4\n  \
+                 - path: \"adr/*.md\"\nextracted: []\n",
+                repo.display()
+            ),
+        );
         let r = survey(&vault, TODAY).expect("survey");
         let count = |n: &str| {
             let p = r.iter().find(|x| x.name == n).expect("project");
@@ -909,6 +1034,8 @@ mod tests {
         };
         assert_eq!(count("unrecorded"), None);
         assert_eq!(count("recorded"), Some(7));
+        // One pattern counted and one not is not a smaller total — it is a total nobody has.
+        assert_eq!(count("mixed"), None);
     }
 
     /// A manifest that is present and unusable is reported, not dropped and not fatal. Both
@@ -1046,7 +1173,7 @@ mod tests {
         );
         assert!(!marked("declares-nothing", &r));
         assert_eq!(
-            unmeasured(&r),
+            tally(&r).unmeasured,
             2,
             "the two states no question reaches are counted apart from the current ones"
         );
