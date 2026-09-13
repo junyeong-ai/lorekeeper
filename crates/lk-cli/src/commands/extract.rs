@@ -544,6 +544,39 @@ fn render(reports: &[ProjectState]) {
     }
 }
 
+/// The state as the contract spells it. Apart from `as_json` so every state can be
+/// enumerated by a test — a `kind` is a NAME for one of eight situations while the `verdict`
+/// beside it says what to do, and one word serving as both would let a reader take either for
+/// the other and be right by accident.
+fn state_json(state: &RepoState) -> serde_json::Value {
+    match state {
+        RepoState::Missing(at) => {
+            serde_json::json!({"kind": "repo-missing", "at": at})
+        }
+        RepoState::NoBaseline => serde_json::json!({"kind": "not-a-repository"}),
+        // Never the vacated `no-baseline`: that string meant "nothing to do" and
+        // this state is its opposite, so a consumer keyed on the old spelling
+        // would read an actionable project as safe.
+        RepoState::Unanchored => {
+            serde_json::json!({"kind": "baseline-not-recorded"})
+        }
+        RepoState::NothingDeclared => {
+            serde_json::json!({"kind": "nothing-declared"})
+        }
+        RepoState::BaselineGone => serde_json::json!({"kind": "baseline-gone"}),
+        // Named for the state, not for the verdict beside it: `kind` says which
+        // of eight situations this is and `verdict` says what to do about it, so
+        // one word for both would invite a reader to take either for the other.
+        RepoState::Unmoved => serde_json::json!({"kind": "unmoved"}),
+        RepoState::Unanswered(why) => {
+            serde_json::json!({"kind": "unanswered", "why": why})
+        }
+        RepoState::Moved { commits, files } => serde_json::json!({
+            "kind": "moved", "commits": commits, "files": files,
+        }),
+    }
+}
+
 fn as_json(reports: &[ProjectState]) -> serde_json::Value {
     let t = tally(reports);
     serde_json::json!({
@@ -561,29 +594,7 @@ fn as_json(reports: &[ProjectState]) -> serde_json::Value {
                 "repo": f.repo.to_string_lossy(),
                 "last_scan": f.last_scan.map(|d| d.to_string()),
                 "days_since_scan": f.days_since,
-                "state": match &f.state {
-                    RepoState::Missing(at) => {
-                        serde_json::json!({"kind": "repo-missing", "at": at})
-                    }
-                    RepoState::NoBaseline => serde_json::json!({"kind": "not-a-repository"}),
-                    // Never the vacated `no-baseline`: that string meant "nothing to do" and
-                    // this state is its opposite, so a consumer keyed on the old spelling
-                    // would read an actionable project as safe.
-                    RepoState::Unanchored => {
-                        serde_json::json!({"kind": "baseline-not-recorded"})
-                    }
-                    RepoState::NothingDeclared => {
-                        serde_json::json!({"kind": "nothing-declared"})
-                    }
-                    RepoState::BaselineGone => serde_json::json!({"kind": "baseline-gone"}),
-                    RepoState::Unmoved => serde_json::json!({"kind": "current"}),
-                    RepoState::Unanswered(why) => {
-                        serde_json::json!({"kind": "unanswered", "why": why})
-                    }
-                    RepoState::Moved { commits, files } => serde_json::json!({
-                        "kind": "moved", "commits": commits, "files": files,
-                    }),
-                },
+                "state": state_json(&f.state),
                 "declared_patterns": f.declared,
                 "declared_files": f.declared_files,
                 "extracted_sources": f.pages,
@@ -1026,6 +1037,31 @@ mod tests {
         let p = &json["projects"][0];
         assert_eq!(p["verdict"], "behind");
         assert_eq!(p["state"]["kind"], "baseline-not-recorded");
+        // The two fields answer different questions, so no state's kind may be spelled with a
+        // verdict's word.
+        let verdicts = ["behind", "current", "unmeasured"];
+        for state in [
+            RepoState::Missing("x".into()),
+            RepoState::NoBaseline,
+            RepoState::Unanchored,
+            RepoState::BaselineGone,
+            RepoState::Unmoved,
+            RepoState::Moved {
+                commits: None,
+                files: 1,
+            },
+            RepoState::Unanswered("x".into()),
+            RepoState::NothingDeclared,
+        ] {
+            let kind = state_json(&state)["kind"]
+                .as_str()
+                .expect("kind")
+                .to_string();
+            assert!(
+                !verdicts.contains(&kind.as_str()),
+                "`{kind}` names a verdict rather than the state it is"
+            );
+        }
         assert_eq!(json["behind"], 1);
         assert_eq!(json["current"], 0);
         assert_eq!(json["unmeasured"], 0);
