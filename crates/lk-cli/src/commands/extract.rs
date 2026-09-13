@@ -12,6 +12,17 @@
 //! is good, whether a project identifier leaked, which concepts two projects now share —
 //! stays with `/lore-extract audit`, because it needs a reader rather than a diff.
 //!
+//! What this can answer is bounded by what git reports, and the boundary is git's to move.
+//! A path git has been TOLD to look away from is silent to every question here: a file the
+//! ignore rules cover, an index entry marked `skip-worktree` or `assume-unchanged`, a
+//! submodule whose `.gitmodules` sets `ignore = all` or `dirty` — the last of which advances
+//! its own history without a word reaching the superproject. The ignore case is the one this
+//! detects, because there the whole population can be empty and "unchanged" would then be a
+//! statement about nothing; the others name a path git still lists, so the measure runs over
+//! them and inherits the silence. None is a defect to repair here — each is a repository or a
+//! user instructing git — but a row saying "sources unchanged" means unchanged as far as git
+//! will say, and that is the sentence this file can support.
+//!
 //! Staleness is measured against the DECLARED source patterns rather than against the
 //! repository as a whole. A quarter of commits that never touched `docs/` leaves an extraction
 //! current, and saying otherwise would mark the row permanently on any active repository —
@@ -405,12 +416,11 @@ fn repo_state(repo: &Path, baseline: Option<&str>, declared: &[String]) -> RepoS
     };
     // `git diff` lists tracked paths only, and a scan reads the working tree — so a source
     // written since and not yet staged differs from what was scanned while the diff is silent.
-    // `--exclude-standard` keeps the repository's own ignore rules. What it costs: a declared
-    // path git ignores is reached by neither probe, so it reads unchanged however it moves —
-    // which is why the scan lists its candidates through git rather than the filesystem, and
-    // refuses to declare an ignored file. Dropping the flag is not the alternative: every
-    // build artefact under a declared directory would then answer, and the row would be red
-    // for good.
+    // `--exclude-standard` keeps the repository's own ignore rules, which is what makes this
+    // pair answer for exactly one population: the files git knows under the declared paths.
+    // Dropping the flag would not widen the measure so much as fill it with every build
+    // artefact under a declared directory, and the row would be red for good. What the flag
+    // leaves out is handled below rather than here, where nothing differed.
     let mut args = vec!["ls-files", "--others", "--exclude-standard", "--"];
     args.extend(specs.iter().map(String::as_str));
     let Some(untracked) = git(repo, &args) else {
