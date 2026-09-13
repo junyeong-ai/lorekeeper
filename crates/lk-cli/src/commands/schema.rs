@@ -1179,6 +1179,24 @@ mod tests {
         }
     }
 
+    /// The wordings that ask which form a field has settled on — the judgment a copied name
+    /// exists to avoid, and the shape the superseded rule took.
+    ///
+    /// A literal set, lowercased, and that is the whole of what it can do: it refuses the
+    /// wording that regressed, never a fresh paraphrase of the same idea. What excludes a
+    /// paraphrase is review, and saying otherwise here would be the overclaim that lets one
+    /// through unread.
+    fn superseded_naming_judgments() -> Vec<String> {
+        use strum::IntoEnumIterator;
+        [
+            "the field actually uses".to_string(),
+            "established {language}".to_string(),
+        ]
+        .into_iter()
+        .chain(Locale::iter().map(|l| format!("established {}", l.english_name().to_lowercase())))
+        .collect()
+    }
+
     /// The two rules an extraction cannot get wrong without splitting a concept in two. A name
     /// chosen by judging what a field has settled on has no stable answer for the term a source
     /// is introducing, and one run answering it twice mints two pages; a rival looked for by
@@ -1217,12 +1235,15 @@ mod tests {
             // The section IS what `convergence_body` composes, not a text those lines appear
             // somewhere inside. Containment answers whether a rule is in there and nothing
             // about what was written beside it, and a clause appended to a rule reads as part
-            // of the rule to every agent downstream.
+            // of the rule to every agent downstream. What this cannot do is judge the
+            // composition: a line added to `convergence_body` satisfies it by construction,
+            // and only the refused wordings below stand against that.
             assert_eq!(
                 section,
                 format!("{}\n", composed.join("\n")),
-                "{locale:?}: the rendered section is not what `convergence_body` composes, so \
-                 the contract carries a sentence no check here reads"
+                "{locale:?}: the rendered section is not what `convergence_body` composes — \
+                 prose was written into the render around the composed lines, where a reader \
+                 takes it for part of the rule"
             );
 
             // The named rules are the rules only while the section is composed FROM them: a
@@ -1263,15 +1284,7 @@ mod tests {
             // superseded wording to warn a maintainer off restoring it, so that warning
             // lives in this comment and in the commit history rather than in the document.
             let document = md.to_lowercase();
-            let judgments = [
-                "the field actually uses".to_string(),
-                "established {language}".to_string(),
-            ]
-            .into_iter()
-            .chain(
-                Locale::iter().map(|l| format!("established {}", l.english_name().to_lowercase())),
-            );
-            for judgment in judgments {
+            for judgment in superseded_naming_judgments() {
                 assert!(
                     !document.contains(&judgment),
                     "{locale:?}: the spec says `{judgment}` somewhere, which asks which form \
@@ -1291,6 +1304,65 @@ mod tests {
                 "{locale:?}: convergence never names the bounded question, so the only way to \
                  find a rival is a read that grows with the vault"
             );
+        }
+    }
+
+    /// The contract as an agent reads it, pinned so a change to it is a change someone saw.
+    ///
+    /// Ten rounds of review each found a reworded naming rule reaching this document, and
+    /// what they have in common is not the wording — it is that nobody looked at the RENDERED
+    /// text. Every other check here asks whether some sentence is present or absent; this one
+    /// asks nothing and states a fact, so it catches the rewording none of those checks was
+    /// written for, including the ones nobody has thought of yet. Its cost is the point:
+    /// editing the contract fails until `cargo insta accept` records the new text, and that
+    /// acceptance lands in the diff as the sentence an agent will read rather than as a change
+    /// to a `format!` string.
+    ///
+    /// It does not replace the refused wordings: an accepted snapshot is silent, and the ban
+    /// still fails.
+    #[test]
+    fn the_rendered_contract_is_the_one_that_was_read() {
+        use strum::IntoEnumIterator;
+        for locale in Locale::iter() {
+            for personal in [true, false] {
+                let board = personal.then_some("tasks.md");
+                let md = render_agents_md(
+                    locale,
+                    &lk_core::config::VaultDirs::default(),
+                    personal,
+                    board,
+                );
+                let scope = if personal { "personal" } else { "core" };
+                // The generator stamp is the binary's version, which every release changes.
+                // Left in, each release would fail all four and be accepted unread — the habit
+                // this test exists to prevent.
+                let md = md.replace(&generator(), "lore <version>");
+                insta::assert_snapshot!(format!("agents-{}-{scope}", locale.tag()), md);
+            }
+        }
+    }
+
+    /// The contract is not the only copy the binary ships, and it is not the copy that names
+    /// a concept. `processing-kinds.md` restates the naming rule for the drain session that
+    /// writes concept pages, so a wording the spec refuses has to be refused there too — a
+    /// judgment the spec cannot state and a skill can is the same regression by a shorter
+    /// path to the page.
+    #[test]
+    fn no_shipped_skill_states_the_superseded_naming_rule() {
+        let judgments = superseded_naming_judgments();
+        for skill in lk_dist::skill_names() {
+            for file in lk_dist::skill_files(skill) {
+                let prose = file.contents.to_lowercase();
+                for judgment in &judgments {
+                    assert!(
+                        !prose.contains(judgment),
+                        "{skill}/{}: says `{judgment}`, which asks which form a field settled \
+                         on — the judgment a copied name exists to avoid, refused in every \
+                         artifact this binary ships",
+                        file.relative
+                    );
+                }
+            }
         }
     }
 
