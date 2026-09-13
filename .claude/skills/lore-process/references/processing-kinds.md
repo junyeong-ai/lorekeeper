@@ -24,10 +24,9 @@ the target: a vault that stays in its language by inference stays in it only whi
 something to infer from, and the first page a new vault writes has nothing.
 
 Two things it does not reach. Source content is never translated — a quoted line, a title
-you preserve, a link stay as they are. And a NAME is not prose: a concept's name is whichever
-form the field actually uses, so an English term keeps its spelling on a page written in
-Korean and a Korean product name keeps its on one written in English (see
-`kind: extract-concepts`).
+you preserve, a link stay as they are. And a NAME is not prose: a concept's name is the form
+the source writes, so an English term keeps its spelling on a page written in Korean and a
+Korean product name keeps its on one written in English (see `kind: extract-concepts`).
 
 ## `kind: summarize`
 
@@ -189,10 +188,12 @@ empty heading.
 **`name` is the concept's name and nothing else.** The name is also the address and the
 lookup key, and the lookup is exact — so a name carrying a gloss
 (`Agent Capability (에이전트 호출 가능 애플리케이션 단위)`) answers to neither the term nor
-the gloss, and the next source naming the bare term mints a rival page beside it. Pick the
-form the field actually uses: the established form in `input.locale` where the concept has
-one, the original term where it does not. Never translate a term to have translated it, and
-never append a translation to one.
+the gloss, and the next source naming the bare term mints a rival page beside it. The name is
+COPIED from the text you just read, never composed: whether a field has settled on a form in
+one language or another is a judgment with no stable answer for a term the text is
+introducing, and two answers to it in one batch is exactly how one concept becomes two pages.
+Where the text writes several forms, `name` is the one it uses AS the term. Never translate a
+term to have translated it, and never append a translation to one.
 
 `aliases` is where every other name goes — the translation, the expanded acronym, the
 original-language term, the abbreviation a team uses. Each is registered against the page, so
@@ -200,15 +201,14 @@ a later citation written in any of them resolves to it rather than forking the c
 alias an established page already answers to is dropped with a warning: the extraction is one
 source's reading, and the page that earned the name by being cited under it keeps it.
 
-**The vault's own language is not optional there.** Where the field has an established
-`input.locale` name for a concept and it is not the one you chose as `name`, that name is an
-alias — the one entry this kind requires rather than invites. A reader who does not yet know
-the title searches in the language the vault is written in, and without it they reach nothing
-while the page holds every citation on the subject, and the next source writing the term
-mints a rival page beside it. The evidence is the text you just read: an alias is a name that
-text WRITES, never one you recognize from elsewhere. A concept the sources only ever name in
-the original term gets none, and a translation nobody in the field writes is a spelling nobody
-will search for.
+**Where the text writes the concept in `input.locale` too, that form is not optional there.**
+It is the one alias entry this kind requires rather than invites: a reader who does not yet
+know the title searches in the language the vault is written in, and without it they reach
+nothing while the page holds every citation on the subject, after which the next source
+writing that form mints a rival page beside it. What bounds this is the rule `name` follows —
+an alias is a name the text WRITES, never one you recognize from elsewhere — so a concept the
+sources only ever name one way gets one name. A translation nobody writes is a spelling nobody
+searches for, and inventing one costs a rival page rather than preventing it.
 
 `concepts` may be empty — that is a valid answer for a page with nothing durable in it, and
 it still records that the task was answered. Copy `target` and `cache_hash` through

@@ -597,25 +597,28 @@ pub fn render_agents_md(
         "**A concept's title is its name and nothing else.** The title is the address and the \
          lookup key, and the lookup is exact — so a title carrying a parenthetical gloss \
          answers to neither the term nor the gloss, and the next mention of the bare term \
-         mints a rival page beside it. Choose the form the field actually uses: the \
-         established {language} where the concept has one, the original term where it does \
-         not. Every other spelling — the translation, the expanded acronym, the abbreviation \
-         — goes in `aliases`, which is what makes a citation written in any of them resolve \
-         here."
+         mints a rival page beside it. The name is COPIED from the material you just read, \
+         never composed: whether a field has settled on a form in one language or another is a \
+         judgment with no stable answer for a term the material is introducing, and two \
+         answers to it in one batch is exactly how one concept becomes two pages. Where the \
+         material writes several forms, the title is the one it uses AS the term and every \
+         other — the gloss, the translation, the expanded acronym, the abbreviation — goes in \
+         `aliases`, which is what makes a citation written in any of them resolve here. A form \
+         the material does not write is a name no later extraction reproduces."
     )
     .unwrap();
     writeln!(out).unwrap();
     writeln!(
         out,
-        "**This vault is written in {language}, and its own language is not optional in \
-         `aliases`.** Where the field has an established {language} name for a concept whose \
-         title is not it, that name belongs on the page. A reader who does not already know \
+        "**This vault is written in {language}, and where the material writes the concept in \
+         {language} too that form is not optional in `aliases`.** A reader who does not know \
          the title searches in the language the vault is written in, and without the alias \
-         they reach nothing while the page holds every citation on the subject — and the \
-         next extraction that writes the term mints a rival page. The evidence is the material \
-         you just read: an alias is a name that material WRITES, never one recognized from \
-         elsewhere, so a concept the sources only ever name in the original term gets none. \
-         A translation nobody in the field writes is a spelling nobody will search for."
+         they reach nothing while the page holds every citation on the subject — after which \
+         the next extraction writing that form mints a rival page. What bounds this is the \
+         same rule the title follows: an alias is a name the material WRITES, so a concept the \
+         sources only ever name one way gets one name. A translation nobody writes is a \
+         spelling nobody searches for, and inventing one costs a rival page rather than \
+         preventing it."
     )
     .unwrap();
     writeln!(out).unwrap();
@@ -766,14 +769,14 @@ mod tests {
                 )),
                 "{locale:?}: AGENTS.md never states the language pages are authored in"
             );
-            assert!(
-                md.contains(&format!("the established {}", locale.english_name())),
-                "{locale:?}: the concept naming policy does not name this vault's language"
-            );
+            // Pinned on the language NAMED anywhere in the spec rather than on one phrase
+            // that names it: an agent told to prefer another vault's language writes that
+            // vault's pages in it, and the instruction erodes into whichever sentence
+            // carries it.
             for other in Locale::iter().filter(|l| *l != locale) {
                 assert!(
-                    !md.contains(&format!("the established {}", other.english_name())),
-                    "{locale:?}: the spec instructs an agent to prefer {} names",
+                    !md.contains(other.english_name()),
+                    "{locale:?}: the spec names {}, which is not this vault's language",
                     other.english_name()
                 );
             }
