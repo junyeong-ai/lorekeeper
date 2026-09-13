@@ -68,7 +68,7 @@ each as an independent source, and report the aggregate results.
    several per source). Converge each one through the **Concept convergence**
    section of the vault's `AGENTS.md` — `lore resolve <name>` per concept for the
    page that already owns the name, the created-this-run set for pages this add
-   minted, the registry (`lore wiki concepts`) for the equivalences no rule about
+   minted, `lore wiki search` on the name's distinguishing terms for the equivalences no rule about
    spelling can see, then alias registration and the machine-owned sources
    section/`source_count` fields. Fill the Synthesis section with a 1-2 sentence
    definition for a new concept; the document's forward concept link from step 3

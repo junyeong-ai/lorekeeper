@@ -132,7 +132,8 @@ The essentials: a visible `.jsonl` is fully written and every
    `lore resolve <name>` which page owns each extracted name: it answers by the same rule
    the ingest pipeline routes by, so the two cannot disagree about an existing name. The
    queue task carries no concept registry, so that answer, plus a created-this-run set, plus
-   `lore wiki concepts` for the equivalences spelling cannot see, is the full dedup baseline
+   `lore wiki search` on the name's distinguishing terms for the equivalences spelling cannot
+   see, is the full dedup baseline
    (see the vault AGENTS.md § Concept convergence).
 
 2. **List unprocessed queue files** in `<vault>/.lorekeeper/queue/` (top

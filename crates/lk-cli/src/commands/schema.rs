@@ -646,9 +646,14 @@ pub fn render_agents_md(
         "3. **Judge the names `resolve` cannot.** An exit 1 is the answer for a name nothing \
          answers to, not for a concept the vault lacks: an acronym and its expansion, a \
          plural, a team's shorthand are DIFFERENT names for one thing, and no rule about \
-         spelling can see it. Read the registry (`lore wiki concepts`) once for those, and \
-         when one matches, reuse the established page and register the surface form as an \
-         alias. When in doubt prefer the established broader concept over a narrow variant."
+         spelling can see it. Ask `lore wiki search` for the name's distinguishing terms — \
+         two or three, never the whole name, since every term must appear and a long query \
+         narrows past the very page it is looking for — then read the hits and judge. Reuse \
+         the established page and register the surface form as an alias when one matches, and \
+         when in doubt prefer the established broader concept over a narrow variant. What a \
+         query cannot reach is a rival sharing no word with the name; the registry (`lore \
+         wiki concepts`) is where that would show, and it is a read whose cost grows with the \
+         vault while a query's does not."
     )
     .unwrap();
     writeln!(

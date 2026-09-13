@@ -230,8 +230,9 @@ what counts as a concept (per-type scoping: see
 
 **Concept dedup** follows the **Concept convergence** section of the vault's
 `AGENTS.md`: `lore resolve <name>` per concept, plus the created-this-run set,
-plus the registry (`lore wiki concepts`) for the equivalences no rule about
-spelling can see — the queue task carries no concept registry of its own.
+plus `lore wiki search` on two or three of the name's distinguishing terms for the
+equivalences no rule about spelling can see — the queue task carries no concept registry of
+its own.
 
 **Category assignment.** Hard constraint: the `category` value MUST be one of
 the IDs in `input.categories` (verbatim string match) or the field MUST be
