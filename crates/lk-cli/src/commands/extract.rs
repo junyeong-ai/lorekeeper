@@ -53,8 +53,9 @@ struct Manifest {
 struct Project {
     repo_path: String,
     last_scan: Option<jiff::civil::Date>,
-    /// Absent for a project not under git — the skill falls back to file mtimes there, and so
-    /// does the verdict below.
+    /// Absent for a project not under git. There is then no anchor to measure against and
+    /// nothing here substitutes one: an mtime moves on a checkout, a copy or a formatter
+    /// without changing a word the source says, so the state is reported unmeasured.
     #[serde(default)]
     git_head_at_scan: Option<String>,
 }
@@ -804,6 +805,36 @@ mod tests {
             panic!("expected a read manifest")
         };
         assert!(matches!(f.state, RepoState::Moved { files: 1, .. }));
+    }
+
+    /// The other half of `:(glob)`, and the half that only a test states: `*` covers one
+    /// directory level. Git's DEFAULT pathspec magic lets a bare `*` cross `/`, so
+    /// `docs/*.md` would answer for `docs/sub/b.md` — a file the scan never read, since the
+    /// scan matched the same pattern as a shell glob. Under default magic the row marks a
+    /// project behind over a source it does not have, and the manifest's own `count` could
+    /// never reproduce the number.
+    #[test]
+    fn a_single_star_covers_one_directory_level_the_way_the_scan_read_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        let vault = dir.path().join("vault");
+        git_repo(&repo);
+        commit(&repo, "docs/a.md", "one");
+        let base = commit(&repo, "docs/sub/b.md", "one");
+        commit(&repo, "docs/sub/b.md", "two");
+
+        write_manifest(&vault, "flat", &manifest_for(&repo, &base, "docs/*.md"));
+        assert!(
+            !survey(&vault, TODAY).expect("survey")[0].needs_attention(),
+            "a nested file is not what `docs/*.md` declared"
+        );
+
+        let deep = dir.path().join("deep-vault");
+        write_manifest(&deep, "deep", &manifest_for(&repo, &base, "docs/**/*.md"));
+        assert!(
+            survey(&deep, TODAY).expect("survey")[0].needs_attention(),
+            "`**` is what reaches beneath, and it must still reach"
+        );
     }
 
     /// One path can answer to both probes: dropped from the index and left on disk, it is a

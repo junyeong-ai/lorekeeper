@@ -187,6 +187,12 @@ Discover knowledge sources and persist a manifest.
    `count` with how many files the pattern matched, so the coverage line has one unit on both
    sides.
 
+   A recorded pattern is read as a SHELL glob, by the scan that wrote it and by the check that
+   reads it back. So `*` covers one directory level and `**` is what recurses: `docs/*.md`
+   names the files directly in `docs/`, and everything beneath it is `docs/**/*.md`. Write the
+   pattern that matches what the scan actually read — `count` is the check on this, since a
+   pattern reaching further than the scan did will not reproduce the number beside it.
+
 4. **Read the claims, and check each one against the facts.** CLAUDE.md, `.claude/rules/`,
    ADRs, learnings, READMEs, and doc comments are all one tier: a claim ABOUT the code, which
    may be absent, may have been true once, or may never have been true.
