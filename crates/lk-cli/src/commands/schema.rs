@@ -1173,12 +1173,16 @@ mod tests {
         }
     }
 
-    /// The two rules an extraction cannot get wrong without splitting a concept in two, held
-    /// by what the document must NOT say as well as what it must. A name chosen by judging
-    /// what a field has settled on has no stable answer for the term a source is introducing,
-    /// and one run answering it twice mints two pages; a rival looked for by reading the whole
-    /// registry is a read that outgrows the session, and a convergence step that stops running
-    /// fails silently. Both were shipped as prose, and prose is what a later edit rewrites.
+    /// The two rules an extraction cannot get wrong without splitting a concept in two. A name
+    /// chosen by judging what a field has settled on has no stable answer for the term a source
+    /// is introducing, and one run answering it twice mints two pages; a rival looked for by
+    /// reading the whole registry is a read that outgrows the session, and a convergence step
+    /// that stops running fails silently.
+    ///
+    /// Each check is anchored to the paragraph that carries the rule rather than run over the
+    /// document: a ban on a phrase is a proxy for a judgment no check can make, and over a
+    /// whole document it fires on prose that merely contains the words — `transform the field`
+    /// has nothing to do with which form a field settled on.
     #[test]
     fn the_naming_and_convergence_rules_survive_a_rewording() {
         use strum::IntoEnumIterator;
@@ -1189,26 +1193,36 @@ mod tests {
                 true,
                 Some("tasks.md"),
             );
-            // `the established page` is a different claim and stays; what may not appear is a
-            // form a FIELD is said to have settled on, in any language this tool speaks.
-            let mut forbidden = vec![
+            let convergence = md
+                .split_once("## Concept convergence")
+                .expect("the spec carries the convergence contract")
+                .1;
+            // The title rule opens the section and ends at the paragraph after it. Both the
+            // superseded wording and this one open the same way, so the slice holds across a
+            // revert — which is the edit this exists to fail on.
+            let title_rule = convergence
+                .split_once("**A concept's title is its name")
+                .expect("the convergence contract opens on the title rule")
+                .1
+                .split("\n\n")
+                .next()
+                .expect("a paragraph");
+            assert!(
+                title_rule.contains("COPIED"),
+                "{locale:?}: the title rule no longer says a name is copied rather than composed"
+            );
+            for judged in [
                 "the field actually uses".to_string(),
-                "form the field".to_string(),
-            ];
-            forbidden.extend(Locale::iter().map(|l| format!("established {}", l.english_name())));
-            for judged in forbidden {
+                format!("established {}", locale.english_name()),
+            ] {
                 assert!(
-                    !md.contains(&judged),
-                    "{locale:?}: `{judged}` asks which form a field settled on, which is the \
-                     judgment a name is copied to avoid"
+                    !title_rule.contains(&judged),
+                    "{locale:?}: the title rule says `{judged}`, which asks which form a field \
+                     settled on — the judgment a name is copied to avoid"
                 );
             }
             assert!(
-                md.contains("COPIED"),
-                "{locale:?}: the document never says a name is copied rather than composed"
-            );
-            assert!(
-                md.contains("`lore wiki search`"),
+                convergence.contains("`lore wiki search`"),
                 "{locale:?}: convergence never names the bounded question, so the only way to \
                  find a rival is a read that grows with the vault"
             );
