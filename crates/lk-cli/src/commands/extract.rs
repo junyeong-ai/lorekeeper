@@ -51,7 +51,6 @@ struct Manifest {
 
 #[derive(Deserialize)]
 struct Project {
-    name: String,
     repo_path: String,
     last_scan: Option<jiff::civil::Date>,
     /// Absent for a project not under git — the skill falls back to file mtimes there, and so
@@ -63,6 +62,10 @@ struct Project {
 #[derive(Deserialize)]
 struct DiscoveredSource {
     path: String,
+    /// How many files the pattern matched when the scan ran. Reported beside the extracted
+    /// count so the two sides share a unit; a pattern count and a file count do not.
+    #[serde(default)]
+    count: usize,
 }
 
 #[derive(Deserialize)]
@@ -84,15 +87,8 @@ enum Source {
 impl Source {
     fn paths(&self) -> &[String] {
         match self {
-            Source::One(_) => std::slice::from_ref(self.first()),
+            Source::One(s) => std::slice::from_ref(s),
             Source::Many(v) => v,
-        }
-    }
-
-    fn first(&self) -> &String {
-        match self {
-            Source::One(s) => s,
-            Source::Many(v) => &v[0],
         }
     }
 }
@@ -103,8 +99,12 @@ impl Source {
 /// another: a repository that is gone needs a path fixed, a baseline that no longer resolves
 /// needs a re-scan to re-anchor, and a moved one needs the extraction run again.
 enum RepoState {
-    Missing,
-    /// No baseline commit was recorded — the project is not under git, or was not when scanned.
+    /// Carries the path it looked at: a manifest written with a `~` this could not expand
+    /// resolves nowhere, and "not found" without the path reads as a repository that moved.
+    Missing(String),
+    /// The manifest recorded no baseline commit, so there is nothing to diff against. The
+    /// scan writes one for every git repository it reads, so this is a project that was not
+    /// one when it was scanned.
     NoBaseline,
     /// The recorded commit is not in this repository: a rebase, a fresh clone, or a rewritten
     /// history. The scan cannot be diffed against anything, which is not the same as unmoved.
@@ -114,6 +114,9 @@ enum RepoState {
         commits: usize,
         files: usize,
     },
+    /// The question could not be put. Apart from the rest because a question that failed is
+    /// not an answer of "nothing changed".
+    Unanswered(String),
 }
 
 impl RepoState {
@@ -123,31 +126,49 @@ impl RepoState {
 
     fn describe(&self) -> String {
         match self {
-            RepoState::Missing => "repository not found".into(),
+            RepoState::Missing(at) => format!("no repository at {at}"),
             RepoState::NoBaseline => "no git baseline".into(),
             RepoState::BaselineGone => "baseline commit is gone".into(),
             RepoState::Unmoved => "sources unchanged".into(),
             RepoState::Moved { commits, files } => {
                 format!("{files} declared source file(s) changed over {commits} commit(s)")
             }
+            RepoState::Unanswered(why) => format!("cannot be measured — {why}"),
         }
     }
 }
 
-pub(crate) struct ProjectReport {
+pub(crate) struct ProjectState {
     name: String,
+    detail: Detail,
+}
+
+/// A manifest that is present and unusable is REPORTED, neither dropped nor fatal — the same
+/// answer `lore queue status` gives a target page that will not parse. Dropping it would say
+/// a project has no extraction when it has one nobody can read; failing the command would let
+/// one bad file decide what is said about the other eight.
+enum Detail {
+    Read(Facts),
+    Unreadable(String),
+}
+
+struct Facts {
     repo: PathBuf,
     last_scan: Option<jiff::civil::Date>,
     days_since: Option<i64>,
     declared: usize,
+    declared_files: usize,
     pages: usize,
     skipped: usize,
     state: RepoState,
 }
 
-impl ProjectReport {
+impl ProjectState {
     fn is_current(&self) -> bool {
-        self.state.is_current()
+        match &self.detail {
+            Detail::Read(f) => f.state.is_current(),
+            Detail::Unreadable(_) => false,
+        }
     }
 }
 
@@ -167,6 +188,12 @@ pub async fn run(opts: &super::GlobalOptions, cmd: ExtractCommand) -> miette::Re
     } else {
         render(&reports);
     }
+    // The command that owns a subsystem is the one whose exit code answers for it, so a
+    // project a person has to act on fails this the way an overdue source fails `lore health`.
+    // `lore status` composes the verdict without gating on it.
+    if behind(&reports) > 0 {
+        std::process::exit(1);
+    }
     Ok(())
 }
 
@@ -177,32 +204,55 @@ pub async fn run(opts: &super::GlobalOptions, cmd: ExtractCommand) -> miette::Re
 pub(crate) fn survey(
     vault_root: &Path,
     today: jiff::civil::Date,
-) -> miette::Result<Vec<ProjectReport>> {
+) -> miette::Result<Vec<ProjectState>> {
     let dir = vault_root.join(".lorekeeper").join("extracts");
     let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Ok(out);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        // An install that has never extracted has no directory. Any other failure is a read
+        // that did not happen, and reporting it as "no manifests" would be the same defect
+        // this command exists to report.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(miette::miette!("{}: {e}", dir.display())),
     };
     for entry in entries.flatten() {
         let path = entry.path().join("manifest.yaml");
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // A directory under `extracts/` holding no manifest is not a project — the only
+        // absence this treats as an absence, because the file system answered it.
+        let detail = match std::fs::read_to_string(&path) {
+            Ok(text) => match serde_yaml_ng::from_str::<Manifest>(&text) {
+                Ok(manifest) => Detail::Read(build_facts(manifest, today)),
+                Err(e) => Detail::Unreadable(e.to_string()),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => Detail::Unreadable(e.to_string()),
         };
-        let manifest: Manifest = serde_yaml_ng::from_str(&text)
-            .map_err(|e| miette::miette!("{}: {e}", path.display()))?;
-        out.push(report(manifest, today));
+        out.push(ProjectState { name, detail });
     }
-    out.sort_by(|a, b| a.last_scan.cmp(&b.last_scan).then(a.name.cmp(&b.name)));
+    out.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
     Ok(out)
 }
 
-fn report(manifest: Manifest, today: jiff::civil::Date) -> ProjectReport {
-    let repo = expand_home(&manifest.project.repo_path);
+impl ProjectState {
+    /// Unreadable manifests sort first: they are the ones a person has to act on before any
+    /// other row about them means anything.
+    fn sort_key(&self) -> (Option<jiff::civil::Date>, &str) {
+        match &self.detail {
+            Detail::Read(f) => (f.last_scan, self.name.as_str()),
+            Detail::Unreadable(_) => (None, self.name.as_str()),
+        }
+    }
+}
+
+fn build_facts(manifest: Manifest, today: jiff::civil::Date) -> Facts {
+    let repo = lk_core::config::expand_tilde(&manifest.project.repo_path);
     let declared: Vec<String> = manifest
         .discovered_sources
         .iter()
         .map(|s| s.path.clone())
         .collect();
+    let declared_files: usize = manifest.discovered_sources.iter().map(|s| s.count).sum();
     let state = repo_state(
         &repo,
         manifest.project.git_head_at_scan.as_deref(),
@@ -221,30 +271,18 @@ fn report(manifest: Manifest, today: jiff::civil::Date) -> ProjectReport {
         .iter()
         .filter(|e| e.vault_page.is_none())
         .count();
-    ProjectReport {
-        name: manifest.project.name,
+    Facts {
         repo,
         last_scan: manifest.project.last_scan,
         days_since: manifest
             .project
             .last_scan
-            .map(|d| today.since(d).map(|s| s.get_days() as i64).unwrap_or(0)),
+            .and_then(|d| today.since(d).ok().map(|s| i64::from(s.get_days()))),
         declared: declared.len(),
+        declared_files,
         pages,
         skipped,
         state,
-    }
-}
-
-/// `~` is expanded because the manifest is written by an agent transcribing what the operator
-/// typed, and both spellings appear in manifests already on disk.
-fn expand_home(raw: &str) -> PathBuf {
-    match raw.strip_prefix("~/") {
-        Some(rest) => match std::env::var_os("HOME") {
-            Some(home) => PathBuf::from(home).join(rest),
-            None => PathBuf::from(raw),
-        },
-        None => PathBuf::from(raw),
     }
 }
 
@@ -256,12 +294,31 @@ fn expand_home(raw: &str) -> PathBuf {
 /// this can only over-report, and over-reporting a change is the direction that sends someone
 /// to look rather than the one that keeps them away.
 fn repo_state(repo: &Path, baseline: Option<&str>, declared: &[String]) -> RepoState {
-    if !repo.join(".git").exists() {
-        return RepoState::Missing;
+    if !repo.is_dir() {
+        return RepoState::Missing(repo.display().to_string());
     }
+    // Whether a directory is a repository is git's question, not the filesystem's: a linked
+    // worktree carries `.git` as a FILE, and a subdirectory of a repository carries none
+    // while git answers for it. Probing for a `.git` directory disagreed with the scan, which
+    // records a baseline through `git -C <path> rev-parse`.
     let Some(baseline) = baseline else {
         return RepoState::NoBaseline;
     };
+    // A declared path is a pathspec git reads from the repository root. One that is absolute
+    // or home-relative names something else, and git answers zero for it with exit 0 — a
+    // green row over a source that has moved. Refused here rather than trusted.
+    if let Some(bad) = declared
+        .iter()
+        .find(|p| p.starts_with('/') || p.starts_with('~'))
+    {
+        return RepoState::Unanswered(format!("`{bad}` is not a path inside the repository"));
+    }
+    if declared.is_empty() {
+        return RepoState::Unanswered("the manifest declares no source to measure".into());
+    }
+    if git(repo, &["rev-parse", "--git-dir"]).is_none() {
+        return RepoState::Unanswered("git does not answer for this directory".into());
+    }
     if git(
         repo,
         &["rev-parse", "--verify", &format!("{baseline}^{{commit}}")],
@@ -271,16 +328,24 @@ fn repo_state(repo: &Path, baseline: Option<&str>, declared: &[String]) -> RepoS
         return RepoState::BaselineGone;
     }
     let range = format!("{baseline}..HEAD");
-    let mut args = vec!["log", "--oneline", &range, "--"];
+    let mut args = vec!["rev-list", "--count", &range, "--"];
     args.extend(declared.iter().map(String::as_str));
-    let commits = git(repo, &args).map_or(0, |out| out.lines().count());
+    let Some(log) = git(repo, &args) else {
+        return RepoState::Unanswered("git refused the declared paths".into());
+    };
+    let commits: usize = log.trim().parse().unwrap_or(0);
     if commits == 0 {
         return RepoState::Unmoved;
     }
     let mut args = vec!["diff", "--name-only", &range, "--"];
     args.extend(declared.iter().map(String::as_str));
-    let files = git(repo, &args).map_or(0, |out| out.lines().count());
-    RepoState::Moved { commits, files }
+    let Some(diff) = git(repo, &args) else {
+        return RepoState::Unanswered("git refused the declared paths".into());
+    };
+    RepoState::Moved {
+        commits,
+        files: diff.lines().count(),
+    }
 }
 
 fn git(repo: &Path, args: &[&str]) -> Option<String> {
@@ -295,7 +360,7 @@ fn git(repo: &Path, args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-fn render(reports: &[ProjectReport]) {
+fn render(reports: &[ProjectState]) {
     if reports.is_empty() {
         println!("No extraction manifests — `/lore-extract scan <repo>` writes the first.");
         return;
@@ -308,62 +373,80 @@ fn render(reports: &[ProjectReport]) {
         .unwrap_or(0);
     for r in reports {
         let mark = if r.is_current() { ' ' } else { '!' };
-        let scanned = match (r.last_scan, r.days_since) {
-            (Some(d), Some(n)) => format!("scanned {d} ({n}d ago)"),
-            _ => "never scanned".to_string(),
-        };
-        println!(
-            "{mark} {}  {scanned} · {}",
-            super::pad(&r.name, width),
-            r.state.describe()
-        );
-        println!(
-            "  {}  {} source group(s) declared · {} extracted · {} skipped",
-            super::pad("", width),
-            r.declared,
-            r.pages,
-            r.skipped
-        );
+        let name = super::pad(&r.name, width);
+        match &r.detail {
+            Detail::Unreadable(why) => {
+                println!("{mark} {name}  manifest unreadable · {why}");
+            }
+            Detail::Read(f) => {
+                let scanned = match (f.last_scan, f.days_since) {
+                    (Some(d), Some(n)) => format!("scanned {d} ({n}d ago)"),
+                    (Some(d), None) => format!("scanned {d}"),
+                    _ => "never scanned".to_string(),
+                };
+                println!("{mark} {name}  {scanned} · {}", f.state.describe());
+                println!(
+                    "  {}  {} file(s) declared in {} pattern(s) · {} extracted · {} skipped",
+                    super::pad("", width),
+                    f.declared_files,
+                    f.declared,
+                    f.pages,
+                    f.skipped
+                );
+            }
+        }
     }
-    let behind = reports.iter().filter(|r| !r.is_current()).count();
+    let behind = behind(reports);
     println!();
     if behind == 0 {
         println!("Every manifest is current with its repository.");
     } else {
         println!(
-            "{behind} of {} project(s) have moved since their scan — `/lore-extract scan <repo>` \
-             then `/lore-extract run <repo>`; `/lore-extract audit` judges what is already there.",
+            "{behind} of {} project(s) need attention — `/lore-extract scan <repo>` then \
+             `/lore-extract run <repo>`; `/lore-extract audit` judges what is already there.",
             reports.len()
         );
     }
 }
 
-fn as_json(reports: &[ProjectReport]) -> serde_json::Value {
+fn as_json(reports: &[ProjectState]) -> serde_json::Value {
     serde_json::json!({
-        "projects": reports.iter().map(|r| serde_json::json!({
-            "name": r.name,
-            "repo": r.repo.to_string_lossy(),
-            "last_scan": r.last_scan.map(|d| d.to_string()),
-            "days_since_scan": r.days_since,
-            "state": match &r.state {
-                RepoState::Missing => serde_json::json!({"kind": "repo-missing"}),
-                RepoState::NoBaseline => serde_json::json!({"kind": "no-baseline"}),
-                RepoState::BaselineGone => serde_json::json!({"kind": "baseline-gone"}),
-                RepoState::Unmoved => serde_json::json!({"kind": "current"}),
-                RepoState::Moved { commits, files } => serde_json::json!({
-                    "kind": "moved", "commits": commits, "files": files,
-                }),
-            },
-            "declared_source_groups": r.declared,
-            "extracted_sources": r.pages,
-            "skipped_sources": r.skipped,
-        })).collect::<Vec<_>>(),
-        "behind": reports.iter().filter(|r| !r.is_current()).count(),
+        "projects": reports.iter().map(|r| match &r.detail {
+            Detail::Unreadable(why) => serde_json::json!({
+                "name": r.name,
+                "state": {"kind": "manifest-unreadable", "why": why},
+            }),
+            Detail::Read(f) => serde_json::json!({
+                "name": r.name,
+                "repo": f.repo.to_string_lossy(),
+                "last_scan": f.last_scan.map(|d| d.to_string()),
+                "days_since_scan": f.days_since,
+                "state": match &f.state {
+                    RepoState::Missing(at) => {
+                        serde_json::json!({"kind": "repo-missing", "at": at})
+                    }
+                    RepoState::NoBaseline => serde_json::json!({"kind": "no-baseline"}),
+                    RepoState::BaselineGone => serde_json::json!({"kind": "baseline-gone"}),
+                    RepoState::Unmoved => serde_json::json!({"kind": "current"}),
+                    RepoState::Unanswered(why) => {
+                        serde_json::json!({"kind": "unanswered", "why": why})
+                    }
+                    RepoState::Moved { commits, files } => serde_json::json!({
+                        "kind": "moved", "commits": commits, "files": files,
+                    }),
+                },
+                "declared_patterns": f.declared,
+                "declared_files": f.declared_files,
+                "extracted_sources": f.pages,
+                "skipped_sources": f.skipped,
+            }),
+        }).collect::<Vec<_>>(),
+        "behind": behind(reports),
     })
 }
 
 /// How many projects have moved since their scan, for the `lore status` row.
-pub(crate) fn behind(reports: &[ProjectReport]) -> usize {
+pub(crate) fn behind(reports: &[ProjectState]) -> usize {
     reports.iter().filter(|r| !r.is_current()).count()
 }
 
@@ -447,8 +530,7 @@ mod tests {
         let quiet = survey(&vault, TODAY).expect("survey");
         assert!(
             quiet[0].is_current(),
-            "a commit outside the declared paths must not age an extraction: {}",
-            quiet[0].state.describe()
+            "a commit outside the declared paths must not age an extraction"
         );
 
         commit(&repo, "docs/b.md", "two");
@@ -457,7 +539,10 @@ mod tests {
             !moved[0].is_current(),
             "a changed declared path must age it"
         );
-        assert!(matches!(moved[0].state, RepoState::Moved { files: 1, .. }));
+        assert!(matches!(
+            moved[0].detail,
+            Detail::Read(ref f) if matches!(f.state, RepoState::Moved { files: 1, .. })
+        ));
     }
 
     /// A baseline the repository no longer holds is its own state. Folding it into "unmoved"
@@ -481,7 +566,10 @@ mod tests {
             ),
         );
         let report = survey(&vault, TODAY).expect("survey");
-        assert!(matches!(report[0].state, RepoState::BaselineGone));
+        assert!(matches!(
+            report[0].detail,
+            Detail::Read(ref f) if matches!(f.state, RepoState::BaselineGone)
+        ));
         assert!(!report[0].is_current());
     }
 
@@ -501,9 +589,164 @@ mod tests {
              wiki/documents/y.md\n  - source: d.md\n    vault_page: null\n",
         );
         let report = survey(&vault, TODAY).expect("survey");
-        assert_eq!(report[0].pages, 3, "a.md, b.md and c.md all reached a page");
-        assert_eq!(report[0].skipped, 1);
-        assert!(matches!(report[0].state, RepoState::Missing));
+        let Detail::Read(f) = &report[0].detail else {
+            panic!("expected a read manifest")
+        };
+        assert_eq!(f.pages, 3, "a.md, b.md and c.md all reached a page");
+        assert_eq!(f.skipped, 1);
+        assert!(matches!(f.state, RepoState::Missing(_)));
+    }
+
+    /// A git call that fails must not read as "nothing changed". Proven by making it fail:
+    /// a declared path git refuses as a pathspec is the one input that reaches this without
+    /// breaking the repository, and before this variant existed it reported the project
+    /// current.
+    #[test]
+    fn a_git_call_that_did_not_answer_is_not_read_as_unchanged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        let vault = dir.path().join("vault");
+        git_repo(&repo);
+        let base = commit(&repo, "docs/a.md", "one");
+        commit(&repo, "docs/b.md", "two");
+
+        write_manifest(&vault, "ok", &manifest_for(&repo, &base, "docs/*.md"));
+        assert!(matches!(
+            survey(&vault, TODAY).expect("survey")[0].detail,
+            Detail::Read(ref f) if matches!(f.state, RepoState::Moved { .. })
+        ));
+
+        // `:(bogus)` is pathspec magic git rejects, so the log call fails rather than
+        // answering zero.
+        write_manifest(&vault, "ok", &manifest_for(&repo, &base, ":(bogus)x"));
+        let report = survey(&vault, TODAY).expect("survey");
+        assert!(
+            matches!(report[0].detail, Detail::Read(ref f) if matches!(f.state, RepoState::Unanswered(_))),
+            "a refused pathspec must not report the project current"
+        );
+        assert!(!report[0].is_current());
+    }
+
+    /// A manifest that is present and unusable is reported, not dropped and not fatal. Both
+    /// halves matter: dropping says a project has no extraction when it has one nobody can
+    /// read, and failing lets one bad file decide what is said about the others.
+    #[test]
+    fn an_unusable_manifest_is_reported_beside_the_ones_that_read() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = dir.path().join("vault");
+        write_manifest(
+            &vault,
+            "broken",
+            "project:\n  name: [this is not a string\n",
+        );
+        write_manifest(
+            &vault,
+            "sound",
+            "project:\n  name: p\n  repo_path: /nonexistent\n  last_scan: 2026-09-01\n\
+             discovered_sources: []\nextracted: []\n",
+        );
+        std::fs::create_dir_all(vault.join(".lorekeeper/extracts/not-a-project")).expect("mkdir");
+
+        let report = survey(&vault, TODAY).expect("a bad manifest must not fail the command");
+        assert_eq!(
+            report.len(),
+            2,
+            "a directory holding no manifest is not a project"
+        );
+        assert_eq!(report[0].name, "broken");
+        assert!(matches!(report[0].detail, Detail::Unreadable(_)));
+        assert!(!report[0].is_current());
+        assert!(matches!(report[1].detail, Detail::Read(_)));
+    }
+
+    /// `source: []` is a shape YAML accepts and the manifest schema does not forbid.
+    #[test]
+    fn an_extraction_naming_no_source_counts_none_rather_than_panicking() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = dir.path().join("vault");
+        write_manifest(
+            &vault,
+            "empty",
+            "project:\n  name: p\n  repo_path: /nonexistent\n  last_scan: 2026-09-01\n\
+             discovered_sources: []\nextracted:\n  - source: []\n    vault_page: x.md\n",
+        );
+        let report = survey(&vault, TODAY).expect("survey");
+        assert!(matches!(report[0].detail, Detail::Read(ref f) if f.pages == 0));
+    }
+
+    /// The four repo states each name a different repair, so none may absorb another. Proven
+    /// by producing each: a path that is not there, a manifest that recorded no baseline, a
+    /// directory git does not answer for, and a baseline the repository no longer holds.
+    /// Before this, a `.git` probe ahead of the baseline check made every non-git project
+    /// read "repository not found" and told the operator to fix a path that was correct.
+    #[test]
+    fn each_repo_state_is_reachable_and_none_absorbs_another() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = dir.path().join("vault");
+        let plain = dir.path().join("plain");
+        std::fs::create_dir_all(&plain).expect("mkdir");
+
+        write_manifest(
+            &vault,
+            "gone",
+            &manifest_for(Path::new("/nonexistent"), "abc", "d/*"),
+        );
+        write_manifest(
+            &vault,
+            "no-baseline",
+            &format!(
+                "project:\n  repo_path: {}\n  last_scan: 2026-09-01\ndiscovered_sources:\n  \
+                 - path: \"d/*\"\n    count: 1\nextracted: []\n",
+                plain.display()
+            ),
+        );
+        write_manifest(&vault, "not-a-repo", &manifest_for(&plain, "abc", "d/*"));
+
+        let by = |n: &str, r: &[ProjectState]| {
+            let p = r.iter().find(|x| x.name == n).expect("project");
+            let Detail::Read(f) = &p.detail else {
+                panic!("expected a read manifest")
+            };
+            f.state.describe()
+        };
+        let r = survey(&vault, TODAY).expect("survey");
+        assert!(by("gone", &r).contains("no repository at"));
+        assert_eq!(by("no-baseline", &r), "no git baseline");
+        assert!(
+            by("not-a-repo", &r).contains("git does not answer"),
+            "a directory git does not answer for is not a missing one: {}",
+            by("not-a-repo", &r)
+        );
+    }
+
+    /// A declared path git reads as something outside the repository answers zero with exit
+    /// 0 — green over a source that has moved. The one failure `Unanswered` cannot catch by
+    /// asking git, so it is refused before git is asked.
+    #[test]
+    fn a_declared_path_outside_the_repository_is_refused_rather_than_answered_green() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        let vault = dir.path().join("vault");
+        git_repo(&repo);
+        let base = commit(&repo, "docs/a.md", "one");
+        commit(&repo, "docs/b.md", "two");
+
+        for bad in ["~/docs/*.md", "/etc/*.md"] {
+            write_manifest(&vault, "p", &manifest_for(&repo, &base, bad));
+            let r = survey(&vault, TODAY).expect("survey");
+            assert!(
+                !r[0].is_current(),
+                "`{bad}` must not report the project current"
+            );
+            let Detail::Read(f) = &r[0].detail else {
+                panic!("expected a read manifest")
+            };
+            assert!(
+                matches!(f.state, RepoState::Unanswered(_)),
+                "`{bad}`: {}",
+                f.state.describe()
+            );
+        }
     }
 
     /// An absent extracts directory is an install that has never extracted, which is not a

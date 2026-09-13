@@ -69,17 +69,9 @@ project:
 
 discovered_sources:
   - path: "docs/adr/*.md"
-    kind: adr           # adr | learning | rule | guide | spec | structure | gate | module-doc | git-history | other
+    kind: adr           # adr | learning | rule | guide | spec | module-doc | other
     count: <discovered>
     transferability_default: T1
-  - path: "Cargo.toml"  # the build manifest answers what the project is made of and refuses
-    kind: structure
-    count: 1
-    transferability_default: T2
-  - path: "."           # history as a source: every commit ages this project
-    kind: git-history
-    count: <commits with a body>
-    transferability_default: T3
 
 domains:
   <domain-name>: [<tag>, <tag>, ...]
@@ -119,16 +111,20 @@ Discover knowledge sources and persist a manifest.
 1. Detect version control. `git -C <path> rev-parse --short HEAD` →
    `git_head_at_scan`. If the path is not a Git repo, set
    `git_head_at_scan: null` and use file mtime everywhere git history would
-   otherwise drive re-scan diffing (step 2) and staleness (Phase 3). Git is
-   preferred, not required — a non-git project is fully supported.
+   otherwise drive re-scan diffing (step 2) and the staleness `lore extract status` reports.
+   Git is preferred, not required — a non-git project is fully supported.
 2. Check for existing manifest at
    `<vault>/.lorekeeper/extracts/<project>/manifest.yaml`
    (`mkdir -p` the directory first if absent).
    - **First scan**: full discovery.
-   - **Re-scan**: load previous manifest. With git, compute `git diff` since
-     `git_head_at_scan`; without git, compare source mtimes against
-     `last_scan`. Present incremental changes. Preserve previous
-     `strip_patterns`, `concept_mapping`, user overrides.
+   - **Re-scan**: load previous manifest. Present what changed, then preserve the previous
+     `strip_patterns`, `concept_mapping` and user overrides.
+
+   **"Has this source moved" has one anchor: `git_head_at_scan`.** Ask it as a commit RANGE
+   over the path (`git diff --name-only <baseline>..HEAD -- <path>`), never as a date with
+   `--since`: a rebased commit keeps its author date, so a date anchor misses exactly the
+   history a lost baseline is about. Without git, compare the file's mtime with `last_scan` —
+   the same question where no commit exists to ask it of.
 
 3. **Read the facts.** These are the current state rather than a statement about it, so they
    are neither absent nor stale, and they are the same questions in every ecosystem even
@@ -140,12 +136,36 @@ Discover knowledge sources and persist a manifest.
    | What it depends on | DIRECT declarations, kept apart from the transitive graph |
    | Where its boundaries are | the public surface — exported types, traits/interfaces/protocols, the types that cross |
    | What it refuses | declared lints, type-level constraints, the commands CI actually runs, and the names of the tests that fail on a violation |
-   | What moves together | which paths change in the same commit, and what was reverted |
+   | What moves together | which paths change in the same commit — the paths alone, which every repository answers cheaply. Reading the bodies is what `--include-git` gates |
 
    A repository that documents nothing still answers all five. What it refuses is the richest
    of them: a forbidden lint, a strict type preset, a test named for the thing it rejects —
    each is a decision recorded in a form that cannot go stale, and reading the set of them is
    reading what the project decided to make impossible.
+
+   **Ask the format's own parser or the ecosystem's own tool, never a line pattern.** A regex
+   over a TOML section reports zero dependencies for a project that declares dozens, because
+   the section it matched is not the one they are in; `cargo metadata --no-deps` answers
+   exactly. A line pattern over `run:` in a workflow reads the block scalar's `|` and reports
+   no gates at all; a YAML parser reads the commands. Both failures report ABSENCE where the
+   truth is that the read failed, which is the one answer a scan must never produce. Where a
+   gate is reached through a script or a task runner (`gate.sh`, `just check`, `make test`),
+   follow it ONE hop and say so; where neither a parser nor a tool answers, record that this
+   could not be read rather than recording nothing.
+
+   The facts are re-read on every scan and are NOT recorded in `discovered_sources`, which
+   tracks what needs re-extracting. A build manifest moves on every release and a history
+   moves on every commit, so tracking either would make the `lore status` row permanently red.
+
+   Record each `discovered_sources.path` EXACTLY as the filesystem reports it: a path relative
+   to the REPOSITORY ROOT, never derived from a document's title or heading, and never
+   absolute or `~`-prefixed. Two consumers depend on it — the re-scan diff in step 2, and
+   `lore extract status`, which passes these paths to git as pathspecs. A path that does not
+   exist makes every source look deleted-then-re-added on the next scan; an absolute or
+   home-relative one git answers zero for with exit 0, which would read as green over a source
+   that has moved (the command refuses those rather than trusting them, and says so). Fill
+   `count` with how many files the pattern matched, so the coverage line has one unit on both
+   sides.
 
 4. **Read the claims, and check each one against the facts.** CLAUDE.md, `.claude/rules/`,
    ADRs, learnings, READMEs, and doc comments are all one tier: a claim ABOUT the code, which
@@ -161,17 +181,17 @@ Discover knowledge sources and persist a manifest.
       were three, zero and zero. Each rule was written after the previous one failed, and each
       was incomplete again.
 
-      So narrow the search where the project's own tooling already models the boundary
-      (`symora map summary` separates code files from test files; a build manifest separates
-      direct dependencies from the transitive graph), and then READ every hit that survives.
+      So narrow the search where the project's own declarations already model the boundary —
+      a build manifest separates direct dependencies from the transitive graph, a test
+      directory and a test-only declaration separate test code from shipped code — and then
+      READ every hit that survives.
       Scoping reduces the reading; it never replaces it. A hit count too large to read is a
       claim this cannot verify, and the page says so rather than reporting the count.
 
    b. **Carry into the verdict what produced it.** A test that fails on the violation, or a
       type that makes it unrepresentable, is the claim already enforced — cite it and stop. A
-      language server's reference set answers "who calls this". A read over a search's hits
-      answers for the population that search covered, which for a negative claim
-      ("nothing outside X does Y") is a lower bound and says so.
+      read over a search's hits answers for the population that search covered, which for a
+      negative claim ("nothing outside X does Y") is a lower bound and says so.
 
    c. Four outcomes, and three of them are knowledge:
       - **Confirmed** → the page states the claim, its exceptions, and the check's reach. The
@@ -235,9 +255,8 @@ Extract knowledge using the manifest. Requires a prior scan.
 
 5. For each discovered source (filtered by `--domain` / `--transferability`):
 
-    a. **Skip if already extracted** and source unchanged: compare
-      `extracted_at` with `git log` (when under git) or source file mtime
-      (when not) — unless `--full`, which re-reads every source. A source with no
+    a. **Skip if already extracted** and source unchanged, asked with the one anchor Phase 1
+      names — unless `--full`, which re-reads every source. A source with no
       `extracted` entry is read whole whatever the baseline says. A T4 skip is recorded in
       `extracted` with `vault_page: null` and a `coverage_note`, so the Phase 3 coverage
       check stays complete.
@@ -375,15 +394,17 @@ holds is read from the code that holds it and checked there; taking it from the 
 introduced it yields a weaker statement of something already covered, and risks stating a
 shape later commits replaced.
 
-It is a separate switch because its cost is a choice rather than a fact about the repository
-— across six repositories under a record-depth discipline, commit bodies ran 356k words, as
-much as every doc comment in them put together. Body length does not narrow it: 89–99% of
-commits there carry a real body, so "has a body" identifies nothing.
+It is a separate switch because its cost is a choice rather than a fact about the repository:
+under a record-depth discipline the commit bodies rival every doc comment in the project put
+together. Body length does not narrow them either — where the discipline holds, nearly every
+commit carries a real body, so "has a body" identifies nothing.
 
-Cite as `source_file: ["git:{sha}", …]`, several shas per page. Declare the source in the
-manifest as `kind: git-history` with `path: "."` — that pathspec is what makes
-`lore extract status` measure this project against every commit, which is what "the history
-is the source" means.
+Cite as `source_file: ["git:{sha}", …]`, several shas per page, and record the extraction in
+`extracted` like any other. Do NOT add the history to `discovered_sources`: staleness there is
+measured per declared path, and a source that every commit moves makes the `lore status` row
+permanently red — an alarm nobody can clear is one everybody learns to skip. The same holds
+for the build manifest and the gate configuration: the facts pass re-reads those on every
+scan, so tracking them buys nothing and costs the row.
 
 ## Transferability levels
 

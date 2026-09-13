@@ -80,7 +80,7 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
             "extract",
             match behind {
                 0 => format!("{} project(s) current", extracts.len()),
-                n => format!("{n} of {} project(s) moved since scan", extracts.len()),
+                n => format!("{n} of {} project(s) need attention", extracts.len()),
             },
             behind == 0,
             "lore extract status",
