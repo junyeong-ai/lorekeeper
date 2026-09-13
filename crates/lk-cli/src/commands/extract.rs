@@ -144,6 +144,16 @@ pub(crate) enum Verdict {
     Unmeasured,
 }
 
+impl Verdict {
+    fn name(&self) -> &'static str {
+        match self {
+            Verdict::Behind => "behind",
+            Verdict::Current => "current",
+            Verdict::Unmeasured => "unmeasured",
+        }
+    }
+}
+
 impl RepoState {
     /// Spelled arm by arm rather than with a wildcard, so a state added later cannot inherit
     /// a verdict nobody chose for it.
@@ -349,6 +359,12 @@ fn repo_state(repo: &Path, baseline: Option<&str>, declared: &[String]) -> RepoS
     if !repo.is_dir() {
         return RepoState::Missing(repo.display().to_string());
     }
+    // Asked before anything about git: a manifest naming no source has nothing to measure,
+    // and a baseline would not change that. Asked after git, such a manifest was told to
+    // anchor a baseline that would anchor nothing.
+    if declared.is_empty() {
+        return RepoState::NothingDeclared;
+    }
     // Whether a directory is a repository is git's question, not the filesystem's: a linked
     // worktree carries `.git` as a FILE, and a subdirectory of a repository carries none
     // while git answers for it. Probing for a `.git` directory disagreed with the scan, which
@@ -372,9 +388,6 @@ fn repo_state(repo: &Path, baseline: Option<&str>, declared: &[String]) -> RepoS
         return RepoState::Unanswered(format!(
             "`{bad}` is home-relative; a declared path is relative to the repository root"
         ));
-    }
-    if declared.is_empty() {
-        return RepoState::NothingDeclared;
     }
     if git(
         repo,
@@ -411,6 +424,28 @@ fn repo_state(repo: &Path, baseline: Option<&str>, declared: &[String]) -> RepoS
         .collect::<BTreeSet<_>>()
         .len();
     if files == 0 {
+        // Nothing answered — which is the right answer only if every declared path is one git
+        // can answer for. A path git IGNORES is reached by neither probe, so it reads
+        // unchanged however it moves, and this is the one place that reading is produced. The
+        // scan is told not to declare such a path; this is the check on the scan, because a
+        // rule that lives only in prose is one nothing enforces.
+        let mut args = vec![
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--",
+        ];
+        args.extend(specs.iter().map(String::as_str));
+        let Some(ignored) = git(repo, &args) else {
+            return RepoState::Unanswered("git refused the declared paths".into());
+        };
+        let n = ignored.lines().count();
+        if n > 0 {
+            return RepoState::Unanswered(format!(
+                "{n} declared file(s) are ignored by git, which cannot answer for them"
+            ));
+        }
         return RepoState::Unmoved;
     }
     // Commits are context beside the file count, asked as a symmetric difference so a rolled
@@ -497,10 +532,14 @@ fn as_json(reports: &[ProjectState]) -> serde_json::Value {
         "projects": reports.iter().map(|r| match &r.detail {
             Detail::Unreadable(why) => serde_json::json!({
                 "name": r.name,
+                "verdict": r.verdict().name(),
                 "state": {"kind": "manifest-unreadable", "why": why},
             }),
             Detail::Read(f) => serde_json::json!({
                 "name": r.name,
+                // What a reader acts on. The `kind` beside it says WHICH state, and a reader
+                // that had to enumerate kinds would read every state added later as safe.
+                "verdict": r.verdict().name(),
                 "repo": f.repo.to_string_lossy(),
                 "last_scan": f.last_scan.map(|d| d.to_string()),
                 "days_since_scan": f.days_since,
@@ -509,7 +548,12 @@ fn as_json(reports: &[ProjectState]) -> serde_json::Value {
                         serde_json::json!({"kind": "repo-missing", "at": at})
                     }
                     RepoState::NoBaseline => serde_json::json!({"kind": "not-a-repository"}),
-                    RepoState::Unanchored => serde_json::json!({"kind": "no-baseline"}),
+                    // Never the vacated `no-baseline`: that string meant "nothing to do" and
+                    // this state is its opposite, so a consumer keyed on the old spelling
+                    // would read an actionable project as safe.
+                    RepoState::Unanchored => {
+                        serde_json::json!({"kind": "baseline-not-recorded"})
+                    }
                     RepoState::NothingDeclared => {
                         serde_json::json!({"kind": "nothing-declared"})
                     }
@@ -860,6 +904,98 @@ mod tests {
             panic!("expected a read manifest")
         };
         assert!(matches!(f.state, RepoState::Moved { files: 1, .. }));
+    }
+
+    /// A source git is told to ignore answers to neither probe, so "sources unchanged" over
+    /// one is a statement about a file nothing looked at. The scan is told not to declare
+    /// such a path, and this is what holds the scan to it: a rule kept only in prose is a
+    /// rule a single skipped step removes.
+    #[test]
+    fn a_declared_path_git_ignores_cannot_be_reported_unchanged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        let vault = dir.path().join("vault");
+        git_repo(&repo);
+        std::fs::write(repo.join(".gitignore"), "docs/gen*.md\n").expect("write");
+        let base = commit(&repo, "docs/a.md", "one");
+
+        write_manifest(&vault, "p", &manifest_for(&repo, &base, "docs/*.md"));
+        assert!(
+            !survey(&vault, TODAY).expect("survey")[0].needs_attention(),
+            "nothing ignored yet, and nothing has moved"
+        );
+
+        std::fs::write(repo.join("docs/gen1.md"), "generated").expect("write");
+        let r = survey(&vault, TODAY).expect("survey");
+        let Detail::Read(f) = &r[0].detail else {
+            panic!("expected a read manifest")
+        };
+        assert!(
+            f.state.describe().contains("ignored by git"),
+            "an ignored declared file is unmeasurable, not unchanged: {}",
+            f.state.describe()
+        );
+        assert!(r[0].needs_attention());
+    }
+
+    /// A manifest with no baseline AND no declared source used to be told to anchor a
+    /// baseline that would anchor nothing, because the baseline was asked about first. What
+    /// is declared decides whether there is anything to measure at all, so it is asked first.
+    #[test]
+    fn a_manifest_declaring_nothing_is_not_told_to_fix_its_baseline() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        let vault = dir.path().join("vault");
+        git_repo(&repo);
+        commit(&repo, "docs/a.md", "one");
+
+        write_manifest(
+            &vault,
+            "empty",
+            &format!(
+                "project:\n  repo_path: {}\n  last_scan: \
+                 2026-09-01\ndiscovered_sources: []\nextracted: []\n",
+                repo.display()
+            ),
+        );
+        let r = survey(&vault, TODAY).expect("survey");
+        let Detail::Read(f) = &r[0].detail else {
+            panic!("expected a read manifest")
+        };
+        assert_eq!(
+            f.state.describe(),
+            "not measured — the manifest declares no source"
+        );
+        assert!(!r[0].needs_attention());
+    }
+
+    /// The JSON is what a skill reads, and a `kind` is a name rather than a slot: `no-baseline`
+    /// meant "nothing to do" before `Unanchored` existed, so reusing it would make an
+    /// actionable project read safe to anything keyed on the old spelling. The verdict beside
+    /// it is what a reader acts on, so no consumer has to enumerate kinds at all.
+    #[test]
+    fn the_contract_names_a_verdict_and_never_reuses_a_kind() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        let vault = dir.path().join("vault");
+        git_repo(&repo);
+        commit(&repo, "docs/a.md", "one");
+        write_manifest(
+            &vault,
+            "unanchored",
+            &format!(
+                "project:\n  repo_path: {}\n  last_scan: 2026-09-01\ndiscovered_sources:\n  \
+                 - path: \"docs/*.md\"\n    count: 1\nextracted: []\n",
+                repo.display()
+            ),
+        );
+        let json = as_json(&survey(&vault, TODAY).expect("survey"));
+        let p = &json["projects"][0];
+        assert_eq!(p["verdict"], "behind");
+        assert_eq!(p["state"]["kind"], "baseline-not-recorded");
+        assert_eq!(json["behind"], 1);
+        assert_eq!(json["current"], 0);
+        assert_eq!(json["unmeasured"], 0);
     }
 
     /// The closing line of the command's own terminal made the fold the `lore status` row
