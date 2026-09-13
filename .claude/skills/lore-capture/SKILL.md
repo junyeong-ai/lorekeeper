@@ -61,8 +61,8 @@ from the conversation's most recent troubleshooting thread.
 
 ### 2. Load context
 
-Ask which page already owns each name this capture will write — `lore resolve <name>` for
-every form the material writes, then `lore wiki search` on two or three distinguishing terms
+Ask which page already owns each name this capture will write — `lore resolve` for
+EVERY form the material writes, then `lore wiki search` on two or three distinguishing terms
 of each for the equivalences no rule about spelling can see. A capture that finds an owner
 MERGES into it rather than creating a duplicate page.
 

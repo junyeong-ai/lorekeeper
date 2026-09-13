@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use lk_core::concept::{ConceptIdentity, ConceptRegistry, ExtractedConcept, Resolution, slugify};
 use lk_core::config::VaultDirs;
@@ -19,7 +19,7 @@ use crate::render::RenderResult;
 /// knowable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefusedAlias {
-    /// The name both pages answer to the extraction's claim about.
+    /// The name the extraction claimed, which the owner already answers to.
     pub alias: String,
     /// The page that already answers to it.
     pub owner: String,
@@ -29,9 +29,17 @@ pub struct RefusedAlias {
 
 pub struct ConceptDrafts {
     drafts: BTreeMap<String, ConceptDraft>,
-    /// Reported by whoever runs the drafts, because a warning in a scheduled run is read by
-    /// nobody.
+    /// Recorded at [`Self::commit`] rather than where the refusal happens, so a batch
+    /// abandoned before it commits names no page. `lore queue apply` reports them after its
+    /// writes land, which is where the extraction that produces them runs; the ingest path
+    /// accumulates them too and says nothing, because a queue-backed ingest extracts no
+    /// concepts of its own.
     refused: Vec<RefusedAlias>,
+    /// Slugs a read found on disk. A refusal is only a rival where this run created the page
+    /// the extraction's own name resolved to — a source that conflates two ESTABLISHED
+    /// concepts minted nothing, and offering to merge them would delete one on the strength
+    /// of one source's confusion.
+    established: BTreeSet<String>,
     /// Every name the vault's concept pages answer to: read once from disk, then extended
     /// by each new name this run resolves, so a decision made for one spelling is the answer
     /// every other spelling of it gets.
@@ -56,6 +64,9 @@ pub struct StagedConcept {
     /// The extraction's aliases this vault can actually adopt, decided in [`ConceptDrafts::stage`]
     /// and already registered there.
     aliases: Vec<String>,
+    /// Names this extraction claimed that another page already answers to, carried to
+    /// [`ConceptDrafts::commit`] so an abandoned batch records none.
+    refused: Vec<(String, String)>,
 }
 
 struct ConceptDraft {
@@ -149,6 +160,7 @@ impl ConceptDrafts {
         Self {
             drafts: BTreeMap::new(),
             refused: Vec::new(),
+            established: BTreeSet::new(),
             registry: None,
         }
     }
@@ -185,7 +197,7 @@ impl ConceptDrafts {
         dirs: &VaultDirs,
     ) -> Result<StagedConcept, PipelineError> {
         let identity = self.resolve_identity(&concept.name, reader, dirs).await?;
-        let aliases = self.adopt_aliases(&identity, &concept.aliases);
+        let (aliases, refused) = self.adopt_aliases(&identity, &concept.aliases);
         // A slug already staged this run needs no read: the draft in hand is newer than the
         // page on disk, and `commit` folds into it.
         let existing = if self.drafts.contains_key(&identity.slug) {
@@ -195,12 +207,16 @@ impl ConceptDrafts {
                 .read_page(VaultPath::concept(dirs, &identity.slug).as_ref())
                 .await?
         };
+        if existing.is_some() {
+            self.established.insert(identity.slug.clone());
+        }
         Ok(StagedConcept {
             concept: concept.clone(),
             slug: identity.slug,
             existing,
             synthesis: synthesis.map(str::to_string),
             aliases,
+            refused,
         })
     }
 
@@ -219,12 +235,17 @@ impl ConceptDrafts {
     /// and the same rule either way — a name is kept by whoever answered to it first — but it
     /// means two spellings of one concept converge or split by where the extraction happened
     /// to put them, which is what a reader looking at a split concept has to know.
-    fn adopt_aliases(&mut self, identity: &ConceptIdentity, proposed: &[String]) -> Vec<String> {
+    fn adopt_aliases(
+        &mut self,
+        identity: &ConceptIdentity,
+        proposed: &[String],
+    ) -> (Vec<String>, Vec<(String, String)>) {
         let registry = self
             .registry
             .as_mut()
             .expect("stage resolves the name first, which builds the registry");
         let mut adopted = Vec::new();
+        let mut refused = Vec::new();
         for alias in proposed {
             let alias = alias.trim();
             if alias.is_empty() || slugify(alias).is_none() {
@@ -245,11 +266,7 @@ impl ConceptDrafts {
                         answered_by = %owner,
                         "alias already answers to another concept page; not adopted"
                     );
-                    self.refused.push(RefusedAlias {
-                        alias: alias.to_string(),
-                        owner,
-                        minted: identity.slug.clone(),
-                    });
+                    refused.push((alias.to_string(), owner));
                     continue;
                 }
             }
@@ -257,7 +274,7 @@ impl ConceptDrafts {
             registry.register(identity.clone(), std::slice::from_ref(&alias));
             adopted.push(alias);
         }
-        adopted
+        (adopted, refused)
     }
 
     /// Fold a staged concept into the run's drafts and return the page identity it resolved
@@ -278,8 +295,25 @@ impl ConceptDrafts {
             existing,
             synthesis,
             aliases,
+            refused,
         } = staged;
         let synthesis = synthesis.as_deref();
+
+        // Only where this run created the page the extraction's own name resolved to. A
+        // source that conflates two established concepts minted nothing, and the same record
+        // there would offer to delete one of them.
+        if !self.established.contains(&safe_slug) {
+            for (alias, owner) in refused {
+                let record = RefusedAlias {
+                    alias,
+                    owner,
+                    minted: safe_slug.clone(),
+                };
+                if !self.refused.contains(&record) {
+                    self.refused.push(record);
+                }
+            }
+        }
 
         if let Some(draft) = self.drafts.get_mut(&safe_slug) {
             draft.observe(date);
@@ -794,6 +828,126 @@ mod tests {
                 owner: "agent-capability".into(),
                 minted: "tool-exposure".into(),
             }]
+        );
+    }
+
+    /// A batch that never commits wrote nothing, so it names nothing. `apply_concept_result`
+    /// stages every concept before folding any, and a later read that fails abandons the
+    /// whole batch — recording the refusal where it happens would print a merge for a page
+    /// the run did not create.
+    #[tokio::test]
+    async fn a_batch_that_never_commits_names_no_rival() {
+        let dirs = VaultDirs::default();
+        let date = jiff::civil::date(2026, 1, 1);
+        let mut drafts = ConceptDrafts::new();
+
+        let staged = drafts
+            .stage(
+                &ExtractedConcept {
+                    name: "Agent Capability".into(),
+                    category: None,
+                    aliases: vec![],
+                },
+                None,
+                &FailsOn("nothing"),
+                &dirs,
+            )
+            .await
+            .expect("stages cleanly");
+        drafts.commit(staged, date);
+
+        let refused_but_abandoned = drafts
+            .stage(
+                &ExtractedConcept {
+                    name: "Tool Exposure".into(),
+                    category: None,
+                    aliases: vec!["Agent Capability".into()],
+                },
+                None,
+                &FailsOn("nothing"),
+                &dirs,
+            )
+            .await
+            .expect("stages cleanly");
+        assert!(
+            drafts.refused_aliases().is_empty(),
+            "staging is not creating; nothing is reportable until the fold"
+        );
+        drop(refused_but_abandoned);
+        assert!(drafts.refused_aliases().is_empty());
+    }
+
+    /// A page on disk is not a rival this run created, and the record is what a person is
+    /// told to delete. A source that conflates two ESTABLISHED concepts refuses an alias for
+    /// the same reason a new page does — and offering to merge them there would fold one
+    /// away on the strength of one source's confusion.
+    #[tokio::test]
+    async fn an_extraction_that_conflates_two_established_pages_names_no_rival() {
+        struct Holds(&'static str);
+        #[async_trait::async_trait]
+        impl VaultStore for Holds {
+            async fn read_page(
+                &self,
+                rel_path: &std::path::Path,
+            ) -> Result<Option<lk_core::frontmatter::VaultPage>, lk_vault::VaultError> {
+                if !rel_path.to_string_lossy().contains(self.0) {
+                    return Ok(None);
+                }
+                Ok(Some(
+                    lk_core::frontmatter::parse_page(
+                        "---\ntype: concept\ntitle: \"RAG\"\naliases: [\"RAG\"]\n---\n\n# RAG\n",
+                    )
+                    .expect("a page this test wrote"),
+                ))
+            }
+            async fn list_markdown(
+                &self,
+                _rel_dir: &std::path::Path,
+            ) -> Result<Vec<std::path::PathBuf>, lk_vault::VaultError> {
+                Ok(Vec::new())
+            }
+        }
+
+        let dirs = VaultDirs::default();
+        let date = jiff::civil::date(2026, 1, 1);
+        let mut drafts = ConceptDrafts::new();
+
+        let staged = drafts
+            .stage(
+                &ExtractedConcept {
+                    name: "Vector DB".into(),
+                    category: None,
+                    aliases: vec![],
+                },
+                None,
+                &FailsOn("nothing"),
+                &dirs,
+            )
+            .await
+            .expect("stages cleanly");
+        drafts.commit(staged, date);
+
+        // `rag` is on disk, so the extraction's own name routes to it and nothing is minted;
+        // the alias it also claimed belongs to the page created above.
+        let staged = drafts
+            .stage(
+                &ExtractedConcept {
+                    name: "RAG".into(),
+                    category: None,
+                    aliases: vec!["Vector DB".into()],
+                },
+                None,
+                &Holds("rag"),
+                &dirs,
+            )
+            .await
+            .expect("stages cleanly");
+        drafts.commit(staged, date);
+
+        assert!(
+            drafts.refused_aliases().is_empty(),
+            "an established page is not a rival this run minted: {:?}",
+            drafts.refused_aliases()
         );
     }
 

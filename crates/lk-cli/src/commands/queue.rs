@@ -369,19 +369,13 @@ async fn apply(
         .await
         .map_err(|e| miette::miette!("{e}"))?;
 
-    // A page minted beside one that already answered to one of its names is the convergence
-    // defect the contract exists to prevent, and the only moment it is visible: the two share
-    // no name afterwards, so nothing downstream compares them. Reported rather than gated —
-    // the result is materialized either way, and merging two concept pages is a judgment.
-    for refused in pipeline.refused_aliases() {
-        eprintln!(
-            "! `{}` already answers to `{}`, so `{}` was minted beside it — \
-             `lore graph merge {} {}` folds them once you have read both",
-            refused.alias, refused.owner, refused.minted, refused.minted, refused.owner
-        );
-    }
-
     if dry_run {
+        for refused in pipeline.refused_aliases() {
+            eprintln!(
+                "[dry-run] `{}` already answers to `{}`, so `{}` would be minted beside it",
+                refused.alias, refused.owner, refused.minted
+            );
+        }
         eprintln!(
             "[dry-run] queue apply: {applied} applied, {dropped} dropped, {failed} failed, \
              {} concept page(s)",
@@ -405,6 +399,20 @@ async fn apply(
             .await
             .map_err(|e| miette::miette!("write {}: {e}", rel_path.display()))?;
     }
+    // After the writes, because this is the one line in the run that tells a person to
+    // delete a page: it may only name one that is now on disk. A page minted beside one that
+    // already answered to its name is the convergence defect the contract exists to prevent,
+    // and the only moment it is visible — the two share no name afterwards, so nothing
+    // downstream compares them. Reported rather than gated: merging two concept pages is a
+    // judgment, and the result is materialized either way.
+    for refused in pipeline.refused_aliases() {
+        eprintln!(
+            "! `{}` already answers to `{}`, so `{}` was minted beside it — \
+             `lore graph merge {} {}` folds them once you have read both",
+            refused.alias, refused.owner, refused.minted, refused.minted, refused.owner
+        );
+    }
+
     for path in &consumed {
         std::fs::remove_file(path)
             .map_err(|e| miette::miette!("remove {}: {e}", path.display()))?;

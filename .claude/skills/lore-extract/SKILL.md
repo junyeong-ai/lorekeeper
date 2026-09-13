@@ -297,7 +297,7 @@ Extract knowledge using the manifest. Requires a prior scan.
 1. Load vault config (root, locale, categories).
 2. Load manifest from `<vault>/.lorekeeper/extracts/<project>/`.
    Abort if no manifest — tell user to scan first.
-3. Converge each name as § Concept convergence defines: `lore resolve` for every form the
+3. Converge each name as § Concept convergence defines: `lore resolve` for EVERY form the
    source writes, then `lore wiki search` on two or three distinguishing terms of each.
 4. Read `strip_patterns` and `concept_mapping` from manifest.
 

@@ -1244,36 +1244,35 @@ mod tests {
     /// it, and three rounds of review found a copy that had been left behind each time. A
     /// reviewer is not a gate.
     ///
-    /// Anchored by CO-OCCURRENCE rather than by a banned phrase: the paragraph that names
-    /// both `lore resolve` and `lore wiki search` is the one stating the dedup baseline, and
-    /// it is the paragraph that must say which forms are asked. A ban would fire on prose
-    /// that merely contains the words; this fires only where a skill states the rule.
+    /// Scoped per FILE rather than per paragraph: a skill that names both commands is one
+    /// that states the dedup baseline, and it must say which forms it asks. Asking the same
+    /// of a paragraph looked tighter and was weaker — splitting a step in two put the copy
+    /// out of range while the other copies kept the count up, which is the miss this exists
+    /// to prevent. Nothing is banned, so prose that merely shares the words cannot fire it.
     #[test]
     fn every_skill_that_states_the_dedup_baseline_asks_every_written_form() {
         let mut stated = 0;
         for skill in lk_dist::skill_names() {
             for file in lk_dist::skill_files(skill) {
-                for paragraph in file.contents.split("\n\n") {
-                    if !(paragraph.contains("lore resolve")
-                        && paragraph.contains("lore wiki search"))
-                    {
-                        continue;
-                    }
-                    stated += 1;
-                    assert!(
-                        paragraph.to_lowercase().contains("every form"),
-                        "{skill}/{}: states the dedup baseline without asking every form the \
-                         source writes — a page written from a source in another language \
-                         answers to none of the forms this one carries, so the title alone \
-                         mints a rival beside it",
-                        file.relative
-                    );
+                if !(file.contents.contains("lore resolve")
+                    && file.contents.contains("lore wiki search"))
+                {
+                    continue;
                 }
+                stated += 1;
+                assert!(
+                    file.contents.contains("EVERY form"),
+                    "{skill}/{}: states the dedup baseline without asking every form the \
+                     source writes — a page written from a source in another language \
+                     answers to none of the forms this one carries, so the title alone \
+                     mints a rival beside it",
+                    file.relative
+                );
             }
         }
         assert!(
             stated >= 3,
-            "only {stated} skill paragraph(s) state the dedup baseline — the anchor stopped \
+            "only {stated} skill file(s) state the dedup baseline — the anchor stopped \
              matching and this test now guards nothing"
         );
     }
