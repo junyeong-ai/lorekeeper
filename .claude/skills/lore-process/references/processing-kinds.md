@@ -185,30 +185,14 @@ is being CREATED — an established page's synthesis is its accumulated meaning 
 source that cited it, so a single mention never overwrites it. Omit it and a new page is an
 empty heading.
 
-**`name` is the concept's name and nothing else.** The name is also the address and the
-lookup key, and the lookup is exact — so a name carrying a gloss
-(`Agent Capability (에이전트 호출 가능 애플리케이션 단위)`) answers to neither the term nor
-the gloss, and the next source naming the bare term mints a rival page beside it. The name is
-COPIED from the text you just read, never composed: whether a field has settled on a form in
-one language or another is a judgment with no stable answer for a term the text is
-introducing, and two answers to it in one batch is exactly how one concept becomes two pages.
-Where the text writes several forms, `name` is the one it uses AS the term. Never translate a
-term to have translated it, and never append a translation to one.
+**`name` and `aliases` follow § Concept convergence in the vault's `AGENTS.md`**
+(`lore config schema-path`), which states what a name may be, which form is the name where the
+text writes several, and what belongs in `aliases` instead. It is stated there and not here:
+a second copy is how the two come to disagree, and step 1 reads that file before this one.
 
-`aliases` is where every other name goes — the translation, the expanded acronym, the
-original-language term, the abbreviation a team uses. Each is registered against the page, so
-a later citation written in any of them resolves to it rather than forking the concept. An
-alias an established page already answers to is dropped with a warning: the extraction is one
-source's reading, and the page that earned the name by being cited under it keeps it.
-
-**Where the text writes the concept in `input.locale` too, that form is not optional there.**
-It is the one alias entry this kind requires rather than invites: a reader who does not yet
-know the title searches in the language the vault is written in, and without it they reach
-nothing while the page holds every citation on the subject, after which the next source
-writing that form mints a rival page beside it. What bounds this is the rule `name` follows —
-an alias is a name the text WRITES, never one you recognize from elsewhere — so a concept the
-sources only ever name one way gets one name. A translation nobody writes is a spelling nobody
-searches for, and inventing one costs a rival page rather than preventing it.
+An alias an established page already answers to is dropped with a warning rather than taken —
+the extraction is one source's reading, and the page that earned the name by being cited under
+it keeps it.
 
 `concepts` may be empty — that is a valid answer for a page with nothing durable in it, and
 it still records that the task was answered. Copy `target` and `cache_hash` through

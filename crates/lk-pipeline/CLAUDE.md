@@ -161,6 +161,16 @@ domain-neutral engine — then no work-log, reviews, or `is_personal` are produc
   both on X, the reverse mints `y.md` and refuses the alias — which is the same
   first-answerer-keeps-the-name rule either way, and deterministic for a given result, but it is
   what a reader looking at a split concept has to know.
+  **A refusal that MINTED a page beside the one holding the name is carried out to whoever
+  writes it.** Nothing downstream can find it afterwards — the two pages share no name for a
+  later check to compare — so the record travels on the `RenderResult` of whichever of the two
+  this run writes LAST, and the writer says it in the same step. Anchored there rather than
+  reported per batch because a write failing part-way through would lose every record whose
+  page was already on disk: the retry finds those established and records nothing. A record is
+  carried only where both pages exist — an owner this run claimed for a name and never wrote a
+  page for is a resolution an abandoned batch left behind, and the merge it would name could
+  not be run. Reported, never gated: folding two concept pages is a judgment, and the page is
+  materialized either way.
 - **Name resolution is `lk_core::concept::ConceptRegistry`, not a local index.** `build_registry`
   reads the vault's concept pages into it; `lore resolve` builds the same registry from a
   directory read, so the routing decision this crate ACTS on and the answer a skill gets
