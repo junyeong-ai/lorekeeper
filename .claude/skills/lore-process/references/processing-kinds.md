@@ -194,6 +194,11 @@ the contract names the language it was RENDERED with, so between a `vault.locale
 the `lore schema` that follows it, the task in your hand is the current answer and the file is
 not.
 
+What separates that field from `synthesis` is what a long run drifts across: `name` is what
+the page is CALLED, `synthesis` is what it SAYS. A finding written into `name` addresses
+nothing — no later extraction reproduces it, so its page is cited once and never again, and
+`lore queue apply` refuses the result outright once the address outgrows a filename.
+
 An alias an established page already answers to is dropped with a warning rather than taken —
 the extraction is one source's reading, and the page that earned the name by being cited under
 it keeps it.

@@ -125,16 +125,44 @@ pub struct Pipeline {
     document_slugs: std::collections::HashSet<String>,
 }
 
-/// The most of a slug a filename can carry.
+/// The most bytes a path component holds on the filesystems this writes to.
+const FILENAME_LIMIT: usize = 255;
+
+/// The most of a slug a DOCUMENT filename can carry.
 ///
-/// A document's title is a sentence in the repositories this reads, and 255 bytes is what a
-/// path component holds. The budget is that limit less the extension and less the longest
-/// suffix the disambiguation below can append, so a collision on a truncated slug still fits.
-/// Concept slugs are deliberately not bounded here: [`lk_core::concept::identity_key`] is
-/// built on the same slug, and a cut there would fold two different names onto one identity —
-/// the duplicate-page defect, written deliberately. A concept's name is a term rather than a
-/// sentence, and a name long enough to exceed this fails its write loudly.
+/// A document's title is a sentence in the repositories this reads, so the budget is
+/// [`FILENAME_LIMIT`] less the extension and less the longest suffix the disambiguation below
+/// can append, leaving a collision on a truncated slug still able to fit.
+///
+/// Concept slugs are deliberately not bounded: [`lk_core::concept::identity_key`] is built on
+/// the same slug, and a cut there would fold two different names onto one identity — the
+/// duplicate-page defect, written deliberately. A concept's name is a term rather than a
+/// sentence, so one that does not fit is REFUSED — see [`find_unaddressable_concept`], which
+/// refuses it where the result can still be set aside whole.
 const ADDRESS_BUDGET: usize = 212;
+
+/// The first concept in `result` whose name has no page address, or `None` when every one has.
+///
+/// A concept page is written at `<slug>.md`, so a name whose slug outgrows a path component
+/// addresses nothing — and because concept slugs are never truncated, the name itself is what
+/// is refused. Asked where `lore queue apply` READS the file, so the whole result is set aside
+/// while its extraction stays re-derivable: the page carries no completion marker until the
+/// result applies, so the next ingest enqueues it again. Left to the write, the same name
+/// aborts the batch with concept pages written and their citations not, and aborts every later
+/// run at the same file, since nothing prunes results.
+///
+/// A name that slugifies to NOTHING is not this question: it is not a name at all, and
+/// `concept_draft::has_valid_slug` already drops it where the render would have used it.
+pub fn find_unaddressable_concept(result: &lk_queue::TaskResult) -> Option<&str> {
+    result
+        .concepts
+        .iter()
+        .map(|reported| reported.concept.name.as_str())
+        .find(|name| {
+            lk_core::concept::slugify(name)
+                .is_some_and(|slug| slug.len() + ".md".len() > FILENAME_LIMIT)
+        })
+}
 
 /// Cut a slug to [`ADDRESS_BUDGET`] on a character boundary, leaving no trailing separator.
 fn bounded_address(slug: &str) -> String {

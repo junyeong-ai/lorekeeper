@@ -3601,6 +3601,62 @@ async fn a_document_titled_past_the_filename_limit_still_gets_a_page() {
         .expect("the address the pipeline chose is one the filesystem accepts");
 }
 
+/// A concept name is a term, so its slug is never truncated — which leaves a name long enough
+/// to outgrow a path component addressing no page at all. It is refused where the result is
+/// READ, because the two filesystems this vault lives on disagree about the write: ext4 stops
+/// a name at 255 BYTES while APFS stops it at 255 characters, so a Korean name of 114
+/// characters writes here and fails on Linux. The byte limit is the portable one, and refusing
+/// past it is what keeps a vault written on one machine readable on the other.
+#[test]
+fn a_concept_named_past_the_filename_limit_has_no_address() {
+    let reported = |name: &str| lk_queue::ReportedConcept {
+        concept: ExtractedConcept {
+            name: name.into(),
+            category: None,
+            aliases: Vec::new(),
+        },
+        synthesis: None,
+    };
+    let result = |name: &str| lk_queue::TaskResult {
+        task_id: "ext-1".into(),
+        cache_hash: "h".into(),
+        target: lk_queue::TaskTarget {
+            vault_path: "daily/test-source/2026-05-23.md".into(),
+            kind: lk_queue::TargetKind::DailyConcepts,
+            anchor: "## Related Concepts".into(),
+        },
+        date: jiff::civil::date(2026, 5, 23),
+        concepts: vec![reported("Retrieval Augmented Generation"), reported(name)],
+    };
+
+    let term = "구체화 뷰의 내구성 비대칭";
+    assert_eq!(
+        lk_pipeline::find_unaddressable_concept(&result(term)),
+        None,
+        "a term addresses a page"
+    );
+
+    // What a drifting extraction writes instead: the finding rather than the name it goes by.
+    let statement =
+        "정교한 진단 체인이라도 아래 계층의 숨은 기본값 하나를 놓치면 전제가 무효가 된다 "
+            .repeat(3);
+    assert_eq!(
+        lk_pipeline::find_unaddressable_concept(&result(&statement)),
+        Some(statement.as_str()),
+        "the refusal names the concept, and only the one that has no address"
+    );
+
+    // The bound is a path component's, measured the way the stricter filesystem measures it.
+    let filename = |name: &str| {
+        format!(
+            "{}.md",
+            lk_core::concept::slugify(name).expect("the name slugifies")
+        )
+    };
+    assert!(filename(term).len() <= 255, "{}", filename(term));
+    assert!(filename(&statement).len() > 255, "{}", filename(&statement));
+}
+
 /// A source plan that FAILS must leave nothing of its concepts behind.
 /// `render_concept_pages` emits the run-level accumulator unconditionally, so a plan that
 /// folded concepts one at a time would write pages for a daily page it never wrote —

@@ -251,20 +251,28 @@ The essentials: a visible `.jsonl` is fully written and every
       file stays on disk so the next `/lore-process` run replays every
       task from the top (all target edits are idempotent).
 
-4. **Only when every task in the file succeeded**, move the file to the
-   archive. If any task failed, leave the file in place:
+4. **Finish the file, then let the classifier say it is finished.** Run `lore queue apply`
+   while the file is still in the queue, then re-run the step 3b `lore queue status --json`
+   and check that no `task_id` from this file reads `current`. Only then move it:
    ```bash
    mkdir -p "$VAULT/.lorekeeper/queue/processed"
    mv "$file" "$VAULT/.lorekeeper/queue/processed/" 2>/dev/null \
      || [ -f "$VAULT/.lorekeeper/queue/processed/$(basename "$file")" ]
    ```
-   Then run `lore queue apply`, before opening the next file. Concept pages are what
-   `lore resolve` reads, and a result that has not been applied is a concept the resolver
-   cannot see — which is why a long run otherwise needs a second answer to the naming
-   question carried alongside the first. Applying per file keeps `lore resolve`
-   authoritative across files and shrinks the created-this-run set to the file in hand.
-   A failing apply stops the run: everything after it would be deciding names against a
-   vault that is missing what this run already found.
+   Your own record of what you wrote is not that answer. A section you filled without
+   stamping its completion marker still reads `current`, and archiving on belief retires a
+   run whose bodies the next render erases and whose tasks nothing re-enqueues — invisibly,
+   because the pages look filled. The classifier reads the marker and not the body, which is
+   the one check that distinguishes work you did from work you recorded. A task that still
+   reads `current` leaves the file where it is, and you report it rather than moving on.
+
+   Applying BEFORE the move is also what keeps `lore resolve` authoritative: concept pages
+   are what it reads, so a result not yet applied is a concept it cannot see, and a long run
+   would otherwise need a second answer to the naming question carried alongside the first.
+   Applying per file shrinks the created-this-run set to the file in hand. A failing apply
+   stops the run — everything after it would decide names against a vault missing what this
+   run already found — and a result it QUARANTINES is one naming a concept no page can be
+   written for, which is a name to correct rather than a file to retry.
 
    The fallback is not error-swallowing: `lore queue prune` runs on its own
    schedule and retires a run whose every task is already answered, so it can

@@ -243,7 +243,21 @@ async fn apply(
 
     let batch = lk_queue::read_results(&queue_dir)
         .map_err(|e| miette::miette!("read queue results: {e}"))?;
-    let results = batch.ready;
+
+    // A result that parses can still name a concept no page can be written for, and that is
+    // the same kind of finding as a file that will not parse: content nothing can act on,
+    // which no retry improves. Judged here so it takes the disposition below rather than
+    // surfacing as a write error with half the batch on disk.
+    let mut unusable = batch.unreadable;
+    let mut results = Vec::with_capacity(batch.ready.len());
+    for (path, result) in batch.ready {
+        match lk_pipeline::find_unaddressable_concept(&result)
+            .map(|name| format!("concept `{name}` has no page address"))
+        {
+            Some(reason) => unusable.push((path, reason)),
+            None => results.push((path, result)),
+        }
+    }
 
     // A file that will never parse is moved out of the apply path, once and loudly. Leaving
     // it would fail this command — and so the scheduled pipeline — on every run forever,
@@ -253,13 +267,13 @@ async fn apply(
     // prevent: a `?` here would strand every ready result behind an unwritable directory,
     // which is the same "one bad file blocks the batch" shape, reached through I/O instead
     // of through parsing. A file that cannot be moved simply stays put and is retried.
-    let unreadable = batch.unreadable.len();
+    let unreadable = unusable.len();
     let mut moved = 0usize;
     if unreadable > 0 {
         let corrupt_dir = queue_dir
             .join(lk_queue::RESULTS_SUBDIR)
             .join(lk_queue::CORRUPT_SUBDIR);
-        moved = quarantine(&corrupt_dir, &batch.unreadable, dry_run);
+        moved = quarantine(&corrupt_dir, &unusable, dry_run);
     }
 
     if results.is_empty() {
