@@ -367,6 +367,20 @@ fn page_schemas(
 /// a bolded lead-in — is a token the rule's own prose may legitimately contain, so each one a
 /// check picked ended it early and let a reworded judgment ship past the guard. What must not
 /// carry that judgment is this string, and this string is what the test reads.
+/// The other half of the naming rule, named for the same reason as [`TITLE_RULE`]: the
+/// superseded wording lived here, telling an agent to add a name the field was said to have
+/// established, and a check bounded at this paragraph's own opening left it outside.
+/// `{language}` is substituted at render.
+const ALIAS_RULE: &str = "**This vault is written in {language}, and where the material writes the concept in \
+         {language} too that form is not optional in `aliases`.** A reader who does not know \
+         the title searches in the language the vault is written in, and without the alias \
+         they reach nothing while the page holds every citation on the subject — after which \
+         the next extraction writing that form mints a rival page. What bounds this is the \
+         same rule the title follows: an alias is a name the material WRITES, so a concept the \
+         sources only ever name one way gets one name. A translation nobody writes is a \
+         spelling nobody searches for, and inventing one costs a rival page rather than \
+         preventing it.";
+
 const TITLE_RULE: &str = "**A concept's title is its name and nothing else.** The title is the address and the \
          lookup key, and the lookup is exact — so a title carrying a parenthetical gloss \
          answers to neither the term nor the gloss, and the next mention of the bare term \
@@ -611,19 +625,7 @@ pub fn render_agents_md(
     let language = locale.english_name();
     writeln!(out, "{TITLE_RULE}").unwrap();
     writeln!(out).unwrap();
-    writeln!(
-        out,
-        "**This vault is written in {language}, and where the material writes the concept in \
-         {language} too that form is not optional in `aliases`.** A reader who does not know \
-         the title searches in the language the vault is written in, and without the alias \
-         they reach nothing while the page holds every citation on the subject — after which \
-         the next extraction writing that form mints a rival page. What bounds this is the \
-         same rule the title follows: an alias is a name the material WRITES, so a concept the \
-         sources only ever name one way gets one name. A translation nobody writes is a \
-         spelling nobody searches for, and inventing one costs a rival page rather than \
-         preventing it."
-    )
-    .unwrap();
+    writeln!(out, "{}", ALIAS_RULE.replace("{language}", language)).unwrap();
     writeln!(out).unwrap();
     writeln!(
         out,
@@ -1204,24 +1206,39 @@ mod tests {
             // The named rule is only the rule while the document carries it verbatim. Without
             // this the constant could be left behind by an edit that goes back to writing the
             // paragraph inline, and every check below would read a string nothing ships.
-            assert!(
-                md.contains(TITLE_RULE),
-                "{locale:?}: the rendered contract does not carry TITLE_RULE, so the checks \
-                 below read a string this vault never sees"
-            );
+            for (name, rule) in [
+                ("TITLE_RULE", TITLE_RULE.to_string()),
+                (
+                    "ALIAS_RULE",
+                    ALIAS_RULE.replace("{language}", locale.english_name()),
+                ),
+            ] {
+                assert!(
+                    md.contains(&rule),
+                    "{locale:?}: the rendered contract does not carry {name}, so the checks \
+                     below read a string this vault never sees"
+                );
+            }
             assert!(
                 TITLE_RULE.contains("COPIED"),
                 "{locale:?}: the title rule no longer says a name is copied rather than composed"
             );
+            // Both halves. The superseded rule had one sentence in each, and a check that
+            // read only the title rule left the half that told an agent to add a name the
+            // field was said to have established — which is the defect that split a concept
+            // across two pages.
             for judged in [
                 "the field actually uses".to_string(),
+                "established {language}".to_string(),
                 format!("established {}", locale.english_name()),
             ] {
-                assert!(
-                    !TITLE_RULE.contains(&judged),
-                    "{locale:?}: the title rule says `{judged}`, which asks which form a field \
-                     settled on — the judgment a name is copied to avoid"
-                );
+                for (name, rule) in [("title rule", TITLE_RULE), ("alias rule", ALIAS_RULE)] {
+                    assert!(
+                        !rule.contains(&judged),
+                        "{locale:?}: the {name} says `{judged}`, which asks which form a field \
+                         settled on — the judgment a name is copied to avoid"
+                    );
+                }
             }
             assert!(
                 convergence.contains("EVERY form"),
@@ -1251,14 +1268,21 @@ mod tests {
         let mut stated = 0;
         for skill in lk_dist::skill_names() {
             for file in lk_dist::skill_files(skill) {
-                if !(file.contents.contains("lore resolve")
-                    && file.contents.contains("lore wiki search"))
-                {
+                // A table row names commands; it does not state a rule. `lore-ingest`'s
+                // command reference lists `lore resolve`, and one added row would otherwise
+                // make it answer for a baseline it never states.
+                let prose: String = file
+                    .contents
+                    .lines()
+                    .filter(|l| !l.trim_start().starts_with('|'))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !(prose.contains("lore resolve") && prose.contains("lore wiki search")) {
                     continue;
                 }
                 stated += 1;
                 assert!(
-                    file.contents.contains("EVERY form"),
+                    prose.contains("EVERY form"),
                     "{skill}/{}: states the dedup baseline without asking every form the \
                      source writes — a page written from a source in another language \
                      answers to none of the forms this one carries, so the title alone \
