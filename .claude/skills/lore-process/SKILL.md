@@ -57,8 +57,8 @@ you last read them.
    stamped earlier in this run therefore reads `done` if you re-classify — that
    is correct, and it is skipped, not failed. An `extract-concepts` task reads
    `current` until `lore queue apply` materializes its result and stamps the marker —
-   which is step 4b, not only the Finalize, so a task covered by an earlier apply reads
-   `done` and is skipped like any other. A
+   which step 4 runs per file, not only the Finalize, so a task covered by an earlier apply
+   reads `done` and is skipped like any other. A
    `synthesize-concept` task is not that case — it stamps its own marker, so it reads
    `done` like every other kind. **Never loop
    on "until nothing reads `current`"** — the "this run is finished" signal is
@@ -71,9 +71,10 @@ you last read them.
 3. **Never hand-write a concept's sources-section body or `source_count`** —
    both are machine-owned; `lore graph backlinks-sync` re-derives them from
    forward concept links on origin pages.
-4. **Move a queue file to `processed/` only when every task in it
-   succeeded.** On any failure, leave the file in place and stop processing
-   that file.
+4. **Move a queue file to `processed/` only when `lore queue status` says nothing in it is
+   still work.** Step 4 has the sequence; what makes it a rule is that the answer is the
+   classifier's and never your own record. On any failure, leave the file in place and stop
+   processing that file.
 5. **The target page's frontmatter is read-only**, except for the one
    `llm_inputs.<key>_done` completion marker you own and MUST stamp when a task
    finishes (the per-kind key is in the step 3c table) — **except
