@@ -145,7 +145,8 @@ domain-neutral engine — then no work-log, reviews, or `is_personal` are produc
   `lore resolve <name>` answers from the same `ConceptRegistry` the router uses, so a skill
   reuses an established page instead of forking a variant — the pipeline embeds no registry in
   the task, and the registry a skill reads for the equivalences spelling cannot see
-  (`lore wiki concepts`) is a second, narrower step rather than the primary one.
+  (asked per name through `lore resolve` and `lore wiki search`) is a second, narrower step
+  rather than the primary one.
 - **An extraction's ALIASES are adopted only where nothing else claims them.** A concept's
   name is its address and its lookup key and the lookup is exact, so a name carrying a gloss
   answers to neither half — `ConceptDrafts::stage` takes the other spellings as data instead,

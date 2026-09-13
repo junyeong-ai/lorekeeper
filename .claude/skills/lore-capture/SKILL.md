@@ -61,12 +61,10 @@ from the conversation's most recent troubleshooting thread.
 
 ### 2. Load context
 
-```bash
-lore wiki concepts
-```
-
-If core concepts exist, this capture MERGES (enriches) rather than
-creates duplicate pages.
+Ask which page already owns each name this capture will write — `lore resolve <name>` for
+every form the material writes, then `lore wiki search` on two or three distinguishing terms
+of each for the equivalences no rule about spelling can see. A capture that finds an owner
+MERGES into it rather than creating a duplicate page.
 
 If an extraction manifest exists for the current project
 (`<vault>/.lorekeeper/extracts/<project>/manifest.yaml`), load
@@ -110,7 +108,7 @@ the insight's nature (troubleshooting, constraint, pattern) belongs in
 
 For each technology, pattern, or constraint, follow the **Concept convergence**
 section of the vault's `AGENTS.md` — matching
-against the registry loaded in step 2, with the concepts you already created
+against what step 2 resolved and searched, with the concepts you already created
 in this capture as the created-this-run set. Then:
 
 1. New → create with a 1-2 sentence synthesis in the Synthesis section

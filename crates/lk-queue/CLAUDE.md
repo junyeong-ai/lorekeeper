@@ -18,7 +18,7 @@ knows about; provider choice is config-driven (`build_llm_client` in lk-cli).
   transactional commit point for buffered side-effects. (Classification is deterministic
   in the pipeline — keyword rules, no LLM task — so the trait has no `classify`.)
 - **Concept dedup is skill-side, not per-task**: the queue task carries no concept
-  registry. `/lore-process` loads the on-disk registry once per run (`lore wiki concepts`
+  registry. `/lore-process` asks the on-disk answer per name (`lore resolve`, then `lore wiki search`
   — slugs, names, aliases) and reuses an established name instead of forking a variant, so
   the per-task payload stays O(1) as the vault grows. `ExtractConceptsRequest` carries only
   `categories: Vec<CategoryReference>` (config-driven category list), serialized into the task

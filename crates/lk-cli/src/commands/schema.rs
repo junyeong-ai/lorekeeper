@@ -630,7 +630,13 @@ pub fn render_agents_md(
          page (reuse its slug and title, never a variant), exit 1 means no page answers to \
          it, exit 2 means more than one does and `lore graph lint` already reports the pair. \
          The match is EXACT on identity, which folds spelling and nothing else: `VectorDB` \
-         finds `vector-db`, `k8s` does not find `kubernetes`."
+         finds `vector-db`, `k8s` does not find `kubernetes`.\n\n   Ask it for EVERY form the \
+         material writes, never the title alone. The other forms are what a page written from \
+         a source in another language already answers to, and a hit on ANY of them is the \
+         owner — reuse that page and register the forms it does not yet carry. Asking only the \
+         title is what mints a rival beside the page that already holds the subject: a name an \
+         established page answers to is REFUSED as an alias on a new page, so the one form \
+         that would have joined them is dropped by the act of creating the rival."
     )
     .unwrap();
     writeln!(
@@ -646,22 +652,26 @@ pub fn render_agents_md(
         "3. **Judge the names `resolve` cannot.** An exit 1 is the answer for a name nothing \
          answers to, not for a concept the vault lacks: an acronym and its expansion, a \
          plural, a team's shorthand are DIFFERENT names for one thing, and no rule about \
-         spelling can see it. Ask `lore wiki search` for the name's distinguishing terms — \
-         two or three, never the whole name, since every term must appear and a long query \
-         narrows past the very page it is looking for — then read the hits and judge. Reuse \
-         the established page and register the surface form as an alias when one matches, and \
-         when in doubt prefer the established broader concept over a narrow variant. What a \
-         query cannot reach is a rival sharing no word with the name; the registry (`lore \
-         wiki concepts`) is where that would show, and it is a read whose cost grows with the \
-         vault while a query's does not."
+         spelling can see it. Ask `lore wiki search` for two or three distinguishing terms of \
+         EACH form the material writes — never a whole name, since every term must appear and \
+         a long query narrows past the very page it is looking for — then read the hits and \
+         judge. In `--json`, `format` says whether a hit is even a concept and `matched` how \
+         it was reached: one reached at `text` sits behind every name and summary hit and is \
+         the one a limit drops. Reuse the established page and register the surface form as an \
+         alias when one matches, and when in doubt prefer the established broader concept over \
+         a narrow variant. Two things a query cannot reach: a rival sharing no word with any \
+         form the material writes, and another inflection of a one-word name — `guardrails` \
+         does not find `guardrail` — which is worth asking for explicitly. The registry (`lore \
+         wiki concepts`) is where the rest would show, and it is a read whose cost grows with \
+         the vault while a query's does not."
     )
     .unwrap();
     writeln!(
         out,
         "4. **Register surface forms as aliases.** When a source's surface form differs \
          from the canonical name, append it to the concept's `aliases` frontmatter — the \
-         registry (`lore wiki concepts`) returns aliases, so the next run's dedup match \
-         recognizes the synonym instead of minting a variant page. Links are unaffected \
+         `lore resolve` answers to an alias, so the next run's first question lands on this \
+         page instead of minting a variant. Links are unaffected \
          (they address the slug path; the display text is free-form). An alias edit is \
          metadata-only: it never renames the page and is not, by itself, a reason to \
          rewrite the body (whether a merge also enriches the synthesis body is the \
@@ -774,10 +784,23 @@ mod tests {
                 )),
                 "{locale:?}: AGENTS.md never states the language pages are authored in"
             );
-            // Pinned on the language NAMED anywhere in the spec rather than on one phrase
-            // that names it: an agent told to prefer another vault's language writes that
-            // vault's pages in it, and the instruction erodes into whichever sentence
-            // carries it.
+            // The convergence section names the language too, and separately: the header says
+            // what pages are written in, the section says which form a page must also answer
+            // to. Pinning only the header let the section stop naming a language at all,
+            // after which nothing tells an agent which one a reader will search in.
+            let convergence = md
+                .split_once("## Concept convergence")
+                .expect("the spec carries the convergence contract")
+                .1;
+            assert!(
+                convergence.contains(locale.english_name()),
+                "{locale:?}: convergence never names the language a reader searches in"
+            );
+            // A ban on the NAME, so the spec can never carry an example sentence naming
+            // another language either — `An English term keeps its spelling on a Korean page`
+            // belongs in the skills and cannot be mirrored here. The cost is accepted: an
+            // agent told to prefer another vault's language writes that vault's pages in it,
+            // and no phrasing rule separates instructing from mentioning.
             for other in Locale::iter().filter(|l| *l != locale) {
                 assert!(
                     !md.contains(other.english_name()),

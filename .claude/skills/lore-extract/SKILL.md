@@ -297,7 +297,8 @@ Extract knowledge using the manifest. Requires a prior scan.
 1. Load vault config (root, locale, categories).
 2. Load manifest from `<vault>/.lorekeeper/extracts/<project>/`.
    Abort if no manifest — tell user to scan first.
-3. Load concept registry: `lore wiki concepts`
+3. Converge each name as § Concept convergence defines: `lore resolve` for every form the
+   source writes, then `lore wiki search` on two or three distinguishing terms of each.
 4. Read `strip_patterns` and `concept_mapping` from manifest.
 
 5. For each discovered source (filtered by `--domain` / `--transferability`):
@@ -369,7 +370,7 @@ Extract knowledge using the manifest. Requires a prior scan.
 
    h. Create/merge concept pages per AGENTS.md, following its
       **Concept convergence** section —
-      matching against the registry loaded in step 3, with the concepts already
+      matching against what step 3 resolved and searched, with the concepts already
       created earlier in this run as the created-this-run set (a batch
       processes many documents, so that set is what closes same-run gaps).
       New concept → fill the Synthesis section, emit the related-concepts
