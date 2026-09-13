@@ -49,7 +49,8 @@ block — it is the pipeline's cache, not part of a directly-authored page.
 
 ## Extraction manifest
 
-The manifest lives in the vault (not the project repo):
+The manifest lives in the vault (not the project repo), and the directory names the project —
+it is the address every reader keys off, so nothing inside the file repeats it:
 
 ```
 <vault>/.lorekeeper/extracts/<project>/manifest.yaml
@@ -62,7 +63,6 @@ by the user between phases for overrides.
 
 ```yaml
 project:
-  name: <project-name>
   repo_path: <absolute-path>
   last_scan: <ISO-date>
   git_head_at_scan: <short-sha>   # null when the repo is not under git (mtime fallback)

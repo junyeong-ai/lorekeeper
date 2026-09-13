@@ -102,7 +102,9 @@ pub enum Command {
     /// it could not read)
     Doctor,
     /// How far each project's knowledge extraction has fallen behind its repository — the
-    /// manifests `/lore-extract` writes declare when they were taken and against which commit
+    /// manifests `/lore-extract` writes declare when they were taken and against which commit.
+    /// Exits non-zero when any project needs attention, the way `lore health` does for a
+    /// source that stopped talking
     Extract {
         #[command(subcommand)]
         cmd: commands::extract::ExtractCommand,
