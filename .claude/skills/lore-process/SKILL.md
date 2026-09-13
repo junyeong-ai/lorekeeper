@@ -133,7 +133,7 @@ The essentials: a visible `.jsonl` is fully written and every
    the ingest pipeline routes by, so the two cannot disagree about an existing name. The
    queue task carries no concept registry, so that answer, plus a created-this-run set, plus
    `lore wiki search` on the name's distinguishing terms for the equivalences spelling cannot
-   see, is the full dedup baseline
+   see, is the dedup baseline
    (see the vault AGENTS.md § Concept convergence).
 
 2. **List unprocessed queue files** in `<vault>/.lorekeeper/queue/` (top

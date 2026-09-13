@@ -398,9 +398,9 @@ pub fn render_agents_md(
         "**This vault is written in {}.** Every word added to a page goes in that language — a \
          summary, a theme, a concept's synthesis, an exploration — whatever language the \
          source arrived in. Two things are not translated by it. Source content is quoted as \
-         it stands, and a NAME is not prose: a concept's name is whichever form the field \
-         actually uses, so a term the field writes in another language keeps its spelling \
-         here (§ Concept convergence says what follows from that).",
+         it stands, and a NAME is not prose: a concept's name is the form its own source \
+         writes, so a term a source writes in another language keeps its spelling here \
+         (§ Concept convergence says what follows from that).",
         locale.english_name()
     )
     .unwrap();
@@ -1146,6 +1146,48 @@ mod tests {
             assert!(
                 !content.contains(&format!("## {personal}")),
                 "personal page type must be omitted when the module is absent: {personal}"
+            );
+        }
+    }
+
+    /// The two rules an extraction cannot get wrong without splitting a concept in two, held
+    /// by what the document must NOT say as well as what it must. A name chosen by judging
+    /// what a field has settled on has no stable answer for the term a source is introducing,
+    /// and one run answering it twice mints two pages; a rival looked for by reading the whole
+    /// registry is a read that outgrows the session, and a convergence step that stops running
+    /// fails silently. Both were shipped as prose, and prose is what a later edit rewrites.
+    #[test]
+    fn the_naming_and_convergence_rules_survive_a_rewording() {
+        use strum::IntoEnumIterator;
+        for locale in Locale::iter() {
+            let md = render_agents_md(
+                locale,
+                &lk_core::config::VaultDirs::default(),
+                true,
+                Some("tasks.md"),
+            );
+            // `the established page` is a different claim and stays; what may not appear is a
+            // form a FIELD is said to have settled on, in any language this tool speaks.
+            let mut forbidden = vec![
+                "the field actually uses".to_string(),
+                "form the field".to_string(),
+            ];
+            forbidden.extend(Locale::iter().map(|l| format!("established {}", l.english_name())));
+            for judged in forbidden {
+                assert!(
+                    !md.contains(&judged),
+                    "{locale:?}: `{judged}` asks which form a field settled on, which is the \
+                     judgment a name is copied to avoid"
+                );
+            }
+            assert!(
+                md.contains("COPIED"),
+                "{locale:?}: the document never says a name is copied rather than composed"
+            );
+            assert!(
+                md.contains("`lore wiki search`"),
+                "{locale:?}: convergence never names the bounded question, so the only way to \
+                 find a rival is a read that grows with the vault"
             );
         }
     }
