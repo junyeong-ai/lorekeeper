@@ -3553,6 +3553,54 @@ async fn a_plan_that_mints_a_rival_carries_the_refusal_on_the_page_it_wrote() {
     );
 }
 
+/// A document title is a sentence in the repositories a document source reads, and a path
+/// component holds 255 bytes. Past that the page cannot be written at all, and the write loop
+/// stops on it — one over-long title costing every document behind it in the batch.
+#[tokio::test]
+async fn a_document_titled_past_the_filename_limit_still_gets_a_page() {
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let mut config = base_config(vault);
+    config.sources.get_mut("test-source").unwrap().source_type = SourceType::Manual;
+    let source = config.sources.get("test-source").unwrap().clone();
+    let options = IngestOptions {
+        target_date: None,
+        today: far_future(),
+        dry_run: false,
+    };
+    let ts: jiff::Timestamp = "2026-05-23T10:00:00Z".parse().unwrap();
+
+    let title = "그림 안의 글자는 그림과 함께 확대된다 ".repeat(20);
+    let llm = ConceptsPerCall::build(vec![vec![]]);
+    let mut pipeline = Pipeline::new(vault, build_ctx(&config, llm));
+    let result = pipeline
+        .plan(
+            "test-source",
+            &source,
+            vec![raw_item(&title, "body", "DOC-LONG", ts)],
+            &options,
+        )
+        .await
+        .expect("a long title is not a reason to refuse the document");
+
+    let page = result
+        .document_pages
+        .first()
+        .expect("the document is planned");
+    let name = std::path::Path::new(page.path.as_ref())
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("the page has a filename");
+    assert!(
+        name.len() <= 255,
+        "a {}-byte filename cannot be written on any filesystem this runs on: {name}",
+        name.len()
+    );
+    std::fs::create_dir_all(vault.join("wiki").join("documents")).unwrap();
+    std::fs::write(vault.join(page.path.as_ref()), &page.content)
+        .expect("the address the pipeline chose is one the filesystem accepts");
+}
+
 /// A source plan that FAILS must leave nothing of its concepts behind.
 /// `render_concept_pages` emits the run-level accumulator unconditionally, so a plan that
 /// folded concepts one at a time would write pages for a daily page it never wrote —

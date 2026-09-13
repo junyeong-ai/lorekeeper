@@ -125,6 +125,29 @@ pub struct Pipeline {
     document_slugs: std::collections::HashSet<String>,
 }
 
+/// The most of a slug a filename can carry.
+///
+/// A document's title is a sentence in the repositories this reads, and 255 bytes is what a
+/// path component holds. The budget is that limit less the extension and less the longest
+/// suffix the disambiguation below can append, so a collision on a truncated slug still fits.
+/// Concept slugs are deliberately not bounded here: [`lk_core::concept::identity_key`] is
+/// built on the same slug, and a cut there would fold two different names onto one identity —
+/// the duplicate-page defect, written deliberately. A concept's name is a term rather than a
+/// sentence, and a name long enough to exceed this fails its write loudly.
+const ADDRESS_BUDGET: usize = 212;
+
+/// Cut a slug to [`ADDRESS_BUDGET`] on a character boundary, leaving no trailing separator.
+fn bounded_address(slug: &str) -> String {
+    if slug.len() <= ADDRESS_BUDGET {
+        return slug.to_string();
+    }
+    let cut = (0..=ADDRESS_BUDGET)
+        .rev()
+        .find(|n| slug.is_char_boundary(*n))
+        .unwrap_or(0);
+    slug[..cut].trim_end_matches('-').to_string()
+}
+
 impl Pipeline {
     pub fn new(vault_root: &Path, ctx: Arc<PipelineContext>) -> Self {
         Self {
@@ -772,6 +795,7 @@ impl Pipeline {
                     }
                 }
             };
+            let base_slug = bounded_address(&base_slug);
             // This document's stable identity — the manual file path the template records as
             // `source_file` (`source_url` is also accepted, as forward-compat for any
             // URL-sourced document). Used to decide whether an existing page at a candidate
