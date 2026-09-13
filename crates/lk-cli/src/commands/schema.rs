@@ -670,9 +670,9 @@ pub fn render_agents_md(
     writeln!(
         out,
         "4. **Register surface forms as aliases.** When a source's surface form differs \
-         from the canonical name, append it to the concept's `aliases` frontmatter — the \
-         `lore resolve` answers to an alias, so the next run's first question lands on this \
-         page instead of minting a variant. Links are unaffected \
+         from the canonical name, append it to the concept's `aliases` frontmatter — \
+         `lore resolve` answers with this page for an alias, so the next run's first \
+         question lands here instead of minting a variant. Links are unaffected \
          (they address the slug path; the display text is free-form). An alias edit is \
          metadata-only: it never renames the page and is not, by itself, a reason to \
          rewrite the body (whether a merge also enriches the synthesis body is the \
@@ -1198,16 +1198,20 @@ mod tests {
                 .split_once("## Concept convergence")
                 .expect("the spec carries the convergence contract")
                 .1;
-            // The title rule opens the section and ends at the paragraph after it. Both the
-            // superseded wording and this one open the same way, so the slice holds across a
-            // revert — which is the edit this exists to fail on.
-            let title_rule = convergence
+            // The title rule runs from its own opening to the next thing the section starts —
+            // another bolded paragraph, or the numbered algorithm. Bounding it at the next
+            // blank line instead would end the check at the first paragraph break, and
+            // splitting a long paragraph for readability is a likelier edit than moving it:
+            // the half below the break would ship unchecked.
+            let rule = convergence
                 .split_once("**A concept's title is its name")
                 .expect("the convergence contract opens on the title rule")
-                .1
-                .split("\n\n")
-                .next()
-                .expect("a paragraph");
+                .1;
+            let title_rule = ["\n\n**", "\n\n1. "]
+                .iter()
+                .filter_map(|end| rule.find(end))
+                .min()
+                .map_or(rule, |at| &rule[..at]);
             assert!(
                 title_rule.contains("COPIED"),
                 "{locale:?}: the title rule no longer says a name is copied rather than composed"
