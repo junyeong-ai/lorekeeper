@@ -151,18 +151,28 @@ Discover knowledge sources and persist a manifest.
    ADRs, learnings, READMEs, and doc comments are all one tier: a claim ABOUT the code, which
    may be absent, may have been true once, or may never have been true.
 
-   a. **Scope every check to the population the claim names.** This is where checks go wrong,
-      and both ways were measured on live repositories. A write-path article reading "every
-      mutation routes through one module" checked with a text search over the repository
-      returned twelve violations that were all inside test modules, against a real count of
-      three. A dependency article reading "no `once_cell`" checked against the transitive
-      graph returned a violation that came in through a test-only package, against zero in
-      the project's own declarations. Both claims are about what the project itself writes;
-      both checks ran over everything reachable.
-   b. **Carry the population into the verdict.** A test that fails on the violation, or a type
-      that makes it unrepresentable, is a verdict. A language server's reference set answers
-      "who calls this". A text search over a negative — "nothing outside X does Y" — is a
-      LOWER BOUND and says so.
+   a. **A search names candidates; reading them is what produces the verdict.** Every way of
+      getting this wrong has the same shape — an exclusion rule written to narrow the search,
+      incomplete for a reason nobody anticipated. Three, measured on live repositories: "every
+      mutation routes through one module" searched over the whole tree returned twelve hits
+      that were all inside `#[cfg(test)]` modules; the same search excluding those still
+      returned four that were all under `tests/`; and "no `once_cell`" checked against the
+      transitive graph returned one that arrived through a test-only package. The real counts
+      were three, zero and zero. Each rule was written after the previous one failed, and each
+      was incomplete again.
+
+      So narrow the search where the project's own tooling already models the boundary
+      (`symora map summary` separates code files from test files; a build manifest separates
+      direct dependencies from the transitive graph), and then READ every hit that survives.
+      Scoping reduces the reading; it never replaces it. A hit count too large to read is a
+      claim this cannot verify, and the page says so rather than reporting the count.
+
+   b. **Carry into the verdict what produced it.** A test that fails on the violation, or a
+      type that makes it unrepresentable, is the claim already enforced — cite it and stop. A
+      language server's reference set answers "who calls this". A read over a search's hits
+      answers for the population that search covered, which for a negative claim
+      ("nothing outside X does Y") is a lower bound and says so.
+
    c. Four outcomes, and three of them are knowledge:
       - **Confirmed** → the page states the claim, its exceptions, and the check's reach. The
         exceptions are the part neither half holds alone: three writes outside that module
