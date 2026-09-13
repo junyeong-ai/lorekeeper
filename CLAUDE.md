@@ -82,6 +82,13 @@ lore health --json                 # source currency as a contract — a dead so
 lore task rollover --closing yesterday  # close the day that ended — carry what is still committed
 ```
 
+**A release's bump size follows what the change reaches, not its commit type.** The CLI
+surface, a config key, or a page format declared in the generated `AGENTS.md` is at least
+MINOR — something downstream has to react to it. A correction to text people and agents read
+(README, `AGENTS.md` prose, an embedded skill or pipeline body) is PATCH however the commit is
+typed. No gate derives this from a diff; the ones that exist pin the tag to the crate version
+and that to every skill stamp.
+
 ## Config
 
 User settings in `config.yaml` (gitignored); copy `config.example.yaml`.
