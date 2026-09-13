@@ -63,9 +63,10 @@ struct Project {
 struct DiscoveredSource {
     path: String,
     /// How many files the pattern matched when the scan ran. Reported beside the extracted
-    /// count so the two sides share a unit; a pattern count and a file count do not.
-    #[serde(default)]
-    count: usize,
+    /// count so the two sides share a unit; a pattern count and a file count do not. Absent on
+    /// a manifest written before the field existed, and absent is not zero — a zero beside a
+    /// non-zero extracted count states an absence where the truth is that nothing recorded it.
+    count: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -102,21 +103,27 @@ enum RepoState {
     /// Carries the path it looked at: a manifest written with a `~` this could not expand
     /// resolves nowhere, and "not found" without the path reads as a repository that moved.
     Missing(String),
-    /// The manifest recorded no baseline commit, so there is nothing to diff against. The
-    /// scan writes one for every git repository it reads, so this is a project that was not
-    /// one when it was scanned.
+    /// Not a git repository, so there is no commit to measure against and nothing a re-scan
+    /// would change. Reported and left alone.
     NoBaseline,
+    /// A git repository whose manifest records no baseline. Unlike [`RepoState::NoBaseline`]
+    /// this HAS a repair — a re-scan anchors it — so it is marked. The two are told apart by
+    /// asking git what the directory is, never by reading what the manifest says about it.
+    Unanchored,
     /// The recorded commit is not in this repository: a rebase, a fresh clone, or a rewritten
     /// history. The scan cannot be diffed against anything, which is not the same as unmoved.
     BaselineGone,
     Unmoved,
     Moved {
-        commits: usize,
+        commits: Option<usize>,
         files: usize,
     },
     /// The question could not be put. Apart from the rest because a question that failed is
     /// not an answer of "nothing changed".
     Unanswered(String),
+    /// The manifest declares no source, so there is nothing to measure and no repair that
+    /// changes the answer. Reported and left alone, like a directory that is not a repository.
+    NothingDeclared,
 }
 
 impl RepoState {
@@ -124,19 +131,25 @@ impl RepoState {
     /// measured is not one — it is reported and left alone, because marking a row nobody can
     /// clear teaches the reader to skip the column.
     fn needs_attention(&self) -> bool {
-        !matches!(self, RepoState::Unmoved | RepoState::NoBaseline)
+        !matches!(
+            self,
+            RepoState::Unmoved | RepoState::NoBaseline | RepoState::NothingDeclared
+        )
     }
 
     fn describe(&self) -> String {
         match self {
             RepoState::Missing(at) => format!("no repository at {at}"),
-            RepoState::NoBaseline => "not measured — no git baseline".into(),
+            RepoState::NoBaseline => "not measured — not a git repository".into(),
+            RepoState::Unanchored => "no baseline recorded — a re-scan anchors it".into(),
             RepoState::BaselineGone => "baseline commit is gone".into(),
             RepoState::Unmoved => "sources unchanged".into(),
-            RepoState::Moved { commits, files } => {
-                format!("{files} declared source file(s) changed over {commits} commit(s)")
-            }
+            RepoState::Moved { commits, files } => match commits {
+                Some(n) => format!("{files} declared source file(s) differ, over {n} commit(s)"),
+                None => format!("{files} declared source file(s) differ"),
+            },
             RepoState::Unanswered(why) => format!("cannot be measured — {why}"),
+            RepoState::NothingDeclared => "not measured — the manifest declares no source".into(),
         }
     }
 }
@@ -160,7 +173,7 @@ struct Facts {
     last_scan: Option<jiff::civil::Date>,
     days_since: Option<i64>,
     declared: usize,
-    declared_files: usize,
+    declared_files: Option<usize>,
     pages: usize,
     skipped: usize,
     state: RepoState,
@@ -255,7 +268,11 @@ fn build_facts(manifest: Manifest, today: jiff::civil::Date) -> Facts {
         .iter()
         .map(|s| s.path.clone())
         .collect();
-    let declared_files: usize = manifest.discovered_sources.iter().map(|s| s.count).sum();
+    let declared_files: Option<usize> = manifest
+        .discovered_sources
+        .iter()
+        .map(|s| s.count)
+        .try_fold(0usize, |acc, n| n.map(|n| acc + n));
     let state = repo_state(
         &repo,
         manifest.project.git_head_at_scan.as_deref(),
@@ -308,9 +325,17 @@ fn repo_state(repo: &Path, baseline: Option<&str>, declared: &[String]) -> RepoS
     // worktree carries `.git` as a FILE, and a subdirectory of a repository carries none
     // while git answers for it. Probing for a `.git` directory disagreed with the scan, which
     // records a baseline through `git -C <path> rev-parse`.
+    let is_repo = git(repo, &["rev-parse", "--git-dir"]).is_some();
     let Some(baseline) = baseline else {
-        return RepoState::NoBaseline;
+        return if is_repo {
+            RepoState::Unanchored
+        } else {
+            RepoState::NoBaseline
+        };
     };
+    if !is_repo {
+        return RepoState::Unanswered("git does not answer for this directory".into());
+    }
     // git refuses a pathspec that leaves the repository and that refusal reaches `Unanswered`
     // below. A `~` prefix is the one it does NOT refuse: nothing expands it, so it names a
     // directory called `~`, matches nothing, and answers zero with exit 0 — a green row over a
@@ -321,10 +346,7 @@ fn repo_state(repo: &Path, baseline: Option<&str>, declared: &[String]) -> RepoS
         ));
     }
     if declared.is_empty() {
-        return RepoState::Unanswered("the manifest declares no source to measure".into());
-    }
-    if git(repo, &["rev-parse", "--git-dir"]).is_none() {
-        return RepoState::Unanswered("git does not answer for this directory".into());
+        return RepoState::NothingDeclared;
     }
     if git(
         repo,
@@ -340,18 +362,24 @@ fn repo_state(repo: &Path, baseline: Option<&str>, declared: &[String]) -> RepoS
     let Some(diff) = git(repo, &args) else {
         return RepoState::Unanswered("git refused the declared paths".into());
     };
-    let files = diff.lines().count();
+    // `git diff` lists tracked paths only, and a scan reads the working tree — so a source
+    // written since and not yet staged differs from what was scanned while the diff is silent.
+    let mut args = vec!["ls-files", "--others", "--exclude-standard", "--"];
+    args.extend(specs.iter().map(String::as_str));
+    let Some(untracked) = git(repo, &args) else {
+        return RepoState::Unanswered("git refused the declared paths".into());
+    };
+    let files = diff.lines().count() + untracked.lines().count();
     if files == 0 {
         return RepoState::Unmoved;
     }
     // Commits are context beside the file count, asked as a symmetric difference so a rolled
-    // back checkout counts what it lost as well as what it gained.
+    // back checkout counts what it lost as well as what it gained. A count that did not answer
+    // is absent rather than zero — the files are the verdict either way.
     let range = format!("{baseline}...HEAD");
     let mut args = vec!["rev-list", "--count", &range, "--"];
     args.extend(specs.iter().map(String::as_str));
-    let commits = git(repo, &args)
-        .and_then(|o| o.trim().parse().ok())
-        .unwrap_or(0);
+    let commits = git(repo, &args).and_then(|o| o.trim().parse().ok());
     RepoState::Moved { commits, files }
 }
 
@@ -392,11 +420,16 @@ fn render(reports: &[ProjectState]) {
                     _ => "never scanned".to_string(),
                 };
                 println!("{mark} {name}  {scanned} · {}", f.state.describe());
+                let declared = match f.declared_files {
+                    Some(n) => format!("{n} file(s) declared in {} pattern(s)", f.declared),
+                    None => format!(
+                        "{} pattern(s) declared, file count not recorded",
+                        f.declared
+                    ),
+                };
                 println!(
-                    "  {}  {} file(s) declared in {} pattern(s) · {} extracted · {} skipped",
+                    "  {}  {declared} · {} extracted · {} skipped",
                     super::pad("", width),
-                    f.declared_files,
-                    f.declared,
                     f.pages,
                     f.skipped
                 );
@@ -432,7 +465,11 @@ fn as_json(reports: &[ProjectState]) -> serde_json::Value {
                     RepoState::Missing(at) => {
                         serde_json::json!({"kind": "repo-missing", "at": at})
                     }
-                    RepoState::NoBaseline => serde_json::json!({"kind": "no-baseline"}),
+                    RepoState::NoBaseline => serde_json::json!({"kind": "not-a-repository"}),
+                    RepoState::Unanchored => serde_json::json!({"kind": "no-baseline"}),
+                    RepoState::NothingDeclared => {
+                        serde_json::json!({"kind": "nothing-declared"})
+                    }
                     RepoState::BaselineGone => serde_json::json!({"kind": "baseline-gone"}),
                     RepoState::Unmoved => serde_json::json!({"kind": "current"}),
                     RepoState::Unanswered(why) => {
@@ -455,6 +492,21 @@ fn as_json(reports: &[ProjectState]) -> serde_json::Value {
 /// How many projects have moved since their scan, for the `lore status` row.
 pub(crate) fn behind(reports: &[ProjectState]) -> usize {
     reports.iter().filter(|r| r.needs_attention()).count()
+}
+
+/// How many projects the check could put no question to — a directory that is not a
+/// repository, a manifest naming no source. They are neither behind nor current, and counting
+/// them as current is how a summary reports coverage it never had.
+pub(crate) fn unmeasured(reports: &[ProjectState]) -> usize {
+    reports
+        .iter()
+        .filter(|r| match &r.detail {
+            Detail::Read(f) => {
+                matches!(f.state, RepoState::NoBaseline | RepoState::NothingDeclared)
+            }
+            Detail::Unreadable(_) => false,
+        })
+        .count()
 }
 
 #[cfg(test)]
@@ -711,6 +763,80 @@ mod tests {
         );
     }
 
+    /// A source the scan has never seen is a difference, and `git diff` does not list one:
+    /// it compares tracked content, while a scan reads the working tree. So the new ADR
+    /// nobody has staged yet — the single likeliest thing to be waiting for extraction —
+    /// was the one change the row could not see.
+    #[test]
+    fn a_source_written_since_the_scan_and_never_staged_is_seen() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        let vault = dir.path().join("vault");
+        git_repo(&repo);
+        let base = commit(&repo, "docs/a.md", "one");
+
+        write_manifest(&vault, "p", &manifest_for(&repo, &base, "docs/*.md"));
+        assert!(
+            !survey(&vault, TODAY).expect("survey")[0].needs_attention(),
+            "nothing has moved yet"
+        );
+
+        std::fs::write(repo.join("docs/b.md"), "new").expect("write");
+        let r = survey(&vault, TODAY).expect("survey");
+        assert!(
+            r[0].needs_attention(),
+            "an unstaged new source is a source the scan never read"
+        );
+        let Detail::Read(f) = &r[0].detail else {
+            panic!("expected a read manifest")
+        };
+        assert!(matches!(f.state, RepoState::Moved { files: 1, .. }));
+    }
+
+    /// Every manifest written before `count` existed carries none, and a defaulted zero made
+    /// each of them report "0 file(s) declared" beside a non-zero extracted count — an
+    /// absence stated as a measurement, which is the defect this whole command exists to
+    /// report. A count nothing recorded is absent, and one recorded is summed.
+    #[test]
+    fn a_file_count_no_manifest_recorded_is_absent_rather_than_zero() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = dir.path().join("vault");
+        let repo = dir.path().join("repo");
+        git_repo(&repo);
+        let base = commit(&repo, "docs/a.md", "one");
+
+        write_manifest(
+            &vault,
+            "unrecorded",
+            &format!(
+                "project:\n  repo_path: {}\n  last_scan: 2026-09-01\n  git_head_at_scan: \
+                 {base}\ndiscovered_sources:\n  - path: \"docs/*.md\"\n  - path: \
+                 \"adr/*.md\"\nextracted: []\n",
+                repo.display()
+            ),
+        );
+        write_manifest(
+            &vault,
+            "recorded",
+            &format!(
+                "project:\n  repo_path: {}\n  last_scan: 2026-09-02\n  git_head_at_scan: \
+                 {base}\ndiscovered_sources:\n  - path: \"docs/*.md\"\n    count: 4\n  \
+                 - path: \"adr/*.md\"\n    count: 3\nextracted: []\n",
+                repo.display()
+            ),
+        );
+        let r = survey(&vault, TODAY).expect("survey");
+        let count = |n: &str| {
+            let p = r.iter().find(|x| x.name == n).expect("project");
+            let Detail::Read(f) = &p.detail else {
+                panic!("expected a read manifest")
+            };
+            f.declared_files
+        };
+        assert_eq!(count("unrecorded"), None);
+        assert_eq!(count("recorded"), Some(7));
+    }
+
     /// A manifest that is present and unusable is reported, not dropped and not fatal. Both
     /// halves matter: dropping says a project has no extraction when it has one nobody can
     /// read, and failing lets one bad file decide what is said about the others.
@@ -786,6 +912,31 @@ mod tests {
         );
         write_manifest(&vault, "not-a-repo", &manifest_for(&plain, "abc", "d/*"));
 
+        // A git repository whose manifest records no baseline. It reads like the plain
+        // directory above from the manifest alone, and the two differ in whether a re-scan
+        // would fix them — which only git can say.
+        let unanchored = dir.path().join("unanchored");
+        git_repo(&unanchored);
+        commit(&unanchored, "docs/a.md", "one");
+        write_manifest(
+            &vault,
+            "unanchored",
+            &format!(
+                "project:\n  repo_path: {}\n  last_scan: 2026-09-01\ndiscovered_sources:\n  \
+                 - path: \"docs/*.md\"\n    count: 1\nextracted: []\n",
+                unanchored.display()
+            ),
+        );
+        write_manifest(
+            &vault,
+            "declares-nothing",
+            &format!(
+                "project:\n  repo_path: {}\n  last_scan: 2026-09-01\n  git_head_at_scan: \
+                 abc\ndiscovered_sources: []\nextracted: []\n",
+                unanchored.display()
+            ),
+        );
+
         let by = |n: &str, r: &[ProjectState]| {
             let p = r.iter().find(|x| x.name == n).expect("project");
             let Detail::Read(f) = &p.detail else {
@@ -793,13 +944,37 @@ mod tests {
             };
             f.state.describe()
         };
+        let marked = |n: &str, r: &[ProjectState]| {
+            r.iter()
+                .find(|x| x.name == n)
+                .expect("project")
+                .needs_attention()
+        };
         let r = survey(&vault, TODAY).expect("survey");
         assert!(by("gone", &r).contains("no repository at"));
-        assert_eq!(by("no-baseline", &r), "not measured — no git baseline");
+        assert_eq!(by("no-baseline", &r), "not measured — not a git repository");
         assert!(
             by("not-a-repo", &r).contains("git does not answer"),
             "a directory git does not answer for is not a missing one: {}",
             by("not-a-repo", &r)
+        );
+        assert_eq!(
+            by("unanchored", &r),
+            "no baseline recorded — a re-scan anchors it"
+        );
+        assert!(
+            marked("unanchored", &r) && !marked("no-baseline", &r),
+            "a baseline a re-scan would supply is work; one nothing would supply is not"
+        );
+        assert_eq!(
+            by("declares-nothing", &r),
+            "not measured — the manifest declares no source"
+        );
+        assert!(!marked("declares-nothing", &r));
+        assert_eq!(
+            unmeasured(&r),
+            2,
+            "the two states no question reaches are counted apart from the current ones"
         );
     }
 

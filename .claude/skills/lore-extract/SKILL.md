@@ -65,7 +65,7 @@ by the user between phases for overrides.
 project:
   repo_path: <absolute-path>
   last_scan: <ISO-date>
-  git_head_at_scan: <short-sha>   # null when the repo is not under git (mtime fallback)
+  git_head_at_scan: <short-sha>   # null when the repo is not under git — staleness then reads "not measured"
 
 discovered_sources:
   - path: "docs/adr/*.md"
@@ -110,10 +110,11 @@ synthetic label like `"a + b"`, which would look deleted on the next scan.
 Discover knowledge sources and persist a manifest.
 
 1. Detect version control. `git -C <path> rev-parse --short HEAD` →
-   `git_head_at_scan`. If the path is not a Git repo, set
-   `git_head_at_scan: null` and use file mtime everywhere git history would
-   otherwise drive re-scan diffing (step 2) and the staleness `lore extract status` reports.
-   Git is preferred, not required — a non-git project is fully supported.
+   `git_head_at_scan`. If the path is not a Git repo, set `git_head_at_scan: null`. A non-git
+   project is fully supported for extraction; what it gives up is the staleness check, and
+   `lore extract status` reports it "not measured" rather than reading mtimes — a checkout, a
+   copy or a formatter rewrites an mtime without changing a word the source says, so an mtime
+   answer would be a verdict about something other than the question.
 2. Check for existing manifest at
    `<vault>/.lorekeeper/extracts/<project>/manifest.yaml`
    (`mkdir -p` the directory first if absent).
@@ -121,11 +122,24 @@ Discover knowledge sources and persist a manifest.
    - **Re-scan**: load previous manifest. Present what changed, then preserve the previous
      `strip_patterns`, `concept_mapping` and user overrides.
 
-   **"Has this source moved" has one anchor: `git_head_at_scan`.** Ask it as a commit RANGE
-   over the path (`git diff --name-only <baseline>..HEAD -- <path>`), never as a date with
-   `--since`: a rebased commit keeps its author date, so a date anchor misses exactly the
-   history a lost baseline is about. Without git, compare the file's mtime with `last_scan` —
-   the same question where no commit exists to ask it of.
+   **"Has this source moved" has one anchor: `git_head_at_scan`.** Ask it as a CONTENT
+   difference between that commit and the working tree, in the scan's own glob — which is
+   exactly what `lore extract status` asks, so the two cannot disagree:
+
+   ```bash
+   git -C <path> diff --name-only <baseline> -- ':(glob)<pattern>'
+   git -C <path> ls-files --others --exclude-standard -- ':(glob)<pattern>'
+   ```
+
+   Not a commit range (`<baseline>..HEAD`): a range runs one direction, so it is empty on a
+   rolled-back checkout and blind to an edit nobody committed. Not `--since` either: a rebased
+   commit keeps its author date, so a date anchor misses exactly the history a lost baseline
+   is about. The second command is not an extra — `git diff` compares TRACKED content, so a
+   new ADR nobody has staged, the likeliest thing to be waiting for extraction, is the one
+   change it cannot see. And `:(glob)` rather than the bare pattern, because git's default
+   pathspec magic requires `**/` to match at least one directory, which silently drops the
+   root-level file the pattern meant to include. Without git there is no anchor, and the
+   question is reported unasked rather than answered from somewhere else.
 
 3. **Read the facts.** These are the current state rather than a statement about it, so they
    are neither absent nor stale, and they are the same questions in every ecosystem even
@@ -277,7 +291,7 @@ Extract knowledge using the manifest. Requires a prior scan.
       sub-sections nested under the document's content section; map each source part to
       its sub-section:
 
-      | Source kind | `###` sub-section under the content section |
+      | Material | `###` sub-section under the content section |
       |------------|----------------|
       | Structure and boundaries | → Background & Constraints, as what the project is made of and where data crosses between its parts |
       | What the build refuses | → Key Findings. Each declared lint, type-level constraint and gate command is a decision recorded where it cannot go stale; state it as a decision, not as configuration |
@@ -371,8 +385,11 @@ What is left is what needs a reader:
    since its last scan, which is a different question: a re-scan alone advances
    `git_head_at_scan`, so a project reads current while a page still holds what its source
    said three commits ago. Ask it per entry, with the same anchor and the same content
-   question: `git diff --name-only <extracted_at_commit> -- <source>`. Non-empty means the
-   page is behind its own source. Without git, compare the source's mtime with `extracted_at`.
+   question: `git diff --name-only <extracted_at_commit> -- ':(glob)<source>'`, plus the
+   `ls-files --others` half above. Non-empty means the page is behind its own source. An entry
+   written before this field existed carries none, and there the question has no anchor: report
+   it as un-checked beside the entries that answered, never as current — the next extraction
+   run records the field and the check starts working from there.
 
 2. **Quality** — per-document: empty sections, missing concept links,
    leaked project identifiers (grep for `strip_patterns` in vault).

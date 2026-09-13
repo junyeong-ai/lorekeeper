@@ -76,15 +76,25 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
         super::extract::survey(&vault_root, now.to_zoned(config.vault.timezone()).date())?;
     if !extracts.is_empty() {
         let behind = super::extract::behind(&extracts);
-        line(
-            "extract",
-            match behind {
-                0 => format!("{} project(s) current", extracts.len()),
-                n => format!("{n} of {} project(s) need attention", extracts.len()),
-            },
-            behind == 0,
-            "lore extract status",
-        );
+        // A project whose staleness could not be measured is counted apart from a current one,
+        // the way a source that never ingested is counted apart from a fresh one: folding the
+        // two would let the row say every project is current on the strength of projects
+        // nothing asked a question about.
+        let unmeasured = super::extract::unmeasured(&extracts);
+        let mut coverage = String::new();
+        let current = extracts.len() - behind - unmeasured;
+        if behind > 0 {
+            let _ = write!(coverage, "{behind} need attention");
+        }
+        if current > 0 {
+            let sep = if coverage.is_empty() { "" } else { " · " };
+            let _ = write!(coverage, "{sep}{current} current");
+        }
+        if unmeasured > 0 {
+            let sep = if coverage.is_empty() { "" } else { " · " };
+            let _ = write!(coverage, "{sep}{unmeasured} not measured");
+        }
+        line("extract", coverage, behind == 0, "lore extract status");
     }
 
     let queue = super::queue::queue_load(&vault_root)?;
