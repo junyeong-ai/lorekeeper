@@ -3450,6 +3450,10 @@ async fn a_break_between_digits_does_not_fold_one_version_onto_another() {
 struct ConceptsPerCall(std::sync::Mutex<std::collections::VecDeque<Vec<ExtractedConcept>>>);
 
 impl ConceptsPerCall {
+    fn with_concepts(batches: Vec<Vec<ExtractedConcept>>) -> Arc<dyn LlmClient> {
+        Arc::new(Self(std::sync::Mutex::new(batches.into_iter().collect())))
+    }
+
     fn build(batches: Vec<Vec<&str>>) -> Arc<dyn LlmClient> {
         Arc::new(Self(std::sync::Mutex::new(
             batches
@@ -3484,6 +3488,69 @@ impl LlmClient for ConceptsPerCall {
     ) -> Result<Vec<ExtractedConcept>, lk_queue::QueueError> {
         Ok(self.0.lock().unwrap().pop_front().unwrap_or_default())
     }
+}
+
+/// `lore ingest` extracts concepts through the same `stage`/`commit` path `lore queue apply`
+/// does, so it mints the same rival page when an extraction claims a name an established page
+/// already answers to — and it has to carry the same record, or the one moment the rival was
+/// knowable passes in silence on this path. The CLI's write loop reports what the page
+/// carries; what this pins is that the page carries it.
+#[tokio::test]
+async fn a_plan_that_mints_a_rival_carries_the_refusal_on_the_page_it_wrote() {
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let config = base_config(vault);
+    let source = config.sources.get("test-source").unwrap();
+    let options = IngestOptions {
+        target_date: None,
+        today: far_future(),
+        dry_run: false,
+    };
+    let ts: jiff::Timestamp = "2026-05-23T10:00:00Z".parse().unwrap();
+
+    let concepts_dir = vault.join("wiki").join("concepts");
+    std::fs::create_dir_all(&concepts_dir).unwrap();
+    std::fs::write(
+        concepts_dir.join("agent-capability.md"),
+        "---\nid: agent-capability\ntype: concept\ntitle: Agent Capability\n---\n",
+    )
+    .unwrap();
+
+    let llm = ConceptsPerCall::with_concepts(vec![vec![ExtractedConcept {
+        name: "Tool Exposure".into(),
+        category: None,
+        aliases: vec!["Agent Capability".into()],
+    }]]);
+    let mut pipeline = Pipeline::new(vault, build_ctx(&config, llm));
+    pipeline
+        .plan(
+            "test-source",
+            source,
+            vec![raw_item("first", "...", "MSG-1", ts)],
+            &options,
+        )
+        .await
+        .unwrap();
+
+    let pages = pipeline.render_concept_pages().await.unwrap();
+    let carrying: Vec<(String, Vec<String>)> = pages
+        .iter()
+        .filter(|page| !page.refused.is_empty())
+        .map(|page| {
+            (
+                page.path.to_string(),
+                page.refused.iter().map(|r| r.owner.clone()).collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        carrying,
+        [(
+            "wiki/concepts/tool-exposure.md".to_string(),
+            vec!["agent-capability".to_string()]
+        )],
+        "the page this plan minted beside an established one carries the record of it"
+    );
 }
 
 /// A source plan that FAILS must leave nothing of its concepts behind.

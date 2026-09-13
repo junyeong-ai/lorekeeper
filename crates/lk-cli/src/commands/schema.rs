@@ -1255,11 +1255,13 @@ mod tests {
             // the only way such a phrase legitimately opens a sentence and the only way past
             // a case-sensitive check.
             //
-            // What it costs, which is real and small: the spec can never write `established
-            // <its own language>` in an innocent sense either — `a vault already authored in
-            // Korean` rather than `an established Korean vault` — and it cannot state its own
+            // What it costs, which is real: the spec can never write `established <its own
+            // language>` in an innocent sense either — `a vault already authored in Korean`
+            // rather than `an established Korean vault`; it cannot state its own
             // cross-language case by naming the languages, which is why step 1 says `a page
-            // written from a source in another language` instead.
+            // written from a source in another language` instead; and it cannot QUOTE the
+            // superseded wording to warn a maintainer off restoring it, so that warning
+            // lives in this comment and in the commit history rather than in the document.
             let document = md.to_lowercase();
             let judgments = [
                 "the field actually uses".to_string(),
