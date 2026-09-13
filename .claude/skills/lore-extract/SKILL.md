@@ -200,13 +200,19 @@ Discover knowledge sources and persist a manifest.
    git -C <path> ls-files --cached --others --exclude-standard -- ':(glob)<pattern>'
    ```
 
-   A file the filesystem holds and git IGNORES is invisible to every question `lore extract
-   status` can ask — no diff reaches it and no untracked listing admits it — so declaring one
-   makes a source that reads "unchanged" forever, whatever happens to it. Such a file is
-   generated rather than authored anyway, which is the reason it is ignored; extract it if it
-   carries knowledge, and record `vault_page` with a `coverage_note` saying the source is
-   outside git, rather than adding it to `discovered_sources` where it would answer green in
-   perpetuity.
+   What is declared is a PATTERN, and its population is what that listing returns. A file the
+   filesystem holds and git IGNORES is in no population: it is invisible to every question
+   `lore extract status` can ask, since no diff reaches it and no untracked listing admits it.
+   So a pattern whose population is EMPTY — every file it reaches is one git ignores, or it
+   reaches none — is not declared, because it could only ever answer about nothing; the status
+   command reports exactly that rather than calling such a pattern unchanged. A pattern with a
+   population is declared as it stands, and an ignored file it also happens to cover is simply
+   not one of its sources.
+
+   An ignored file is generated rather than authored anyway, which is the reason it is
+   ignored. Extract it if it carries knowledge and record `vault_page` with a `coverage_note`
+   saying the source is outside git — that note is what stops Phase 3 reading the silence over
+   it as "current".
 
 4. **Read the claims, and check each one against the facts.** CLAUDE.md, `.claude/rules/`,
    ADRs, learnings, READMEs, and doc comments are all one tier: a claim ABOUT the code, which
