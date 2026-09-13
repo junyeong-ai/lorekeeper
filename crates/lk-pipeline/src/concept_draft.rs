@@ -11,8 +11,27 @@ use crate::render::RenderResult;
 
 /// In-memory aggregator for concept page state across multiple dates in a single run.
 /// Reads existing vault pages on first encounter, then merges further mentions.
+/// An extraction that named a concept an established page already answers to, minted beside
+/// it anyway. The convergence contract forbids the draft: an agent asks the resolver for every
+/// form the material writes, so a hit on any of them routes the extraction to the owner. When
+/// one arrives regardless, the vault gains a rival that no later check can see — the two pages
+/// share no name, so `lore graph lint` reports nothing — and this is the only moment it is
+/// knowable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefusedAlias {
+    /// The name both pages answer to the extraction's claim about.
+    pub alias: String,
+    /// The page that already answers to it.
+    pub owner: String,
+    /// The page the extraction minted instead.
+    pub minted: String,
+}
+
 pub struct ConceptDrafts {
     drafts: BTreeMap<String, ConceptDraft>,
+    /// Reported by whoever runs the drafts, because a warning in a scheduled run is read by
+    /// nobody.
+    refused: Vec<RefusedAlias>,
     /// Every name the vault's concept pages answer to: read once from disk, then extended
     /// by each new name this run resolves, so a decision made for one spelling is the answer
     /// every other spelling of it gets.
@@ -129,8 +148,15 @@ impl ConceptDrafts {
     pub fn new() -> Self {
         Self {
             drafts: BTreeMap::new(),
+            refused: Vec::new(),
             registry: None,
         }
+    }
+
+    /// Every extraction this run minted beside a page that already answered to one of its
+    /// names.
+    pub fn refused_aliases(&self) -> &[RefusedAlias] {
+        &self.refused
     }
 
     /// Read everything a fold needs from the vault, without folding it into the drafts.
@@ -208,12 +234,22 @@ impl ConceptDrafts {
                 Resolution::Absent => {}
                 held if held.routed().is_some_and(|r| r.slug == identity.slug) => continue,
                 held => {
+                    let owner = held
+                        .routed()
+                        .map(|r| r.slug.as_str())
+                        .unwrap_or_default()
+                        .to_string();
                     tracing::warn!(
                         alias,
                         proposed_for = %identity.slug,
-                        answered_by = %held.routed().map(|r| r.slug.as_str()).unwrap_or_default(),
+                        answered_by = %owner,
                         "alias already answers to another concept page; not adopted"
                     );
+                    self.refused.push(RefusedAlias {
+                        alias: alias.to_string(),
+                        owner,
+                        minted: identity.slug.clone(),
+                    });
                     continue;
                 }
             }
@@ -747,6 +783,17 @@ mod tests {
                 .slug,
             "agent-capability",
             "the established page keeps the name"
+        );
+        // The refusal is correct and it is also a page minted beside one that already held
+        // the subject. Nothing downstream can see that afterwards — the two share no name —
+        // so it is recorded here for whoever runs the drafts to report.
+        assert_eq!(
+            drafts.refused_aliases(),
+            [RefusedAlias {
+                alias: "Agent Capability".into(),
+                owner: "agent-capability".into(),
+                minted: "tool-exposure".into(),
+            }]
         );
     }
 

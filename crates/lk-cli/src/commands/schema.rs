@@ -653,8 +653,9 @@ pub fn render_agents_md(
          answers to, not for a concept the vault lacks: an acronym and its expansion, a \
          plural, a team's shorthand are DIFFERENT names for one thing, and no rule about \
          spelling can see it. Ask `lore wiki search` for two or three distinguishing terms of \
-         EACH form the material writes — never a whole name, since every term must appear and \
-         a long query narrows past the very page it is looking for — then read the hits and \
+         EACH form the material writes — never a whole multi-word name, since every term must \
+         appear and a long query narrows past the very page it is looking for, while a \
+         one-word form is the only term it has and is asked whole — then read the hits and \
          judge. In `--json`, `format` says whether a hit is even a concept and `matched` how \
          it was reached: one reached at `text` sits behind every name and summary hit and is \
          the one a limit drops. Reuse the established page and register the surface form as an \
@@ -1222,11 +1223,55 @@ mod tests {
                 );
             }
             assert!(
+                title_rule.contains("EVERY form") || convergence.contains("EVERY form"),
+                "{locale:?}: convergence no longer asks the resolver for every form the \
+                 material writes, so a page written in another language is unreachable from \
+                 the one name an extraction happens to carry"
+            );
+            assert!(
                 convergence.contains("`lore wiki search`"),
                 "{locale:?}: convergence never names the bounded question, so the only way to \
                  find a rival is a read that grows with the vault"
             );
         }
+    }
+
+    /// The convergence rule lives in the contract and is restated by every skill that runs
+    /// it, and three rounds of review found a copy that had been left behind each time. A
+    /// reviewer is not a gate.
+    ///
+    /// Anchored by CO-OCCURRENCE rather than by a banned phrase: the paragraph that names
+    /// both `lore resolve` and `lore wiki search` is the one stating the dedup baseline, and
+    /// it is the paragraph that must say which forms are asked. A ban would fire on prose
+    /// that merely contains the words; this fires only where a skill states the rule.
+    #[test]
+    fn every_skill_that_states_the_dedup_baseline_asks_every_written_form() {
+        let mut stated = 0;
+        for skill in lk_dist::skill_names() {
+            for file in lk_dist::skill_files(skill) {
+                for paragraph in file.contents.split("\n\n") {
+                    if !(paragraph.contains("lore resolve")
+                        && paragraph.contains("lore wiki search"))
+                    {
+                        continue;
+                    }
+                    stated += 1;
+                    assert!(
+                        paragraph.to_lowercase().contains("every form"),
+                        "{skill}/{}: states the dedup baseline without asking every form the \
+                         source writes — a page written from a source in another language \
+                         answers to none of the forms this one carries, so the title alone \
+                         mints a rival beside it",
+                        file.relative
+                    );
+                }
+            }
+        }
+        assert!(
+            stated >= 3,
+            "only {stated} skill paragraph(s) state the dedup baseline — the anchor stopped \
+             matching and this test now guards nothing"
+        );
     }
 
     #[test]
@@ -1242,7 +1287,8 @@ mod tests {
         );
         assert!(ko.contains("## Concept convergence"));
         assert!(ko.contains("created-this-run"));
-        assert!(ko.contains("`lore wiki concepts`"));
+        assert!(ko.contains("`lore resolve`"));
+        assert!(ko.contains("`lore wiki search`"));
         assert!(ko.contains("backlinks-sync"));
 
         let en = render_agents_md(

@@ -229,10 +229,10 @@ what counts as a concept (per-type scoping: see
 [source-types.md](source-types.md)). Never invent it from the path.
 
 **Concept dedup** follows the **Concept convergence** section of the vault's
-`AGENTS.md`: `lore resolve <name>` per concept, plus the created-this-run set,
-plus `lore wiki search` on two or three of the name's distinguishing terms for the
-equivalences no rule about spelling can see — the queue task carries no concept registry of
-its own.
+`AGENTS.md`: `lore resolve` for EVERY form the text writes — a hit on any of them is the
+owner — plus the created-this-run set, plus `lore wiki search` on two or three distinguishing
+terms of each form for the equivalences no rule about spelling can see. The queue task carries
+no concept registry of its own.
 
 **Category assignment.** Hard constraint: the `category` value MUST be one of
 the IDs in `input.categories` (verbatim string match) or the field MUST be

@@ -369,6 +369,18 @@ async fn apply(
         .await
         .map_err(|e| miette::miette!("{e}"))?;
 
+    // A page minted beside one that already answered to one of its names is the convergence
+    // defect the contract exists to prevent, and the only moment it is visible: the two share
+    // no name afterwards, so nothing downstream compares them. Reported rather than gated —
+    // the result is materialized either way, and merging two concept pages is a judgment.
+    for refused in pipeline.refused_aliases() {
+        eprintln!(
+            "! `{}` already answers to `{}`, so `{}` was minted beside it — \
+             `lore graph merge {} {}` folds them once you have read both",
+            refused.alias, refused.owner, refused.minted, refused.minted, refused.owner
+        );
+    }
+
     if dry_run {
         eprintln!(
             "[dry-run] queue apply: {applied} applied, {dropped} dropped, {failed} failed, \

@@ -129,11 +129,12 @@ The essentials: a visible `.jsonl` is fully written and every
    reproduces two resolution rules that already exist in the binary. `lore config schema-path` prints the
    absolute path of the vault's `AGENTS.md`, which carries the page formats and the Concept
    convergence contract — the wiki dir is configurable, so never assume `wiki/`. Ask
-   `lore resolve <name>` which page owns each extracted name: it answers by the same rule
-   the ingest pipeline routes by, so the two cannot disagree about an existing name. The
-   queue task carries no concept registry, so that answer, plus a created-this-run set, plus
-   `lore wiki search` on the name's distinguishing terms for the equivalences spelling cannot
-   see, is the dedup baseline
+   `lore resolve` which page owns each extracted name, asked for EVERY form the text
+   writes: it answers by the same rule the ingest pipeline routes by, so the two cannot
+   disagree about an existing name, and a hit on any form is the owner. The queue task
+   carries no concept registry, so that answer, plus a created-this-run set, plus
+   `lore wiki search` on two or three distinguishing terms of each form for the
+   equivalences spelling cannot see, is the dedup baseline
    (see the vault AGENTS.md § Concept convergence).
 
 2. **List unprocessed queue files** in `<vault>/.lorekeeper/queue/` (top
