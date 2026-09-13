@@ -343,6 +343,7 @@ pub async fn run(
             .map_err(|e| miette::miette!("concept render: {e}"))?;
         for out in &concept_pages {
             eprintln!("  [dry-run] would write: {}", out.path);
+            super::report_refusals(out, true);
         }
         if had_failure {
             return Err(miette::miette!(
@@ -414,6 +415,7 @@ pub async fn run(
             }
             total_pages += 1;
             eprintln!("  ✓ wrote: {}", out.path);
+            super::report_refusals(out, false);
         }
     }
 

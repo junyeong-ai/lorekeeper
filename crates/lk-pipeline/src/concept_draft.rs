@@ -30,9 +30,9 @@ pub struct RefusedAlias {
 pub struct ConceptDrafts {
     drafts: BTreeMap<String, ConceptDraft>,
     /// Recorded at [`Self::commit`] rather than where the refusal happens, so a batch
-    /// abandoned before it commits names no page. `lore queue apply` reports them after its
-    /// writes land, which is where the extraction that produces them runs; the ingest path
-    /// accumulates them too and says nothing, because a queue-backed ingest extracts no
+    /// abandoned before it commits names no page. [`Self::render_pages`] hands each record to
+    /// the page whose write establishes it, which is where the caller reports it; the ingest
+    /// path accumulates them too and says nothing, because a queue-backed ingest extracts no
     /// concepts of its own.
     refused: Vec<RefusedAlias>,
     /// Slugs a read found on disk. A refusal is only a rival where this run created the page
@@ -436,10 +436,22 @@ impl ConceptDrafts {
         self.drafts
             .iter()
             .map(|(slug, draft)| {
+                // A record rides on whichever of the two pages it names this run writes
+                // LAST, so the merge it suggests never names a page that is not yet on
+                // disk. Pages are written in the order returned, which for this map is
+                // slug order, so that is the greater of the two keys — and where the owner
+                // was already established the minted page is the only one in question.
                 let refused = self
                     .refused
                     .iter()
-                    .filter(|record| &record.minted == slug)
+                    .filter(|record| {
+                        let anchor = if self.drafts.contains_key(&record.owner) {
+                            std::cmp::max(&record.minted, &record.owner)
+                        } else {
+                            &record.minted
+                        };
+                        anchor == slug
+                    })
                     .cloned()
                     .collect();
                 draft
@@ -860,6 +872,56 @@ mod tests {
                 .filter(|page| !std::ptr::eq(*page, minted))
                 .all(|page| page.refused.is_empty()),
             "a refusal belongs to the page it minted and to no other"
+        );
+    }
+
+    /// The merge a refusal suggests names two pages, and both have to exist when the line is
+    /// printed. Where the owner was itself minted this run, the record rides on whichever of
+    /// the two is written last rather than on the page it minted.
+    #[tokio::test]
+    async fn a_refusal_rides_on_the_later_of_the_two_pages_it_names() {
+        let dirs = VaultDirs::default();
+        let empty = FailsOn("nothing reads this");
+        let date = jiff::civil::date(2026, 1, 1);
+        let mut drafts = ConceptDrafts::new();
+
+        for (name, aliases) in [
+            ("Zeta Capability", vec!["Agent Capability".to_string()]),
+            ("Tool Exposure", vec!["Agent Capability".to_string()]),
+        ] {
+            let staged = drafts
+                .stage(
+                    &ExtractedConcept {
+                        name: name.into(),
+                        category: None,
+                        aliases,
+                    },
+                    None,
+                    &empty,
+                    &dirs,
+                )
+                .await
+                .expect("an empty vault stages cleanly");
+            drafts.commit(staged, date);
+        }
+
+        let pages = drafts
+            .render_pages(
+                &TemplateEngine::build(None).unwrap(),
+                &dirs,
+                lk_core::i18n::Locale::Ko,
+            )
+            .expect("the drafts render");
+        let carrying: Vec<String> = pages
+            .iter()
+            .filter(|page| !page.refused.is_empty())
+            .map(|page| page.path.to_string())
+            .collect();
+        assert_eq!(
+            carrying,
+            ["wiki/concepts/zeta-capability.md"],
+            "the record belongs to the page written last, so the merge it suggests names \
+             two pages that are both on disk by then"
         );
     }
 

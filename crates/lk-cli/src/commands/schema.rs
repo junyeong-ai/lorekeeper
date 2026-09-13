@@ -1242,26 +1242,39 @@ mod tests {
                 TITLE_RULE.contains("COPIED"),
                 "{locale:?}: the title rule no longer says a name is copied rather than composed"
             );
+            assert!(
+                alias_rule(locale.english_name()).contains("the material WRITES"),
+                "{locale:?}: the alias rule no longer says an alias is a name the material \
+                 writes, so a sentence adding one it does not write contradicts nothing"
+            );
 
-            // The superseded wording told an agent to prefer whichever form a field had
-            // established, and it cost a concept two pages. Every language is banned rather
-            // than the rendered one, because that wording named a language outright. Scoped to
-            // every statement of the rule: `an established Korean vault` is ordinary prose
-            // elsewhere in the document, and in these lines the same words are the judgment.
+            // Over the WHOLE document, not the paragraphs that state the rule. Narrowing
+            // this to the rule's own text is what left a style note elsewhere free to say
+            // the opposite, and the document has no paragraph where the superseded judgment
+            // would be right. Compared lowercased, since a sentence-initial capital is both
+            // the only way such a phrase legitimately opens a sentence and the only way past
+            // a case-sensitive check.
+            //
+            // What it costs, which is real and small: the spec can never write `established
+            // <its own language>` in an innocent sense either — `a vault already authored in
+            // Korean` rather than `an established Korean vault` — and it cannot state its own
+            // cross-language case by naming the languages, which is why step 1 says `a page
+            // written from a source in another language` instead.
+            let document = md.to_lowercase();
             let judgments = [
                 "the field actually uses".to_string(),
                 "established {language}".to_string(),
             ]
             .into_iter()
-            .chain(Locale::iter().map(|l| format!("established {}", l.english_name())));
+            .chain(
+                Locale::iter().map(|l| format!("established {}", l.english_name().to_lowercase())),
+            );
             for judgment in judgments {
-                for line in std::iter::once(&banner).chain(composed.iter()) {
-                    assert!(
-                        !line.contains(&judgment),
-                        "{locale:?}: the contract says `{judgment}`, which asks which form a \
-                         field settled on — the judgment a copied name exists to avoid"
-                    );
-                }
+                assert!(
+                    !document.contains(&judgment),
+                    "{locale:?}: the spec says `{judgment}` somewhere, which asks which form \
+                     a field settled on — the judgment a copied name exists to avoid"
+                );
             }
 
             let convergence = composed.join("\n");

@@ -370,11 +370,8 @@ async fn apply(
         .map_err(|e| miette::miette!("{e}"))?;
 
     if dry_run {
-        for refused in concept_pages.iter().flat_map(|page| &page.refused) {
-            eprintln!(
-                "[dry-run] `{}` already answers to `{}`, so `{}` would be minted beside it",
-                refused.alias, refused.owner, refused.minted
-            );
+        for page in &concept_pages {
+            super::report_refusals(page, true);
         }
         eprintln!(
             "[dry-run] queue apply: {applied} applied, {dropped} dropped, {failed} failed, \
@@ -392,18 +389,7 @@ async fn apply(
             .write_page(page.path.as_ref(), &page.content)
             .await
             .map_err(|e| miette::miette!("write {}: {e}", page.path))?;
-        // With the page rather than after the batch: the rival this names is on disk from
-        // the line above, and a failure anywhere later retains the result for a retry that
-        // finds the pages already written established and records nothing — the only moment
-        // the refusal was knowable. Reported rather than gated: merging two concept pages is
-        // a judgment, and the result is materialized either way.
-        for refused in &page.refused {
-            eprintln!(
-                "! `{}` already answers to `{}`, so `{}` was minted beside it — \
-                 `lore graph merge {} {}` folds them once you have read both",
-                refused.alias, refused.owner, refused.minted, refused.minted, refused.owner
-            );
-        }
+        super::report_refusals(page, false);
     }
 
     for (rel_path, content) in &origin_pages {

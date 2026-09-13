@@ -184,6 +184,30 @@ pub fn build_llm_client_for(
 /// Over-long text is returned whole rather than cut. A truncated title is a title someone
 /// cannot search for, and a line that runs past the column is legible in a way a clipped one is
 /// not — the column exists to align the common case, not to enforce a width.
+/// Say that a concept page was minted beside one that already answers to a name it claimed.
+///
+/// Printed by whoever WROTE the page, in the same step: both pages the merge names are on
+/// disk by then, and a report made once at the end of a batch loses every refusal whose page
+/// was written before a later failure — the retry finds those established and records
+/// nothing, so the only moment it was knowable has passed. Reported rather than gated:
+/// folding two concept pages is a judgment, and the page is materialized either way.
+pub fn report_refusals(page: &lk_pipeline::RenderResult, dry_run: bool) {
+    for refused in &page.refused {
+        let (alias, owner, minted) = (&refused.alias, &refused.owner, &refused.minted);
+        if dry_run {
+            eprintln!(
+                "[dry-run] `{alias}` already answers to `{owner}`, so `{minted}` would be \
+                 minted beside it"
+            );
+        } else {
+            eprintln!(
+                "! `{alias}` already answers to `{owner}`, so `{minted}` was minted beside \
+                 it — `lore graph merge {minted} {owner}` folds them once you have read both"
+            );
+        }
+    }
+}
+
 pub fn pad(text: &str, width: usize) -> String {
     use unicode_width::UnicodeWidthStr;
     let used = UnicodeWidthStr::width(text);
