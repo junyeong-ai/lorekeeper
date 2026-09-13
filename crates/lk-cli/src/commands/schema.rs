@@ -362,6 +362,21 @@ fn page_schemas(
     schemas
 }
 
+/// The first statement of the naming rule an agent reads, and the one it anchors on: a
+/// concept's name is copied from the source rather than chosen. Named beside the two rules
+/// of `## Concept convergence` because it is the same rule said earlier, and a check that
+/// reached only the section left this sentence free to say the opposite.
+fn language_banner(language: &str) -> String {
+    format!(
+        "**This vault is written in {language}.** Every word added to a page goes in that \
+         language — a summary, a theme, a concept's synthesis, an exploration — whatever \
+         language the source arrived in. Two things are not translated by it. Source content \
+         is quoted as it stands, and a NAME is not prose: a concept's name is the form its \
+         own source writes, so a term a source writes in another language keeps its spelling \
+         here (§ Concept convergence says what follows from that)."
+    )
+}
+
 /// The rule a concept's title follows, named so a test asserts on the rule itself. Every
 /// boundary a check could slice the rendered paragraph at — a blank line, a bolded lead-in —
 /// is a token the rule's own prose may carry, so each one ends the rule early and lets a
@@ -378,11 +393,13 @@ const TITLE_RULE: &str = "**A concept's title is its name and nothing else.** Th
          `aliases`, which is what makes a citation written in any of them resolve here. A form \
          the material does not write is a name no later extraction reproduces.";
 
-/// The other half of the naming rule, named for the same reason. The superseded wording lived
-/// here: it told an agent to add a name the field was said to have established, which is a
-/// judgment, and two answers to it in one batch is two pages of one concept. `{language}` is
-/// substituted at render.
-const ALIAS_RULE: &str = "**This vault is written in {language}, and where the material writes the concept in \
+/// The other half of the naming rule, composed for the same reason the title rule is named.
+/// The superseded wording lived here: it told an agent to add a name the field was said to
+/// have established, which is a judgment, and two answers to it in one batch is two pages of
+/// one concept.
+fn alias_rule(language: &str) -> String {
+    format!(
+        "**This vault is written in {language}, and where the material writes the concept in \
          {language} too that form is not optional in `aliases`.** A reader who does not know \
          the title searches in the language the vault is written in, and without the alias \
          they reach nothing while the page holds every citation on the subject — after which \
@@ -390,7 +407,9 @@ const ALIAS_RULE: &str = "**This vault is written in {language}, and where the m
          same rule the title follows: an alias is a name the material WRITES, so a concept the \
          sources only ever name one way gets one name. A translation nobody writes is a \
          spelling nobody searches for, and inventing one costs a rival page rather than \
-         preventing it.";
+         preventing it."
+    )
+}
 
 /// The body of `## Concept convergence`, one entry per rendered line and `""` a blank one.
 ///
@@ -412,7 +431,7 @@ fn convergence_body(language: &str, strings: &Strings) -> Vec<String> {
         String::new(),
         TITLE_RULE.to_string(),
         String::new(),
-        ALIAS_RULE.replace("{language}", language),
+        alias_rule(language),
         String::new(),
         "1. **Ask which page owns the name**: `lore resolve <name>` answers with the page a \
          citation of it addresses, by the same rule the ingest pipeline routes an extraction \
@@ -510,17 +529,7 @@ pub fn render_agents_md(
     )
     .unwrap();
     writeln!(out).unwrap();
-    writeln!(
-        out,
-        "**This vault is written in {}.** Every word added to a page goes in that language — a \
-         summary, a theme, a concept's synthesis, an exploration — whatever language the \
-         source arrived in. Two things are not translated by it. Source content is quoted as \
-         it stands, and a NAME is not prose: a concept's name is the form its own source \
-         writes, so a term a source writes in another language keeps its spelling here \
-         (§ Concept convergence says what follows from that).",
-        locale.english_name()
-    )
-    .unwrap();
+    writeln!(out, "{}", language_banner(locale.english_name())).unwrap();
     writeln!(out).unwrap();
     writeln!(
         out,
@@ -1194,6 +1203,16 @@ mod tests {
                 .split_once("\n## Concept convergence\n")
                 .expect("the spec carries the convergence contract");
             let composed = convergence_body(locale.english_name(), locale.strings());
+            let banner = language_banner(locale.english_name());
+
+            // The banner states the same rule the section states, earlier and in one
+            // sentence, and it is the first naming statement an agent reads. Checking the
+            // section alone left it free to say the opposite.
+            assert!(
+                md.lines().any(|line| line == banner),
+                "{locale:?}: no line of the spec IS the language banner, so the first \
+                 statement of the naming rule is not the one composed here"
+            );
 
             // The section IS what `convergence_body` composes, not a text those lines appear
             // somewhere inside. Containment answers whether a rule is in there and nothing
@@ -1211,10 +1230,7 @@ mod tests {
             // to read while the vault reads something else.
             for (name, rule) in [
                 ("TITLE_RULE", TITLE_RULE.to_string()),
-                (
-                    "ALIAS_RULE",
-                    ALIAS_RULE.replace("{language}", locale.english_name()),
-                ),
+                ("alias_rule", alias_rule(locale.english_name())),
             ] {
                 assert!(
                     composed.contains(&rule),
@@ -1230,8 +1246,8 @@ mod tests {
             // The superseded wording told an agent to prefer whichever form a field had
             // established, and it cost a concept two pages. Every language is banned rather
             // than the rendered one, because that wording named a language outright. Scoped to
-            // this section: `an established Korean vault` is ordinary prose elsewhere in the
-            // document, and here the same words are the judgment itself.
+            // every statement of the rule: `an established Korean vault` is ordinary prose
+            // elsewhere in the document, and in these lines the same words are the judgment.
             let judgments = [
                 "the field actually uses".to_string(),
                 "established {language}".to_string(),
@@ -1239,7 +1255,7 @@ mod tests {
             .into_iter()
             .chain(Locale::iter().map(|l| format!("established {}", l.english_name())));
             for judgment in judgments {
-                for line in &composed {
+                for line in std::iter::once(&banner).chain(composed.iter()) {
                     assert!(
                         !line.contains(&judgment),
                         "{locale:?}: the contract says `{judgment}`, which asks which form a \
@@ -1280,10 +1296,20 @@ mod tests {
                 // A table row names commands; it does not state a rule. `lore-ingest`'s
                 // command reference lists `lore resolve`, and one added row would otherwise
                 // make it answer for a baseline it never states.
+                let mut fenced = false;
                 let prose: String = file
                     .contents
                     .lines()
-                    .filter(|l| !l.trim_start().starts_with('|'))
+                    .filter(|l| {
+                        let l = l.trim_start();
+                        if l.starts_with("```") {
+                            fenced = !fenced;
+                            return false;
+                        }
+                        // A table row names commands and a fenced block shows how to type
+                        // them; neither states a rule for the check below to hold it to.
+                        !fenced && !l.starts_with('|')
+                    })
                     .collect::<Vec<_>>()
                     .join("\n");
                 if !(prose.contains("lore resolve") && prose.contains("lore wiki search")) {

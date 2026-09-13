@@ -592,26 +592,6 @@ impl Pipeline {
         Ok(merged_all)
     }
 
-    /// Materialize the concepts a drained queue task produced.
-    ///
-    /// Extraction is the LLM's half of the work; deciding where each concept lands is this
-    /// crate's, and it is the same decision `plan` makes when an LLM answers synchronously:
-    /// invalid categories dropped, slugs normalized, the origin page's related-concepts
-    /// section rendered from `concept_links`, and each concept page created-or-merged with
-    /// its `## Synthesis`, aliases and citation count preserved. Routing the queue's results
-    /// back through it is what keeps that logic in one place rather than restated as prose
-    /// the drain has to follow.
-    ///
-    /// Returns the rewritten origin page. Concept pages accumulate and are emitted together
-    /// by [`Self::render_concept_pages`], so a concept named by several pages produces one
-    /// page rather than a last-writer-wins race.
-    /// Every extraction this run minted beside a page that already answered to one of its
-    /// names. The convergence contract forbids the draft; this is where one that arrives
-    /// anyway is knowable, since the two pages share no name for a later check to compare.
-    pub fn refused_aliases(&self) -> &[RefusedAlias] {
-        self.concept_drafts.refused_aliases()
-    }
-
     pub async fn apply_concept_result(
         &mut self,
         result: &lk_queue::TaskResult,

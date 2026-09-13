@@ -1,3 +1,4 @@
+use crate::concept_draft::RefusedAlias;
 use std::path::Path;
 
 use lk_core::concept::ConceptIdentity;
@@ -38,6 +39,14 @@ pub struct RenderResult {
     /// state describes a section somebody answered WITHOUT recording it, and rewriting the
     /// page is not reversible.
     pub discarded: Vec<String>,
+    /// Names this page was minted under that an established page already answers to.
+    ///
+    /// Travels with the page for the same reason `discarded` does: the refusal is worth
+    /// reporting only once the rival is on disk, and a caller holding it beside the page
+    /// would report a rival for a write that never happened — while a write that failed
+    /// mid-batch would lose the refusals for the pages already written, since the retry
+    /// finds those established and records nothing.
+    pub refused: Vec<RefusedAlias>,
 }
 
 impl RenderResult {
@@ -49,6 +58,7 @@ impl RenderResult {
             path,
             content,
             discarded: Vec::new(),
+            refused: Vec::new(),
         }
     }
 
@@ -58,7 +68,14 @@ impl RenderResult {
             path,
             content: spliced.content,
             discarded: spliced.discarded,
+            refused: Vec::new(),
         }
+    }
+
+    /// Attach the refusals the page's own minting produced.
+    pub fn with_refused(mut self, refused: Vec<RefusedAlias>) -> Self {
+        self.refused = refused;
+        self
     }
 }
 

@@ -167,7 +167,8 @@ impl ConceptDrafts {
 
     /// Every extraction this run minted beside a page that already answered to one of its
     /// names.
-    pub fn refused_aliases(&self) -> &[RefusedAlias] {
+    #[cfg(test)]
+    fn refused_aliases(&self) -> &[RefusedAlias] {
         &self.refused
     }
 
@@ -433,8 +434,18 @@ impl ConceptDrafts {
         locale: Locale,
     ) -> Result<Vec<RenderResult>, PipelineError> {
         self.drafts
-            .values()
-            .map(|d| d.render(engine, dirs, locale))
+            .iter()
+            .map(|(slug, draft)| {
+                let refused = self
+                    .refused
+                    .iter()
+                    .filter(|record| &record.minted == slug)
+                    .cloned()
+                    .collect();
+                draft
+                    .render(engine, dirs, locale)
+                    .map(|page| page.with_refused(refused))
+            })
             .collect()
     }
 }
@@ -821,13 +832,34 @@ mod tests {
         // The refusal is correct and it is also a page minted beside one that already held
         // the subject. Nothing downstream can see that afterwards — the two share no name —
         // so it is recorded here for whoever runs the drafts to report.
-        assert_eq!(
-            drafts.refused_aliases(),
-            [RefusedAlias {
-                alias: "Agent Capability".into(),
-                owner: "agent-capability".into(),
-                minted: "tool-exposure".into(),
-            }]
+        let refusal = RefusedAlias {
+            alias: "Agent Capability".into(),
+            owner: "agent-capability".into(),
+            minted: "tool-exposure".into(),
+        };
+        assert_eq!(drafts.refused_aliases(), std::slice::from_ref(&refusal));
+
+        // And it rides on the page it names. That is what lets a caller report it in the
+        // same step that writes the rival, so a batch that fails part-way reports exactly
+        // the refusals whose pages are on disk.
+        let pages = drafts
+            .render_pages(
+                &TemplateEngine::build(None).unwrap(),
+                &dirs,
+                lk_core::i18n::Locale::Ko,
+            )
+            .expect("the drafts render");
+        let minted = pages
+            .iter()
+            .find(|page| page.path.as_ref().ends_with("tool-exposure.md"))
+            .expect("the minted page is rendered");
+        assert_eq!(minted.refused, [refusal]);
+        assert!(
+            pages
+                .iter()
+                .filter(|page| !std::ptr::eq(*page, minted))
+                .all(|page| page.refused.is_empty()),
+            "a refusal belongs to the page it minted and to no other"
         );
     }
 

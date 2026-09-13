@@ -370,7 +370,7 @@ async fn apply(
         .map_err(|e| miette::miette!("{e}"))?;
 
     if dry_run {
-        for refused in pipeline.refused_aliases() {
+        for refused in concept_pages.iter().flat_map(|page| &page.refused) {
             eprintln!(
                 "[dry-run] `{}` already answers to `{}`, so `{}` would be minted beside it",
                 refused.alias, refused.owner, refused.minted
@@ -392,19 +392,18 @@ async fn apply(
             .write_page(page.path.as_ref(), &page.content)
             .await
             .map_err(|e| miette::miette!("write {}: {e}", page.path))?;
-    }
-    // Here, and not after the origin pages: the concept page this names is on disk from the
-    // line above, and a failure writing an origin page retains the result for a retry that
-    // can no longer see the refusal — the rival is established by then, so the next run
-    // records nothing and the only moment it was knowable has passed. Reported rather than
-    // gated: merging two concept pages is a judgment, and the result is materialized either
-    // way.
-    for refused in pipeline.refused_aliases() {
-        eprintln!(
-            "! `{}` already answers to `{}`, so `{}` was minted beside it — \
-             `lore graph merge {} {}` folds them once you have read both",
-            refused.alias, refused.owner, refused.minted, refused.minted, refused.owner
-        );
+        // With the page rather than after the batch: the rival this names is on disk from
+        // the line above, and a failure anywhere later retains the result for a retry that
+        // finds the pages already written established and records nothing — the only moment
+        // the refusal was knowable. Reported rather than gated: merging two concept pages is
+        // a judgment, and the result is materialized either way.
+        for refused in &page.refused {
+            eprintln!(
+                "! `{}` already answers to `{}`, so `{}` was minted beside it — \
+                 `lore graph merge {} {}` folds them once you have read both",
+                refused.alias, refused.owner, refused.minted, refused.minted, refused.owner
+            );
+        }
     }
 
     for (rel_path, content) in &origin_pages {
