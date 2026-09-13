@@ -35,6 +35,10 @@ pub struct ConceptDrafts {
     /// path accumulates them too and says nothing, because a queue-backed ingest extracts no
     /// concepts of its own.
     refused: Vec<RefusedAlias>,
+    /// Slugs this run claimed for a name nothing answered to. A claim routes every later
+    /// spelling of that name to one page; whether the page is ever WRITTEN is a separate
+    /// question, and one a refusal naming such a slug as the owner has to ask.
+    claimed: BTreeSet<String>,
     /// Slugs a read found on disk. A refusal is only a rival where this run created the page
     /// the extraction's own name resolved to — a source that conflates two ESTABLISHED
     /// concepts minted nothing, and offering to merge them would delete one on the strength
@@ -136,7 +140,15 @@ impl ConceptDrafts {
             Some(registry) => registry,
             slot => slot.insert(build_registry(reader, dirs).await?),
         };
-        if let Resolution::Ambiguous { routed, claimants } = registry.resolve(name) {
+        let resolution = registry.resolve(name);
+        if matches!(resolution, Resolution::Absent) {
+            // Nothing answered to the name, so the next line claims the slug for this run.
+            // A claim is not a page: the batch that made it may be abandoned before it
+            // writes one, while the claim stays so that every later spelling of the name
+            // still routes the same way.
+            self.claimed.insert(slug.clone());
+        }
+        if let Resolution::Ambiguous { routed, claimants } = resolution {
             // The vault defect `lore graph lint` reports as a duplicate concept. Routing has
             // to pick one, and it does so deterministically — but silence here is what would
             // make a mis-addressed citation impossible to explain afterwards.
@@ -160,6 +172,7 @@ impl ConceptDrafts {
         Self {
             drafts: BTreeMap::new(),
             refused: Vec::new(),
+            claimed: BTreeSet::new(),
             established: BTreeSet::new(),
             registry: None,
         }
@@ -436,16 +449,28 @@ impl ConceptDrafts {
         self.drafts
             .iter()
             .map(|(slug, draft)| {
-                // A record rides on whichever of the two pages it names this run writes
-                // LAST, so the merge it suggests never names a page that is not yet on
-                // disk. Pages are written in the order returned, which for this map is
-                // slug order, so that is the greater of the two keys — and where the owner
-                // was already established the minted page is the only one in question.
                 let refused = self
                     .refused
                     .iter()
                     .filter(|record| {
-                        let anchor = if self.drafts.contains_key(&record.owner) {
+                        // The line a record becomes names two pages and offers to fold one
+                        // into the other, so it is carried only where both exist. An owner
+                        // this run claimed and never drafted is a name an abandoned batch
+                        // resolved: no page was written under it and the merge could not run.
+                        let owner_minted_here = self.drafts.contains_key(&record.owner);
+                        if self.claimed.contains(&record.owner) && !owner_minted_here {
+                            return false;
+                        }
+                        // It rides on whichever of the two this run writes LAST, so neither
+                        // is missing when the line prints. Pages are written in the order
+                        // returned, which for this map is slug order, so that is the greater
+                        // key — but only where the owner is one this run WRITES. An owner
+                        // read from disk is written by nobody and is already there, which is
+                        // what `drafts` alone could not tell: a page cited again this run is
+                        // a draft too, and waiting for it put the rival on disk first.
+                        let owner_awaits_its_own_write =
+                            owner_minted_here && !self.established.contains(&record.owner);
+                        let anchor = if owner_awaits_its_own_write {
                             std::cmp::max(&record.minted, &record.owner)
                         } else {
                             &record.minted
@@ -969,6 +994,150 @@ mod tests {
         );
         drop(refused_but_abandoned);
         assert!(drafts.refused_aliases().is_empty());
+    }
+
+    /// A page already on disk is written by nobody, so the record rides on the rival the
+    /// moment it lands. Waiting for the owner's own write is what `drafts` alone could not
+    /// tell apart: a concept cited again this run is a draft too, and anchoring on it put the
+    /// rival on disk first — the retry then finds it established and records nothing, which
+    /// is the loss this record exists to prevent.
+    #[tokio::test]
+    async fn a_refusal_against_a_page_already_on_disk_rides_on_the_rival() {
+        struct OnDisk;
+        #[async_trait::async_trait]
+        impl VaultStore for OnDisk {
+            async fn read_page(
+                &self,
+                rel_path: &std::path::Path,
+            ) -> Result<Option<lk_core::frontmatter::VaultPage>, lk_vault::VaultError> {
+                if !rel_path.to_string_lossy().contains("zeta-capability") {
+                    return Ok(None);
+                }
+                Ok(Some(
+                    lk_core::frontmatter::parse_page(
+                        "---\ntype: concept\ntitle: \"Zeta Capability\"\naliases: [\"Agent Capability\"]\n---\n\n# Zeta Capability\n",
+                    )
+                    .expect("a page this test wrote"),
+                ))
+            }
+            async fn list_markdown(
+                &self,
+                _rel_dir: &std::path::Path,
+            ) -> Result<Vec<std::path::PathBuf>, lk_vault::VaultError> {
+                Ok(vec![std::path::PathBuf::from("zeta-capability.md")])
+            }
+        }
+
+        let dirs = VaultDirs::default();
+        let date = jiff::civil::date(2026, 1, 1);
+        let mut drafts = ConceptDrafts::new();
+
+        // The established concept, cited again today — a draft as well as a page on disk.
+        let staged = drafts
+            .stage(
+                &ExtractedConcept {
+                    name: "Zeta Capability".into(),
+                    category: None,
+                    aliases: Vec::new(),
+                },
+                None,
+                &OnDisk,
+                &dirs,
+            )
+            .await
+            .expect("the established page reads cleanly");
+        drafts.commit(staged, date);
+
+        let staged = drafts
+            .stage(
+                &ExtractedConcept {
+                    name: "Tool Exposure".into(),
+                    category: None,
+                    aliases: vec!["Agent Capability".into()],
+                },
+                None,
+                &OnDisk,
+                &dirs,
+            )
+            .await
+            .expect("the rival stages cleanly");
+        drafts.commit(staged, date);
+
+        let carrying: Vec<String> = drafts
+            .render_pages(
+                &TemplateEngine::build(None).unwrap(),
+                &dirs,
+                lk_core::i18n::Locale::Ko,
+            )
+            .expect("the drafts render")
+            .iter()
+            .filter(|page| !page.refused.is_empty())
+            .map(|page| page.path.to_string())
+            .collect();
+        assert_eq!(
+            carrying,
+            ["wiki/concepts/tool-exposure.md"],
+            "the owner is on disk already, so the record belongs to the page whose write \
+             establishes the rival — the one that sorts FIRST here"
+        );
+    }
+
+    /// A name an abandoned batch resolved is a claim, not a page. The claim stays so every
+    /// later spelling routes the same way, and an alias refused against it names an owner
+    /// nothing ever wrote — a merge the operator could not run.
+    #[tokio::test]
+    async fn a_refusal_naming_an_owner_no_page_was_written_for_is_not_carried() {
+        let dirs = VaultDirs::default();
+        let date = jiff::civil::date(2026, 1, 1);
+        let mut drafts = ConceptDrafts::new();
+
+        let abandoned = drafts
+            .stage(
+                &ExtractedConcept {
+                    name: "Agent Capability".into(),
+                    category: None,
+                    aliases: Vec::new(),
+                },
+                None,
+                &FailsOn("agent-capability"),
+                &dirs,
+            )
+            .await;
+        assert!(
+            abandoned.is_err(),
+            "the read fails after the name is claimed"
+        );
+
+        let staged = drafts
+            .stage(
+                &ExtractedConcept {
+                    name: "Tool Exposure".into(),
+                    category: None,
+                    aliases: vec!["Agent Capability".into()],
+                },
+                None,
+                &FailsOn("agent-capability"),
+                &dirs,
+            )
+            .await
+            .expect("the later batch stages cleanly");
+        assert!(
+            staged.aliases.is_empty(),
+            "the claim owns the name, so the alias is refused"
+        );
+        drafts.commit(staged, date);
+
+        let pages = drafts
+            .render_pages(
+                &TemplateEngine::build(None).unwrap(),
+                &dirs,
+                lk_core::i18n::Locale::Ko,
+            )
+            .expect("the drafts render");
+        assert!(
+            pages.iter().all(|page| page.refused.is_empty()),
+            "no page was written for the owner, so no line may offer to merge into it"
+        );
     }
 
     /// A page on disk is not a rival this run created, and the record is what a person is
