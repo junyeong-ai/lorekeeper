@@ -34,6 +34,12 @@ Korean and a Korean product name keeps its on one written in English (see
 Synthesize a knowledge-rich summary in `input.locale`. Aim for
 `input.max_sentences` substantive points. No preamble.
 
+A daily page's summary answers a different question from the events below it.
+Each refined body says what its own event is; the summary says what the day's
+events establish together, naming the ones it draws on. A sentence that would
+be true of a single event belongs to that event's body rather than here — where
+one event is the whole day, say so in a sentence instead of repeating its body.
+
 **Source-type-aware synthesis.** Adapt the strategy to `input.source_type`
 (the adapter type verbatim from config; never guess it from the vault path).
 When `source_type` is absent (cross-source syntheses such as the work-log),
