@@ -72,6 +72,8 @@ need something no one but the user can supply.
 
 Before ending your turn, read your last paragraph. If it is a plan, a question, a list of
 next steps, or a promise about work you have not done, do that work now instead of ending.
+How long the run has taken is not a reason to stop. While work remains and nothing has
+failed, keep going; a report that names what is left is still a turn that ended early.
 
 Report only what you can point to a tool result for. If a step failed or was skipped, say
 so plainly with the evidence; state finished work plainly without hedging.'
