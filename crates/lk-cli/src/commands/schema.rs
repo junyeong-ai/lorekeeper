@@ -1323,20 +1323,36 @@ mod tests {
     #[test]
     fn the_rendered_contract_is_the_one_that_was_read() {
         use strum::IntoEnumIterator;
+        // Exhaustive because every conditional in `render_agents_md` and `page_schemas` only
+        // ADDS — `if personal`, `if let Some(board)` — so each rendering is a superset of the
+        // one below it. A future `else`, or prose written for the absent case, is a rendering
+        // no case here enters, and it has to add one.
         for locale in Locale::iter() {
-            for personal in [true, false] {
-                let board = personal.then_some("tasks.md");
+            for (scope, personal, board) in [
+                ("personal-board", true, Some("tasks.md")),
+                ("personal", true, None),
+                ("core", false, None),
+            ] {
                 let md = render_agents_md(
                     locale,
                     &lk_core::config::VaultDirs::default(),
                     personal,
                     board,
                 );
-                let scope = if personal { "personal" } else { "core" };
                 // The generator stamp is the binary's version, which every release changes.
-                // Left in, each release would fail all four and be accepted unread — the habit
-                // this test exists to prevent.
-                let md = md.replace(&generator(), "lore <version>");
+                // Left in, each release would fail every case and be accepted unread — the
+                // habit this test exists to prevent. Anchored to the field it belongs to: a
+                // substitution matched anywhere would blank whatever prose resembled it and
+                // ship that unreviewed.
+                let stamp = format!(
+                    "{}: {}",
+                    lk_core::frontmatter::field::GENERATOR,
+                    generator()
+                );
+                let md = md.replace(
+                    &stamp,
+                    &format!("{}: lore <version>", lk_core::frontmatter::field::GENERATOR),
+                );
                 insta::assert_snapshot!(format!("agents-{}-{scope}", locale.tag()), md);
             }
         }

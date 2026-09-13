@@ -26,7 +26,10 @@ gate clippy
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 gate test
-cargo nextest run --workspace --all-targets
+# INSTA_UPDATE pinned: inherited from the environment, `always` makes a changed snapshot
+# rewrite itself and pass, so the gate would report green on a contract nobody read. Accepting
+# a deliberate change stays a separate, explicit `cargo insta accept`.
+INSTA_UPDATE=no cargo nextest run --workspace --all-targets
 cargo test --workspace --doc
 
 gate shell

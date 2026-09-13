@@ -18,7 +18,7 @@ Pages with an LLM-owned section also carry an `llm_inputs` frontmatter block, an
 
 A page's `llm_inputs` map is machine-coordination state: each key records the input a section is owed against and its `_done` companion the input a section was written from. Never author or edit those values — the writer of a section stamps its own marker in the same edit. A concept page's `aliases` is renderer-written and always present, carrying the title and every other name the page answers to; on a page you author yourself, write `aliases` only where the page really does answer to another name.
 
-Each table's `Owner` column names who fills that section's body: `machine` = `lore` writes it, under whichever command produces the page (`lore graph backlinks-sync` for concept; `lore ingest` for daily, document, work-log; `lore synthesis` for weekly-review, monthly-review, quarterly-review, annual-review); `LLM` = an agent writes it, which in the automated pipeline is `/lore-process`. A page you author DIRECTLY has no pipeline behind it, so you fill EVERY section yourself, `machine` ones included — except a concept's `## 출처` section and its `source_count`, which `lore graph backlinks-sync` re-derives wholesale from the forward links on citing pages every time it runs, so leave those empty and let it.
+Each table's `Owner` column names who fills that section's body: `machine` = `lore` writes it, under whichever command produces the page (`lore graph backlinks-sync` for concept; `lore ingest` for daily, document, work-log; `lore task` for task-board; `lore synthesis` for weekly-review, monthly-review, quarterly-review, annual-review); `LLM` = an agent writes it, which in the automated pipeline is `/lore-process`. A page you author DIRECTLY has no pipeline behind it, so you fill EVERY section yourself, `machine` ones included — except a concept's `## 출처` section and its `source_count`, which `lore graph backlinks-sync` re-derives wholesale from the forward links on citing pages every time it runs, so leave those empty and let it.
 
 A concept's `## 핵심` is yours to write when you create the page and is NOT yours after that. It is owed against the set of pages citing the concept, so once that set moves, `lore graph backlinks-sync` queues a rewrite and a drain writes the section from the sources themselves. Write what the page's own material establishes; do not write a synthesis you would not want restated from the evidence.
 
@@ -86,6 +86,17 @@ Frontmatter: `id`, `type`, `title`, `aliases`, `created`, `updated`, `tags`
 | Key Themes | `## 이번 주 핵심 주제` | LLM |
 
 Frontmatter: `id`, `type`, `title`, `created`, `labels`, `period`, `sources_covered`
+
+## task-board (`me/tasks.md`)
+
+| Section | Heading | Owner |
+|---------|---------|-------|
+| Today | `## 오늘` | machine |
+| Next | `## 다음` | machine |
+| Waiting | `## 대기` | machine |
+| Someday | `## 언젠가` | machine |
+
+Frontmatter: `id`, `type`, `title`, `updated`
 
 ## work-log (`me/work-log/YYYY-MM-DD.md`)
 
