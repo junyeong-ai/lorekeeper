@@ -377,7 +377,9 @@ every project at once: when each manifest was taken, how far the repository has
 moved under the paths that scan declared, and how many sources reached a page.
 Re-deriving that from `git log` here would be a second implementation of a
 question the binary already answers, and the two would disagree the first time
-either changed.
+either changed. Read `unmeasured` beside `behind`: a project git could put no
+question to — not a repository, or a manifest naming no source — is neither
+behind nor current, and reporting it as current is coverage nobody measured.
 
 What is left is what needs a reader:
 

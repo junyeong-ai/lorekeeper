@@ -364,12 +364,21 @@ fn repo_state(repo: &Path, baseline: Option<&str>, declared: &[String]) -> RepoS
     };
     // `git diff` lists tracked paths only, and a scan reads the working tree — so a source
     // written since and not yet staged differs from what was scanned while the diff is silent.
+    // `--exclude-standard` keeps the repository's own ignore rules: a path git is told to
+    // ignore is not a source the extraction declared, and without it every build artefact
+    // under a declared directory would answer.
     let mut args = vec!["ls-files", "--others", "--exclude-standard", "--"];
     args.extend(specs.iter().map(String::as_str));
     let Some(untracked) = git(repo, &args) else {
         return RepoState::Unanswered("git refused the declared paths".into());
     };
-    let files = diff.lines().count() + untracked.lines().count();
+    // A union rather than a sum: a path dropped from the index but left on disk answers to
+    // BOTH probes, and counting it twice states a measurement no repository holds.
+    let files = diff
+        .lines()
+        .chain(untracked.lines())
+        .collect::<BTreeSet<_>>()
+        .len();
     if files == 0 {
         return RepoState::Unmoved;
     }
@@ -486,6 +495,10 @@ fn as_json(reports: &[ProjectState]) -> serde_json::Value {
             }),
         }).collect::<Vec<_>>(),
         "behind": behind(reports),
+        // Beside it because the two are a different answer: a project nothing could ask a
+        // question about is neither behind nor current, and a reader given only `behind`
+        // would report the rest current — the fold the terminal row stopped making.
+        "unmeasured": unmeasured(reports),
     })
 }
 
@@ -791,6 +804,36 @@ mod tests {
             panic!("expected a read manifest")
         };
         assert!(matches!(f.state, RepoState::Moved { files: 1, .. }));
+    }
+
+    /// One path can answer to both probes: dropped from the index and left on disk, it is a
+    /// deletion to `git diff` and an untracked file to `git ls-files`. Summing the two lists
+    /// states a file count no repository holds, which is the same class of defect — a number
+    /// asserted past what was measured — this command exists to report.
+    #[test]
+    fn a_path_both_probes_name_is_counted_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        let vault = dir.path().join("vault");
+        git_repo(&repo);
+        let base = commit(&repo, "docs/a.md", "one");
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["rm", "-q", "--cached", "docs/a.md"])
+            .output()
+            .expect("rm --cached");
+
+        write_manifest(&vault, "p", &manifest_for(&repo, &base, "docs/*.md"));
+        let r = survey(&vault, TODAY).expect("survey");
+        let Detail::Read(f) = &r[0].detail else {
+            panic!("expected a read manifest")
+        };
+        assert!(
+            matches!(f.state, RepoState::Moved { files: 1, .. }),
+            "one path, one file: {}",
+            f.state.describe()
+        );
     }
 
     /// Every manifest written before `count` existed carries none, and a defaulted zero made
