@@ -23,6 +23,7 @@ use serde::Serialize;
 
 use crate::GraphError;
 use crate::scan::ScannedPage;
+use lk_core::vault_path::path_slug;
 
 /// One page whose links were (or would be) rewritten by a merge.
 #[derive(Debug, Clone, Serialize)]
@@ -131,7 +132,7 @@ pub fn merge_concepts(
         Some(aliases)
     };
 
-    let from_id = crate::scan::path_slug(&from_rel);
+    let from_id = path_slug(&from_rel);
     let mut rewritten = Vec::new();
     for page in pages {
         // The from page itself is about to be deleted — don't rewrite it.
@@ -284,7 +285,7 @@ fn rewrite_links(
     from_rel: &Path,
     into_rel: &Path,
 ) -> (String, usize) {
-    let from_id = crate::scan::path_slug(from_rel);
+    let from_id = path_slug(from_rel);
     let mut count = 0;
     // Rewrite OUTSIDE code only (shared helper): a from-link shown inside a code
     // fence/span is a code example, not a graph edge — `extract_dests`/`broken` ignore
@@ -302,7 +303,7 @@ fn rewrite_links(
             return None;
         }
         let resolved = link::resolve_dest(page_path, &decoded)?;
-        if crate::scan::path_slug(&resolved) != from_id {
+        if path_slug(&resolved) != from_id {
             return None;
         }
         count += 1;

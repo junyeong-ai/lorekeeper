@@ -25,7 +25,8 @@ use lk_vault::{
 use serde::Serialize;
 
 use crate::GraphError;
-use crate::scan::{ScannedPage, VaultExistence, is_concept_page, is_valid_source, path_slug};
+use crate::scan::{ScannedPage, VaultExistence, is_concept_page, is_valid_source};
+use lk_core::vault_path::path_slug;
 
 /// Outcome of one concept page's reconciliation.
 #[derive(Debug, Clone, Serialize)]

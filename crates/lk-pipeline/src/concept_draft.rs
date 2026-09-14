@@ -1,9 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
-use lk_core::concept::{ConceptIdentity, ConceptRegistry, ExtractedConcept, Resolution, slugify};
+use lk_core::concept::{
+    ConceptIdentity, ConceptRegistry, ExtractedConcept, Resolution, citation_digest, slugify,
+};
 use lk_core::config::VaultDirs;
+use lk_core::frontmatter::field;
 use lk_core::i18n::Locale;
-use lk_core::vault_path::VaultPath;
+use lk_core::vault_path::{VaultPath, path_slug};
 use lk_vault::{TemplateEngine, VaultError, VaultStore, replace_section};
 
 use crate::PipelineError;
@@ -58,6 +62,35 @@ pub struct ConceptDrafts {
     registry: Option<ConceptRegistry>,
 }
 
+/// The sentence an extraction wrote to ground a concept it is introducing, and the page whose
+/// material produced it.
+///
+/// The two travel together because the sentence is only an answer for that one page. Carried
+/// as far as the render, which records it as the concept's synthesis input — the same digest
+/// `lore graph backlinks-sync` derives — so a second citation is what makes a rewrite owed.
+pub struct Grounding<'a> {
+    pub text: &'a str,
+    /// Vault-relative path of the citing page.
+    pub origin: &'a Path,
+}
+
+/// A grounding sentence resolved against the evidence it answers.
+#[derive(Clone)]
+struct GroundedSynthesis {
+    text: String,
+    evidence: String,
+}
+
+impl GroundedSynthesis {
+    fn build(grounding: Grounding<'_>) -> Option<Self> {
+        let text = grounding.text.trim();
+        (!text.is_empty()).then(|| Self {
+            text: text.to_string(),
+            evidence: citation_digest(&[path_slug(grounding.origin)]),
+        })
+    }
+}
+
 /// One extraction with everything the vault could tell us about it already read: the page
 /// identity its name resolves to, and the existing page at that slug if there is one.
 /// Produced by [`ConceptDrafts::stage`] (fallible, reads) and consumed by
@@ -66,7 +99,7 @@ pub struct StagedConcept {
     concept: ExtractedConcept,
     slug: String,
     existing: Option<lk_core::frontmatter::VaultPage>,
-    synthesis: Option<String>,
+    grounding: Option<GroundedSynthesis>,
     /// The extraction's aliases this vault can actually adopt, decided in [`ConceptDrafts::stage`]
     /// and already registered there.
     aliases: Vec<String>,
@@ -101,6 +134,15 @@ struct ConceptDraft {
     /// `/lore-wiki audit` for `## Related` — and none should ever be wiped by an ingest
     /// re-render.
     preserved_synthesis: Option<String>,
+    /// The citation digest a grounding sentence seeded into `## Synthesis` this run answers:
+    /// the single page whose material produced it.
+    ///
+    /// Recorded on the page so the sentence states what it was written from. Without it the
+    /// sentence is indistinguishable from an authored synthesis, and `lore graph
+    /// backlinks-sync` adopts it as the answer for however many pages cite the concept by the
+    /// time it first sees the page — one sentence from one source standing as the answer for
+    /// thirty, with nothing left to say the rewrite is owed.
+    synthesis_evidence: Option<String>,
     preserved_sources: Option<String>,
     preserved_related: Option<String>,
     /// Every name this page answers to beyond its own title: the ones already on disk, plus
@@ -208,7 +250,7 @@ impl ConceptDrafts {
     pub async fn stage(
         &mut self,
         concept: &ExtractedConcept,
-        synthesis: Option<&str>,
+        grounding: Option<Grounding<'_>>,
         reader: &dyn VaultStore,
         dirs: &VaultDirs,
     ) -> Result<StagedConcept, PipelineError> {
@@ -230,7 +272,7 @@ impl ConceptDrafts {
             concept: concept.clone(),
             slug: identity.slug,
             existing,
-            synthesis: synthesis.map(str::to_string),
+            grounding: grounding.and_then(GroundedSynthesis::build),
             aliases,
             refused,
         })
@@ -316,11 +358,10 @@ impl ConceptDrafts {
             concept,
             slug: safe_slug,
             existing,
-            synthesis,
+            grounding,
             aliases,
             refused,
         } = staged;
-        let synthesis = synthesis.as_deref();
 
         // Only where this run created the page the extraction's own name resolved to. A
         // source that conflates two established concepts minted nothing, and the same record
@@ -340,7 +381,7 @@ impl ConceptDrafts {
 
         if let Some(draft) = self.drafts.get_mut(&safe_slug) {
             draft.observe(date);
-            draft.seed_synthesis(synthesis);
+            draft.seed_synthesis(grounding);
             draft.adopt_aliases(aliases);
             warn_category_conflict(
                 &safe_slug,
@@ -418,6 +459,7 @@ impl ConceptDrafts {
                     source_count,
                     preserved_llm_inputs: capture_llm_inputs(page),
                     preserved_synthesis: capture_section(&page.body, |s| s.concept_synthesis),
+                    synthesis_evidence: None,
                     preserved_sources: capture_section(&page.body, |s| s.concept_sources),
                     preserved_related: capture_section(&page.body, |s| s.related),
                     aliases,
@@ -432,6 +474,7 @@ impl ConceptDrafts {
                 source_count: 0,
                 preserved_llm_inputs: BTreeMap::new(),
                 preserved_synthesis: None,
+                synthesis_evidence: None,
                 preserved_sources: None,
                 preserved_related: None,
                 aliases: Vec::new(),
@@ -439,7 +482,7 @@ impl ConceptDrafts {
         };
 
         draft.observe(date);
-        draft.seed_synthesis(synthesis);
+        draft.seed_synthesis(grounding);
         draft.adopt_aliases(aliases);
         let identity = ConceptIdentity {
             slug: safe_slug.clone(),
@@ -525,12 +568,16 @@ impl ConceptDraft {
     /// Applied on every fold, not just the one that creates the draft: two results in a run
     /// can name the same new concept and only one of them carry a grounding. Seeding solely
     /// on the fold that creates it would leave the page's synthesis empty or filled
-    /// depending on which result the run happened to read first.
-    fn seed_synthesis(&mut self, synthesis: Option<&str>) {
-        if self.preserved_synthesis.is_none()
-            && let Some(text) = synthesis.map(str::trim).filter(|t| !t.is_empty())
-        {
-            self.preserved_synthesis = Some(text.to_string());
+    /// depending on which result the run happened to read first — and the evidence recorded
+    /// beside it is that one result's page, never the others, because the sentence answers
+    /// only the material it was written from.
+    fn seed_synthesis(&mut self, grounding: Option<GroundedSynthesis>) {
+        if self.preserved_synthesis.is_some() {
+            return;
+        }
+        if let Some(grounding) = grounding {
+            self.preserved_synthesis = Some(grounding.text);
+            self.synthesis_evidence = Some(grounding.evidence);
         }
     }
 
@@ -542,6 +589,25 @@ impl ConceptDraft {
                 self.aliases.push(alias);
             }
         }
+    }
+
+    /// The `llm_inputs` markers the page carries out of this render.
+    ///
+    /// Established ones pass through untouched: a concept's synthesis is owed against the set
+    /// of pages citing it, which only `lore graph backlinks-sync` derives, so a render has
+    /// nothing to say about a marker that sweep recorded. What it does know is the sentence it
+    /// just wrote and the page it came from, and a synthesis seeded here is the answer for
+    /// that one citation — recorded as both the input and the answer, so the next sweep queues
+    /// the rewrite exactly when a second page cites the concept.
+    fn llm_inputs(&self) -> BTreeMap<String, String> {
+        let mut inputs = self.preserved_llm_inputs.clone();
+        if let Some(evidence) = &self.synthesis_evidence
+            && !inputs.contains_key(field::SYNTHESIS)
+        {
+            inputs.insert(field::SYNTHESIS.to_string(), evidence.clone());
+            inputs.insert(field::completion(field::SYNTHESIS), evidence.clone());
+        }
+        inputs
     }
 
     fn render(
@@ -563,6 +629,8 @@ impl ConceptDraft {
             }
         }
 
+        let llm_inputs = self.llm_inputs();
+
         let context = serde_json::json!({
             "slug": self.slug,
             "name": self.name,
@@ -573,7 +641,7 @@ impl ConceptDraft {
             // Preserved verbatim — backlinks-sync owns the real count; ingest never
             // recomputes or resets it (new pages start at 0).
             "source_count": self.source_count,
-            "llm_inputs": self.preserved_llm_inputs,
+            "llm_inputs": llm_inputs,
             "i18n": strings,
         });
 
@@ -1288,6 +1356,41 @@ mod tests {
         assert!(capture_section(empty, |s| s.concept_synthesis).is_none());
     }
 
+    /// A synthesis input `backlinks-sync` already recorded is that sweep's promise of a
+    /// rewrite, and the queued task reads it as its cache key. A grounding seeded into the
+    /// empty section is not an answer to it, so the record stands as written.
+    #[test]
+    fn a_recorded_synthesis_input_outranks_a_grounding_seeded_this_run() {
+        let draft = ConceptDraft {
+            slug: "rag".into(),
+            name: "RAG".into(),
+            category: None,
+            first_seen: jiff::civil::date(2026, 5, 1),
+            last_seen: jiff::civil::date(2026, 5, 1),
+            source_count: 2,
+            preserved_llm_inputs: BTreeMap::from([("synthesis".into(), "recorded".into())]),
+            preserved_synthesis: Some("A sentence one source grounded.".into()),
+            synthesis_evidence: Some("grounded".into()),
+            preserved_sources: None,
+            preserved_related: None,
+            aliases: Vec::new(),
+        };
+        let engine = TemplateEngine::build(None).unwrap();
+        let page = draft
+            .render(&engine, &VaultDirs::default(), Locale::Ko)
+            .unwrap();
+        assert!(
+            page.content.contains(r#"synthesis: "recorded""#),
+            "the recorded input must survive:\n{}",
+            page.content
+        );
+        assert!(
+            !page.content.contains("synthesis_done:"),
+            "a grounding answers nothing the sweep recorded:\n{}",
+            page.content
+        );
+    }
+
     #[test]
     fn rendered_frontmatter_escapes_quotes_in_name() {
         let draft = ConceptDraft {
@@ -1299,6 +1402,7 @@ mod tests {
             source_count: 0,
             preserved_llm_inputs: BTreeMap::new(),
             preserved_synthesis: None,
+            synthesis_evidence: None,
             preserved_sources: None,
             preserved_related: None,
             aliases: Vec::new(),
@@ -1336,6 +1440,7 @@ mod tests {
                 "Retrieval-Augmented Generation enriches an LLM prompt with retrieved context."
                     .into(),
             ),
+            synthesis_evidence: None,
             preserved_sources: Some(
                 "- [d1](../../daily/x/2026-05-01.md)\n- [d2](../../daily/x/2026-05-02.md)".into(),
             ),
@@ -1381,6 +1486,7 @@ mod tests {
             source_count: 0,
             preserved_llm_inputs: BTreeMap::new(),
             preserved_synthesis: None,
+            synthesis_evidence: None,
             preserved_sources: None,
             preserved_related: None,
             aliases: Vec::new(),
@@ -1415,6 +1521,7 @@ mod tests {
             source_count: 0,
             preserved_llm_inputs: BTreeMap::new(),
             preserved_synthesis: None,
+            synthesis_evidence: None,
             preserved_sources: None,
             preserved_related: None,
             aliases: vec!["RAG".into()],

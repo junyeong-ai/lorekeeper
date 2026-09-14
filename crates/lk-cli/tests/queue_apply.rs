@@ -43,6 +43,19 @@ impl Workspace {
     /// One `extract-concepts` result naming a single concept, as a drain writes it.
     /// Serialized from the real type so the fixture cannot drift from the wire format.
     fn drop_result(&self, task_id: &str, target: &str, hash: &str, concept: &str) {
+        self.drop_grounded_result(task_id, target, hash, concept, None);
+    }
+
+    /// The same result carrying the grounding sentence a drain writes when the concept is one
+    /// the vault does not hold yet.
+    fn drop_grounded_result(
+        &self,
+        task_id: &str,
+        target: &str,
+        hash: &str,
+        concept: &str,
+        synthesis: Option<&str>,
+    ) {
         let body = serde_json::to_string(&lk_queue::TaskResult {
             task_id: task_id.into(),
             cache_hash: hash.into(),
@@ -58,7 +71,7 @@ impl Workspace {
                     category: None,
                     aliases: Vec::new(),
                 },
-                synthesis: None,
+                synthesis: synthesis.map(str::to_string),
             }],
         })
         .expect("serialize result");
@@ -119,8 +132,12 @@ impl Workspace {
 const PAGE: &str = "daily/notes/2026-05-23.md";
 
 fn daily_page(hash: &str) -> String {
+    dated_daily_page("2026-05-23", hash)
+}
+
+fn dated_daily_page(date: &str, hash: &str) -> String {
     format!(
-        "---\nid: notes-2026-05-23\ntype: daily\nllm_inputs:\n  concepts: \"{hash}\"\n---\n\n\
+        "---\nid: notes-{date}\ntype: daily\nllm_inputs:\n  concepts: \"{hash}\"\n---\n\n\
          ## Summary\n\nbody\n\n## Related Concepts\n\n## Key Events\n\n- a\n"
     )
 }
@@ -479,4 +496,41 @@ fn prune_reports_the_same_verdict_in_json_as_in_its_exit_code() {
     );
     assert!(!ok, "a queue nothing can drain is a finding\n{parsed}");
     assert_eq!(parsed["data"]["kept_unparseable"].as_u64(), Some(1));
+}
+
+/// A grounding sentence answers the ONE page whose material produced it, and `queue apply`
+/// records that page as the concept's synthesis input. Without the record the sentence is
+/// indistinguishable from an authored synthesis, and `backlinks-sync` adopts it as the answer
+/// for every page citing the concept by the time it first runs — which in a backfill is the
+/// whole citation set, permanently, since adoption also stamps the answer.
+#[test]
+fn a_grounding_answers_one_page_and_a_second_citation_owes_a_rewrite() {
+    const SECOND: &str = "daily/notes/2026-05-24.md";
+    let ws = Workspace::new();
+    ws.write(PAGE, &daily_page("h"));
+    ws.write(SECOND, &dated_daily_page("2026-05-24", "h"));
+    ws.drop_grounded_result("ext-1", PAGE, "h", "Concept A", Some("What Concept A is."));
+    ws.drop_result("ext-2", SECOND, "h", "Concept A");
+    ws.apply_expecting(2, 0);
+
+    let concept = ws.read("wiki/concepts/concept-a.md");
+    let grounded = lk_core::concept::citation_digest(&["daily/notes/2026-05-23".to_owned()]);
+    assert!(
+        concept.contains(&format!("synthesis_done: \"{grounded}\"")),
+        "the seeded sentence must answer the page it was written from:\n{concept}"
+    );
+
+    let out = ws.run(&["graph", "backlinks-sync"]);
+    assert!(
+        out.status.success(),
+        "backlinks-sync failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out = ws.run(&["queue", "count"]);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "1",
+        "two pages cite a concept whose synthesis answers one, so the rewrite is owed"
+    );
 }

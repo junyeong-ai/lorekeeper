@@ -20,6 +20,7 @@ use lk_core::vault_path::concepts_dir;
 
 use crate::cluster::detect_communities;
 use crate::graph::WikiGraph;
+use lk_core::vault_path::path_slug;
 
 /// Build the `map.md` markdown for `graph`. Concepts are the knowledge nodes the map
 /// navigates to; documents and explorations stay in the graph as CLUSTERING EVIDENCE
@@ -45,7 +46,7 @@ pub fn build_map(
         .collect();
 
     // A concept page id is `{wiki}/concepts/{slug}` (per-segment slugified).
-    let concept_prefix = format!("{}/", crate::scan::path_slug(&concepts_dir(dirs)));
+    let concept_prefix = format!("{}/", path_slug(&concepts_dir(dirs)));
 
     // Destinations are relative to the map's own location (`{wiki}/map.md`). A concept
     // page's path is its id plus `.md` — machine-created pages are slug-addressed by

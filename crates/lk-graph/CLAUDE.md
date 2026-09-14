@@ -157,6 +157,10 @@ on-disk state, never from a cached snapshot.
   and since adoption stamps the page fully answered, `doctor` reads it green and nothing is
   queued, so the sweep's own report is the ONLY place that deferral is ever stated. It names
   how many, with the `llm_inputs.synthesis_done` lever that turns one back into work.
+  The population it reaches is authored prose: a page the ingest pipeline created records the
+  one citation its grounding sentence answers, so it arrives here already stating what it was
+  written from. Before that it did not, and a backfill — thousands of pages created, one sweep
+  at the end — adopted every creation sentence as the answer for the whole citation set.
   **A concept nothing cites records no input and is owed nothing**: there is no evidence for a
   synthesis to answer to, a queued task would send a drain to read an empty set, and a
   recorded-but-unanswerable input would have `lore doctor` report it forever. A concept whose

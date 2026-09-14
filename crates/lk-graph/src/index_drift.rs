@@ -6,7 +6,7 @@ use lk_core::i18n::Locale;
 use lk_core::link;
 
 use crate::GraphError;
-use crate::scan;
+use lk_core::vault_path::path_slug;
 
 /// A page the catalog does not carry, an entry no page justifies, and whether the catalog
 /// differs from a re-derivation at all.
@@ -75,7 +75,7 @@ pub fn diff(root: &Path, locale: Locale, dirs: &VaultDirs) -> Result<IndexDrift,
         link::extract_dests(content)
             .into_iter()
             .filter_map(|dest| link::resolve_dest(&index_rel, &dest))
-            .map(|resolved| scan::path_slug(&resolved))
+            .map(|resolved| path_slug(&resolved))
             .filter(|id| !id.is_empty())
             .collect()
     };

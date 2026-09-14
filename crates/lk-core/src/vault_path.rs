@@ -212,6 +212,52 @@ pub fn quarter_of_month(month: u8) -> u8 {
     (month - 1) / 3 + 1
 }
 
+/// Node key for a vault-relative path: drop the extension, normalize separators to `/`, then
+/// name each segment by the rule that segment is named under — directories by the filesystem
+/// ([`crate::fs::fold_name`]), the file by the concept slug (so `wiki/Concept A.md` →
+/// `wiki/concept-a`).
+///
+/// A concept page's FILE is named by its slug, which is why two files whose stems slugify alike
+/// are one address and a violation. A DIRECTORY is not: the vault addresses it literally, so
+/// `slugify` applied there answers a question nobody asked and folds directories the filesystem
+/// keeps apart. `daily_/` beside `daily/` became one id: a broken link written on a page under
+/// `daily_/` was reported against the page under `daily/`, where a reader looking for it finds
+/// no such link, and the two real files at two real addresses were reported as one address with
+/// two files.
+///
+/// Single-sourced here because the id is what a CITATION is counted as: `lore graph
+/// backlinks-sync` derives a concept's evidence set from these ids, and the ingest pipeline
+/// records the same set on a concept page it creates. Two derivations of the id would make the
+/// two disagree about whether a synthesis answers the evidence it was written from.
+pub fn path_slug(rel: &Path) -> String {
+    let no_ext = rel.with_extension("");
+    let s = no_ext.to_string_lossy().replace('\\', "/");
+    let mut segments: Vec<&str> = s.split('/').collect();
+    let stem = segments.pop();
+    join_segments(
+        segments
+            .into_iter()
+            .map(crate::fs::fold_name)
+            .chain(stem.and_then(crate::concept::slugify)),
+    )
+}
+
+/// The id prefix a vault-relative DIRECTORY contributes: every segment is a directory, so every
+/// segment is named by the filesystem rule. Sharing [`path_slug`] here would slugify the last
+/// segment as though it were a page's file, and a configured `daily_` would then match no page
+/// at all — it would ask for the prefix `daily`, which is not what any page under it carries.
+pub fn dir_slug(dir: &Path) -> String {
+    let s = dir.to_string_lossy().replace('\\', "/");
+    join_segments(s.split('/').map(crate::fs::fold_name))
+}
+
+fn join_segments(segments: impl Iterator<Item = String>) -> String {
+    segments
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,5 +361,41 @@ mod tests {
         assert_eq!(quarter_of_month(9), 3);
         assert_eq!(quarter_of_month(10), 4);
         assert_eq!(quarter_of_month(12), 4);
+    }
+
+    #[test]
+    fn path_slug_basic() {
+        assert_eq!(path_slug(Path::new("wiki/Concept A.md")), "wiki/concept-a");
+        assert_eq!(path_slug(Path::new("wiki/Bad_Name.md")), "wiki/bad-name");
+    }
+
+    #[test]
+    fn path_slug_preserves_directory_structure() {
+        assert_eq!(
+            path_slug(Path::new("wiki/sub/Topic Name.md")),
+            "wiki/sub/topic-name"
+        );
+    }
+
+    /// A directory is addressed literally, so two directories the filesystem keeps apart stay
+    /// two ids. Slugifying them folded `daily_/` onto `daily/`: a broken link written under one
+    /// was reported against a page in the other, where nothing of the kind is written, and the
+    /// two real files were reported as one address holding two.
+    #[test]
+    fn a_directory_is_named_by_the_filesystem_not_by_the_concept_rule() {
+        assert_ne!(
+            path_slug(Path::new("daily_/notes/2026-07-30.md")),
+            path_slug(Path::new("daily/notes/2026-07-30.md"))
+        );
+        assert_eq!(
+            path_slug(Path::new("daily_/notes/2026-07-30.md")),
+            "daily_/notes/2026-07-30"
+        );
+        // The FILE is still named by the concept rule, which is what makes two stems that
+        // slugify alike one address and a violation.
+        assert_eq!(
+            path_slug(Path::new("wiki/concepts/Bad_Name.md")),
+            path_slug(Path::new("wiki/concepts/bad-name.md"))
+        );
     }
 }

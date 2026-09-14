@@ -26,7 +26,7 @@ use lk_core::config::{ObservationUnit, SourceConfig};
 use lk_core::event::{Event, RawItem};
 use lk_vault::{FsVault, VaultStore};
 
-use concept_draft::ConceptDrafts;
+use concept_draft::{ConceptDrafts, Grounding};
 
 #[derive(Debug, Error)]
 pub enum PipelineError {
@@ -721,7 +721,10 @@ impl Pipeline {
                 self.concept_drafts
                     .stage(
                         &concept,
-                        reported.synthesis.as_deref(),
+                        reported.synthesis.as_deref().map(|text| Grounding {
+                            text,
+                            origin: Path::new(&result.target.vault_path),
+                        }),
                         self.reader.as_ref(),
                         &self.ctx.dirs,
                     )
