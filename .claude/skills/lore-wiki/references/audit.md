@@ -18,10 +18,35 @@ resolve section headings before inspecting pages.
    faults — it does NOT mean the wiki is well-connected. Empty related-concepts sections are
    never a lint finding; only `suggest-links` (layer 2) reveals that gap, so never equate
    "no violations" with "healthy".
-2. **Missing cross-references** — run `lore graph --json suggest-links` (never
-   exits non-zero — always inspect the pairs), then confirm topical relatedness
-   before proposing a link. Community grounding + LLM confirmation = double gate
-   against false positives.
+2. **Missing cross-references** — two kinds, and they are found differently.
+
+   Between concepts: run `lore graph --json suggest-links` (never exits non-zero —
+   always inspect the pairs), then confirm topical relatedness before proposing a
+   link. Community grounding + LLM confirmation = double gate against false positives.
+
+   From a source page to a concept — a citation the page owes and does not carry.
+   A concept's synthesis is written from its citations and nothing else, so every
+   missing citation is evidence the concept's page cannot see, and the next rewrite
+   drops whatever only that page supported. Nothing derives these: a page mentioning
+   a concept's name is not a citation (thousands of pages mention `Anthropic` in
+   passing), so the graph cannot add them and you may not add them from a text match.
+   Two signals are exact enough to act on:
+   - **A page that DECLARES a concept and does not cite it.** A promotion marker
+     (`[PROMOTES: <id>]`) or a pattern id in a document's own frontmatter is the
+     source asserting that this document establishes that concept. Where the id
+     resolves (`lore resolve <id>`) and the page's related-concepts section lacks
+     the link, add it — that is a repair of the extraction, not a judgment.
+   - **A claim a rewrite dropped.** The drain leaves a `> [!note] 현재 인용 N건에서
+     확인되지 않은 기존 주장` on a concept page for each substantive claim the
+     current citations did not support. Read the claim and look for the page that
+     does support it — across the WHOLE vault, daily pages included: `lore wiki
+     search` reads only the wiki, so use `grep -rl` over every page directory, and
+     search every spelling the concept answers to (an English name inside a Korean
+     page is the common miss). A page found is a missing citation: add the link on
+     that page and register the spelling as an alias if it was one. Nothing found
+     means the drop stands; leave the note, since the next rewrite re-derives it.
+   Report every citation you add: a link is a claim of evidence, and `lore graph
+   backlinks-sync` will queue the concept for a rewrite on the strength of it.
 3. **Contradictions** — read layer 1's `observations.unresolved_conflicts`: the
    concepts whose Synthesis carries an open `> [!conflict]` callout. Flagging is
    not this skill's job — `lore graph backlinks-sync` queues a synthesis rewrite

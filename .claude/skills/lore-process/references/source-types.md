@@ -82,7 +82,16 @@ Use `input.source_type` to scope what counts as a concept:
   environments, config keys or file paths — those name one codebase and no second
   source can ever cite them. Where a document states a general insight in project
   terms, name the concept in the general terms and leave the project's word out
-  unless another source would plausibly write it, in which case it is an alias
+  unless another source would plausibly write it, in which case it is an alias.
+  **A document that DECLARES the concept it establishes has already made that
+  judgment**, and the declaration outranks your reading of the prose: a learning
+  carrying a promotion marker (`[PROMOTES: <id>]`) or a pattern id in its own
+  frontmatter is the repository saying this document is evidence for that
+  pattern. Report every declared id, verbatim as the name — it is an identifier
+  the project minted to be reused, so a later learning writes the same string —
+  and put the prose form beside it as an alias. A declared concept left out is
+  the citation the vault most needs and is least able to recover, because the
+  page that declared it will not be read again
 - `google-drive` / `manual` → document subject matter
 - `tasks` → what the closing note established: the systems touched, the
   constraint found, the decision taken. The task's title names an intention and

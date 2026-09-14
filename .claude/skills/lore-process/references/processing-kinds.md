@@ -100,6 +100,27 @@ the task carries no text.
 4. Every claim must be traceable to one of the cited pages. Write nothing the
    sources do not support, and nothing from your own background knowledge —
    a concept page is what the vault observed, not what is generally true.
+
+   The body you are replacing was written the same way, from the citations of
+   its day. So a substantive claim it carries — a cause, a mechanism, a named
+   remedy, a figure — that none of the current citations supports means one of
+   two things, and you cannot tell which: the claim was never sound, or the
+   page that supported it is not in the citation set (an extraction missed it,
+   or its link was lost). Drop the claim from the synthesis either way, and
+   name what you dropped in one `> [!note]` at the end of the section, stated
+   at the width you actually checked:
+
+   ```
+   > [!note] 현재 인용 4건에서 확인되지 않은 기존 주장
+   > PSC 이그레스가 `*.run.app`으로 나갈 출구가 없어 실패하며, ALB로 사설 IP에 연결해 해결했다.
+   ```
+
+   Never write that the claim has no basis: you read N pages, and the vault
+   holds more. `/lore-wiki audit` reads these notes against the whole vault and
+   repairs the citation where the support exists — which is the only way a
+   lost citation is ever found, since nothing else reads the previous body.
+   A wording you tightened or a restatement you folded is not a dropped claim
+   and gets no note.
 5. When two cited sources disagree on a fact about the concept, state the
    disagreement in a `> [!conflict]` callout naming both sides, inside the
    section. `lore graph lint` surfaces open callouts. You are the only writer of
