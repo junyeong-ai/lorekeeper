@@ -324,7 +324,9 @@ async fn apply(
     // the page from disk would see a version predating the first — and its write would then
     // drop the citations the first added, the exact loss the accumulating render exists to
     // prevent. Within a batch, the pending version IS the page.
-    let mut origin_pages: BTreeMap<PathBuf, String> = BTreeMap::new();
+    // Each page carries the results that produced it, because whether they may be deleted is
+    // decided by whether that page WROTE, and one page can hold several.
+    let mut origin_pages: BTreeMap<PathBuf, (String, Vec<PathBuf>)> = BTreeMap::new();
     let mut consumed: Vec<PathBuf> = Vec::new();
 
     // Everything a result can get wrong is that result's problem, not the batch's: aborting
@@ -367,7 +369,16 @@ async fn apply(
             Artifact::Result,
         ) {
             Ok(TaskStatus::Current) => {}
-            Ok(status) => {
+            // A page nobody can read is the absence of a verdict, not a dead result. The
+            // extraction it carries is the answer in flight, and a repair of the page is a
+            // one-line fix that brings it back — consuming it here would spend that answer on
+            // a page that could not receive it, with nothing left to say what was lost.
+            Ok(TaskStatus::Unreadable) => {
+                fail("target page will not parse; repair it and this result applies".into());
+                failed += 1;
+                continue;
+            }
+            Ok(status @ (TaskStatus::Done | TaskStatus::Stale | TaskStatus::MissingTarget)) => {
                 drop_dead(status.as_str());
                 dropped += 1;
                 consumed.push(path.clone());
@@ -380,7 +391,7 @@ async fn apply(
             }
         }
         let content = match origin_pages.get(&rel_path) {
-            Some(pending) => pending.clone(),
+            Some((pending, _)) => pending.clone(),
             None => match std::fs::read_to_string(vault_root.join(&rel_path)) {
                 Ok(c) => c,
                 Err(e) => {
@@ -392,8 +403,11 @@ async fn apply(
         };
         match pipeline.apply_concept_result(result, &content).await {
             Ok(rewritten) => {
-                origin_pages.insert(rel_path, rewritten);
-                consumed.push(path.clone());
+                let page = origin_pages
+                    .entry(rel_path)
+                    .or_insert_with(|| (String::new(), Vec::new()));
+                page.0 = rewritten;
+                page.1.push(path.clone());
                 applied += 1;
             }
             Err(e) => {
@@ -431,11 +445,19 @@ async fn apply(
         super::report_refusals(page, false);
     }
 
-    for (rel_path, content) in &origin_pages {
-        writer
-            .write_page(rel_path, content)
-            .await
-            .map_err(|e| miette::miette!("write {}: {e}", rel_path.display()))?;
+    // A page this refuses is one result's problem on the same terms as every other: a target
+    // whose frontmatter an earlier drain mangled is refused on every run until a human repairs
+    // it, and aborting here would hold every other page's citations behind it for that whole
+    // time. Its results are kept rather than deleted, so the repair brings the work back.
+    for (rel_path, (content, results)) in &origin_pages {
+        match writer.write_page(rel_path, content).await {
+            Ok(()) => consumed.extend(results.iter().cloned()),
+            Err(e) => {
+                eprintln!("  ✗ write {}: {e}", rel_path.display());
+                applied -= results.len();
+                failed += results.len();
+            }
+        }
     }
 
     for path in &consumed {

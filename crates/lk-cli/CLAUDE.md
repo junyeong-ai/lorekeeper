@@ -132,6 +132,15 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   and an exclusive claim held that long needs a liveness answer nothing here can give, which is
   where timeouts and their false positives come in. `--dry-run` writes nothing and so claims
   nothing.
+  **Nothing one result gets wrong reaches the batch**, and the writes are where that was
+  breached: a page the writer REFUSES — frontmatter a drain mangled while stamping a marker —
+  aborted the run with concept pages on disk and no citations, and aborted again at the same
+  file every run after, since nothing prunes results. Each page now carries the results that
+  produced it, so a refused page fails those and the rest of the batch writes. An `unreadable`
+  target is the same judgment one step earlier and is REPORTED rather than dropped: it is the
+  absence of a verdict, not a dead result, and consuming it would spend an extraction on a page
+  that could not receive it — `Stale` and `MissingTarget` are the ones a newer task or a
+  re-render already answers for.
   It materializes the concept extractions a drain wrote to
   `queue/results/*.json` through the same `ConceptDrafts` merge the ingest path uses, then
   deletes each result it consumed — so an empty `results/` after a pipeline run is evidence

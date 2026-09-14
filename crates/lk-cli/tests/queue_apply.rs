@@ -188,6 +188,49 @@ fn two_results_for_one_page_both_land() {
     );
 }
 
+/// A result whose target page will not parse is kept, and does not strand the batch.
+///
+/// The likeliest author of unparseable frontmatter is a drain stamping a marker, and the
+/// repair is a line. So the page is a question nobody can answer yet rather than a dead
+/// result: consuming it would spend the extraction on a page that could not receive it, with
+/// nothing left to say what was lost. And every other page's citations must not wait for that
+/// repair — aborting would hold them on this run and on every run after it, since nothing
+/// prunes results.
+#[test]
+fn a_result_whose_page_will_not_parse_is_kept_and_holds_up_nothing() {
+    const BROKEN: &str = "daily/notes/2026-05-24.md";
+    let ws = Workspace::new();
+    ws.write(PAGE, &daily_page("h"));
+    ws.write(
+        BROKEN,
+        "---\nid: notes-2026-05-24\ntype: daily\nllm_inputs:\n   [[[\n---\n\n\
+         ## Related Concepts\n\n",
+    );
+    ws.drop_result("ext-good", PAGE, "h", "Concept A");
+    ws.drop_result("ext-broken", BROKEN, "h", "Concept B");
+
+    let out = ws.run(&["queue", "apply"]);
+    assert!(
+        !out.status.success(),
+        "a result nothing could apply must fail the run"
+    );
+
+    assert!(
+        ws.read(PAGE).contains("wiki/concepts/concept-a.md"),
+        "the page that could be written must be cited:\n{}",
+        ws.read(PAGE)
+    );
+    assert_eq!(
+        json_files(&results_dir(&ws))
+            .iter()
+            .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
+            .map(str::to_owned)
+            .collect::<Vec<_>>(),
+        vec!["ext-broken.json".to_string()],
+        "the unapplicable result is kept and the applied one consumed"
+    );
+}
+
 /// `--dry-run` reports without touching the vault or consuming a result.
 #[test]
 fn dry_run_applies_nothing_and_consumes_nothing() {
