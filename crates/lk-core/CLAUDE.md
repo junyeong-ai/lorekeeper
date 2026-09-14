@@ -113,9 +113,20 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   deduplicated set of pages citing it, serialized as a JSON array so no id is confusable with
   a pair of shorter ones. The SET, never the rendered citation list — a source page that is
   retitled changes how a citation reads without changing what it is, and a digest over the
-  text would resurface a concept whose material is identical. Single-sourced because
-  `lk-graph` records it on the page and `lk-queue` carries it as the task's input; two
-  implementations would be a task that can never match the page it names.
+  text would resurface a concept whose material is identical. Single-sourced because three
+  crates must produce the same string: `lk-graph` records it on the page, `lk-queue` carries
+  it as the task's input, and `lk-pipeline` records the ONE citation a created page's
+  grounding sentence answers. Two implementations would be a task that can never match the
+  page it names.
+- **`vault_path::path_slug`** is the node key for a vault-relative path, and it lives here for
+  the same reason: the id is what a CITATION is counted as. `lk-graph` derives a concept's
+  evidence set from these ids and `lk-pipeline` records that set on a page it creates, so a
+  second derivation would have the two disagree about whether a synthesis answers the evidence
+  it was written from. Each segment is named by the rule that segment is named under — a
+  directory by the filesystem (`fs::fold_name`), the file by `slugify` — which is why `daily_/`
+  and `daily/` stay two addresses while two page stems that slugify alike are one.
+  `dir_slug` is the directory-only form; sharing `path_slug` there would slugify the last
+  segment as a page's file and ask for a prefix no page carries.
 - **`link`** is the single implementation of the vault's link vocabulary: inline
   markdown links `[Display](relative/path.md)`, destinations relative to the containing
   page and always `.md`-suffixed. Construction (`md_link` + `relative_dest`, CommonMark

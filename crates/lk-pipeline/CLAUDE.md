@@ -206,6 +206,18 @@ domain-neutral engine — then no work-log, reviews, or `is_personal` are produc
   is read last, which is deterministic but arbitrary, so it is `tracing::warn`ed rather
   than settled in silence. Two pages claiming the same non-address name likewise warns
   (first wins, deterministic) and is reported deterministically by `lore graph lint`.
+- **A concept page's `llm_inputs` are carried, except the one fact only the render knows.**
+  A concept's synthesis is owed against the SET of pages citing it, which only `lore graph
+  backlinks-sync` derives, so established markers are re-emitted unchanged — dropping them
+  would re-enqueue every concept a run touched, and judging them would need a link graph the
+  render cannot see. What the render does know is the page it is CREATING and the one citation
+  creating it: `ConceptDrafts::stage` takes the extraction's grounding sentence together with
+  the page whose material produced it (`Grounding`), and a page seeded from it records that
+  single citation's digest as both `synthesis` and `synthesis_done`. Without the record the
+  sentence reaches the sweep indistinguishable from authored prose and is ADOPTED as the answer
+  for however many pages cite the concept by then — which in a backfill is the whole set, with
+  the page stamped fully answered so no rewrite is ever owed. An input the sweep already
+  recorded is left alone: it is that sweep's promise and the queued task's cache key.
 - **`theme` vs `topic` are deliberately distinct, not drift.** A weekly-synthesis
   `Theme` (`identify_themes`) is a cross-source cluster spanning a whole week; a work-log
   `topic_summary`/`topic_heading` is a single day's per-source activity grouping. They sit
