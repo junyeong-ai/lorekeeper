@@ -47,7 +47,45 @@ pipeline_start() {
     log "vault: $VAULT"
 }
 
+# Record what this run changed, when the vault is a git repository.
+#
+# Every LLM-owned section is REPLACED on rewrite and a merge deletes a page, so a run that
+# went wrong is recoverable only from a copy taken before it — and a diff is the one gate
+# that sees a drift the prose contracts cannot: a drain that named concepts in sentences
+# shows up as new files with 300-byte names before anyone reads a page. One run is one
+# commit, which is the unit a person reviews and reverts. A vault that is not a repository
+# gets no stage rather than a failing one; a run that changed nothing commits nothing and
+# succeeds; a run whose stages failed still commits, because its diff is the one worth
+# reading. `git` reaches ~/Documents under launchd only where it holds its own TCC grant —
+# the shell's `ls` does not — so a refusal here is reported as a failed stage, never skipped.
+#
+# `.lorekeeper/` is the one path this refuses to commit: it holds `credentials.json` beside
+# the queue archives, and a vault initialised without ignoring it would put every token into
+# history on the first run. The refusal names the fix and fails the stage until it is made.
+commit_vault() {
+    if ! git -C "$VAULT" rev-parse --git-dir >/dev/null 2>&1; then
+        log "− vault commit skipped (not a git repository)"
+        return
+    fi
+    run "vault commit" commit_vault_changes
+}
+
+commit_vault_changes() {
+    if ! git -C "$VAULT" check-ignore -q .lorekeeper; then
+        log "  refusing: .lorekeeper/ is not ignored and holds credentials.json — add it to .gitignore"
+        return 1
+    fi
+    git -C "$VAULT" add -A || return
+    if git -C "$VAULT" diff --cached --quiet; then
+        log "  nothing changed"
+        return 0
+    fi
+    git -C "$VAULT" -c user.name=lore -c user.email=lore@localhost \
+        commit -q -m "$(basename "$0" .sh) $(date '+%Y-%m-%dT%H:%M%z')"
+}
+
 pipeline_finish() {
+    commit_vault
     if [ ${#failed[@]} -gt 0 ]; then
         log "done with failures: ${failed[*]}"
         exit 1

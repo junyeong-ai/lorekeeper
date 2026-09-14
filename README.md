@@ -418,6 +418,20 @@ lore schedule --format launchd --bin "$(command -v lore)" \
 
 `--pipeline-dir`가 그 스크립트를 **실제로 스케줄에 태우는** 플래그입니다. `lore ingest`와 `lore synthesis weekly`는 파이프라인의 첫 단계일 뿐이고 큐 드레인과 `queue apply`는 스크립트에만 있으므로, 이 플래그 없이 발행하면 매일 수집만 하고 요약·개념은 영원히 비어 있게 됩니다. 스케줄러는 환경을 거의 물려주지 않으므로 스크립트가 필요로 하는 `PATH`/`lore`/`claude`/config 경로도 함께 실립니다 — 추측이 아니라 이 명령을 실행한 세션에서 그대로 상속합니다. macOS는 launchd를 권합니다: 잠든 사이 놓친 작업을 깨어나면 실행하지만 cron은 조용히 건너뜁니다.
 
+### 볼트를 git으로 관리하기 (선택)
+
+LLM이 쓰는 절은 다시 쓸 때 **대체**되고 개념 병합은 페이지를 **삭제**하므로, 잘못된 실행을 되돌릴 수 있는 사본은 실행 전에 떠 둔 것뿐입니다. 볼트를 git 저장소로 만들어 두면 파이프라인이 실행마다 한 번 커밋합니다 — 실행 하나가 커밋 하나라서 무엇이 바뀌었는지 `git diff`로 보고 `git checkout`으로 되돌립니다. 저장소가 아니면 이 단계는 존재하지 않으며, 어떤 설정도 필요 없습니다.
+
+```bash
+cd "$(lore config vault-root)"
+git init
+git config core.precomposeunicode true        # macOS: 한글 파일명을 NFC로 저장
+printf '.lorekeeper/\n.obsidian/\nwiki/index.md\nwiki/log.md\nwiki/map.md\n' > .gitignore
+git add -A && git commit -m "vault"
+```
+
+`.lorekeeper/`는 반드시 제외하십시오 — `credentials.json`이 그 안에 있습니다. 제외되지 않은 채로는 파이프라인이 커밋을 거부합니다. `wiki/index.md`·`log.md`·`map.md`는 `lore wiki refresh`가 매번 다시 만드는 파생물이라 이력에 둘 이유가 없습니다. 볼트에는 메일·메신저·이슈 본문이 그대로 들어 있으니, 원격 저장소는 회사 정책이 허용하는 곳에만 두거나 로컬 전용으로 쓰십시오.
+
 ---
 
 ## 더 알아보기
