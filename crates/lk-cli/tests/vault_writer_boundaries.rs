@@ -64,8 +64,10 @@ fn all_page_writer_entrypoints_refuse_another_processes_vault_lease() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    for page in ["index.md", "log.md", "map.md"] {
-        assert!(vault.join("wiki").join(page).is_file());
+    assert!(vault.join("wiki/index.md").is_file());
+    assert!(vault.join(".lorekeeper/search.sqlite").is_file());
+    for page in ["log.md", "map.md"] {
+        assert!(!vault.join("wiki").join(page).exists());
     }
 }
 

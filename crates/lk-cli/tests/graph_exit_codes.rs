@@ -83,6 +83,20 @@ impl Workspace {
         Self { root }
     }
 
+    fn enable_markdown_exports(&self) {
+        let path = self.root.path().join("config.yaml");
+        let config = std::fs::read_to_string(&path).expect("config");
+        std::fs::write(
+            path,
+            config.replacen(
+                "  root: vault\n",
+                "  root: vault\n  navigation:\n    markdown_exports: true\n",
+                1,
+            ),
+        )
+        .expect("config");
+    }
+
     fn write(&self, rel: &str, content: &str) {
         let path = self.root.path().join("vault").join(rel);
         std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
@@ -333,6 +347,7 @@ fn a_link_to_a_page_that_does_not_exist_exits_one() {
 #[test]
 fn the_json_report_carries_every_channel_field_on_a_clean_vault() {
     let ws = Workspace::new();
+    ws.enable_markdown_exports();
     ws.write(
         "wiki/concepts/cited.md",
         &concept("cited", "Cited", "A concept, cited and uncontested."),
@@ -409,6 +424,7 @@ fn a_broken_link_written_outside_the_analysis_scope_still_gates() {
 #[test]
 fn a_page_with_unparseable_frontmatter_still_reports_its_broken_link() {
     let ws = sound_vault();
+    ws.enable_markdown_exports();
     ws.write(
         "daily/notes/2026-05-24.md",
         "---\nid: notes-2026-05-24\ntype: daily\ntitle: Notes: today\n---\n\n\
@@ -962,6 +978,7 @@ fn a_category_outside_the_configured_vocabulary_exits_one() {
 #[test]
 fn a_catalog_that_disagrees_with_the_disk_exits_one() {
     let ws = sound_vault();
+    ws.enable_markdown_exports();
     ws.write(
         "wiki/concepts/added-after-the-index.md",
         &concept(

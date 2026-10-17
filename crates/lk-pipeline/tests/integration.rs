@@ -31,6 +31,7 @@ fn base_config(vault_root: &std::path::Path) -> Config {
     Config {
         ingest: Default::default(),
         vault: VaultConfig {
+            navigation: Default::default(),
             root: vault_root.to_string_lossy().into(),
             dirs: VaultDirs::default(),
             timezone: Some("UTC".into()),

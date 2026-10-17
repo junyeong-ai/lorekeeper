@@ -912,7 +912,7 @@ mod tests {
     fn empty_vault_yields_header_only() {
         let tmp = TempDir::new().unwrap();
         let out = build_index(tmp.path(), Locale::Ko, &VaultDirs::default()).unwrap();
-        assert!(out.starts_with("# 위키 인덱스"));
+        assert!(out.starts_with("<!-- lorekeeper:catalog -->\n# 위키 인덱스"));
         assert!(out.contains("0 pages"));
         // No category sections should be rendered.
         assert!(!out.contains("## 개념"));
@@ -923,9 +923,15 @@ mod tests {
     fn index_h1_is_localized() {
         let tmp = TempDir::new().unwrap();
         let en = build_index(tmp.path(), Locale::En, &VaultDirs::default()).unwrap();
-        assert!(en.starts_with("# Wiki Index"), "EN H1 localized:\n{en}");
+        assert!(
+            en.starts_with("<!-- lorekeeper:catalog -->\n# Wiki Index"),
+            "EN H1 localized:\n{en}"
+        );
         let ko = build_index(tmp.path(), Locale::Ko, &VaultDirs::default()).unwrap();
-        assert!(ko.starts_with("# 위키 인덱스"), "KO H1 localized:\n{ko}");
+        assert!(
+            ko.starts_with("<!-- lorekeeper:catalog -->\n# 위키 인덱스"),
+            "KO H1 localized:\n{ko}"
+        );
     }
 
     #[test]

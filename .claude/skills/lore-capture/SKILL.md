@@ -1,6 +1,6 @@
 ---
 name: lore-capture
-version: 0.53.1
+version: 0.54.0
 description: Capture high-value insights from active work into the Lorekeeper vault — troubleshooting discoveries, non-obvious constraints, reusable patterns. Operates in the moment while context is alive.
 when_to_use: |
   knowledge capture, lore capture, capture this, record insight,
@@ -134,8 +134,8 @@ checks pass:
 
 ```bash
 lore graph backlinks-sync   # re-derive every concept's ## Sources + source_count
-lore wiki refresh           # re-derive the catalog, timeline and map this page joins
-lore graph lint             # non-zero means the vault contradicts itself somewhere — a link to a page that is not there, a catalog that disagrees with the disk, a category outside the configured vocabulary, or a name answering to two pages. Resolve every violation naming a page THIS capture wrote; a violation elsewhere in the vault predates you, so report it rather than fixing it silently. Orphans and open conflicts are reported as observations and never gate
+lore wiki refresh           # refresh SQLite navigation and configured Markdown exports
+lore graph lint             # non-zero means the vault contradicts itself somewhere — a link to a page that is not there, an enabled automatic catalog export that disagrees with the disk, a category outside the configured vocabulary, or a name answering to two pages. Resolve every violation naming a page THIS capture wrote; a violation elsewhere in the vault predates you, so report it rather than fixing it silently. Orphans and open conflicts are reported as observations and never gate
 ```
 
 ### 7. Report

@@ -7,8 +7,8 @@ use serde::Serialize;
 use crate::search::{Page, SearchOptions, SearchResult, fold, fold_name, search_text};
 use crate::{MutationSession, VaultError};
 
-const INDEX_PATH: &str = ".lorekeeper/search.sqlite";
-const VERSION: i32 = 3;
+pub(super) const INDEX_PATH: &str = ".lorekeeper/search.sqlite";
+const VERSION: i32 = 5;
 
 #[derive(Serialize)]
 pub struct SearchSnapshot {
@@ -37,6 +37,14 @@ pub fn prepare_search(
 ) -> Result<SearchSnapshot, VaultError> {
     let root = session.root();
     let pages = super::search::load_pages(root, dirs, true)?;
+    // Body-search pagination retains traversal order; browse ties use PathBuf ordering.
+    let mut ordered_paths = pages.iter().map(|page| &page.rel_path).collect::<Vec<_>>();
+    ordered_paths.sort();
+    let path_ranks = ordered_paths
+        .into_iter()
+        .enumerate()
+        .map(|(rank, path)| (path, rank))
+        .collect::<std::collections::BTreeMap<_, _>>();
     let context = context(root, dirs)?;
     let manifest = pages
         .iter()
@@ -60,18 +68,33 @@ pub fn prepare_search(
         }
     }
     let transaction = connection.transaction()?;
-    transaction.execute_batch("DROP TABLE IF EXISTS terms;
+    transaction.execute_batch("DROP TABLE IF EXISTS links;
+        DROP TABLE IF EXISTS terms;
         DROP TABLE IF EXISTS pages;
         DROP TABLE IF EXISTS snapshot;
         CREATE TABLE snapshot (id TEXT NOT NULL, context TEXT NOT NULL, version INTEGER NOT NULL);
         CREATE TABLE pages (id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE, title TEXT NOT NULL,
-            aliases TEXT NOT NULL, concept INTEGER NOT NULL, knowledge INTEGER NOT NULL, payload TEXT NOT NULL, metadata TEXT NOT NULL, intro TEXT NOT NULL);
-        CREATE VIRTUAL TABLE terms USING fts5(text, tokenize='trigram case_sensitive 1');")?;
+            aliases TEXT NOT NULL, concept INTEGER NOT NULL, knowledge INTEGER NOT NULL, payload TEXT NOT NULL, metadata TEXT NOT NULL, intro TEXT NOT NULL,
+            category TEXT NOT NULL, format TEXT NOT NULL, source_status TEXT NOT NULL, created_date TEXT, path_rank INTEGER NOT NULL);
+        CREATE INDEX browse_title ON pages(knowledge, title, path_rank);
+        CREATE INDEX browse_created ON pages(knowledge, created_date DESC, path_rank);
+        CREATE INDEX browse_all_title ON pages(title, path_rank);
+        CREATE INDEX browse_all_created ON pages(created_date DESC, path_rank);
+        CREATE VIRTUAL TABLE terms USING fts5(text, tokenize='trigram case_sensitive 1');
+        CREATE TABLE links (source TEXT NOT NULL, ordinal INTEGER NOT NULL,
+            source_revision TEXT NOT NULL, line INTEGER NOT NULL, label TEXT NOT NULL,
+            destination TEXT NOT NULL, target TEXT, context TEXT NOT NULL,
+            context_truncated INTEGER NOT NULL,
+            PRIMARY KEY (source, ordinal));
+        CREATE INDEX links_target ON links(target, source, ordinal);")?;
     {
-        let mut insert_page =
-            transaction.prepare("INSERT INTO pages VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)")?;
+        let mut insert_page = transaction.prepare(
+            "INSERT INTO pages VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        )?;
         let mut insert_terms =
             transaction.prepare("INSERT INTO terms(rowid, text) VALUES (?1, ?2)")?;
+        let mut insert_link =
+            transaction.prepare("INSERT INTO links VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)")?;
         for (id, page) in pages.iter().enumerate() {
             let aliases = serde_json::to_string(&page.aliases)
                 .map_err(|e| VaultError::Serialization(e.to_string()))?;
@@ -106,9 +129,47 @@ pub fn prepare_search(
                 knowledge,
                 payload,
                 metadata,
-                intro
+                intro,
+                page.page
+                    .frontmatter
+                    .get("category")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
+                page.page
+                    .frontmatter
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
+                page.page
+                    .frontmatter
+                    .get("source_record")
+                    .and_then(|v| v.get("status"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
+                page.created_date().map(|date| date.to_string()),
+                path_ranks[&page.rel_path] as i64
             ])?;
             insert_terms.execute(params![id as i64, text])?;
+            for (ordinal, occurrence) in
+                lk_core::link::extract_page_link_occurrences(&page.page.body)
+                    .into_iter()
+                    .enumerate()
+            {
+                let target = lk_core::link::resolve_dest(&page.rel_path, &occurrence.link.dest);
+                let (context, context_truncated) =
+                    crate::links::context_preview(occurrence.context);
+                insert_link.execute(params![
+                    page.rel_path.to_string_lossy(),
+                    ordinal as i64,
+                    page.file_revision,
+                    (page.body_line_offset + occurrence.line) as i64,
+                    occurrence.link.text,
+                    occurrence.link.dest,
+                    target.map(|path| path.to_string_lossy().into_owned()),
+                    context,
+                    context_truncated,
+                ])?;
+            }
         }
     }
     transaction.execute(
@@ -132,6 +193,9 @@ pub(super) fn search(
     let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let transaction = connection.transaction()?;
     verify_snapshot(&transaction, root, dirs, expected)?;
+    if options.query.is_none() {
+        return browse(&transaction, options);
+    }
     let query = options.query.unwrap_or_default();
     let identity = lk_core::concept::identity_key(query);
     let terms: Vec<_> = query.split_whitespace().map(fold).collect();
@@ -188,29 +252,20 @@ pub(super) fn search(
             ));
         }
     }
-    let filter = if options.query.is_none() {
-        "1".to_string()
-    } else {
-        format!(
-            "({})",
-            predicates.join(if spellings.is_empty() {
-                " AND "
-            } else {
-                " OR "
-            })
-        )
-    };
+    let filter = format!(
+        "({})",
+        predicates.join(if spellings.is_empty() {
+            " AND "
+        } else {
+            " OR "
+        })
+    );
     let scope = if options.include_sources {
         "1"
     } else {
         "knowledge = 1"
     };
-    let column = if options.query.is_none() {
-        "metadata"
-    } else {
-        "payload"
-    };
-    let sql = format!("SELECT {column} FROM pages WHERE {scope} AND {filter} ORDER BY id");
+    let sql = format!("SELECT payload FROM pages WHERE {scope} AND {filter} ORDER BY id");
     let mut statement = transaction.prepare(&sql)?;
     let rows = statement.query_map(rusqlite::params_from_iter(&arguments), |row| {
         row.get::<_, String>(0)
@@ -222,18 +277,105 @@ pub(super) fn search(
                 .map_err(|error| VaultError::Serialization(error.to_string()))?,
         );
     }
-    let mut result =
-        super::search::search_pages(options, &pages, &spellings, &terms, identity.as_deref());
-    if options.query.is_none() {
-        let mut statement = transaction.prepare("SELECT intro FROM pages WHERE path = ?1")?;
-        for hit in &mut result.hits {
-            hit.excerpt = statement.query_row([&hit.path], |row| row.get(0))?;
+    Ok(super::search::search_pages(
+        options,
+        &pages,
+        &spellings,
+        &terms,
+        identity.as_deref(),
+    ))
+}
+
+/// Browse scalar metadata in SQLite; deserialize only the requested page of hits.
+fn browse(
+    connection: &Connection,
+    options: &SearchOptions<'_>,
+) -> Result<SearchResult, VaultError> {
+    let scope = if options.include_sources {
+        "1"
+    } else {
+        "knowledge = 1"
+    };
+    let facets = |column: &str| -> Result<std::collections::BTreeMap<String, usize>, VaultError> {
+        let mut statement = connection.prepare(&format!(
+            "SELECT {column}, COUNT(*) FROM pages WHERE {scope} GROUP BY {column}"
+        ))?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    };
+    let categories = facets("category")?;
+    let formats = facets("format")?;
+    let source_statuses = facets("source_status")?;
+    let mut predicates = vec![scope.to_string()];
+    let mut arguments = Vec::<rusqlite::types::Value>::new();
+    for (column, value) in [
+        ("category", options.category),
+        ("format", options.format),
+        ("source_status", options.source_status),
+    ] {
+        if let Some(value) = value {
+            arguments.push(value.to_string().into());
+            predicates.push(format!("{column} = ?{}", arguments.len()));
         }
     }
+    for (operator, value) in [(">=", options.created_from), ("<=", options.created_to)] {
+        if let Some(value) = value {
+            arguments.push(value.to_string().into());
+            predicates.push(format!("created_date {operator} ?{}", arguments.len()));
+        }
+    }
+    let filter = predicates.join(" AND ");
+    let total: i64 = connection.query_row(
+        &format!("SELECT COUNT(*) FROM pages WHERE {filter}"),
+        rusqlite::params_from_iter(&arguments),
+        |row| row.get(0),
+    )?;
+    let order = match options.sort {
+        super::search::BrowseSort::Title => "title, path_rank",
+        super::search::BrowseSort::Created => "created_date DESC, path_rank",
+    };
+    arguments.push(i64::try_from(options.limit).unwrap_or(i64::MAX).into());
+    arguments.push(i64::try_from(options.offset).unwrap_or(i64::MAX).into());
+    let mut statement = connection.prepare(&format!(
+        "SELECT metadata, intro FROM pages WHERE {filter} ORDER BY {order} LIMIT ?{} OFFSET ?{}",
+        arguments.len() - 1,
+        arguments.len()
+    ))?;
+    let rows = statement.query_map(rusqlite::params_from_iter(&arguments), |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut pages = Vec::new();
+    let mut intros = Vec::new();
+    for row in rows {
+        let (metadata, intro) = row?;
+        pages.push(
+            serde_json::from_str(&metadata)
+                .map_err(|error| VaultError::Serialization(error.to_string()))?,
+        );
+        intros.push(intro);
+    }
+    let selected = SearchOptions {
+        offset: 0,
+        ..*options
+    };
+    let mut result = super::search::search_pages(&selected, &pages, &[], &[], None);
+    for (hit, intro) in result.hits.iter_mut().zip(intros) {
+        hit.excerpt = intro;
+    }
+    let total = total as usize;
+    result.total = total;
+    result.offset = options.offset;
+    let end = options.offset.saturating_add(result.hits.len());
+    result.next_offset = (end < total).then_some(end);
+    result.categories = categories;
+    result.formats = formats;
+    result.source_statuses = source_statuses;
     Ok(result)
 }
 
-fn verify_snapshot(
+pub(super) fn verify_snapshot(
     connection: &Connection,
     root: &Path,
     dirs: &VaultDirs,

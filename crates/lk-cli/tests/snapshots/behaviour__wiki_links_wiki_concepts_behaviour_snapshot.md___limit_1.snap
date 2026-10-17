@@ -13,7 +13,8 @@ exit: 0
       "label": "deterministic-clock",
       "destination": "deterministic-clock.md",
       "target": "wiki/concepts/deterministic-clock.md",
-      "context": "- [deterministic-clock](deterministic-clock.md)"
+      "context": "- [deterministic-clock](deterministic-clock.md)",
+      "context_truncated": false
     }
   ],
   "total": 3,

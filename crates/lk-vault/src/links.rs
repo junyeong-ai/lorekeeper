@@ -12,6 +12,13 @@ pub struct LinkDetail {
     pub destination: String,
     pub target: Option<String>,
     pub context: String,
+    pub context_truncated: bool,
+}
+
+pub(super) fn context_preview(line: &str) -> (String, bool) {
+    let mut characters = line.chars();
+    let preview = characters.by_ref().take(400).collect();
+    (preview, characters.next().is_some())
 }
 
 #[derive(Debug, Serialize)]
@@ -87,12 +94,14 @@ pub fn inspect_links(
         if total <= options.offset || links.len() >= options.limit {
             continue;
         }
+        let (context, context_truncated) = context_preview(occurrence.context);
         links.push(LinkDetail {
             line: line_offset + occurrence.line,
             label: occurrence.link.text,
             destination: occurrence.link.dest,
             target: target.map(|path| path.to_string_lossy().into_owned()),
-            context: occurrence.context.to_owned(),
+            context,
+            context_truncated,
         });
     }
     let end = options.offset.saturating_add(links.len());
@@ -109,6 +118,15 @@ pub fn inspect_links(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_is_a_bounded_unicode_preview_not_an_address() {
+        let full = format!("{}[Target](target.md)", "가".repeat(400));
+        let (preview, truncated) = context_preview(&full);
+        assert_eq!(preview, "가".repeat(400));
+        assert!(truncated);
+        assert_eq!(context_preview(&preview), (preview, false));
+    }
 
     #[test]
     fn links_preserve_locations_duplicates_and_revision_guarded_pagination() {

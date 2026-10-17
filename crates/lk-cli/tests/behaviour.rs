@@ -378,12 +378,35 @@ fn observe(staged: &Path, argv: &[&str]) -> String {
         .args(argv)
         .output()
         .expect("command ran");
-    let body = format!(
+    let mut body = format!(
         "exit: {}\n--- stdout ---\n{}--- stderr ---\n{}",
         out.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
+    if argv == ["wiki", "refresh"] && out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let snapshot = stderr
+            .lines()
+            .find_map(|line| line.strip_prefix("Prepared navigation snapshot "))
+            .expect("refresh reports its captured snapshot");
+        assert_eq!(snapshot.len(), 64);
+        assert!(snapshot.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        let verified = Command::cargo_bin("lore")
+            .unwrap()
+            .arg("--config")
+            .arg(staged.join("corpus/config.yaml"))
+            .args(["wiki", "browse", "--snapshot", snapshot, "--json"])
+            .output()
+            .unwrap();
+        assert!(
+            verified.status.success(),
+            "{}",
+            String::from_utf8_lossy(&verified.stderr)
+        );
+        // Snapshot identity includes the temporary vault's canonical path.
+        body = body.replace(snapshot, "<snapshot>");
+    }
     normalise(&body, staged)
 }
 

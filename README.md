@@ -185,7 +185,7 @@ source_count: 2          # ← 두 문서가 이 한 개념을 인용
 
 > `Vector DB`라고 쓰든 `벡터 데이터베이스`라고 쓰든 **한 페이지**로 모입니다(alias로 등록). 같은 지식이 흩어지지 않는 것 — 이게 "복리로 쌓인다"의 핵심입니다.
 
-### ✅ 결과 ③ — 주제별 인덱스 (`wiki/index.md`)
+### ✅ 결과 ③ — 선택적 주제별 인덱스 내보내기 (`wiki/index.md`)
 
 ```markdown
 # 위키 인덱스
@@ -201,7 +201,7 @@ source_count: 2          # ← 두 문서가 이 한 개념을 인용
 - [Kubernetes](concepts/kubernetes.md) — 컨테이너 오케스트레이션. 안정 운영은 pod 메모리·재시작 지표 관찰에 달림…
 ```
 
-큰 볼트에서는 `index.md`를 진입점으로 각 페이지 최대 100개 항목의 탐색 트리를 생성합니다. 작은 그룹은 통째로 배치하고, 100개를 넘는 그룹만 나눕니다. 그룹명과 분할 순번을 따라 탐색하며, 인용은 목록의 번호 파일이 아닌 원래 지식 페이지를 가리킵니다. `catalog/`는 재생성 가능한 목록이며 지식·근거 그래프에 포함되지 않습니다. `log.md`는 기록된 `created` 날짜순 목록으로, 원문 작성일이 포함되므로 수집 이력과 다릅니다.
+Markdown 내보내기를 켠 큰 볼트에서는 `index.md`를 진입점으로 각 페이지 최대 100개 항목의 탐색 트리를 생성합니다. 작은 그룹은 통째로 배치하고, 100개를 넘는 그룹만 나눕니다. 그룹명과 분할 순번을 따라 탐색하며, 인용은 목록의 번호 파일이 아닌 원래 지식 페이지를 가리킵니다. `catalog/`는 재생성 가능한 목록이며 지식·근거 그래프에 포함되지 않습니다. `log.md`는 기록된 `created` 날짜순 목록으로, 원문 작성일이 포함되므로 수집 이력과 다릅니다.
 
 Markdown이 지식의 정본이며 `.lorekeeper/search.sqlite`는 `lore wiki prepare`로 재생성하는 검색 판본입니다. `--snapshot`은 캡처한 내용을 조회하므로 외부 편집을 자동 반영하지 않습니다. 변경 후에는 다시 준비하고, 근거로 사용할 페이지는 반환된 revision으로 확인합니다. SQLite를 사용해도 기본 Obsidian 페이지에 동적 목록이 생기지는 않습니다. Obsidian에서는 그룹별 링크와 검색을, CLI에서는 `wiki search`·`browse`·`links`를 사용합니다.
 
@@ -335,6 +335,12 @@ lore queue count              # current 작업 수만 정수로 출력(스크립
 lore config vault-root        # vault 절대경로만 출력(스크립트용)
 lore schema                   # wiki/AGENTS.md(페이지 포맷 스키마) 생성
 ```
+
+기본 `lore wiki refresh`는 SQLite 탐색 스냅샷과 작은 `index.md` 진입 안내를 갱신합니다. 전체 Markdown catalog/log/map 자동 내보내기는 `vault.navigation.markdown_exports: true`로 켭니다(기본 false). 명시 `wiki index/log/map`와 `graph index-sync`는 선택적 export 명령으로 유지됩니다. 기본 모드의 graph lint는 export 최신성을 요구하지 않습니다. 생성 마커가 없는 기존 파일은 자동으로 덮거나 삭제하지 않으며, 충돌은 명시적으로 보고합니다. 탐색 세션은 `wiki prepare` 한 번으로 ID를 확보한 뒤 `wiki browse/search/links --snapshot ID`를 반복하고(`links --direction incoming|both`), `wiki read --revision REV`로 현재 원문을 확인합니다. refresh도 준비한 ID를 출력합니다.
+
+날짜별 탐색은 `lore wiki browse --snapshot ID --sort created --from 2026-01-01 --to 2026-12-31 --json`을 사용합니다. `created`는 수집일이 아니라 원문 작성일일 수 있습니다. 날짜가 없거나 유효하지 않으면 상태를 표시하고 날짜 필터에서는 제외합니다. 날짜순은 최신부터이며, 필터가 없으면 날짜 미상 항목을 마지막에 둡니다.
+
+마커가 없는 기존 목록은 자동으로 생성물이라고 추정하지 않습니다. 업그레이드 시 `lore wiki read wiki/index.md`(필요하면 log.md/map.md도)에서 현재 `file_revision`을 확인하고, 기본 SQLite 모드에서 `lore wiki refresh --archive-replace wiki/index.md=FULL_FILE_REVISION`을 실행합니다. 교체할 각 root마다 옵션을 반복하세요. 정확한 원문(수동 수정 포함)은 `.lorekeeper/navigation-archives/`에 보존되고 주소·해시 receipt 경로가 출력됩니다. `wiki read <archive_path>`로 다시 읽을 수 있습니다. 다른 경로, 변경된 revision, source/knowledge 타입과 inbox 충돌은 거부합니다. 자동 Markdown export가 켜져 있다면 먼저 끄고 이관한 뒤 다시 켭니다. 이 옵션에는 dry-run이 없습니다.
 
 일상적으로 쓰는 것들만 추렸다. 전체 목록은 `lore --help`, 각 명령의 플래그는
 `lore <명령> --help`.

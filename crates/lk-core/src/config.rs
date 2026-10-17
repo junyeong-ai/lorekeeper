@@ -541,6 +541,8 @@ fn validate_cron_field(field: &str, min: u8, max: u8) -> Result<(), String> {
 pub struct VaultConfig {
     pub root: String,
     #[serde(default)]
+    pub navigation: NavigationConfig,
+    #[serde(default)]
     pub dirs: VaultDirs,
     #[serde(default)]
     pub timezone: Option<String>,
@@ -549,6 +551,13 @@ pub struct VaultConfig {
     /// an unrecognized tag is rejected at load (see `Config::validate`).
     #[serde(default)]
     pub locale: Option<String>,
+}
+
+/// Optional full Markdown exports; SQLite navigation remains the default.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NavigationConfig {
+    pub markdown_exports: bool,
 }
 
 impl VaultConfig {
@@ -1461,6 +1470,22 @@ mod observation_unit_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn navigation_defaults_to_sqlite_and_rejects_misspelled_export_keys() {
+        let config: super::VaultConfig = crate::yaml::from_str("root: /tmp/vault\n").unwrap();
+        assert!(!config.navigation.markdown_exports);
+        let config: super::VaultConfig =
+            crate::yaml::from_str("root: /tmp/vault\nnavigation:\n  markdown_exports: true\n")
+                .unwrap();
+        assert!(config.navigation.markdown_exports);
+        assert!(
+            crate::yaml::from_str::<super::VaultConfig>(
+                "root: /tmp/vault\nnavigation:\n  markdown_export: true\n"
+            )
+            .is_err()
+        );
+    }
+
     use super::*;
 
     #[test]

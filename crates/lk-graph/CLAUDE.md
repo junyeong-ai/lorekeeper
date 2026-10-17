@@ -56,7 +56,7 @@ on-disk state, never from a cached snapshot.
   — the orphan-connectivity question, where counting a link to `index.md` would exempt the very
   pages detection looks for). Reserved meta pages
   (`lk_core::vault_path::RESERVED_WIKI_FILES`) and generated catalog children are never knowledge nodes or citation sources.
-- **Index drift is asked of the catalog's own builder** (`index_drift::diff` →
+- **Catalog export drift is asked of the catalog's own builder** (`index_drift::diff` →
   `lk_vault::build_catalog`): the entire index tree is a materialized view, so drift is the difference
   between the catalog on disk and the one a re-derivation produces now. A second definition of
   what belongs in the catalog disagrees with the builder's on any page the builder does not
@@ -64,13 +64,16 @@ on-disk state, never from a cached snapshot.
   stays permanently red with two repairs undoing each other. For the same reason the repair is
   the whole catalog, resolving both directions at once, and no analysis-scope or
   `orphan_exclude` filter reaches it: an observation-tuning knob must not decide a violation.
+  CLI `graph lint` includes this catalog check only with
+  `vault.navigation.markdown_exports: true`. SQLite-default navigation does not claim optional
+  export currency; explicit `graph index-sync` still checks and repairs an opt-in catalog.
 - **`graph::broken_links` is a free function over (pages, existence), not a `WikiGraph`
   method** — a broken link involves no node, edge or community, so computing it inside the graph
   would scope it to `graph.scope.dirs` on the SOURCE side, and a link is broken wherever it was
   written (`queue apply` writes concept links on daily pages). Both `lint` and `broken` pass
   every scanned page; the scope narrowing applies only to the graph's nodes. Reserved meta pages
-  are skipped as SOURCES — they are re-derived WHOLE, and `wiki refresh` runs before `graph lint`
-  in the pipeline, so a stale link in one is repaired by the same run rather than reported — but
+  are skipped as SOURCES — they are optional navigation exports rather than authored evidence; enabled exports are
+  refreshed before lint in the pipeline — but
   they remain valid DESTINATIONS.
 - **Exit codes**: 0 = every claim the vault makes holds, 1 = it contradicts itself, 2 = runtime
   error. Exit 1 identifies a structural contradiction with a named repair — a link whose

@@ -60,6 +60,11 @@ pub struct SearchHit {
     pub format: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
+    /// Declared creation date, not ingestion time; invalid strings remain visible (bounded).
+    pub created: Option<String>,
+    pub created_status: CreatedStatus,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub created_truncated: bool,
     pub source_count: u64,
     pub matched: MatchField,
     pub excerpt: String,
@@ -68,11 +73,38 @@ pub struct SearchHit {
     pub source_record: Option<serde_json::Value>,
 }
 
+/// Metadata browsing order. Search relevance ordering is unchanged.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BrowseSort {
+    #[default]
+    Title,
+    /// Valid declared dates newest first, then exact path; unknown dates last.
+    Created,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CreatedStatus {
+    Valid,
+    Missing,
+    Invalid,
+}
+
+/// Only canonical civil dates participate in chronological discovery.
+pub fn parse_created_date(value: &str) -> Option<jiff::civil::Date> {
+    let date = value.parse::<jiff::civil::Date>().ok()?;
+    (value.len() == 10 && date.to_string() == value).then_some(date)
+}
+
 /// Search knowledge pages, optionally including managed source and review pages.
 /// Source inclusion is explicit so callers can retrieve evidence without requiring
 /// a successful concept extraction first.
 pub struct SearchOptions<'a> {
     pub query: Option<&'a str>,
+    pub sort: BrowseSort,
+    pub created_from: Option<jiff::civil::Date>,
+    pub created_to: Option<jiff::civil::Date>,
     pub snapshot: Option<&'a str>,
     pub limit: usize,
     pub offset: usize,
@@ -86,6 +118,9 @@ impl Default for SearchOptions<'_> {
     fn default() -> Self {
         Self {
             query: None,
+            sort: BrowseSort::Title,
+            created_from: None,
+            created_to: None,
             snapshot: None,
             limit: 20,
             offset: 0,
@@ -94,6 +129,32 @@ impl Default for SearchOptions<'_> {
             source_status: None,
             format: None,
         }
+    }
+}
+
+impl SearchOptions<'_> {
+    pub(crate) fn validate_browse(&self) -> Result<(), VaultError> {
+        let message = if self.query.is_some()
+            && (self.sort != BrowseSort::Title
+                || self.created_from.is_some()
+                || self.created_to.is_some())
+        {
+            Some(
+                "created sorting and date filters are only available when browsing without a query",
+            )
+        } else if self
+            .created_from
+            .zip(self.created_to)
+            .is_some_and(|(from, to)| from > to)
+        {
+            Some("created date range requires from <= to")
+        } else {
+            None
+        };
+        if let Some(message) = message {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, message).into());
+        }
+        Ok(())
     }
 }
 
@@ -116,6 +177,7 @@ pub fn search(
     dirs: &VaultDirs,
     options: &SearchOptions<'_>,
 ) -> Result<SearchResult, VaultError> {
+    options.validate_browse()?;
     let query = options.query.unwrap_or_default();
     let terms: Vec<String> = query.split_whitespace().map(fold).collect();
     if options.limit == 0 || (options.query.is_some() && terms.is_empty()) {
@@ -280,7 +342,13 @@ pub(super) fn search_pages(
 
     candidates.sort_by(|(a, a_match), (b, b_match)| {
         if options.query.is_none() {
-            return a.title.cmp(&b.title).then(a.rel_path.cmp(&b.rel_path));
+            return match options.sort {
+                BrowseSort::Title => a.title.cmp(&b.title).then(a.rel_path.cmp(&b.rel_path)),
+                BrowseSort::Created => b
+                    .created_date()
+                    .cmp(&a.created_date())
+                    .then(a.rel_path.cmp(&b.rel_path)),
+            };
         }
         a_match
             .cmp(b_match)
@@ -321,6 +389,23 @@ pub(super) fn search_pages(
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
                 .map(String::from),
+            created: entry
+                .page
+                .frontmatter
+                .get("created")
+                .and_then(|v| v.as_str())
+                .map(|value| value.chars().take(160).collect()),
+            created_status: match entry.page.frontmatter.get("created") {
+                None | Some(serde_json::Value::Null) => CreatedStatus::Missing,
+                Some(_) if entry.created_date().is_some() => CreatedStatus::Valid,
+                Some(_) => CreatedStatus::Invalid,
+            },
+            created_truncated: entry
+                .page
+                .frontmatter
+                .get("created")
+                .and_then(|v| v.as_str())
+                .is_some_and(|value| value.chars().count() > 160),
             source_count: entry.page.frontmatter.source_count().unwrap_or(0),
             matched,
         })
@@ -357,6 +442,14 @@ pub(super) struct Page {
 }
 
 impl Page {
+    pub(super) fn created_date(&self) -> Option<jiff::civil::Date> {
+        self.page
+            .frontmatter
+            .get("created")
+            .and_then(|v| v.as_str())
+            .and_then(parse_created_date)
+    }
+
     pub(super) fn matches_filters(&self, options: &SearchOptions<'_>) -> bool {
         let metadata = |key| {
             self.page
@@ -377,6 +470,11 @@ impl Page {
             .is_none_or(|value| metadata("category") == value)
             && options.format.is_none_or(|value| metadata("type") == value)
             && options.source_status.is_none_or(|value| status == value)
+            && (options.created_from.is_none() && options.created_to.is_none()
+                || self.created_date().is_some_and(|date| {
+                    options.created_from.is_none_or(|from| date >= from)
+                        && options.created_to.is_none_or(|to| date <= to)
+                }))
     }
 
     pub(super) fn names(&self) -> impl Iterator<Item = &str> {
@@ -670,6 +768,188 @@ pub(crate) fn markdown_files(root: &Path, dir: &Path) -> Result<Vec<PathBuf>, Va
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn created_browse_preserves_date_scope_facets_and_snapshot_pagination() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let docs = root.path().join(documents_dir(&dirs));
+        for (name, created, category) in [
+            ("a", "2026-02-03", "ops"),
+            ("b", "2026-02-03", "ops"),
+            ("old", "2025-01-01", "other"),
+            ("missing", "null", "ops"),
+            ("invalid", "2026-02-30", "ops"),
+            ("object", "{unexpected: value}", "ops"),
+        ] {
+            write(
+                &docs,
+                &format!("{name}.md"),
+                &format!(
+                    "---\ntype: document\ntitle: Same\ncategory: {category}\ncreated: {created}\n---\n## Summary\nBody."
+                ),
+            );
+        }
+        let session = crate::MutationSession::acquire(root.path()).unwrap();
+        let snapshot = crate::prepare_search(&session, &dirs).unwrap();
+        drop(session);
+        for captured in [None, Some(snapshot.snapshot.as_str())] {
+            let mut options = SearchOptions {
+                snapshot: captured,
+                sort: BrowseSort::Created,
+                limit: 1,
+                ..Default::default()
+            };
+            let mut paths = Vec::new();
+            loop {
+                let result = super::search(root.path(), &dirs, &options).unwrap();
+                assert_eq!(result.total, 6);
+                paths.extend(result.hits.into_iter().map(|hit| hit.path));
+                if let Some(offset) = result.next_offset {
+                    options.offset = offset;
+                } else {
+                    break;
+                }
+            }
+            assert_eq!(
+                paths
+                    .iter()
+                    .map(|p| p.rsplit('/').next().unwrap())
+                    .collect::<Vec<_>>(),
+                [
+                    "a.md",
+                    "b.md",
+                    "old.md",
+                    "invalid.md",
+                    "missing.md",
+                    "object.md"
+                ]
+            );
+            options.offset = 0;
+            options.limit = 20;
+            options.category = Some("ops");
+            options.created_from = parse_created_date("2026-02-03");
+            options.created_to = parse_created_date("2026-02-03");
+            let result = super::search(root.path(), &dirs, &options).unwrap();
+            assert_eq!(result.total, 2);
+            assert_eq!(result.categories["other"], 1);
+            assert_eq!(result.categories["ops"], 5);
+            assert_eq!(result.formats["document"], 6);
+            assert!(
+                result
+                    .hits
+                    .iter()
+                    .all(|hit| matches!(hit.created_status, CreatedStatus::Valid))
+            );
+        }
+        let result = super::search(
+            root.path(),
+            &dirs,
+            &SearchOptions {
+                limit: 20,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let invalid = result
+            .hits
+            .iter()
+            .find(|hit| hit.path.ends_with("invalid.md"))
+            .unwrap();
+        assert!(matches!(invalid.created_status, CreatedStatus::Invalid));
+        assert_eq!(invalid.created.as_deref(), Some("2026-02-30"));
+        let object = result
+            .hits
+            .iter()
+            .find(|hit| hit.path.ends_with("object.md"))
+            .unwrap();
+        assert!(matches!(object.created_status, CreatedStatus::Invalid));
+        assert_eq!(object.created, None);
+        let missing = result
+            .hits
+            .iter()
+            .find(|hit| hit.path.ends_with("missing.md"))
+            .unwrap();
+        assert!(matches!(missing.created_status, CreatedStatus::Missing));
+    }
+
+    #[test]
+    fn created_browse_nested_paths_preserve_component_order() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let docs = root.path().join(documents_dir(&dirs));
+        for name in ["a/z.md", "a-x.md", "가.md"] {
+            let path = docs.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(
+                path,
+                "---\ntype: document\ntitle: Same\ncreated: 2026-02-03\n---\nBody",
+            )
+            .unwrap();
+        }
+        let session = crate::MutationSession::acquire(root.path()).unwrap();
+        let snapshot = crate::prepare_search(&session, &dirs).unwrap();
+        drop(session);
+        for sort in [BrowseSort::Title, BrowseSort::Created] {
+            for offset in 0..3 {
+                let options = SearchOptions {
+                    sort,
+                    offset,
+                    limit: 1,
+                    ..Default::default()
+                };
+                let live = super::search(root.path(), &dirs, &options).unwrap();
+                let indexed = super::search(
+                    root.path(),
+                    &dirs,
+                    &SearchOptions {
+                        snapshot: Some(&snapshot.snapshot),
+                        ..options
+                    },
+                )
+                .unwrap();
+                assert_eq!(
+                    serde_json::to_value(&live.hits).unwrap(),
+                    serde_json::to_value(&indexed.hits).unwrap()
+                );
+                assert_eq!(live.next_offset, indexed.next_offset);
+            }
+        }
+    }
+
+    #[test]
+    fn created_browse_rejects_query_options_and_reversed_ranges_before_io() {
+        let absent = Path::new("/nonexistent-created-browse-fixture");
+        let dirs = VaultDirs::default();
+        for options in [
+            SearchOptions {
+                query: Some("topic"),
+                sort: BrowseSort::Created,
+                ..Default::default()
+            },
+            SearchOptions {
+                query: Some("topic"),
+                created_from: parse_created_date("2026-01-01"),
+                ..Default::default()
+            },
+            SearchOptions {
+                created_from: parse_created_date("2026-02-01"),
+                created_to: parse_created_date("2026-01-01"),
+                ..Default::default()
+            },
+        ] {
+            let error = super::search(absent, &dirs, &options)
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(
+                error.contains("only available") || error.contains("from <= to"),
+                "{error}"
+            );
+        }
+        assert!(parse_created_date("2026-02-30").is_none());
+        assert!(parse_created_date("2026-01-01T00:00:00Z").is_none());
+    }
 
     #[test]
     fn discovery_filters_after_alias_resolution_and_paginates_without_losing_pages() {

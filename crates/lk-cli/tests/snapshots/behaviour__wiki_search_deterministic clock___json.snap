@@ -18,6 +18,8 @@ exit: 0
         "injected clock"
       ],
       "category": "engineering",
+      "created": "2026-05-02",
+      "created_status": "valid",
       "excerpt": "A reference date supplied as an argument rather than read from the host, so a date-relative answer is a function of its inputs.",
       "file_revision": "5ff21ff52d4ae9fcb3a3dfb3c04024bc9477e438e96b78a1d3fd63e8f4b77385",
       "format": "concept",

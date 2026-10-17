@@ -1,6 +1,6 @@
 ---
 name: lore-process
-version: 0.53.1
+version: 0.54.0
 description: Drain the Lorekeeper LLM work queue after `lore ingest` runs in queue mode — fill the empty LLM-owned sections (summaries, refined events, concepts, themes, reviews) of freshly-written vault pages using the active agent session. Idempotent and resumable. Run after each ingest, or on a daily schedule.
 when_to_use: |
   queue process, drain queue, fill summaries,
@@ -235,8 +235,8 @@ The essentials: a visible `.jsonl` is fully written and every
    left pending; `lore graph backlinks-sync` and `lore wiki refresh` are owed once, at the
    end, over everything this run wrote. Concept `## Sources` sections and
    `source_count` are deliberately left empty during processing; they are
-   machine-owned and reconciled here from the link graph, then the catalog
-   is refreshed. Confirm each command exits 0:
+   machine-owned and reconciled here from the link graph, then SQLite discovery and configured exports
+   are refreshed. Confirm each command exits 0:
    ```bash
    lore queue apply            # materialize reported concepts into pages + links
    lore graph backlinks-sync   # re-derive every concept's ## Sources + source_count
@@ -246,7 +246,7 @@ The essentials: a visible `.jsonl` is fully written and every
    current tasks; stop and report any blocked work or failed command. Refresh and
    check completion only after that drain:
    ```bash
-   lore wiki refresh           # re-derive the catalog, the timeline and the map
+   lore wiki refresh           # refresh SQLite navigation and configured Markdown exports
    lore queue check            # pending or blocked work and unpublished results
    lore wiki reviews --check   # evidence drift and invalid assessments; open is valid
    ```

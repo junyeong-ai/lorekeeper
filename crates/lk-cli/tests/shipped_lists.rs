@@ -501,10 +501,9 @@ fn everything_that_writes_pages_refreshes_the_pages_derived_from_the_vault() {
         }
     }
 
-    // Any skill that finalizes a page-writing run must call it, and none may call the per-page
-    // commands instead — a subset is what went stale. The GENERATED page is held to the same rule:
-    // it is the authoritative procedure every skill is told to read, and it went on naming
-    // `wiki index` then `wiki map` after the skills had stopped.
+    // Finalization calls refresh rather than a subset of per-page exports. The generated
+    // procedure may separately document explicit optional exports, provided it states both
+    // the opt-in configuration and default; that is not a replacement finalization sequence.
     let mut refreshing = 0;
     for skill in glob_skill_markdown()
         .into_iter()
@@ -524,7 +523,13 @@ fn everything_that_writes_pages_refreshes_the_pages_derived_from_the_vault() {
             // drift it looks for.
             let named = format!("lore {command}");
             assert!(
-                !body.contains(&named),
+                !body.lines().any(|line| {
+                    line.contains(&named)
+                        && !(line.contains(
+                            "Full Markdown catalog/timeline/cluster-map exports are optional:",
+                        ) && line.contains("vault.navigation.markdown_exports: true")
+                            && line.contains("default false"))
+                }),
                 "{} names `{named}` for {page} — say `lore wiki refresh` so no caller can \
                  refresh or report on a subset",
                 skill.display()

@@ -17,9 +17,11 @@ Slack ─────────┼─ config ─┤  Collapse dup (intra-batch
 Jira ──────────┤  .yaml   ├─ Classify (labels)       <synthesis>/{weekly}/
 Calendar ──────┤          ├─ Concepts (LLM)          <wiki>/concepts/
 RSS/Atom ──────┤          ├─ Render (templates)      <wiki>/documents/
-Manual inbox ──┘          ├─ Wiki index (catalog)    <wiki>/index.md → catalog/ (bounded navigation)
-                          ├─ Wiki log (timeline)     <wiki>/log.md → catalog/log/
-                          ├─ Wiki map (clusters)     <wiki>/map.md → catalog/map/
+Manual inbox ──┘          ├─ SQLite navigation       .lorekeeper/ (prepared browse/search/links)
+                          ├─ Entry guide             <wiki>/index.md
+                          ├─ Optional index export   <wiki>/index.md → catalog/
+                          ├─ Optional timeline     <wiki>/log.md → catalog/log/
+                          ├─ Optional map     <wiki>/map.md → catalog/map/
                           ├─ Resolve (name → page)
                           └─ Graph (lint, cluster,   <wiki>/AGENTS.md
                                suggest-links, merge,
@@ -101,6 +103,12 @@ MINOR — something downstream has to react to it. A correction to text people a
 (README, `AGENTS.md` prose, an embedded skill or pipeline body) is PATCH however the commit is
 typed. No gate derives this from a diff; the ones that exist pin the tag to the crate version
 and that to every skill stamp.
+
+Default `wiki refresh` prepares SQLite navigation and a small permanent entry guide.
+Full Markdown catalog/log/map exports are optional via `vault.navigation.markdown_exports`
+(default false), or explicit `wiki index/log/map`. Graph lint requires export currency only
+when automatic exports are enabled. A retrieval session prepares once and explicitly reuses
+that snapshot for browse/search/links, then reads current pages with revision guards.
 
 ## Config
 

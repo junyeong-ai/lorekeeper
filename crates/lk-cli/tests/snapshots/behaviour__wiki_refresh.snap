@@ -5,6 +5,5 @@ expression: "observe(staged.path(), argv)"
 exit: 0
 --- stdout ---
 --- stderr ---
-Wrote <staged>/corpus/vault/wiki/index.md
-Wrote <staged>/corpus/vault/wiki/log.md
-Wrote <staged>/corpus/vault/wiki/map.md
+Prepared navigation snapshot <snapshot>
+Updated SQLite navigation entry; full Markdown exports are optional

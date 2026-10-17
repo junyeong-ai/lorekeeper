@@ -42,6 +42,16 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   Maintenance holds the same vault lease before reading the ingest log, then prunes the
   queue with `--prune-queue`. Remove the superseded `com.lorekeeper.queue-prune` agent
   when installing a generated schedule; the maintenance job owns both operations.
+- **`wiki refresh` prepares SQLite navigation before page publication.** Default
+  `vault.navigation.markdown_exports: false` publishes a small marked entry guide and
+  retires only marked generated exports through one mutation plan. It prints the prepared
+  snapshot ID for explicit browse/search/links reuse; default live reads remain live.
+  `true` refreshes the full catalog/log/map instead. Explicit `wiki index/log/map` and
+  `graph index-sync` remain export commands independent of that setting. Graph lint checks
+  catalog currency only when automatic exports are enabled, so optional exports do not
+  create a permanent synchronization obligation. Unmarked existing entries fail safely.
+  Enabled manual inboxes use the shared adapter resolver and canonical filesystem aliases;
+  overlap with export namespaces refuses refresh before capture or retirement.
 - **`lore wiki concepts`** keys each entry on the FILE STEM, never the `id` frontmatter: a
   page's address is where it sits, which is what a link resolves to and what `VaultPath::concept`
   builds. Reading `id` would be a second answer to the same question, and a page missing the

@@ -187,7 +187,7 @@ latency than by **operational simplicity** — co-locating vectors with relation
 
 > Whether you write `Vector DB` or `Vector Database`, it lands on **one page** (registered as an alias). Knowledge not fragmenting — that *is* the "compounds over time" promise.
 
-### ✅ Result ③ — a by-topic index (`wiki/index.md`)
+### ✅ Result ③ — optional by-topic index export (`wiki/index.md`)
 
 ```markdown
 # Wiki Index
@@ -203,7 +203,7 @@ latency than by **operational simplicity** — co-locating vectors with relation
 - [Kubernetes](concepts/kubernetes.md) — container orchestration; reliable operation depends on observing pod memory and restart signals…
 ```
 
-Larger vaults use `index.md` as the entry to a navigation tree with at most 100 entries per page. Generated `catalog/` pages are navigation, not evidence or knowledge nodes.
+When Markdown exports are enabled, larger vaults use `index.md` as the entry to a navigation tree with at most 100 entries per page. Generated `catalog/` pages are navigation, not evidence or knowledge nodes.
 
 Knowledge reviews appear in the catalog’s first group with their current effective state. Changed evidence marks a resolved judgment as needing reassessment while preserving its history. Scheduled pipelines finish with `queue check` and `wiki reviews --check`. Open reviews pass; a deleted historical source remains valid when its recorded revision has a verified archive.
 
@@ -333,6 +333,12 @@ lore queue count              # current task count as a bare integer (for script
 lore config vault-root        # the vault's absolute path, and nothing else (for scripts)
 lore schema                   # generate wiki/AGENTS.md (the page-format schema)
 ```
+
+By default, `lore wiki refresh` refreshes the SQLite navigation snapshot and a small `index.md` entry guide. Enable automatic full Markdown catalog/log/map exports with `vault.navigation.markdown_exports: true` (default false). Explicit `wiki index/log/map` and `graph index-sync` remain optional export commands. Graph lint does not require export currency in the default mode. Existing files without a generation marker are preserved; collisions fail explicitly. For each retrieval session, prepare once and repeat `wiki browse/search/links --snapshot ID` (links supports `--direction incoming|both`), then verify originals with `wiki read --revision REV`. Refresh prints the prepared ID too.
+
+For date-based discovery, use `lore wiki browse --snapshot ID --sort created --from 2026-01-01 --to 2026-12-31 --json`. `created` may be the original authoring date rather than the ingestion date. Missing or invalid dates retain an explicit status and are excluded by date filters. Date order is newest first, with unknown dates last when no date filter is applied.
+
+Legacy entries without markers are never inferred to be generated. During upgrade, inspect the current `file_revision` with `lore wiki read wiki/index.md` (and log.md/map.md if present), then run `lore wiki refresh --archive-replace wiki/index.md=FULL_FILE_REVISION` in default SQLite mode. Repeat the option for each root to replace. Exact originals, including hand edits, are retained under `.lorekeeper/navigation-archives/`; the command reports an address/hash receipt. Read retained content with `wiki read <archive_path>`. Other paths, changed revisions, source/knowledge types and inbox collisions are refused. Disable automatic Markdown exports for this migration, then re-enable them if desired. This option has no dry-run.
 
 These are the ones you reach for day to day. `lore --help` lists the full surface;
 `lore <command> --help` has each command's flags.

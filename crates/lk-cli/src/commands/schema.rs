@@ -671,35 +671,9 @@ pub fn render_agents_md(
          support or contradiction; read its context."
     )
     .unwrap();
-    writeln!(
-        out,
-        "- `{}/map.md` — concepts grouped by citation cluster (the graph's emergent \
-         structure), with at most 100 entries per page and details under `catalog/map/`. Cluster membership is navigation, not a semantic relationship assertion.",
-        dirs.wiki
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "- `{}/index.md` — entry to a complete catalog grouped by category. Each generated page \
-         contains at most 100 entries; larger vaults use a navigation tree under `catalog/`. \
-         Follow the group labels and continuation numbers. Small groups stay whole; only oversized \
-         groups span detail pages. Generated catalog pages are not evidence or graph nodes.",
-        dirs.wiki
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "- `{}/log.md` — reverse-chronological timeline by declared `created` date, which may \
-         be the source's authored date rather than collection time. Each page contains at most 100 entries; follow `catalog/log/` links for detail. Child addresses are regenerated navigation positions; cite original knowledge pages.",
-        dirs.wiki
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "From an entry point, open the pages it links and follow their links. \
-         Regenerate every entry point with `lore wiki refresh`."
-    )
-    .unwrap();
+    writeln!(out, "- `{}/index.md` — a small permanent navigation guide after default `lore wiki refresh`. The refresh captures SQLite discovery first and prints its snapshot ID. Start a retrieval session with `lore wiki prepare`, then reuse its ID with browse/search/links `--snapshot ID` (links supports `--direction incoming|both`). Confirm current originals with wiki read and the captured file_revision as `--revision`. Markdown knowledge pages remain the source of truth.", dirs.wiki).unwrap();
+    writeln!(out, "- Full Markdown catalog/timeline/cluster-map exports are optional: request `lore wiki index`, `lore wiki log`, or `lore wiki map`, or enable `vault.navigation.markdown_exports: true` for automatic refresh (default false). Each exported page has at most 100 entries, with details under `catalog/`; these are generated navigation positions, not evidence. Timeline dates are declared `created`, not collection times, and cluster membership does not assert semantic relationships.").unwrap();
+    writeln!(out, "Run `lore wiki refresh` after knowledge changes. It refreshes SQLite navigation and configured exports; only marked generated navigation is retired when exports are disabled. Unmarked existing files are preserved and collisions fail. Default graph lint does not require optional export currency; `lore graph index-sync` explicitly checks the catalog export.").unwrap();
 
     for schema in &schemas {
         writeln!(out).unwrap();

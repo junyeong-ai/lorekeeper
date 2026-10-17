@@ -3,6 +3,7 @@ mod body_search;
 mod brief;
 mod document;
 mod index;
+mod indexed_links;
 mod links;
 mod log;
 mod manual_original;
@@ -31,6 +32,9 @@ pub use self::document::{
     DocumentContent, DocumentOptions, DocumentSection, DocumentView, inspect_document,
 };
 pub use self::index::{IndexCatalog, build_catalog, build_index, write_index};
+pub use self::indexed_links::{
+    IndexedLink, IndexedLinkOptions, IndexedLinks, LinkDirection, inspect_indexed_links,
+};
 pub use self::links::{LinkDetail, LinkDetails, LinkOptions, inspect_links};
 pub use self::log::{IngestLog, LogEntry, LogStatus};
 pub use self::manual_original::{
@@ -48,7 +52,10 @@ pub use self::review::{
     archive_evidence, inspect_evidence, is_archived_evidence, list_reviews, load_archived_evidence,
     publish_document, publish_document_expected, same_existing_file,
 };
-pub use self::search::{MatchField, SearchHit, SearchOptions, SearchResult, search};
+pub use self::search::{
+    BrowseSort, CreatedStatus, MatchField, SearchHit, SearchOptions, SearchResult,
+    parse_created_date, search,
+};
 pub use self::search_index::{SearchSnapshot, prepare_search};
 pub use self::section::{
     PageSection, SectionKey, clear_llm_input, record_llm_input, replace_section, resolve_section,

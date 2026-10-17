@@ -13,6 +13,8 @@ vault:
   timezone: system          # IANA name (e.g., "Asia/Seoul") or "system"
   locale: ko                # output language for added labels/headers: ko | en
                             # (source content — mail/Slack/Jira bodies — is never translated)
+  navigation:
+    markdown_exports: false # refresh SQLite + a small entry guide; true also refreshes full index/log/map exports
   dirs:
     daily: daily
     weekly: weekly

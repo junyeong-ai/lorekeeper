@@ -90,6 +90,12 @@ pub enum WikiCommand {
     Links {
         /// Exact vault-relative Markdown source path
         path: PathBuf,
+        /// Inspect captured link addresses from wiki prepare, without reading live pages
+        #[arg(long, conflicts_with_all = ["target", "revision"])]
+        snapshot: Option<String>,
+        /// Traverse incoming, outgoing or both captured link directions (requires --snapshot)
+        #[arg(long, value_enum, requires = "snapshot")]
+        direction: Option<LinkDirection>,
         /// Filter by vault-relative target address; existing filesystem aliases are verified
         #[arg(long)]
         target: Option<PathBuf>,
@@ -123,11 +129,14 @@ pub enum WikiCommand {
         #[arg(long)]
         root: Option<PathBuf>,
     },
-    /// Regenerate every page derived from the vault: the catalog, the timeline and the map
+    /// Refresh SQLite navigation and entry guide; optionally export the full catalog, timeline and map
     Refresh {
         /// Vault root override (default: vault.root from config)
         #[arg(long)]
         root: Option<PathBuf>,
+        /// Preserve and replace an unmarked root: repeat exact PATH=FILE_REVISION (SQLite mode only)
+        #[arg(long, value_name = "PATH=FILE_REVISION")]
+        archive_replace: Vec<String>,
     },
     /// List all concept pages in the vault
     Concepts {
@@ -147,15 +156,24 @@ pub enum WikiCommand {
         #[command(flatten)]
         evidence: BodyEvidenceOptions,
     },
-    /// Browse knowledge pages by declared metadata, ordered by title and path
+    /// Browse metadata by title, or newest declared created date (not ingestion time)
     Browse {
         #[command(flatten)]
         options: DiscoveryOptions,
+        #[command(flatten)]
+        dates: BrowseOptions,
     },
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
 pub enum ProvenanceDirection {
+    Outgoing,
+    Incoming,
+    Both,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum LinkDirection {
     Outgoing,
     Incoming,
     Both,
@@ -175,6 +193,32 @@ pub struct BodyEvidenceOptions {
     /// Surrounding body lines (0..5, default 1); each is limited to 400 Unicode characters
     #[arg(long, requires = "body")]
     context: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, Default, clap::ValueEnum, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BrowseSort {
+    #[default]
+    Title,
+    Created,
+}
+
+#[derive(Default, clap::Args)]
+pub struct BrowseOptions {
+    /// Title/path, or declared created newest first with unknown dates last
+    #[arg(long, value_enum, default_value_t = BrowseSort::Title)]
+    sort: BrowseSort,
+    /// Earliest declared created date, inclusive (YYYY-MM-DD); unknown dates excluded
+    #[arg(long = "from", value_parser = parse_browse_date)]
+    from: Option<jiff::civil::Date>,
+    /// Latest declared created date, inclusive (YYYY-MM-DD); not collection time
+    #[arg(long = "to", value_parser = parse_browse_date)]
+    to: Option<jiff::civil::Date>,
+}
+
+fn parse_browse_date(value: &str) -> Result<jiff::civil::Date, String> {
+    lk_vault::parse_created_date(value)
+        .ok_or_else(|| "expected a valid YYYY-MM-DD date".to_string())
 }
 
 #[derive(clap::Args)]
@@ -351,12 +395,38 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
         }
         WikiCommand::Links {
             path,
+            snapshot,
+            direction,
             target,
             limit,
             offset,
             revision,
         } => {
             let config = load_config(&find_config(opts)?)?;
+            if let Some(snapshot) = snapshot {
+                let report = lk_vault::inspect_indexed_links(
+                    &config.vault.root_path(),
+                    &config.vault.dirs,
+                    &path,
+                    &lk_vault::IndexedLinkOptions {
+                        snapshot: &snapshot,
+                        direction: match direction.unwrap_or(LinkDirection::Outgoing) {
+                            LinkDirection::Outgoing => lk_vault::LinkDirection::Outgoing,
+                            LinkDirection::Incoming => lk_vault::LinkDirection::Incoming,
+                            LinkDirection::Both => lk_vault::LinkDirection::Both,
+                        },
+                        limit,
+                        offset,
+                    },
+                )
+                .map_err(|error| miette::miette!("{error}"))?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report)
+                        .map_err(|error| miette::miette!("{error}"))?
+                );
+                return Ok(());
+            }
             let report = lk_vault::inspect_links(
                 &config.vault.root_path(),
                 &path,
@@ -378,7 +448,10 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
         WikiCommand::Index { root } => run_index(opts, root).await,
         WikiCommand::Log { root } => run_log(opts, root).await,
         WikiCommand::Map { root } => run_map(opts, root).await,
-        WikiCommand::Refresh { root } => run_refresh(opts, root).await,
+        WikiCommand::Refresh {
+            root,
+            archive_replace,
+        } => run_refresh_with_archives(opts, root, archive_replace).await,
         WikiCommand::Concepts { json } => run_concepts(opts, json).await,
         WikiCommand::Search {
             query,
@@ -388,10 +461,16 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
             if evidence.body {
                 run_body_search(opts, &query.join(" "), options, evidence).await
             } else {
-                run_search(opts, Some(&query.join(" ")), options).await
+                run_search(
+                    opts,
+                    Some(&query.join(" ")),
+                    options,
+                    BrowseOptions::default(),
+                )
+                .await
             }
         }
-        WikiCommand::Browse { options } => run_search(opts, None, options).await,
+        WikiCommand::Browse { options, dates } => run_search(opts, None, options, dates).await,
     }
 }
 
@@ -415,6 +494,7 @@ async fn run_body_search(
                 category: options.category.as_deref(),
                 source_status: options.source_status.as_deref(),
                 format: options.format.as_deref(),
+                ..Default::default()
             },
             regex: evidence.regex,
             ignore_case: evidence.ignore_case,
@@ -486,6 +566,7 @@ async fn run_search(
     opts: &super::GlobalOptions,
     query: Option<&str>,
     options: DiscoveryOptions,
+    dates: BrowseOptions,
 ) -> miette::Result<()> {
     if query.is_some_and(|query| query.trim().is_empty()) {
         return Err(miette::miette!(
@@ -501,6 +582,12 @@ async fn run_search(
         &config.vault.dirs,
         &lk_vault::SearchOptions {
             query,
+            sort: match dates.sort {
+                BrowseSort::Title => lk_vault::BrowseSort::Title,
+                BrowseSort::Created => lk_vault::BrowseSort::Created,
+            },
+            created_from: dates.from,
+            created_to: dates.to,
             snapshot: options.snapshot.as_deref(),
             limit: options.limit,
             offset: options.offset,
@@ -515,6 +602,12 @@ async fn run_search(
     if options.json {
         let mut output = serde_json::to_value(&result).map_err(|e| miette::miette!("{e}"))?;
         output["query"] = serde_json::json!(query);
+        if query.is_none() {
+            output["sort"] = serde_json::json!(dates.sort);
+            output["from"] = serde_json::json!(dates.from.map(|date| date.to_string()));
+            output["to"] = serde_json::json!(dates.to.map(|date| date.to_string()));
+            output["date_basis"] = serde_json::json!("declared-created-not-ingestion");
+        }
         output["include_sources"] = serde_json::json!(options.include_sources);
         output["category"] = serde_json::json!(options.category);
         output["source_status"] = serde_json::json!(options.source_status);
@@ -525,6 +618,11 @@ async fn run_search(
         );
         return Ok(());
     }
+    if query.is_none()
+        && (matches!(dates.sort, BrowseSort::Created) || dates.from.is_some() || dates.to.is_some())
+    {
+        eprintln!("Date basis: declared created; may be source-authored, not ingestion time.");
+    }
     eprintln!(
         "{} of {} pages (offset {})",
         result.hits.len(),
@@ -532,7 +630,25 @@ async fn run_search(
         result.offset
     );
     for hit in &result.hits {
-        println!("{}  {}  {}", hit.path, hit.title, hit.excerpt);
+        if query.is_none() && matches!(dates.sort, BrowseSort::Created) {
+            println!(
+                "{}  {}  {}  {}",
+                match hit.created_status {
+                    lk_vault::CreatedStatus::Valid => hit.created.clone().unwrap_or_default(),
+                    lk_vault::CreatedStatus::Missing => "[undated]".to_string(),
+                    lk_vault::CreatedStatus::Invalid => format!(
+                        "[invalid: {}{}]",
+                        hit.created.as_deref().unwrap_or("non-string"),
+                        if hit.created_truncated { "…" } else { "" }
+                    ),
+                },
+                hit.path,
+                hit.title,
+                hit.excerpt
+            );
+        } else {
+            println!("{}  {}  {}", hit.path, hit.title, hit.excerpt);
+        }
     }
     if let Some(offset) = result.next_offset {
         eprintln!("next page: repeat with --offset {offset}");
@@ -540,27 +656,129 @@ async fn run_search(
     Ok(())
 }
 
-/// Regenerate every page derived from the vault's contents, in one call.
-///
-/// Each of these is a materialized view, true only while something re-derives it, and every
-/// caller that adds pages has to re-derive all of them. One command is what makes naming a subset
-/// impossible: a caller cannot refresh two of three, and a page added to the set reaches every
-/// caller without any of them changing.
-///
-/// Every view is attempted even when an earlier one fails, and the failures are reported
-/// together. The views are independent — one failing says nothing about the others — and the
-/// scheduled pipeline is deliberately not `set -e` for the same reason: a stage that cannot run
-/// must not decide for the stages after it.
-///
-/// `lore schema` stays separate: `AGENTS.md` derives from config, not from the vault, so a run
-/// that only added pages has nothing to refresh there.
+/// Manual input is independent of VaultDirs and may otherwise occupy an export namespace.
+pub(super) fn refuse_navigation_inbox_overlap(
+    root: &std::path::Path,
+    config: Option<&lk_core::config::Config>,
+) -> miette::Result<()> {
+    let Some(config) = config else { return Ok(()) };
+    let wiki = root.join(&config.vault.dirs.wiki);
+    let namespaces = [
+        wiki.join(lk_core::vault_path::CATALOG_SUBDIR),
+        wiki.join(lk_core::vault_path::INDEX_FILE),
+        wiki.join(lk_core::vault_path::TIMELINE_FILE),
+        wiki.join(lk_core::vault_path::MAP_FILE),
+    ]
+    .map(|path| lk_core::fs::canonical_prefix(&path));
+    for (id, source) in &config.sources {
+        if !source.enabled || source.source_type != lk_core::config::SourceType::Manual {
+            continue;
+        }
+        let inbox = lk_source::manual_inbox_dir(&source.params, root)
+            .map_err(|error| miette::miette!("{id}: {error}"))?;
+        match std::fs::symlink_metadata(&inbox) {
+            Ok(_) => {
+                inbox
+                    .canonicalize()
+                    .map_err(|error| miette::miette!("{id}: resolve inbox: {error}"))?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(miette::miette!("{id}: inspect inbox: {error}")),
+        }
+        let inbox = lk_core::fs::canonical_prefix(&inbox);
+        if namespaces
+            .iter()
+            .any(|path| path.starts_with(&inbox) || inbox.starts_with(path))
+        {
+            return Err(miette::miette!(
+                "manual source `{id}` inbox overlaps generated navigation; move the inbox or configure a separate wiki directory before exporting or refreshing navigation"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Refresh SQLite discovery first; optionally export full Markdown views.
+/// A failed capture never authorizes retirement of previously generated navigation.
 pub async fn run_refresh(
     opts: &super::GlobalOptions,
     root_override: Option<PathBuf>,
 ) -> miette::Result<()> {
-    use lk_core::vault_path::{INDEX_FILE, MAP_FILE, TIMELINE_FILE};
+    run_refresh_with_archives(opts, root_override, Vec::new()).await
+}
 
-    let (session, locale, dirs, graph) = resolve_wiki_writer(opts, root_override)?;
+async fn run_refresh_with_archives(
+    opts: &super::GlobalOptions,
+    root_override: Option<PathBuf>,
+    archive_replace: Vec<String>,
+) -> miette::Result<()> {
+    use lk_core::vault_path::{INDEX_FILE, MAP_FILE, TIMELINE_FILE};
+    let archive_replace = archive_replace
+        .into_iter()
+        .map(|value| {
+            let (path, revision) = value
+                .rsplit_once('=')
+                .ok_or_else(|| miette::miette!("archive-replace requires PATH=FILE_REVISION"))?;
+            Ok((PathBuf::from(path), revision.to_owned()))
+        })
+        .collect::<miette::Result<Vec<_>>>()?;
+    let super::RootConfig { root, config } = super::resolve_root_config(opts, root_override)?;
+    refuse_navigation_inbox_overlap(&root, config.as_ref())?;
+    let exports = config
+        .as_ref()
+        .is_some_and(|config| config.vault.navigation.markdown_exports);
+    if exports && !archive_replace.is_empty() {
+        return Err(miette::miette!(
+            "archive-replace requires vault.navigation.markdown_exports: false; migrate to SQLite navigation first, then re-enable exports"
+        ));
+    }
+    // Use the same config capture for input ownership checks and output addresses.
+    let locale = config
+        .as_ref()
+        .map(|config| config.vault.locale())
+        .unwrap_or_default();
+    let dirs = config
+        .as_ref()
+        .map(|config| config.vault.dirs.clone())
+        .unwrap_or_default();
+    let mut graph = config
+        .as_ref()
+        .map(|config| config.graph.clone())
+        .unwrap_or_default();
+    graph.apply_vault_defaults(&dirs);
+    std::fs::create_dir_all(&root).map_err(|error| miette::miette!("create vault: {error}"))?;
+    let session = lk_vault::MutationSession::acquire(&root)
+        .map_err(|error| miette::miette!("vault mutation: {error}"))?;
+    let entrypoint = if !exports {
+        Some(
+            lk_vault::NavigationCatalog::plan_entrypoint(
+                session.root(),
+                locale,
+                &dirs,
+                &archive_replace,
+            )
+            .map_err(|error| miette::miette!("validate navigation entry: {error}"))?,
+        )
+    } else {
+        None
+    };
+    let snapshot = lk_vault::prepare_search(&session, &dirs)
+        .map_err(|error| miette::miette!("prepare navigation snapshot: {error}"))?;
+    eprintln!("Prepared navigation snapshot {}", snapshot.snapshot);
+    if !exports {
+        let (plan, receipt) = entrypoint.expect("SQLite entrypoint plan validated");
+        session
+            .apply(plan)
+            .map_err(|error| miette::miette!("refresh navigation entry: {error}"))?;
+        if let Some(receipt) = receipt {
+            eprintln!(
+                "Preserved navigation originals; receipt {}",
+                receipt.display()
+            );
+        }
+        eprintln!("Updated SQLite navigation entry; full Markdown exports are optional");
+        return Ok(());
+    }
     let mut failed: Vec<String> = Vec::new();
     for (page, outcome) in [
         (INDEX_FILE, write_index(&session, locale, &dirs).await),
@@ -690,6 +908,7 @@ fn resolve_wiki_context(
     lk_core::config::GraphConfig,
 )> {
     let super::RootConfig { root, config } = super::resolve_root_config(opts, root_override)?;
+    refuse_navigation_inbox_overlap(&root, config.as_ref())?;
     match config {
         Some(config) => Ok((
             root,

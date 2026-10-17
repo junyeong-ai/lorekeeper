@@ -99,6 +99,7 @@ pub fn search_body(
         ))
     };
     let search = &options.search;
+    search.validate_browse()?;
     let query = search.query.unwrap_or_default();
     if query.trim().is_empty() || query.len() > MAX_QUERY_BYTES || query.contains(['\r', '\n']) {
         return Err(invalid(

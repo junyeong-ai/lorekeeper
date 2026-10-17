@@ -8,13 +8,13 @@ resolve section headings before inspecting pages.
 1. **Structural** — run `lore graph --json lint`. ONE pass returns ALL of it, in two
    channels: `violations` (`broken`, `invalid_categories`, `duplicate_concepts`,
    `address_collisions` — distinct addresses that would collide under slug normalization — `unnormalized` — a filename that is not its own slug — and index
-   drift under `index`) and `observations` (`orphans`,
+   drift under `index` when automatic Markdown exports are enabled) and `observations` (`orphans`,
    `hubs`, `unresolved_conflicts`). Surface every non-empty list from both — and read
    `violations.index` as the OBJECT it is: `missing_from_index`/`missing_from_disk` name which
    pages differ, while `stale` is the verdict and can be true with BOTH lists empty (a catalog
    holding every page while stating a title or a summary no page states, which `lore wiki refresh`
-   repairs). An agent that surfaces only the lists misses a finding that gates. The split says
-   which ones are FALSE (a violation names its own repair) versus true of a healthy vault
+   repairs). An agent that surfaces only the lists misses a finding that gates. With default SQLite navigation, `violations.index` is null: optional exports do not promise live catalog currency.
+   The split says which ones are FALSE (a violation names its own repair) versus true of a healthy vault
    (an observation), not which ones to read. NOTE: an empty `violations` means no structural
    faults — it does NOT mean the wiki is well-connected. Empty related-concepts sections are
    never a lint finding; only `suggest-links` (layer 2) reveals that gap, so never equate

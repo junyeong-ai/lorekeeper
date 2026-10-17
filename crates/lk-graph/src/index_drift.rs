@@ -152,7 +152,11 @@ mod tests {
     }
 
     fn index(root: &Path, entries: &str) {
-        write(root, "wiki/index.md", &format!("# Index\n\n{entries}"));
+        write(
+            root,
+            "wiki/index.md",
+            &format!("<!-- lorekeeper:catalog -->\n# Index\n\n{entries}"),
+        );
     }
 
     fn drift_of(root: &Path) -> IndexDrift {

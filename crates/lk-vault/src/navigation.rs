@@ -37,6 +37,24 @@ impl NavigationKind {
         }
     }
 
+    fn owns(self, content: &str) -> bool {
+        crate::parse_page(content).is_ok_and(|page| page.body.starts_with(self.marker()))
+    }
+
+    fn mark(self, content: &str) -> String {
+        let parts = lk_core::frontmatter::split_page(content);
+        if parts.yaml.is_empty() {
+            format!("{}{content}", self.marker())
+        } else {
+            format!(
+                "---\n{}\n---\n\n{}{}",
+                parts.yaml.trim_end(),
+                self.marker(),
+                parts.body
+            )
+        }
+    }
+
     fn directory(self, wiki: &Path) -> PathBuf {
         let dir = wiki.join(CATALOG_SUBDIR);
         match self {
@@ -117,6 +135,7 @@ impl NavigationCatalog {
         rows: Vec<NavigationRow>,
     ) -> Self {
         let index = wiki.join(kind.file());
+        let header = kind.mark(header);
         let mut pages = BTreeMap::new();
         if rows.len() <= NAVIGATION_PAGE_ENTRIES {
             pages.insert(
@@ -229,9 +248,138 @@ impl NavigationCatalog {
     /// Preserve a small view's existing inline layout without changing the shared bound.
     pub fn with_inline(mut self, content: String) -> Self {
         if self.pages.len() == 1 {
-            self.pages.insert(self.wiki.join(self.kind.file()), content);
+            self.pages
+                .insert(self.wiki.join(self.kind.file()), self.kind.mark(&content));
         }
         self
+    }
+
+    /// Publish the permanent SQLite entry guide and retire only explicitly marked exports.
+    /// Call only after the search snapshot has been prepared successfully.
+    pub fn refresh_entrypoint(
+        session: &MutationSession,
+        locale: lk_core::i18n::Locale,
+        dirs: &lk_core::config::VaultDirs,
+    ) -> Result<(), VaultError> {
+        let (plan, _) = Self::plan_entrypoint(session.root(), locale, dirs, &[])?;
+        session.apply(plan)
+    }
+
+    /// Build one guarded plan. Only explicitly revision-pinned root addresses may
+    /// replace unmarked content; exact originals and their receipt precede retirement.
+    pub fn plan_entrypoint(
+        root: &Path,
+        locale: lk_core::i18n::Locale,
+        dirs: &lk_core::config::VaultDirs,
+        archive_replace: &[(PathBuf, String)],
+    ) -> Result<(MutationPlan, Option<PathBuf>), VaultError> {
+        let wiki = Path::new(&dirs.wiki);
+        let index = wiki.join(INDEX_FILE);
+        let mut plan = MutationPlan::default();
+        let mut approvals = BTreeMap::new();
+        for (path, revision) in archive_replace {
+            if ![INDEX_FILE, TIMELINE_FILE, MAP_FILE]
+                .iter()
+                .any(|file| path == &wiki.join(file))
+                || revision.len() != 64
+                || !revision
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                || approvals.insert(path.clone(), revision.clone()).is_some()
+            {
+                return Err(std::io::Error::other("archive-replace requires unique configured navigation root paths and full lowercase file revisions").into());
+            }
+        }
+        let mut changes = Vec::new();
+        let mut originals = Vec::new();
+        let wiki_name = &dirs.wiki;
+        let guide = match locale {
+            lk_core::i18n::Locale::Ko => {
+                format!(
+                    "# 지식 탐색\n\n`lore wiki refresh`는 SQLite 탐색 스냅샷을 갱신합니다.\n\n- 탐색 세션마다 `lore wiki prepare`로 snapshot ID를 한 번 확보합니다(refresh 출력 ID도 사용 가능).\n- `lore wiki browse --snapshot ID --json`과 `lore wiki search <query> --snapshot ID --json`으로 반복 탐색합니다.\n- `lore wiki links <path> --snapshot ID --direction both`로 명시 링크·역링크를 읽습니다.\n- 검색의 file_revision으로 `lore wiki read <path> --revision REV`를 호출해 현재 원문을 확인합니다.\n\n전체 Markdown 내보내기는 `lore wiki index`, `lore wiki log`, `lore wiki map`으로 요청합니다.\n자동 내보내기는 `vault.navigation.markdown_exports: true`로 설정합니다.\n\nObsidian에서는 검색창에서 {wiki_name}/concepts 및 {wiki_name}/documents 경로로 범위를 좁히고 페이지의 백링크를 사용합니다. 클릭형 전체 목록이 필요하면 Markdown 내보내기를 켭니다.\n"
+                )
+            }
+            lk_core::i18n::Locale::En => {
+                format!(
+                    "# Knowledge navigation\n\n`lore wiki refresh` refreshes the SQLite navigation snapshot.\n\n- Start a retrieval session with `lore wiki prepare` and retain its snapshot ID (or the ID printed by refresh).\n- Repeat `lore wiki browse --snapshot ID --json` and `lore wiki search <query> --snapshot ID --json`.\n- Inspect links/backlinks with `lore wiki links <path> --snapshot ID --direction both`.\n- Verify current originals with `lore wiki read <path> --revision REV`, using the hit's file_revision.\n\nRequest full Markdown exports with `lore wiki index`, `lore wiki log`, or `lore wiki map`.\nEnable automatic exports with `vault.navigation.markdown_exports: true`.\n\nIn Obsidian, narrow search to {wiki_name}/concepts and {wiki_name}/documents and use page backlinks. Enable Markdown exports for a complete clickable catalog.\n"
+                )
+            }
+        };
+        let guide = NavigationKind::Index.mark(&guide);
+        for kind in [
+            NavigationKind::Index,
+            NavigationKind::Timeline,
+            NavigationKind::Map,
+        ] {
+            let previous = Self::read(root, wiki, kind)?;
+            for (path, content) in previous.pages {
+                let approved = approvals.remove(&path);
+                if let Some(revision) = approved {
+                    if kind.owns(&content) || lk_core::concept::file_revision(&content) != revision
+                    {
+                        return Err(std::io::Error::other(format!(
+                            "archive-replace revision changed or entry is already marked: {}",
+                            path.display()
+                        ))
+                        .into());
+                    }
+                    crate::writable_page_path(root, &path)?;
+                    let archive = Path::new(".lorekeeper/navigation-archives").join(format!(
+                        "{}-{revision}.md",
+                        path.file_stem().unwrap().to_string_lossy()
+                    ));
+                    preserve_navigation_file(root, &mut plan, &archive, &content)?;
+                    originals.push(serde_json::json!({"original_path": path, "file_revision": revision, "archive_path": archive, "action": if path == index { "replace" } else { "retire" }}));
+                } else if !kind.owns(&content) {
+                    return Err(std::io::Error::other(format!(
+                        "navigation entry is not marked generated; preserve or move it explicitly: {}",
+                        path.display()
+                    )).into());
+                }
+                // A marker cannot authorize deleting a source/knowledge page carrying a format.
+                let page = crate::parse_page(&content).map_err(VaultError::Frontmatter)?;
+                if page.frontmatter.get("type").is_some_and(|value| {
+                    kind.file() != MAP_FILE
+                        || value.as_str() != Some(lk_core::vault_path::MAP_FORMAT)
+                }) {
+                    return Err(std::io::Error::other(format!(
+                        "generated navigation overlaps an authored page: {}",
+                        path.display()
+                    ))
+                    .into());
+                }
+                changes.push((path, content));
+            }
+        }
+        if !approvals.is_empty() {
+            return Err(std::io::Error::other(
+                "archive-replace address is absent; no replacement was performed",
+            )
+            .into());
+        }
+        let receipt = if originals.is_empty() {
+            None
+        } else {
+            let content = serde_json::to_string_pretty(&serde_json::json!({"scheme": "lore-navigation-archive-v1", "originals": originals}))
+                .map_err(|error| VaultError::Serialization(error.to_string()))? + "\n";
+            let path = Path::new(".lorekeeper/navigation-archives").join(format!(
+                "{}.json",
+                lk_core::concept::file_revision(&content)
+            ));
+            preserve_navigation_file(root, &mut plan, &path, &content)?;
+            Some(path)
+        };
+        for (path, content) in changes {
+            if path == index {
+                plan.edit(path, content, guide.clone());
+            } else {
+                plan.remove(path, content);
+            }
+        }
+        if !crate::page_path(root, &index)?.try_exists()? {
+            plan.create(index, guide);
+        }
+        Ok((plan, receipt))
     }
 
     pub fn read(root: &Path, wiki: &Path, kind: NavigationKind) -> Result<Self, VaultError> {
@@ -288,6 +436,24 @@ impl NavigationCatalog {
             ))
             .into());
         }
+        if !self.kind.owns(&self.pages[&index]) {
+            return Err(
+                std::io::Error::other("navigation entry omitted its generation marker").into(),
+            );
+        }
+        crate::writer::refuse_format_change(
+            &crate::writable_page_path(root, &index)?,
+            &self.pages[&index],
+        )?;
+        if let Some(content) = before.pages.get(&index)
+            && !self.kind.owns(content)
+        {
+            return Err(std::io::Error::other(format!(
+                "navigation entry is not marked generated; preserve or move it explicitly: {}",
+                index.display()
+            ))
+            .into());
+        }
         let mut plan = MutationPlan::default();
         for (path, content) in self
             .pages
@@ -327,6 +493,32 @@ impl NavigationCatalog {
             }
         }
         session.apply(plan)
+    }
+}
+
+/// Reuse only exact direct files; immutable archive collisions never authorize replacement.
+fn preserve_navigation_file(
+    root: &Path,
+    plan: &mut MutationPlan,
+    path: &Path,
+    content: &str,
+) -> Result<(), VaultError> {
+    let full = crate::writable_page_path(root, path)?;
+    match std::fs::read_to_string(full) {
+        Ok(previous) if previous == content => {
+            plan.require_unchanged(path.to_owned(), previous);
+            Ok(())
+        }
+        Ok(_) => Err(std::io::Error::other(format!(
+            "navigation archive collision: {}",
+            path.display()
+        ))
+        .into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            plan.create(path.to_owned(), content.to_owned());
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -447,6 +639,246 @@ mod tests {
                 })
                 .collect(),
         )
+    }
+
+    #[test]
+    fn archive_replacement_guards_whole_plan_and_refuses_typed_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = lk_core::config::VaultDirs::default();
+        let root_path = Path::new(&dirs.wiki).join(INDEX_FILE);
+        let full = tmp.path().join(&root_path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        let original = "# Legacy\nAuthored edits are preserved verbatim.\n";
+        std::fs::write(&full, original).unwrap();
+        let session = MutationSession::acquire(tmp.path()).unwrap();
+        let approval = vec![(root_path.clone(), lk_core::concept::file_revision(original))];
+        let (plan, _) = NavigationCatalog::plan_entrypoint(
+            tmp.path(),
+            lk_core::i18n::Locale::En,
+            &dirs,
+            &approval,
+        )
+        .unwrap();
+        std::fs::write(&full, "Changed after planning\n").unwrap();
+        assert!(session.apply(plan).is_err());
+        assert!(!tmp.path().join(".lorekeeper/navigation-archives").exists());
+        assert_eq!(
+            std::fs::read_to_string(&full).unwrap(),
+            "Changed after planning\n"
+        );
+        let typed = "---\ntype: document\n---\n# Source\n";
+        std::fs::write(&full, typed).unwrap();
+        assert!(
+            NavigationCatalog::plan_entrypoint(
+                tmp.path(),
+                lk_core::i18n::Locale::En,
+                &dirs,
+                &[(root_path, lk_core::concept::file_revision(typed))]
+            )
+            .is_err()
+        );
+        assert!(!tmp.path().join(".lorekeeper/navigation-archives").exists());
+    }
+
+    #[test]
+    fn archive_replacement_reuses_exact_backups_and_refuses_corruption() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = lk_core::config::VaultDirs::default();
+        let path = Path::new(&dirs.wiki).join(INDEX_FILE);
+        let full = tmp.path().join(&path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        let original = "# Legacy\nExact original.\n";
+        std::fs::write(&full, original).unwrap();
+        let revision = lk_core::concept::file_revision(original);
+        let approvals = vec![(path, revision.clone())];
+        let session = MutationSession::acquire(tmp.path()).unwrap();
+        let (plan, receipt) = NavigationCatalog::plan_entrypoint(
+            tmp.path(),
+            lk_core::i18n::Locale::En,
+            &dirs,
+            &approvals,
+        )
+        .unwrap();
+        session.apply(plan).unwrap();
+        std::fs::write(&full, original).unwrap();
+        let (plan, reused_receipt) = NavigationCatalog::plan_entrypoint(
+            tmp.path(),
+            lk_core::i18n::Locale::En,
+            &dirs,
+            &approvals,
+        )
+        .unwrap();
+        assert_eq!(receipt, reused_receipt);
+        session.apply(plan).unwrap();
+        std::fs::write(&full, original).unwrap();
+        let archive = tmp.path().join(format!(
+            ".lorekeeper/navigation-archives/index-{revision}.md"
+        ));
+        std::fs::write(&archive, "Corrupted archive\n").unwrap();
+        assert!(
+            NavigationCatalog::plan_entrypoint(
+                tmp.path(),
+                lk_core::i18n::Locale::En,
+                &dirs,
+                &approvals
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&full).unwrap(), original);
+        assert_eq!(
+            std::fs::read_to_string(&archive).unwrap(),
+            "Corrupted archive\n"
+        );
+    }
+
+    #[test]
+    fn reused_archive_and_receipt_are_pinned_until_publication() {
+        for receipt_changed in [false, true] {
+            for deleted in [false, true] {
+                let tmp = tempfile::tempdir().unwrap();
+                let dirs = lk_core::config::VaultDirs::default();
+                let path = Path::new(&dirs.wiki).join(INDEX_FILE);
+                let full = tmp.path().join(&path);
+                std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+                let original = "# Legacy\nRetain these exact bytes.\n";
+                std::fs::write(&full, original).unwrap();
+                let revision = lk_core::concept::file_revision(original);
+                let approvals = vec![(path, revision.clone())];
+                let session = MutationSession::acquire(tmp.path()).unwrap();
+                let (initial, receipt) = NavigationCatalog::plan_entrypoint(
+                    tmp.path(),
+                    lk_core::i18n::Locale::En,
+                    &dirs,
+                    &approvals,
+                )
+                .unwrap();
+                session.apply(initial).unwrap();
+                std::fs::write(&full, original).unwrap();
+                let (plan, _) = NavigationCatalog::plan_entrypoint(
+                    tmp.path(),
+                    lk_core::i18n::Locale::En,
+                    &dirs,
+                    &approvals,
+                )
+                .unwrap();
+                let dependency = if receipt_changed {
+                    tmp.path().join(receipt.unwrap())
+                } else {
+                    tmp.path().join(format!(
+                        ".lorekeeper/navigation-archives/index-{revision}.md"
+                    ))
+                };
+                if deleted {
+                    std::fs::remove_file(&dependency).unwrap();
+                } else {
+                    std::fs::write(&dependency, "Changed after plan capture\n").unwrap();
+                }
+                assert!(session.apply(plan).is_err());
+                assert_eq!(std::fs::read_to_string(&full).unwrap(), original);
+                assert_eq!(!dependency.exists(), deleted);
+                if !deleted {
+                    assert_eq!(
+                        std::fs::read_to_string(dependency).unwrap(),
+                        "Changed after plan capture\n"
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_replacement_does_not_adopt_a_leaf_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = lk_core::config::VaultDirs::default();
+        let path = Path::new(&dirs.wiki).join(INDEX_FILE);
+        std::fs::create_dir_all(tmp.path().join(&dirs.wiki)).unwrap();
+        let original = "# Authored target\n";
+        std::fs::write(tmp.path().join("saved.md"), original).unwrap();
+        std::os::unix::fs::symlink("../saved.md", tmp.path().join(&path)).unwrap();
+        assert!(
+            NavigationCatalog::plan_entrypoint(
+                tmp.path(),
+                lk_core::i18n::Locale::En,
+                &dirs,
+                &[(path, lk_core::concept::file_revision(original))]
+            )
+            .is_err()
+        );
+        assert!(!tmp.path().join(".lorekeeper/navigation-archives").exists());
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("saved.md")).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn sqlite_entry_retires_only_marked_views_in_one_plan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = MutationSession::acquire(tmp.path()).unwrap();
+        let dirs = lk_core::config::VaultDirs {
+            wiki: "custom".into(),
+            ..Default::default()
+        };
+        for kind in [
+            NavigationKind::Index,
+            NavigationKind::Timeline,
+            NavigationKind::Map,
+        ] {
+            build(kind, 101).publish(&session).unwrap();
+        }
+        let authored = tmp.path().join("custom/catalog/keep.md");
+        std::fs::write(&authored, "# Authored\n").unwrap();
+        NavigationCatalog::refresh_entrypoint(&session, lk_core::i18n::Locale::En, &dirs).unwrap();
+        assert_eq!(std::fs::read_to_string(&authored).unwrap(), "# Authored\n");
+        assert!(!tmp.path().join("custom/log.md").exists());
+        assert!(!tmp.path().join("custom/map.md").exists());
+        assert!(!tmp.path().join("custom/catalog/0-0.md").exists());
+        let entry = std::fs::read_to_string(tmp.path().join("custom/index.md")).unwrap();
+        assert!(entry.contains("lore wiki browse"));
+        assert!(entry.len() < 2000);
+        NavigationCatalog::refresh_entrypoint(&session, lk_core::i18n::Locale::En, &dirs).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("custom/index.md")).unwrap(),
+            entry
+        );
+        // Explicit export remains valid after switching to the SQLite entry.
+        build(NavigationKind::Index, 101).publish(&session).unwrap();
+    }
+
+    #[test]
+    fn retirement_refuses_unmarked_or_typed_collisions_before_any_edit() {
+        for collision in [
+            "# Hand-written\n".to_owned(),
+            format!(
+                "# Authored source\n{}\n```markdown\n<!-- lorekeeper:timeline -->\n```\n",
+                "source text ".repeat(1000)
+            ),
+            "---\ntype: document\n---\n<!-- lorekeeper:timeline -->\nOriginal source\n".to_owned(),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let session = MutationSession::acquire(tmp.path()).unwrap();
+            let dirs = lk_core::config::VaultDirs {
+                wiki: "custom".into(),
+                ..Default::default()
+            };
+            build(NavigationKind::Index, 101).publish(&session).unwrap();
+            let old = std::fs::read(tmp.path().join("custom/index.md")).unwrap();
+            std::fs::write(tmp.path().join("custom/log.md"), &collision).unwrap();
+            assert!(
+                NavigationCatalog::refresh_entrypoint(&session, lk_core::i18n::Locale::En, &dirs)
+                    .is_err()
+            );
+            assert_eq!(
+                std::fs::read(tmp.path().join("custom/index.md")).unwrap(),
+                old
+            );
+            assert_eq!(
+                std::fs::read_to_string(tmp.path().join("custom/log.md")).unwrap(),
+                collision
+            );
+            assert!(tmp.path().join("custom/catalog/0-0.md").exists());
+        }
     }
 
     #[test]

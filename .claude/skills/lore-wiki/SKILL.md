@@ -1,6 +1,6 @@
 ---
 name: lore-wiki
-version: 0.53.1
+version: 0.54.0
 description: Semantic wiki operations for the Lorekeeper vault. Add sources, query with compounding, audit structural and semantic health. Reads AGENTS.md for page formats and section vocabulary — never hardcodes headings. Pairs with `lore` (the deterministic binary) for graph analysis and queue processing.
 when_to_use: |
   wiki query, knowledge search, ask wiki, search vault,
@@ -96,8 +96,7 @@ each as an independent source, and report the aggregate results.
    is what `backlinks-sync` counts as the citation. A concept whose evidence later
    moves is rewritten by the queue, not here — `lore graph backlinks-sync` queues
    it once the citation lands.
-5. **Finalize**: `lore graph backlinks-sync`, then `lore wiki refresh` (re-derive
-   the catalog, the knowledge timeline and the citation-cluster map), then
+5. **Finalize**: `lore graph backlinks-sync`, then `lore wiki refresh` (refresh SQLite navigation and configured Markdown exports), then
    `lore graph lint`. A non-zero exit is the vault contradicting itself somewhere, which
    is not the same as this add having caused it: a broken link or an unknown category
    elsewhere in the vault predates you. Resolve every violation naming a page this add
@@ -121,6 +120,10 @@ Answer a question grounded in vault content, with compounding.
    For an unfamiliar topic, start with `lore wiki browse --json`.
    Use its category/type counts to select a scope with `--category` and `--type`.
    Browse orders by title, without treating citation frequency as relevance.
+   When time matters, use `lore wiki browse --snapshot <id> --sort created
+   --from YYYY-MM-DD --to YYYY-MM-DD --json`. Bounds are inclusive; unknown or invalid
+   dates are excluded by date filters. `created` may describe source authorship, not ingestion.
+   Without date filters, newest-first order places unknown dates last.
    Search and browse return `total` and `next_offset`; follow `--offset` when more
    results are needed. Counts describe the query before metadata filters. An empty
    category key denotes uncategorized pages. Do not call the first page a complete inventory.
@@ -205,9 +208,7 @@ Answer a question grounded in vault content, with compounding.
      evidence that the answer is correct.
      Then **finalize** so the new page leaves the graph clean:
      `lore graph backlinks-sync` (its Grounding links are real citations that
-     raise each grounded concept's `source_count`), then `lore wiki refresh` (so the
-     exploration is catalogued, the next audit shows no index drift, and its links
-     compound the cluster structure). Run `lore queue status --json` and report any
+     raise each grounded concept's `source_count`), then `lore wiki refresh` (so SQLite discovery captures the exploration and configured exports are refreshed). Run `lore queue status --json` and report any
      synthesis queued by reconciliation as pending. Use `/lore-process` when semantic
      completion is part of the request. Tell the user where the assessment landed.
    - **Ephemeral** (single-fact, navigational lookup) → do not file.

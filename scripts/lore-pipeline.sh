@@ -168,10 +168,10 @@ drain_queue() {
 # citations. Leaving them for tomorrow would put every concept page a day behind its own
 # sources AND leave a queue file pending at every ingest, whose startup warning about
 # unprocessed work would then never clear. `wiki refresh` follows both drains because the
-# catalog summarizes each concept from its synthesis.
+# SQLite navigation must capture the final semantic bodies (and configured exports follow).
 #
 # `graph lint` is a stage like any other. It exits non-zero only when the vault contradicts
-# itself — a link to a page that is not there, a catalog that disagrees with the disk, an unknown
+# itself — a link to a page that is not there, an enabled automatic catalog export that drifts, an unknown
 # category, one name on two pages — and a run of this pipeline is what produces those. What a
 # healthy vault carries (uncited concepts, hubs, open conflicts) it reports without gating, so its
 # exit code belongs in `failed`.

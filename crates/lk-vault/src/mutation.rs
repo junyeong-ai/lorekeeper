@@ -119,6 +119,16 @@ impl MutationPlan {
         }
     }
 
+    /// Pin an existing dependency even when no replacement is needed. Unlike `edit`,
+    /// this retains an equal-before/after step for preflight and journal replay.
+    pub fn require_unchanged(&mut self, path: impl Into<PathBuf>, expected: String) {
+        self.steps.push(Step::Edit {
+            path: path.into(),
+            before: expected.clone(),
+            after: expected,
+        });
+    }
+
     pub fn rename(&mut self, from: impl Into<PathBuf>, to: impl Into<PathBuf>, expected: String) {
         self.steps.push(Step::Rename {
             from: from.into(),

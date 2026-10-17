@@ -11,4 +11,4 @@ lore <version>  <staged>/corpus/vault
   · sources  0 fresh                                     lore health
   · queue    drained                                     /lore-process
   · pages    5 clean                                     lore doctor
-  ! graph    5 contradiction(s)                          lore graph lint
+  ! graph    1 contradiction(s)                          lore graph lint

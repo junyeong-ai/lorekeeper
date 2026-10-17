@@ -91,7 +91,7 @@ fn wiki_refresh_writes_every_page_derived_from_the_vault() {
     std::fs::create_dir_all(root.join("vault/inbox")).expect("inbox dir");
     std::fs::write(
         root.join("config.yaml"),
-        "vault:\n  root: vault\nidentity:\n  name: T\n  email: t@e.com\n\
+        "vault:\n  root: vault\n  navigation:\n    markdown_exports: true\nidentity:\n  name: T\n  email: t@e.com\n\
          sources:\n  notes:\n    type: manual\n    params:\n      inbox_dir: inbox\n",
     )
     .expect("config");
@@ -170,7 +170,7 @@ fn wiki_refresh_attempts_every_view_even_when_one_fails() {
     std::fs::create_dir_all(root.join("vault/inbox")).expect("inbox dir");
     std::fs::write(
         root.join("config.yaml"),
-        "vault:\n  root: vault\nidentity:\n  name: T\n  email: t@e.com\n\
+        "vault:\n  root: vault\n  navigation:\n    markdown_exports: true\nidentity:\n  name: T\n  email: t@e.com\n\
          sources:\n  notes:\n    type: manual\n    params:\n      inbox_dir: inbox\n",
     )
     .expect("config");

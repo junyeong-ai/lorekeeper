@@ -63,6 +63,21 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   `IndexCatalog::publish` uses a mutation plan, removes only marked generated children,
   and refuses collisions with authored files. Index drift compares the whole tree.
   Read or parse failures abort rebuilding; missing optional directories are empty inputs.
+- **SQLite navigation is the default refresh surface.** After a successful `prepare_search`,
+  `NavigationCatalog::refresh_entrypoint` journals the small permanent `index.md` guide and
+  retirement of only exact marked catalog/log/map outputs. The marker is the first
+  body line (after any frontmatter), not a match anywhere in authored prose or code.
+  Existing unmarked entries and
+  marked files carrying a knowledge/source type refuse the whole plan before any edit.
+  Unmarked children are preserved, including under overlapping configured source roots.
+  New explicit Markdown exports mark their entry as well as children; old unmarked roots
+  are never guessed to be generated from their title or shape. A failed snapshot capture
+  never authorizes retirement. Markdown page bodies remain authoritative.
+  Explicit refresh migration accepts only configured root `PATH=FILE_REVISION` approvals.
+  `plan_entrypoint` validates every address/revision/type before snapshot capture; its one
+  MutationPlan preserves full-byte originals and a content-addressed receipt before edits
+  or retirement. Archive collisions never overwrite. Unmarked children remain untouched.
+  The evidence archive's authored revision is not a substitute for these full-file guards.
 - **Generated navigation shares one bound and publisher** (`navigation`): at most 100 rows
   or branches per page. Small heading groups pack whole into available space; only a group
   over the bound continues on multiple pages. Entry links name groups and continuation
@@ -210,6 +225,11 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   resolved across the scope. Facets count query matches before filters, `total` counts after
   filters, and pagination runs last. Missing category/type uses an empty facet key. Live offsets
   reflect current files; an explicit prepared snapshot pins the captured corpus.
+  Browse may sort by declared `created` newest first, with exact path ties and missing/invalid
+  dates last. `created` may be source-authored, never inferred collection time. Inclusive
+  date bounds exclude unknown dates; facets still count the scope before metadata/date filters.
+  Hits expose bounded declared strings and valid/missing/invalid status, not arbitrary metadata
+  objects. Date sorting/ranges are browse-only; the library refuses them with a text query.
 
 - **`inspect_links`** reads one source snapshot and returns explicit internal link
   occurrences in source order, including repeats. Source line numbers include frontmatter;
@@ -225,6 +245,11 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   editors are not frozen during capture. FTS trigram filtering only narrows candidates;
   short terms use exact substring candidates and the shared matcher decides every hit.
   Schema/projection changes require a snapshot version bump. No embeddings or daemon.
+  Snapshot browse uses prepared scalar filters/counts and SQL LIMIT/OFFSET, decoding only
+  selected metadata rows rather than all page payloads. Scalar projections and metadata
+  must derive from the same captured page; projection/version changes require prepare again.
+  Snapshot links use captured lexical addresses without filesystem-alias inference. Link
+  context is capped at 400 Unicode characters with explicit `context_truncated` reporting.
   Body search reads the captured Markdown payload and its physical line offset through
   the same matcher as live search. It scans the selected snapshot's full scope, without
   visible-text FTS filtering that would omit code/link matches. Results identify the

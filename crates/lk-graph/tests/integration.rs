@@ -166,7 +166,7 @@ fn index_sync_fix_mutates_and_idempotent() {
     .unwrap();
     std::fs::write(
         tmp.path().join("wiki/index.md"),
-        "# Index\n\n- [Alpha](concepts/alpha.md)\n",
+        "<!-- lorekeeper:catalog -->\n# Index\n\n- [Alpha](concepts/alpha.md)\n",
     )
     .unwrap();
 
