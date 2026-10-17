@@ -109,7 +109,7 @@ pub fn build_map_catalog(
         for id in &concepts {
             let node = &nodes[*id];
             rows.push(NavigationRow {
-                headings: vec![group.clone()],
+                headings: vec![group.clone().into()],
                 title: node.title.clone(),
                 path: PathBuf::from(format!("{id}.md")),
                 summary: Some(format!("{} {}", node.degree, strings.map_links)),
@@ -144,7 +144,7 @@ pub fn build_map_catalog(
         for id in single_concepts {
             let node = &nodes[id];
             rows.push(NavigationRow {
-                headings: vec![group.clone()],
+                headings: vec![group.clone().into()],
                 title: node.title.clone(),
                 path: PathBuf::from(format!("{id}.md")),
                 summary: Some(format!("{} {}", node.degree, strings.map_links)),

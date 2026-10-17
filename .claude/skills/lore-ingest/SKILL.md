@@ -152,6 +152,15 @@ Review and commit vault changes separately; existing staging remains untouched.
 4. **Flush LLM queue** — one atomic JSONL task file (queue mode).
 5. **Archive** — `manual` inbox files move to `archived/{date}/`, only after every
    vault write and the queue flush succeeded, so a mid-run failure leaves them for retry.
+   Existing archive entries are never replaced; identical bytes may reuse an entry.
+   An empty inbox means collection finished, not that semantic tasks or reviews finished.
+
+The manual adapter reads top-level UTF-8 Markdown, text and HTML files. Unsupported
+formats and subdirectories are not ingestion units; failed reads are reported, and
+failure of every eligible read fails the source. Original YAML is preserved under
+`source_record.manual_frontmatter` as source evidence, never as page identity or
+completion state. Relative attachments are not collected as a bundle; inspect their
+availability before treating an imported document as complete evidence.
 
 In **queue mode** (the default), phases 1–5 leave summary/concept/work-log
 sections empty and emit JSONL tasks. They are NOT knowledge yet — run

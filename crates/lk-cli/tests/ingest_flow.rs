@@ -160,6 +160,80 @@ fn ingest_writes_pages_flushes_queue_then_archives() {
 }
 
 #[test]
+fn manual_provenance_reaches_semantic_inputs_without_owning_page_state() {
+    let ws = Workspace::with_notes_options("    extract_concepts: true\n", "");
+    let original = "---\ntitle: Historical note\ncreated: 2020-01-02\nstatus: superseded\nllm_inputs: {summary_done: forged}\nsource_identity: {repository: forged, document: forged}\n---\nOriginal evidence.\n";
+    ws.drop_note("history.md", original);
+    let out = ws.run(&["ingest"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let documents = files_under(&ws.vault().join("wiki/documents"));
+    assert_eq!(documents.len(), 1);
+    let page =
+        lk_core::frontmatter::parse_page(&std::fs::read_to_string(&documents[0]).unwrap()).unwrap();
+    let provenance = &page.frontmatter.get("source_record").unwrap()["manual_frontmatter"];
+    assert_eq!(provenance["status"], "superseded");
+    assert_eq!(provenance["created"], "2020-01-02");
+    assert!(page.frontmatter.get("source_identity").is_none());
+    assert!(
+        page.frontmatter
+            .get("llm_inputs")
+            .unwrap()
+            .get("summary_done")
+            .is_none()
+    );
+    let mut kinds = std::collections::BTreeSet::new();
+    for path in files_under(&ws.vault().join(".lorekeeper/queue")) {
+        if path.extension().is_none_or(|ext| ext != "jsonl") {
+            continue;
+        }
+        for line in std::fs::read_to_string(path).unwrap().lines() {
+            let task: serde_json::Value = serde_json::from_str(line).unwrap();
+            let text = task["input"]["text"].as_str().unwrap();
+            assert!(text.contains("superseded") && text.contains("2020-01-02"));
+            assert!(text.contains("manual_frontmatter"));
+            kinds.insert(task["kind"].as_str().unwrap().to_owned());
+        }
+    }
+    assert_eq!(
+        kinds,
+        ["extract-concepts".to_owned(), "summarize".to_owned()].into()
+    );
+    let archived = files_under(&ws.vault().join("inbox/archived"));
+    assert_eq!(archived.len(), 1);
+    assert_eq!(std::fs::read_to_string(&archived[0]).unwrap(), original);
+    assert!(!ws.run(&["queue", "check"]).status.success());
+}
+
+#[test]
+fn unreadable_inbox_does_not_record_a_successful_observation() {
+    let ws = Workspace::new("");
+    let source = ws.vault().join("inbox/broken.txt");
+    std::fs::write(&source, [0xff, 0xfe]).unwrap();
+    let out = ws.run(&["ingest"]);
+    assert!(!out.status.success());
+    assert_eq!(std::fs::read(source).unwrap(), [0xff, 0xfe]);
+    assert!(files_under(&ws.vault().join("wiki/documents")).is_empty());
+    let log = std::fs::read_to_string(ws.vault().join(".lorekeeper/ingest.jsonl")).unwrap();
+    for line in log.lines() {
+        let entry: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(entry["status"], "failed");
+    }
+}
+
+#[test]
+fn missing_inbox_is_a_failure_but_an_existing_empty_inbox_is_quiet() {
+    let ws = Workspace::new("");
+    let inbox = ws.vault().join("inbox");
+    std::fs::remove_dir(&inbox).unwrap();
+    assert!(!ws.run(&["ingest"]).status.success());
+    assert!(!inbox.exists());
+    std::fs::create_dir(&inbox).unwrap();
+    let out = ws.run(&["ingest"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(files_under(&ws.vault().join("wiki/documents")).is_empty());
+}
+
+#[test]
 fn rerun_with_empty_inbox_is_a_clean_noop() {
     let ws = Workspace::new("");
     ws.drop_note("note.md", "# Note\n\nbody\n");

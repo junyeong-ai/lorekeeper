@@ -59,6 +59,10 @@ the work-log), apply the generic guidance without a type bias.
 ### `google-drive`, `manual`
 - Treat as curated documents: preserve the author's structure, distill to the
   core argument and supporting detail
+- For manual inputs, `Source record.manual_frontmatter` retains the author's original
+  metadata. Use declared dates, lifecycle and scope to interpret that source; these
+  declarations do not certify current truth or override the pipeline's identity and
+  completion state. Missing fields remain unknown.
 
 ### `tasks`
 - The user's OWN completed work, one item per task they closed. The title is what

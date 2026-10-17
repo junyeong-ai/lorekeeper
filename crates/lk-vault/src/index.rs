@@ -113,7 +113,10 @@ pub fn build_catalog(
             Locale::Ko => "지식 검토",
             Locale::En => "Knowledge reviews",
         };
-        let headings = vec![format!("{title} ({})", review_entries.len())];
+        let headings = vec![crate::navigation::NavigationHeading::counted(
+            title,
+            review_entries.len(),
+        )];
         for entry in &review_entries {
             let report = &reviews[&entry.rel_path];
             let mut row = catalog_row(entry, &headings, |body| {
@@ -421,7 +424,7 @@ fn render_group(
     entries: &[IndexEntry],
     extract: impl Fn(&str) -> Option<String>,
 ) {
-    let headings = vec![format!("{title} ({count})")];
+    let headings = vec![crate::navigation::NavigationHeading::counted(title, count)];
     rows.extend(
         entries
             .iter()
@@ -450,11 +453,10 @@ fn render_grouped_section(
         .chain(ungrouped.map(|entries| (None, entries)))
     {
         let headings = vec![
-            format!("{section_title} ({})", entries.len()),
-            format!(
-                "{} ({})",
+            crate::navigation::NavigationHeading::counted(section_title, entries.len()),
+            crate::navigation::NavigationHeading::counted(
                 name.unwrap_or(uncategorized_label),
-                entries_in_group.len()
+                entries_in_group.len(),
             ),
         ];
         rows.extend(
@@ -467,7 +469,7 @@ fn render_grouped_section(
 
 fn catalog_row(
     entry: &IndexEntry,
-    headings: &[String],
+    headings: &[crate::navigation::NavigationHeading],
     extract: impl Fn(&str) -> Option<String>,
 ) -> CatalogRow {
     CatalogRow {
@@ -825,7 +827,10 @@ mod tests {
     fn catalog_tree_bounds_each_page_and_keeps_every_exact_address() {
         let rows: Vec<_> = (0..10_201)
             .map(|number| CatalogRow {
-                headings: vec!["Concepts".into(), format!("Category {}", number / 300)],
+                headings: vec![
+                    "Concepts".into(),
+                    format!("Category {}", number / 300).into(),
+                ],
                 title: format!("항목 {number}"),
                 path: PathBuf::from(format!("custom/concepts/Item {number}.md")),
                 summary: Some("Evidence.".into()),

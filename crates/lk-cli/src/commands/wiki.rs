@@ -93,7 +93,7 @@ pub enum WikiCommand {
         root: Option<PathBuf>,
     },
     /// Generate `<vault>/<wiki>/log.md` — reverse-chronological knowledge timeline
-    /// (when each concept/document/exploration first entered the vault, by `created`)
+    /// (by declared `created` date, which may be the source's authored date)
     Log {
         /// Vault root override (default: vault.root from config)
         #[arg(long)]

@@ -682,14 +682,15 @@ pub fn render_agents_md(
         out,
         "- `{}/index.md` — entry to a complete catalog grouped by category. Each generated page \
          contains at most 100 entries; larger vaults use a navigation tree under `catalog/`. \
-         Follow the displayed ranges. Generated catalog pages are not evidence or graph nodes.",
+         Follow the group labels and continuation numbers. Small groups stay whole; only oversized \
+         groups span detail pages. Generated catalog pages are not evidence or graph nodes.",
         dirs.wiki
     )
     .unwrap();
     writeln!(
         out,
-        "- `{}/log.md` — reverse-chronological timeline of when each knowledge node entered \
-         the vault. Each page contains at most 100 entries; follow `catalog/log/` links for detail. Child addresses are regenerated navigation positions; cite original knowledge pages.",
+        "- `{}/log.md` — reverse-chronological timeline by declared `created` date, which may \
+         be the source's authored date rather than collection time. Each page contains at most 100 entries; follow `catalog/log/` links for detail. Child addresses are regenerated navigation positions; cite original knowledge pages.",
         dirs.wiki
     )
     .unwrap();
@@ -731,7 +732,7 @@ pub fn render_agents_md(
         .unwrap();
 
         if schema.type_name == "document" {
-            out.push_str("\nOptional `source_identity` records a stable repository namespace and document ID, independent of title and checkout location. Legacy location-only ownership requires verified migration. `source_record` preserves an imported document\'s provider id, declared status, source revision evidence and declared `superseded_by` value. Nodex `observation_revision` carries an explicit scheme and digest of verified metadata, canonical body and outgoing relations; it is not a raw-file SHA. Earlier `revision` and `content_revision` records retain their original meaning. Archived or superseded means historical scope, not falsehood. Missing metadata means unknown; a successor value is not an automatically resolved vault link. Status changes invalidate semantic inputs.\n");
+            out.push_str("\nOptional `source_identity` records a stable repository namespace and document ID, independent of title and checkout location. Legacy location-only ownership requires verified migration. `source_record` preserves an imported document\'s provider id, declared status, source revision evidence and declared `superseded_by` value. Nodex `observation_revision` carries an explicit scheme and digest of verified metadata, canonical body and outgoing relations; it is not a raw-file SHA. Earlier `revision` and `content_revision` records retain their original meaning. Archived or superseded means historical scope, not falsehood. Missing metadata means unknown; a successor value is not an automatically resolved vault link. Status changes invalidate semantic inputs. Manual imports preserve original YAML under `source_record.manual_frontmatter`; these declarations are source evidence, not page identity, completion markers or the top-level state used by `--source-status`.\n");
             writeln!(
                 out,
                 "\n`document_type` values: {} (FORMAT only; subject-matter goes in `tags`).",

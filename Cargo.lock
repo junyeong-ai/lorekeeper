@@ -1527,6 +1527,7 @@ dependencies = [
  "blake3",
  "jiff",
  "regex",
+ "same-file",
  "serde",
  "serde-saphyr",
  "serde_json",

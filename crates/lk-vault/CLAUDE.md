@@ -64,8 +64,13 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   and refuses collisions with authored files. Index drift compares the whole tree.
   Read or parse failures abort rebuilding; missing optional directories are empty inputs.
 - **Generated navigation shares one bound and publisher** (`navigation`): at most 100 rows
-  or branches per page. The topic catalog uses `catalog/`, the citation map `catalog/map/`,
-  and the timeline `catalog/log/`. Each view reads and removes only its own marked direct
+  or branches per page. Small heading groups pack whole into available space; only a group
+  over the bound continues on multiple pages. Entry links name groups and continuation
+  positions rather than ranges of long document titles. `NavigationHeading` keeps semantic
+  labels separate from optional heading totals; detail headings render their totals while
+  branch links use labels plus their own reachable-row count exactly once. The topic catalog uses `catalog/`,
+  the citation map `catalog/map/`, and the timeline `catalog/log/`. Each view reads and
+  removes only its own marked direct
   children. Unknown-file collisions refuse the complete publication. Children, entry page
   and stale removals use the caller's `MutationSession` and one journaled plan; callers do
   not acquire another session while holding one. Exact relative page addresses survive
@@ -73,7 +78,8 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
 - **`timeline::build_timeline_catalog`** derives the complete bounded knowledge timeline.
   `build_timeline` reads its entry string; publication uses the complete catalog. Entries
   remain reverse chronological by `created` ONLY, never `updated`; durable concepts,
-  documents and explorations only. Every dated entry stays reachable, including a day
+  documents and explorations only. `created` may be a source's authored date, not when
+  Lorekeeper collected it. Every dated entry stays reachable, including a day
   larger than one detail page. Undated pages have no timeline position; traversal, read
   and parse failures abort rebuilding and preserve previously published output.
 - **Frontmatter writers are bounded by `frontmatter_block`** — the shared line range between

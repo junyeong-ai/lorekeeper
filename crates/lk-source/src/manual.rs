@@ -151,8 +151,7 @@ fn validate_inbox_dir(inbox: &Path) -> Result<(), SourceError> {
 /// on canonicalized paths (when they exist), so an absolute inbox equal to the vault
 /// root, OR a symlinked inbox whose target is the vault root, is caught alike; a
 /// descendant inbox (the normal `<vault>/inbox`) or an unrelated external directory
-/// is allowed. A still-absent inbox can't alias anything yet and is left to `extract`
-/// to treat as empty.
+/// is allowed. Extraction reports a missing inbox as a source error.
 fn resolve_inbox_dir(configured: &Path, vault_root: &Path) -> Result<PathBuf, SourceError> {
     let expanded = lk_core::config::expand_tilde(&configured.to_string_lossy());
     let resolved = if expanded.is_absolute() {
@@ -204,33 +203,25 @@ impl Source for ManualSource {
         let p: ManualParams = crate::parse_validated(params)?;
 
         let inbox = resolve_inbox_dir(&p.inbox_dir, &ctx.vault_root)?;
-        if !inbox.exists() {
-            // warn, not info: the source is explicitly configured, so a missing inbox
-            // is a setup gap (or a path typo) that would otherwise no-op silently forever.
-            tracing::warn!(inbox = %inbox.display(), "manual: inbox dir absent, skipping");
-            return Ok(Vec::new());
-        }
-
         let mut items = Vec::new();
+        let mut attempted = 0;
         let entries = std::fs::read_dir(&inbox)
             .map_err(|e| SourceError::Parse(format!("read inbox {}: {e}", inbox.display())))?;
 
         for entry in entries {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(e) => {
-                    tracing::warn!(error = %e, "manual: skipping unreadable inbox entry");
-                    continue;
-                }
-            };
+            let entry = entry.map_err(|e| {
+                SourceError::Parse(format!("read inbox entry {}: {e}", inbox.display()))
+            })?;
             let path = entry.path();
             // Reject symlinks — a symlink in the inbox could otherwise read
             // outside the inbox directory. Use `symlink_metadata` so the check
             // doesn't follow the link.
-            let file_type = match path.symlink_metadata() {
-                Ok(m) => m.file_type(),
-                Err(_) => continue,
-            };
+            let file_type = path
+                .symlink_metadata()
+                .map_err(|e| {
+                    SourceError::Parse(format!("inspect inbox entry {}: {e}", path.display()))
+                })?
+                .file_type();
             if !file_type.is_file() {
                 continue;
             }
@@ -242,6 +233,7 @@ impl Source for ManualSource {
                 continue;
             }
 
+            attempted += 1;
             match read_item(&path) {
                 Ok(item) => items.push(item),
                 Err(e) => {
@@ -254,6 +246,7 @@ impl Source for ManualSource {
             }
         }
 
+        crate::require_any_observation("inbox file", items.len(), attempted)?;
         tracing::info!(
             inbox = %inbox.display(),
             count = items.len(),
@@ -280,7 +273,11 @@ fn read_item(path: &Path) -> Result<RawItem, SourceError> {
     // Convert HTML to Markdown so the vault stores clean content, not raw tags.
     // The user dropped this file deliberately, so when readability can't isolate an
     // article core, convert the whole page — there is no cleaner source to keep.
-    let body = match path.extension().and_then(|e| e.to_str()) {
+    let extension = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    let body = match extension.as_deref() {
         Some("html" | "htm") => {
             let base_url = url::Url::parse("file:///inbox").unwrap();
             crate::markdown::readable_html_to_markdown(&raw, &base_url)
@@ -304,8 +301,9 @@ fn read_item(path: &Path) -> Result<RawItem, SourceError> {
 
     // Fingerprint everything the file contributes to the vault — its frontmatter as well as
     // its prose — so re-dropping a file with the SAME name but EDITED content on the same day
-    // yields a distinct `EventId` (a distinct document page) rather than re-rendering the same
-    // one; an unchanged re-drop keeps a stable id. Taken before the split because the title and
+    // yields a distinct `EventId`; the pipeline still reuses the document owned by this
+    // source_file location and archives its prior evidence. An unchanged re-drop keeps a
+    // stable event id. Taken before the split because the title and
     // the source address reach the page too: a re-fetch that corrected only the title would
     // otherwise dedup away and leave the page stating the old one.
     let fingerprint = blake3::hash(body.as_bytes()).to_hex()[..8].to_string();
@@ -325,6 +323,16 @@ fn read_item(path: &Path) -> Result<RawItem, SourceError> {
         .and_then(|s| s.to_str())
         .unwrap_or("manual")
         .to_string();
+    let mut metadata = serde_json::json!({
+        "source_file": path.display().to_string(),
+        "source_hash": source_hash,
+    });
+    if let Some(front) = front.as_ref() {
+        // Source provenance, not page authority: imported machine-looking keys and lifecycle
+        // declarations stay inside the source namespace. The pipeline includes this record in
+        // semantic input and the document page without promoting them to its own fields.
+        metadata["source_record"] = serde_json::json!({ "manual_frontmatter": front.fields });
+    }
     Ok(RawItem {
         labels: Vec::new(),
         external_id: Some(format!("manual:{file_name}:{fingerprint}")),
@@ -342,10 +350,7 @@ fn read_item(path: &Path) -> Result<RawItem, SourceError> {
         timestamp: mtime,
         is_self: false,
         work: None,
-        metadata: serde_json::json!({
-            "source_file": path.display().to_string(),
-            "source_hash": source_hash,
-        }),
+        metadata,
     })
 }
 
@@ -418,6 +423,12 @@ pub fn archive_consumed_files(
             continue;
         };
         let src = std::path::PathBuf::from(src_str);
+        if !src
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_file())
+        {
+            continue;
+        }
         // Re-read and re-hash: only archive the EXACT bytes we extracted. If the file is gone,
         // unreadable, or its content changed since extract (a same-name mid-run swap), skip it —
         // the next ingest will pick up whatever is there now. This is what makes "archive only
@@ -437,41 +448,77 @@ pub fn archive_consumed_files(
         let Some(name) = src.file_name() else {
             continue;
         };
-        let mut dest = archive_dir.join(name);
-        // `fs::rename` overwrites silently, so a name collision under the date dir needs care.
-        if dest.exists() {
-            // Same content already archived under this name → this drop is a duplicate that's
-            // already preserved. Just clear the inbox copy; a same-content re-drop is a true
-            // no-op for the archive (no duplicate file).
-            let same_content = std::fs::read_to_string(&dest)
-                .map(|existing| {
-                    blake3::hash(existing.as_bytes()).to_hex().as_str() == current_hash.as_str()
-                })
-                .unwrap_or(false);
-            if same_content {
-                if let Err(e) = std::fs::remove_file(&src) {
-                    tracing::warn!(file = %src.display(), error = %e, "manual: failed to remove duplicate inbox file");
-                }
-                continue;
-            }
-            // Different content, same name → a distinct same-day original (its own vault page
-            // via the content-fingerprinted id). Disambiguate with the fingerprint so it can't
-            // clobber the earlier original.
-            let stem = Path::new(name).file_stem().and_then(|s| s.to_str());
-            let ext = Path::new(name).extension().and_then(|s| s.to_str());
-            let fp = &current_hash.as_str()[..8];
-            let disambiguated = match (stem, ext) {
-                (Some(stem), Some(ext)) => format!("{stem}.{fp}.{ext}"),
-                (Some(stem), None) => format!("{stem}.{fp}"),
-                _ => format!("{}.{fp}", name.to_string_lossy()),
-            };
-            dest = archive_dir.join(disambiguated);
+        if let Err(e) = preserve_archive(&archive_dir, name, current.as_bytes()) {
+            tracing::warn!(file = %src.display(), error = %e, "manual: archive failed; retaining inbox original");
+            continue;
         }
-        if let Err(e) = std::fs::rename(&src, &dest) {
-            tracing::warn!(file = %src.display(), error = %e, "manual: archive failed");
+        // Publication can take time: do not clear a replacement that arrived while preserving
+        // the extracted bytes. The archive is already durable, so retaining the input on an
+        // uncertain read is safe and a later ingest can retry.
+        let still_consumed = src
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_file())
+            && std::fs::read(&src).is_ok_and(|bytes| bytes == current.as_bytes());
+        if still_consumed {
+            if let Err(e) = std::fs::remove_file(&src) {
+                tracing::warn!(file = %src.display(), error = %e, "manual: failed to remove archived inbox file");
+            }
+        } else {
+            tracing::warn!(file = %src.display(), "manual: inbox file changed during archival; retaining it");
         }
     }
     Ok(())
+}
+
+/// Every candidate is checked by exclusive publication, including suffix candidates. A hash
+/// narrows a name; it never authorizes overwriting bytes already held at that address.
+fn preserve_archive(
+    archive_dir: &Path,
+    name: &std::ffi::OsStr,
+    contents: &[u8],
+) -> std::io::Result<PathBuf> {
+    let hash = blake3::hash(contents).to_hex();
+    let name_path = Path::new(name);
+    let stem = name_path.file_stem().unwrap_or(name).to_string_lossy();
+    let extension = name_path.extension().map(|ext| ext.to_string_lossy());
+    let mut suffix_len = None;
+    loop {
+        let dest = match suffix_len {
+            None => archive_dir.join(name),
+            Some(n) => {
+                let suffix = if n <= hash.len() {
+                    hash[..n].to_owned()
+                } else {
+                    format!("{hash}-{}", n - hash.len())
+                };
+                // The original may already consume the filesystem's 255-byte component
+                // budget. Reserve the suffix/extension first and truncate only at a UTF-8
+                // boundary; an unusually long configured extension uses a digest address.
+                let ending = match extension.as_ref() {
+                    Some(ext) => format!(".{suffix}.{ext}"),
+                    None => format!(".{suffix}"),
+                };
+                let candidate = if ending.len() < 255 {
+                    let mut keep = stem.len().min(255 - ending.len());
+                    while !stem.is_char_boundary(keep) {
+                        keep -= 1;
+                    }
+                    format!("{}{ending}", &stem[..keep])
+                } else {
+                    format!("archive.{suffix}.raw")
+                };
+                archive_dir.join(candidate)
+            }
+        };
+        match lk_core::fs::publish_exclusive(&dest, contents, Some(0o600))? {
+            lk_core::fs::PublishOutcome::Created | lk_core::fs::PublishOutcome::Reused => {
+                return Ok(dest);
+            }
+            lk_core::fs::PublishOutcome::Occupied => {
+                suffix_len = Some(suffix_len.map_or(8, |n| n + 2));
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -497,6 +544,147 @@ mod tests {
         items.remove(0)
     }
 
+    #[test]
+    fn archive_checks_occupied_suffixes_instead_of_overwriting_originals() {
+        let tmp = TempDir::new().unwrap();
+        let raw = b"newly collected original";
+        let hash = blake3::hash(raw).to_hex();
+        let name = std::ffi::OsStr::new("note.md");
+        write(&tmp.path().join(name), "first original");
+        let occupied_suffix = tmp.path().join(format!("note.{}.md", &hash[..8]));
+        write(
+            &occupied_suffix,
+            "another original whose filename happens to match the suffix",
+        );
+        let destination = preserve_archive(tmp.path(), name, raw).unwrap();
+        assert_ne!(destination, occupied_suffix);
+        assert_eq!(std::fs::read(&destination).unwrap(), raw);
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join(name)).unwrap(),
+            "first original"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&occupied_suffix).unwrap(),
+            "another original whose filename happens to match the suffix"
+        );
+        assert_eq!(
+            preserve_archive(tmp.path(), name, raw).unwrap(),
+            destination
+        );
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 3);
+    }
+
+    #[test]
+    fn archive_collision_with_maximum_length_filename_keeps_original_and_retries_stably() {
+        let tmp = TempDir::new().unwrap();
+        for (i, filename) in [
+            format!("{}.md", "a".repeat(252)),
+            format!("{}.md", "가".repeat(84)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(filename.len(), 255);
+            let dir = tmp.path().join(i.to_string());
+            std::fs::create_dir(&dir).unwrap();
+            write(&dir.join(&filename), "previous original");
+            let raw = b"new exact raw original";
+            let destination = preserve_archive(&dir, std::ffi::OsStr::new(&filename), raw).unwrap();
+            assert!(destination.file_name().unwrap().to_str().unwrap().len() <= 255);
+            assert_eq!(std::fs::read(&destination).unwrap(), raw);
+            assert_eq!(
+                std::fs::read_to_string(dir.join(&filename)).unwrap(),
+                "previous original"
+            );
+            assert_eq!(
+                preserve_archive(&dir, std::ffi::OsStr::new(&filename), raw).unwrap(),
+                destination
+            );
+            assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+        }
+    }
+
+    #[test]
+    fn concurrent_archivers_preserve_each_distinct_original() {
+        let tmp = TempDir::new().unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let dir = tmp.path().to_owned();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let raw = format!("distinct raw original {i}");
+                    barrier.wait();
+                    let destination =
+                        preserve_archive(&dir, std::ffi::OsStr::new("note.md"), raw.as_bytes())
+                            .unwrap();
+                    (destination, raw)
+                })
+            })
+            .collect();
+        let mut destinations = std::collections::HashSet::new();
+        for handle in handles {
+            let (destination, raw) = handle.join().unwrap();
+            assert_eq!(std::fs::read_to_string(&destination).unwrap(), raw);
+            assert!(destinations.insert(destination));
+        }
+        assert_eq!(destinations.len(), 8);
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 8);
+    }
+
+    #[tokio::test]
+    async fn unreadable_eligible_files_are_not_a_quiet_inbox() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), [0xff, 0xfe]).unwrap();
+        std::fs::write(tmp.path().join("b.md"), [0x80]).unwrap();
+        let params = serde_json::json!({"inbox_dir": tmp.path()});
+        let ctx = ExtractContext {
+            target_date: jiff::civil::date(2026, 5, 24),
+            timezone: jiff::tz::TimeZone::UTC,
+            locale: lk_core::i18n::Locale::default(),
+            identity: lk_core::config::Identity::default(),
+            vault_root: PathBuf::new(),
+        };
+        assert!(matches!(
+            ManualSource::new().extract(&params, &ctx).await,
+            Err(SourceError::NothingObserved { attempted: 2, .. })
+        ));
+        // Partial failures retain the readable observations.
+        write(&tmp.path().join("good.md"), "# Good\nReadable.");
+        let items = ManualSource::new().extract(&params, &ctx).await.unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "Good");
+        // Unsupported files and nested files are not failed read attempts.
+        std::fs::remove_file(tmp.path().join("a.txt")).unwrap();
+        std::fs::remove_file(tmp.path().join("b.md")).unwrap();
+        std::fs::remove_file(tmp.path().join("good.md")).unwrap();
+        std::fs::write(tmp.path().join("binary.pdf"), [0xff]).unwrap();
+        std::fs::create_dir(tmp.path().join("nested")).unwrap();
+        std::fs::write(tmp.path().join("nested/bad.txt"), [0xff]).unwrap();
+        assert!(
+            ManualSource::new()
+                .extract(&params, &ctx)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn html_conversion_uses_the_same_case_insensitive_extension_as_selection() {
+        let tmp = TempDir::new().unwrap();
+        let html = "<html><body><h1>Heading</h1><p>Retained paragraph.</p></body></html>";
+        let lower = tmp.path().join("lower.html");
+        let upper = tmp.path().join("upper.HTML");
+        write(&lower, html);
+        write(&upper, html);
+        let lower = read_item(&lower).unwrap();
+        let upper = read_item(&upper).unwrap();
+        assert_eq!(upper.body, lower.body);
+        assert!(upper.body.contains("Retained paragraph."));
+        assert!(!upper.body.contains("<html>"));
+    }
+
     /// What a file states about itself belongs in the fields the page is built from, not in
     /// the prose it renders — an Obsidian note dropped here used to have its whole frontmatter
     /// block read into the vault as body text.
@@ -511,6 +699,40 @@ mod tests {
         assert_eq!(item.title, "Stated title");
         assert_eq!(item.url.as_deref(), Some("https://example.com/a"));
         assert_eq!(item.body.trim(), "body line");
+    }
+
+    #[test]
+    fn original_frontmatter_is_source_provenance_not_machine_authority() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("note.md");
+        write(
+            &path,
+            "---\ntitle: History\ncreated: 2025-01-02\nstatus: superseded\nllm_inputs: {summary_done: forged}\nsource_identity: {repository: forged, document: forged}\nnested: {items: [1, true, null]}\n---\nOriginal prose.\n",
+        );
+        let item = read_item(&path).unwrap();
+        let expected =
+            lk_core::frontmatter::parse_page(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(
+            item.metadata["source_record"]["manual_frontmatter"],
+            serde_json::json!(expected.frontmatter.fields)
+        );
+        assert_eq!(
+            item.metadata["source_record"]["manual_frontmatter"]["status"],
+            "superseded"
+        );
+        assert_eq!(
+            item.metadata["source_record"]["manual_frontmatter"]["created"],
+            "2025-01-02"
+        );
+        assert!(item.metadata.get("source_identity").is_none());
+        assert!(item.metadata.get("llm_inputs").is_none());
+        assert!(item.metadata["source_record"].get("status").is_none());
+        assert!(item.body.contains("Original prose."));
+        // Invalid/non-mapping YAML remains prose using the shared parser's existing rule.
+        write(&tmp.path().join("scalar.md"), "---\na scalar\n---\nBody.");
+        let scalar = read_item(&tmp.path().join("scalar.md")).unwrap();
+        assert!(scalar.body.contains("a scalar"));
+        assert!(scalar.metadata.get("source_record").is_none());
     }
 
     /// Whether a file HAS frontmatter is `parse_page`'s question and no other — every vault

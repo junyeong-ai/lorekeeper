@@ -217,12 +217,13 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   inboxes are two deliberately separate streams. The file carries `title` and `source_url` as
   frontmatter because the address has to reach the document page, or the citation points at a
   copy nobody can check. A page with no article body is refused rather than absorbed as
-  boilerplate — the same judgment RSS makes when it keeps the feed summary. `free_path` decides
-  the name against what the FILESYSTEM holds, not what a read returns: a name is taken unless it
-  is a regular file already holding these bytes, so the check never follows a symlink the inbox
-  scanner would refuse anyway, and the stem is bounded at 200 bytes on a char boundary because
-  the title is the publisher's and Linux stops a name at 255 (a Korean headline reaches that in
-  a third of its characters, and the fetch would succeed while the write failed).
+  boilerplate — the same judgment RSS makes when it keeps the feed summary. `publish_article`
+  tries the title, 8/16/full digest suffixes and finally full-digest counters through
+  `lk_core::fs::publish_exclusive`: every candidate is atomically created or exact-byte reused,
+  never overwritten after an existence check. Symlinks/directories occupy every suffix,
+  and I/O errors abort instead of meaning absent. The base stem remains bounded at 200 bytes
+  on a character boundary; longer suffixes shorten it further so the whole filename fits
+  255 bytes. Concurrent fetches with one title preserve distinct article bytes.
 - **`lore wiki search` refuses rather than approximates.** An empty query has no answer to give
   — reporting that nothing holds it would read as a fact about the vault — and a `--limit 0`
   admits no page from the first one on, which is every other cap's rule in this workspace.

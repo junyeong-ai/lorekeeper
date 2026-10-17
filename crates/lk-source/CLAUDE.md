@@ -296,12 +296,27 @@ map to `RawItem`.
   root and the adapter would scan/archive vault pages). Files are
   read into `RawItem` with `external_id = "manual:{filename}:{blake3(body)[..8]}"` — the
   content fingerprint means a same-name file re-dropped with EDITED content on the same
-  day is a distinct event; an unchanged re-drop keeps a stable id. Symlinks are rejected.
+  day is a distinct event; an unchanged re-drop keeps a stable id. The pipeline still
+  reuses the document owned by that `source_file` location and archives prior page evidence;
+  event identity is not a promise of a new document page. Symlinks are rejected.
+  HTML conversion uses the same case-insensitive extension decision as selection.
+  Eligible files that all fail reading return `NothingObserved`; unsupported and nested
+  files are not read attempts, and a genuinely empty inbox remains successful. A missing
+  inbox or failed directory inspection is a source error, never an empty observation. Valid
+  parsed frontmatter is retained under `metadata.source_record.manual_frontmatter`, which
+  reaches the document and semantic input without promoting source-defined lifecycle or
+  machine-looking fields into generated page authority. Invalid/non-mapping YAML follows
+  the shared parser and remains prose; original bytes remain the archival authority.
   Archive-after-ingest defaults to **true**, but archival is deferred to
   `archive_consumed_files` (run only after every vault write and the queue flush
   succeeded), so a write/flush failure leaves the inbox intact for retry. It archives
-  every scanned file (one event per file), so nothing lingers in the inbox to be
-  re-scanned next run.
+  every consumed unchanged file only after exact bytes have been durably preserved with
+  `lk_core::fs::publish_exclusive`. Every candidate, including hash suffixes, is checked:
+  different bytes, directories and symlinks are never overwritten. Suffix candidates reserve
+  their byte budget before truncating a long stem at a UTF-8 boundary; an oversized extension
+  uses an explicit digest address. Identical regular bytes may be reused. Publication failures and changed inbox originals are retained for retry.
+  Archival establishes collection durability, not semantic completion. Relative attachment
+  bundles are not imported or relocated; preserving their source base remains separate work.
 - `Source` has no `source_type()` accessor — the factory selects by the input enum.
 - `markdown` module normalizes rich text to Markdown, loss-aversely (unmapped constructs
   degrade to their text): `adf_to_markdown`, `html_to_markdown` (via `htmd`),

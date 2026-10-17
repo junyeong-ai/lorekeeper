@@ -46,8 +46,36 @@ impl NavigationKind {
     }
 }
 
+/// Semantic heading identity is separate from its optional display count.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NavigationHeading {
+    pub label: String,
+    pub count: Option<usize>,
+}
+
+impl NavigationHeading {
+    pub fn counted(label: impl Into<String>, count: usize) -> Self {
+        Self {
+            label: label.into(),
+            count: Some(count),
+        }
+    }
+}
+
+impl From<String> for NavigationHeading {
+    fn from(label: String) -> Self {
+        Self { label, count: None }
+    }
+}
+
+impl From<&str> for NavigationHeading {
+    fn from(label: &str) -> Self {
+        label.to_owned().into()
+    }
+}
+
 pub struct NavigationRow {
-    pub headings: Vec<String>,
+    pub headings: Vec<NavigationHeading>,
     pub title: String,
     pub path: PathBuf,
     pub summary: Option<String>,
@@ -62,6 +90,7 @@ pub struct NavigationCatalog {
 
 struct Branch {
     path: PathBuf,
+    label: String,
     first: String,
     last: String,
     count: usize,
@@ -102,7 +131,46 @@ impl NavigationCatalog {
         }
         let dir = kind.directory(wiki);
         let mut branches = Vec::new();
-        for (number, chunk) in rows.chunks(NAVIGATION_PAGE_ENTRIES).enumerate() {
+        // Pack small groups whole; only an oversized group may cross a leaf boundary.
+        let mut leaves = Vec::new();
+        let mut pending_start = 0;
+        let mut pending_end = 0;
+        let mut start = 0;
+        while start < rows.len() {
+            let end = start
+                + rows[start..]
+                    .iter()
+                    .take_while(|row| row.headings == rows[start].headings)
+                    .count();
+            let size = end - start;
+            if pending_end > pending_start
+                && (size > NAVIGATION_PAGE_ENTRIES || end - pending_start > NAVIGATION_PAGE_ENTRIES)
+            {
+                leaves.push((pending_start, pending_end, None));
+                pending_start = start;
+            }
+            if size > NAVIGATION_PAGE_ENTRIES {
+                let parts = size.div_ceil(NAVIGATION_PAGE_ENTRIES);
+                for part in 0..parts {
+                    let chunk_start = start + part * NAVIGATION_PAGE_ENTRIES;
+                    let chunk_end = (chunk_start + NAVIGATION_PAGE_ENTRIES).min(end);
+                    let label = format!("{} · {}/{}", group_label(&rows[start]), part + 1, parts);
+                    leaves.push((chunk_start, chunk_end, Some(label)));
+                }
+                pending_start = end;
+            }
+            pending_end = end;
+            start = end;
+        }
+        if pending_end > pending_start {
+            leaves.push((pending_start, pending_end, None));
+        }
+        for (number, (start, end, continuation)) in leaves.into_iter().enumerate() {
+            let chunk = &rows[start..end];
+            let first = continuation
+                .clone()
+                .unwrap_or_else(|| group_label(&chunk[0]));
+            let last = continuation.unwrap_or_else(|| group_label(chunk.last().unwrap()));
             let path = dir.join(format!("0-{number}.md"));
             let body = format!(
                 "{}# {title}\n\n{}\n{}",
@@ -113,8 +181,9 @@ impl NavigationCatalog {
             pages.insert(path.clone(), body);
             branches.push(Branch {
                 path,
-                first: row_label(&chunk[0]),
-                last: row_label(chunk.last().unwrap()),
+                label: group_range(&first, &last),
+                first,
+                last,
                 count: chunk.len(),
             });
         }
@@ -134,6 +203,7 @@ impl NavigationCatalog {
                 );
                 parents.push(Branch {
                     path,
+                    label: group_range(&chunk[0].first, &chunk.last().unwrap().last),
                     first: chunk[0].first.clone(),
                     last: chunk.last().unwrap().last.clone(),
                     count: chunk.iter().map(|branch| branch.count).sum(),
@@ -260,13 +330,29 @@ impl NavigationCatalog {
     }
 }
 
-fn row_label(row: &NavigationRow) -> String {
-    format!("{} / {}", row.headings.join(" / "), row.title)
+fn group_label(row: &NavigationRow) -> String {
+    if row.headings.is_empty() {
+        row.title.clone()
+    } else {
+        row.headings
+            .iter()
+            .map(|heading| heading.label.as_str())
+            .collect::<Vec<_>>()
+            .join(" / ")
+    }
+}
+
+fn group_range(first: &str, last: &str) -> String {
+    if first == last {
+        first.to_owned()
+    } else {
+        format!("{first} … {last}")
+    }
 }
 
 fn render_rows(path: &Path, rows: &[NavigationRow]) -> String {
     let mut out = String::new();
-    let mut previous: &[String] = &[];
+    let mut previous: &[NavigationHeading] = &[];
     for row in rows {
         let shared = previous
             .iter()
@@ -274,7 +360,11 @@ fn render_rows(path: &Path, rows: &[NavigationRow]) -> String {
             .take_while(|(a, b)| a == b)
             .count();
         for (level, heading) in row.headings.iter().enumerate().skip(shared) {
-            writeln!(out, "\n{} {heading}\n", "#".repeat(level + 2)).unwrap();
+            let label = match heading.count {
+                Some(count) => format!("{} ({count})", heading.label),
+                None => heading.label.clone(),
+            };
+            writeln!(out, "\n{} {label}\n", "#".repeat(level + 2)).unwrap();
         }
         let entry = link::md_link(&row.title, &link::relative_dest(path, &row.path));
         match &row.summary {
@@ -289,10 +379,7 @@ fn render_rows(path: &Path, rows: &[NavigationRow]) -> String {
 fn render_branches(path: &Path, branches: &[Branch]) -> String {
     let mut out = String::new();
     for branch in branches {
-        let label = format!(
-            "{} … {} ({} pages)",
-            branch.first, branch.last, branch.count
-        );
+        let label = format!("{} ({})", branch.label, branch.count);
         writeln!(
             out,
             "- {}",
@@ -353,13 +440,44 @@ mod tests {
             "# Navigation\n",
             (0..count)
                 .map(|number| NavigationRow {
-                    headings: vec![format!("Group {}", number / 300)],
+                    headings: vec![format!("Group {}", number / 300).into()],
                     title: format!("항목 [{number}]"),
                     path: PathBuf::from(format!("custom/concepts/Item {number}.md")),
                     summary: None,
                 })
                 .collect(),
         )
+    }
+
+    #[test]
+    fn heading_counts_do_not_leak_into_branch_group_labels() {
+        let rows = (0..101)
+            .map(|number| NavigationRow {
+                headings: vec![
+                    NavigationHeading::counted("Concepts", 101),
+                    NavigationHeading::counted("auth-identity (literal)", 101),
+                ],
+                title: format!("Document {number}"),
+                path: PathBuf::from(format!("wiki/documents/{number}.md")),
+                summary: None,
+            })
+            .collect();
+        let catalog = NavigationCatalog::build(
+            NavigationKind::Index,
+            Path::new("wiki"),
+            "Navigation",
+            "# Navigation\n",
+            rows,
+        );
+        let root = &catalog.pages[&PathBuf::from("wiki/index.md")];
+        assert!(root.contains("Concepts / auth-identity (literal) · 1/2 (100)"));
+        assert!(!root.contains("Concepts (101)"));
+        let detail = catalog
+            .pages
+            .values()
+            .find(|page| page.contains("## Concepts (101)"))
+            .unwrap();
+        assert!(detail.contains("### auth-identity (literal) (101)"));
     }
 
     #[test]
@@ -372,6 +490,13 @@ mod tests {
             for count in [0, 1, 100, 101, 10_201] {
                 let catalog = build(kind, count);
                 assert_eq!(catalog.pages, build(kind, count).pages);
+                if count == 10_201 {
+                    let root = &catalog.pages[&Path::new("custom").join(kind.file())];
+                    // The parent's boundary continues a group; its two links must
+                    // identify different continuation ranges, not repeat its name.
+                    assert!(root.contains("Group 0 · 1/3 … Group 33 · 1/3"), "{root}");
+                    assert!(root.contains("Group 33 · 2/3 … Group 34"), "{root}");
+                }
                 let mut visited = HashSet::new();
                 let mut reached = HashSet::new();
                 let mut pending = vec![Path::new("custom").join(kind.file())];
@@ -403,6 +528,82 @@ mod tests {
                 assert_eq!(visited.len(), catalog.pages.len());
             }
         }
+    }
+
+    #[test]
+    fn detail_pages_keep_groups_whole_and_label_only_large_group_continuations() {
+        for kind in [
+            NavigationKind::Index,
+            NavigationKind::Map,
+            NavigationKind::Timeline,
+        ] {
+            let mut rows = Vec::new();
+            for (group, count) in [("First", 60), ("Second", 60), ("Large", 205)] {
+                for number in 0..count {
+                    rows.push(NavigationRow {
+                        headings: vec![group.into()],
+                        title: format!("Long document title {group} {number}"),
+                        path: PathBuf::from(format!("custom/documents/{group} {number}.md")),
+                        summary: None,
+                    });
+                }
+            }
+            let catalog = NavigationCatalog::build(
+                kind,
+                Path::new("custom"),
+                "Navigation",
+                "# Navigation\n",
+                rows,
+            );
+            let root = &catalog.pages[&Path::new("custom").join(kind.file())];
+            assert!(!root.contains("Long document title"), "{root}");
+            assert!(root.contains("[First (60)]"), "{root}");
+            assert!(root.contains("[Second (60)]"), "{root}");
+            for part in 1..=3 {
+                assert!(root.contains(&format!("Large · {part}/3")), "{root}");
+            }
+            assert_eq!(catalog.pages.len(), 6);
+            for (path, content) in &catalog.pages {
+                if path == &Path::new("custom").join(kind.file()) {
+                    continue;
+                }
+                assert_eq!(
+                    content
+                        .lines()
+                        .filter(|line| line.starts_with("## "))
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn many_small_groups_keep_the_entry_bounded_and_parent_labels_unambiguous() {
+        let rows = (0..101)
+            .map(|number| NavigationRow {
+                headings: vec![format!("Group {number:03}").into()],
+                title: format!("Document {number}"),
+                path: PathBuf::from(format!("custom/documents/{number}.md")),
+                summary: None,
+            })
+            .collect();
+        let catalog = NavigationCatalog::build(
+            NavigationKind::Index,
+            Path::new("custom"),
+            "Navigation",
+            "# Navigation\n",
+            rows,
+        );
+        let root = &catalog.pages[Path::new("custom/index.md")];
+        assert!(root.contains("Group 000 … Group 099 (100)"), "{root}");
+        assert!(root.contains("[Group 100 (1)]"), "{root}");
+        assert!(!root.contains("Group 100 … Group 100"));
+        assert_eq!(
+            root.lines().filter(|line| line.starts_with("- ")).count(),
+            2
+        );
+        assert_eq!(catalog.pages.len(), 3);
     }
 
     #[test]

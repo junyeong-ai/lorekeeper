@@ -45,9 +45,8 @@ pub async fn run(opts: &GlobalOptions, url: &str, source: Option<String>) -> mie
     tokio::fs::create_dir_all(&inbox)
         .await
         .map_err(|e| miette::miette!("create {}: {e}", inbox.display()))?;
-    let path = free_path(&inbox, &title, &content);
-    lk_core::fs::write_atomic(&path, content.as_bytes(), None)
-        .map_err(|e| miette::miette!("write {}: {e}", path.display()))?;
+    let path = publish_article(&inbox, &title, content.as_bytes())
+        .map_err(|e| miette::miette!("preserve article in {}: {e}", inbox.display()))?;
 
     eprintln!("{title}");
     eprintln!("  {}", path.display());
@@ -113,38 +112,59 @@ fn listing(manual: &[(&String, &lk_core::config::SourceConfig)]) -> String {
     )
 }
 
-/// Where this article belongs in `inbox`.
+/// Preserve this article in `inbox`, testing every candidate through exclusive
+/// publication rather than choosing a path and subsequently overwriting it.
 ///
 /// The title names the file so the inbox stays readable. A name already taken by DIFFERENT
 /// content takes a suffix from this article's own bytes, which keeps both properties that
-/// matter: re-fetching one article always resolves to the one path it already occupies, and
-/// two articles sharing a title never overwrite each other. A counter would satisfy the
-/// second and break the first, minting a file per re-fetch.
+/// matter: with the prior entries retained, re-fetching reuses its existing bytes, and
+/// two articles sharing a title never overwrite each other. Longer digest prefixes
+/// and finally a counter also handle occupied suffixes; every step reuses exact
+/// existing bytes, so repeated fetches do not mint another file.
 /// A name is taken by anything that is not this same article as a regular file. The inbox
 /// scanner refuses a symlink, so writing under one would leave an article nothing ever
 /// ingests — and the comparison itself must not read through one, since what it would compare
 /// is a file somewhere else entirely.
-fn free_path(inbox: &Path, title: &str, content: &str) -> PathBuf {
+fn publish_article(inbox: &Path, title: &str, content: &[u8]) -> std::io::Result<PathBuf> {
+    use lk_core::fs::{PublishOutcome, publish_exclusive};
+
     let stem = bounded(&slugify(title).unwrap_or_else(|| "article".into()));
-    let candidate = inbox.join(format!("{stem}.md"));
-    let free = match candidate.symlink_metadata() {
-        Err(_) => true,
-        Ok(held) => {
-            held.file_type().is_file()
-                && std::fs::read_to_string(&candidate).is_ok_and(|on_disk| on_disk == content)
+    let fingerprint = blake3::hash(content).to_hex().to_string();
+    let names = [
+        article_name(&stem, ""),
+        article_name(&stem, &format!("-{}", &fingerprint[..8])),
+        article_name(&stem, &format!("-{}", &fingerprint[..16])),
+        article_name(&stem, &format!("-{fingerprint}")),
+    ];
+    for name in names {
+        let path = inbox.join(name);
+        match publish_exclusive(&path, content, None)? {
+            PublishOutcome::Created | PublishOutcome::Reused => return Ok(path),
+            PublishOutcome::Occupied => {}
         }
-    };
-    if free {
-        return candidate;
     }
-    let fingerprint = &blake3::hash(content.as_bytes()).to_hex()[..8];
-    inbox.join(format!("{stem}-{fingerprint}.md"))
+    for counter in 1..=u64::MAX {
+        let path = inbox.join(article_name(&stem, &format!("-{fingerprint}-{counter}")));
+        match publish_exclusive(&path, content, None)? {
+            PublishOutcome::Created | PublishOutcome::Reused => return Ok(path),
+            PublishOutcome::Occupied => {}
+        }
+    }
+    Err(std::io::Error::other("article name space exhausted"))
+}
+
+fn article_name(stem: &str, suffix: &str) -> String {
+    let mut cut = stem.len().min(255 - suffix.len() - ".md".len());
+    while !stem.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}{suffix}.md", stem[..cut].trim_end_matches('-'))
 }
 
 /// A filename a filesystem will accept. The title is the page's, not the user's, and Linux
 /// bounds one name at 255 BYTES — a long Korean or Japanese headline reaches that in a third
 /// of its characters, so a fetch would succeed and the write fail. Cut on a character
-/// boundary, leaving room for the fingerprint suffix and the extension.
+/// boundary. `article_name` reserves any additional digest/counter suffix budget.
 fn bounded(stem: &str) -> String {
     const MAX_STEM_BYTES: usize = 200;
 
@@ -156,4 +176,130 @@ fn bounded(stem: &str) -> String {
         cut -= 1;
     }
     stem[..cut].trim_end_matches('-').to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn publication_checks_every_suffix_and_reuses_the_existing_article() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = b"new article";
+        let fingerprint = blake3::hash(bytes).to_hex().to_string();
+        let occupied = [
+            "headline.md".to_owned(),
+            format!("headline-{}.md", &fingerprint[..8]),
+            format!("headline-{}.md", &fingerprint[..16]),
+            format!("headline-{fingerprint}.md"),
+            format!("headline-{fingerprint}-1.md"),
+        ];
+        for name in &occupied {
+            std::fs::write(dir.path().join(name), name.as_bytes()).unwrap();
+        }
+        let path = publish_article(dir.path(), "Headline", bytes).unwrap();
+        assert_eq!(
+            path,
+            dir.path().join(format!("headline-{fingerprint}-2.md"))
+        );
+        assert_eq!(
+            publish_article(dir.path(), "Headline", bytes).unwrap(),
+            path
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        for name in &occupied {
+            assert_eq!(
+                std::fs::read(dir.path().join(name)).unwrap(),
+                name.as_bytes()
+            );
+        }
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 6);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publication_skips_symlinks_and_directories_at_suffixes_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = b"article";
+        let fingerprint = blake3::hash(bytes).to_hex().to_string();
+        let outside = dir.path().join("outside");
+        std::fs::write(&outside, bytes).unwrap();
+        let base = dir.path().join("headline.md");
+        std::os::unix::fs::symlink(&outside, &base).unwrap();
+        let short = dir
+            .path()
+            .join(format!("headline-{}.md", &fingerprint[..8]));
+        std::fs::create_dir(&short).unwrap();
+        let medium = dir
+            .path()
+            .join(format!("headline-{}.md", &fingerprint[..16]));
+        std::os::unix::fs::symlink(&outside, &medium).unwrap();
+        let path = publish_article(dir.path(), "Headline", bytes).unwrap();
+        assert_eq!(path, dir.path().join(format!("headline-{fingerprint}.md")));
+        assert!(base.symlink_metadata().unwrap().file_type().is_symlink());
+        assert!(medium.symlink_metadata().unwrap().file_type().is_symlink());
+        assert!(short.is_dir());
+        assert_eq!(std::fs::read(outside).unwrap(), bytes);
+    }
+
+    #[test]
+    fn long_multibyte_titles_fit_even_the_full_digest_and_counter_candidates() {
+        let dir = tempfile::tempdir().unwrap();
+        let title = "긴제목".repeat(100);
+        let stem = bounded(&slugify(&title).unwrap());
+        let bytes = b"article";
+        let fingerprint = blake3::hash(bytes).to_hex().to_string();
+        for suffix in [
+            "".to_owned(),
+            format!("-{}", &fingerprint[..8]),
+            format!("-{}", &fingerprint[..16]),
+            format!("-{fingerprint}"),
+        ] {
+            std::fs::write(dir.path().join(article_name(&stem, &suffix)), b"occupied").unwrap();
+        }
+        let path = publish_article(dir.path(), &title, bytes).unwrap();
+        assert!(path.file_name().unwrap().len() <= 255);
+        assert!(
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .ends_with("-1.md")
+        );
+        assert_eq!(publish_article(dir.path(), &title, bytes).unwrap(), path);
+        assert!(article_name(&stem, &format!("-{fingerprint}-{}", u64::MAX)).len() <= 255);
+    }
+
+    #[test]
+    fn publication_propagates_unreadable_parent_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let inbox = dir.path().join("not-a-directory");
+        std::fs::write(&inbox, b"keep").unwrap();
+        assert!(publish_article(&inbox, "headline", b"article").is_err());
+        assert_eq!(std::fs::read(inbox).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn concurrent_same_title_fetches_preserve_both_originals() {
+        use std::sync::{Arc, Barrier};
+        let dir = tempfile::tempdir().unwrap();
+        let barrier = Arc::new(Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|number| {
+                let inbox = dir.path().to_owned();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let bytes = vec![b'a' + number; 16_384];
+                    barrier.wait();
+                    let path = publish_article(&inbox, "same title", &bytes).unwrap();
+                    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+                    assert_eq!(publish_article(&inbox, "same title", &bytes).unwrap(), path);
+                    path
+                })
+            })
+            .collect();
+        let paths: std::collections::HashSet<_> =
+            handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(paths.len(), 8);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 8);
+    }
 }

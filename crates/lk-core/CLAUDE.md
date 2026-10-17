@@ -104,6 +104,16 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   unique-temp invariant can't drift; `lk_vault::VaultWriter` delegates here from both its
   sync and its async (tokio `spawn_blocking`) paths — not a second implementation. The
   temp keeps `path`'s extension before `.tmp` so suffix sweeps still match.
+- **`fs::publish_exclusive` preserves originals instead of replacing them.** It fsyncs a
+  private same-directory temporary file, then atomically hard-links it into an absent
+  destination. `Created` and `Reused` are success; `Occupied` means different bytes or a
+  non-regular/symlink entry, and all other I/O errors propagate. Reuse reads a pinned
+  regular inode and syncs it; it never changes existing permissions. Every candidate
+  suffix must use this API, not a preflight existence check followed by `write_atomic`.
+  Short independent temp names also fit maximum-length destination filenames. Hard-link
+  support is required; there is no overwriting fallback. This is not a lock against
+  external in-place edits or parent-directory replacement, and does not authorize deleting
+  a source without a separate consumed-byte check. `write_atomic` keeps its replacement contract.
 - **`markdown` holds two contracts over vault text, and they are not the same kind of thing.**
   `scan_defects` is the CLEANLINESS contract the converters uphold at conversion time, so a
   finding means a page predates a tightening and re-rendering repairs it. `scan_credentials`

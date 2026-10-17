@@ -138,6 +138,8 @@ Answer a question grounded in vault content, with compounding.
    includes nested subsections. Read the sources behind the claim, not only its synthesis.
    Use `source_record` to distinguish active, archived, superseded and unknown source state;
    `--source-status` filters exact recorded states. A historical claim can remain valid.
+   Manual `source_record.manual_frontmatter` retains unpromoted source declarations;
+   inspect them directly, since `--source-status` does not classify that nested metadata.
    Follow declared document relations with `lore wiki provenance <exact-path>`.
    It resolves only exact repository/document identities; missing or ambiguous owners
    remain explicit. Use `--direction incoming|both` or `--relation <name>` to narrow,
