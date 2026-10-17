@@ -1,6 +1,6 @@
 ---
 name: lore-process
-version: 0.49.1
+version: 0.50.0
 description: Drain the Lorekeeper LLM work queue after `lore ingest` runs in queue mode — fill the empty LLM-owned sections (summaries, refined events, concepts, themes, reviews) of freshly-written vault pages using the active agent session. Idempotent and resumable. Run after each ingest, or on a daily schedule.
 when_to_use: |
   queue process, drain queue, fill summaries,
@@ -315,7 +315,10 @@ and other page writers with a processing wave so they do not invalidate drafts.
 ## Regenerating a section
 
 For an established mistaken citation, finish work touching its origin first. Read
-the source and concept in context, then preview `lore graph retract-citation
+the source and the concept's complete synthesis, including its conditions and
+boundary cases. A source can establish when a method does not apply; absence of
+a positive example does not make that citation mistaken. Judge the evidence
+against that scope, not just the concept's title or opening definition. Then preview `lore graph retract-citation
 <origin.md> <concept.md> --revision <file_revision from wiki read> --dry-run`.
 Omit `--dry-run` to publish the reviewed correction. This archives prior evidence
 and removes only standalone links in the existing related-concepts list. It never

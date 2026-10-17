@@ -8,9 +8,7 @@ use crate::search::{Page, SearchOptions, SearchResult, fold, fold_name, search_t
 use crate::{MutationSession, VaultError};
 
 const INDEX_PATH: &str = ".lorekeeper/search.sqlite";
-// Version 2 excludes configured wiki navigation even when source roots overlap it.
-// Old payloads are readable JSON but describe a different search population.
-const VERSION: i32 = 2;
+const VERSION: i32 = 3;
 
 #[derive(Serialize)]
 pub struct SearchSnapshot {
@@ -133,15 +131,7 @@ pub(super) fn search(
     let path = crate::page_path(root, Path::new(INDEX_PATH))?;
     let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let transaction = connection.transaction()?;
-    let (snapshot, recorded_context, version): (String, String, i32) =
-        transaction.query_row("SELECT id, context, version FROM snapshot", [], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })?;
-    if version != VERSION || recorded_context != context(root, dirs)? || snapshot != expected {
-        return Err(invalid(
-            "search snapshot does not match; run `lore wiki prepare` and restart navigation",
-        ));
-    }
+    verify_snapshot(&transaction, root, dirs, expected)?;
     let query = options.query.unwrap_or_default();
     let identity = lk_core::concept::identity_key(query);
     let terms: Vec<_> = query.split_whitespace().map(fold).collect();
@@ -160,6 +150,7 @@ pub(super) fn search(
             let (path, title, aliases) = row?;
             vocabulary.push(Page {
                 file_revision: String::new(),
+                body_line_offset: 0,
                 id: String::new(),
                 title,
                 rel_path: PathBuf::from(path),
@@ -240,6 +231,47 @@ pub(super) fn search(
         }
     }
     Ok(result)
+}
+
+fn verify_snapshot(
+    connection: &Connection,
+    root: &Path,
+    dirs: &VaultDirs,
+    expected: &str,
+) -> Result<(), VaultError> {
+    let (snapshot, recorded_context, version): (String, String, i32) =
+        connection.query_row("SELECT id, context, version FROM snapshot", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+    if version != VERSION || recorded_context != context(root, dirs)? || snapshot != expected {
+        return Err(invalid(
+            "search snapshot does not match; run `lore wiki prepare` and restart navigation",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn visit_body_pages(
+    root: &Path,
+    dirs: &VaultDirs,
+    include_sources: bool,
+    expected: &str,
+    mut visit: impl FnMut(Page, usize) -> Result<(), VaultError>,
+) -> Result<(), VaultError> {
+    let path = crate::page_path(root, Path::new(INDEX_PATH))?;
+    let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let transaction = connection.transaction()?;
+    verify_snapshot(&transaction, root, dirs, expected)?;
+    let mut statement =
+        transaction.prepare("SELECT payload FROM pages WHERE ?1 OR knowledge = 1 ORDER BY id")?;
+    let rows = statement.query_map([include_sources], |row| row.get::<_, String>(0))?;
+    for row in rows {
+        let page: Page = serde_json::from_str(&row?)
+            .map_err(|error| VaultError::Serialization(error.to_string()))?;
+        let offset = page.body_line_offset;
+        visit(page, offset)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

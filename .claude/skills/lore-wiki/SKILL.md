@@ -1,6 +1,6 @@
 ---
 name: lore-wiki
-version: 0.49.1
+version: 0.50.0
 description: Semantic wiki operations for the Lorekeeper vault. Add sources, query with compounding, audit structural and semantic health. Reads AGENTS.md for page formats and section vocabulary — never hardcodes headings. Pairs with `lore` (the deterministic binary) for graph analysis and queue processing.
 when_to_use: |
   wiki query, knowledge search, ask wiki, search vault,
@@ -152,8 +152,11 @@ Answer a question grounded in vault content, with compounding.
    Choose `--regex` or `--ignore-case` explicitly; `--context 0..5` bounds surrounding
    lines. Results carry physical line/column, file revision and clipping flags.
    Follow `next_offset` for further matching lines, then use revision-checked `wiki read`
-   to inspect the containing passage. This mode reads live files and rejects `--snapshot`;
-   its totals are matching lines/pages, not claims or semantic-review coverage.
+   to inspect the containing passage. Repeated searches can use `--snapshot <id>` from
+   `lore wiki prepare` to scan captured bodies without reopening every source file.
+   Snapshot results retain captured file revisions; a changed live page requires fresh
+   retrieval before reading. Without a snapshot the scan reads live files. Totals count
+   matching lines/pages, not claims or semantic-review coverage.
    For claims missing from the concept layer, search the same terms with
    `--include-sources`; daily observations and managed reviews are then searchable.
    Use `lore graph --json neighbors <vault-relative.md>` to follow incoming and outgoing

@@ -146,8 +146,8 @@ pub enum ProvenanceDirection {
 
 #[derive(clap::Args)]
 pub struct BodyEvidenceOptions {
-    /// Search literal Markdown body lines, including code and link addresses (live only)
-    #[arg(long, conflicts_with = "snapshot")]
+    /// Search literal Markdown body lines, including code and link addresses
+    #[arg(long)]
     body: bool,
     /// Interpret the body query as a Rust regular expression, matched within each line
     #[arg(long, requires = "body")]
@@ -394,11 +394,15 @@ async fn run_body_search(
         );
     } else {
         eprintln!(
-            "{} of {} matching lines in {} pages (offset {}; live scan)",
+            "{} of {} matching lines in {} pages (offset {}; {})",
             report.hits.len(),
             report.total,
             report.matching_pages,
-            report.offset
+            report.offset,
+            report.snapshot.as_deref().map_or_else(
+                || "live scan".to_owned(),
+                |snapshot| format!("snapshot {snapshot}")
+            )
         );
         for hit in &report.hits {
             println!(

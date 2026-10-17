@@ -8,7 +8,7 @@ use regex::RegexBuilder;
 use serde::Serialize;
 
 use crate::VaultError;
-use crate::search::{SearchOptions, visit_pages};
+use crate::search::{Page, SearchOptions, visit_pages};
 
 const MAX_LIMIT: usize = 100;
 const MAX_CONTEXT: usize = 5;
@@ -16,7 +16,7 @@ const CONTEXT_CHARACTERS: usize = 400;
 const MAX_QUERY_BYTES: usize = 4096;
 
 /// Scope, pagination and metadata filters have the same meaning as discovery.
-/// A query is required. Prepared visible-text snapshots cannot answer raw-body queries.
+/// A query is required. An explicit snapshot pins the captured Markdown bodies.
 pub struct BodySearchOptions<'a> {
     pub search: SearchOptions<'a>,
     pub regex: bool,
@@ -60,6 +60,8 @@ pub struct BodySearchHit {
 
 #[derive(Debug, Serialize)]
 pub struct BodySearchResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<String>,
     pub query: String,
     pub regex: bool,
     pub ignore_case: bool,
@@ -77,8 +79,8 @@ pub struct BodySearchResult {
     pub context_characters_per_line: usize,
 }
 
-/// Scan live managed bodies with bounded output and exact totals. Scope/file/line order
-/// is deterministic, but offsets are live: external edits can change later pages of results.
+/// Scan managed bodies with bounded output and exact totals. Scope/file/line order
+/// is deterministic; without a snapshot, external edits can change later result pages.
 /// Every hit carries the full file revision accepted by `inspect_document`.
 ///
 /// Matching is line-oriented, case-sensitive literal substring by default. Regex and
@@ -103,11 +105,6 @@ pub fn search_body(
             "body search requires a nonempty single-line query of at most 4096 bytes",
         ));
     }
-    if search.snapshot.is_some() {
-        return Err(invalid(
-            "body search reads live Markdown; --snapshot is not supported",
-        ));
-    }
     if !(1..=MAX_LIMIT).contains(&search.limit) || options.context > MAX_CONTEXT {
         return Err(invalid(
             "body search requires --limit 1..100 and --context 0..5",
@@ -127,7 +124,7 @@ pub fn search_body(
     let mut total = 0;
     let mut matching_pages = 0;
     let mut scanned_pages = 0;
-    visit_pages(root, dirs, search.include_sources, |page, line_offset| {
+    let visit = |page: Page, line_offset| {
         if !page.matches_filters(search) {
             return Ok(());
         }
@@ -182,9 +179,15 @@ pub fn search_body(
         }
         matching_pages += usize::from(page_matches);
         Ok(())
-    })?;
+    };
+    if let Some(snapshot) = search.snapshot {
+        super::search_index::visit_body_pages(root, dirs, search.include_sources, snapshot, visit)?;
+    } else {
+        visit_pages(root, dirs, search.include_sources, visit)?;
+    }
     let end = search.offset.saturating_add(hits.len());
     Ok(BodySearchResult {
+        snapshot: search.snapshot.map(str::to_owned),
         query: query.into(),
         regex: options.regex,
         ignore_case: options.ignore_case,
@@ -352,6 +355,94 @@ mod tests {
             "wiki/documents/b.md",
             "---\ninvalid: [\n---\nneedle\n",
         );
+        assert!(search_body(root.path(), &dirs, &options).is_err());
+    }
+
+    #[test]
+    fn snapshot_preserves_body_locations_scope_and_pagination_until_reprepared() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let path = "wiki/documents/a.md";
+        write(
+            root.path(),
+            path,
+            "\u{feff}---\r\ntitle: a+b metadata\r\ntype: document\r\ncategory: ops\r\nsource_record: {status: archived}\r\n---\r\n## Claim\r\n한글 [a+b](hidden-target.md)\r\n```\r\nA+B\r\n```\r\na+b",
+        );
+        write(
+            root.path(),
+            "wiki/concepts/b.md",
+            "---\ntype: concept\n---\na+b\n",
+        );
+        write(
+            root.path(),
+            "daily/feed/a.md",
+            "---\ntype: daily\n---\na+b\n",
+        );
+        let session = crate::MutationSession::acquire(root.path()).unwrap();
+        let snapshot = crate::prepare_search(&session, &dirs).unwrap().snapshot;
+        drop(session);
+        for (query, regex, ignore_case) in [
+            ("a+b", false, false),
+            ("a\\+b", true, true),
+            ("hidden-target.md", false, false),
+            ("한글", false, false),
+            ("metadata", false, false),
+        ] {
+            for include_sources in [false, true] {
+                for filtered in [false, true] {
+                    for offset in [0, 1, 10] {
+                        let mut options = BodySearchOptions {
+                            search: SearchOptions {
+                                query: Some(query),
+                                include_sources,
+                                format: filtered.then_some("document"),
+                                category: filtered.then_some("ops"),
+                                source_status: filtered.then_some("archived"),
+                                limit: 1,
+                                offset,
+                                ..Default::default()
+                            },
+                            regex,
+                            ignore_case,
+                            context: 1,
+                        };
+                        let live = search_body(root.path(), &dirs, &options).unwrap();
+                        options.search.snapshot = Some(&snapshot);
+                        let mut captured = search_body(root.path(), &dirs, &options).unwrap();
+                        assert_eq!(captured.snapshot.take().as_deref(), Some(snapshot.as_str()));
+                        assert_eq!(
+                            serde_json::to_value(captured).unwrap(),
+                            serde_json::to_value(live).unwrap()
+                        );
+                    }
+                }
+            }
+        }
+        let mut options = BodySearchOptions {
+            search: SearchOptions {
+                query: Some("hidden-target.md"),
+                snapshot: Some(&snapshot),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let captured = search_body(root.path(), &dirs, &options).unwrap();
+        assert_eq!(captured.hits[0].line, 8);
+        write(root.path(), path, "---\ntype: document\n---\nchanged\n");
+        assert_eq!(search_body(root.path(), &dirs, &options).unwrap().total, 1);
+        let read = DocumentOptions {
+            revision: Some(&captured.hits[0].file_revision),
+            section: None,
+            offset: 0,
+            limit: 20,
+        };
+        assert!(inspect_document(root.path(), Path::new(path), &read).is_err());
+        options.search.snapshot = None;
+        assert_eq!(search_body(root.path(), &dirs, &options).unwrap().total, 0);
+        let session = crate::MutationSession::acquire(root.path()).unwrap();
+        crate::prepare_search(&session, &dirs).unwrap();
+        drop(session);
+        options.search.snapshot = Some(&snapshot);
         assert!(search_body(root.path(), &dirs, &options).is_err());
     }
 }

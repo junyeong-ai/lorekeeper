@@ -303,6 +303,7 @@ lore graph --json neighbors wiki/concepts/example.md # 출처를 포함한 양�
 lore graph --json neighbors wiki/concepts/example.md --type concept # 관련 개념만 탐색; --type document로 원문 조회
 lore wiki prepare             # 검색 판본 생성; 반복 검색에 --snapshot <id> 사용
 lore wiki search "정확한 문자열" --body --json # 원문 행·문맥·판본; 정규식은 --regex
+lore wiki search "정확한 문자열" --body --snapshot <id> --json # 준비한 판본에서 반복 검색
 lore wiki document-identity plan --source ID --manifest /tmp/identity.json # 기존 사본의 식별자 이관 검증
 lore wiki read wiki/concepts/example.md # 목차 → --section ID; 후속 읽기에 --revision 사용
 lore wiki links wiki/concepts/example.md --limit 20 # 연결된 원문 행·설명·리비전 조회

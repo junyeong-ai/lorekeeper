@@ -637,7 +637,7 @@ pub fn render_agents_md(
          an empty key. Live pagination reflects current files; `--snapshot` paginates captured revisions."
     )
     .unwrap();
-    writeln!(out, "- `lore wiki search <literal> --body --json` — exact raw Markdown body lines, including code and link destinations. Case-sensitive by default; select --regex or --ignore-case explicitly. --context 0..5 bounds surrounding lines; each result supplies physical line/column, clipping flags and file_revision. Totals count matching lines/pages, not semantic claims. This live scan rejects --snapshot and reads the full selected scope even with a small --limit.").unwrap();
+    writeln!(out, "- `lore wiki search <literal> --body --json` — exact raw Markdown body lines, including code and link destinations. Case-sensitive by default; select --regex or --ignore-case explicitly. --context 0..5 bounds surrounding lines; each result supplies physical line/column, clipping flags and file_revision. Totals count matching lines/pages, not semantic claims. The default scans live files; --snapshot searches captured bodies without reopening each file. Both read the full selected scope even with a small --limit. A snapshot is historical evidence, not a guarantee that current files are unchanged.").unwrap();
     writeln!(out, "- `lore wiki prepare` — capture a reusable SQLite lexical search snapshot. Pass its \
         `snapshot` to search/browse with `--snapshot`. It contains captured revisions, not live changes; \
         prepare again after edits or before a new investigation. Missing or mismatched snapshots fail explicitly.").unwrap();

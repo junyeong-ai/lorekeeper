@@ -161,3 +161,34 @@ fn invalid_body_combinations_fail_without_partial_json() {
     }
     assert!(!root.path().join("vault/.lorekeeper").exists());
 }
+
+#[test]
+fn body_search_can_pin_a_prepared_snapshot_and_reports_its_scope() {
+    let root = fixture();
+    let prepared = report(&run(root.path(), &["wiki", "prepare"]));
+    let snapshot = prepared["snapshot"].as_str().unwrap();
+    let args = [
+        "wiki",
+        "search",
+        "unusual-destination.md",
+        "--body",
+        "--snapshot",
+        snapshot,
+    ];
+    let mut json_args = args.to_vec();
+    json_args.push("--json");
+    let captured = report(&run(root.path(), &json_args));
+    assert_eq!(captured["snapshot"], snapshot);
+    assert_eq!(captured["total"], 1);
+    std::fs::remove_file(root.path().join("vault/knowledge/documents/a.md")).unwrap();
+    assert_eq!(report(&run(root.path(), &json_args)), captured);
+    let human = run(root.path(), &args);
+    assert!(human.status.success());
+    assert!(String::from_utf8_lossy(&human.stderr).contains(&format!("snapshot {snapshot}")));
+    assert!(!String::from_utf8_lossy(&human.stderr).contains("live scan"));
+    let updated = report(&run(root.path(), &["wiki", "prepare"]));
+    assert_ne!(updated["snapshot"], snapshot);
+    let stale = run(root.path(), &json_args);
+    assert!(!stale.status.success());
+    assert!(stale.stdout.is_empty());
+}

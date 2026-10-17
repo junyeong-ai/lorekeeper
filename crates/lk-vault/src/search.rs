@@ -212,6 +212,7 @@ pub(super) fn visit_pages(
             visit(
                 Page {
                     file_revision: lk_core::concept::file_revision(&raw),
+                    body_line_offset,
                     // Taken from where the file actually sits rather than assembled from the
                     // directory and the name: the walk is recursive, so a page filed in a
                     // subdirectory would otherwise be reported at an address resolving nowhere.
@@ -344,6 +345,7 @@ pub(super) fn search_pages(
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(super) struct Page {
     pub(super) file_revision: String,
+    pub(super) body_line_offset: usize,
     pub(super) id: String,
     pub(super) title: String,
     pub(super) aliases: Vec<String>,

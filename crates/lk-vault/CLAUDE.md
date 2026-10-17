@@ -219,6 +219,10 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   editors are not frozen during capture. FTS trigram filtering only narrows candidates;
   short terms use exact substring candidates and the shared matcher decides every hit.
   Schema/projection changes require a snapshot version bump. No embeddings or daemon.
+  Body search reads the captured Markdown payload and its physical line offset through
+  the same matcher as live search. It scans the selected snapshot's full scope, without
+  visible-text FTS filtering that would omit code/link matches. Results identify the
+  snapshot and captured file revisions; a later live read still checks that revision.
 - **`inspect_document`** parses a CommonMark outline, paginates it, and reads bounded section
   text with Unicode scalar offsets. Section ids belong to the returned full file revision;
   duplicate headings stay distinct. A selected section includes its nested subsections.
