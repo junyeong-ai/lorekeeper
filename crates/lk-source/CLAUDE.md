@@ -319,7 +319,7 @@ map to `RawItem`.
   unbuildable documents, unfollowed scope boundaries, unavailable verification and scope
   coverage gaps refuse the observation instead of claiming an empty or complete success.
   The adapter does not rebuild a source graph as a side effect and pins its public CLI
-  envelope compatibility to nodex `>=0.52.0, <0.53` with `--check-version`.
+  envelope compatibility to nodex `>=0.53.0, <0.54` with `--check-version`.
 - **Nodex reconciliation is explicit.** `reconcile: true` requires a portable, nonblank
   `repository_id`. It selects the current inventory independently of declared dates;
   `kinds` and exact `document_ids` narrow the imported population only after completeness
