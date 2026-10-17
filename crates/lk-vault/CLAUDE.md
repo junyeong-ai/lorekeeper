@@ -249,3 +249,15 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   Target candidates share the bounded entry stream. The revision binds the complete collection and query, so a newly added owner
   invalidates pagination even when the starting document did not change. This read-only view
   neither adds Markdown graph edges nor infers support, contradiction or current truth.
+
+- **Manual originals** have a separate typed store, never the authored-page review archive.
+  `publish_manual_original` validates captured bytes, exclusive-publishes content-addressed
+  objects, hard-links exact member paths, and publishes the manifest last. Identical members
+  across revisions share bytes; occupied/corrupt objects are errors, never overwrites or a
+  suffix fallback. Store symlinks are refused. A complete manifest records listed byte
+  inventory, not complete browser offline capture. `inspect_original` reads that manifest
+  and verifies the entry plus any selected member, never mutable `source_file`; legacy pages
+  report unavailable. Roster pagination is bounded/revision-pinned; coverage is a bounded
+  sample with explicit total/truncation. Raw previews preserve UTF-8 bytes up to a 64 KiB
+  boundary; binary members expose their validated path. Hidden originals are not knowledge
+  nodes; graph resolvability only accepts exact manifest-listed, digest-verified members.

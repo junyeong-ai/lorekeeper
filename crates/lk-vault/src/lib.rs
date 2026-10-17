@@ -5,6 +5,7 @@ mod document;
 mod index;
 mod links;
 mod log;
+mod manual_original;
 mod mutation;
 mod navigation;
 mod provenance;
@@ -32,6 +33,9 @@ pub use self::document::{
 pub use self::index::{IndexCatalog, build_catalog, build_index, write_index};
 pub use self::links::{LinkDetail, LinkDetails, LinkOptions, inspect_links};
 pub use self::log::{IngestLog, LogEntry, LogStatus};
+pub use self::manual_original::{
+    OriginalOptions, OriginalView, inspect_original, is_manual_original, publish_manual_original,
+};
 pub use self::mutation::{MutationPlan, MutationSession};
 pub use self::navigation::{
     NAVIGATION_PAGE_ENTRIES, NavigationCatalog, NavigationKind, NavigationRow,
@@ -59,6 +63,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum VaultError {
+    #[error("manual original: {0}")]
+    Original(String),
     #[error("search index: {0}")]
     SearchIndex(#[from] rusqlite::Error),
     #[error("I/O error: {0}")]

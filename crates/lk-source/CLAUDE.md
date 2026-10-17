@@ -286,37 +286,34 @@ map to `RawItem`.
     (bounded retries on 429/5xx + connect/timeout, honoring numeric `Retry-After`), so a
     single provider hiccup doesn't abort an unattended ingest. Per-item Google fetches keep
     their warn-and-skip isolation. Extend new idempotent calls with the same helper.
-- **Manual source** (`manual.rs`): watches an inbox directory for user-dropped files
-  (`.md`, `.txt`, `.markdown`, `.html`, `.htm` by default — NOT `.json`: there is no
-  JSON→Markdown renderer, and storing raw JSON as a document is meaningless).
-  `inbox_dir` is resolved by `resolve_inbox_dir` — `~`/`~/…` expands to home, a relative
-  path anchors at `ExtractContext::vault_root` (never the process CWD, so cron and
-  interactive runs read the same inbox); extract and archive share the one resolution.
-  `validate_params` rejects an empty or `.`/`..` `inbox_dir` (it would resolve to the vault
-  root and the adapter would scan/archive vault pages). Files are
-  read into `RawItem` with `external_id = "manual:{filename}:{blake3(body)[..8]}"` — the
-  content fingerprint means a same-name file re-dropped with EDITED content on the same
-  day is a distinct event; an unchanged re-drop keeps a stable id. The pipeline still
-  reuses the document owned by that `source_file` location and archives prior page evidence;
-  event identity is not a promise of a new document page. Symlinks are rejected.
-  HTML conversion uses the same case-insensitive extension decision as selection.
-  Eligible files that all fail reading return `NothingObserved`; unsupported and nested
-  files are not read attempts, and a genuinely empty inbox remains successful. A missing
-  inbox or failed directory inspection is a source error, never an empty observation. Valid
-  parsed frontmatter is retained under `metadata.source_record.manual_frontmatter`, which
-  reaches the document and semantic input without promoting source-defined lifecycle or
-  machine-looking fields into generated page authority. Invalid/non-mapping YAML follows
-  the shared parser and remains prose; original bytes remain the archival authority.
-  Archive-after-ingest defaults to **true**, but archival is deferred to
-  `archive_consumed_files` (run only after every vault write and the queue flush
-  succeeded), so a write/flush failure leaves the inbox intact for retry. It archives
-  every consumed unchanged file only after exact bytes have been durably preserved with
-  `lk_core::fs::publish_exclusive`. Every candidate, including hash suffixes, is checked:
-  different bytes, directories and symlinks are never overwritten. Suffix candidates reserve
-  their byte budget before truncating a long stem at a UTF-8 boundary; an oversized extension
-  uses an explicit digest address. Identical regular bytes may be reused. Publication failures and changed inbox originals are retained for retry.
-  Archival establishes collection durability, not semantic completion. Relative attachment
-  bundles are not imported or relocated; preserving their source base remains separate work.
+- **Manual originals** (`manual.rs`, `manual_bundle.rs`): `capture_manual` returns RawItems
+  and a bounded byte-capture sidechannel; the CLI publishes originals before pages, flushes
+  the queue, then optionally retires unchanged entries. `Source`/`RawItem` do not carry blobs.
+  `source_file` remains location ownership; `source_record.manual_original` is a separate
+  typed manifest/entry reference even without YAML. Source YAML stays under `manual_frontmatter`.
+  Capture is bounded to 256 MiB/2048 entries per source, entry text 32 MiB, member 64 MiB,
+  dependency depth 32 and 2048 members per bundle; a source batch also caps total member
+  records at 8192 and derived text at 256 MiB. The CLI additionally bounds retained captures across
+  sources to 512 MiB. Limits refuse, never truncate; linked closure size is not reduced merely
+  by splitting the inbox. Each selected file's bytes are read once; conversion/hash derive from
+  that capture. The explicit inbox directory is the local boundary, never a whole-inbox copy.
+  Parsed Markdown Link/Image events (including explicit-relative Obsidian links/embeds) and
+  supported HTML URL attributes discover dependencies. The tested event serializer writes
+  standard Markdown links, not a handwritten destination parser. Implicit Obsidian extension/
+  basename lookup and embed options refuse. Missing, escaping, nonregular or symlink members
+  refuse; HTML `base` and local raw-HTML resources inside Markdown refuse rather than render
+  against the wrong base. CSS/SVG and unsupported HTML URL surfaces are explicit partial
+  coverage and block input retirement. No network assets are fetched. UTF-8 entry support
+  remains unchanged; binary attachments are byte-preserved. New paths are only derived-view
+  rewrites; original bytes are untouched. `archive_after_ingest=false` disables retirement,
+  not original storage. Attachments are never removed; an entry used by another captured
+  bundle is retained as a shared attachment, and any entry-capture failure blocks retirement
+  for that source alone. The unchanged-bundle check before
+  retirement is an observation, not a lease against external editors or an atomic snapshot.
+  Existing `resolve_inbox_dir` still expands `~`, anchors relative paths to the vault and
+  refuses vault-root/ancestor inboxes; selection is case-insensitive by configured extension.
+  Per-entry failures remain observable even with successful neighbors; no observation fails
+  the source. `lore fetch` remains an inbox writer and has no separate ingestion path.
 - `Source` has no `source_type()` accessor — the factory selects by the input enum.
 - `markdown` module normalizes rich text to Markdown, loss-aversely (unmapped constructs
   degrade to their text): `adf_to_markdown`, `html_to_markdown` (via `htmd`),

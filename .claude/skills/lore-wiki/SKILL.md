@@ -140,6 +140,13 @@ Answer a question grounded in vault content, with compounding.
    `--source-status` filters exact recorded states. A historical claim can remain valid.
    Manual `source_record.manual_frontmatter` retains unpromoted source declarations;
    inspect them directly, since `--source-status` does not classify that nested metadata.
+   For a preserved manual original, run `lore wiki original <document-path>`.
+   Follow its member roster with `--offset`; pin `reference.manifest_revision.value`
+   with `--revision` and select an exact `--member` for a bounded text preview.
+   `preview_truncated` means the preview is incomplete; `selected_file` addresses
+   the verified preserved bytes. Check unsupported coverage before claiming every
+   dependency was captured. `available: false` means no preserved-original reference;
+   a mutable `source_file` is not a substitute for the historical bytes.
    Follow declared document relations with `lore wiki provenance <exact-path>`.
    It resolves only exact repository/document identities; missing or ambiguous owners
    remain explicit. Use `--direction incoming|both` or `--relation <name>` to narrow,

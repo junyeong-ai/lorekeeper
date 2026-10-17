@@ -1,0 +1,26 @@
+---
+source: crates/lk-cli/tests/behaviour.rs
+assertion_line: 465
+expression: "observe(staged.path(), argv)"
+---
+exit: 0
+--- stdout ---
+{
+  "page": "wiki/concepts/behaviour-snapshot.md",
+  "page_revision": "0910fa9895a91558fab7f71b70e16552d191c6bd23e0e7c1eb4dcf08020b735a",
+  "available": false,
+  "reference": null,
+  "unsupported": [],
+  "unsupported_total": 0,
+  "unsupported_truncated": false,
+  "total_members": 0,
+  "offset": 0,
+  "limit": 20,
+  "next_offset": null,
+  "members": [],
+  "selected_path": null,
+  "selected_file": null,
+  "preview": null,
+  "preview_truncated": false
+}
+--- stderr ---

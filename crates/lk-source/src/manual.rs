@@ -200,69 +200,41 @@ impl Source for ManualSource {
         params: &serde_json::Value,
         ctx: &ExtractContext,
     ) -> Result<Vec<RawItem>, SourceError> {
-        let p: ManualParams = crate::parse_validated(params)?;
-
-        let inbox = resolve_inbox_dir(&p.inbox_dir, &ctx.vault_root)?;
-        let mut items = Vec::new();
-        let mut attempted = 0;
-        let entries = std::fs::read_dir(&inbox)
-            .map_err(|e| SourceError::Parse(format!("read inbox {}: {e}", inbox.display())))?;
-
-        for entry in entries {
-            let entry = entry.map_err(|e| {
-                SourceError::Parse(format!("read inbox entry {}: {e}", inbox.display()))
-            })?;
-            let path = entry.path();
-            // Reject symlinks — a symlink in the inbox could otherwise read
-            // outside the inbox directory. Use `symlink_metadata` so the check
-            // doesn't follow the link.
-            let file_type = path
-                .symlink_metadata()
-                .map_err(|e| {
-                    SourceError::Parse(format!("inspect inbox entry {}: {e}", path.display()))
-                })?
-                .file_type();
-            if !file_type.is_file() {
-                continue;
-            }
-            let ext = match path.extension().and_then(|s| s.to_str()) {
-                Some(e) => e.to_lowercase(),
-                None => continue,
-            };
-            if !p.extensions.iter().any(|e| e == &ext) {
-                continue;
-            }
-
-            attempted += 1;
-            match read_item(&path) {
-                Ok(item) => items.push(item),
-                Err(e) => {
-                    tracing::warn!(
-                        file = %path.display(),
-                        error = %e,
-                        "manual: skipping file (read failed)"
-                    );
-                }
-            }
-        }
-
-        crate::require_any_observation("inbox file", items.len(), attempted)?;
-        tracing::info!(
-            inbox = %inbox.display(),
-            count = items.len(),
-            "manual: ingested"
-        );
-        Ok(items)
+        Ok(capture_manual(params, ctx)?.items)
     }
 }
 
 /// Read one inbox file into a `RawItem`. The title is derived from the
 /// first non-blank line if the body starts with a markdown H1, otherwise from
 /// the file stem.
+#[cfg(test)]
 fn read_item(path: &Path) -> Result<RawItem, SourceError> {
-    let raw = std::fs::read_to_string(path)
-        .map_err(|e| SourceError::Parse(format!("read {}: {e}", path.display())))?;
+    let root = path
+        .parent()
+        .ok_or_else(|| SourceError::Parse("manual entry has no parent".into()))?
+        .canonicalize()
+        .map_err(|e| SourceError::Parse(e.to_string()))?;
+    let canonical = root.join(
+        path.file_name()
+            .ok_or_else(|| SourceError::Parse("manual filename".into()))?,
+    );
+    let capture = crate::manual_bundle::capture(&root, &canonical)?;
+    read_captured_item(path, &capture)
+}
 
+fn read_captured_item(
+    path: &Path,
+    capture: &lk_core::manual_original::ManualBundleCapture,
+) -> Result<RawItem, SourceError> {
+    let at = capture
+        .manifest
+        .members
+        .iter()
+        .position(|m| m.path == capture.manifest.entry)
+        .ok_or_else(|| SourceError::Parse("missing manual entry".into()))?;
+    let raw = std::str::from_utf8(&capture.contents[at])
+        .map_err(|e| SourceError::Parse(e.to_string()))?
+        .to_owned();
     // Integrity hash of the file's raw bytes AS READ HERE. `archive_consumed_files` re-reads
     // the file and re-hashes before moving it: a mismatch means the file was swapped (same
     // name, new content) between extract and archive, so the new content has NOT been
@@ -279,13 +251,29 @@ fn read_item(path: &Path) -> Result<RawItem, SourceError> {
         .map(str::to_ascii_lowercase);
     let body = match extension.as_deref() {
         Some("html" | "htm") => {
-            let base_url = url::Url::parse("file:///inbox").unwrap();
+            let canonical_parent = path
+                .parent()
+                .ok_or_else(|| SourceError::Parse("manual entry parent".into()))?
+                .canonicalize()
+                .map_err(|e| SourceError::Parse(e.to_string()))?;
+            let base_path = canonical_parent.join(
+                path.file_name()
+                    .ok_or_else(|| SourceError::Parse("manual entry filename".into()))?,
+            );
+            let base_url = url::Url::from_file_path(base_path).map_err(|()| {
+                SourceError::Parse("manual HTML requires an absolute entry path".into())
+            })?;
             crate::markdown::readable_html_to_markdown(&raw, &base_url)
                 .unwrap_or_else(|| crate::markdown::html_to_markdown(&raw))
         }
         _ => raw,
     };
 
+    if body.len() > lk_core::manual_original::MAX_ORIGINAL_ENTRY_BYTES {
+        return Err(SourceError::Parse(
+            "manual derived Markdown exceeds 32 MiB".into(),
+        ));
+    }
     let Some(mtime) = path
         .metadata()
         .and_then(|m| m.modified())
@@ -327,11 +315,15 @@ fn read_item(path: &Path) -> Result<RawItem, SourceError> {
         "source_file": path.display().to_string(),
         "source_hash": source_hash,
     });
+    metadata["source_record"] = serde_json::json!({});
+    metadata["source_record"][lk_core::manual_original::MANUAL_ORIGINAL_FIELD] =
+        serde_json::to_value(capture.manifest.reference().map_err(SourceError::Parse)?)
+            .map_err(|e| SourceError::Parse(e.to_string()))?;
     if let Some(front) = front.as_ref() {
         // Source provenance, not page authority: imported machine-looking keys and lifecycle
         // declarations stay inside the source namespace. The pipeline includes this record in
         // semantic input and the document page without promoting them to its own fields.
-        metadata["source_record"] = serde_json::json!({ "manual_frontmatter": front.fields });
+        metadata["source_record"]["manual_frontmatter"] = serde_json::json!(front.fields);
     }
     Ok(RawItem {
         labels: Vec::new(),
@@ -360,7 +352,7 @@ fn read_item(path: &Path) -> Result<RawItem, SourceError> {
 /// block into the vault page as text. A file whose leading `---` is not YAML has no
 /// frontmatter — it is prose that happens to start with a rule — so it is kept whole and the
 /// mismatch is reported rather than costing the user the file.
-fn split_frontmatter(
+pub(super) fn split_frontmatter(
     raw: &str,
     path: &Path,
 ) -> (Option<lk_core::frontmatter::Frontmatter>, String) {
@@ -519,6 +511,180 @@ fn preserve_archive(
             }
         }
     }
+}
+
+/// One bounded manual source capture, retained beside the source's planned pages.
+pub struct ManualExtraction {
+    pub items: Vec<RawItem>,
+    pub originals: Vec<lk_core::manual_original::ManualBundleCapture>,
+    /// Per-entry refusal remains visible to the CLI even when other entries succeeded.
+    pub failures: Vec<String>,
+}
+impl ManualExtraction {
+    pub fn project_links(&mut self, documents: &Path) -> Result<(), SourceError> {
+        for (item, capture) in self.items.iter_mut().zip(&self.originals) {
+            let path = Path::new(&capture.source_file);
+            let root = path
+                .parent()
+                .ok_or_else(|| SourceError::Parse("manual parent".into()))?
+                .canonicalize()
+                .map_err(|e| SourceError::Parse(e.to_string()))?;
+            let entry = root.join(
+                path.file_name()
+                    .ok_or_else(|| SourceError::Parse("manual filename".into()))?,
+            );
+            item.body =
+                crate::manual_bundle::project_links(&item.body, &root, &entry, capture, documents)?;
+        }
+        if self.items.iter().map(|item| item.body.len()).sum::<usize>()
+            > lk_core::manual_original::MAX_MANUAL_BATCH_BYTES
+        {
+            return Err(SourceError::Parse(
+                "manual projected source batch exceeds 256 MiB; use a smaller self-contained batch"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+    pub fn byte_len(&self) -> usize {
+        self.originals
+            .iter()
+            .map(lk_core::manual_original::ManualBundleCapture::byte_len)
+            .sum()
+    }
+}
+
+pub fn capture_manual(
+    params: &serde_json::Value,
+    ctx: &ExtractContext,
+) -> Result<ManualExtraction, SourceError> {
+    let p: ManualParams = crate::parse_validated(params)?;
+    let inbox = resolve_inbox_dir(&p.inbox_dir, &ctx.vault_root)?;
+    let root = inbox
+        .canonicalize()
+        .map_err(|e| SourceError::Parse(format!("read inbox: {e}")))?;
+    let mut result = ManualExtraction {
+        items: Vec::new(),
+        originals: Vec::new(),
+        failures: Vec::new(),
+    };
+    let mut total = 0usize;
+    let mut total_members = 0usize;
+    let mut total_derived = 0usize;
+    let mut attempted = 0;
+    let mut entries = std::fs::read_dir(&inbox)
+        .map_err(|e| SourceError::Parse(e.to_string()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| SourceError::Parse(e.to_string()))?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        let path = entry.path();
+        let kind = path
+            .symlink_metadata()
+            .map_err(|e| SourceError::Parse(e.to_string()))?
+            .file_type();
+        if !kind.is_file() {
+            continue;
+        }
+        let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !p.extensions.iter().any(|e| e == &ext.to_ascii_lowercase()) {
+            continue;
+        }
+        attempted += 1;
+        if attempted > lk_core::manual_original::MAX_ORIGINAL_MEMBERS {
+            return Err(SourceError::Parse(
+                "manual batch exceeds 2048 entries; split the inbox batch".into(),
+            ));
+        }
+        let canonical = root.join(entry.file_name());
+        let observation = crate::manual_bundle::capture_limited(
+            &root,
+            &canonical,
+            lk_core::manual_original::MAX_MANUAL_BATCH_BYTES.saturating_sub(total),
+        )
+        .and_then(|mut capture| {
+            capture.source_file = path.display().to_string();
+            let item = read_captured_item(&path, &capture)?;
+            Ok((item, capture))
+        });
+        match observation {
+            Ok((item, capture)) => {
+                total_members += capture.manifest.members.len();
+                total_derived += item.body.len();
+                if total_members > 8192
+                    || total_derived > lk_core::manual_original::MAX_MANUAL_BATCH_BYTES
+                {
+                    return Err(SourceError::Parse("manual source batch exceeds 8192 member records or 256 MiB derived text; use a smaller self-contained batch".into()));
+                }
+                total = total.checked_add(capture.byte_len()).ok_or_else(|| {
+                    SourceError::Parse("manual source batch size overflow".into())
+                })?;
+                if total > lk_core::manual_original::MAX_MANUAL_BATCH_BYTES {
+                    return Err(SourceError::Parse(
+                        "manual source batch exceeds 256 MiB; split the inbox batch".into(),
+                    ));
+                }
+                result.items.push(item);
+                result.originals.push(capture);
+            }
+            Err(error) => {
+                tracing::warn!(file=%path.display(),error=%error,"manual: entry refused; retaining input");
+                result.failures.push(format!("{}: {error}", path.display()));
+            }
+        }
+    }
+    crate::require_any_observation("inbox file", result.items.len(), attempted)?;
+    Ok(result)
+}
+
+/// Optional input retirement is never the original store. Assets are never removed.
+pub fn archive_manual_originals(
+    params: &serde_json::Value,
+    events: &[lk_core::event::Event],
+    captures: &[lk_core::manual_original::ManualBundleCapture],
+    date: jiff::civil::Date,
+    vault_root: &Path,
+) -> Result<(), SourceError> {
+    let filtered: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            let Some(path) = event.metadata.get("source_file").and_then(|v| v.as_str()) else {
+                return false;
+            };
+            let Some(capture) = captures.iter().find(|c| c.source_file == path) else {
+                return false;
+            };
+            if captures.iter().any(|other| other.manifest.entry!=capture.manifest.entry && other.manifest.members.iter().any(|member|member.path==capture.manifest.entry)) {
+                tracing::warn!(file=path,"manual: entry is another bundle's dependency; retaining it as a shared attachment");
+                return false;
+            }
+            if !capture.manifest.unsupported.is_empty() {
+                tracing::warn!(
+                    file = path,
+                    "manual: original retained; unsupported dependency constructs"
+                );
+                return false;
+            }
+            let Some(parent) = Path::new(path).parent() else {
+                return false;
+            };
+            let Ok(root) = parent.canonicalize() else {
+                return false;
+            };
+            if !crate::manual_bundle::unchanged(&root, capture) {
+                tracing::warn!(
+                    file = path,
+                    "manual: original bundle changed; retaining input"
+                );
+                return false;
+            }
+            true
+        })
+        .cloned()
+        .collect();
+    archive_consumed_files(params, &filtered, date, vault_root)
 }
 
 #[cfg(test)]
@@ -732,7 +898,16 @@ mod tests {
         write(&tmp.path().join("scalar.md"), "---\na scalar\n---\nBody.");
         let scalar = read_item(&tmp.path().join("scalar.md")).unwrap();
         assert!(scalar.body.contains("a scalar"));
-        assert!(scalar.metadata.get("source_record").is_none());
+        assert!(
+            scalar.metadata["source_record"]
+                .get("manual_frontmatter")
+                .is_none()
+        );
+        assert!(
+            scalar.metadata["source_record"]
+                .get("manual_original")
+                .is_some()
+        );
     }
 
     /// Whether a file HAS frontmatter is `parse_page`'s question and no other — every vault

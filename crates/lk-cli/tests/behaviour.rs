@@ -30,6 +30,7 @@ use tempfile::TempDir;
 /// Every entry was measured byte-identical across repeated runs before being
 /// admitted: a snapshot of an unstable command is a flake, not a pin.
 const SWEEP: &[&[&str]] = &[
+    &["wiki", "original", "wiki/concepts/behaviour-snapshot.md"],
     &[
         "wiki",
         "read",

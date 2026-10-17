@@ -8,6 +8,7 @@ pub mod frontmatter;
 pub mod fs;
 pub mod i18n;
 pub mod link;
+pub mod manual_original;
 pub mod markdown;
 pub mod math;
 pub mod origin;

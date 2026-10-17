@@ -531,3 +531,211 @@ fn a_section_the_render_refills_is_not_reported_as_emptied() {
         "a section the render refills must not be reported as emptied\n{stderr}"
     );
 }
+
+#[test]
+fn manual_original_survives_retirement_and_asset_only_edits_revise_the_same_owner() {
+    let ws = Workspace::new("");
+    // Keep input in place to exercise asset-only changes against the same location owner.
+    let config = ws.root.path().join("config.yaml");
+    let text = std::fs::read_to_string(&config).unwrap().replace(
+        "inbox_dir: inbox",
+        "inbox_dir: inbox\n      archive_after_ingest: false",
+    );
+    std::fs::write(config, text).unwrap();
+    let raw =
+        "---\r\ntitle: Asset note\r\n---\r\n# Source heading\r\n\r\n![figure](assets/plot.png)\r\n";
+    std::fs::create_dir(ws.vault().join("inbox/assets")).unwrap();
+    std::fs::write(ws.vault().join("inbox/assets/plot.png"), [0, 255, 1]).unwrap();
+    ws.drop_note("note.md", raw);
+    let before = files_under(&ws.vault());
+    let dry = ws.run(&["ingest", "--dry-run"]);
+    assert!(dry.status.success(), "{}", stderr_of(&dry));
+    assert_eq!(files_under(&ws.vault()), before);
+    let run = ws.run(&["ingest"]);
+    assert!(run.status.success(), "{}", stderr_of(&run));
+    let pages = files_under(&ws.vault().join("wiki/documents"));
+    assert_eq!(pages.len(), 1);
+    let original_page = std::fs::read_to_string(&pages[0]).unwrap();
+    let relative = pages[0]
+        .strip_prefix(ws.vault())
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let query = ws.run(&[
+        "wiki", "original", &relative, "--member", "note.md", "--limit", "1",
+    ]);
+    assert!(query.status.success(), "{}", stderr_of(&query));
+    let query: serde_json::Value = serde_json::from_slice(&query.stdout).unwrap();
+    assert_eq!(query["preview"], raw);
+    assert_eq!(query["members"].as_array().unwrap().len(), 1);
+    let manifest = query["reference"]["manifest_revision"]["value"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(ws.vault().join("inbox/note.md").exists());
+    assert!(original_page.contains("../../.lorekeeper/evidence/manual/"));
+    assert!(original_page.contains("files/assets/plot.png"));
+    std::fs::write(ws.vault().join("inbox/assets/plot.png"), [0, 255, 2]).unwrap();
+    let second = ws.run(&["ingest"]);
+    assert!(second.status.success(), "{}", stderr_of(&second));
+    assert_eq!(files_under(&ws.vault().join("wiki/documents")), pages);
+    let query = ws.run(&["wiki", "original", &relative]);
+    let query: serde_json::Value = serde_json::from_slice(&query.stdout).unwrap();
+    assert_ne!(query["reference"]["manifest_revision"]["value"], manifest);
+    let after = std::fs::read_to_string(&pages[0]).unwrap();
+    let old = lk_core::frontmatter::parse_page(&original_page).unwrap();
+    let new = lk_core::frontmatter::parse_page(&after).unwrap();
+    assert_eq!(
+        old.frontmatter.get("source_file"),
+        new.frontmatter.get("source_file")
+    );
+    assert_ne!(
+        old.frontmatter.get("llm_inputs"),
+        new.frontmatter.get("llm_inputs")
+    );
+    // Losing the external input does not lose the actual original lookup.
+    std::fs::remove_dir_all(ws.vault().join("inbox")).unwrap();
+    let q = ws.run(&["wiki", "original", &relative, "--member", "note.md"]);
+    assert!(q.status.success());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&q.stdout).unwrap()["preview"],
+        raw
+    );
+}
+
+#[test]
+fn manual_html_preserves_raw_and_marks_unsupported_closure_without_retiring() {
+    let ws = Workspace::new("");
+    let raw = "<!doctype html><html><head><style>body{background:url(unknown.png)}</style></head><body><h1>Saved page</h1><p>A paragraph with an <img src='image.png' alt='chart'> image.</p></body></html>";
+    ws.drop_note("saved.html", raw);
+    std::fs::write(ws.vault().join("inbox/image.png"), [0, 255]).unwrap();
+    let out = ws.run(&["ingest"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(ws.vault().join("inbox/saved.html").exists());
+    let pages = files_under(&ws.vault().join("wiki/documents"));
+    let relative = pages[0]
+        .strip_prefix(ws.vault())
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let q = ws.run(&["wiki", "original", &relative, "--member", "saved.html"]);
+    assert!(q.status.success(), "{}", stderr_of(&q));
+    let q: serde_json::Value = serde_json::from_slice(&q.stdout).unwrap();
+    assert_eq!(q["preview"], raw);
+    assert!(q["unsupported_total"].as_u64().unwrap() > 0);
+    let page = std::fs::read_to_string(&pages[0]).unwrap();
+    assert!(page.contains("files/image.png"));
+    assert!(!page.contains("file:///inbox"));
+    let help = ws.run(&["wiki", "original", "--help"]);
+    assert!(help.status.success());
+    assert!(
+        String::from_utf8_lossy(&help.stdout).contains("read-only")
+            || String::from_utf8_lossy(&help.stdout).contains("JSON")
+    );
+}
+
+#[test]
+fn missing_local_asset_is_a_loud_refusal_without_retirement_or_false_page() {
+    let ws = Workspace::new("");
+    ws.drop_note("missing.md", "# Missing\n\n![x](missing.png)\n");
+    let out = ws.run(&["ingest"]);
+    assert!(!out.status.success());
+    assert!(ws.vault().join("inbox/missing.md").exists());
+    assert!(files_under(&ws.vault().join("wiki/documents")).is_empty());
+    assert!(files_under(&ws.vault().join(".lorekeeper/evidence/manual")).is_empty());
+}
+
+#[test]
+fn explicit_obsidian_embed_preserves_asset_before_retiring_only_the_entry() {
+    let ws = Workspace::new("");
+    ws.drop_note("obsidian.md", "# Obsidian\n\n![[figure.png]]\n");
+    std::fs::write(ws.vault().join("inbox/figure.png"), [0, 255]).unwrap();
+    let out = ws.run(&["ingest"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!ws.vault().join("inbox/obsidian.md").exists());
+    assert!(ws.vault().join("inbox/figure.png").exists());
+    let pages = files_under(&ws.vault().join("wiki/documents"));
+    let page = std::fs::read_to_string(&pages[0]).unwrap();
+    assert!(page.contains("files/figure.png"));
+    assert!(!page.contains("![[figure.png]]\n\n##"));
+    let parsed = lk_core::frontmatter::parse_page(&page).unwrap();
+    let reference: lk_core::manual_original::ManualOriginalReference = serde_json::from_value(
+        parsed.frontmatter.get("source_record").unwrap()["manual_original"].clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read(ws.vault().join(reference.entry_vault_path().unwrap())).unwrap(),
+        b"# Obsidian\n\n![[figure.png]]\n"
+    );
+}
+
+#[test]
+fn immutable_publication_collision_refuses_page_queue_and_retirement_then_retry_recovers() {
+    let ws = Workspace::new("");
+    ws.drop_note("n.md", "# N\n\nbody\n");
+    let objects = ws.vault().join(".lorekeeper/evidence/manual/objects");
+    std::fs::create_dir_all(&objects).unwrap();
+    let digest = lk_core::manual_original::OriginalDigest::of(b"# N\n\nbody\n").value;
+    std::fs::write(objects.join(&digest), "wrong bytes").unwrap();
+    let failed = ws.run(&["ingest"]);
+    assert!(!failed.status.success());
+    assert!(ws.vault().join("inbox/n.md").exists());
+    assert!(files_under(&ws.vault().join("wiki/documents")).is_empty());
+    assert!(
+        files_under(&ws.vault().join(".lorekeeper/queue"))
+            .iter()
+            .all(|p| p.extension().is_none_or(|e| e != "jsonl"))
+    );
+    assert_eq!(
+        std::fs::read_to_string(objects.join(&digest)).unwrap(),
+        "wrong bytes"
+    );
+    std::fs::remove_file(objects.join(digest)).unwrap();
+    let retried = ws.run(&["ingest"]);
+    assert!(retried.status.success(), "{}", stderr_of(&retried));
+    assert!(!ws.vault().join("inbox/n.md").exists());
+}
+
+#[test]
+fn partial_manual_failure_and_cross_entry_dependencies_keep_remaining_inputs_self_contained() {
+    let ws = Workspace::new("");
+    ws.drop_note("A.md", "# A\n\n[B](B.md) ![missing](missing.png)\n");
+    ws.drop_note("B.md", "# B\n\nIndependent body\n");
+    let partial = ws.run(&["ingest"]);
+    assert!(!partial.status.success());
+    assert!(ws.vault().join("inbox/A.md").exists());
+    assert!(ws.vault().join("inbox/B.md").exists());
+    assert_eq!(files_under(&ws.vault().join("wiki/documents")).len(), 1);
+    std::fs::write(ws.vault().join("inbox/missing.png"), [0, 255]).unwrap();
+    let retry = ws.run(&["ingest"]);
+    assert!(retry.status.success(), "{}", stderr_of(&retry));
+    assert!(!ws.vault().join("inbox/A.md").exists());
+    assert!(
+        ws.vault().join("inbox/B.md").exists(),
+        "a captured dependency is not automatically removed as an entry"
+    );
+    assert!(ws.vault().join("inbox/missing.png").exists());
+    assert_eq!(files_under(&ws.vault().join("wiki/documents")).len(), 2);
+}
+
+#[test]
+fn an_excluded_forecast_entry_still_protects_its_consumed_dependency_from_retirement() {
+    let ws = Workspace::new("");
+    ws.drop_note("A.md", "# Future A\n\n[B](B.md)\n");
+    ws.drop_note("B.md", "# B\n\nbody\n");
+    std::fs::File::options()
+        .write(true)
+        .open(ws.vault().join("inbox/A.md"))
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3 * 86400))
+        .unwrap();
+    let run = ws.run(&["ingest"]);
+    assert!(run.status.success(), "{}", stderr_of(&run));
+    assert_eq!(files_under(&ws.vault().join("wiki/documents")).len(), 1);
+    assert!(ws.vault().join("inbox/A.md").exists());
+    assert!(ws.vault().join("inbox/B.md").exists());
+    let dry = ws.run(&["ingest", "--dry-run"]);
+    assert!(dry.status.success());
+    assert!(stderr_of(&dry).contains("retirement blocked"));
+    assert!(!stderr_of(&dry).contains("retirement eligible"));
+}

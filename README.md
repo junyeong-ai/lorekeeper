@@ -308,6 +308,7 @@ lore wiki search "정확한 문자열" --body --json # 원문 행·문맥·판�
 lore wiki search "정확한 문자열" --body --snapshot <id> --json # 준비한 판본에서 반복 검색
 lore wiki document-identity plan --source ID --manifest /tmp/identity.json # 기존 사본의 식별자 이관 검증
 lore wiki read wiki/concepts/example.md # 목차 → --section ID; 후속 읽기에 --revision 사용
+lore wiki original wiki/documents/example.md # 보존된 수동 원본·첨부 목록; --member로 선택 조회
 lore wiki links wiki/concepts/example.md --limit 20 # 연결된 원문 행·설명·리비전 조회
 lore wiki provenance wiki/documents/example.md # 동일 저장소의 정확한 문서 ID로 선언 관계·후속 문서 조회
 lore wiki concepts            # 개념 목록

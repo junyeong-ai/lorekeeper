@@ -306,6 +306,7 @@ lore wiki prepare             # Capture once; use --snapshot <id> for repeated s
 lore wiki search "exact text" --body --json # Raw evidence lines/context/revision; opt into --regex
 lore wiki document-identity plan --source ID --manifest /tmp/identity.json # Verify legacy copy identity migration
 lore wiki read wiki/concepts/example.md # Outline → --section ID; pin subsequent reads with --revision
+lore wiki original wiki/documents/example.md # Verified manual original/member roster; select with --member
 lore wiki links wiki/concepts/example.md --limit 20 # Inspect link source lines, context and revision
 lore wiki provenance wiki/documents/example.md # Follow declared relations by exact repository + document ID
 lore wiki concepts            # list concepts

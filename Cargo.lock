@@ -1620,12 +1620,15 @@ dependencies = [
  "encoding_rs",
  "feed-rs",
  "htmd",
+ "html5ever 0.38.0",
  "jiff",
  "lk-core",
  "lk-task",
  "markup5ever_rcdom",
  "mime",
  "proptest",
+ "pulldown-cmark",
+ "pulldown-cmark-to-cmark",
  "rand",
  "regex",
  "reqwest",
@@ -1658,6 +1661,7 @@ name = "lk-vault"
 version = "0.52.0"
 dependencies = [
  "async-trait",
+ "blake3",
  "jiff",
  "lk-core",
  "minijinja",
@@ -2142,6 +2146,16 @@ checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
 dependencies = [
  "bitflags 2.13.1",
  "memchr",
+ "unicase",
+]
+
+[[package]]
+name = "pulldown-cmark-to-cmark"
+version = "23.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9e14cd4ec725b2227ba76d4772169af814438bcf48f6d9b806d1308f40a7413"
+dependencies = [
+ "pulldown-cmark",
  "unicase",
 ]
 

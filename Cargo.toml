@@ -66,6 +66,8 @@ dialoguer = "0.12"
 unicode-normalization = "0.1"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 pulldown-cmark = { version = "0.13.4", default-features = false }
+pulldown-cmark-to-cmark = "23.0.0"
+html5ever = "0.38"
 petgraph = "0.8"
 rayon = "1"
 same-file = "1"

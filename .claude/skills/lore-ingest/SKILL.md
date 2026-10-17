@@ -150,8 +150,10 @@ Review and commit vault changes separately; existing staging remains untouched.
    entries even if listed). FULL ingest only: a source-filtered run skips this step —
    its event set is a structural subset and would overwrite the complete page.
 4. **Flush LLM queue** — one atomic JSONL task file (queue mode).
-5. **Archive** — `manual` inbox files move to `archived/{date}/`, only after every
-   vault write and the queue flush succeeded, so a mid-run failure leaves them for retry.
+5. **Archive** — eligible `manual` inbox entries move to `archived/{date}/` when
+   enabled, only after original preservation, every vault write and the queue flush
+   succeeded. Partial dependency coverage, changed bytes, shared entry dependencies
+   or a failed entry in the same manual source prevent retirement.
    Existing archive entries are never replaced; identical bytes may reuse an entry.
    An empty inbox means collection finished, not that semantic tasks or reviews finished.
 
@@ -159,8 +161,23 @@ The manual adapter reads top-level UTF-8 Markdown, text and HTML files. Unsuppor
 formats and subdirectories are not ingestion units; failed reads are reported, and
 failure of every eligible read fails the source. Original YAML is preserved under
 `source_record.manual_frontmatter` as source evidence, never as page identity or
-completion state. Relative attachments are not collected as a bundle; inspect their
-availability before treating an imported document as complete evidence.
+completion state. Before page publication, the adapter preserves exact entry bytes
+and supported local dependencies under `.lorekeeper/evidence/manual/`. Identical
+file bytes share storage across bundle revisions. `source_record.manual_original`
+identifies the immutable manifest; `lore wiki original <document-path>` verifies it
+and lists members. Assets remain in the inbox; they are not independent ingestion units.
+
+Explicit relative Markdown links and supported HTML resources are captured within
+the inbox boundary. Missing, escaping or symlink dependencies fail capture. CSS/SVG
+and other unsupported resource constructs are reported as incomplete coverage and
+keep the entry for retry; HTML `base`, implicit Obsidian basename lookup and local
+raw-HTML links in Markdown are refused. Inspect `unsupported` before assuming a
+self-contained export. Each entry is a separate observation, not an atomic inbox
+snapshot. Capture is bounded to 32 MiB per text, 64 MiB per member, 2048 members,
+32 dependency levels and 8192 member records per source. Each source allows
+256 MiB of captured bytes and 256 MiB of derived text; captures across an ingest
+are limited to 512 MiB. Split unlinked batches or provide smaller self-contained
+exports when those limits fail.
 
 In **queue mode** (the default), phases 1–5 leave summary/concept/work-log
 sections empty and emit JSONL tasks. They are NOT knowledge yet — run

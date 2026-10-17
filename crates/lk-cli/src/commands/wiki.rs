@@ -10,6 +10,23 @@ use super::{find_config, load_config};
 
 #[derive(clap::Subcommand)]
 pub enum WikiCommand {
+    /// Read a verified preserved manual original, never the mutable inbox (JSON)
+    Original {
+        /// Exact vault-relative document path
+        path: PathBuf,
+        /// Exact manifest member path; include a bounded UTF-8 preview when selected
+        #[arg(long)]
+        member: Option<String>,
+        /// Maximum manifest members (1..100)
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Skip this many manifest members
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+        /// Pin the immutable manifest digest from a prior response
+        #[arg(long)]
+        revision: Option<String>,
+    },
     /// Inspect exact imported-document provenance and declared relations (read-only JSON)
     Provenance {
         /// Exact vault-relative imported document path
@@ -220,6 +237,31 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
             println!(
                 "{}",
                 serde_json::to_string_pretty(&report).map_err(|e| miette::miette!("{e}"))?
+            );
+            Ok(())
+        }
+        WikiCommand::Original {
+            path,
+            member,
+            limit,
+            offset,
+            revision,
+        } => {
+            let config = load_config(&find_config(opts)?)?;
+            let view = lk_vault::inspect_original(
+                &config.vault.root_path(),
+                &path,
+                &lk_vault::OriginalOptions {
+                    member: member.as_deref(),
+                    limit,
+                    offset,
+                    revision: revision.as_deref(),
+                },
+            )
+            .map_err(|e| miette::miette!("{e}"))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&view).map_err(|e| miette::miette!("{e}"))?
             );
             Ok(())
         }

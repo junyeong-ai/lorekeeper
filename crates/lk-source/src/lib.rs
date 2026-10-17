@@ -5,6 +5,7 @@ pub mod fetch;
 mod google;
 mod jira;
 mod manual;
+mod manual_bundle;
 pub(crate) mod markdown;
 mod nodex;
 pub use nodex::repoint_document_links;
@@ -17,7 +18,10 @@ mod tasks;
 /// Move consumed manual-inbox files into `<inbox>/archived/{date}/`. The CLI calls
 /// this only once a source's vault writes and the queue flush have succeeded, so a
 /// write/flush failure leaves the inbox intact for retry.
-pub use manual::{archive_consumed_files, inbox_dir as manual_inbox_dir};
+pub use manual::{
+    ManualExtraction, archive_consumed_files, archive_manual_originals, capture_manual,
+    inbox_dir as manual_inbox_dir,
+};
 
 use std::sync::Arc;
 

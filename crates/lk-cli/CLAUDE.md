@@ -261,3 +261,16 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   outgoing/incoming/both declarations; `--relation` is exact. `--limit 1..100` bounds all entries,
   including invalid metadata and ambiguous target candidates. Pin subsequent pages using the
   returned collection `revision`; this command never creates a search snapshot or writes pages.
+
+- **Manual original publication precedes document journal publication.** Ingest retains the
+  adapter's bounded capture sidechannel (256 MiB per source; 512 MiB across planned sources),
+  publishes immutable byte objects/member hardlinks and the complete manifest, writes guarded
+  pages, flushes semantic tasks, then optionally retires unchanged input entries. Failed or
+  partial dependency coverage never authorizes retirement; attachments are not removed.
+  A source with any entry-capture failure retains all its entries; cross-entry dependencies
+  are retained as shared attachments.
+  `wiki original` is read-only JSON: paginated manifest members with limit/next_offset,
+  bounded coverage sample/count and verified entry/selected-member availability. `--revision`
+  pins the manifest; `--member` requests a 64 KiB UTF-8 preview or binary file address.
+  It does not open a browser or fall back to a mutable inbox path. Source location ownership
+  remains unchanged by this independent provenance store.

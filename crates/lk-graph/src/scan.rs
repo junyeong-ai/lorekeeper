@@ -477,6 +477,8 @@ impl VaultExistence {
             }
             if lk_vault::is_archived_evidence(root, Path::new(dest))
                 .map_err(|error| GraphError::Io(error.to_string()))?
+                || lk_vault::is_manual_original(root, Path::new(dest))
+                    .map_err(|error| GraphError::Io(error.to_string()))?
             {
                 existence.archives.insert(dest.to_string());
                 continue;
@@ -737,6 +739,55 @@ mod tests {
         assert_eq!(
             existence.reached(&Link::to("wiki/Lower.md")),
             Some("wiki/Lower")
+        );
+    }
+
+    #[test]
+    fn preserved_manual_markdown_resolves_but_is_not_a_second_knowledge_origin() {
+        use lk_core::manual_original::{
+            ManualBundleCapture, ManualBundleManifest, ManualBundleMember, ORIGINAL_SCHEME,
+            OriginalDigest,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let raw = b"# Raw original\n[Not a managed citation](missing.md)\n".to_vec();
+        let capture = ManualBundleCapture {
+            source_file: "/removed/inbox/n.md".into(),
+            manifest: ManualBundleManifest {
+                schema: ORIGINAL_SCHEME.into(),
+                entry: "n.md".into(),
+                members: vec![ManualBundleMember {
+                    path: "n.md".into(),
+                    bytes: raw.len(),
+                    revision: OriginalDigest::of(&raw),
+                }],
+                unsupported: vec![],
+            },
+            contents: vec![raw],
+        };
+        let session = lk_vault::MutationSession::acquire(root).unwrap();
+        let reference = lk_vault::publish_manual_original(&session, &capture).unwrap();
+        drop(session);
+        std::fs::create_dir_all(root.join("wiki")).unwrap();
+        let original = reference.entry_vault_path().unwrap();
+        std::fs::write(
+            root.join("wiki/source.md"),
+            format!("# Imported\n[Original](../{original})\n"),
+        )
+        .unwrap();
+        let pages = scan_vault(root, false).unwrap();
+        assert_eq!(pages.len(), 1);
+        let dirs = VaultDirs::default();
+        let existence = VaultExistence::build_at(root, &pages, &dirs).unwrap();
+        assert!(existence.is_resolvable(&original));
+        assert!(!existence.is_knowledge(&page_id(Path::new(&original))));
+        assert!(existence.reached(&Link::to(&original)).is_none());
+        assert!(crate::graph::broken_links(&pages, &existence, &dirs).is_empty());
+        std::fs::remove_file(root.join(&original)).unwrap();
+        let existence = VaultExistence::build_at(root, &pages, &dirs).unwrap();
+        assert_eq!(
+            crate::graph::broken_links(&pages, &existence, &dirs).len(),
+            1
         );
     }
 

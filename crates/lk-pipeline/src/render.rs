@@ -485,6 +485,23 @@ pub fn render_document_page(
         }
     }
 
+    let original_link = event
+        .metadata
+        .get("source_record")
+        .and_then(|r| r.get(lk_core::manual_original::MANUAL_ORIGINAL_FIELD))
+        .map(|value| {
+            let reference: lk_core::manual_original::ManualOriginalReference =
+                serde_json::from_value(value.clone())
+                    .map_err(|e| crate::PipelineError::Render(e.to_string()))?;
+            let original = reference
+                .entry_vault_path()
+                .map_err(crate::PipelineError::Render)?;
+            Ok::<_, crate::PipelineError>(lk_core::link::md_link(
+                strings.original_link,
+                &lk_core::link::relative_dest(path.as_ref(), std::path::Path::new(&original)),
+            ))
+        })
+        .transpose()?;
     let context = serde_json::json!({
         "slug": slug,
         "title": event.title,
@@ -494,6 +511,7 @@ pub fn render_document_page(
         "source_url": event.url,
         "source_file": source_file,
         "source_record": event.metadata.get("source_record"),
+        "original_link": original_link,
         "source_identity": event.metadata.get("source_identity"),
         "tags": tags,
         "summary": summary,

@@ -59,6 +59,7 @@ lore ingest ai-news                # run a single source
 lore schema                        # generate <wiki>/AGENTS.md
 lore wiki prepare                  # reusable, explicitly selected lexical search snapshot
 lore wiki read wiki/concepts/example.md # bounded outline and revision-checked section reads
+lore wiki original wiki/documents/example.md # verified manual-original member discovery and selected reads
 lore wiki browse --json             # bounded catalog with category/type filters and pagination
 lore graph --json neighbors wiki/concepts/example.md # direct links, including daily evidence
 lore wiki links wiki/concepts/example.md # paginated explicit links with source lines and revision
@@ -236,7 +237,7 @@ Auto-discovered: `./config.yaml` → `~/.config/lorekeeper/config.yaml`.
 | `google-calendar` | Calendar API | Schedule tracking (HTML→Markdown) |
 | `rss` | RSS/Atom (`feed-rs`) | External knowledge feeds (vendor blogs, news) → concepts; no auth, multi-feed, per-feed error isolation (but a source that reached NO feed fails) |
 | `nodex` | `nodex` CLI | A project repository's declared document graph — each ADR, learning or guide becomes a `<wiki>/documents/` page tagged with its own kind, linked back to the repository that stores it |
-| `manual` | Local inbox | User-curated files dropped in `inbox/` (md/txt/markdown/html/htm by default; archives consumed files once this source's vault writes and the queue flush succeed) |
+| `manual` | Local inbox | User-curated md/txt/markdown/html/htm entries; preserves exact originals and supported local dependencies before pages, then retires eligible unchanged inputs after writes and queue flush |
 | `tasks` | The intent plane's transition log | The user's own completed tasks — what `lore task` closed becomes that day's page, the work-log and a review |
 
 ## Naming conventions

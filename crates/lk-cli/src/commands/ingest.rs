@@ -198,8 +198,11 @@ pub async fn run(
         id: String,
         result: lk_pipeline::IngestResult,
         started_at: std::time::Instant,
+        manual_originals: Vec<lk_core::manual_original::ManualBundleCapture>,
+        manual_retirement_blocked: bool,
     }
     let mut planned: Vec<Planned> = Vec::new();
+    let mut manual_capture_bytes = 0usize;
     // Set on any source/extract/pipeline/write failure so the process exits non-zero —
     // a cron or CI run must be able to detect a partial failure, not see exit 0.
     let mut had_failure = false;
@@ -226,8 +229,35 @@ pub async fn run(
             }
         };
 
-        let raw = match adapter.extract(&sc.params, &extract_ctx).await {
-            Ok(items) => items,
+        let extracted = if sc.source_type == lk_core::config::SourceType::Manual {
+            lk_source::capture_manual(&sc.params, &extract_ctx).and_then(|mut capture| {
+                capture.project_links(
+                    &std::path::PathBuf::from(&config.vault.dirs.wiki)
+                        .join(lk_core::vault_path::DOCUMENTS_SUBDIR),
+                )?;
+                for failure in &capture.failures {
+                    eprintln!("  ✗ {failure}");
+                }
+                if !capture.failures.is_empty() {
+                    had_failure = true;
+                }
+                if manual_capture_bytes.saturating_add(capture.byte_len()) > 512 * 1024 * 1024 {
+                    return Err(lk_source::SourceError::Parse(
+                        "manual captures exceed the ingest-wide 512 MiB limit; split the ingest"
+                            .into(),
+                    ));
+                }
+                let retirement_blocked = !capture.failures.is_empty();
+                Ok((capture.items, capture.originals, retirement_blocked))
+            })
+        } else {
+            adapter
+                .extract(&sc.params, &extract_ctx)
+                .await
+                .map(|items| (items, Vec::new(), false))
+        };
+        let (raw, manual_originals, manual_retirement_blocked) = match extracted {
+            Ok(capture) => capture,
             Err(e) => {
                 eprintln!("  ✗ extract: {e}");
                 had_failure = true;
@@ -269,6 +299,8 @@ pub async fn run(
             }
         };
 
+        // Keep ALL captures for dependency/retirement guards, including entries the
+        // pipeline excluded. Publication below selects only actually rendered events.
         // Written BEFORE the empty-pages skip, and written even when the list is empty: a
         // source can be open-work-only in a run that renders nothing, and an empty answer is
         // what retires proposals whose work is now finished. `--dry-run` writes nothing at all.
@@ -339,6 +371,49 @@ pub async fn run(
         }
 
         if dry_run {
+            for capture in &manual_originals {
+                if !result.events.iter().any(|event| {
+                    event.metadata.get("source_file").and_then(|v| v.as_str())
+                        == Some(capture.source_file.as_str())
+                }) {
+                    continue;
+                }
+                let shared = manual_originals.iter().any(|other| {
+                    other.manifest.entry != capture.manifest.entry
+                        && other
+                            .manifest
+                            .members
+                            .iter()
+                            .any(|member| member.path == capture.manifest.entry)
+                });
+                let retirement = if sc
+                    .params
+                    .get("archive_after_ingest")
+                    .and_then(|v| v.as_bool())
+                    == Some(false)
+                {
+                    "disabled"
+                } else if manual_retirement_blocked
+                    || shared
+                    || !capture.manifest.unsupported.is_empty()
+                {
+                    "blocked"
+                } else {
+                    "eligible only after publication and unchanged-byte check"
+                };
+                let reference = capture
+                    .manifest
+                    .reference()
+                    .map_err(|e| miette::miette!("{e}"))?;
+                eprintln!(
+                    "  [dry-run] original: {} ({} bytes, {} members, {} unsupported constructs; retirement {})",
+                    reference.manifest_path,
+                    capture.byte_len(),
+                    capture.manifest.members.len(),
+                    capture.manifest.unsupported.len(),
+                    retirement
+                );
+            }
             for out in &result.daily_pages {
                 report_discards(out, dry_run);
                 eprintln!(
@@ -354,7 +429,13 @@ pub async fn run(
             continue;
         }
 
+        manual_capture_bytes += manual_originals
+            .iter()
+            .map(lk_core::manual_original::ManualBundleCapture::byte_len)
+            .sum::<usize>();
         planned.push(Planned {
+            manual_originals,
+            manual_retirement_blocked,
             id: id.clone(),
             result,
             started_at,
@@ -385,6 +466,27 @@ pub async fn run(
     let mut all_personal: Vec<lk_core::event::Event> = Vec::new();
 
     for p in &planned {
+        for capture in &p.manual_originals {
+            if !p.result.events.iter().any(|event| {
+                event.metadata.get("source_file").and_then(|v| v.as_str())
+                    == Some(capture.source_file.as_str())
+            }) {
+                continue;
+            }
+            if let Err(error) = lk_vault::publish_manual_original(
+                _mutation
+                    .as_ref()
+                    .expect("writing ingest holds mutation session"),
+                capture,
+            ) {
+                eprintln!("  ✗ original publication: {error}");
+                any_write_failed = true;
+                break;
+            }
+        }
+        if any_write_failed {
+            break;
+        }
         for out in &p.result.daily_pages {
             report_discards(out, dry_run);
             let mut plan = lk_vault::MutationPlan::default();
@@ -543,12 +645,17 @@ pub async fn run(
     // Any write/flush failure leaves files in the inbox for safe retry.
     if !any_write_failed {
         for p in &planned {
+            if p.manual_retirement_blocked {
+                tracing::warn!(source=%p.id,"manual: entry capture failures; retaining this source's inbox entries");
+                continue;
+            }
             let sc = sources.iter().find(|(id, _)| id == &p.id).map(|(_, sc)| sc);
             if let Some(sc) = sc
                 && sc.source_type == lk_core::config::SourceType::Manual
-                && let Err(e) = lk_source::archive_consumed_files(
+                && let Err(e) = lk_source::archive_manual_originals(
                     &sc.params,
                     &p.result.events,
+                    &p.manual_originals,
                     extract_target,
                     &vault_root,
                 )
