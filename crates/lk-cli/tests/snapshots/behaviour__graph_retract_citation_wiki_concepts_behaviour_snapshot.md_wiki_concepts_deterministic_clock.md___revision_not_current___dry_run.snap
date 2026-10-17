@@ -1,0 +1,8 @@
+---
+source: crates/lk-cli/tests/behaviour.rs
+expression: "observe(staged.path(), argv)"
+---
+exit: 2
+--- stdout ---
+--- stderr ---
+error: origin must be real citation evidence, not a concept or task board

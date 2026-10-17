@@ -198,7 +198,7 @@ fn incoming_citations(
         // finished — and queue a synthesis rewrite on each move. This sweep reads the whole
         // vault rather than the analysis scope, because a citation lives wherever it was
         // written, so the exclusion has to be asked here too.
-        if crate::scan::states_intent(page) || !is_valid_source(&page.path, dirs) {
+        if !crate::scan::is_citation_origin(page, dirs) {
             continue;
         }
         for target in page

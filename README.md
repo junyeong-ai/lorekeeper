@@ -306,6 +306,7 @@ lore wiki search "정확한 문자열" --body --json # 원문 행·문맥·판�
 lore wiki document-identity plan --source ID --manifest /tmp/identity.json # 기존 사본의 식별자 이관 검증
 lore wiki read wiki/concepts/example.md # 목차 → --section ID; 후속 읽기에 --revision 사용
 lore wiki links wiki/concepts/example.md --limit 20 # 연결된 원문 행·설명·리비전 조회
+lore wiki provenance wiki/documents/example.md # 동일 저장소의 정확한 문서 ID로 선언 관계·후속 문서 조회
 lore wiki concepts            # 개념 목록
 lore resolve <name>           # 어떤 개념 페이지가 그 이름을 갖는지 (0 소유 / 1 없음 / 2 중복)
 lore wiki index / log / map   # 주제별 인덱스 / 시간순 타임라인 / 인용 클러스터 맵 재생성
@@ -314,6 +315,7 @@ lore graph suggest-links      # 개념 간 관계 후보(Adamic-Adar)
 lore graph cluster            # 토픽 커뮤니티(Louvain)
 lore graph backlinks-sync     # 개념의 ## Sources·인용수·요약 입력 재도출(변한 요약은 큐로)
 lore graph merge <from> <into># 중복 개념 통합
+lore graph retract-citation <원문.md> <개념.md> --revision <file_revision> --dry-run # 검토한 오인용 철회 미리보기
 lore graph normalize --fix    # 링크 표기 정규화
 lore graph index-sync --fix   # index.md 누락/유령 항목 정정
 lore doctor                   # 페이지 계약 감사(텍스트 청결도·미답변 섹션·자격증명)

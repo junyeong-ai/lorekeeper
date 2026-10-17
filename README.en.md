@@ -307,8 +307,7 @@ lore wiki search "exact text" --body --json # Raw evidence lines/context/revisio
 lore wiki document-identity plan --source ID --manifest /tmp/identity.json # Verify legacy copy identity migration
 lore wiki read wiki/concepts/example.md # Outline → --section ID; pin subsequent reads with --revision
 lore wiki links wiki/concepts/example.md --limit 20 # Inspect link source lines, context and revision
-                              #   asked by a concept's name, it also reads the prose written
-                              #   under that concept's other names (MCP <-> Model Context Protocol)
+lore wiki provenance wiki/documents/example.md # Follow declared relations by exact repository + document ID
 lore wiki concepts            # list concepts
 lore resolve <name>           # which concept page owns a name (0 owned / 1 absent / 2 ambiguous)
 lore wiki index / log / map   # rebuild by-topic index / by-time timeline / citation-cluster map
@@ -317,6 +316,7 @@ lore graph suggest-links      # concept-relationship candidates (Adamic-Adar)
 lore graph cluster            # topic communities (Louvain)
 lore graph backlinks-sync     # re-derive each concept's ## Sources, citation count and synthesis input
 lore graph merge <from> <into># fold a duplicate concept into the canonical one
+lore graph retract-citation <origin.md> <concept.md> --revision <file_revision> --dry-run # Preview a reviewed citation correction
 lore graph normalize --fix    # normalize link spelling across the vault
 lore graph index-sync --fix   # repair missing/phantom entries in index.md
 lore doctor                   # page contracts: text cleanliness, unanswered sections, credentials

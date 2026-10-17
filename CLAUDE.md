@@ -62,12 +62,14 @@ lore wiki read wiki/concepts/example.md # bounded outline and revision-checked s
 lore wiki browse --json             # bounded catalog with category/type filters and pagination
 lore graph --json neighbors wiki/concepts/example.md # direct links, including daily evidence
 lore wiki links wiki/concepts/example.md # paginated explicit links with source lines and revision
+lore wiki provenance wiki/documents/example.md # exact source-ID relations, including declared successors
 lore wiki concepts                 # list all concept pages
 lore wiki search <query> --json    # which pages a query reaches, and whether they NAME it or merely mention it
 lore brief --date yesterday        # a day's knowledge: what the vault learned, and what it saw again
 lore fetch <url>                   # save a page's article into the manual inbox, with its address
 lore resolve <name>                # which concept page a name addresses (0 owned/1 absent/2 ambiguous)
 lore graph lint                    # structural health check
+lore graph retract-citation daily/source/date.md wiki/concepts/example.md --revision REV --dry-run # preview a reviewed citation correction
 lore doctor                        # page contracts: text cleanliness, unanswered sections, credentials
 lore queue status                  # classify pending LLM tasks (current/stale/missing)
 lore queue count                   # bare integer: current tasks (machine contract for scripts)

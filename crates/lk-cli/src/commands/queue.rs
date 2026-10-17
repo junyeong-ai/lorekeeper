@@ -317,6 +317,123 @@ fn read_pending_tasks(queue: &Path) -> miette::Result<PendingTasks> {
     Ok(pending)
 }
 
+/// A deliberate evidence edit must not strand work or race an unpublished draft.
+/// Called under the vault mutation claim followed by the queue writer claim.
+pub(super) fn require_citation_origin_quiescent(root: &Path, origin: &Path) -> miette::Result<()> {
+    let queue = root.join(".lorekeeper/queue");
+    let pending = read_pending_tasks(&queue)?;
+    if pending.unparseable != 0 {
+        return Err(miette::miette!(
+            "unparseable pending work prevents citation retraction"
+        ));
+    }
+    let addresses_origin = |address: &str| -> miette::Result<bool> {
+        let Some(path) = resolve_target_path(address) else {
+            return Ok(false);
+        };
+        if path == origin {
+            return Ok(true);
+        }
+        if lk_vault::page_path(root, &path).is_err() {
+            return Ok(false);
+        }
+        lk_vault::same_existing_file(root, &path, origin)
+            .map_err(|error| miette::miette!("compare queued origin address: {error}"))
+    };
+    let touches = |task: &QueueTask| -> miette::Result<bool> {
+        if addresses_origin(&task.target.vault_path)? {
+            return Ok(true);
+        }
+        if let Some(citations) = task.input.get("citations").and_then(|v| v.as_array()) {
+            for path in citations
+                .iter()
+                .filter_map(|citation| citation.get("path").and_then(|v| v.as_str()))
+            {
+                if addresses_origin(path)? {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    };
+    let mut revisions = BTreeMap::new();
+    for task in pending.tasks.values() {
+        if !touches(task)? {
+            continue;
+        }
+        if matches!(
+            classify_task(root, task, &mut revisions)?,
+            TaskStatus::Current | TaskStatus::Unreadable | TaskStatus::MissingTarget
+        ) {
+            return Err(miette::miette!(
+                "pending task {} touches citation origin; finish or repair it first",
+                task.task_id
+            ));
+        }
+    }
+    let batch =
+        lk_queue::read_results(&queue).map_err(|e| miette::miette!("read queue results: {e}"))?;
+    if !batch.unreadable.is_empty() {
+        return Err(miette::miette!(
+            "unreadable staged results prevent citation retraction"
+        ));
+    }
+    let mut staged: Vec<(String, String)> = batch
+        .ready
+        .into_iter()
+        .map(|(_, result)| {
+            if addresses_origin(&result.target.vault_path)? {
+                return Err(miette::miette!(
+                    "staged extraction {} targets citation origin",
+                    result.task_id
+                ));
+            }
+            Ok((result.task_id, result.cache_hash))
+        })
+        .collect::<miette::Result<_>>()?;
+    let entries = match std::fs::read_dir(queue.join(lk_queue::RESULTS_SUBDIR)) {
+        Ok(entries) => Some(entries),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(miette::miette!("read staged results: {e}")),
+    };
+    for entry in entries.into_iter().flatten() {
+        let path = entry
+            .map_err(|e| miette::miette!("read staged result: {e}"))?
+            .path();
+        let name = path.to_string_lossy();
+        let section = name.ends_with(lk_queue::SECTION_RESULT_SUFFIX);
+        if !section && !name.ends_with(lk_queue::SYNTHESIS_RESULT_SUFFIX) {
+            continue;
+        }
+        let raw =
+            std::fs::read(&path).map_err(|e| miette::miette!("read {}: {e}", path.display()))?;
+        let identity = if section {
+            serde_json::from_slice::<lk_queue::SectionResult>(&raw)
+                .map(|r| (r.task_id, r.cache_hash))
+        } else {
+            serde_json::from_slice::<lk_queue::SynthesisResult>(&raw)
+                .map(|r| (r.task_id, r.cache_hash))
+        }
+        .map_err(|e| miette::miette!("unreadable staged result {}: {e}", path.display()))?;
+        staged.push(identity);
+    }
+    for identity in staged {
+        let task = pending.tasks.get(&identity).ok_or_else(|| {
+            miette::miette!(
+                "unmatched staged result {} prevents citation retraction",
+                identity.0
+            )
+        })?;
+        if touches(task)? {
+            return Err(miette::miette!(
+                "staged result {} touches citation origin; finish or repair it first",
+                task.task_id
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn claim_writer(
     queue_dir: &Path,
     dry_run: bool,

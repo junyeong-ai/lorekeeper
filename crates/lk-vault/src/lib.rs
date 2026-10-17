@@ -7,6 +7,7 @@ mod links;
 mod log;
 mod mutation;
 mod navigation;
+mod provenance;
 mod review;
 mod search;
 mod search_index;
@@ -34,6 +35,9 @@ pub use self::log::{IngestLog, LogEntry, LogStatus};
 pub use self::mutation::{MutationPlan, MutationSession};
 pub use self::navigation::{
     NAVIGATION_PAGE_ENTRIES, NavigationCatalog, NavigationKind, NavigationRow,
+};
+pub use self::provenance::{
+    ProvenanceDirection, ProvenanceOptions, ProvenanceReport, inspect_provenance,
 };
 pub use self::review::{
     EvidenceReport, KnowledgeReview, ReviewEffectiveState, ReviewReport, ReviewStatus,

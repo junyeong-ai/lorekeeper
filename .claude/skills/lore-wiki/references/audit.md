@@ -52,6 +52,14 @@ resolve section headings before inspecting pages.
      the concept's synthesis.
    Report every proposed citation: a link is a claim of evidence. After authorized
    repairs, run `lore graph backlinks-sync` to queue affected concept rewrites.
+   For a mistaken existing citation, compare the complete source context with the
+   concept's identity before proposing retraction. Within authorized repair work,
+   use `lore graph retract-citation <origin.md> <concept.md> --revision <file_revision>
+   --dry-run`, then omit `--dry-run` after reviewing the preview. It archives the
+   prior evidence and refuses prose links or touching pending work. Process the
+   affected synthesis through `/lore-process` and its full Finalize sequence.
+   A rejected alternative can still be useful evidence; disagreement alone is not
+   a reason to remove a citation.
 3. **Contradictions** — run `lore wiki reviews` first. Review open records and records
    with changed or unreadable evidence; retain resolved records and their reasons. Search
    `lore wiki search "<claim terms>" --include-sources --json` to compare direct evidence,

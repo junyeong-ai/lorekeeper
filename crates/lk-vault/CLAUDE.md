@@ -225,3 +225,17 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   Callers pin subsequent reads with `--revision`, including revisions from search hits.
 - **`load_concept_registry`** is shared by ingestion and CLI resolution. One operation loads
   the declared names once; unreadable or disappearing pages fail instead of implying absence.
+
+- **`inspect_provenance`** reads only the configured document collection and resolves declared
+  targets by the exact `(source_identity.repository, source_identity.document)` pair. It never
+  guesses from titles, filenames, URLs or concept aliases. Verified filesystem symlink spellings
+  share one owner, preferring its direct collection address; distinct files and hard-link entries
+  remain distinct owners. All scanned addresses still bind the collection revision and coverage.
+  Duplicate declarations retain all
+  field locations in one row; missing and multiple owners remain unresolved and ambiguous.
+  `superseded_by` is exposed even when nodex outgoing relations omit it. Center metadata issues are visible in the bounded entry stream; unrelated malformed
+  records and unavailable legacy identities are counted in small coverage metadata. Compact
+  declaring/target records omit full source_record; use wiki read for the complete record.
+  Target candidates share the bounded entry stream. The revision binds the complete collection and query, so a newly added owner
+  invalidates pagination even when the starting document did not change. This read-only view
+  neither adds Markdown graph edges nor infers support, contradiction or current truth.

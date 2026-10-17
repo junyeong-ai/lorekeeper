@@ -253,3 +253,10 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   `wiki reviews --check` prints the same JSON as the ordinary list, then fails for a
   `ReviewEffectiveState` requiring attention. Open reviews pass. The pipeline derives
   backlinks after its final apply before running both checks.
+
+- **`lore wiki provenance <document-path>`** is read-only JSON for exact imported-document
+  identities, lifecycle metadata and declared relations; it is distinct from `wiki evidence`
+  (review snapshots) and `wiki document-identity` (ownership migration). `--direction` chooses
+  outgoing/incoming/both declarations; `--relation` is exact. `--limit 1..100` bounds all entries,
+  including invalid metadata and ambiguous target candidates. Pin subsequent pages using the
+  returned collection `revision`; this command never creates a search snapshot or writes pages.

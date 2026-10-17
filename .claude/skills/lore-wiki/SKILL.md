@@ -1,6 +1,6 @@
 ---
 name: lore-wiki
-version: 0.47.0
+version: 0.48.0
 description: Semantic wiki operations for the Lorekeeper vault. Add sources, query with compounding, audit structural and semantic health. Reads AGENTS.md for page formats and section vocabulary — never hardcodes headings. Pairs with `lore` (the deterministic binary) for graph analysis and queue processing.
 when_to_use: |
   wiki query, knowledge search, ask wiki, search vault,
@@ -138,6 +138,12 @@ Answer a question grounded in vault content, with compounding.
    includes nested subsections. Read the sources behind the claim, not only its synthesis.
    Use `source_record` to distinguish active, archived, superseded and unknown source state;
    `--source-status` filters exact recorded states. A historical claim can remain valid.
+   Follow declared document relations with `lore wiki provenance <exact-path>`.
+   It resolves only exact repository/document identities; missing or ambiguous owners
+   remain explicit. Use `--direction incoming|both` or `--relation <name>` to narrow,
+   then paginate with `--offset` and its collection `--revision`. Target candidates
+   provide paths and file revisions for `wiki read`; neither a declared relation nor
+   recorded source status establishes support, contradiction or current deployment.
    `lore wiki concepts` is the registry for convergence decisions, not a
    lookup — reading all of it to find one page is what search exists to replace.
    For exact evidence such as a number, code symbol or quoted phrase, use

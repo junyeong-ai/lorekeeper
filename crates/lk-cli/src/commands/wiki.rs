@@ -10,6 +10,26 @@ use super::{find_config, load_config};
 
 #[derive(clap::Subcommand)]
 pub enum WikiCommand {
+    /// Inspect exact imported-document provenance and declared relations (read-only JSON)
+    Provenance {
+        /// Exact vault-relative imported document path
+        path: PathBuf,
+        /// Follow declarations made by this page, to its identity, or both
+        #[arg(long, value_enum, default_value_t = ProvenanceDirection::Outgoing)]
+        direction: ProvenanceDirection,
+        /// Exact declared relation name (never inferred support or contradiction)
+        #[arg(long)]
+        relation: Option<String>,
+        /// Maximum entries, including metadata issues and target candidates (1..100)
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Skip this many entries in deterministic collection order
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+        /// Pin the entire document collection and query to a prior response
+        #[arg(long)]
+        revision: Option<String>,
+    },
     /// Verify and migrate legacy imported document ownership
     DocumentIdentity {
         #[command(subcommand)]
@@ -117,6 +137,13 @@ pub enum WikiCommand {
     },
 }
 
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum ProvenanceDirection {
+    Outgoing,
+    Incoming,
+    Both,
+}
+
 #[derive(clap::Args)]
 pub struct BodyEvidenceOptions {
     /// Search literal Markdown body lines, including code and link addresses (live only)
@@ -163,6 +190,39 @@ pub struct DiscoveryOptions {
 
 pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Result<()> {
     match cmd {
+        WikiCommand::Provenance {
+            path,
+            direction,
+            relation,
+            limit,
+            offset,
+            revision,
+        } => {
+            let config = load_config(&find_config(opts)?)?;
+            let direction = match direction {
+                ProvenanceDirection::Outgoing => lk_vault::ProvenanceDirection::Outgoing,
+                ProvenanceDirection::Incoming => lk_vault::ProvenanceDirection::Incoming,
+                ProvenanceDirection::Both => lk_vault::ProvenanceDirection::Both,
+            };
+            let report = lk_vault::inspect_provenance(
+                &config.vault.root_path(),
+                &config.vault.dirs,
+                &path,
+                &lk_vault::ProvenanceOptions {
+                    direction,
+                    relation: relation.as_deref(),
+                    limit,
+                    offset,
+                    revision: revision.as_deref(),
+                },
+            )
+            .map_err(|e| miette::miette!("{e}"))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report).map_err(|e| miette::miette!("{e}"))?
+            );
+            Ok(())
+        }
         WikiCommand::DocumentIdentity { command } => {
             super::document_identity::run(opts, command).await
         }

@@ -232,6 +232,12 @@ pub(crate) fn states_intent(page: &ScannedPage) -> bool {
     page.format.as_deref() == Some(lk_core::vault_path::TASK_BOARD_FORMAT)
 }
 
+/// Whether this scanned page is real citation evidence, rather than a concept or board.
+/// Shares the source eligibility used by backlink reconciliation.
+pub fn is_citation_origin(page: &ScannedPage, dirs: &VaultDirs) -> bool {
+    is_valid_source(&page.path, dirs) && !states_intent(page)
+}
+
 /// Whether a page id sits under a configured vault-relative directory.
 ///
 /// THE definition, shared by the analysis scope and by every consumer that asks what kind of
@@ -530,7 +536,7 @@ impl VaultExistence {
 /// Whether a page is a concept page (`{dirs.wiki}/concepts/{slug}.md`). Anchored to
 /// the configured `dirs.wiki` — never a hardcoded path segment — and shared by
 /// `backlinks` and the concept lints.
-pub(crate) fn is_concept_page(path: &Path, dirs: &VaultDirs) -> bool {
+pub fn is_concept_page(path: &Path, dirs: &VaultDirs) -> bool {
     under(
         &path_slug(path),
         &Path::new(&dirs.wiki).join(CONCEPTS_SUBDIR),

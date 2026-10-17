@@ -111,6 +111,15 @@ const SWEEP: &[&[&str]] = &[
         "wiki/concepts/behaviour-snapshot.md",
         "--dry-run",
     ],
+    &[
+        "graph",
+        "retract-citation",
+        "wiki/concepts/behaviour-snapshot.md",
+        "wiki/concepts/deterministic-clock.md",
+        "--revision",
+        "not-current",
+        "--dry-run",
+    ],
     // Each period is named explicitly, so the pin describes the code rather than
     // the calendar: the same argv targets the same period forever.
     &["synthesis", "weekly", "--date", "2026-01-07"],
@@ -124,6 +133,10 @@ const SWEEP: &[&[&str]] = &[
 /// [`every_command_is_swept_or_exempt`], so an exemption is a written decision
 /// rather than an omission.
 const EXEMPT: &[(&[&str], &str)] = &[
+    (
+        &["wiki", "provenance"],
+        "requires imported document identities absent from this corpus; wiki_provenance integration tests exact successor resolution, revision-pinned pagination and read-only publication against a configured knowledge directory",
+    ),
     (
         &["wiki", "document-identity", "plan"],
         "requires a configured external nodex repository; document_identity tests exact projection and ownership collisions",
@@ -239,6 +252,18 @@ const EXEMPT: &[(&[&str], &str)] = &[
 /// Each is a stated gap: the pin still catches a change to the guard's own
 /// wording or exit code, and states that it catches nothing past it.
 const GUARD_ONLY: &[(&[&str], &str)] = &[
+    (
+        &[
+            "graph",
+            "retract-citation",
+            "wiki/concepts/behaviour-snapshot.md",
+            "wiki/concepts/deterministic-clock.md",
+            "--revision",
+            "not-current",
+            "--dry-run",
+        ],
+        "the fixture contains no evidence source pages; pins refusal to retract concept-to-concept structure. Retraction unit tests cover actual archived publication, exact revisions and queue collisions",
+    ),
     (
         &[
             "graph",

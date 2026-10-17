@@ -293,3 +293,13 @@ on-disk state, never from a cached snapshot.
   queue writer lock; existing current matching work is reused. It preserves prose
   until queue apply publishes the new answer. Dry-run neither writes nor recovers.
   Historical replay remains `queue regenerate --task-id`, requiring retained input.
+
+- **Citation retraction is explicit and narrow.** `graph retract-citation ORIGIN CONCEPT
+  --revision FILE_REVISION` operates only on standalone generated items in the real
+  source's existing related-concepts section. It refuses other occurrences, mixed prose,
+  ambiguous sections, stale bytes and relevant active/blocked work or unpublished drafts.
+  The CLI holds the mutation session then queue claim, archives the old authored evidence
+  through `publish_document_expected`, and journals the exact-byte origin edit. Concept
+  bodies, markers and generated backlinks are untouched; reconcile backlinks and process
+  synthesis afterward. Preview never archives, recovers a journal or writes. Source
+  eligibility is shared with backlinks through `scan::is_citation_origin`.

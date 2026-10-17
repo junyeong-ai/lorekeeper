@@ -646,6 +646,11 @@ pub fn render_agents_md(
         `next_offset` with `--offset`; pass the returned `file_revision` as `--revision` on every \
         subsequent read. Search hits also carry this revision. A mismatch requires fresh retrieval, \
         not reuse of the old section id. Source provenance is returned alongside the content.").unwrap();
+    writeln!(out, "- `lore wiki provenance <document.md>` — follow declared relations by exact \
+        repository/document identity, including superseded_by. Missing and ambiguous owners stay explicit. \
+        Use --direction incoming|both or --relation to narrow, then --limit/--offset with the returned \
+        collection --revision. Target candidates carry file revisions for wiki read. Recorded status \
+        and relations are source declarations, not current truth or inferred support/contradiction.").unwrap();
     writeln!(
         out,
         "- `lore graph --json neighbors <vault-relative.md>` — direct incoming/outgoing \
