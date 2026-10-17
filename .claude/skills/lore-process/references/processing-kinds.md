@@ -33,6 +33,12 @@ Korean product name keeps its on one written in English (see `kind: extract-conc
 Synthesize a knowledge-rich summary in `input.locale`. Aim for
 `input.max_sentences` substantive points. No preamble.
 
+Ground the summary in this task's input. Its cache tracks that input, so claims
+borrowed from another document would survive changes to their actual evidence.
+Preserve a declared status or successor identity, but do not import the successor's
+conclusions from another task or prior reading. Compare versions in a concept
+synthesis or knowledge review that records both sources and their revisions.
+
 A daily page's summary answers a different question from the events below it.
 Each refined body says what its own event is; the summary says what the day's
 events establish together, naming the ones it draws on. A sentence that would
