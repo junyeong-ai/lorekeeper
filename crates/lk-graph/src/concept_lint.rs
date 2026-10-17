@@ -112,7 +112,7 @@ pub fn scan_concept_pages(
         // Slug is always the file stem (the graph's canonical page identity); only
         // category, names and body come from parsing, and a malformed page degrades to
         // none/slug-only/empty.
-        let mut names = vec![file_stem.clone()];
+        let mut names = Vec::new();
         let (category, body) = match frontmatter::parse_page(&raw) {
             Ok(page) => {
                 // A PRESENT field is reported as written, whatever its YAML type: a value that
@@ -126,6 +126,7 @@ pub fn scan_concept_pages(
                     page.frontmatter
                         .get("title")
                         .and_then(|v| v.as_str())
+                        .or(Some(file_stem.as_str()))
                         .map(str::to_owned),
                 );
                 names.extend(
@@ -207,32 +208,8 @@ pub struct DuplicateConcept {
 /// remedy a human triggers — or, when the pages are genuinely different things that happen
 /// to share a name, renaming one of them is.
 ///
-/// Deliberately EXACT: no score, no threshold, and no morphology. Two names collide only
-/// when `lk_core::concept::identity_key` reduces them to one identity — no similarity guess is
-/// ever made.
-///
-/// `C`, `C++` and `C#` are reported as one name on three pages, and that IS a fact about the
-/// vault: all three slugify to `c`, so they claim one address, and whichever page owns it is
-/// where every extraction naming any of them lands. Reporting the pair is right, and the remedy
-/// is the one `/lore-wiki audit` prescribes for a genuine collision — disambiguate the name.
-/// `identity_key` records why the addressing cannot separate them.
-///
-/// A scored variant (Sørensen-Dice over slug character bigrams) preceded this and was
-/// measured on a 1,599-concept vault: 298 findings, of which one was a real duplicate. The
-/// signal is morphology, so it fires on every shared namespace prefix (`amazon-sagemaker-ai`
-/// ~ `amazon-sagemaker-hyperpod`), every shared head noun (`robot-foundation-model` ~
-/// `tabular-foundation-model`) and on plain character coincidence (`agentops` ~ `gentoo`),
-/// while missing acronym pairs entirely. No cutoff separates those from real duplicates,
-/// because the difference is meaning, not spelling distance — and a permanently-red lint is
-/// worse than a silent one. Two softer keys were measured on the same vault and dropped for
-/// the same reason: an order-insensitive token multiset found nothing the exact key did not
-/// (no two slugs are permutations of each other) while assuming word order carries no
-/// meaning, and per-token plural stripping bought exactly one finding at the cost of
-/// collapsing `http` onto `https`. Everything they reached for — plurals, acronyms,
-/// shorthand — is a question about meaning, and belongs to `/lore-wiki audit` layer 5.
-///
-/// Being exact is also why no version-variant escape hatch is needed: `gpt-4`/`gpt-5` and
-/// `gemini-3-1-flash-lite`/`gemini-3-5-flash-lite` simply claim different names.
+/// Report shared declared names, without inferring equivalence from file addresses
+/// or spelling similarity. A shared name requires review, not automatic merging.
 pub fn find_duplicate_concepts(pages: &[ConceptPage]) -> Vec<DuplicateConcept> {
     // key → the pages claiming it, each with the first name on that page that produced it.
     // BTreeMaps throughout: iteration order is the key order and then page order, so the
@@ -529,7 +506,7 @@ mod tests {
         assert_eq!(pages[0].category.as_deref(), Some("ai-ml"));
         assert_eq!(
             pages[0].names,
-            vec!["rag", "RAG", "RAG", "Retrieval-Augmented Generation"],
+            vec!["RAG", "RAG", "Retrieval-Augmented Generation"],
             "the name set is slug + title + every alias, verbatim"
         );
         assert!(pages[0].body.contains("# rag"));
@@ -555,7 +532,7 @@ mod tests {
         assert_eq!(pages.len(), 1);
         assert_eq!(pages[0].slug, "broken");
         assert!(pages[0].category.is_none());
-        assert_eq!(pages[0].names, vec!["broken"]);
+        assert_eq!(pages[0].names, Vec::<String>::new());
         assert!(pages[0].body.is_empty());
     }
 
@@ -641,10 +618,10 @@ mod tests {
     }
 
     #[test]
-    fn one_name_spelled_two_ways_is_flagged() {
+    fn an_explicit_shared_name_is_flagged() {
         let tmp = TempDir::new().unwrap();
         write_concept(tmp.path(), "vector-db", "id: vector-db");
-        write_concept(tmp.path(), "vectordb", "id: vectordb");
+        write_concept(tmp.path(), "vectordb", "id: vectordb\naliases: [vector-db]");
         write_concept(tmp.path(), "kubernetes", "id: kubernetes");
         let result = find_duplicate_concepts(&scan(tmp.path()));
         let pairs: Vec<(&str, &str)> = result.iter().map(|d| (&*d.a, &*d.b)).collect();
@@ -656,7 +633,7 @@ mod tests {
     }
 
     #[test]
-    fn a_break_beside_a_single_digit_is_still_one_name() {
+    fn word_boundaries_do_not_imply_identity() {
         // The companion of `claude-3-5` ~ `claude-35` staying distinct: only a break
         // BETWEEN numerals is identity, so a one-sided one folds and the pair IS a finding.
         // The pipeline relies on the same rule to route `Claude 35` at one page.
@@ -665,7 +642,7 @@ mod tests {
         write_concept(tmp.path(), "claude35", "id: claude35");
         let result = find_duplicate_concepts(&scan(tmp.path()));
         let pairs: Vec<(&str, &str)> = result.iter().map(|d| (&*d.a, &*d.b)).collect();
-        assert_eq!(pairs, vec![("claude-35", "claude35")], "{result:?}");
+        assert!(pairs.is_empty(), "{result:?}");
     }
 
     #[test]
@@ -687,7 +664,7 @@ mod tests {
         assert_eq!(result[0].b, "hypermedia-driven-frontend");
         // Each side reports the first of its own names that claimed the key — for `htmx`
         // that is its slug, for the other page the alias that reaches across.
-        assert_eq!(result[0].a_name, "htmx");
+        assert_eq!(result[0].a_name, "HTMX");
         assert_eq!(result[0].b_name, "HTMX");
     }
 
@@ -699,12 +676,12 @@ mod tests {
         write_concept(
             tmp.path(),
             "vector-db",
-            "id: vector-db\ntitle: \"Vector DB\"\naliases: [\"vectordb\"]",
+            "id: vector-db\ntitle: \"Vector DB\"\naliases: [\"VectorDB\"]",
         );
         write_concept(
             tmp.path(),
             "vectordb",
-            "id: vectordb\ntitle: \"VectorDB\"\naliases: [\"vector db\"]",
+            "id: vectordb\ntitle: \"VectorDB\"\naliases: [\"Vector DB\"]",
         );
         let result = find_duplicate_concepts(&scan(tmp.path()));
         assert_eq!(result.len(), 1, "{result:?}");
@@ -772,35 +749,17 @@ mod tests {
     }
 
     #[test]
-    fn only_what_carries_no_identity_is_folded() {
-        // Names are compared through `slugify`, the same normalization that mints page ids,
-        // so display styling never lets one name address two pages unnoticed…
-        assert_eq!(
-            identity_key("Chain of Thought"),
-            identity_key("chain-of-thought")
-        );
-        assert_eq!(identity_key("A/I"), identity_key("a i"));
-        assert_eq!(identity_key("ＲＡＧ"), identity_key("rag")); // NFKC full-width
-        assert_eq!(identity_key("Vite+"), identity_key("vite"));
-        assert_eq!(identity_key("vector-db"), identity_key("vectordb"));
-        // …and nothing beyond that is folded: order, every character, and a break
-        // between digits are all identity.
-        assert_ne!(identity_key("agent harness"), identity_key("harness agent"));
-        assert_ne!(identity_key("http"), identity_key("https"));
-        assert_ne!(identity_key("doc-hub"), identity_key("docs-hub"));
-        assert_ne!(identity_key("Claude 3.5"), identity_key("Claude 35"));
-        assert_eq!(identity_key("!!!"), None);
+    fn punctuation_does_not_imply_equivalence() {
+        for (a, b) in [
+            ("A/I", "A I"),
+            ("Vite+", "Vite"),
+            ("C", "C++"),
+            ("vector-db", "vectordb"),
+        ] {
+            assert_ne!(identity_key(a), identity_key(b));
+        }
     }
 
-    /// The report is the only place an open disagreement is machine-visible, and Obsidian's
-    /// callout title is optional — so a callout that stated its case in the body and left the
-    /// title empty reported nothing at all. Two of the reference vault's 24 open conflicts
-    /// were invisible that way.
-    /// A fenced block ends with its CONTAINER, and carrying a quoted fence past the
-    /// blockquote that held it SUPPRESSED every later conflict on the page — the one failure
-    /// direction worse than a false report, since the page goes on asserting a disagreement
-    /// nothing tells anyone about. A decorative `> ~~~~~ … ~~~~~` line reaches it too: a
-    /// tilde fence accepts any info string, so an ordinary separator in a quote opens one.
     #[test]
     fn a_fence_inside_a_quote_ends_with_the_quote_and_suppresses_nothing_after_it() {
         let tmp = TempDir::new().unwrap();

@@ -61,7 +61,7 @@ pub struct Config {
 impl Config {
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let content = std::fs::read_to_string(path)?;
-        let mut config: Self = serde_yaml_ng::from_str(&content)?;
+        let mut config: Self = crate::yaml::from_str(&content)?;
         config.validate()?;
         config.graph.apply_vault_defaults(&config.vault.dirs);
         if let Some(parent) = path.parent() {
@@ -582,7 +582,7 @@ impl VaultConfig {
 /// `weekly`, `monthly`, `quarterly`, and `annual` are time-period names used as
 /// subdirectories within both `personal` (e.g. `me/weekly/`) and `synthesis`
 /// (e.g. `synthesis/weekly/`).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct VaultDirs {
     pub daily: String,
@@ -1515,7 +1515,7 @@ sources:
   bad/id:
     type: gmail
 "#;
-        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = crate::yaml::from_str(yaml).unwrap();
         assert!(config.validate().is_err());
     }
 
@@ -1563,7 +1563,7 @@ sources:
   s1:
     type: gmail
 "#;
-        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = crate::yaml::from_str(yaml).unwrap();
         assert!(config.validate().is_err(), "'..' segment must be rejected");
     }
 
@@ -1574,7 +1574,7 @@ sources:
     #[test]
     fn validate_rejects_a_vault_dir_nested_in_another() {
         let with = |dirs: &str| -> Config {
-            serde_yaml_ng::from_str(&format!(
+            crate::yaml::from_str(&format!(
                 "vault:\n  root: /tmp/vault\n  dirs:\n{dirs}identity:\n  name: t\n  \
                  email: t@t.com\nsources:\n  s1:\n    type: gmail\n"
             ))
@@ -1623,9 +1623,9 @@ sources:
                  sources:\n  s1:\n    type: gmail\ngraph:\n  scope:\n    dirs: [{scope}]\n"
             )
         };
-        let mut bad: Config = serde_yaml_ng::from_str(&base("\"../escape\"")).unwrap();
+        let mut bad: Config = crate::yaml::from_str(&base("\"../escape\"")).unwrap();
         assert!(bad.validate().is_err(), "'..' segment must be rejected");
-        let mut ok: Config = serde_yaml_ng::from_str(&base("\"notes..old\"")).unwrap();
+        let mut ok: Config = crate::yaml::from_str(&base("\"notes..old\"")).unwrap();
         assert!(
             ok.validate().is_ok(),
             "a name merely containing '..' (no parent segment) must be allowed"
@@ -1642,7 +1642,7 @@ sources:
         let yaml = "vault:\n  root: /tmp/vault\n  dirs:\n    wiki: wiki\nidentity:\n  name: t\n  \
                     email: t@t.com\nsources:\n  s1:\n    type: gmail\ngraph:\n  scope:\n    \
                     dirs: [\"./wiki/\"]\n";
-        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = crate::yaml::from_str(yaml).unwrap();
         config.validate().unwrap();
         assert_eq!(
             config.graph.scope.dirs,
@@ -1671,7 +1671,7 @@ sources:
   s1:
     type: gmail
 "#;
-        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = crate::yaml::from_str(yaml).unwrap();
         assert!(
             config.validate().is_err(),
             "'.' must be rejected (it normalizes to an empty path)"
@@ -1694,7 +1694,7 @@ sources:
   s1:
     type: gmail
 "#;
-        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = crate::yaml::from_str(yaml).unwrap();
         assert!(config.validate().is_ok());
         assert_eq!(config.vault.dirs.wiki, "wiki");
     }
@@ -1713,7 +1713,7 @@ sources:
   s1:
     type: gmail
 "#;
-        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = crate::yaml::from_str(yaml).unwrap();
         assert!(config.validate().is_err(), "absolute path must be rejected");
     }
 
@@ -1731,7 +1731,7 @@ sources:
   s1:
     type: gmail
 "#;
-        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = crate::yaml::from_str(yaml).unwrap();
         assert!(
             config.validate().is_ok(),
             "a normal nested relative path must be allowed"
@@ -1762,9 +1762,9 @@ maintenance:
             )
         };
         assert_eq!(MaintenanceConfig::default().retention_days, 90);
-        let mut ok: Config = serde_yaml_ng::from_str(&base("120")).unwrap();
+        let mut ok: Config = crate::yaml::from_str(&base("120")).unwrap();
         assert!(ok.validate().is_ok());
-        let mut bad: Config = serde_yaml_ng::from_str(&base("0")).unwrap();
+        let mut bad: Config = crate::yaml::from_str(&base("0")).unwrap();
         assert!(
             bad.validate().is_err(),
             "retention_days=0 should be rejected"
@@ -1784,7 +1784,7 @@ sources:
   s1:
     type: gmail
 "#;
-        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = crate::yaml::from_str(yaml).unwrap();
         assert!(config.validate().is_err());
     }
 
@@ -1801,7 +1801,7 @@ sources:
   s1:
     type: gmail
 "#;
-        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = crate::yaml::from_str(yaml).unwrap();
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("vault.locale"));
     }
@@ -1820,7 +1820,7 @@ sources:
 ingest:
   schedule: "0 7 *"
 "#;
-        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = crate::yaml::from_str(yaml).unwrap();
         assert!(config.validate().is_err());
     }
 
@@ -1838,7 +1838,7 @@ sources:
 ingest:
   schedule: "0 25 * * *"
 "#;
-        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = crate::yaml::from_str(yaml).unwrap();
         assert!(config.validate().is_err(), "hour=25 should be rejected");
     }
 
@@ -1856,7 +1856,7 @@ sources:
 ingest:
   schedule: "*/0 * * * *"
 "#;
-        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = crate::yaml::from_str(yaml).unwrap();
         assert!(config.validate().is_err());
     }
 
@@ -1874,7 +1874,7 @@ sources:
 ingest:
   schedule: "0-29/foo * * * *"
 "#;
-        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = crate::yaml::from_str(yaml).unwrap();
         assert!(config.validate().is_err());
     }
 
@@ -1897,7 +1897,7 @@ personal:
     enabled: false
     schedule: "0 8 1 1 *"
 "#;
-        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = crate::yaml::from_str(yaml).unwrap();
         config.validate().unwrap();
         let personal = config.personal.as_ref().unwrap();
         let names: Vec<_> = personal.review_schedules().map(|(n, _)| n).collect();
@@ -1954,7 +1954,7 @@ sources:
 ingest:
   schedule: "0 7 * * 1-5"
 "#;
-        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = crate::yaml::from_str(yaml).unwrap();
         assert!(config.validate().is_ok());
     }
 
@@ -1986,7 +1986,7 @@ synthesis:
   weekly:
     include_sources: [nonexistent]
 "#;
-        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = crate::yaml::from_str(yaml).unwrap();
         assert!(config.validate().is_err());
     }
 
@@ -2008,7 +2008,7 @@ sources:
         keywords: ["deployed"]
         performance_category: project-delivery
 "#;
-        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = crate::yaml::from_str(yaml).unwrap();
         assert!(
             config.validate().is_err(),
             "a performance_category bridge with no `personal:` section must be rejected"
@@ -2030,7 +2030,7 @@ personal:
   source_category_map:
     s1: nonexistent-category
 "#;
-        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = crate::yaml::from_str(yaml).unwrap();
         assert!(config.validate().is_err());
     }
 
@@ -2054,7 +2054,7 @@ sources:
     highlights:
       - { category: never_classified, label: "Oops" }
 "#;
-        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = crate::yaml::from_str(yaml).unwrap();
         assert!(
             config.validate().is_err(),
             "a highlight category with no classify rule must be rejected"
@@ -2078,7 +2078,7 @@ sources:
     highlights:
       - { category: action_required, label: "Action Required" }
 "#;
-        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = crate::yaml::from_str(yaml).unwrap();
         assert!(config.validate().is_ok());
     }
 
@@ -2134,7 +2134,7 @@ sources:
   s1:
     type: gmail
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let config: Config = crate::yaml::from_str(yaml).unwrap();
         assert!(config.graph.scope.dirs.is_empty());
         assert_eq!(config.graph.metrics.min_hub_degree, 5);
         assert_eq!(config.graph.cluster.resolution, 1.0);
@@ -2166,7 +2166,7 @@ graph:
     max_iterations: 50
     min_community_size: 2
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let config: Config = crate::yaml::from_str(yaml).unwrap();
         assert_eq!(config.graph.scope.dirs.len(), 2);
         assert!(config.graph.scope.follow_links);
         assert_eq!(config.graph.metrics.min_hub_degree, 3);
@@ -2190,7 +2190,7 @@ graph:
   cluster:
     resolution: 10.0
 "#;
-        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = crate::yaml::from_str(yaml).unwrap();
         assert!(
             config.validate().is_err(),
             "resolution=10.0 should be rejected"
@@ -2209,7 +2209,7 @@ graph:
   cluster:
     resolution: 0.05
 "#;
-        let mut config_low: Config = serde_yaml_ng::from_str(yaml_low).unwrap();
+        let mut config_low: Config = crate::yaml::from_str(yaml_low).unwrap();
         assert!(
             config_low.validate().is_err(),
             "resolution=0.05 should be rejected"
@@ -2231,7 +2231,7 @@ sources:
       - category: action_required
         keywords: []
 "#;
-        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = crate::yaml::from_str(yaml).unwrap();
         assert!(
             config.validate().is_err(),
             "classify rule with empty keywords must be rejected"
@@ -2258,7 +2258,7 @@ sources:
       - category: ethics
         keywords: ["AI ethics"]
 "#;
-        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = crate::yaml::from_str(yaml).unwrap();
         let err = config.validate().unwrap_err().to_string();
         assert!(
             err.contains("unreachable") && err.contains("ethics"),
@@ -2285,7 +2285,7 @@ sources:
       - category: ai_topic
         keywords: ["ai"]
 "#;
-        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = crate::yaml::from_str(yaml).unwrap();
         assert!(
             config.validate().is_ok(),
             "specific-before-general ordering must be accepted"
@@ -2312,7 +2312,7 @@ sources:
       - category: ethics
         keywords: ["ai ethics", "fairness"]
 "#;
-        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = crate::yaml::from_str(yaml).unwrap();
         assert!(
             config.validate().is_ok(),
             "a rule with at least one unshadowed keyword is reachable"
@@ -2338,7 +2338,7 @@ sources:
       - category: review_request
         keywords: ["검토"]
 "#;
-        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = crate::yaml::from_str(yaml).unwrap();
         assert!(
             config.validate().is_err(),
             "a later rule whose only keyword duplicates an earlier rule's must be rejected"
@@ -2363,7 +2363,7 @@ concepts:
     - id: ai-ml
       label: "Duplicate"
 "#;
-        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = crate::yaml::from_str(yaml).unwrap();
         assert!(
             config.validate().is_err(),
             "duplicate concept category id must be rejected"
@@ -2386,7 +2386,7 @@ concepts:
     - id: "ai/ml"
       label: "AI/ML"
 "#;
-        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = crate::yaml::from_str(yaml).unwrap();
         assert!(
             config.validate().is_err(),
             "category id with '/' must be rejected"
@@ -2415,7 +2415,7 @@ concepts:
       label: {label}
 "#
             );
-            let mut config: Config = serde_yaml_ng::from_str(&yaml).unwrap();
+            let mut config: Config = crate::yaml::from_str(&yaml).unwrap();
             assert!(
                 config.validate().is_err(),
                 "a label spanning more than one record must be rejected: {label}"
@@ -2435,7 +2435,7 @@ sources:
   s1:
     type: gmail
 "#;
-        let mut config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut config: Config = crate::yaml::from_str(yaml).unwrap();
         assert!(config.validate().is_ok());
         assert!(config.concepts.categories.is_empty());
     }
@@ -2455,7 +2455,7 @@ graph:
   metrics:
     typo_field: 1
 "#;
-        let result: Result<Config, _> = serde_yaml_ng::from_str(yaml);
+        let result: Result<Config, _> = crate::yaml::from_str(yaml);
         assert!(result.is_err());
     }
 

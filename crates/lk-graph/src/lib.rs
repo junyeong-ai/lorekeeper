@@ -21,6 +21,8 @@ use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 pub enum GraphError {
+    #[error("cannot reconcile evidence while source page is unreadable: {0}")]
+    UnreadableSource(PathBuf),
     #[error("scan directory not found: {0}")]
     ScanDirNotFound(PathBuf),
     #[error("invalid exclude pattern '{0}': {1}")]

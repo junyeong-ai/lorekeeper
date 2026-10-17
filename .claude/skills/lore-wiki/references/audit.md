@@ -1,12 +1,13 @@
 # `/lore-wiki audit` — five-layer procedure
 
-Surface findings for human review — never auto-resolve. Read AGENTS.md to
+Surface findings and proposed repairs for human review — never auto-resolve or
+edit pages during the audit. Execute separately authorized repairs after reporting.
+Read AGENTS.md to
 resolve section headings before inspecting pages.
 
 1. **Structural** — run `lore graph --json lint`. ONE pass returns ALL of it, in two
    channels: `violations` (`broken`, `invalid_categories`, `duplicate_concepts`,
-   `address_collisions` — two files whose paths slugify to one page id, so one of them silently
-   loses its node — `unnormalized` — a filename that is not its own slug — and index
+   `address_collisions` — distinct addresses that would collide under slug normalization — `unnormalized` — a filename that is not its own slug — and index
    drift under `index`) and `observations` (`orphans`,
    `hubs`, `unresolved_conflicts`). Surface every non-empty list from both — and read
    `violations.index` as the OBJECT it is: `missing_from_index`/`missing_from_disk` name which
@@ -21,8 +22,10 @@ resolve section headings before inspecting pages.
 2. **Missing cross-references** — two kinds, and they are found differently.
 
    Between concepts: run `lore graph --json suggest-links` (never exits non-zero —
-   always inspect the pairs), then confirm topical relatedness before proposing a
-   link. Community grounding + LLM confirmation = double gate against false positives.
+   always inspect the pairs). Clusters generate candidates; they do not establish a
+   relation. Read the sources and propose a link only when its explanation states a
+   useful, supported relationship, such as a component, prerequisite, alternative,
+   or limitation. Sharing a topic or appearing in the same article is insufficient.
 
    From a source page to a concept — a citation the page owes and does not carry.
    A concept's synthesis is written from its citations and nothing else, so every
@@ -35,63 +38,72 @@ resolve section headings before inspecting pages.
      (`[PROMOTES: <id>]`) or a pattern id in a document's own frontmatter is the
      source asserting that this document establishes that concept. Where the id
      resolves (`lore resolve <id>`) and the page's related-concepts section lacks
-     the link, add it — that is a repair of the extraction, not a judgment.
-   - **A claim a rewrite dropped.** The drain leaves a `> [!note] 현재 인용 N건에서
-     확인되지 않은 기존 주장` on a concept page for each substantive claim the
-     current citations did not support. Read the claim and look for the page that
-     does support it — across the WHOLE vault, daily pages included: `lore wiki
-     search` reads only the wiki, so use `grep -rl` over every page directory, and
+     the link, propose adding it as an extraction repair.
+   - **A material evidence gap recorded during synthesis.** Read open evidence-gap
+     reviews and processing findings; older concepts may also carry unsupported-claim
+     notes. Look for the page that supports the claim across the WHOLE vault,
+     daily pages included: `lore wiki
+     search --include-sources` reaches daily observations too; search claim terms and
      search every spelling the concept answers to (an English name inside a Korean
-     page is the common miss). A page found is a missing citation: add the link on
-     that page and register the spelling as an alias if it was one. Nothing found
-     means the drop stands; leave the note, since the next rewrite re-derives it.
-   Report every citation you add: a link is a claim of evidence, and `lore graph
-   backlinks-sync` will queue the concept for a rewrite on the strength of it.
-3. **Contradictions** — read layer 1's `observations.unresolved_conflicts`: the
-   concepts whose Synthesis carries an open `> [!conflict]` callout. Flagging is
-   not this skill's job — `lore graph backlinks-sync` queues a synthesis rewrite
-   whenever a concept's citation set moves, and the drain that rewrites the
+     page is the common miss). A page found is a candidate missing citation: confirm it supports the claim, then
+     propose the forward link and an alias where the spelling is equivalent. Nothing found
+     means the claim remains unsupported by the pages checked. Keep a material
+     unresolved gap in its review; do not reintroduce routine removal history into
+     the concept's synthesis.
+   Report every proposed citation: a link is a claim of evidence. After authorized
+   repairs, run `lore graph backlinks-sync` to queue affected concept rewrites.
+3. **Contradictions** — run `lore wiki reviews` first. Review open records and records
+   with changed or unreadable evidence; retain resolved records and their reasons. Search
+   `lore wiki search "<claim terms>" --include-sources --json` to compare direct evidence,
+   including claims never promoted to concepts. Compare subject, scope, time and attribution
+   before calling two statements contradictory. Propose exploration reviews for material findings
+   under AGENTS.md's Knowledge reviews contract. Then read layer 1's `observations.unresolved_conflicts`: the
+   concepts whose Synthesis carries an open `> [!conflict]` callout. These are additional
+   candidates, not a complete inventory: `lore graph backlinks-sync` queues a synthesis rewrite
+   whenever a concept's source paths or authored revisions change, and the drain that rewrites the
    section is the reader of every source, so it is where a disagreement between
    two of them is seen and stated. What you do here is judge the OPEN ones: read
    each callout with its cited sources and report whether the disagreement still
    stands, has been settled by later evidence, or was never a contradiction at
-   all (a difference in emphasis, a gap). Never choose a side.
+   all (a difference in emphasis, a gap). Resolve only when direct evidence supports
+   the stated scope; never prefer a side merely because its wording or date differs.
+   Follow AGENTS.md's reassessment protocol to preserve the prior review before explicitly
+   updating the current evidence baseline.
 
-   There is a fourth answer and it is the commonest one: the disagreement stands and
-   nothing this vault will ever observe can settle it, because both sides are REPORTS of
+   Another outcome is that the disagreement cannot be settled by the available evidence:
+   both sides are REPORTS of
    an external fact — a model's parameter count, a funding round's stage — and the vault
-   holds no primary source for it. That is a permanent, correct state rather than an open
-   question, and the callout is answered once it says so. Report those separately from the
-   ones a later observation could close; asking every audit to re-derive the split is what
-   makes this layer read the same 24 findings forever.
+   holds no primary source for it. Record the evidence limit and what would resolve it;
+   absence of decisive evidence does not resolve the review. Reuse that assessment while
+   its evidence remains unchanged, and revisit it when relevant new evidence arrives.
 
    A callout is NOT durable, and treating it as a permanent record is the one
    mistake to avoid here. It lives in `## Synthesis`, which is rewritten from the
-   sources whenever the citation set moves, so it survives only by being written
+   sources whenever source paths or authored revisions change, so it survives only by being written
    again — a statement about the last rewrite, not a ledger entry. What that means
    for you: a disagreement worth keeping belongs somewhere the machine does not
    own. Report it, and if it matters beyond this page, file it as an exploration
    page whose Grounding cites both sides.
 4. **Frontiers — data gaps + new directions**. Report:
-   - Concepts mentioned in daily pages but missing a dedicated wiki page
-     (cross-check body links vs concept files from `lore wiki concepts`).
-   - Topics with high cross-source activity (3+ sources in a week) but shallow
-     concept coverage (placeholder Synthesis or single source listed).
+   - Durable subjects established by daily pages that have no suitable concept page.
+     Check the registry and existing broader pages; incidental mentions alone do not
+     justify a new concept.
+   - Topics whose sources add distinct claims or decisions that the concept does not
+     cover. Repeated mentions or a high citation count alone do not establish a gap.
    - Concepts whose Synthesis is thin against the evidence behind it — several
      citations, a placeholder sentence. Staleness itself is not this layer's:
      `lore graph backlinks-sync` already queues a rewrite for every concept whose
-     citation set has moved, so what is left here is judging whether the writing
+     source paths or authored revisions have changed, so what is left here is judging whether the writing
      is worth the evidence.
    This layer is LLM judgment, not a deterministic check. Surface as questions
    for human review, never auto-create pages.
 5. **Concept convergence** — two parts:
+   Ask `lore resolve` for EVERY form actually written in the source before proposing changes.
    The two halves split on what is DECIDABLE. Layer 1 owns spelling; you own meaning.
    - **Duplicates** from layer 1's `violations.duplicate_concepts`: two pages answering to one
-     name (`vector-db` ~ `vectordb`, or an alias on one page that is another page's
-     title). Layer 1 folds only typography — case, punctuation, and every break except
-     one between two numerals (so `claude-35` ~ `claude35` IS a finding, `claude-3-5` ~
-     `claude-35` is not) — so this is a fact, not a candidate: one name reaches two pages, so
-     citations fragment by spelling, and every entry needs resolving. Recommend
+     declared name. NFC and whitespace normalize; case, compatibility characters, punctuation
+     and word boundaries remain significant. Shared names can mean duplicate concepts or distinct senses;
+     inspect the sources before recommending a merge. For established equivalence, recommend
      `lore graph merge <from> <into>`
      followed by `lore graph backlinks-sync` (the merge rewires every link and deletes
      the `from` page; it refuses if `from` has authored prose unless `--force`, so
@@ -101,21 +113,17 @@ resolve section headings before inspecting pages.
      name, the fix is the opposite one and it matters more than it looks: **disambiguate
      the name itself** — rename one page (`Go (programming language)` beside `Go (board
      game)`), or drop the alias that reaches across. Nothing downstream can tell two
-     things apart while they answer to one name: ingest routes an extraction to whichever
-     page owns it, and the loser silently accumulates none of its own mentions. Giving
+     things apart while they answer to one name: ingest refuses the ambiguous extraction
+     until the declared vocabulary distinguishes the senses. Giving
      them distinct names is what makes every later citation land correctly, and it is why
      an encyclopedia disambiguates rather than tolerating the collision.
-   - **A title holding a name the page does not answer to**: a title of the form
-     `Term (풀이)` is two names written as one, and `lore resolve` answers for neither —
-     so the page is unreachable by anything a person or a later extraction would type, and
-     the next source naming the bare term mints a rival page beside it. Run `lore resolve`
-     on both halves to confirm before reporting; a compound title whose halves already
-     resolve here is fine.
-     The repair is `aliases`, not a rename: the slug is what existing citations address, and
-     adding names only makes more of them land. Which half is the TITLE is a separate
-     judgment and usually not worth making — the exception is a parenthetical that
-     disambiguates rather than glosses (`Go (programming language)`), where the bare term
-     must NOT become an alias, because it belongs to whichever sibling page claims it next.
+   - **Equivalent names missing from aliases**: a title such as `Term (풀이)` may
+     contain another name for the same concept. Read the definition and sources before
+     treating either part as an alias; punctuation does not establish equivalence.
+     Confirm the same meaning and scope, then run `lore resolve` for each candidate.
+     Recommend an alias only when it names this concept and does not claim a sibling's
+     name. Preserve the stable path. A disambiguating qualifier such as
+     `Go (programming language)` does not justify registering the ambiguous bare term.
    - **Synonyms, abbreviations, plurals, and short forms**: layer 1 compares names, so by
      construction it cannot see two DIFFERENT names for one thing — an acronym and its
      expansion (`rag` ↔ `retrieval-augmented-generation`, `k8s` ↔ `kubernetes`), a plural
@@ -141,5 +149,5 @@ resolve section headings before inspecting pages.
 A page's age or citation recency is never an audit signal: reference knowledge does
 not expire by going unmentioned, so "old and uncited" identifies nothing actionable.
 What makes a concept due for review is a CHANGE in its evidence — which `lore graph
-backlinks-sync` detects and queues, keyed on the citation set — or a defect in its
+backlinks-sync` detects and queues, keyed on source paths and authored revisions — or a defect in its
 structure (layer 1).

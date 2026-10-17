@@ -4,7 +4,7 @@ The installation as a thing with invariants. `lore self` is the only consumer; `
 reads the coherence report for its first line.
 
 - **The artifacts are compiled in, not published beside the binary.** `embedded.rs` carries the
-  agent skills, the three pipeline scripts, the rendering templates and `config.example.yaml`.
+  agent skills, the pipeline scripts, the rendering templates and `config.example.yaml`.
   A skill describes the commands this binary exposes and a pipeline composes them into a
   scheduled run, so both are true only of the version they shipped with — carrying them here is
   what makes "the deployed skill matches the binary" hold by construction rather than by

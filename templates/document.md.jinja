@@ -11,6 +11,12 @@ source_url: {{ source_url | tojson }}
 {% if source_file -%}
 source_file: {{ source_file | tojson }}
 {% endif -%}
+{% if source_identity -%}
+source_identity: {{ source_identity | tojson }}
+{% endif -%}
+{% if source_record -%}
+source_record: {{ source_record | tojson }}
+{% endif -%}
 tags: {{ tags | tojson }}
 llm_inputs:
   summary: {{ llm_inputs.summary | tojson }}

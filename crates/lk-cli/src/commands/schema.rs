@@ -164,6 +164,8 @@ fn page_schemas(
                 "document_type",
                 "source_url",
                 "source_file",
+                "source_record",
+                "source_identity",
                 "tags",
             ],
             sections: vec![
@@ -187,7 +189,7 @@ fn page_schemas(
             type_name: "exploration",
             path_pattern: format!("{}/{EXPLORATIONS_SUBDIR}/{{slug}}.md", dirs.wiki),
             frontmatter: &[
-                "id", "type", "title", "aliases", "created", "updated", "tags",
+                "id", "type", "title", "aliases", "created", "updated", "tags", "review",
             ],
             sections: vec![
                 s(
@@ -381,7 +383,7 @@ fn language_banner(language: &str) -> String {
 /// boundary a check could slice the rendered paragraph at — a blank line, a bolded lead-in —
 /// is a token the rule's own prose may carry, so each one ends the rule early and lets a
 /// reworded judgment ship past.
-const TITLE_RULE: &str = "**A concept's title is its name and nothing else.** The title is the address and the \
+const TITLE_RULE: &str = "**A concept's title is its name and nothing else.** The title is a declared \
          lookup key, and the lookup is exact — so a title carrying a parenthetical gloss \
          — `Agent Capability (the unit an agent can call)` — answers to neither the term nor \
          the gloss, and the next mention of the bare term \
@@ -394,10 +396,7 @@ const TITLE_RULE: &str = "**A concept's title is its name and nothing else.** Th
          `aliases`, which is what makes a citation written in any of them resolve here. A form \
          the material does not write is a name no later extraction reproduces.";
 
-/// The other half of the naming rule, composed for the same reason the title rule is named.
-/// The superseded wording lived here: it told an agent to add a name the field was said to
-/// have established, which is a judgment, and two answers to it in one batch is two pages of
-/// one concept.
+/// Shared alias contract for every generated page format.
 fn alias_rule(language: &str) -> String {
     format!(
         "**This vault is written in {language}, and where the material writes the concept in \
@@ -408,7 +407,9 @@ fn alias_rule(language: &str) -> String {
          same rule the title follows: an alias is a name the material WRITES, so a concept the \
          sources only ever name one way gets one name. A translation nobody writes is a \
          spelling nobody searches for, and inventing one costs a rival page rather than \
-         preventing it."
+         preventing it. An alias must name the SAME concept in the same scope: a method, \
+         component, broader category, narrower application or distinct version is a \
+         relationship, not an alternative name."
     )
 }
 
@@ -439,8 +440,10 @@ fn convergence_body(language: &str, strings: &Strings) -> Vec<String> {
          by — so the two cannot disagree about what an existing name is. Exit 0 names the \
          page (reuse its slug and title, never a variant), exit 1 means no page answers to \
          it, exit 2 means more than one does and `lore graph lint` already reports the pair. \
-         The match is EXACT on identity, which folds spelling and nothing else: `VectorDB` \
-         finds `vector-db`, `k8s` does not find `kubernetes`.\n\n   Ask it for EVERY form the \
+         Identity preserves case, compatibility characters, punctuation and word boundaries after NFC and whitespace \
+         normalization. Different spellings require explicit aliases. Ambiguous names must be \
+         resolved before writing. For an absent name, `lore resolve --json` provides an unoccupied \
+         `proposed_path`; use that address rather than deriving a filename from the name.\n\n   Ask it for EVERY form the \
          material writes, never the title alone. The other forms are what a page written from \
          a source in another language already answers to, and a hit on ANY of them is the \
          owner — reuse that page and register the forms it does not yet carry. Asking only the \
@@ -461,21 +464,22 @@ fn convergence_body(language: &str, strings: &Strings) -> Vec<String> {
          answers to, not for a concept the vault lacks: an acronym and its expansion, a \
          plural, a team's shorthand are DIFFERENT names for one thing, and no rule about \
          spelling can see it. Ask `lore wiki search` for two or three distinguishing terms of \
-         EACH form the material writes — never a whole multi-word name, since every term must \
-         appear and a long query narrows past the very page it is looking for, while a \
-         one-word form is the only term it has and is asked whole — then read the hits and \
+         EACH form the material writes, and also ask the complete declared name so its \
+         registered aliases participate in retrieval. Other multi-term queries require \
+         every term to appear, so split them when they narrow past useful candidates. Read the hits and \
          judge. In `--json`, `format` says whether a hit is even a concept and `matched` how \
          it was reached: one reached at `text` sits behind every name and summary hit and is \
          the one a limit drops. Reuse the established page and register the surface form as an \
-         alias when one matches, and when in doubt prefer the established broader concept over \
-         a narrow variant. Two things a query cannot reach: a rival sharing no word with any \
+         alias only when they denote the same concept. A broader page may receive a citation \
+         when it faithfully covers the claim, but the narrower method or application must not \
+         become its alias. Two things a query cannot reach: a rival sharing no word with any \
          form the material writes, and another inflection of a one-word name — `guardrails` \
          does not find `guardrail` — which is worth asking for explicitly. The registry (`lore \
          wiki concepts`) is where the rest would show, and it is a read whose cost grows with \
-         the vault while a query's does not."
+         the vault. Live search bounds the returned context but scans its scope; an explicit prepared snapshot reuses its lexical index."
             .to_string(),
-        "4. **Register surface forms as aliases.** When a source's surface form differs \
-         from the canonical name, append it to the concept's `aliases` frontmatter — \
+        "4. **Register equivalent surface forms as aliases.** When the source establishes \
+         that a different form names the same concept, append it to the concept's `aliases` frontmatter — \
          `lore resolve` answers with this page for an alias, so the next run's first \
          question lands here instead of minting a variant. Links are unaffected \
          (they address the slug path; the display text is free-form). An alias edit is \
@@ -538,23 +542,13 @@ pub fn render_agents_md(
     writeln!(out).unwrap();
     writeln!(
         out,
-        "Pages with an LLM-owned section also carry an `llm_inputs` frontmatter block, and it \
-         is a two-part contract, not an opaque cache. `lore ingest` and `lore synthesis` record \
-         `<key>` — the hash of the input enqueued — and whoever ANSWERS the section records \
-         `<key>_done` with \
-         that same hash. A section counts as answered only when the two are EQUAL; a non-empty \
-         body never signals it, because a section can be legitimately empty (an extraction that \
-         found nothing, a focus-filtered summary), and inferring completion from content would \
-         re-enqueue every such result forever. So: never touch a `<key>` input hash, and stamp \
-         `<key>_done` when you fill the section it belongs to. Stamping is not bookkeeping: a \
-         section whose marker does not match its input is ANSWERED AGAIN by the next render, \
-         which writes it EMPTY and re-queues it, so an unstamped body is lost the next time the \
-         page is rendered — by `lore ingest` for a daily or document page, by `lore synthesis` \
-         for a synthesis or review page. `lore doctor` names every page in that state, the \
-         queued ones included. The one exception is `concepts_done`: that section and its marker \
-         are both written by `lore queue apply`, and stamping it by hand claims an empty \
-         section is answered, which loses the extraction permanently. A page you create \
-         directly has no pipeline behind it and omits the whole block."
+        "Pipeline-managed semantic sections carry `llm_inputs`: `<key>` identifies the \
+         queued input and `<key>_done` identifies the input whose answer was published. \
+         Equality signals completion; a non-empty body does not. For every queued kind, \
+         `/lore-process` stages a typed result and `lore queue apply` validates and publishes \
+         the body and completion marker together. Never edit a queued target or stamp its \
+         markers directly. `lore doctor` reports unanswered inputs, including pending work. \
+         Directly authored pages omit this block until a machine writer establishes it."
     )
     .unwrap();
     writeln!(out).unwrap();
@@ -562,8 +556,9 @@ pub fn render_agents_md(
         out,
         "A page's `llm_inputs` map is machine-coordination state: each key records the input \
          a section is owed against and its `_done` companion the input a section was written \
-         from. Never author or edit those values — the writer of a section stamps its own \
-         marker in the same edit. A concept page's `aliases` is renderer-written and always \
+         from. Never author or edit those values. The applier owns completion and generation-policy \
+         provenance; `lore queue regenerate --task-id ID` requests regeneration from retained \
+         input when its guards still match. A concept page's `aliases` is renderer-written and always \
          present, carrying the title and every other name the page answers to; on a page you \
          author yourself, write `aliases` only where the page really does answer to another name."
     )
@@ -572,8 +567,8 @@ pub fn render_agents_md(
     writeln!(
         out,
         "Each table's `Owner` column names who fills that section's body: `machine` = `lore` \
-         writes it, under whichever command produces the page ({}); `LLM` = an agent writes \
-         it, which in the automated pipeline is `/lore-process`. A page you author DIRECTLY \
+         writes it, under whichever command produces the page ({}); `LLM` = an agent generates \
+         its content; queued results are published by `lore queue apply`. A page you author DIRECTLY \
          has no pipeline behind it, so you fill EVERY section yourself, `machine` ones \
          included — except a concept's `## {}` section and its `{}`, which `lore graph \
          backlinks-sync` re-derives wholesale from the forward links on citing pages every \
@@ -629,29 +624,67 @@ pub fn render_agents_md(
         "- `lore wiki search <query> --json` — the pages a query reaches, best match first. \
          `matched` says WHY each is here: `identity`/`name` is a page the query names, \
          `summary` one that opens by stating it, `text` one that merely mentions it. Start \
-         here for any topic you can phrase; it is the only entry point whose cost does not \
-         grow with the vault."
+         here for a named topic. Output is bounded by `--limit`; live calls scan their scope; `--snapshot` reuses a prepared lexical index. \
+         Query meaningful terms separately when a full question has no results."
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "- `lore wiki browse --json` — browse by title with category/type counts. \
+         Both browse and search accept `--category`, `--type`, `--source-status`, `--limit` and `--offset`. \
+         Facet counts describe the query before metadata filters; `total` counts filtered \
+         matches and `next_offset` locates the next page. Counts include empty metadata under \
+         an empty key. Live pagination reflects current files; `--snapshot` paginates captured revisions."
+    )
+    .unwrap();
+    writeln!(out, "- `lore wiki search <literal> --body --json` — exact raw Markdown body lines, including code and link destinations. Case-sensitive by default; select --regex or --ignore-case explicitly. --context 0..5 bounds surrounding lines; each result supplies physical line/column, clipping flags and file_revision. Totals count matching lines/pages, not semantic claims. This live scan rejects --snapshot and reads the full selected scope even with a small --limit.").unwrap();
+    writeln!(out, "- `lore wiki prepare` — capture a reusable SQLite lexical search snapshot. Pass its \
+        `snapshot` to search/browse with `--snapshot`. It contains captured revisions, not live changes; \
+        prepare again after edits or before a new investigation. Missing or mismatched snapshots fail explicitly.").unwrap();
+    writeln!(out, "- `lore wiki read <page.md>` — paginated CommonMark outline (20 entries by default). \
+        Select `--section ID` for up to 4000 Unicode characters including nested sections. Follow \
+        `next_offset` with `--offset`; pass the returned `file_revision` as `--revision` on every \
+        subsequent read. Search hits also carry this revision. A mismatch requires fresh retrieval, \
+        not reuse of the old section id. Source provenance is returned alongside the content.").unwrap();
+    writeln!(
+        out,
+        "- `lore graph --json neighbors <vault-relative.md>` — direct incoming/outgoing \
+        links across managed pages, including daily evidence. Narrow with `--type concept` or \
+        `--direction incoming|outgoing|mutual` before paginating with `--limit` and `--offset`. \
+        Types match declared metadata exactly; an empty type selects undeclared pages. \
+        `formats` counts all neighbors before filters. Incoming/outgoing include mutual links; \
+        a link's direction does not establish its semantic meaning."
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "- `lore wiki links <source.md> --target <target.md>` — inspect explicit link \
+         occurrences as JSON with source line numbers, literal context and file_revision. \
+         Omit --target to see all internal links. Supports --limit and --offset; pass \
+         --revision from the previous response to reject pagination across source edits. \
+         For incoming neighbors inspect the neighbor as source. A link does not establish \
+         support or contradiction; read its context."
     )
     .unwrap();
     writeln!(
         out,
         "- `{}/map.md` — concepts grouped by citation cluster (the graph's emergent \
-         structure); read it to see what a topic sits beside once you have found it.",
+         structure), with at most 100 entries per page and details under `catalog/map/`. Cluster membership is navigation, not a semantic relationship assertion.",
         dirs.wiki
     )
     .unwrap();
     writeln!(
         out,
-        "- `{}/index.md` — catalog of every page, grouped by category, each with a \
-         first-sentence summary. It holds every page and grows with the vault, so read a \
-         category's section to survey what exists there — not the whole file to find one page.",
+        "- `{}/index.md` — entry to a complete catalog grouped by category. Each generated page \
+         contains at most 100 entries; larger vaults use a navigation tree under `catalog/`. \
+         Follow the displayed ranges. Generated catalog pages are not evidence or graph nodes.",
         dirs.wiki
     )
     .unwrap();
     writeln!(
         out,
         "- `{}/log.md` — reverse-chronological timeline of when each knowledge node entered \
-         the vault.",
+         the vault. Each page contains at most 100 entries; follow `catalog/log/` links for detail. Child addresses are regenerated navigation positions; cite original knowledge pages.",
         dirs.wiki
     )
     .unwrap();
@@ -693,6 +726,7 @@ pub fn render_agents_md(
         .unwrap();
 
         if schema.type_name == "document" {
+            out.push_str("\nOptional `source_identity` records a stable repository namespace and document ID, independent of title and checkout location. Legacy location-only ownership requires verified migration. `source_record` preserves an imported document\'s provider id, declared status, authored source revision and declared `superseded_by` value. Archived or superseded means historical scope, not falsehood. Missing metadata means unknown; a successor value is not an automatically resolved vault link. Status changes invalidate semantic inputs.\n");
             writeln!(
                 out,
                 "\n`document_type` values: {} (FORMAT only; subject-matter goes in `tags`).",
@@ -707,6 +741,7 @@ pub fn render_agents_md(
     }
 
     writeln!(out).unwrap();
+    out.push_str("## Knowledge reviews\n\nAn exploration may carry optional `review` metadata. It is an authored assessment, never a regenerated concept section.\n\n```yaml\nreview:\n  status: open # open or resolved\n  evidence:\n    - path: wiki/documents/example.md\n      revision: <revision from lore wiki evidence>\n  resolution: null\n```\n\nUse configured vault paths. `lore wiki evidence <path>...` supplies exact revisions and recorded source addresses. Before publishing a review, use `lore wiki evidence --archive <path>...` to retain verified evidence content under `.lorekeeper/evidence/<revision>.md`. Historical evidence stays retrievable after source changes; never replace a recorded revision merely to match current content. Equal addresses expose shared provenance; different or absent addresses do not establish independence. `source_count` counts citing pages, not independent evidence or confidence.\n\nRecord the competing claims, scope, effective time and source links in the exploration body. A resolved review requires a nonempty `resolution` explaining the evidence and reasoning. Before reassessing, archive the existing review with `lore wiki evidence --archive` and record its archive path in a dated reassessment. After actually rereading changed sources, archive them and explicitly replace `review.evidence` with the revisions supporting the current judgment; historical revisions remain in the archived prior review, not alongside newer revisions of the same path in the current evidence set. An archived review is judgment history, not independent evidence. `lore wiki reviews` reports the recorded status and its effective state without rewriting history. `lore wiki reviews --check` fails for evidence drift or invalid records, but accepts open reviews. Link a concept's conflict callout to the corresponding review.\n\n");
     writeln!(out, "## Concept convergence").unwrap();
     for line in convergence_body(locale.english_name(), strings) {
         writeln!(out, "{line}").unwrap();
@@ -747,6 +782,10 @@ pub async fn run(
             None,
         ),
     };
+
+    std::fs::create_dir_all(&vault_root).map_err(|e| miette::miette!("create vault: {e}"))?;
+    let _mutation = lk_vault::MutationSession::acquire(&vault_root)
+        .map_err(|e| miette::miette!("vault mutation: {e}"))?;
 
     let content = render_agents_md(locale, &dirs, personal, board.as_deref());
 
@@ -955,7 +994,11 @@ mod tests {
                     schema.type_name
                 );
             }
-            assert!(legend.contains("`LLM` = an agent writes it"), "{legend}");
+            assert!(legend.contains("`LLM` = an agent generates"), "{legend}");
+            assert!(
+                legend.contains("published by `lore queue apply`"),
+                "{legend}"
+            );
             assert!(
                 legend.contains(&format!("`{sources}`")),
                 "{locale:?}: legend names the localized sources heading: {legend}"

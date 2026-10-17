@@ -23,7 +23,6 @@ use serde::Serialize;
 
 use crate::GraphError;
 use crate::scan::ScannedPage;
-use lk_core::vault_path::path_slug;
 
 /// One page whose links were (or would be) rewritten by a merge.
 #[derive(Debug, Clone, Serialize)]
@@ -71,6 +70,49 @@ pub fn merge_concepts(
     dry_run: bool,
     force: bool,
 ) -> Result<MergeResult, GraphError> {
+    if dry_run {
+        return plan_merge(
+            pages, vault_root, wiki_dir, from_slug, into_slug, true, force,
+        )
+        .map(|(result, _)| result);
+    }
+    let session = lk_vault::MutationSession::acquire(vault_root)
+        .map_err(|e| GraphError::Io(e.to_string()))?;
+    merge_in_session(pages, &session, wiki_dir, from_slug, into_slug, force)
+}
+
+pub fn merge_in_session(
+    pages: &[ScannedPage],
+    session: &lk_vault::MutationSession,
+    wiki_dir: &str,
+    from_slug: &str,
+    into_slug: &str,
+    force: bool,
+) -> Result<MergeResult, GraphError> {
+    let (result, plan) = plan_merge(
+        pages,
+        session.root(),
+        wiki_dir,
+        from_slug,
+        into_slug,
+        false,
+        force,
+    )?;
+    session
+        .apply(plan)
+        .map_err(|e| GraphError::Io(e.to_string()))?;
+    Ok(result)
+}
+
+fn plan_merge(
+    pages: &[ScannedPage],
+    vault_root: &Path,
+    wiki_dir: &str,
+    from_slug: &str,
+    into_slug: &str,
+    dry_run: bool,
+    force: bool,
+) -> Result<(MergeResult, lk_vault::MutationPlan), GraphError> {
     let from = slugify(from_slug)
         .ok_or_else(|| GraphError::Io(format!("invalid from slug: '{from_slug}'")))?;
     let into = slugify(into_slug)
@@ -132,34 +174,45 @@ pub fn merge_concepts(
         Some(aliases)
     };
 
-    let from_id = path_slug(&from_rel);
+    if !dry_run {
+        lk_vault::KnowledgeReview::ensure_evidence_paths_preserved(
+            vault_root,
+            &pages
+                .iter()
+                .map(|page| page.path.clone())
+                .collect::<Vec<_>>(),
+            std::slice::from_ref(&from_rel),
+        )
+        .map_err(|e| GraphError::Io(e.to_string()))?;
+    }
+
+    let mut plan = lk_vault::MutationPlan::default();
+    let mut into_updated = None;
     let mut rewritten = Vec::new();
     for page in pages {
-        // The from page itself is about to be deleted — don't rewrite it.
         if page.path == from_rel {
             continue;
         }
-        // Only a page that CITES `from` has anything to rewrite. Reading the rest is not just
-        // wasted work: a page that cannot be read — a non-UTF-8 file in a user's own folder —
-        // would fail the merge midway, after part of the vault was already repointed, and every
-        // re-run would fail at the same file, leaving the half-merge permanent.
-        if !page
-            .outgoing
-            .iter()
-            .filter_map(|link| link.id.as_ref())
-            .any(|id| *id == from_id)
-        {
+        let mut cites_from = false;
+        for link in &page.outgoing {
+            cites_from |=
+                lk_vault::same_existing_file(vault_root, Path::new(&link.dest), &from_rel)
+                    .map_err(|error| GraphError::Io(error.to_string()))?;
+        }
+        if !cites_from {
             continue;
         }
         let abs = vault_root.join(&page.path);
         let content = std::fs::read_to_string(&abs)
             .map_err(|e| GraphError::Io(format!("read {}: {e}", abs.display())))?;
-        let (updated, count) = rewrite_links(&content, &page.path, &from_rel, &into_rel);
+        let (updated, count) =
+            rewrite_links(&content, &page.path, &from_rel, &into_rel, vault_root)?;
         if count > 0 {
             if !dry_run && updated != content {
-                lk_vault::VaultWriter::new(vault_root)
-                    .edit_page_sync(&page.path, &updated)
-                    .map_err(|e| GraphError::Io(format!("write {}: {e}", page.path.display())))?;
+                plan.edit(&page.path, content.clone(), updated.clone());
+                if page.path == into_rel {
+                    into_updated = Some(updated);
+                }
             }
             rewritten.push(RewrittenPage {
                 path: page.path.clone(),
@@ -170,25 +223,34 @@ pub fn merge_concepts(
     rewritten.sort_by(|a, b| a.path.cmp(&b.path));
 
     if !dry_run {
-        // Apply the pre-computed aliases (reading `into` fresh so the rewrite loop's body
-        // changes are kept), then delete `from`. The merged names stay in the concept
-        // registry, so a later extraction of the old name converges on `into` instead of
-        // re-minting a page.
         if let Some(aliases) = &absorbed_aliases {
-            apply_aliases(vault_root, &into_rel, aliases)?;
+            let before = match into_updated {
+                Some(content) => content,
+                None => std::fs::read_to_string(vault_root.join(&into_rel))
+                    .map_err(|e| GraphError::Io(e.to_string()))?,
+            };
+            let value =
+                serde_json::to_string(aliases).map_err(|e| GraphError::Io(e.to_string()))?;
+            let updated = lk_vault::set_frontmatter_field(&before, "aliases", &value)
+                .ok_or_else(|| GraphError::Io("merge target has no frontmatter".into()))?;
+            plan.edit(&into_rel, before, updated);
         }
-        std::fs::remove_file(vault_root.join(&from_rel))
-            .map_err(|e| GraphError::Io(format!("delete {}: {e}", from_rel.display())))?;
+        let original = std::fs::read_to_string(vault_root.join(&from_rel))
+            .map_err(|e| GraphError::Io(e.to_string()))?;
+        plan.remove(&from_rel, original);
     }
 
-    Ok(MergeResult {
-        from_slug: from,
-        into_slug: into,
-        rewritten,
-        deleted: true,
-        from_authored,
-        dry_run,
-    })
+    Ok((
+        MergeResult {
+            from_slug: from,
+            into_slug: into,
+            rewritten,
+            deleted: true,
+            from_authored,
+            dry_run,
+        },
+        plan,
+    ))
 }
 
 /// Compute the `into` page's alias list after absorbing `from`'s identity (its title and
@@ -254,28 +316,6 @@ fn compute_absorbed_aliases(
     Ok(aliases)
 }
 
-/// Write the pre-computed alias list onto the `into` page. Reads `into` fresh so the merge's
-/// body-link rewrite is kept, then rewrites only the `aliases:` line via the single-sourced
-/// [`lk_vault::set_frontmatter_field`]; everything else round-trips untouched (an ingest
-/// re-render preserves the merged aliases — `lk-pipeline` carries `aliases` like the title).
-fn apply_aliases(vault_root: &Path, into_rel: &Path, aliases: &[String]) -> Result<(), GraphError> {
-    let into_raw = std::fs::read_to_string(vault_root.join(into_rel))
-        .map_err(|e| GraphError::Io(format!("read {}: {e}", into_rel.display())))?;
-    let value = serde_json::to_string(aliases)
-        .map_err(|e| GraphError::Io(format!("serialize aliases: {e}")))?;
-    let updated =
-        lk_vault::set_frontmatter_field(&into_raw, "aliases", &value).ok_or_else(|| {
-            GraphError::Io(format!(
-                "{}: no frontmatter block to record aliases in",
-                into_rel.display()
-            ))
-        })?;
-    lk_vault::VaultWriter::new(vault_root)
-        .edit_page_sync(into_rel, &updated)
-        .map_err(|e| GraphError::Io(format!("write {}: {e}", into_rel.display())))?;
-    Ok(())
-}
-
 /// Repoint every link targeting the from concept at the into concept, preserving the
 /// display text and any heading anchor. Returns the new content and the number of
 /// links rewritten.
@@ -284,9 +324,10 @@ fn rewrite_links(
     page_path: &Path,
     from_rel: &Path,
     into_rel: &Path,
-) -> (String, usize) {
-    let from_id = path_slug(from_rel);
+    root: &Path,
+) -> Result<(String, usize), GraphError> {
     let mut count = 0;
+    let mut failure = None;
     // Rewrite OUTSIDE code only (shared helper): a from-link shown inside a code
     // fence/span is a code example, not a graph edge — `extract_dests`/`broken` ignore
     // it, so it never dangles after the from page is deleted, and rewriting it would
@@ -303,8 +344,13 @@ fn rewrite_links(
             return None;
         }
         let resolved = link::resolve_dest(page_path, &decoded)?;
-        if path_slug(&resolved) != from_id {
-            return None;
+        match lk_vault::same_existing_file(root, &resolved, from_rel) {
+            Ok(true) => {}
+            Ok(false) => return None,
+            Err(error) => {
+                failure = Some(GraphError::Io(error.to_string()));
+                return None;
+            }
         }
         count += 1;
         // `text` arrives exactly as written (escapes included) — reassemble verbatim
@@ -312,7 +358,10 @@ fn rewrite_links(
         let new_dest = format!("{}{anchor}", link::relative_dest(page_path, into_rel));
         Some(format!("[{text}]({new_dest})"))
     });
-    (out, count)
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    Ok((out, count))
 }
 
 /// True if a concept page has body content a human likely authored — any non-blank
@@ -369,6 +418,7 @@ mod tests {
 
     fn page(id: &str, rel: &str, outgoing: &[&str]) -> ScannedPage {
         ScannedPage {
+            revision: Some("revision".into()),
             id: id.to_owned(),
             path: PathBuf::from(rel),
             title: id.to_owned(),
@@ -378,6 +428,57 @@ mod tests {
                 .map(|s| Link::to(&format!("{s}.md")))
                 .collect(),
         }
+    }
+
+    #[test]
+    fn merge_does_not_retarget_a_distinct_punctuation_address() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        for name in ["a-b", "a_b", "target"] {
+            write(
+                root,
+                &format!("wiki/concepts/{name}.md"),
+                &format!("---\ntitle: {name}\ntype: concept\n---\n# {name}\n"),
+            );
+        }
+        let original = "[distinct](../../wiki/concepts/a_b.md)\n";
+        write(root, "daily/test/day.md", original);
+        let pages = crate::scan::scan_vault(root, false).unwrap();
+        let result = merge_concepts(&pages, root, "wiki", "a-b", "target", false, false).unwrap();
+        assert!(result.rewritten.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(root.join("daily/test/day.md")).unwrap(),
+            original
+        );
+        assert!(root.join("wiki/concepts/a_b.md").is_file());
+    }
+
+    #[test]
+    fn historical_review_evidence_blocks_mutation_before_any_write() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("wiki/concepts")).unwrap();
+        let old = "---\ntype: concept\ntitle: Old\n---\nOld prose.\n";
+        let into = "---\ntype: concept\ntitle: Into\n---\n";
+        std::fs::write(root.join("wiki/concepts/old.md"), old).unwrap();
+        std::fs::write(root.join("wiki/concepts/into.md"), into).unwrap();
+        let review = "---\ntype: exploration\nreview: {status: open, evidence: [{path: wiki/concepts/old.md, revision: historical}]}\n---\n[Old](wiki/concepts/old.md)\n";
+        std::fs::write(root.join("review.md"), review).unwrap();
+        let pages = crate::scan::scan_vault(root, false).unwrap();
+        assert!(merge_concepts(&pages, root, "wiki", "old", "into", false, true).is_err());
+        assert_eq!(
+            std::fs::read_to_string(root.join("wiki/concepts/old.md")).unwrap(),
+            old
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("wiki/concepts/into.md")).unwrap(),
+            into
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("review.md")).unwrap(),
+            review
+        );
+        assert!(!root.join("wiki/concepts/new.md").exists());
     }
 
     #[test]
@@ -822,13 +923,10 @@ mod tests {
         assert!(!root.join("wiki/concepts/vector-db.md").exists());
     }
 
-    /// A citation on a page whose frontmatter will not parse is still a citation.
-    ///
-    /// The links live in the body, and a block that opens and never closes delimits nothing —
-    /// so the sweep that repoints them must reach that page, or the concept is deleted while a
-    /// live citation still points at it and `graph broken` reports nothing.
+    // An unparseable page may hide structured historical evidence. A preview
+    // remains available, but deletion requires repairing that uncertainty first.
     #[test]
-    fn a_citation_inside_an_unparseable_page_is_repointed() {
+    fn an_unparseable_page_blocks_deletion_but_allows_preview() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         std::fs::create_dir_all(root.join("wiki/concepts")).unwrap();
@@ -851,14 +949,16 @@ mod tests {
         let citing = root.join("daily/notes/2026-07-31.md");
 
         let pages = crate::scan::scan_vault(root, false).unwrap();
-        let result = merge_concepts(&pages, root, "wiki", "from", "into", false, false).unwrap();
-
-        assert_eq!(result.rewritten.len(), 1, "{result:?}");
-        let after = std::fs::read_to_string(&citing).unwrap();
-        assert!(after.contains("concepts/into.md"), "{after}");
+        let before = std::fs::read_to_string(&citing).unwrap();
+        let preview = merge_concepts(&pages, root, "wiki", "from", "into", true, false).unwrap();
+        assert_eq!(preview.rewritten.len(), 1);
+        let error = merge_concepts(&pages, root, "wiki", "from", "into", false, false).unwrap_err();
         assert!(
-            after.starts_with("---\nid: notes\ntitle: unclosed\n"),
-            "the bytes above the body are untouched:\n{after}"
+            error
+                .to_string()
+                .contains("cannot establish review evidence safety")
         );
+        assert_eq!(std::fs::read_to_string(&citing).unwrap(), before);
+        assert!(root.join("wiki/concepts/from.md").exists());
     }
 }

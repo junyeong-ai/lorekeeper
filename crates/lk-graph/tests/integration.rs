@@ -174,7 +174,15 @@ fn index_sync_fix_mutates_and_idempotent() {
     let drift = index_drift::diff(tmp.path(), Locale::default(), &dirs).unwrap();
     assert!(!drift.is_in_sync());
 
-    assert_eq!(index_drift::fix(&drift, tmp.path(), &dirs).unwrap(), 1);
+    assert_eq!(
+        index_drift::fix(
+            &drift,
+            &lk_vault::MutationSession::acquire(tmp.path()).unwrap(),
+            &dirs
+        )
+        .unwrap(),
+        1
+    );
     let content = std::fs::read_to_string(tmp.path().join("wiki/index.md")).unwrap();
     assert!(content.contains("[Beta](concepts/beta.md)"), "{content}");
 
@@ -272,18 +280,19 @@ fn lint_combined_report() {
     let drift = index_drift::diff(&root, Locale::default(), &VaultDirs::default()).unwrap();
 
     let report = output::LintReport {
+        errors: Vec::new(),
         pages: g.node_count(),
         links: g.edge_count(),
         components: g.component_count(),
         violations: output::Violations {
             broken,
-            index: output::IndexSyncReport {
+            index: Some(output::IndexSyncReport {
                 stale: false,
                 absent: drift.absent,
                 missing_from_index: drift.missing_from_index,
                 missing_from_disk: drift.missing_from_disk,
                 fixed: None,
-            },
+            }),
             invalid_categories: Vec::new(),
             duplicate_concepts: Vec::new(),
             address_collisions: Vec::new(),

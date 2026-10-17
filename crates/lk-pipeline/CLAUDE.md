@@ -120,8 +120,16 @@ domain-neutral engine — then no work-log, reviews, or `is_personal` are produc
   LLM-input hash never depend on the adapter/API return order: re-ingesting the same set in
   a different order is byte-identical and enqueues zero tasks. Don't sort events ad hoc
   anywhere else — route through the one comparator.
-- **Document slugs are collision-free, identity-aware, across runs.** A document's page slug
-  is its title slug, but a same-titled *different* document never overwrites another's page.
+- **Document addresses follow source identity, not mutable titles.** The run loads exact
+  `source_identity` ownership (repository namespace + document ID), or legacy
+  `source_file`/`source_url`, once across all Markdown descendants of the documents
+  directory, retaining nested relative addresses. A unique existing owner keeps its address when
+  the title changes; multiple owners refuse ingestion rather than selecting or merging one.
+  The same ownership constraint covers planned pages across sources before publication.
+  A source batch must have one observation per document origin; overlapping collections
+  fail before rendering. Exact repeated events may collapse, but different payloads under
+  one event id fail rather than selecting a version. Only successful plans reserve ownership.
+  New documents start with a title slug, but a same-titled *different* document never overwrites another's page.
   A candidate slug is claimed only when it is free in this batch AND its on-disk page (if any)
   is the SAME document — compared by the page's `source_file`/`source_url` identity. Otherwise
   a suffix from the document's own `EventId` trailing hash is appended and lengthened until the
@@ -130,6 +138,10 @@ domain-neutral engine — then no work-log, reviews, or `is_personal` are produc
   unique — collision-freedom is not assumed anywhere. This catches
   both intra-batch collisions and the cross-run case (a prior run's archived note's page still
   on disk). Re-ingesting the same document reuses its slug (identity match) → idempotent.
+- **Legacy document adoption requires identity evidence.** Exact location plus a matching
+  source record ID can adopt a page into a repository namespace. Missing source IDs or
+  multiple owners stop ingestion for explicit migration. Titles and similar content never
+  authorize adoption. A removed source is not automatically archived or deleted.
 - **Concept merge** reads existing `created`/`updated` frontmatter (the keys actually
   written), preserves the original title, category, AND `aliases` (established identity =
   first writer wins) — a synonym a human or `/lore-wiki audit` registered survives the
@@ -147,6 +159,13 @@ domain-neutral engine — then no work-log, reviews, or `is_personal` are produc
   the task, and the registry a skill reads for the equivalences spelling cannot see
   (asked per name through `lore resolve` and `lore wiki search`) is a second, narrower step
   rather than the primary one.
+- **Ingest publication checks the snapshot used to derive the page.** Daily, document
+  and concept renders retain `VaultPage.original`; a reader omitting that snapshot is
+  refused. `RenderResult.expected_original` carries those exact bytes, or expected
+  absence for a new page. Daily and concept writers use `plan_publication` and
+  `MutationPlan::publish_expected`; document writers use `publish_document_expected`
+  to preserve evidence archival as well as the derivation guard. Rereading at publication
+  time would accept an intervening edit as the baseline and overwrite it with an older draft.
 - **An extraction's ALIASES are adopted only where nothing else claims them.** A concept's
   name is its address and its lookup key and the lookup is exact, so a name carrying a gloss
   answers to neither half — `ConceptDrafts::stage` takes the other spellings as data instead,
@@ -173,46 +192,17 @@ domain-neutral engine — then no work-log, reviews, or `is_personal` are produc
   page for is a resolution an abandoned batch left behind, and the merge it would name could
   not be run. Reported, never gated: folding two concept pages is a judgment, and the page is
   materialized either way.
-- **Name resolution is `lk_core::concept::ConceptRegistry`, not a local index.** `build_registry`
-  reads the vault's concept pages into it; `lore resolve` builds the same registry from a
-  directory read, so the routing decision this crate ACTS on and the answer a skill gets
-  before writing a page are the same answer.
-  **A page whose FRONTMATTER will not parse registers its address and nothing else** — the
-  filename is a name parsing has no say in, and failing instead let one hand-edited page block
-  every concept a run would materialize. That is not free: the aliases on it are lost for the
-  run, so an extraction arriving under one mints a page beside it, and no lint reports the
-  split (the two slugs reduce to different identities, so there is no pair to compare). It is
-  the smaller loss, and repairing the page recovers it. Only that failure — a page this cannot
-  READ is not a page with no names, so I/O propagates, exactly as `lore resolve` propagates it.
-  And routing is all the tolerance buys: `stage`'s own read of the page it is about to
-  re-render stays strict, since rendering from the template without the frontmatter the page
-  carries would drop its synthesis, aliases, category and count. Keyed on `identity_key` — the SAME key `lore
-  graph lint` uses to report two pages owning one name, so what routes here and what the lint
-  calls a duplicate cannot drift apart. Keying on identity rather than the slug is also what makes
-  `VectorDB` land on `vector-db.md` instead of minting a second page.
-  **This index is the one place a fold ACTS rather than reports**, and the act is not
-  reviewable afterwards: a name folded onto an established page leaves only one page, so
-  the lint has no pair to compare and the extraction's synthesis is dropped as a later
-  mention. That is why `identity_key` keeps a break between numerals — see lk-core — and
-  why nothing meaning-shaped may ever be added to it. A page owning its OWN address is what
-  stops a stale alias elsewhere from redirecting a concept away from its page. Deriving
-  that claim from title/aliases
-  alone would only protect pages whose names happen to reproduce the stem — and a page
-  titled more descriptively than its file (`access-ingress-2axis-model` ←
-  "Access × Ingress 2-Axis Deployment Model") has NO such name, leaving its address free
-  for another page's alias to take and sending every citation of its own name elsewhere.
-  Seeding is unconditional, so the guarantee does not depend on directory read order; two
-  pages whose ADDRESSES claim one identity — the lint's own finding — resolve to whichever
-  is read last, which is deterministic but arbitrary, so it is `tracing::warn`ed rather
-  than settled in silence. Two pages claiming the same non-address name likewise warns
-  (first wins, deterministic) and is reported deterministically by `lore graph lint`.
+- **Name resolution uses `ConceptRegistry`.** Read every page's title and aliases;
+  unreadable or malformed registry pages fail the operation rather than dropping unknown
+  names. Ambiguous names refuse staging. Allocate an unoccupied address for an absent
+  name and register it before resolving the next concept in the batch.
 - **A concept page's `llm_inputs` are carried, except the one fact only the render knows.**
-  A concept's synthesis is owed against the SET of pages citing it, which only `lore graph
+  A concept's synthesis is owed against source paths and authored revisions, which `lore graph
   backlinks-sync` derives, so established markers are re-emitted unchanged — dropping them
   would re-enqueue every concept a run touched, and judging them would need a link graph the
   render cannot see. What the render does know is the page it is CREATING and the one citation
-  creating it: `ConceptDrafts::stage` takes the extraction's grounding sentence together with
-  the page whose material produced it (`Grounding`), and a page seeded from it records that
+  creating it: after staging and rendering the origin links, `StagedConcept::ground` takes
+  the grounding sentence and the completed origin page's revision (`Grounding`), and a page seeded from it records that
   single citation's digest as both `synthesis` and `synthesis_done`. Without the record the
   sentence reaches the sweep indistinguishable from authored prose and is ADOPTED as the answer
   for however many pages cite the concept by then — which in a backfill is the whole set, with
@@ -248,3 +238,8 @@ domain-neutral engine — then no work-log, reviews, or `is_personal` are produc
 - Every page renders through an embedded template; the ad-hoc fallback renderers that once
   shadowed them are gone, which is why the `##` anchors `/lore-process` locates by and the
   frontmatter keys synthesis reads (e.g. work-log `categories`) have exactly one source.
+
+- **Document provenance participates in semantic input.** An imported `source_record` is
+  rendered as metadata and included in summary/extraction requests, so a status-only change
+  cannot reuse a summary claiming current applicability. Original content remains separate
+  from generated interpretation; a source's archived state does not make its claims false.

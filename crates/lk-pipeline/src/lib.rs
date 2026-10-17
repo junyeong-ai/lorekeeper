@@ -2,6 +2,7 @@ mod classify;
 mod concept_draft;
 mod context;
 mod dedup;
+mod document_identity;
 mod event_log;
 mod llm_cache;
 mod normalize;
@@ -11,6 +12,7 @@ mod work_log;
 
 pub use concept_draft::RefusedAlias;
 pub use context::PipelineContext;
+pub use normalize::normalize_events;
 pub use render::RenderResult;
 pub use synthesis::Synthesizer;
 
@@ -27,6 +29,7 @@ use lk_core::event::{Event, RawItem};
 use lk_vault::{FsVault, VaultStore};
 
 use concept_draft::{ConceptDrafts, Grounding};
+use document_identity::DocumentIdentity;
 
 #[derive(Debug, Error)]
 pub enum PipelineError {
@@ -123,46 +126,11 @@ pub struct Pipeline {
     /// neither sees the other's page on disk. Run-level reservation makes the later one
     /// disambiguate by its own identity instead of silently overwriting the earlier page.
     document_slugs: std::collections::HashSet<String>,
+    document_addresses: Option<BTreeMap<DocumentIdentity, Vec<String>>>,
 }
 
-/// The most bytes a path component holds on the filesystems this writes to.
-const FILENAME_LIMIT: usize = 255;
-
-/// The most of a slug a DOCUMENT filename can carry.
-///
-/// A document's title is a sentence in the repositories this reads, so the budget is
-/// [`FILENAME_LIMIT`] less the extension and less the longest suffix the disambiguation below
-/// can append, leaving a collision on a truncated slug still able to fit.
-///
-/// Concept slugs are deliberately not bounded: [`lk_core::concept::identity_key`] is built on
-/// the same slug, and a cut there would fold two different names onto one identity — the
-/// duplicate-page defect, written deliberately. A concept's name is a term rather than a
-/// sentence, so one that does not fit is REFUSED — see [`find_unaddressable_concept`], which
-/// refuses it where the result can still be set aside whole.
+/// Document addresses reserve room for their disambiguation suffix and extension.
 const ADDRESS_BUDGET: usize = 212;
-
-/// The first concept in `result` whose name has no page address, or `None` when every one has.
-///
-/// A concept page is written at `<slug>.md`, so a name whose slug outgrows a path component
-/// addresses nothing — and because concept slugs are never truncated, the name itself is what
-/// is refused. Asked where `lore queue apply` READS the file, so the whole result is set aside
-/// while its extraction stays re-derivable: the page carries no completion marker until the
-/// result applies, so the next ingest enqueues it again. Left to the write, the same name
-/// aborts the batch with concept pages written and their citations not, and aborts every later
-/// run at the same file, since nothing prunes results.
-///
-/// A name that slugifies to NOTHING is not this question: it is not a name at all, and
-/// `concept_draft::has_valid_slug` already drops it where the render would have used it.
-pub fn find_unaddressable_concept(result: &lk_queue::TaskResult) -> Option<&str> {
-    result
-        .concepts
-        .iter()
-        .map(|reported| reported.concept.name.as_str())
-        .find(|name| {
-            lk_core::concept::slugify(name)
-                .is_some_and(|slug| slug.len() + ".md".len() > FILENAME_LIMIT)
-        })
-}
 
 /// Cut a slug to [`ADDRESS_BUDGET`] on a character boundary, leaving no trailing separator.
 fn bounded_address(slug: &str) -> String {
@@ -184,6 +152,7 @@ impl Pipeline {
             event_log: event_log::EventLog::new(vault_root),
             concept_drafts: ConceptDrafts::new(),
             document_slugs: std::collections::HashSet::new(),
+            document_addresses: None,
         }
     }
 
@@ -235,6 +204,9 @@ impl Pipeline {
     ) -> Result<IngestResult, PipelineError> {
         let mut events =
             normalize::normalize_events(source_id, config.source_type, items, &self.ctx.timezone);
+        if config.source_type.descriptor().unit == ObservationUnit::Document {
+            events.retain(|event| event.date <= options.today);
+        }
         tracing::info!(source = source_id, raw = events.len(), "normalized");
 
         if let Some(target) = options.target_date {
@@ -244,6 +216,9 @@ impl Pipeline {
 
         // Collapse repeats of the SAME item within this single fetch (same event-id —
         // exact identity, e.g. paginated history overlap).
+        if config.source_type.descriptor().unit == ObservationUnit::Document {
+            dedup::ensure_document_events_consistent(&events)?;
+        }
         let before = events.len();
         events = dedup::deduplicate(events);
         if events.len() != before {
@@ -561,9 +536,10 @@ impl Pipeline {
             // from the configured one) yields `None`; skip the write so the previous
             // on-disk page — and its LLM body — is left intact.
             match render::splice_preserved_sections(fresh.content, splices) {
-                Some(spliced) => {
-                    daily_pages.push(render::RenderResult::spliced(fresh.path, spliced))
-                }
+                Some(spliced) => daily_pages.push(
+                    render::RenderResult::spliced(fresh.path, spliced)
+                        .with_original(existing.as_ref())?,
+                ),
                 // A cached section heading is absent from the freshly rendered template
                 // (almost always a custom template that renamed it). The previous on-disk
                 // page is kept intact; warn so the divergence is observable instead of a
@@ -590,7 +566,7 @@ impl Pipeline {
         for (concept, date) in &staged_concepts {
             reads.push((
                 self.concept_drafts
-                    .stage(concept, None, self.reader.as_ref(), &self.ctx.dirs)
+                    .stage(concept, self.reader.as_ref(), &self.ctx.dirs)
                     .await?,
                 *date,
             ));
@@ -717,24 +693,14 @@ impl Pipeline {
             else {
                 continue;
             };
-            staged.push(
+            staged.push((
                 self.concept_drafts
-                    .stage(
-                        &concept,
-                        reported.synthesis.as_deref().map(|text| Grounding {
-                            text,
-                            origin: Path::new(&result.target.vault_path),
-                        }),
-                        self.reader.as_ref(),
-                        &self.ctx.dirs,
-                    )
+                    .stage(&concept, self.reader.as_ref(), &self.ctx.dirs)
                     .await?,
-            );
+                reported.synthesis.as_deref(),
+            ));
         }
-        let identities: Vec<_> = staged
-            .into_iter()
-            .map(|s| self.concept_drafts.commit(s, result.date))
-            .collect();
+        let identities: Vec<_> = staged.iter().map(|(s, _)| s.identity()).collect();
 
         let concepts = render::accumulate_concepts(
             // The links to CARRY are read under any locale, for the reason accumulation
@@ -746,11 +712,20 @@ impl Pipeline {
             &self.ctx.dirs,
         );
         let links = render::concept_links(&concepts, &result.target.vault_path, &self.ctx.dirs);
-        Ok(lk_vault::replace_section(
-            &stamped,
-            heading,
-            &links.join("\n"),
-        ))
+        let updated = lk_vault::replace_section(&stamped, heading, &links.join("\n"));
+        let page = lk_core::frontmatter::parse_page(&updated)
+            .map_err(|e| PipelineError::Render(e.to_string()))?;
+        let citation = lk_core::concept::Citation::new(Path::new(&result.target.vault_path), &page);
+        for (mut concept, synthesis) in staged {
+            if let Some(text) = synthesis {
+                concept.ground(Grounding {
+                    text,
+                    citation: citation.clone(),
+                });
+            }
+            self.concept_drafts.commit(concept, result.date);
+        }
+        Ok(updated)
     }
 
     /// Render the concept pages accumulated across every `plan` call in this run.
@@ -768,12 +743,164 @@ impl Pipeline {
         work_log::render_work_log(personal_events, today, &self.ctx, self.reader.as_ref()).await
     }
 
+    async fn load_document_addresses(&mut self) -> Result<(), PipelineError> {
+        if self.document_addresses.is_some() {
+            return Ok(());
+        }
+        let mut addresses: BTreeMap<DocumentIdentity, Vec<String>> = BTreeMap::new();
+        for path in self
+            .reader
+            .list_markdown_recursive(&lk_core::vault_path::documents_dir(&self.ctx.dirs))
+            .await?
+        {
+            let page = self.reader.read_page(&path).await?.ok_or_else(|| {
+                PipelineError::Render(format!(
+                    "document disappeared during address lookup: {}",
+                    path.display()
+                ))
+            })?;
+            if let Some(identity) = DocumentIdentity::from_page(&page.frontmatter)? {
+                let address = path
+                    .strip_prefix(lk_core::vault_path::documents_dir(&self.ctx.dirs))
+                    .map_err(|error| PipelineError::Render(error.to_string()))?
+                    .with_extension("");
+                let slug = address.to_str().ok_or_else(|| {
+                    PipelineError::Render(format!(
+                        "document address is not UTF-8: {}",
+                        path.display()
+                    ))
+                })?;
+                // Vault addresses use slash separators on every platform.
+                addresses
+                    .entry(identity)
+                    .or_default()
+                    .push(slug.replace(std::path::MAIN_SEPARATOR, "/"));
+            }
+        }
+        self.document_addresses = Some(addresses);
+        Ok(())
+    }
+
+    fn event_document_identity(event: &Event) -> Result<Option<DocumentIdentity>, PipelineError> {
+        DocumentIdentity::from_fields(
+            event.metadata.get("source_identity"),
+            event
+                .metadata
+                .get("source_file")
+                .and_then(|value| value.as_str()),
+            event.url.as_deref(),
+        )
+    }
+
+    async fn legacy_document_address(
+        &self,
+        event: &Event,
+        identity: Option<&DocumentIdentity>,
+    ) -> Result<Option<String>, PipelineError> {
+        let Some(DocumentIdentity::Repository(repository)) = identity else {
+            return Ok(None);
+        };
+        let legacy = DocumentIdentity::from_fields(
+            None,
+            event
+                .metadata
+                .get("source_file")
+                .and_then(|value| value.as_str()),
+            event.url.as_deref(),
+        )?;
+        let Some(addresses) = legacy
+            .as_ref()
+            .and_then(|key| self.document_addresses.as_ref()?.get(key))
+        else {
+            return Ok(None);
+        };
+        let mut matches = Vec::new();
+        for address in addresses {
+            let path =
+                lk_core::vault_path::VaultPath::document(&self.ctx.dirs, address).to_string();
+            let page = self
+                .reader
+                .read_page(Path::new(&path))
+                .await?
+                .ok_or_else(|| PipelineError::Render(format!("document disappeared: {path}")))?;
+            let source_document = page
+                .frontmatter
+                .get("source_record")
+                .and_then(|record| record.get("id"))
+                .and_then(|id| id.as_str());
+            if source_document.is_none() {
+                return Err(PipelineError::Render(format!(
+                    "document migration requires verified source identity for {path}; matching location alone cannot authorize adoption"
+                )));
+            }
+            if page
+                .frontmatter
+                .get("source_identity")
+                .is_none_or(|value| value.is_null())
+                && page
+                    .frontmatter
+                    .get("source_record")
+                    .and_then(|record| record.get("id"))
+                    .and_then(|id| id.as_str())
+                    == Some(repository.document.as_str())
+            {
+                matches.push(address.clone());
+            }
+        }
+        if matches.len() > 1
+            || (!matches.is_empty()
+                && identity
+                    .and_then(|key| self.document_addresses.as_ref()?.get(key))
+                    .is_some())
+        {
+            return Err(PipelineError::Render(format!(
+                "ambiguous legacy document ownership for {}: {}",
+                repository.document,
+                matches.join(", ")
+            )));
+        }
+        if matches
+            .iter()
+            .any(|address| self.document_slugs.contains(address))
+        {
+            return Err(PipelineError::Render(format!(
+                "legacy document {} is already planned",
+                repository.document
+            )));
+        }
+        Ok(matches.pop())
+    }
+
     async fn plan_documents(
         &mut self,
         source_id: &str,
         config: &SourceConfig,
         events: Vec<Event>,
     ) -> Result<IngestResult, PipelineError> {
+        self.load_document_addresses().await?;
+        let mut identities = std::collections::BTreeSet::new();
+        for event in &events {
+            let Some(identity) = Self::event_document_identity(event)? else {
+                continue;
+            };
+            if !identities.insert(identity.clone()) {
+                return Err(PipelineError::Render(format!(
+                    "repeated document source {identity}: one source plan must contain one observation per document"
+                )));
+            }
+            if let Some(addresses) = self
+                .document_addresses
+                .as_ref()
+                .and_then(|addresses| addresses.get(&identity))
+                && addresses
+                    .iter()
+                    .any(|address| self.document_slugs.contains(address))
+            {
+                return Err(PipelineError::Render(format!(
+                    "document source {identity} is already planned in this run; remove overlapping document collection before retrying"
+                )));
+            }
+        }
         // Canonical order so slug-collision disambiguation (first occurrence keeps the clean
         // slug) is stable across runs — the same comparator the daily path and event log use.
         let mut events = events;
@@ -791,7 +918,7 @@ impl Pipeline {
         // (which returns `Err` and is rolled back by the CLI) never poisons the shared slug
         // namespace nor leaks half a source's concepts — the same commit-on-success contract
         // the queue's begin_source/rollback_source gives buffered tasks.
-        let mut claimed_slugs: Vec<(String, Option<String>)> = Vec::new();
+        let mut claimed_slugs: Vec<(String, Option<DocumentIdentity>)> = Vec::new();
         let mut staged_concepts: Vec<(lk_core::concept::ExtractedConcept, jiff::civil::Date)> =
             Vec::new();
         // Two documents can share a title — and therefore a base slug — whether in one batch
@@ -827,21 +954,39 @@ impl Pipeline {
                 }
             };
             let base_slug = bounded_address(&base_slug);
-            // This document's stable identity — the manual file path the template records as
-            // `source_file` (`source_url` is also accepted, as forward-compat for any
-            // URL-sourced document). Used to decide whether an existing page at a candidate
-            // slug is THIS document (reuse it idempotently) or a DIFFERENT one (disambiguate)
-            // — so a later same-titled document never overwrites an earlier one's page,
-            // ACROSS runs too: the in-memory slug claims only cover this run, so the on-disk
-            // owner check is what catches a prior run's page.
-            let identity = event
-                .metadata
-                .get("source_file")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-                .or_else(|| event.url.clone());
+            let identity = Self::event_document_identity(event)?;
+            let adopted = self
+                .legacy_document_address(event, identity.as_ref())
+                .await?;
+            if adopted
+                .as_ref()
+                .is_some_and(|address| claimed_slugs.iter().any(|(slug, _)| slug == address))
+            {
+                return Err(PipelineError::Render(
+                    "overlapping legacy document adoption in one source".into(),
+                ));
+            }
 
-            // Resolve a collision-free slug. The bare title slug is tried first (readable);
+            let base_slug = match identity
+                .as_ref()
+                .and_then(|identity| self.document_addresses.as_ref()?.get(identity))
+            {
+                Some(addresses) if addresses.len() == 1 => addresses[0].clone(),
+                Some(addresses) => {
+                    return Err(PipelineError::Render(format!(
+                        "document source {} is claimed by multiple pages: {}",
+                        identity
+                            .as_ref()
+                            .map(ToString::to_string)
+                            .unwrap_or_default(),
+                        addresses.join(", ")
+                    )));
+                }
+                None => adopted.clone().unwrap_or(base_slug),
+            };
+
+            // Resolve a collision-free slug, starting with the existing source address
+            // or a title-derived address for a new document;
             // on any collision — a slug already claimed in this batch, OR an on-disk page
             // owned by a DIFFERENT document — the document's own `EventId` hash is appended,
             // lengthened, and finally given a numeric tail. The candidate ALWAYS keeps
@@ -858,42 +1003,25 @@ impl Pipeline {
                     // the candidate never saturates, so the loop always reaches a free slug.
                     Some(n) => format!("{base_slug}-{hash}-{}", n - hash.len()),
                 };
-                // A slug claimed earlier in this run belongs to a DIFFERENT document — that
-                // is what the claim asserts, and the disambiguation below rests on it. Two
-                // events carrying one identity break it, and the page split that follows is
-                // invisible in the vault, so this says so rather than holding silently.
-                // Nothing constructs that today: a document source yields one event per
-                // document (`manual` by having one file, `nodex` by folding its two queries),
-                // which is where the rule belongs and where it is tested.
-                if let Some((_, claimant)) = claimed_slugs.iter().find(|(s, _)| *s == candidate)
-                    && claimant.is_some()
-                    && *claimant == identity
-                {
-                    tracing::warn!(
-                        source = source_id,
-                        slug = %candidate,
-                        document = ?identity,
-                        "two events in one batch are the same document; each is getting its own page"
-                    );
-                }
                 if !self.document_slugs.contains(&candidate)
                     && !claimed_slugs.iter().any(|(s, _)| *s == candidate)
                 {
                     let path = lk_core::vault_path::VaultPath::document(&self.ctx.dirs, &candidate)
                         .to_string();
                     let existing = self.reader.read_page(Path::new(&path)).await?;
-                    let owner = existing.as_ref().and_then(|pg| {
-                        pg.frontmatter
-                            .get("source_file")
-                            .or_else(|| pg.frontmatter.get("source_url"))
-                            .and_then(|v| v.as_str())
-                            .map(String::from)
-                    });
+                    let owner = existing
+                        .as_ref()
+                        .map(|page| DocumentIdentity::from_page(&page.frontmatter))
+                        .transpose()?
+                        .flatten();
                     // Claim only a free slug OR a page provably THIS document (owner present
                     // and equal). A page with NO owner can't be proven to be ours, so it is
                     // never taken over — we disambiguate around it rather than overwrite an
                     // unidentifiable page.
-                    if existing.is_none() || (owner.is_some() && owner == identity) {
+                    if existing.is_none()
+                        || (owner.is_some() && owner == identity)
+                        || adopted.as_deref() == Some(candidate.as_str())
+                    {
                         break (candidate, existing);
                     }
                 }
@@ -904,7 +1032,10 @@ impl Pipeline {
             let vault_path =
                 lk_core::vault_path::VaultPath::document(&self.ctx.dirs, &slug).to_string();
 
-            let combined = format!("{}\n{}", event.title, event.body);
+            let combined = match event.metadata.get("source_record") {
+                Some(record) => format!("{}\nSource record: {record}\n{}", event.title, event.body),
+                None => format!("{}\n{}", event.title, event.body),
+            };
 
             let summary_req = lk_queue::SummarizeRequest {
                 text: combined.clone(),
@@ -1052,9 +1183,10 @@ impl Pipeline {
                 splices.push((concepts_heading, d));
             }
             match render::splice_preserved_sections(fresh.content, splices) {
-                Some(spliced) => {
-                    document_pages.push(render::RenderResult::spliced(fresh.path, spliced))
-                }
+                Some(spliced) => document_pages.push(
+                    render::RenderResult::spliced(fresh.path, spliced)
+                        .with_original(existing.as_ref())?,
+                ),
                 None => tracing::warn!(
                     source = source_id,
                     slug = %slug,
@@ -1075,7 +1207,7 @@ impl Pipeline {
         for (concept, date) in &staged_concepts {
             reads.push((
                 self.concept_drafts
-                    .stage(concept, None, self.reader.as_ref(), &self.ctx.dirs)
+                    .stage(concept, self.reader.as_ref(), &self.ctx.dirs)
                     .await?,
                 *date,
             ));
@@ -1084,8 +1216,15 @@ impl Pipeline {
             self.concept_drafts.commit(staged, date);
         }
         let all_concepts: Vec<_> = staged_concepts.into_iter().map(|(c, _)| c).collect();
-        self.document_slugs
-            .extend(claimed_slugs.into_iter().map(|(slug, _)| slug));
+        for (slug, identity) in claimed_slugs {
+            self.document_slugs.insert(slug.clone());
+            if let Some(identity) = identity {
+                self.document_addresses
+                    .as_mut()
+                    .expect("document addresses loaded")
+                    .insert(identity, vec![slug]);
+            }
+        }
 
         Ok(IngestResult {
             source_id: source_id.into(),

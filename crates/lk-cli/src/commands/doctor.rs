@@ -181,10 +181,10 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
              `concepts` is the exception, and it needs no re-fetch at all. Never stamp its marker\n\
              by hand — that claims an empty section is answered and loses the extraction for\n\
              good. Write a result file to `<vault>/.lorekeeper/queue/results/<name>.json` and run\n\
-             `lore queue apply`: it writes the concept pages, the links and the marker in one\n\
-             edit, and needs no queue task behind it. The file must be a COMPLETE result — the\n\
-             schema is `/lore-process`'s `references/processing-kinds.md`, under\n\
-             `kind: extract-concepts` — because a partial one is quarantined, and one whose\n\
+             `lore queue apply --recover-extraction <task_id>`: it writes concepts, links and the marker in one\n\
+             edit without the lost task. Before reading the page, capture its `file_revisions` value from\n\
+             `lore wiki evidence <page>` as `target_revision`. The complete result schema is in\n\
+             `/lore-process` references/processing-kinds.md. A partial result cannot be applied; one whose\n\
              `anchor` or `cache_hash` does not match the page is dropped as dead with exit 0."
         );
     }

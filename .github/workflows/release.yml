@@ -45,16 +45,23 @@ jobs:
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+      - name: Read repository toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          channel=$(awk -F'"' '/^[[:space:]]*channel[[:space:]]*=/ { print $2; exit }' rust-toolchain.toml)
+          [ -n "$channel" ] || { echo "rust-toolchain.toml declares no channel" >&2; exit 1; }
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master commit (2026-08-05)
         with:
-          toolchain: stable
+          toolchain: ${{ steps.toolchain.outputs.channel }}
       - name: Compare
         shell: bash
         env:
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          declared=$(cargo metadata --no-deps --format-version 1 \
+          declared=$(cargo metadata --locked --no-deps --format-version 1 \
             | jq -r '.packages[] | select(.name == "lore") | .version')
           if [ "$TAG" != "v$declared" ]; then
             echo "tag $TAG does not name the declared version v$declared — bump the crates" >&2
@@ -102,18 +109,25 @@ jobs:
           ref: ${{ github.event.inputs.tag || github.ref }}
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+      - name: Read repository toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          channel=$(awk -F'"' '/^[[:space:]]*channel[[:space:]]*=/ { print $2; exit }' rust-toolchain.toml)
+          [ -n "$channel" ] || { echo "rust-toolchain.toml declares no channel" >&2; exit 1; }
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master commit (2026-08-05)
         with:
-          toolchain: stable
+          toolchain: ${{ steps.toolchain.outputs.channel }}
           targets: ${{ matrix.target }}
 
       # No build cache: these are the bytes a user installs, so they are compiled from the
       # checkout rather than restored from a store some other run wrote.
       - name: Install cross
         if: matrix.cross
-        uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
-          tool: cross
+          tool: cross@0.2.5
 
       - name: Build (cross)
         if: matrix.cross
@@ -172,7 +186,7 @@ jobs:
           subject-path: ${{ steps.package.outputs.archive }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ steps.package.outputs.archive }}
           path: |
@@ -191,7 +205,7 @@ jobs:
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
           persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: artifacts
           merge-multiple: true

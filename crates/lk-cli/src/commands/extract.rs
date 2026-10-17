@@ -286,7 +286,7 @@ pub(crate) fn survey(
         // A directory under `extracts/` holding no manifest is not a project — the only
         // absence this treats as an absence, because the file system answered it.
         let detail = match std::fs::read_to_string(&path) {
-            Ok(text) => match serde_yaml_ng::from_str::<Manifest>(&text) {
+            Ok(text) => match lk_core::yaml::from_str::<Manifest>(&text) {
                 Ok(manifest) => Detail::Read(build_facts(manifest, today)),
                 Err(e) => Detail::Unreadable(e.to_string()),
             },

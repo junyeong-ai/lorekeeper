@@ -24,9 +24,9 @@ Notes and wikis fail not because reading or thinking is hard, but because of the
 | 🧩 **Concepts as assets** | The same concept converges to one page (`Vector DB` = `vector-database`), categorized and related |
 | 🔗 **A connected knowledge graph** | Wikilinks, backlinks, and clusters link concepts to one another |
 | 📈 **Compounding** | Weekly / monthly / quarterly / annual synthesis — value grows over time |
-| 🔑 **No API key** | Claude Code's own session does the LLM work (no separate billing) |
+| 🔑 **No API key** | Claude Code's own session does the LLM work (no separate LLM API integration) |
 
-> 💡 Inspired by Andrej Karpathy's *"LLM-maintained wiki"*: **raw sources stay immutable**, **the LLM writes and maintains the wiki**, and **the schema (config) defines the workflow**. You curate sources and ask questions; the LLM does the bookkeeping.
+> 💡 Inspired by Andrej Karpathy's *"LLM-maintained wiki"*: **source material stays distinct from generated knowledge**, **the LLM writes and maintains the wiki**, and **the schema (config) defines the workflow**. You curate sources and ask questions; the LLM does the bookkeeping.
 
 ---
 
@@ -58,7 +58,7 @@ flowchart LR
 
 > **Before you start, you'll need** — nothing exotic:
 > - 💻 **macOS or Linux** (Windows ships a PowerShell installer)
-> - 🤖 **Claude Code** — `/lore-process` fills in summaries & concepts (no separate API key or billing)
+> - 🤖 **Claude Code** — `/lore-process` fills in summaries & concepts (uses your Claude Code session)
 > - 🔑 **Credentials only for the sources you enable** — e.g. Google sign-in for Gmail/Drive/Calendar, a token for Slack
 > - 🗂️ **(optional) Obsidian** — for pretty graph browsing. Without it, the output is still plain markdown
 >
@@ -203,6 +203,12 @@ latency than by **operational simplicity** — co-locating vectors with relation
 - [Kubernetes](concepts/kubernetes.md) — container orchestration; reliable operation depends on observing pod memory and restart signals…
 ```
 
+Larger vaults use `index.md` as the entry to a navigation tree with at most 100 entries per page. Generated `catalog/` pages are navigation, not evidence or knowledge nodes.
+
+Knowledge reviews appear in the catalog’s first group with their current effective state. Changed evidence marks a resolved judgment as needing reassessment while preserving its history. Scheduled pipelines finish with `queue check` and `wiki reviews --check`. Open reviews pass; a deleted historical source remains valid when its recorded revision has a verified archive.
+
+For an actual reassessment, first preserve the prior review with `lore wiki evidence --archive <review-path>`. Read and archive the new evidence, explicitly replace the current `review.evidence`, and record a dated judgment with the prior review’s `.lorekeeper/evidence/<revision>.md` path in the body. Never update revision labels on an old judgment without reassessing it.
+
 ### ✅ Result ④ — a knowledge graph forms
 
 `lore graph suggest-links` / `cluster` discover relationships between concepts (ranked by an Adamic-Adar score that down-weights hub co-citations):
@@ -271,7 +277,7 @@ The source key becomes the vault subfolder name. You can define several of the s
 
 - **Output is plain markdown** — `daily/{source}/` (raw timeline), `wiki/concepts/` (concepts), `wiki/documents/` (documents), `me/` (work-log & reviews), `synthesis/` (weekly themes).
 - **Materialized views** — a page has two layers. The **structural layer** (frontmatter, raw items, headings) re-renders every ingest; the **semantic layer** (summary, concepts, synthesis) is LLM-owned and preserved across re-renders. Unchanged input enqueues zero LLM work (a BLAKE3 hash decides).
-- **No data loss** — re-runs are idempotent (byte-identical). Streaming sources (RSS) keep a permanent event log, so scrolled-out items are never lost.
+- **Inputs and replay** — unchanged input hashes reuse completed LLM results. Refetching can observe remote edits, deletions and different query windows. RSS event logs retain collected entries after they leave the feed; exact-input regeneration requires a retained queue task.
 - **Realized-only** — a future date materializes no page (a forecast isn't knowledge yet). It becomes knowledge once the date arrives.
 - **Config decides the vault's language** — `vault.locale` (ko | en) is not a label switch but **the language of every sentence Lorekeeper adds**: summaries, weekly themes, concept definitions, explorations. A concept's NAME is the form its own source writes, so a term a source writes in another language keeps its spelling. Source content is never translated.
 - **The graph does the bookkeeping** — `backlinks-sync` (re-derive each concept's citations, count and synthesis input, queueing a rewrite when the evidence moves), `lint` (orphans, broken links, duplicate concepts), `merge` (fold duplicate concepts), `cluster` / `suggest-links` (discover relationships).
@@ -293,6 +299,14 @@ lore schedule | crontab -     # emit cron lines
 lore brief --date yesterday   # a day's knowledge — what was learned (a line each), what was seen again (names)
 lore fetch <url>              # read a link into the inbox, carrying its address
 lore wiki search <query>      # the pages a query reaches, and whether they NAME it or merely mention it
+lore wiki browse --category ai-ml --type concept --limit 20 --json # Browse metadata; follow next_offset
+lore graph --json neighbors wiki/concepts/example.md # Follow incoming/outgoing links, including evidence
+lore graph --json neighbors wiki/concepts/example.md --type concept # Browse linked concepts; --type document selects documents
+lore wiki prepare             # Capture once; use --snapshot <id> for repeated searches
+lore wiki search "exact text" --body --json # Raw evidence lines/context/revision; opt into --regex
+lore wiki document-identity plan --source ID --manifest /tmp/identity.json # Verify legacy copy identity migration
+lore wiki read wiki/concepts/example.md # Outline → --section ID; pin subsequent reads with --revision
+lore wiki links wiki/concepts/example.md --limit 20 # Inspect link source lines, context and revision
                               #   asked by a concept's name, it also reads the prose written
                               #   under that concept's other names (MCP <-> Model Context Protocol)
 lore wiki concepts            # list concepts
@@ -309,7 +323,11 @@ lore doctor                   # page contracts: text cleanliness, unanswered sec
 lore extract status           # how far each project's knowledge extraction trails its repository
 lore maintenance              # prune ingest logs and drained queue files past retention
 lore queue status / prune     # LLM task queue status / clear dead tasks
-lore queue apply              # materialize the concept extractions a drain produced
+lore queue apply              # validate and publish all staged section/concept results
+lore queue check              # JSON completion check: outstanding work, results and mutations
+lore wiki reviews --check     # fail on evidence drift or invalid reviews; open reviews pass
+lore queue packet --task-id ID # revision-checked evidence (bodies: --include-content)
+lore queue regenerate --task-id ID --dry-run # preview retained-input regeneration
 lore queue count              # current task count as a bare integer (for scripts)
 lore config vault-root        # the vault's absolute path, and nothing else (for scripts)
 lore schema                   # generate wiki/AGENTS.md (the page-format schema)
@@ -332,6 +350,7 @@ Skills that pair with the deterministic `lore` binary — the *judgment* parts r
 | `/lore-capture` | Capture an insight from active work straight into the vault |
 | `/lore-extract` | Batch-extract transferable knowledge from a project repo (scan→run→audit) |
 | `/lore-ingest` | Wraps the `lore` CLI (ingest, synthesis, status, schedule) |
+| `/lore-day` | Daily agenda, knowledge briefing, reminders and closing the day |
 
 > e.g. `/lore-wiki query "how do I improve RAG retrieval quality?"` → answers by cross-citing the vault's concepts, and files a good answer back as a page under `wiki/explorations/`.
 
@@ -343,7 +362,7 @@ Skills that pair with the deterministic `lore` binary — the *judgment* parts r
 
 | Mode | Default | Description |
 |---|:---:|---|
-| `queue` | ✓ | Queues JSONL tasks under `<vault>/.lorekeeper/queue/`; `/lore-process` drains them with Claude Code's session — **no API key, no separate billing** |
+| `queue` | ✓ | Queues JSONL tasks under `<vault>/.lorekeeper/queue/`; `/lore-process` drains them with Claude Code's session — **no separate LLM API integration** |
 | `noop` | | No LLM work — for development, CI, or template-only runs |
 
 Unattended operation is what `lore-daily.sh` is for. The drain runs as a `claude -p` session, and `-p` mode cannot ask — anything that would prompt is simply denied — so the tools the protocol spells must be named with `--allowedTools`; the script passes that list along with a preamble telling the session nobody is watching. A failing stage never skips the ones after it: one source failing to collect is no reason to leave the other sources' tasks unanswered.
@@ -390,7 +409,7 @@ lore self deploy      # redeploy only — the repair `self status` reports
 lore self uninstall   # remove what was installed; the vault is never touched
 ```
 
-The skills, pipeline scripts, templates and `config.example.yaml` are **compiled into the binary**, so there is no second artifact to fall out of step with it, and `lore self deploy` writes the copies. `lore self update` refuses while the queue still holds work, and refuses a release older than the running one — pass `--version` to go back deliberately.
+The skills, pipeline scripts, templates and `config.example.yaml` are **compiled into the binary**, and deployed copies can drift; `lore self status` checks them, while `lore self deploy` writes the copies. `lore self update` refuses while the queue still holds work, and refuses a release older than the running one — pass `--version` to go back deliberately.
 
 ---
 
@@ -418,11 +437,21 @@ lore schedule --format launchd --bin "$(command -v lore)" \
               --pipeline-dir ~/.local/share/lorekeeper/pipelines               # macOS
 ```
 
+Scheduled scripts execute directly with `/bin/bash`. Monthly, quarterly and annual reviews retain their calendars and wait for exclusive vault access. Maintenance and queue pruning run sequentially in one job. When replacing an existing schedule, unload and remove the old `com.lorekeeper.queue-prune` LaunchAgent. Template overrides are carried into the scheduled environment.
+
 `ingest.schedule` emits a single `lore ingest` line that runs **every source in one process** (the work-log is a cross-source daily aggregate, so per-source runs would overwrite it partially). Each synthesis period (weekly/monthly/quarterly/annual) emits its own cron line, and `maintenance.schedule` automates the janitors.
 
-For unattended operation the installer ships two pipeline scripts (`lore-daily.sh`, `lore-weekly.sh`) — daily ingest + queue drain + graph reconcile, and weekly synthesis + knowledge audit. A system scheduler (launchd or cron) fires them, so they run whether or not Claude Desktop is open.
+For unattended operation the installer ships `lore-daily.sh` (daily ingest + queue drain + graph reconcile), `lore-weekly.sh` (weekly synthesis + knowledge audit), and separate monthly, quarterly, annual and maintenance entry scripts. A system scheduler (launchd or cron) fires them, so they run whether or not Claude Desktop is open.
 
 `--pipeline-dir` is what actually puts those scripts on the schedule. `lore ingest` and `lore synthesis weekly` are only a pipeline's FIRST stage — the queue drain and `queue apply` live in the scripts — so emitting without it ingests every morning and leaves summaries and concepts empty forever. A scheduler hands a job almost no environment, so the entry also carries the `PATH`, `lore`, `claude` and config path the scripts need, inherited from the session that ran the command rather than guessed. Prefer launchd on macOS: it runs a job missed during sleep once the machine wakes, where cron silently drops it.
+
+---
+
+### Versioning the vault with Git (optional)
+
+Keep a backup or a reviewed Git commit before substantial rewrites or merges. Pipelines never stage or commit automatically because they cannot distinguish concurrent user edits from their own output. A mutation journal resumes interrupted changes; it is not a historical backup.
+
+Exclude `.lorekeeper/`, credentials and any private local state from Git. Review `git status` and `git diff`, then stage only the intended files. Generated `index.md`, `catalog/`, `log.md` and `map.md` can be excluded under the configured wiki directory. Check the sharing scope before using a remote repository.
 
 ---
 
@@ -434,4 +463,4 @@ For unattended operation the installer ships two pipeline scripts (`lore-daily.s
 
 ## Built with
 
-Rust 1.97 · 2024 edition. `tokio`/`reqwest` (async sources), `jiff` (timezone-correct dates), `minijinja` (templates), `petgraph` (link graph), `blake3` (event/cache hashing). License: MIT.
+Rust 2024 edition · build toolchain 1.99.1 · MSRV 1.97. `tokio`/`reqwest` (async sources), `jiff` (timezone-correct dates), `serde-saphyr` (YAML), `minijinja` (templates), `feed-rs` (feeds), `petgraph` (link graph), `blake3` (event/cache hashing). License: MIT.

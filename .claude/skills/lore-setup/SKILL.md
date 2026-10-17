@@ -1,6 +1,6 @@
 ---
 name: lore-setup
-version: 0.36.2
+version: 0.46.0
 description: Build or edit a Lorekeeper config.yaml by inspecting the user's real workspace — discovers Slack channel IDs, Jira projects and custom-field IDs, Google calendars, and Gmail query categories via their CLIs, then writes a validated config. Use when the user wants help setting up Lorekeeper, adding a source, or finding the concrete IDs a source needs. Read-only against the user's accounts; only writes config.yaml after confirmation.
 when_to_use: |
   setup Lorekeeper, configure sources, build config,
@@ -55,15 +55,15 @@ channel IDs, project keys, and custom-field IDs.
 
 ## Design principles
 
-- **Preserve source language** — only labels switch via `vault.locale: ko|en`.
+- **Preserve source language** — `vault.locale: ko|en` sets generated prose and headings; source content and declared concept names retain their original language.
 - **Jira uses `updated` field** — daily snapshot of touched issues.
   Start/due dates are display-only (`start_date_field` is instance-specific
-  custom-field ID). Never query by date range.
+  custom-field ID). Filter collection by `updated`, not start/due dates.
 - **Slack = full channel** for team awareness. Personal messages auto-split
   to work-log when the source is in `personal.tracked_sources` (+ `identity.slack_id`).
   Use `watch_users` only to narrow to specific people.
-- **Gmail: recommend `category:primary`** — filters out bot/notification
-  noise (GitHub, CI, etc.).
+- **Gmail scope follows the user's needs.** `category:primary` is an optional filter,
+  not a definition of work mail; updates and notifications can contain useful evidence.
 - Credentials via `lore init credentials` — this skill only fills IDs/conditions.
 
 ## When NOT to invoke

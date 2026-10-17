@@ -118,6 +118,12 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
     // own root and scope resolution, and reading it twice is what keeps this line the same
     // verdict `lore graph lint` exits on rather than a second derivation of it.
     match super::graph::lint(opts, None) {
+        Ok(report) if !report.errors.is_empty() => line(
+            "graph",
+            format!("incomplete: {}", report.errors.join("; ")),
+            false,
+            "lore graph lint",
+        ),
         Ok(report) => {
             let violations = report.violations.count();
             line(

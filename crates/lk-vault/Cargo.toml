@@ -20,7 +20,11 @@ minijinja = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 unicode-normalization = { workspace = true }
+rusqlite = { workspace = true }
+pulldown-cmark = { workspace = true }
 walkdir = { workspace = true }
+same-file = { workspace = true }
+regex = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

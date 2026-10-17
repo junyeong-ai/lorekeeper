@@ -8,8 +8,8 @@ pub use mock::MockLlmClient;
 pub use noop::NoopLlmClient;
 pub use queue::{
     CORRUPT_SUBDIR, PROCESSED_SUBDIR, QueueClaim, QueueLlmClient, QueueTask, RESULTS_SUBDIR,
-    ReportedConcept, ResultBatch, TaskKind, TaskResult, claim_queue, read_results,
-    write_tasks_atomic,
+    ReportedConcept, ResultBatch, SECTION_RESULT_SUFFIX, SYNTHESIS_RESULT_SUFFIX, SectionResult,
+    SynthesisResult, TaskKind, TaskResult, claim_queue, read_results, write_tasks_atomic,
 };
 
 use async_trait::async_trait;
@@ -32,6 +32,13 @@ impl QueueError {
     pub fn is_fatal(&self) -> bool {
         matches!(self, QueueError::QueueIo(_))
     }
+}
+
+fn deserialize_locale<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Locale, D::Error> {
+    let tag = String::deserialize(deserializer)?;
+    Locale::try_from_tag(&tag).ok_or_else(|| serde::de::Error::custom("unsupported input locale"))
 }
 
 /// What kind of vault content a semantic task produces. Used for classification/logging;
@@ -97,7 +104,7 @@ impl TargetKind {
     /// `TargetKind` only ever touches `llm_inputs_key`).
     ///
     /// Completion is uniformly marker-signalled: the pipeline pre-stamps `llm_inputs_key()`
-    /// with the current input hash (the stale-task reference), and `/lore-process` stamps
+    /// with the current input hash (the stale-task reference), and `lore queue apply` stamps
     /// this companion `*_done` key once it has finished — **even when the result is empty**.
     /// A cache hit is `*_done == llm_inputs_key()`, never inferred from the body being
     /// non-empty. This is the single completion model precisely because emptiness is not a
@@ -126,7 +133,7 @@ pub struct TaskTarget {
 
 /// Structured theme extraction from combined multi-source text. Used by weekly
 /// synthesis to replace free-text parsing with reliable JSON output.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ThemeRequest {
     pub text: String,
     pub max_themes: usize,
@@ -134,6 +141,7 @@ pub struct ThemeRequest {
     /// are re-derived from the same text whenever that text moves, so a locale switch must
     /// re-derive them in the new language. Without that the stale-task guard would freeze
     /// wrong-language themes forever.
+    #[serde(deserialize_with = "deserialize_locale")]
     pub locale: Locale,
     pub target: TaskTarget,
 }
@@ -145,7 +153,7 @@ pub struct Theme {
     pub description: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct SummarizeRequest {
     pub text: String,
     pub max_sentences: usize,
@@ -155,6 +163,7 @@ pub struct SummarizeRequest {
     pub focus: Option<String>,
     /// Part of the cache identity, for the reason [`ThemeRequest::locale`] records: a
     /// summary is a view over its input, so a locale switch re-derives it.
+    #[serde(deserialize_with = "deserialize_locale")]
     pub locale: Locale,
     /// Originating source type, when the task summarizes a single source's content
     /// (daily / document). `None` for cross-source or derived tasks (work-log topic
@@ -168,25 +177,18 @@ pub struct SummarizeRequest {
 
 /// Rewrite one concept page's synthesis from the pages that currently cite it.
 ///
-/// The input is the citation SET — the evidence the synthesis is answerable to — and not the
-/// evidence's text. A concept page's synthesis states what the vault knows about the concept,
-/// so it is owed a rewrite exactly when the set of pages backing it changes, and not when one
-/// of them is edited: an ingest re-renders a daily page whenever its source is re-fetched, and
-/// hashing their content would re-enqueue every concept they cite on every run.
-///
-/// The task carries no source text. The concept page's own `## Sources` section links every
-/// page in the set, so the drain reads them at the address the vault already records — which
-/// keeps the payload O(1) as a concept accumulates citations, the same reason the extraction
-/// task carries no concept registry.
-#[derive(Debug, Clone)]
+/// Each citation carries its vault-relative path and authored revision. The drain reads
+/// those pages; queue classification checks that they still match before work begins.
+#[derive(Debug, Clone, Deserialize)]
 pub struct ConceptSynthesisRequest {
-    /// Page ids citing this concept, as `lore graph backlinks-sync` derived them.
-    pub citations: Vec<String>,
+    /// Source paths and revisions observed by `lore graph backlinks-sync`.
+    pub citations: Vec<lk_core::concept::Citation>,
     /// The language to write in when the page carries no prose to answer the question
     /// itself. A rewrite normally matches what the page already says, which is why a locale
     /// switch leaves an authored synthesis alone — but a page created with no grounding
     /// sentence says nothing, and inferring a language from the sources would write the
     /// vault in whatever language its inputs happened to arrive in.
+    #[serde(deserialize_with = "deserialize_locale")]
     pub locale: Locale,
     /// The page's related-concepts heading, or `None` where it carries none.
     ///
@@ -248,7 +250,7 @@ pub struct CategoryReference {
     pub label: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ExtractConceptsRequest {
     pub text: String,
     pub source_id: String,
@@ -266,9 +268,11 @@ pub struct ExtractConceptsRequest {
     /// that ever cites it — and a locale switch does not retranslate those, so hashing the
     /// locale here would re-enqueue an extraction for every daily page and document in the
     /// vault to produce the same concepts under a different grounding sentence.
+    #[serde(deserialize_with = "deserialize_locale")]
     pub locale: Locale,
     pub target: TaskTarget,
     /// Valid category IDs the LLM may assign to each concept. Empty = no categorization.
+    #[serde(default)]
     pub categories: Vec<CategoryReference>,
 }
 
@@ -487,8 +491,7 @@ pub trait LlmClient: Send + Sync {
     }
 
     /// Rewrite a concept page's synthesis from the pages citing it. Called by `lore graph
-    /// backlinks-sync`, the sole deriver of that citation set, when the set a page's
-    /// synthesis was written against is no longer the set the page carries. The default
+    /// backlinks-sync` when its source paths or authored revisions change. The default
     /// returns an empty body, which suffices for noop and mock clients; queue mode emits a
     /// deferred task and the drain fills the section.
     async fn synthesize_concept(

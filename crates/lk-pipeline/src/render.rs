@@ -29,6 +29,8 @@ pub fn llm_inputs_map(
 }
 
 pub struct RenderResult {
+    /// Outer None: unguarded output. Some(None): target was absent when derived.
+    pub expected_original: Option<Option<String>>,
     pub path: VaultPath,
     pub content: String,
     /// Section headings on the existing page whose body this write replaces with an empty one.
@@ -55,6 +57,7 @@ impl RenderResult {
     /// will be written.
     pub fn fresh(path: VaultPath, content: String) -> Self {
         Self {
+            expected_original: None,
             path,
             content,
             discarded: Vec::new(),
@@ -66,9 +69,46 @@ impl RenderResult {
     pub fn spliced(path: VaultPath, spliced: Spliced) -> Self {
         Self {
             path,
+            expected_original: None,
             content: spliced.content,
             discarded: spliced.discarded,
             refused: Vec::new(),
+        }
+    }
+
+    /// Bind a materialized view to the exact page whose bodies it preserved.
+    pub fn with_original(
+        mut self,
+        existing: Option<&lk_core::frontmatter::VaultPage>,
+    ) -> Result<Self, PipelineError> {
+        self.expected_original = Some(
+            existing
+                .map(|page| {
+                    page.original.clone().ok_or_else(|| {
+                        PipelineError::Render(
+                            "page reader omitted its original input snapshot".into(),
+                        )
+                    })
+                })
+                .transpose()?,
+        );
+        Ok(self)
+    }
+
+    /// Add this rendered page to a plan using its original derivation snapshot.
+    pub fn plan_publication(
+        &self,
+        plan: &mut lk_vault::MutationPlan,
+        root: &Path,
+    ) -> Result<(), lk_vault::VaultError> {
+        match &self.expected_original {
+            Some(before) => plan.publish_expected(
+                root,
+                self.path.as_ref(),
+                before.clone(),
+                self.content.clone(),
+            ),
+            None => plan.publish(root, self.path.as_ref(), self.content.clone()),
         }
     }
 
@@ -453,6 +493,8 @@ pub fn render_document_page(
         "document_type": document_type,
         "source_url": event.url,
         "source_file": source_file,
+        "source_record": event.metadata.get("source_record"),
+        "source_identity": event.metadata.get("source_identity"),
         "tags": tags,
         "summary": summary,
         "content": event.body,
@@ -511,6 +553,13 @@ where
             out = replace_section(&out, heading, body);
         } else if decision.discarding.is_some() {
             candidates.push(heading);
+        }
+        for (key, value) in &decision.provenance {
+            out = lk_vault::set_llm_input(
+                &out,
+                key,
+                &serde_json::to_string(value).expect("provenance serializes"),
+            )?;
         }
     }
     // After every splice, so a section is judged on the page as it will be written. A heading
@@ -595,8 +644,65 @@ mod tests {
         assert_eq!(obj.get("sender").and_then(|v| v.as_str()), Some("a@x.com"));
     }
 
+    #[test]
+    fn generation_provenance_follows_preserved_body_and_matching_request_input_only() {
+        for scenario in ["cached", "pending", "changed-input", "unrelated-request"] {
+            let done = if matches!(scenario, "cached" | "unrelated-request") {
+                "  summary_done: old\n"
+            } else {
+                ""
+            };
+            let request_input = if scenario == "unrelated-request" {
+                "different"
+            } else {
+                "old"
+            };
+            let previous = format!(
+                "---\nllm_inputs:\n  summary: old\n{done}  summary_policy_done: summary-v0\n  summary_policy_requested: summary-v1\n  summary_policy_requested_input: {request_input}\n---\n## Summary\nPreserved knowledge.\n"
+            );
+            let page = lk_core::frontmatter::parse_page(&previous).unwrap();
+            let hash = if scenario == "changed-input" {
+                "new"
+            } else {
+                "old"
+            };
+            let decision =
+                crate::llm_cache::lookup(Some(&page), "summary_done", |s| s.summary, hash.into());
+            let fresh = format!("---\nllm_inputs:\n  summary: {hash}\n---\n## Summary\n\n");
+            let output = splice_preserved_sections(fresh, [("Summary", &decision)])
+                .unwrap()
+                .content;
+            let output_page = lk_core::frontmatter::parse_page(&output).unwrap();
+            let policy = crate::llm_cache::stored_hash(Some(&output_page), "summary_policy_done");
+            assert_eq!(
+                policy,
+                if decision.cached {
+                    Some("summary-v0")
+                } else {
+                    None
+                },
+                "{scenario}"
+            );
+            let request =
+                crate::llm_cache::stored_hash(Some(&output_page), "summary_policy_requested");
+            assert_eq!(
+                request,
+                if matches!(scenario, "cached" | "pending") {
+                    Some("summary-v1")
+                } else {
+                    None
+                },
+                "{scenario}"
+            );
+            if decision.cached {
+                assert!(output.contains("Preserved knowledge."));
+            }
+        }
+    }
+
     fn cached(body: &str) -> SectionDecision {
         SectionDecision {
+            provenance: Default::default(),
             hash: "h".into(),
             cached: true,
             preserved_body: Some(body.into()),
@@ -606,6 +712,7 @@ mod tests {
 
     fn uncached() -> SectionDecision {
         SectionDecision {
+            provenance: Default::default(),
             hash: "h".into(),
             cached: false,
             preserved_body: None,

@@ -26,13 +26,10 @@ const ABSENT: i32 = 1;
 const AMBIGUOUS: i32 = 2;
 const FAILED: i32 = 3;
 
-/// How the resolved page claims the name — an ADDRESS is the page's own location, a TITLE or
-/// an ALIAS is a name it answers to. A caller deciding whether to write a page reads the
-/// verdict; a caller explaining a surprising destination reads this.
+/// Whether the resolved page declares the queried name as its title or an alias.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum Claim {
-    Address,
     Title,
     Alias,
 }
@@ -54,139 +51,100 @@ enum Answer {
         page: ResolvedPage,
     },
     /// No page does — writing one is correct.
-    Absent { name: String },
-    /// More than one does. `lore graph lint` reports the pair as a duplicate concept; until a
-    /// human resolves it, `routed` is where a citation written now would land.
-    Ambiguous {
-        routed: ResolvedPage,
-        claimants: Vec<ResolvedPage>,
+    Absent {
+        name: String,
+        proposed_path: Option<String>,
     },
+    /// Multiple owners; a writer must resolve the ambiguity before applying changes.
+    Ambiguous { claimants: Vec<ResolvedPage> },
 }
 
-pub async fn run(opts: &GlobalOptions, name: String, json: bool, root: Option<PathBuf>) -> i32 {
-    match answer(opts, &name, root).await {
-        Ok(answer) => {
+pub async fn run(
+    opts: &GlobalOptions,
+    names: Vec<String>,
+    json: bool,
+    root: Option<PathBuf>,
+) -> i32 {
+    match answers(opts, &names, root).await {
+        Ok(answers) => {
             if json {
-                match serde_json::to_string_pretty(&answer) {
+                let output = if answers.len() == 1 {
+                    serde_json::to_value(&answers[0])
+                } else {
+                    Ok(serde_json::Value::Array(names.iter().zip(&answers).map(|(name, answer)| {
+                        serde_json::json!({"name": name, "answer": answer})
+                    }).collect()))
+                };
+                match output.and_then(|value| serde_json::to_string_pretty(&value)) {
                     Ok(out) => println!("{out}"),
-                    Err(e) => {
-                        eprintln!("error: {e}");
+                    Err(error) => {
+                        eprintln!("error: {error}");
                         return FAILED;
                     }
                 }
             } else {
-                print(&answer);
+                for answer in &answers {
+                    print(answer);
+                }
             }
-            match answer {
-                Answer::Owned { .. } => OWNED,
-                Answer::Absent { .. } => ABSENT,
-                Answer::Ambiguous { .. } => AMBIGUOUS,
-            }
+            answers
+                .iter()
+                .map(|answer| match answer {
+                    Answer::Owned { .. } => OWNED,
+                    Answer::Absent { .. } => ABSENT,
+                    Answer::Ambiguous { .. } => AMBIGUOUS,
+                })
+                .max()
+                .unwrap_or(OWNED)
         }
-        Err(e) => {
-            eprintln!("error: {e:#}");
+        Err(error) => {
+            eprintln!("error: {error:#}");
             FAILED
         }
     }
 }
 
-async fn answer(opts: &GlobalOptions, name: &str, root: Option<PathBuf>) -> miette::Result<Answer> {
+async fn answers(
+    opts: &GlobalOptions,
+    names: &[String],
+    root: Option<PathBuf>,
+) -> miette::Result<Vec<Answer>> {
     let super::RootConfig { root, config } = super::resolve_root_config(opts, root)?;
-    let dirs = config.map(|c| c.vault.dirs).unwrap_or_default();
-    let registry = read_registry(&root, &dirs).await?;
-
-    Ok(match registry.resolve(name) {
-        Resolution::Absent => Answer::Absent {
-            name: name.to_owned(),
-        },
-        Resolution::Owned(identity) => Answer::Owned {
-            page: describe(&identity, name, &dirs),
-        },
-        Resolution::Ambiguous { routed, claimants } => Answer::Ambiguous {
-            routed: describe(&routed, name, &dirs),
-            claimants: claimants
-                .iter()
-                .map(|identity| describe(identity, name, &dirs))
-                .collect(),
-        },
-    })
+    let dirs = config.map(|config| config.vault.dirs).unwrap_or_default();
+    let registry = lk_vault::load_concept_registry(&lk_vault::FsVault::new(root), &dirs)
+        .await
+        .map_err(|error| miette::miette!("read concept registry: {error}"))?;
+    Ok(names
+        .iter()
+        .map(|name| answer(&registry, name, &dirs))
+        .collect())
 }
 
-/// Read every concept page in the vault into the registry.
-///
-/// A page that will not parse still registers its address: the name it is reachable by is its
-/// filename, which parsing has no say in, and dropping it would answer `absent` for a name the
-/// vault already holds — the one answer that leads a caller to write a second page.
-async fn read_registry(
-    root: &std::path::Path,
-    dirs: &VaultDirs,
-) -> miette::Result<ConceptRegistry> {
-    let dir = root.join(lk_core::vault_path::concepts_dir(dirs));
-    let mut registry = ConceptRegistry::new();
-    let mut entries = match tokio::fs::read_dir(&dir).await {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(registry),
-        Err(e) => return Err(miette::miette!("read {}: {e}", dir.display())),
-    };
-
-    // Sorted, because registration ORDER decides which page a name routes to when more than
-    // one claims it, and `readdir` returns whatever the filesystem stored. The pipeline reads
-    // the same pages through `VaultStore::list_markdown`, which sorts — so an unsorted read
-    // here is the two planes answering one question differently, on exactly the ambiguous
-    // names this command exists to report, and differently again on another machine.
-    let mut paths: Vec<PathBuf> = Vec::new();
-    while let Some(entry) = entries
-        .next_entry()
-        .await
-        .map_err(|e| miette::miette!("read {}: {e}", dir.display()))?
-    {
-        paths.push(entry.path());
+fn answer(registry: &ConceptRegistry, name: &str, dirs: &VaultDirs) -> Answer {
+    match registry.resolve(name) {
+        Resolution::Absent => Answer::Absent {
+            name: name.to_owned(),
+            proposed_path: registry
+                .available_slug(name)
+                .map(|slug| VaultPath::concept(dirs, &slug).to_string()),
+        },
+        Resolution::Owned(identity) => Answer::Owned {
+            page: describe(&identity, name, dirs),
+        },
+        Resolution::Ambiguous { claimants } => Answer::Ambiguous {
+            claimants: claimants
+                .iter()
+                .map(|identity| describe(identity, name, dirs))
+                .collect(),
+        },
     }
-    paths.sort();
-
-    for path in paths {
-        if path.extension().is_none_or(|ext| ext != "md") {
-            continue;
-        }
-        let Some(slug) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        let content = tokio::fs::read_to_string(&path)
-            .await
-            .map_err(|e| miette::miette!("read {}: {e}", path.display()))?;
-        let page = lk_core::frontmatter::parse_page(&content).ok();
-        let frontmatter = page.as_ref().map(|p| &p.frontmatter);
-        let title = frontmatter
-            .and_then(|f| f.get("title"))
-            .and_then(|v| v.as_str())
-            .unwrap_or(slug);
-        let aliases: Vec<String> = frontmatter
-            .and_then(|f| f.get("aliases"))
-            .and_then(|v| v.as_array())
-            .into_iter()
-            .flatten()
-            .filter_map(|v| v.as_str())
-            .map(String::from)
-            .collect();
-        registry.register(
-            ConceptIdentity {
-                slug: slug.to_owned(),
-                title: title.to_owned(),
-            },
-            &aliases,
-        );
-    }
-
-    Ok(registry)
 }
 
 fn describe(identity: &ConceptIdentity, name: &str, dirs: &VaultDirs) -> ResolvedPage {
     let same =
         |a: &str, b: &str| lk_core::concept::identity_key(a) == lk_core::concept::identity_key(b);
     ResolvedPage {
-        claim: if same(&identity.slug, name) {
-            Claim::Address
-        } else if same(&identity.title, name) {
+        claim: if same(&identity.title, name) {
             Claim::Title
         } else {
             Claim::Alias
@@ -200,14 +158,13 @@ fn describe(identity: &ConceptIdentity, name: &str, dirs: &VaultDirs) -> Resolve
 fn print(answer: &Answer) {
     match answer {
         Answer::Owned { page } => println!("{}\t{}\t{}", page.slug, page.title, page.path),
-        Answer::Absent { name } => {
+        Answer::Absent { name, .. } => {
             eprintln!("no concept page answers to `{name}`");
         }
-        Answer::Ambiguous { routed, claimants } => {
+        Answer::Ambiguous { claimants } => {
             eprintln!(
-                "{} concept pages answer to one name; a citation written now lands on `{}`:",
-                claimants.len(),
-                routed.slug
+                "{} concept pages answer to one name; resolve the ambiguity before writing:",
+                claimants.len()
             );
             for page in claimants {
                 eprintln!("  {}\t{}", page.slug, page.path);

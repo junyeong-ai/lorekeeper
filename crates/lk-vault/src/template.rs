@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use minijinja::Environment;
+use minijinja::{Environment, value::Serde};
 
 use crate::VaultError;
 
@@ -135,7 +135,7 @@ impl TemplateEngine {
         context: &serde_json::Value,
     ) -> Result<String, VaultError> {
         let tmpl = self.env.get_template(template_name)?;
-        let rendered = tmpl.render(context)?;
+        let rendered = tmpl.render(Serde(context))?;
         Ok(lk_core::text::collapse_blank_lines(&rendered))
     }
 

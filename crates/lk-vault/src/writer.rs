@@ -75,10 +75,9 @@ impl Format {
 /// (`.lorekeeper/`: the queue, the event logs, the ingest log) or `credentials.json`, none of
 /// which is a page.
 ///
-/// The check and the publish are separate syscalls, so two concurrent processes writing
-/// different formats to one path can both pass it; the vault has no cross-process lock, and
-/// every writer in it is check-then-write.
-fn refuse_format_change(full: &Path, content: &str) -> Result<(), VaultError> {
+/// Cooperating CLI mutations hold a `MutationSession` while deriving and publishing pages.
+/// External editors do not participate in that lock.
+pub(crate) fn refuse_format_change(full: &Path, content: &str) -> Result<(), VaultError> {
     let existing = match std::fs::read_to_string(full) {
         Ok(existing) => existing,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -137,7 +136,7 @@ impl VaultWriter {
     }
 
     pub async fn write_page(&self, rel_path: &Path, content: &str) -> Result<(), VaultError> {
-        let full = self.root.join(rel_path);
+        let full = crate::writable_page_path(&self.root, rel_path)?;
         let content = content.to_owned();
         // File I/O is blocking and `write_atomic` fsyncs, so publish on the blocking pool
         // rather than reimplementing a non-fsyncing async variant (which is exactly the
@@ -152,7 +151,7 @@ impl VaultWriter {
     /// (e.g. `lk-graph`, which is purely sync). Routes through the same
     /// `lk_core::fs::write_atomic`, so it is not a second atomic-write implementation.
     pub fn write_page_sync(&self, rel_path: &Path, content: &str) -> Result<(), VaultError> {
-        write_blocking(&self.root.join(rel_path), content)
+        write_blocking(&crate::writable_page_path(&self.root, rel_path)?, content)
     }
 
     /// Rewrite a page from content derived from its own bytes: a link repointed at a renamed
@@ -164,7 +163,7 @@ impl VaultWriter {
     /// of them. Refusing there abandons the sweep half-done over a page nobody can parse, and
     /// leaves a citation pointing at a concept that was just deleted.
     pub fn edit_page_sync(&self, rel_path: &Path, content: &str) -> Result<(), VaultError> {
-        let full = self.root.join(rel_path);
+        let full = crate::writable_page_path(&self.root, rel_path)?;
         if let Some(parent) = full.parent() {
             std::fs::create_dir_all(parent)?;
         }

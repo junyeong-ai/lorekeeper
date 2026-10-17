@@ -30,6 +30,20 @@ use tempfile::TempDir;
 /// Every entry was measured byte-identical across repeated runs before being
 /// admitted: a snapshot of an unstable command is a flake, not a pin.
 const SWEEP: &[&[&str]] = &[
+    &[
+        "wiki",
+        "read",
+        "wiki/concepts/behaviour-snapshot.md",
+        "--limit",
+        "2",
+    ],
+    &[
+        "wiki",
+        "links",
+        "wiki/concepts/behaviour-snapshot.md",
+        "--limit",
+        "1",
+    ],
     &["validate"],
     &["config", "vault-root"],
     &["config", "schema-path"],
@@ -49,6 +63,7 @@ const SWEEP: &[&[&str]] = &[
     // real repository, and a recorded HEAD is not reproducible from a checked-in tree.
     &["extract", "status"],
     &["queue", "status"],
+    &["queue", "check"],
     &["queue", "count"],
     &["queue", "prune"],
     &["task", "list"],
@@ -61,6 +76,9 @@ const SWEEP: &[&[&str]] = &[
     // the dates the corpus's pages carry, not to the clock.
     &["brief", "--date", "2026-06-09", "--json"],
     &["wiki", "concepts"],
+    &[
+        "wiki", "browse", "--type", "concept", "--limit", "2", "--json",
+    ],
     &["wiki", "index"],
     &["wiki", "log"],
     // A name the corpus holds — spelled as neither its address nor its title, so the answer
@@ -80,6 +98,7 @@ const SWEEP: &[&[&str]] = &[
     &["graph", "hubs"],
     &["graph", "orphans"],
     &["graph", "broken"],
+    &["graph", "neighbors", "wiki/concepts/deterministic-clock.md"],
     &["graph", "cluster"],
     &["graph", "export"],
     &["graph", "index-sync"],
@@ -99,6 +118,30 @@ const SWEEP: &[&[&str]] = &[
 /// [`every_command_is_swept_or_exempt`], so an exemption is a written decision
 /// rather than an omission.
 const EXEMPT: &[(&[&str], &str)] = &[
+    (
+        &["wiki", "document-identity", "plan"],
+        "requires a configured external nodex repository; document_identity tests exact projection and ownership collisions",
+    ),
+    (
+        &["wiki", "document-identity", "check"],
+        "requires an external source snapshot and migration manifest; document_identity tests source, target and config drift",
+    ),
+    (
+        &["wiki", "document-identity", "apply"],
+        "publishes verified identity metadata; document_identity tests archival, guarded journal publication, blocked entries and replay",
+    ),
+    (
+        &["wiki", "prepare"],
+        "snapshot identity includes the real vault path; SQLite capture/query/revision contracts are exercised in lk-vault",
+    ),
+    (
+        &["wiki", "reviews"],
+        "durable review and evidence drift contracts are tested in lk-vault; this corpus holds no reviews",
+    ),
+    (
+        &["wiki", "evidence"],
+        "requires explicit evidence paths; provenance grouping is tested in lk-vault",
+    ),
     (
         &["ingest"],
         "reaches the configured sources, so its answer is a property of the network rather than of the vault",
@@ -122,6 +165,14 @@ const EXEMPT: &[(&[&str], &str)] = &[
     (
         &["queue", "apply"],
         "materialises a drain's LLM results; the fixture has no drain to apply",
+    ),
+    (
+        &["queue", "regenerate"],
+        "requires a retained task id and mutates completion state; queue_apply exercises retained-input replay, policy stamping and changed-source refusal",
+    ),
+    (
+        &["queue", "packet"],
+        "requires selected current synthesis task ids absent from this corpus; queue_packet exercises shared-source export, content opt-in and stale-input refusal",
     ),
     (
         &["task", "add"],
@@ -363,7 +414,7 @@ fn every_fixture_file_is_tracked() {
 /// [`no_snapshot_outlives_its_invocation`], so the two cannot disagree about
 /// which file belongs to which argv.
 fn snapshot_name(argv: &[&str]) -> String {
-    argv.join("_").replace('-', "_")
+    argv.join("_").replace(['-', '/', '\\'], "_")
 }
 
 #[test]

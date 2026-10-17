@@ -47,41 +47,13 @@ pipeline_start() {
     log "vault: $VAULT"
 }
 
-# Record what this run changed, when the vault is a git repository.
-#
-# Every LLM-owned section is REPLACED on rewrite and a merge deletes a page, so a run that
-# went wrong is recoverable only from a copy taken before it — and a diff is the one gate
-# that sees a drift the prose contracts cannot: a drain that named concepts in sentences
-# shows up as new files with 300-byte names before anyone reads a page. One run is one
-# commit, which is the unit a person reviews and reverts. A vault that is not a repository
-# gets no stage rather than a failing one; a run that changed nothing commits nothing and
-# succeeds; a run whose stages failed still commits, because its diff is the one worth
-# reading. `git` reaches ~/Documents under launchd only where it holds its own TCC grant —
-# the shell's `ls` does not — so a refusal here is reported as a failed stage, never skipped.
-#
-# `.lorekeeper/` is the one path this refuses to commit: it holds `credentials.json` beside
-# the queue archives, and a vault initialised without ignoring it would put every token into
-# history on the first run. The refusal names the fix and fails the stage until it is made.
+# The pipeline has no per-write ownership manifest: even a clean starting tree cannot
+# distinguish a user's concurrent edit from this run's output. Never stage or commit
+# the vault implicitly. Keep this receipt in the scheduler log, including on failed
+# runs, so an operator knows that reviewing/committing the changes is still pending.
+# In particular, leave the user's index and existing staging exactly as they were.
 commit_vault() {
-    if ! git -C "$VAULT" rev-parse --git-dir >/dev/null 2>&1; then
-        log "− vault commit skipped (not a git repository)"
-        return
-    fi
-    run "vault commit" commit_vault_changes
-}
-
-commit_vault_changes() {
-    if ! git -C "$VAULT" check-ignore -q .lorekeeper; then
-        log "  refusing: .lorekeeper/ is not ignored and holds credentials.json — add it to .gitignore"
-        return 1
-    fi
-    git -C "$VAULT" add -A || return
-    if git -C "$VAULT" diff --cached --quiet; then
-        log "  nothing changed"
-        return 0
-    fi
-    git -C "$VAULT" -c user.name=lore -c user.email=lore@localhost \
-        commit -q -m "$(basename "$0" .sh) $(date '+%Y-%m-%dT%H:%M%z')"
+    log "− vault commit skipped: run-owned changes cannot be proven; working tree and staging left untouched — review and commit separately"
 }
 
 pipeline_finish() {
@@ -212,6 +184,11 @@ sync_graph() {
     # synthesis, and a concept result written after the only apply of the run would wait a
     # day for its pages. Idempotent: with no results on disk it is a no-op.
     run "queue apply"    lore_cmd queue apply
+    # The last apply may publish leftover extractions. Derive their synthesis obligations
+    # before checking completion, even when the drain did not finish its own Finalize.
+    run "backlinks-sync" lore_cmd graph backlinks-sync
     run "wiki refresh"   lore_cmd wiki refresh
     run "graph lint"     lore_cmd graph lint
+    run "queue completion" lore_cmd queue check
+    run "knowledge reviews" lore_cmd wiki reviews --check
 }

@@ -67,9 +67,28 @@ fn expired_log_lines(lines: &[&str], cutoff_secs: i64) -> HashSet<usize> {
         .collect()
 }
 
-pub async fn run(opts: &super::GlobalOptions, dry_run: bool) -> miette::Result<()> {
+pub async fn run(
+    opts: &super::GlobalOptions,
+    dry_run: bool,
+    wait_for_vault: bool,
+    prune_queue: bool,
+) -> miette::Result<()> {
     let config = load_config(&find_config(opts)?)?;
     let vault_root = config.vault.root_path();
+    let _mutation = if dry_run {
+        None
+    } else {
+        std::fs::create_dir_all(&vault_root).map_err(|e| miette::miette!("create vault: {e}"))?;
+        Some(
+            if wait_for_vault {
+                eprintln!("Waiting for exclusive vault access...");
+                lk_vault::MutationSession::acquire_waiting(&vault_root)
+            } else {
+                lk_vault::MutationSession::acquire(&vault_root)
+            }
+            .map_err(|e| miette::miette!("vault mutation: {e}"))?,
+        )
+    };
     let retention_days = config.maintenance.retention_days;
     let log_path = vault_root.join(".lorekeeper").join("ingest.jsonl");
     let cutoff_secs = prune_cutoff_secs(jiff::Timestamp::now().as_second(), retention_days);
@@ -112,11 +131,10 @@ pub async fn run(opts: &super::GlobalOptions, dry_run: bool) -> miette::Result<(
     // 2. Prune processed queue files (older than retention). Pending queue files
     // (the top-level .lorekeeper/queue/*.jsonl) are NEVER deleted by maintenance —
     // they represent unfinished semantic work that `/lore-process` must drain.
-    let processed_dir = vault_root
-        .join(".lorekeeper")
-        .join("queue")
-        .join(lk_queue::PROCESSED_SUBDIR);
+    let queue_dir = vault_root.join(".lorekeeper").join("queue");
+    let processed_dir = queue_dir.join(lk_queue::PROCESSED_SUBDIR);
     if processed_dir.exists() {
+        let _claim = super::queue::claim_writer(&queue_dir, dry_run)?;
         let mut entries = tokio::fs::read_dir(&processed_dir)
             .await
             .map_err(|e| miette::miette!("read queue/processed: {e}"))?;
@@ -234,6 +252,9 @@ pub async fn run(opts: &super::GlobalOptions, dry_run: bool) -> miette::Result<(
         }
     }
 
+    if prune_queue {
+        super::queue::prune(opts, None, false, dry_run).await?;
+    }
     Ok(())
 }
 

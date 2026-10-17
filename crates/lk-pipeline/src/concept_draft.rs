@@ -1,14 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
 
 use lk_core::concept::{
-    ConceptIdentity, ConceptRegistry, ExtractedConcept, Resolution, citation_digest, slugify,
+    Citation, ConceptIdentity, ConceptRegistry, ExtractedConcept, Resolution, citation_digest,
+    slugify,
 };
 use lk_core::config::VaultDirs;
 use lk_core::frontmatter::field;
 use lk_core::i18n::Locale;
-use lk_core::vault_path::{VaultPath, path_slug};
-use lk_vault::{TemplateEngine, VaultError, VaultStore, replace_section};
+use lk_core::vault_path::VaultPath;
+use lk_vault::{TemplateEngine, VaultStore, replace_section};
 
 use crate::PipelineError;
 use crate::render::RenderResult;
@@ -67,11 +67,10 @@ pub struct ConceptDrafts {
 ///
 /// The two travel together because the sentence is only an answer for that one page. Carried
 /// as far as the render, which records it as the concept's synthesis input — the same digest
-/// `lore graph backlinks-sync` derives — so a second citation is what makes a rewrite owed.
+/// `lore graph backlinks-sync` derives. A changed source revision makes a rewrite owed.
 pub struct Grounding<'a> {
     pub text: &'a str,
-    /// Vault-relative path of the citing page.
-    pub origin: &'a Path,
+    pub citation: Citation,
 }
 
 /// A grounding sentence resolved against the evidence it answers.
@@ -86,7 +85,7 @@ impl GroundedSynthesis {
         let text = grounding.text.trim();
         (!text.is_empty()).then(|| Self {
             text: text.to_string(),
-            evidence: citation_digest(&[path_slug(grounding.origin)]),
+            evidence: citation_digest(&[grounding.citation]),
         })
     }
 }
@@ -97,7 +96,7 @@ impl GroundedSynthesis {
 /// [`ConceptDrafts::commit`] (pure, mutates).
 pub struct StagedConcept {
     concept: ExtractedConcept,
-    slug: String,
+    identity: ConceptIdentity,
     existing: Option<lk_core::frontmatter::VaultPage>,
     grounding: Option<GroundedSynthesis>,
     /// The extraction's aliases this vault can actually adopt, decided in [`ConceptDrafts::stage`]
@@ -108,7 +107,18 @@ pub struct StagedConcept {
     refused: Vec<(String, String)>,
 }
 
+impl StagedConcept {
+    pub fn identity(&self) -> ConceptIdentity {
+        self.identity.clone()
+    }
+
+    pub fn ground(&mut self, grounding: Grounding<'_>) {
+        self.grounding = GroundedSynthesis::build(grounding);
+    }
+}
+
 struct ConceptDraft {
+    original: Option<String>,
     slug: String,
     name: String,
     category: Option<String>,
@@ -131,7 +141,7 @@ struct ConceptDraft {
     /// Bodies of LLM-authored or graph-maintained sections, captured from the existing
     /// concept page so a re-render can splice them back. Each has a writer of its own —
     /// `/lore-process` for `## Synthesis`, `lore graph backlinks-sync` for `## Sources`,
-    /// `/lore-wiki audit` for `## Related` — and none should ever be wiped by an ingest
+    /// `/lore-process` for `## Related` — and none should ever be wiped by an ingest
     /// re-render.
     preserved_synthesis: Option<String>,
     /// The citation digest a grounding sentence seeded into `## Synthesis` this run answers:
@@ -154,62 +164,40 @@ struct ConceptDraft {
 }
 
 impl ConceptDrafts {
-    /// Resolve a concept name to the page identity that owns it, building the alias index
-    /// from disk on first use. The run's accumulator is untouched, so a caller may resolve
-    /// before deciding whether to fold anything.
-    ///
-    /// Lookup is by `identity_key`, so a name reaches its page however its separators fall
-    /// (`VectorDB` finds `vector-db.md`); only when NO page owns the name does it become a
-    /// new concept, addressed at its own `slugify` slug — and that decision is recorded in
-    /// the index, so it is the answer every later resolve of the name gets.
-    ///
-    /// Recording it here rather than at commit is what makes resolution self-consistent
-    /// within a run, and both callers need that. `Pipeline::plan` renders a page's concept
-    /// links from resolutions taken BEFORE anything is folded, so a decision made only at
-    /// commit would leave the link pointing at a page the fold then absorbed. And
-    /// `apply_concept_result` stages a whole extraction before folding any of it, so two
-    /// spellings of one name in a single result would each resolve against the pre-batch
-    /// index and mint rival pages. The index is a lookup cache, not the accumulator, so a
-    /// caller that abandons a resolution leaves nothing half-folded behind — only the
-    /// decision that the FIRST spelling seen is the one this run answers with.
+    /// Resolve a declared name, refusing ambiguous ownership before staging any writes.
     pub async fn resolve_identity(
         &mut self,
         name: &str,
         reader: &dyn VaultStore,
         dirs: &VaultDirs,
     ) -> Result<ConceptIdentity, PipelineError> {
-        let slug =
-            slugify(name).expect("concepts are slug-filtered via has_valid_slug before staging");
         let registry = match &mut self.registry {
             Some(registry) => registry,
-            slot => slot.insert(build_registry(reader, dirs).await?),
+            slot => slot.insert(lk_vault::load_concept_registry(reader, dirs).await?),
         };
-        let resolution = registry.resolve(name);
-        if matches!(resolution, Resolution::Absent) {
-            // Nothing answered to the name, so the next line claims the slug for this run.
-            // A claim is not a page: the batch that made it may be abandoned before it
-            // writes one, while the claim stays so that every later spelling of the name
-            // still routes the same way.
-            self.claimed.insert(slug.clone());
+        match registry.resolve(name) {
+            Resolution::Owned(identity) => Ok(identity),
+            Resolution::Ambiguous { claimants, .. } => Err(PipelineError::Render(format!(
+                "ambiguous concept `{name}`: {}",
+                claimants
+                    .iter()
+                    .map(|c| c.slug.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))),
+            Resolution::Absent => {
+                let slug = registry.available_slug(name).ok_or_else(|| {
+                    PipelineError::Render(format!("no unoccupied concept address for `{name}`"))
+                })?;
+                let identity = ConceptIdentity {
+                    slug: slug.clone(),
+                    title: name.to_string(),
+                };
+                registry.register(identity.clone(), &[]);
+                self.claimed.insert(slug);
+                Ok(identity)
+            }
         }
-        if let Resolution::Ambiguous { routed, claimants } = resolution {
-            // The vault defect `lore graph lint` reports as a duplicate concept. Routing has
-            // to pick one, and it does so deterministically — but silence here is what would
-            // make a mis-addressed citation impossible to explain afterwards.
-            tracing::warn!(
-                name,
-                resolves_to = %routed.slug,
-                claimants = %claimants.iter().map(|c| c.slug.as_str()).collect::<Vec<_>>().join(", "),
-                "more than one concept page answers to this name"
-            );
-        }
-        Ok(registry.resolve_or_claim(
-            name,
-            ConceptIdentity {
-                slug,
-                title: name.to_string(),
-            },
-        ))
     }
 
     pub fn new() -> Self {
@@ -250,7 +238,6 @@ impl ConceptDrafts {
     pub async fn stage(
         &mut self,
         concept: &ExtractedConcept,
-        grounding: Option<Grounding<'_>>,
         reader: &dyn VaultStore,
         dirs: &VaultDirs,
     ) -> Result<StagedConcept, PipelineError> {
@@ -265,14 +252,22 @@ impl ConceptDrafts {
                 .read_page(VaultPath::concept(dirs, &identity.slug).as_ref())
                 .await?
         };
+        if existing
+            .as_ref()
+            .is_some_and(|page| page.original.is_none())
+        {
+            return Err(PipelineError::Render(
+                "concept reader omitted its original input snapshot".into(),
+            ));
+        }
         if existing.is_some() {
             self.established.insert(identity.slug.clone());
         }
         Ok(StagedConcept {
             concept: concept.clone(),
-            slug: identity.slug,
+            identity,
             existing,
-            grounding: grounding.and_then(GroundedSynthesis::build),
+            grounding: None,
             aliases,
             refused,
         })
@@ -356,12 +351,13 @@ impl ConceptDrafts {
     pub fn commit(&mut self, staged: StagedConcept, date: jiff::civil::Date) -> ConceptIdentity {
         let StagedConcept {
             concept,
-            slug: safe_slug,
+            identity,
             existing,
             grounding,
             aliases,
             refused,
         } = staged;
+        let safe_slug = identity.slug;
 
         // Only where this run created the page the extraction's own name resolved to. A
         // source that conflates two established concepts minted nothing, and the same record
@@ -397,6 +393,11 @@ impl ConceptDrafts {
             };
         }
 
+        let original = existing.as_ref().map(|page| {
+            page.original
+                .clone()
+                .expect("concept staging requires the parsed input snapshot")
+        });
         let mut draft = match existing.as_ref() {
             Some(page) => {
                 // The persisted page stores these as `created`/`updated` (the keys the template
@@ -451,6 +452,7 @@ impl ConceptDrafts {
                     .unwrap_or_default();
 
                 ConceptDraft {
+                    original: original.clone(),
                     slug: safe_slug.clone(),
                     name,
                     category,
@@ -466,6 +468,7 @@ impl ConceptDrafts {
                 }
             }
             None => ConceptDraft {
+                original,
                 slug: safe_slug.clone(),
                 name: concept.name.clone(),
                 category: concept.category.clone(),
@@ -598,7 +601,7 @@ impl ConceptDraft {
     /// nothing to say about a marker that sweep recorded. What it does know is the sentence it
     /// just wrote and the page it came from, and a synthesis seeded here is the answer for
     /// that one citation — recorded as both the input and the answer, so the next sweep queues
-    /// the rewrite exactly when a second page cites the concept.
+    /// a rewrite when its source paths or authored revisions change.
     fn llm_inputs(&self) -> BTreeMap<String, String> {
         let mut inputs = self.preserved_llm_inputs.clone();
         if let Some(evidence) = &self.synthesis_evidence
@@ -664,7 +667,9 @@ impl ConceptDraft {
             }
         }
 
-        Ok(RenderResult::fresh(path, content))
+        let mut page = RenderResult::fresh(path, content);
+        page.expected_original = Some(self.original.clone());
+        Ok(page)
     }
 }
 
@@ -710,68 +715,6 @@ fn warn_category_conflict(slug: &str, established: Option<&str>, incoming: Optio
     }
 }
 
-/// Read every concept page in the vault into the registry that answers what a name
-/// addresses. A page whose stem is not readable as a slug is skipped — it has no address
-/// for a citation to name.
-async fn build_registry(
-    reader: &dyn VaultStore,
-    dirs: &VaultDirs,
-) -> Result<ConceptRegistry, PipelineError> {
-    let dir = lk_core::vault_path::concepts_dir(dirs);
-    let mut registry = ConceptRegistry::new();
-    for path in reader.list_markdown(&dir).await? {
-        let Some(slug) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        // A page whose frontmatter will not parse still answers to its ADDRESS: the name it
-        // is reachable by is its filename, which parsing has no say in. Failing the read
-        // instead would let one hand-edited page block every concept this run would
-        // materialize, on every run — and would have the write plane report absent for a name
-        // the read plane calls owned, which is the disagreement the shared registry exists to
-        // remove.
-        //
-        // ONLY that failure. A page this cannot READ answers to nothing knowable — the
-        // filename is a guess about a file whose content was never seen — and continuing past
-        // it mints a page beside one whose alias would have caught the name, which no lint
-        // reports: the two slugs reduce to different identities, so there is no pair to
-        // compare. `lore resolve` propagates an I/O error for the same reason, and the two
-        // planes answering one question differently is what this registry exists to prevent.
-        //
-        // Losing a broken page's aliases splits the concept the same silent way, and that
-        // cost is real — it is simply smaller than the run this used to block, and repairing
-        // the page is what recovers it. Routing is all this tolerance buys: `stage`'s own
-        // read of the page it is about to re-render stays strict, because a page rendered
-        // from the template without the frontmatter it carries loses everything on it.
-        let page = match reader.read_page(&path).await {
-            Ok(Some(page)) => Some(page),
-            Ok(None) => continue,
-            Err(VaultError::Frontmatter(_)) => None,
-            Err(e) => return Err(e.into()),
-        };
-        let frontmatter = page.as_ref().map(|p| &p.frontmatter);
-        let title = frontmatter
-            .and_then(|f| f.get("title"))
-            .and_then(|v| v.as_str())
-            .unwrap_or(slug);
-        let aliases: Vec<String> = frontmatter
-            .and_then(|f| f.get("aliases"))
-            .and_then(|v| v.as_array())
-            .into_iter()
-            .flatten()
-            .filter_map(|v| v.as_str())
-            .map(String::from)
-            .collect();
-        registry.register(
-            ConceptIdentity {
-                slug: slug.to_string(),
-                title: title.to_string(),
-            },
-            &aliases,
-        );
-    }
-    Ok(registry)
-}
-
 /// Filter that callers use to drop concepts whose slug would be empty before threading
 /// them into rendered output. Keeps daily-page wiki links honest.
 pub fn has_valid_slug(concept: &ExtractedConcept) -> bool {
@@ -787,6 +730,12 @@ mod tests {
 
     #[async_trait::async_trait]
     impl VaultStore for FailsOn {
+        async fn list_markdown_recursive(
+            &self,
+            rel_dir: &std::path::Path,
+        ) -> Result<Vec<std::path::PathBuf>, lk_vault::VaultError> {
+            self.list_markdown(rel_dir).await
+        }
         async fn read_page(
             &self,
             rel_path: &std::path::Path,
@@ -812,6 +761,12 @@ mod tests {
 
     #[async_trait::async_trait]
     impl VaultStore for OneBadPage {
+        async fn list_markdown_recursive(
+            &self,
+            rel_dir: &std::path::Path,
+        ) -> Result<Vec<std::path::PathBuf>, lk_vault::VaultError> {
+            self.list_markdown(rel_dir).await
+        }
         async fn read_page(
             &self,
             _rel_path: &std::path::Path,
@@ -832,30 +787,17 @@ mod tests {
         }
     }
 
-    /// The two halves of what a page the registry cannot read means, and they are opposite
-    /// answers. Frontmatter that will not parse leaves the page's ADDRESS knowable, so it
-    /// still claims it and an extraction naming it routes there instead of minting a rival
-    /// beside it. A page that cannot be READ leaves nothing knowable — the filename is a
-    /// guess about content never seen — so the run fails. Tolerating both would put the write
-    /// plane's answer at odds with `lore resolve`, which propagates I/O and only ever
-    /// swallows a parse.
-    ///
-    /// Routing is the only question this tolerance answers. Reading the page to MERGE into is
-    /// stricter and stays that way: an unparseable page re-rendered from the template loses
-    /// the synthesis, aliases, category and count it carries, so `stage` fails rather than
-    /// overwrite what it could not read.
+    /// Unknown names on an unreadable page must not be treated as absent.
     #[tokio::test]
-    async fn a_page_that_will_not_parse_claims_its_address_and_one_that_cannot_be_read_fails() {
+    async fn an_unreadable_registry_refuses_resolution_and_staging() {
         let dirs = VaultDirs::default();
 
         let unparseable = OneBadPage(lk_vault::VaultError::Frontmatter("bad".into()));
-        let identity = ConceptDrafts::new()
-            .resolve_identity("VectorDB", &unparseable, &dirs)
-            .await
-            .expect("a page that will not parse never fails the routing");
-        assert_eq!(
-            identity.slug, "vector-db",
-            "the extraction routes to the page already holding that address"
+        assert!(
+            ConceptDrafts::new()
+                .resolve_identity("VectorDB", &unparseable, &dirs)
+                .await
+                .is_err()
         );
         assert!(
             ConceptDrafts::new()
@@ -865,7 +807,6 @@ mod tests {
                         category: None,
                         aliases: Vec::new(),
                     },
-                    None,
                     &unparseable,
                     &dirs,
                 )
@@ -906,7 +847,6 @@ mod tests {
                     category: None,
                     aliases: vec!["에이전트 호출 가능 애플리케이션 단위".into()],
                 },
-                None,
                 &empty,
                 &dirs,
             )
@@ -930,7 +870,6 @@ mod tests {
                     category: None,
                     aliases: vec!["Agent Capability".into()],
                 },
-                None,
                 &empty,
                 &dirs,
             )
@@ -1005,7 +944,6 @@ mod tests {
                         category: None,
                         aliases,
                     },
-                    None,
                     &empty,
                     &dirs,
                 )
@@ -1051,7 +989,6 @@ mod tests {
                     category: None,
                     aliases: vec![],
                 },
-                None,
                 &FailsOn("nothing"),
                 &dirs,
             )
@@ -1066,7 +1003,6 @@ mod tests {
                     category: None,
                     aliases: vec!["Agent Capability".into()],
                 },
-                None,
                 &FailsOn("nothing"),
                 &dirs,
             )
@@ -1090,6 +1026,12 @@ mod tests {
         struct OnDisk;
         #[async_trait::async_trait]
         impl VaultStore for OnDisk {
+            async fn list_markdown_recursive(
+                &self,
+                rel_dir: &std::path::Path,
+            ) -> Result<Vec<std::path::PathBuf>, lk_vault::VaultError> {
+                self.list_markdown(rel_dir).await
+            }
             async fn read_page(
                 &self,
                 rel_path: &std::path::Path,
@@ -1124,7 +1066,6 @@ mod tests {
                     category: None,
                     aliases: Vec::new(),
                 },
-                None,
                 &OnDisk,
                 &dirs,
             )
@@ -1139,7 +1080,6 @@ mod tests {
                     category: None,
                     aliases: vec!["Agent Capability".into()],
                 },
-                None,
                 &OnDisk,
                 &dirs,
             )
@@ -1182,7 +1122,6 @@ mod tests {
                     category: None,
                     aliases: Vec::new(),
                 },
-                None,
                 &FailsOn("agent-capability"),
                 &dirs,
             )
@@ -1199,7 +1138,6 @@ mod tests {
                     category: None,
                     aliases: vec!["Agent Capability".into()],
                 },
-                None,
                 &FailsOn("agent-capability"),
                 &dirs,
             )
@@ -1233,6 +1171,12 @@ mod tests {
         struct Holds(&'static str);
         #[async_trait::async_trait]
         impl VaultStore for Holds {
+            async fn list_markdown_recursive(
+                &self,
+                rel_dir: &std::path::Path,
+            ) -> Result<Vec<std::path::PathBuf>, lk_vault::VaultError> {
+                self.list_markdown(rel_dir).await
+            }
             async fn read_page(
                 &self,
                 rel_path: &std::path::Path,
@@ -1266,7 +1210,6 @@ mod tests {
                     category: None,
                     aliases: vec![],
                 },
-                None,
                 &FailsOn("nothing"),
                 &dirs,
             )
@@ -1283,7 +1226,6 @@ mod tests {
                     category: None,
                     aliases: vec!["Vector DB".into()],
                 },
-                None,
                 &Holds("rag"),
                 &dirs,
             )
@@ -1319,8 +1261,8 @@ mod tests {
             category: None,
             aliases: Vec::new(),
         };
-        let staged = drafts.stage(&first, None, &reader, &dirs).await.unwrap();
-        assert!(drafts.stage(&second, None, &reader, &dirs).await.is_err());
+        let staged = drafts.stage(&first, &reader, &dirs).await.unwrap();
+        assert!(drafts.stage(&second, &reader, &dirs).await.is_err());
         assert!(
             drafts.drafts.is_empty(),
             "staging alone must fold nothing, so the batch can be abandoned whole"
@@ -1362,6 +1304,7 @@ mod tests {
     #[test]
     fn a_recorded_synthesis_input_outranks_a_grounding_seeded_this_run() {
         let draft = ConceptDraft {
+            original: None,
             slug: "rag".into(),
             name: "RAG".into(),
             category: None,
@@ -1394,6 +1337,7 @@ mod tests {
     #[test]
     fn rendered_frontmatter_escapes_quotes_in_name() {
         let draft = ConceptDraft {
+            original: None,
             slug: "rag".into(),
             name: r#"RAG: "Retrieval" Augmented"#.into(),
             category: Some("ai-ml".into()),
@@ -1429,6 +1373,7 @@ mod tests {
     #[test]
     fn preserved_sections_are_spliced_back_into_rendered_page() {
         let draft = ConceptDraft {
+            original: None,
             slug: "rag".into(),
             name: "RAG".into(),
             category: Some("ai-ml".into()),
@@ -1478,6 +1423,7 @@ mod tests {
     #[test]
     fn category_omitted_when_none() {
         let draft = ConceptDraft {
+            original: None,
             slug: "test".into(),
             name: "Test".into(),
             category: None,
@@ -1513,6 +1459,7 @@ mod tests {
         // resolves to the canonical page) must NOT be wiped when a later ingest re-renders
         // the concept. The title is always the first alias; preserved synonyms follow.
         let draft = ConceptDraft {
+            original: None,
             slug: "retrieval-augmented-generation".into(),
             name: "Retrieval Augmented Generation".into(),
             category: None,
@@ -1530,11 +1477,14 @@ mod tests {
         let page = draft
             .render(&engine, &VaultDirs::default(), Locale::Ko)
             .unwrap();
-        assert!(
-            page.content
-                .contains(r#"aliases: ["Retrieval Augmented Generation","RAG"]"#),
-            "registered alias must survive the re-render (title first, then synonyms):\n{}",
-            page.content
+        let rendered = lk_core::frontmatter::parse_page(&page.content).unwrap();
+        assert_eq!(
+            rendered.frontmatter.get("aliases"),
+            Some(&serde_json::json!([
+                "Retrieval Augmented Generation",
+                "RAG"
+            ])),
+            "registered aliases must survive in order, independently of YAML spacing"
         );
     }
 }

@@ -1,13 +1,14 @@
 # config.yaml schema
 
-The full example is `config.example.yaml` at the repo root (per-source-type blocks +
-comments). This file summarizes only the top-level structure around the source blocks.
+The full example is `config.example.yaml` at the repo root, deployed to
+`~/.config/lorekeeper/config.example.yaml` for binary installs. It owns the supported
+source types and their options; this file summarizes the surrounding structure.
 
 ```yaml
 vault:
   root: ~/Documents/Obsidian Vault   # relative paths resolve against the config file
   timezone: Asia/Seoul               # IANA name or "system"
-  locale: ko                         # label language: ko | en (source bodies kept as-is)
+  locale: ko                         # generated prose/headings: ko | en; source bodies kept as-is
 
 identity:                            # basis for ownership (the personal split, when enabled)
   name: "..."
@@ -20,10 +21,11 @@ ingest:
                                      # (never per source: the work-log is a cross-source
                                      # daily aggregate, so one run keeps it complete)
 
-sources:                             # key = source id = <daily>/{id}/ directory name
+sources:                             # key = source id; document sources use wiki/documents
   <id>:
-    type: gmail | google-calendar | google-drive | slack-channel | slack-search | jira | confluence | rss | manual
+    type: <source-type>              # from config.example.yaml
     enabled: true
+    # instance: cloud               # Jira/Confluence credential instance, if needed
     params: { ... }                  # per-type (see each reference)
     focus: "..."                     # optional natural-language relevance filter (LLM-applied)
     classify:                        # optional ordered rules, first match wins
@@ -52,7 +54,21 @@ llm: {provider: queue}
 
 ## Location / validation
 - `./config.yaml` (repo) or `~/.config/lorekeeper/config.yaml` (binary install). Also
-  selectable via `--config` / `LORE_CONFIG`. It should not live inside the vault (the vault
-  path is defined inside the config — that would be circular).
+  selectable via `--config` / `LORE_CONFIG`. Other locations require that explicit selection;
+  `vault.root` resolves against the selected config file, not the working directory.
 - After writing, always verify with `lore validate` → `lore ingest --dry-run`.
 - If a config already exists, merge only the relevant source block — never overwrite the whole file.
+
+The optional `nodex` adapter requires a current index (`nodex build` after edits).
+`params.document_ids` selects exact source IDs within the configured kinds and date
+window; every selected document must be present and readable. `reconcile: true`
+selects current documents independently of authored dates and requires a stable
+`repository_id` namespace. It preserves authored dates rather than treating import
+as a new publication. `max_documents` refuses oversized selections, never truncates.
+Use temporary configurations for selected batches, not scheduled `document_ids`.
+
+A namespace identifies a repository, not its checkout or source configuration name.
+An existing imported document keeps its vault address when its title or path changes.
+Legacy pages without verified document identity require explicit migration; a matching
+path alone cannot authorize overwriting a curated synthesis. Missing inventory entries
+do not imply deletion, archival or false claims.

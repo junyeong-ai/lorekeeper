@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Say out loud whatever `lore` says is due.
 #
 # The split every script here keeps: the binary answers what is due and retires it — one

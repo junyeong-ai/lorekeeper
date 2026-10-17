@@ -152,6 +152,7 @@ fn skill_documents_the_result_protocol_it_must_produce() {
 
     // Field names as serde writes them, taken from a real value so the test cannot drift.
     let sample = lk_queue::TaskResult {
+        target_revision: "r".into(),
         task_id: "t".into(),
         cache_hash: "h".into(),
         target: lk_queue::TaskTarget {
@@ -169,6 +170,27 @@ fn skill_documents_the_result_protocol_it_must_produce() {
         assert!(
             processing.contains(&format!("\"{field}\"")),
             "processing-kinds.md must document the `{field}` result field"
+        );
+    }
+}
+
+#[test]
+fn skill_documents_staged_section_results_instead_of_direct_page_writes() {
+    let format = read_skill_file("references/queue-format.md");
+    assert!(format.contains(lk_queue::SECTION_RESULT_SUFFIX));
+    let sample = lk_queue::SectionResult {
+        task_id: "t".into(),
+        cache_hash: "h".into(),
+        target_revision: "r".into(),
+        body: String::new(),
+    };
+    let serde_json::Value::Object(fields) = serde_json::to_value(sample).unwrap() else {
+        panic!("SectionResult must serialize as an object");
+    };
+    for field in fields.keys() {
+        assert!(
+            format.contains(&format!("\"{field}\"")),
+            "missing section field {field}"
         );
     }
 }

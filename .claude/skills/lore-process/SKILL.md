@@ -1,7 +1,7 @@
 ---
 name: lore-process
-version: 0.36.2
-description: Drain the Lorekeeper LLM work queue after `lore ingest` runs in queue mode — fill the empty LLM-owned sections (summaries, refined events, concepts, themes, reviews) of freshly-written vault pages using Claude Code's own LLM (no API key, no separate billing). Idempotent and resumable. Run after each ingest, or on a daily schedule.
+version: 0.46.0
+description: Drain the Lorekeeper LLM work queue after `lore ingest` runs in queue mode — fill the empty LLM-owned sections (summaries, refined events, concepts, themes, reviews) of freshly-written vault pages using the active agent session. Idempotent and resumable. Run after each ingest, or on a daily schedule.
 when_to_use: |
   queue process, drain queue, fill summaries,
   concept extraction run, enrich daily pages, post-ingest
@@ -11,8 +11,8 @@ allowed-tools: |
   Bash(jq *)
   Bash(wc *)
   Bash(head *)
-  Bash(mv *)
   Bash(mkdir *)
+  Bash(mv *)
   Bash(lore *)
   Bash(date *)
   Bash([ *)
@@ -30,8 +30,8 @@ by writing JSONL task files into
 `<vault>/.lorekeeper/queue/{run-id}.jsonl` (run-id = `{timestamp}-pid{PID}-{seq}`).
 Each task points at a vault page written with an empty section awaiting LLM
 content. This skill consumes those tasks: read the queue, perform the LLM
-work in your own session, edit the target pages' sections in place, then move
-the processed queue file to `.lorekeeper/queue/processed/`.
+work in your own session, stage typed result files, and let `lore queue apply`
+publish pages and markers. `lore queue prune` retires completed runs.
 
 The protocol below is the integrity contract — follow it exactly. The
 generation specs (what good output looks like per task kind) live in
@@ -53,16 +53,10 @@ you last read them.
    one for the rest. Only a task that passes the
    first, fails the second, and has somewhere to land is work — an anchor the page
    no longer carries means the heading vocabulary changed (a locale switch), which
-   no amount of waiting undoes. A task you filled and
-   stamped earlier in this run therefore reads `done` if you re-classify — that
-   is correct, and it is skipped, not failed. An `extract-concepts` task reads
-   `current` until `lore queue apply` materializes its result and stamps the marker —
-   which step 4 runs per file, not only the Finalize, so a task covered by an earlier apply
-   reads `done` and is skipped like any other. A
-   `synthesize-concept` task is not that case — it stamps its own marker, so it reads
-   `done` like every other kind. **Never loop
-   on "until nothing reads `current`"** — the "this run is finished" signal is
-   the queue file moving to `processed/`, not `queue status` reaching zero.
+   no amount of waiting undoes. A task applied earlier in this run
+   reads `done` and is skipped. Every staged task remains `current` until apply
+   publishes the result and stamps its marker. Apply after each task; never loop
+   on classification alone without publishing results.
 2. **Locate a section only by a heading the TASK carries** — `target.anchor`, and
    `input.related_anchor` for the second section a `synthesize-concept` task fills. Each is
    the exact `## …` heading the pipeline wrote, resolved from i18n at queue time. Never
@@ -71,24 +65,21 @@ you last read them.
 3. **Never hand-write a concept's sources-section body or `source_count`** —
    both are machine-owned; `lore graph backlinks-sync` re-derives them from
    forward concept links on origin pages.
-4. **Move a queue file to `processed/` only when `lore queue status` says nothing in it is
+4. **Retire a queue file through `lore queue prune` only when `lore queue status` says nothing in it is
    still work.** Step 4 has the sequence; what makes it a rule is that the answer is the
    classifier's and never your own record. On any failure, leave the file in place and stop
    processing that file.
-5. **The target page's frontmatter is read-only**, except for the one
-   `llm_inputs.<key>_done` completion marker you own and MUST stamp when a task
-   finishes (the per-kind key is in the step 3c table) — **except
-   `extract-concepts`, whose marker is `lore queue apply`'s** and which you never
-   stamp. A `synthesize-concept` task stamps its own `synthesis_done` once, and that
-   one marker answers for BOTH sections it fills.
+5. **Workers never edit target pages or completion markers.** Every task returns a
+   typed result file. Only `lore queue apply` publishes section bodies and the matching
+   completion marker after checking the pending task and exact captured target revision.
+   A synthesis result's one marker answers for both sections.
 6. **Never create or merge a concept page, and never write an ORIGIN page's
    related-concepts section.** `extract-concepts` emits a result file; `lore queue
    apply` materializes both. Concept pages are shared between origin pages and merge
    under rules that already exist as tested Rust — restating them here would be a
    second implementation, and a drain that wrote them could not run two pages at once.
-   That argument is about extraction and does not reach `synthesize-concept`: it names
-   ONE concept page that already exists, it is the only task in the run that writes
-   that page, and both headings it fills are its own. Writing them is the task.
+   `synthesize-concept` also stages a result: only `lore queue apply` publishes its
+   two sections and completion marker after validating source and target revisions.
 
 ## Materialized-view contract
 
@@ -101,16 +92,10 @@ Daily pages are materialized views with two kinds of fields:
   written by `lore queue apply` from the concepts this skill reports, so that
   their slug and link format match the pages it creates.
 
-The pipeline decides what needs work before the queue file exists: a task is
-enqueued only when its section is missing or its inputs changed. This skill's
-sole obligation to that machinery is to write **only** LLM-produced content
-into the target sections, never structural artifacts, and to stamp the section's
-`llm_inputs.<key>_done` completion marker when finished (step 3c) —
-`extract-concepts` excepted, whose section and marker both belong to `lore queue apply`. Completion is
-uniformly marker-signalled — a non-empty body never signals done — so a section
-that is legitimately empty (a focus-filtered summary, an extraction that found
-nothing, a trivial-only work-log, an empty-period review) stays done instead of
-re-enqueueing forever.
+The pipeline owns structural fields and input hashes. Workers propose semantic content
+in result files; the applier owns all page writes and completion markers. Empty section
+results remain valid where the generation specification permits them. Completion depends
+on the matching marker, never on whether a section looks filled.
 
 ## Queue format & recovery
 
@@ -136,7 +121,8 @@ The essentials: a visible `.jsonl` is fully written and every
    last vault taught it. The path is computed rather than checked — on an install where
    `lore schema` has never run it names a file that is not there, and the answer is to run
    `lore schema` rather than to proceed without the rule. Ask
-   `lore resolve` which page owns each extracted name, asked for EVERY form the text
+   `lore resolve "<name>" "<another name>" --json` which page owns each extracted name
+   from one registry read, asked for EVERY form the text
    writes: it answers by the same rule the ingest pipeline routes by, so the two cannot
    disagree about an existing name, and a hit on any form is the owner. The queue task
    carries no concept registry, so that answer, plus a created-this-run set, plus
@@ -167,101 +153,59 @@ The essentials: a visible `.jsonl` is fully written and every
       `current` tasks; skip the rest without editing their pages.** Match tasks
       by `task_id`.
 
-      An `unreadable` task is one whose target page will not parse — most often frontmatter an
-      earlier drain mangled while stamping a marker. It is neither work nor dead: it neither
-      succeeded nor failed, so it does NOT block archiving the file (rule 4 is about tasks that
-      failed while being processed), and it is not dropped either — repairing the page brings it
-      back. Report it so a human can fix the page; never edit that page to make the task
-      classify.
+      An `unreadable` task has an unsafe/unreadable target or source, or a malformed/mismatched request input.
+      Leave its queue file in place, report the page and stop. Repairing the page must
+      make the task reachable again; moving it to `processed/` prevents that recovery.
 
-   c. **For each `current` task** (in file order), resolve its state from the
-      page's frontmatter. Completion is **uniformly marker-signalled**: every kind
-      has an `llm_inputs.<key>` (pipeline-owned input hash) and a companion
-      `llm_inputs.<key>_done` marker **you own and MUST stamp** — even when the
-      result is empty. Body emptiness NEVER signals done, because many sections can
-      be legitimately empty (a focus-filtered summary that matched nothing, an
-      extraction that found nothing, a trivial-only work-log, an empty-period
-      review); inferring completion from a non-empty body would re-enqueue every
-      such result forever. Find the row for `target.kind`:
+   c. **For each `current` task**, capture `target_revision` from status before reading
+      the target and drafting. Read the task input and current target; follow the generation
+      specification. The applier owns every completion marker in this table:
 
-      | target.kind | input key | completion marker (you stamp) |
+      | target.kind | input key | completion marker (applier-owned) |
       |-------------|-----------|-------------------------------|
       | `daily-summary`, `document-summary` | `summary` | `summary_done` |
       | `daily-refine-events` | `refine_events` | `refine_events_done` |
       | `daily-concepts`, `document-concepts` | `concepts` | **not yours** — `lore queue apply` stamps `concepts_done` in the same edit that writes the links (safety rule 6). Write the result file and stop. |
-      | `concept-synthesis` | `synthesis` | `synthesis_done` |
+      | `concept-synthesis` | `synthesis` | **not yours** — `lore queue apply` stamps `synthesis_done` after validating the staged result. |
       | `work-log-synthesis` | `topic_summary` | `topic_summary_done` |
       | `weekly-synthesis-themes` | `themes` | `themes_done` |
       | `weekly-review-narrative`, `monthly-review-narrative` | `narrative` | `narrative_done` |
       | `quarterly-review-narrative`, `annual-review-narrative` | `narrative` | `narrative_done` |
 
-      Resolve with the input key and marker for that row, in order:
+   d. **Stage and apply the result.** All output goes under
+      `<vault>/.lorekeeper/queue/results/`, never directly into a target page:
 
-      1. **Stale:** `task.cache_hash` ≠ `page.<input key>` (or the input key is
-         absent). A later ingest superseded this task — writing now would inject
-         content keyed to an older input under the newer hash, freezing the
-         mismatch forever. **Drop as successful, no edit** — exactly how `lore
-         queue status` classifies it; never invent a different outcome.
-      2. **Cache hit:** `task.cache_hash` = `page.<input key>` AND
-         `page.<marker>` = `page.<input key>` → already done for this exact
-         input. **Skip, no edit.**
-      3. **Process:** `task.cache_hash` = `page.<input key>` AND `<marker>` is
-         absent or ≠ the input key. Do the LLM work per
-         [references/processing-kinds.md](references/processing-kinds.md) — a
-         genuinely empty result is fine where the kind allows it (write nothing
-         rather than invent low-value content) — then set `llm_inputs.<marker>` =
-         `task.cache_hash`, copied verbatim (a 32-char hex string). Leave the
-         pipeline-owned input key untouched.
+      - `extract-concepts`: `<task_id>.json`, the extraction contract in
+        [processing-kinds.md](references/processing-kinds.md).
+      - `synthesize-concept`: `<task_id>.synthesis.json`.
+      - Every other task: `<task_id>.section.json`, with `task_id`, `cache_hash`,
+        captured `target_revision`, and `body` (the section body without its heading).
 
-         **Except `extract-concepts`**, whose marker row says "not yours": their
-         value goes to a result file and `lore queue apply` writes the links and
-         the marker in one edit. Stamping it yourself claims the section is
-         answered while it is still empty, which is what `llm_cache` believes —
-         so the task never re-enqueues and the extraction is lost.
-
-   d. **Write the result.** For a CONCEPT kind (`daily-concepts`,
-      `document-concepts`) there is no page edit at all: write the result file per
-      [references/processing-kinds.md](references/processing-kinds.md) and move to
-      the next task. Do not touch the related-concepts section and do not stamp
-      `concepts_done` — `lore queue apply` writes both in one edit (safety rule 6),
-      and stamping it here claims an empty section is answered, which is what
-      `llm_cache` believes, so the task never re-enqueues and the extraction is lost.
-
-      For every OTHER kind, edit the markdown file at `target.vault_path` using the
-      Edit tool (section replace):
-
-      1. Open the file at `target.vault_path`
-      2. Locate the section heading `target.anchor` (literal match)
-      3. Replace the body between this heading and the next `## ` heading
-         (or EOF) with the generated content
-      4. Preserve frontmatter and every other section unchanged, then stamp the
-         task's `llm_inputs.<key>_done` completion marker (the table under 3c)
-
-      A `synthesize-concept` task fills TWO sections in that one edit: `target.anchor`
-      and `input.related_anchor`. Write both, then stamp `synthesis_done` once — it
-      answers for the pair, so stamping it with only one section written leaves the
-      other permanently unanswered, since `backlinks-sync` re-queues the task only
-      when the citation set moves. A task whose `input.related_anchor` is absent has
-      no second section to write. One naming a heading the page does not carry never
-      reaches you as work: `queue status` validates EVERY heading a task names, so such a
-      task classifies `missing-target` and is skipped under rule 1.
+      See [queue-format.md](references/queue-format.md) for the exact contracts.
+      Write each result atomically through a temporary file and rename. Run
+      `lore queue apply` after each task before capturing the next target revision:
+      several tasks can share one page, and a successful earlier publication changes
+      its exact bytes. Parallel workers must coordinate targets; if another task or
+      editor changes a target, reread and regenerate rather than relabeling the old result.
+      A failed apply stops this run and preserves uncommitted work for diagnosis.
 
    e. **On task failure** (page not found, edit error, malformed task):
       record the failed `task_id` and the reason. **Abort processing of
       this queue file** — do not attempt the remaining tasks. The queue
       file stays on disk so the next `/lore-process` run replays every
-      task from the top (all target edits are idempotent).
+      task from the top (publication is marker-idempotent).
 
 4. **Finish the file, then let the classifier say it is finished.** Run `lore queue apply`
    while the file is still in the queue, then re-run the step 3b `lore queue status --json`
-   and check that no `task_id` from this file reads `current`. Only then move it:
+   and check that no `task_id` from this file reads `current` or `unreadable`, and that
+   the file contains no unparseable lines. Retire completed files through the CLI:
    ```bash
-   mkdir -p "$VAULT/.lorekeeper/queue/processed"
-   mv "$file" "$VAULT/.lorekeeper/queue/processed/" 2>/dev/null \
-     || [ -f "$VAULT/.lorekeeper/queue/processed/$(basename "$file")" ]
+   lore queue prune --json
    ```
-   Your own record of what you wrote is not that answer. A section you filled without
-   stamping its completion marker still reads `current`, and archiving on belief retires a
+   Pruning reclassifies tasks while holding the same writer lock as apply. It preserves
+   unfinished or unreadable work and chooses archive destinations without overwriting history.
+   Your own record of what you wrote is not that answer. A result not yet published with
+   its completion marker still reads `current`, and archiving on belief retires a
    run whose bodies the next render erases and whose tasks nothing re-enqueues — invisibly,
    because the pages look filled. The classifier reads the marker and not the body, which is
    the one check that distinguishes work you did from work you recorded. A task that still
@@ -270,28 +214,29 @@ The essentials: a visible `.jsonl` is fully written and every
    Applying BEFORE the move is also what keeps `lore resolve` authoritative: concept pages
    are what it reads, so a result not yet applied is a concept it cannot see, and a long run
    would otherwise need a second answer to the naming question carried alongside the first.
-   Applying per file shrinks the created-this-run set to the file in hand. A failing apply
+   Applying per task makes new concepts visible before the next extraction. A failing apply
    stops the run — everything after it would decide names against a vault missing what this
    run already found — and a result it QUARANTINES is one naming a concept no page can be
    written for, which is a name to correct rather than a file to retry.
-
-   The fallback is not error-swallowing: `lore queue prune` runs on its own
-   schedule and retires a run whose every task is already answered, so it can
-   archive this file while you are working through it (you read every task in
-   step 3a, so nothing is lost). A file already sitting in `processed/` is the
-   outcome this step wanted — treat it as success. Any other `mv` failure leaves
-   neither file present and fails the check, which is a real failure to report.
 
 5. **Finalize (mandatory — do not skip).** The apply here covers whatever the last file
    left pending; `lore graph backlinks-sync` and `lore wiki refresh` are owed once, at the
    end, over everything this run wrote. Concept `## Sources` sections and
    `source_count` are deliberately left empty during processing; they are
    machine-owned and reconciled here from the link graph, then the catalog
-   is refreshed. Run both and confirm each exits 0:
+   is refreshed. Confirm each command exits 0:
    ```bash
    lore queue apply            # materialize reported concepts into pages + links
    lore graph backlinks-sync   # re-derive every concept's ## Sources + source_count
+   ```
+   If reconciliation queues current synthesis tasks, resume steps 2–4 for that work,
+   then repeat apply and backlinks-sync. Continue until reconciliation leaves no
+   current tasks; stop and report any blocked work or failed command. Refresh and
+   check completion only after that drain:
+   ```bash
    lore wiki refresh           # re-derive the catalog, the timeline and the map
+   lore queue check            # pending or blocked work and unpublished results
+   lore wiki reviews --check   # evidence drift and invalid assessments; open is valid
    ```
    Run these on EVERY `/lore-process` invocation that processed at least one
    task — skipping them leaves new concepts with no `## Sources` and a stale
@@ -326,62 +271,47 @@ succeeded. Failure rules:
     ingest preserves the existing value, and only `lore graph
     backlinks-sync` computes the authoritative count.
 - **Never partially-commit progress** to the queue file itself (no
-  `processed.jsonl` sidecar): the source-of-truth is the vault edits, which
+  `processed.jsonl` sidecar): the source-of-truth is the applied vault state, which
   are themselves idempotent.
+
+## Parallel processing
+
+For selected synthesis inputs, use the [read-only evidence packet workflow](references/queue-format.md#read-only-evidence-packets).
+Assign each task and target page to one worker. Workers stage typed result files;
+one coordinator runs apply, retires queue files through `queue prune`, and performs Finalize. During a
+synthesis wave, pause ingest, merges, capture/extract/wiki edits, and other source or
+target writers: external editors do not share the applier lock. Workers return
+durable-review proposals to the coordinator instead of editing shared exploration
+pages. The coordinator reconciles proposals against existing reviews and publishes
+them serially before the final synthesis snapshot. Re-run backlinks-sync and status
+after review publication; reissue only affected tasks and draft against their new
+source revisions and target snapshots. A review proposal is
+a coordination artifact, not a field accepted by `lore queue apply`.
 
 ## When NOT to invoke
 
 `lore ingest` writes the queue file atomically (temp + rename) after all
 vault pages are written, so a concurrent ingest cannot produce a partial
 `.jsonl` you might consume mid-write. There is no append-while-reading
-hazard. You may still want to wait so the user sees the new pages before
-they get edited.
+hazard. Atomic queue publication does not freeze target pages: serialize ingest
+and other page writers with a processing wave so they do not invalidate drafts.
 
 ## Regenerating a section
 
-To regenerate a section that was already filled, invalidate its cache and
-re-ingest that day (`lore ingest --date <day>`). The pipeline sees the cache
-miss, re-queues the task, and `/lore-process` fills it on the next run. No
-flag, no skill argument — the page itself is the cache key. To invalidate,
-delete the section's `llm_inputs.<key>_done` marker line (e.g. `summary_done`,
-`concepts_done`, `narrative_done` — the per-kind key is in the step 3c table).
-Emptying the body does NOT force a re-run: completion is tracked only by the
-marker, so an empty-but-done result stays cached.
+Use `lore queue regenerate --task-id <retained-task-id> --dry-run` to preview, then
+omit `--dry-run` to request that one task again. The task must exist exactly once in
+pending or processed queue files. Its complete original typed input, input hash,
+target kind and headings must still agree; synthesis source revisions must remain
+current. Missing retained input is a refusal, not permission to remotely re-fetch an
+expired source or reconstruct raw events from refined prose.
 
-`--date` on a PAST day RE-FETCHES it, and the re-render replaces the page's event list with
-what the source returns now. An RSS source renders from its per-date event log, so a date the
-log covers comes back intact; a date older than the log does not, and no other source type
-keeps a log at all. Check first: `lore ingest <source> --date <day> --dry-run` reports the
-event count it would write for each daily page — compare it with the count the page states.
-Regenerating a summary is not worth truncating the events it summarizes.
+The command preserves authored bodies, clears only completion/provenance for that
+section, and publishes a new unique task through the mutation journal. Process it
+normally. Never manually clear a marker and re-ingest as a substitute for this operation.
 
-## Proposing work from what you read
-
-`lore config propose-from` names the sources whose prose you may read for work — it is empty by
-default and this step does not run then. For a daily page belonging to a named source, and only
-those, name anything that asks the vault's owner to DO something:
-
-```
-lore task candidate --source <source-id> --summary "<what to do>" --url "<absolute url>"
-```
-
-The URL is the thing itself — the mail, the thread, the issue — never a vault path: it is copied
-onto the archive page when the task closes, and it is what stops that OBSERVATION being proposed
-twice.
-
-It does not stop the same WORK being proposed twice, and nothing in Rust can: a condition that
-is still true is reported again tomorrow from a new mail with a new address, and only a reader
-of both can say they ask for one thing. So read the board before you name anything —
-
-```
-lore agenda --json
-```
-
-— and where `proposed` or `committed` already carries the work, say nothing. One line is one
-decision; eight lines for one broken log sink is eight, and its `since` already tells the person
-how long it has been asking.
-
-This is a proposal and never a commitment. Do not judge priority, do not guess a due date, and
-do not name something merely because it was mentioned: a person answers every line by moving it
-or dropping it, so a wrong one costs them a decision. Say nothing rather than fill a quota.
-
+New tasks carry `input.generation_policy`, a per-kind semantic policy identifier.
+Only apply writes `llm_inputs.<key>_policy_done` from the matched task. Missing policy
+is legacy/unknown; it does not make existing answers stale or trigger a global rewrite.
+Unknown requested policy versions require a compatible processor. Policy provenance
+is separate from the unchanged data cache hash. Explicit regeneration records a
+policy request for this input so an old legacy task cannot satisfy the new request.

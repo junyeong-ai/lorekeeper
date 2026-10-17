@@ -1,6 +1,6 @@
 ---
 name: lore-wiki
-version: 0.36.2
+version: 0.46.0
 description: Semantic wiki operations for the Lorekeeper vault. Add sources, query with compounding, audit structural and semantic health. Reads AGENTS.md for page formats and section vocabulary — never hardcodes headings. Pairs with `lore` (the deterministic binary) for graph analysis and queue processing.
 when_to_use: |
   wiki query, knowledge search, ask wiki, search vault,
@@ -37,7 +37,23 @@ fill every section yourself, and only a concept's sources section +
 
 If AGENTS.md is missing, run `lore schema` first.
 
+Direct page authoring must not overlap a queued synthesis worker wave: finish or
+pause that wave before changing its concept targets or citing sources.
+
 ## Commands
+
+### Imported document identity migration
+
+For a configured nodex source, set a stable `repository_id` and a sufficient
+`max_documents`, then run `lore wiki document-identity plan --source ID --manifest PATH`.
+Review the manifest and run `check --manifest PATH` before `apply --manifest PATH`.
+These are subcommands of `lore wiki document-identity`; apply also supports `--dry-run`.
+Only exact production-projected source copies qualify. Changed bodies, missing sources
+and ownership conflicts remain blocked; do not edit the manifest to approve them.
+`--allow-blocked` explicitly applies the verified subset while retaining blocked pages.
+Apply archives original evidence and adds identity without rewriting bodies or asserting
+that historical source metadata is current. After publication, reconcile backlinks,
+process resulting synthesis tasks, and refresh navigation.
 
 ### `/lore-wiki add <source>`
 
@@ -46,7 +62,8 @@ Manual ad-hoc ingest of a file, **folder**, pasted text, or a URL.
 A URL goes through `lore fetch <url>`, which reads the page, keeps its readable core, and
 writes it into the `manual` source's inbox with the address as `source_url` — so the document
 page cites the original rather than a copy nobody can check. Then run `lore ingest <that
-source>` and report where it landed; do NOT also create the page here, or the same article
+source>`, then `/lore-process` to complete queued semantic work and report where
+it landed; do NOT also create the page here, or the same article
 exists twice. A page with no article body (a listing, or one the browser assembles) is
 refused rather than absorbed: say so and ask for the underlying article's URL, or for the
 page saved as HTML into the inbox.
@@ -64,10 +81,13 @@ each as an independent source, and report the aggregate results.
    what a template written here gets wrong: a literal `concepts/<slug>.md` on a document page
    resolves to `<wiki>/documents/concepts/<slug>.md`, which `graph lint` reports broken and
    whose citation never reaches the concept's `source_count`.
-4. Extract every named entity, technology, and topic as concepts (typically
-   several per source). Converge each one through the **Concept convergence**
+4. Extract durable, independently reusable concepts. A name's appearance alone does not
+   justify a page: the source must establish something worth retrieving about it. Keep
+   incidental mentions in the document; an empty extraction is valid. Reuse an existing
+   broader concept when it faithfully covers the material. Converge each one through the **Concept convergence**
    section of the vault's `AGENTS.md` — `lore resolve` for EVERY form the source writes,
    since a hit on any of them names the page that already owns the concept, the
+   `proposed_path` from `lore resolve --json` for absent names (never derive a filename from the name),
    created-this-run set for pages this add minted, `lore wiki search` on two or three
    distinguishing terms of each form for the equivalences no rule about spelling can
    see, then alias registration and the machine-owned sources
@@ -84,33 +104,85 @@ each as an independent source, and report the aggregate results.
    wrote — especially a `duplicate_concepts` entry, which means a new page claims a name
    another page already answers to — and REPORT the rest rather than fixing them silently.
    Observations (orphans, open conflicts) are reported without gating.
-6. Report what was created/updated, grouped by source file.
+6. Run `lore queue status --json` and report what was created/updated, grouped by
+   source file, with any newly queued synthesis still pending. Drain it through
+   `/lore-process` when semantic completion is part of the request.
 
 ### `/lore-wiki query <question>`
 
 Answer a question grounded in vault content, with compounding.
 
-1. **Gather context.** Run `lore wiki search "<terms>" --json` — it answers which pages the
+1. **Gather context.** For several searches in one investigation, run `lore wiki prepare`
+   once and pass its `snapshot` to search/browse with `--snapshot`. This is a captured
+   corpus, not a claim of current state. Prepare again after writes or before a new
+   investigation. A single lookup can use live search without preparing a snapshot.
+   For an unfamiliar topic, start with `lore wiki browse --json`.
+   Use its category/type counts to select a scope with `--category` and `--type`.
+   Browse orders by title, without treating citation frequency as relevance.
+   Search and browse return `total` and `next_offset`; follow `--offset` when more
+   results are needed. Counts describe the query before metadata filters. An empty
+   category key denotes uncategorized pages. Do not call the first page a complete inventory.
+   Run `lore wiki search "<terms>" --json` — it answers which pages the
    question reaches and, in `matched`, whether each ANSWERS to it (`identity`/`name`), opens
    by stating it (`summary`), or merely mentions it (`text`). Query the question's terms
-   separately when it spans several: adding a term narrows, since every term must appear —
-   EXCEPT where the terms together spell a concept's name, which widens instead, because a
-   query that names a concept also reads the prose written under that concept's other names.
-   So ask the full name as well as the parts: it is the one query that reaches the pages
-   spelling the subject differently, in either language. Read the pages it names, and follow
-   their `## Sources` to the daily pages behind a claim. `lore wiki concepts` is the registry for convergence decisions, not a
+   separately when it spans several. A query naming one concept matches its declared
+   names and aliases as phrases; other queries require every term. Markdown formatting
+   and soft line breaks preserve a phrase; separate blocks and separate aliases do not
+   combine into one. Ask for the full
+   registered name to reach its alternate spellings in either language. Open each
+   selected page with `lore wiki read <path> --revision <file_revision from the hit>`.
+   Inspect its outline, then read relevant `--section ID` content and follow `next_offset`.
+   Carry `--revision` through pagination; a mismatch requires fresh retrieval. A section
+   includes nested subsections. Read the sources behind the claim, not only its synthesis.
+   Use `source_record` to distinguish active, archived, superseded and unknown source state;
+   `--source-status` filters exact recorded states. A historical claim can remain valid.
+   `lore wiki concepts` is the registry for convergence decisions, not a
    lookup — reading all of it to find one page is what search exists to replace.
+   For exact evidence such as a number, code symbol or quoted phrase, use
+   `lore wiki search "<literal>" --body --json`. This searches raw Markdown body lines,
+   including code and link destinations, with case-sensitive literal matching.
+   Choose `--regex` or `--ignore-case` explicitly; `--context 0..5` bounds surrounding
+   lines. Results carry physical line/column, file revision and clipping flags.
+   Follow `next_offset` for further matching lines, then use revision-checked `wiki read`
+   to inspect the containing passage. This mode reads live files and rejects `--snapshot`;
+   its totals are matching lines/pages, not claims or semantic-review coverage.
+   For claims missing from the concept layer, search the same terms with
+   `--include-sources`; daily observations and managed reviews are then searchable.
+   Use `lore graph --json neighbors <vault-relative.md>` to follow incoming and outgoing
+   links, including managed daily evidence. Follow `next_offset` for additional neighbors.
+   Narrow before paginating with `--type concept` for other concepts, `--type document`
+   for documents, or `--type exploration` for assessments. Types match declared metadata;
+   an empty type selects undeclared pages. `formats` counts all neighbors before filters.
+   `--direction incoming|outgoing|mutual` selects link direction; incoming/outgoing also
+   include mutual links. These filters do not classify support, contradiction or causality.
+   Inspect a connection with `lore wiki links <source.md> --target <target.md>`.
+   The JSON gives each occurrence's source line, literal context and file revision.
+   For an incoming neighbor, the neighbor is the source; for an outgoing neighbor,
+   the selected page is the source. Follow `next_offset` with `--offset` and the
+   returned `--revision` to avoid mixing edits. A bare link supplies no relationship
+   explanation; read the surrounding passage before asserting meaning.
+   Check `lore wiki reviews` for relevant open reviews or changed evidence before answering.
+   A full natural-language question may match nothing: search its subjects and claim terms,
+   then inspect the sources. Report the queries and scope checked when evidence remains absent;
+   absence in a bounded result set does not establish absence from the vault.
 2. Synthesize an answer grounded in vault content. Cite sources using
    link format (AGENTS.md § Links).
 3. **Concept enrichment.** If the answer reveals connections between concepts
    that aren't currently linked in their Related sections (heading from
    AGENTS.md), note these as suggested edits (but do NOT auto-apply).
 4. **Compounding judgment** — after answering, judge reusability:
-   - **Reusable** (synthesis, comparison, multi-source analysis) → write an
-     **exploration** page (path from AGENTS.md). Read AGENTS.md
+   - **Reusable and new** (a decision-relevant synthesis, comparison or evidence gap)
+     → first search for an existing exploration addressing the same question. Update
+     that assessment when appropriate; create a new **exploration** only for a distinct
+     question (path from AGENTS.md). Read AGENTS.md
      for the exploration page format (frontmatter keys, section headings, ownership).
-     What the answer is grounded in is recorded ONCE, as links in the body's
-     Grounding section — that is the form every consumer reads.
+     Ground the assessment in direct source links, with scope and effective dates.
+     A generated answer and the documents it summarizes are one derivation chain,
+     not independent corroboration. For a durable assessment, record the evidence
+     revisions through the Knowledge reviews contract; preserve unresolved differences.
+     Before publishing, repeat the original question against the proposed change and
+     check whether the cited evidence supports it. Do not treat structural lint as
+     evidence that the answer is correct.
      Then **finalize** so the new page leaves the graph clean:
      `lore graph backlinks-sync` (its Grounding links are real citations that
      raise each grounded concept's `source_count`), then `lore wiki refresh` (so the

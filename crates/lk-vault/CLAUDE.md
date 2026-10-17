@@ -10,7 +10,9 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
 - **Frontmatter parsing is line-based** (`frontmatter::parse_page`): a `---` is a
   delimiter only when it's the standalone first line and a later standalone `---` line.
   A leading BOM is stripped; CRLF is normalized to LF. A substring scan would
-  mis-detect `---` inside a YAML value — don't reintroduce one.
+  mis-detect `---` inside a YAML value — don't reintroduce one. `VaultPage.original`
+  retains the exact input before normalization for optimistic publication guards; it is
+  skipped by serialization and must not be reconstructed from parsed fields.
 - **`TemplateEngine::has_user_override` returns `Ok(false)` only for not-found**; a template
   that exists but fails to parse propagates `Err`. Callers must thread that through so a
   broken user template surfaces instead of silently falling back to the embedded
@@ -54,22 +56,26 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   trailing whitespace from heading lines. (`lk_pipeline::llm_cache` reads `section_body`
   to splice a preserved LLM-owned body back on a cache hit; completion is marker-signalled,
   never inferred from whether a section is empty.)
-- **`index::build_index`** generates `{wiki}/index.md` — a single hierarchical page catalog
-  grouped by category (concepts, documents, daily sources, work-log, synthesis), NEVER split
-  into sub-pages (like `log.md`/`map.md`). Each entry is `[title](relative-path) — first-sentence summary`,
-  the summary extracted from the page's type-specific `## ` section body (concept synthesis,
-  daily/document summary — heading resolved from the i18n bundle) and bounded by
-  `truncate_summary` (first sentence, `MAX_SUMMARY_BYTES` cap) so a line stays scannable and
-  the catalog grows linearly. `write_index` handles the atomic write.
-- **`timeline::build_timeline`** generates `{wiki}/log.md` — a reverse-chronological
-  knowledge timeline (when each concept/document/exploration first entered the vault).
-  A materialized view like the index (regenerate → byte-identical), with two rules:
-  anchored on `created` ONLY (never `updated`, which churns on re-mention/machine work
-  and would inject fake "knowledge changed" events); and durable knowledge nodes only
-  (daily/synthesis excluded — a principled split, not a fuzzy score). Complete like
-  `index.md` — every knowledge node ever created appears, never truncated (text-only,
-  grows linearly in node count). `log.md` is in `RESERVED_WIKI_FILES`, so the graph
-  never flags it as an orphan or index drift.
+- **`index::build_catalog`** derives the complete navigation tree. `index.md` is its entry;
+  at most 100 entries occur on each page, with generated children under `{wiki}/catalog/`.
+  Small catalogs remain a single page. Relative links retain exact addresses; every page
+  is reachable from the entry. Generated children are excluded from knowledge graphs.
+  `IndexCatalog::publish` uses a mutation plan, removes only marked generated children,
+  and refuses collisions with authored files. Index drift compares the whole tree.
+  Read or parse failures abort rebuilding; missing optional directories are empty inputs.
+- **Generated navigation shares one bound and publisher** (`navigation`): at most 100 rows
+  or branches per page. The topic catalog uses `catalog/`, the citation map `catalog/map/`,
+  and the timeline `catalog/log/`. Each view reads and removes only its own marked direct
+  children. Unknown-file collisions refuse the complete publication. Children, entry page
+  and stale removals use the caller's `MutationSession` and one journaled plan; callers do
+  not acquire another session while holding one. Exact relative page addresses survive
+  splitting. Detail addresses are reconstructible positions, not permanent knowledge ids.
+- **`timeline::build_timeline_catalog`** derives the complete bounded knowledge timeline.
+  `build_timeline` reads its entry string; publication uses the complete catalog. Entries
+  remain reverse chronological by `created` ONLY, never `updated`; durable concepts,
+  documents and explorations only. Every dated entry stays reachable, including a day
+  larger than one detail page. Undated pages have no timeline position; traversal, read
+  and parse failures abort rebuilding and preserve previously published output.
 - **Frontmatter writers are bounded by `frontmatter_block`** — the shared line range between
   the delimiters, recognized by the same first-line rule and `is_delimiter_line` predicate as
   `parse_page`. `set_frontmatter_field` sets a TOP-LEVEL (column-0) key — never an indented
@@ -101,9 +107,7 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   span, so a block-style value never outlives the key it belonged to. And `set_llm_input`
   reads the child indentation from the first REAL child, never from the span's first line,
   which may be a comment indented past them.
-- **`search::search` ranks by WHERE a query matched, never by a score.** `index.md` holds
-  every page and grows with the vault — 685KB at 2689 concepts, with no way to read part of
-  it — so the catalog stopped being an entry point at the size that made one necessary. A hit
+- **`search::search` ranks by WHERE a query matched.** A hit
   is ordered by `MatchField` (`Identity` → `Name` → `Summary` → `Text`, the derived enum
   ordering IS the ranking) and then by `source_count`: both are facts a page states, so an
   answer is explainable hit by hit, which a weighted blend of the two would not be. Every term
@@ -111,21 +115,14 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   lets one common word in a title outrank a page discussing the whole phrase. `Summary` is the
   page's OPENING STATEMENT rather than its whole first section: a concept cited a hundred
   times accumulates a synthesis long enough to hold any three common words, and ordered by
-  evidence it would otherwise answer every query in the vault. Scope is the wiki, never the
-  daily pages under it — those are the bulk material a concept was read out of, so admitting
-  them buries every page that ANSWERS a query under the pages that mentioned it once.
-  **A page is reached two ways and keeps the better one**: every term of the query appearing
-  on it, or — when the query IS a concept's name — any OTHER name that concept answers to
-  appearing on it. `identity_key` folds spelling while prose matching is literal, so without
-  the second route one question asked in one spelling read a quarter of its own answer
-  (`지식그래프` 4 pages, `지식 그래프` 29) and an English query read almost none of the Korean
-  prose about the same subject (`Model Context Protocol` 9, `MCP` 202). `spellings_of` reads
-  only names the vault WROTE DOWN — a concept page's title and aliases — so a hit is always
-  reachable by a recorded name and the excerpt shows the line carrying it; where it reaches
-  too far is an alias that is also a common word in another sense, which belongs to the alias
-  rather than to the matching. A query naming no concept has no other spellings and is matched
-  term by term alone, which is what keeps the expansion bounded. Pages are therefore READ
-  before any is judged, since the vocabulary the query is read against lives on them.
+  evidence it would otherwise answer every query in the vault. Default scope is concepts, documents and explorations.
+  `--include-sources` adds managed daily, personal and synthesis pages, excluding the task board.
+  A query naming a single concept matches its declared title and aliases as phrases.
+  Other queries require every term. Metadata filters never narrow the vocabulary used to
+  resolve alias ownership. Scattered words do not establish a match for a declared concept
+  name, so Korean spacing variants registered as aliases reach the same prose. Ambiguous
+  names do not expand through competing owners. A declared name may occur in another sense;
+  excerpts expose that use for semantic review.
   **A term is matched as a word where the term itself is Latin, and anywhere where it is
   not.** Plain containment is what Korean needs — a noun carries its particle inside the same
   word (`에이전트를`), so a boundary requirement makes the vault's own language unsearchable —
@@ -133,12 +130,13 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   `guardrail` at the NAME rank, above every page that discusses the subject. `contains_term`
   therefore requires a boundary per EDGE, decided by the TERM: where a term begins or ends
   with an ASCII letter or digit, the character beside the match may not be one. Nothing
-  inspects the page's language. **Matching is over `link::strip_links(body)`, never the raw
-  body.** A link DESTINATION is an
-  address rather than prose and a concept page carries one per citation, so matching them made
-  every page in the vault answer to `daily`, to any source id and to a date fragment — 2700
-  hits for one word, against 5 once stripped. The excerpt comes from the same stripped prose,
-  so the line shown is the line that matched.
+  inspects the page's language. **Search reads visible Markdown text through CommonMark parsing.**
+  Soft breaks and inline formatting preserve phrases; block boundaries, list items and
+  table cells separate them. Link destinations and HTML markup are excluded. Titles and
+  aliases are independent name fields, so a phrase cannot span two names. Excerpts use
+  the same text projection as matching. This read-only projection does not change graph
+  link extraction or authored content.
+
 - **`brief::build_brief` splits a day by whether the vault already held the concept.** Ten
   concepts enter a day and thirty are named again; what it did not hold is what was learned
   and carries the line its page opens with, while what it already held carries names only —
@@ -153,9 +151,77 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   was LAST cited and not every day it was, so a concept introduced on Tuesday and named again
   on Wednesday fell out of Tuesday's `learned` and, no longer new on Wednesday, out of every
   day: measured at 1 in 13 on one day of the reference vault, and it is the recurring concepts
-  — the interesting ones — that vanish. A day's own links do not move. The correct source is
-  also the cheap one: eight pages and their concepts rather than a scan of all 2689, which took
-  the command from 230ms to 16ms. Citations are gated exactly as the graph gates an edge.
+  — the interesting ones — that vanish. A day's own links do not move. Bodies come from that day's pages and the
+  concepts they name. `ExistingPageResolver` indexes concept addresses and filesystem metadata
+  so an actual alias reaches its owner, while a nonexistent Linux case spelling is not credited.
+  It does not read every concept body. Brief and graph share this filesystem resolver.
+
 - **`VaultWriter::write_page_sync`** calls `lk_core::fs::write_atomic` directly (no tokio
   runtime). Used by graph commands — the same single atomic-write implementation as the
   async path, not a separate one.
+
+- **Knowledge reviews are authored explorations.** Optional `review` metadata records status,
+  evidence revisions and a resolution. `list_reviews` reports evidence drift and invalid
+  records without changing a judgment. `ReviewEffectiveState` is the shared current-state
+  policy: errors are invalid, changed evidence needs reassessment, otherwise the authored
+  status stands. `review.evidence` is the evidence for the current explicit assessment,
+  not a union of all historical versions. Before reassessment, archive the review itself
+  with `wiki evidence --archive <review-path>`; preserve that archive path/revision and
+  a dated judgment in the authored body. After actually reviewing and archiving the new
+  evidence, explicitly replace the current evidence set. Never silently retag old prose,
+  delete historical archives, or treat the archived review as independent source evidence.
+  Verified historical archives preserve validity after source deletion.
+  The bounded catalog shows reviews once in its first group with localized state labels;
+  an evidence citation never labels the source itself as a conflict target.
+  `inspect_evidence` groups exact recorded `source_url`
+  values; neither URL count nor citation count claims independence.
+
+- **Review evidence archives** retain the first raw source snapshot for an authored revision
+  under `.lorekeeper/evidence/<revision>.md`. Reading verifies the content hash; publication
+  never replaces an existing archive. Current source drift and historical availability are
+  separate facts. Missing current evidence is not an integrity error when its recorded
+  revision remains available in a verified archive.
+
+- **`MutationSession`** holds the cooperating writer lock and recovers a pending journal
+  before new plans. `MutationPlan` preflights every expected file, then records ordered
+  creates, edits, renames and removals with their original and resulting content. Recovery
+  accepts only the expected before/after states and preserves conflicts for reconciliation.
+  Existing hard-link directory entries are not case-only rename aliases. Journal files are
+  private; durable directory creation and progress use the shared atomic-write primitive.
+  The plan is persisted once; small progress receipts bind the cursor to its plan revision.
+  Completion removes and syncs the plan before clearing progress, so recovery cannot replay
+  earlier edits over a later state of the same file.
+
+- **Page addresses** pass through `page_path` for reads and `writable_page_path` for
+  publication. Existing ancestors must resolve inside the configured vault, including
+  when the leaf does not exist. Internal directory aliases are supported; publication
+  refuses leaf symlinks rather than replacing their directory entries. This validates
+  paths at access time, not an OS-level guarantee against concurrent symlink replacement.
+
+- **Live discovery is bounded output over a complete scope scan.** Search and browse share the
+  page reader. Browse sorts by title and exact path; search retains field ranking and uses
+  exact path as the final tie-break. Category/type filters apply after alias ownership is
+  resolved across the scope. Facets count query matches before filters, `total` counts after
+  filters, and pagination runs last. Missing category/type uses an empty facet key. Live offsets
+  reflect current files; an explicit prepared snapshot pins the captured corpus.
+
+- **`inspect_links`** reads one source snapshot and returns explicit internal link
+  occurrences in source order, including repeats. Source line numbers include frontmatter;
+  context is the literal link-bearing line. Target filters resolve lexical addresses and
+  verified filesystem aliases, never concept-name guesses. Missing targets remain inspectable.
+  `file_revision` pins pagination when supplied on the next request. This shares graph link
+  extraction and does not infer relationship types or read target bodies.
+
+- **`prepare_search`** creates a reconstructible SQLite FTS5 snapshot under `.lorekeeper/`.
+  Explicit `--snapshot` queries use that captured corpus; default search reads live files.
+  The snapshot identity binds schema version, vault/config context, paths and full revisions.
+  Refresh commits atomically in SQLite; failed reads keep the previous snapshot. External
+  editors are not frozen during capture. FTS trigram filtering only narrows candidates;
+  short terms use exact substring candidates and the shared matcher decides every hit.
+  Schema/projection changes require a snapshot version bump. No embeddings or daemon.
+- **`inspect_document`** parses a CommonMark outline, paginates it, and reads bounded section
+  text with Unicode scalar offsets. Section ids belong to the returned full file revision;
+  duplicate headings stay distinct. A selected section includes its nested subsections.
+  Callers pin subsequent reads with `--revision`, including revisions from search hits.
+- **`load_concept_registry`** is shared by ingestion and CLI resolution. One operation loads
+  the declared names once; unreadable or disappearing pages fail instead of implying absence.

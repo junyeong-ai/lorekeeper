@@ -76,7 +76,7 @@ knows about; provider choice is config-driven (`build_llm_client` in lk-cli).
     one marker answers for the pair, so a task judged work on the strength of the synthesis
     heading alone would have the drain fill one section and stamp both answered — with no
     re-queue until the citation set next moves.
-    `concept-synthesis` hashes the citation SET alone, through
+    `concept-synthesis` hashes source paths and authored revisions through
     `lk_core::concept::citation_digest`, so the page's recorded input and the task's
     `cache_hash` are the same string by construction rather than by two implementations
     agreeing. `vault.locale` is deliberately absent from it: a concept page's authored body is
@@ -99,9 +99,8 @@ knows about; provider choice is config-driven (`build_llm_client` in lk-cli).
   **`lore queue status`** (`commands::queue::classify_task`), which reads each
   pending task's target page and classifies it `current` / `done` / `stale` /
   `missing-target` / `unreadable` (`done` is what `queue count` and `queue prune` hinge on;
-  `unreadable` is a target page whose frontmatter will not parse, which is not a judgment at
-  all — it counts as work LEFT so the run is never retired, and only repairing the page
-  resolves it). A queue LINE that will not parse is separate from all five: it names work
+  `unreadable` includes invalid retained inputs, unsupported policies, unsafe paths and
+  unreadable target/source pages; it is retained until the underlying cause is repaired). A queue LINE that will not parse is separate from all five: it names work
   nothing can classify, so its file is kept whole and `prune` reports it as `unparseable`,
   with the tasks held alongside it as `blocked`;
   `/lore-process` consults that classification and processes only `current` tasks
@@ -116,7 +115,7 @@ knows about; provider choice is config-driven (`build_llm_client` in lk-cli).
   per-kind "can this be empty?" judgment proved intractable (it was wrong for concepts,
   themes, work-log, summaries, and narratives in turn), so the model removes the judgment
   entirely: the pipeline pre-stamps the input key as the stale-task reference and the
-  skill stamps the marker when done; a cache hit is `marker == input key`, never inferred
+  `lore queue apply` stamps the marker when publishing; a cache hit is `marker == input key`, never inferred
   from the body. The pipeline, work-log, and synthesis derive both keys from these.
   Adding a `TargetKind` is compiler-forced to choose both.
   The skill-side mirror is enforced too: `tests/skill_contract.rs` iterates the full
@@ -137,13 +136,18 @@ knows about; provider choice is config-driven (`build_llm_client` in lk-cli).
   - `MockLlmClient` — tests only, with configurable `summary`, `concepts`, `themes`.
     Behind the `test-util` feature (dependents enable it as a dev-dependency), so it is
     never compiled into the release binary.
-- **Results travel back for the kinds this workspace materializes itself.** Most drained
-  tasks write one section of one page and the drain writes it directly. `extract-concepts`
-  does not: its output lands on concept pages SHARED between origin pages, so the drain
+- **Every semantic result is staged.** Single-section tasks return `SectionResult` in
+  `<task_id>.section.json`; concept synthesis returns `<task_id>.synthesis.json`.
+  Workers never edit target pages or completion markers. `extract-concepts` returns values: its output lands on concept pages SHARED between origin pages, so the drain
   writes a [`TaskResult`] to `<queue>/results/{task_id}.json` and `lore queue apply` merges
   it through `lk-pipeline`'s `ConceptDrafts` — the same code the synchronous LLM route uses.
-  The result carries `target` and `cache_hash` verbatim so the applier can re-run the queue's
-  one staleness check: the page may have been re-rendered while the drain was working.
+  The result carries `target` and `cache_hash` verbatim and the `target_revision` captured
+  before reading the page. The applier requires a matching pending extraction task, checks
+  its target and date, and verifies the page revision before materializing the result.
+  A changed page requires a new extraction; an old answer cannot be relabeled as current.
+  Lost extraction tasks can be recovered explicitly with `queue apply --recover-extraction
+  <task_id>`, using the current file revision reported by `wiki evidence`; normal draining
+  rejects orphan results. Recovery retains the same target revision checks.
   `read_results` splits the directory into `ready` and `unreadable` rather than failing on a
   malformed file, and `queue apply` moves the unreadable ones to `results/corrupt/`. Failing
   the read stranded every other pending result behind one truncated write on every run
@@ -157,3 +161,17 @@ knows about; provider choice is config-driven (`build_llm_client` in lk-cli).
   (`lk-pipeline`'s `event_log` stays strict about a corrupt line for a reason that does NOT
   transfer: its caller rewrites the log from what it parsed, so a skip would destroy the
   record.)
+
+- **Concept synthesis returns a staged result.** `<task_id>.synthesis.json` is owned by
+  the CLI synthesis applier, separate from extraction results. It contains both section
+  bodies and the target snapshot from `queue status`. The applier revalidates source
+  revisions and the target, publishes both sections and their marker together, and retains
+  failed results. Apply holds the vault mutation session before the queue claim.
+  Extraction concept and origin writes share one recoverable mutation plan. External
+  editors do not participate in these locks. Permanent decode failures preserve bytes
+  and a diagnostic sidecar in quarantine; actual I/O errors remain failures.
+
+- **Retained input validation** reconstructs the typed request and recomputes its cache
+  identity before normal classification or result application. Missing or mismatched
+  inputs are unreadable, even when completion markers match; pruning retains them for
+  diagnosis. Packet export and explicit regeneration use the same validation.

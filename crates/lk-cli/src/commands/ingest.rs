@@ -56,6 +56,17 @@ pub async fn run(
 ) -> miette::Result<()> {
     let config = load_config(&find_config(opts)?)?;
     let vault_root = config.vault.root_path();
+    // Hold the shared vault writer lease before reading evidence or existing pages.
+    // External editors do not participate; publication still validates its own inputs.
+    let _mutation = if dry_run {
+        None
+    } else {
+        std::fs::create_dir_all(&vault_root).map_err(|e| miette::miette!("create vault: {e}"))?;
+        Some(
+            lk_vault::MutationSession::acquire(&vault_root)
+                .map_err(|e| miette::miette!("vault mutation: {e}"))?,
+        )
+    };
 
     let creds = lk_source::credentials::Credentials::load(&vault_root)
         .map_err(|e| miette::miette!("{e}"))?;
@@ -165,7 +176,9 @@ pub async fn run(
         eprintln!("[dry-run] no vault writes will be performed");
     }
     if let Some(td) = target_date {
-        eprintln!("[date] only events on {td} will be processed");
+        eprintln!(
+            "[date] event windows are anchored to {td}; document snapshots preserve authored dates"
+        );
     }
 
     let http = lk_source::build_http_client().map_err(|e| miette::miette!("{e}"))?;
@@ -230,7 +243,20 @@ pub async fn run(
         // buffered LLM tasks for pages it never finished writing — roll those back so the
         // flushed queue file never references an unwritten page.
         llm.begin_source().await;
-        let result = match pipeline.plan(id, sc, raw, &options).await {
+        let source_options = lk_pipeline::IngestOptions {
+            target_date: if adapter
+                .selection(&sc.params)
+                .map_err(|error| miette::miette!("{error}"))?
+                == lk_source::Selection::DocumentSnapshot
+            {
+                None
+            } else {
+                options.target_date
+            },
+            today: options.today,
+            dry_run: options.dry_run,
+        };
+        let result = match pipeline.plan(id, sc, raw, &source_options).await {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("  ✗ pipeline: {e}");
@@ -361,7 +387,14 @@ pub async fn run(
     for p in &planned {
         for out in &p.result.daily_pages {
             report_discards(out, dry_run);
-            if let Err(e) = writer.write_page(out.path.as_ref(), &out.content).await {
+            let mut plan = lk_vault::MutationPlan::default();
+            let publication = out.plan_publication(&mut plan, &vault_root).and_then(|()| {
+                _mutation
+                    .as_ref()
+                    .expect("writing ingest holds mutation session")
+                    .apply(plan)
+            });
+            if let Err(e) = publication {
                 eprintln!("  ✗ vault write {}: {e}", out.path);
                 any_write_failed = true;
                 break;
@@ -371,7 +404,14 @@ pub async fn run(
         }
         for out in &p.result.document_pages {
             report_discards(out, dry_run);
-            if let Err(e) = writer.write_page(out.path.as_ref(), &out.content).await {
+            if let Err(e) = lk_vault::publish_document_expected(
+                _mutation
+                    .as_ref()
+                    .expect("writing ingest holds mutation session"),
+                out.path.as_ref(),
+                &out.content,
+                out.expected_original.as_ref(),
+            ) {
                 eprintln!("  ✗ vault write {}: {e}", out.path);
                 any_write_failed = true;
                 break;
@@ -408,7 +448,14 @@ pub async fn run(
             .await
             .map_err(|e| miette::miette!("concept render: {e}"))?;
         for out in &concept_pages {
-            if let Err(e) = writer.write_page(out.path.as_ref(), &out.content).await {
+            let mut plan = lk_vault::MutationPlan::default();
+            let publication = out.plan_publication(&mut plan, &vault_root).and_then(|()| {
+                _mutation
+                    .as_ref()
+                    .expect("writing ingest holds mutation session")
+                    .apply(plan)
+            });
+            if let Err(e) = publication {
                 eprintln!("  ✗ vault write {}: {e}", out.path);
                 any_write_failed = true;
                 break;

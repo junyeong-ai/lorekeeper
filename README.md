@@ -25,9 +25,9 @@ Gmail·Slack·Jira·캘린더·RSS·메모를 매일 모아 중복을 없애고,
 | 🔗 **연결되는 지식 그래프** | 마크다운 링크·역링크·클러스터로 개념이 서로 이어짐 |
 | ✅ **할 일 → 기록** | `lore task`로 관리한 할 일이 완료되는 순간 그날의 페이지가 됨 — SaaS에 흔적을 남기지 않은 일도 work-log와 성과 리뷰에 잡힘 |
 | 📈 **복리** | 주간·월간·분기·연간 합성으로 시간이 갈수록 가치↑ |
-| 🔑 **API 키 불필요** | Claude Code 세션이 직접 LLM 작업 수행 (별도 과금 없음) |
+| 🔑 **API 키 불필요** | Claude Code 세션이 직접 LLM 작업 수행 (별도 LLM API 연동 불필요) |
 
-> 💡 영감: Andrej Karpathy의 *"LLM이 관리하는 위키"* — **원본은 불변**, **위키는 LLM이 작성·유지**, **스키마(config)가 워크플로를 정의**. 사람은 소스를 고르고 질문하고, LLM은 부기를 한다.
+> 💡 영감: Andrej Karpathy의 *"LLM이 관리하는 위키"* — **출처와 생성된 지식을 구분**, **위키는 LLM이 작성·유지**, **스키마(config)가 워크플로를 정의**. 사람은 소스를 고르고 질문하고, LLM은 부기를 한다.
 
 ---
 
@@ -59,7 +59,7 @@ flowchart LR
 
 > **시작하기 전에 준비물** — 어렵지 않습니다:
 > - 💻 **macOS 또는 Linux** (Windows는 PowerShell 설치 스크립트 제공)
-> - 🤖 **Claude Code** — `/lore-process`가 요약·개념을 채워줍니다 (별도 API 키·과금 없음)
+> - 🤖 **Claude Code** — `/lore-process`가 요약·개념을 채워줍니다 (Claude Code 세션 사용)
 > - 🔑 **쓰려는 소스의 자격증명만** — 예: Gmail/Drive/Calendar는 Google 로그인, Slack은 토큰
 > - 🗂️ **(선택) Obsidian** — 그래프를 예쁘게 탐색용. 없어도 결과물은 평범한 마크다운입니다
 >
@@ -201,6 +201,12 @@ source_count: 2          # ← 두 문서가 이 한 개념을 인용
 - [Kubernetes](concepts/kubernetes.md) — 컨테이너 오케스트레이션. 안정 운영은 pod 메모리·재시작 지표 관찰에 달림…
 ```
 
+큰 볼트에서는 `index.md`를 진입점으로 각 페이지 최대 100개 항목의 탐색 트리를 생성합니다. `catalog/`는 재생성 가능한 목록이며 지식·근거 그래프에 포함되지 않습니다.
+
+지식 검토는 카탈로그의 선두 그룹에서 현재 상태와 함께 찾습니다. 증거가 바뀐 해결 기록은 원래 판단을 보존하면서 `재검토 필요`로 표시합니다. 예약 파이프라인은 마지막에 `queue check`와 `wiki reviews --check`를 실행합니다. 열린 검토 자체는 실패가 아니며, 검증된 보관본이 있는 역사적 증거의 원본 삭제도 오류로 취급하지 않습니다.
+
+증거 변경을 실제로 재검토할 때는 먼저 `lore wiki evidence --archive <검토 경로>`로 이전 검토 전체를 보존합니다. 새 근거도 읽고 보관한 다음 현재 `review.evidence`를 명시적으로 교체하고, 본문에 날짜·판단·이전 검토의 `.lorekeeper/evidence/<revision>.md` 경로를 남기십시오. 오래된 판단의 revision만 자동으로 새 값으로 바꾸지 않습니다.
+
 ### ✅ 결과 ④ — 지식 그래프가 형성됩니다
 
 `lore graph suggest-links`·`cluster`가 개념 사이의 관계를 발견합니다(공동인용을 차수로 정규화한 Adamic-Adar 점수):
@@ -269,7 +275,7 @@ flowchart LR
 
 - **결과물은 평범한 마크다운** — `daily/{소스}/`(원본 타임라인), `wiki/concepts/`(개념), `wiki/documents/`(문서), `me/`(work-log·성과리뷰), `synthesis/`(주간 테마).
 - **자료화된 뷰(materialized view)** — 페이지는 두 층. **구조 층**(frontmatter·원본·헤딩)은 매 수집마다 재생성, **의미 층**(요약·개념·합성)은 LLM 소유이며 재렌더에도 보존됩니다. 입력이 안 바뀌면 LLM 작업 0건(BLAKE3 해시로 판정).
-- **무손실** — 재실행은 멱등(byte-identical). 스트리밍 소스(RSS)는 영구 이벤트 로그로 스크롤아웃된 항목도 보존.
+- **입력과 재처리** — 입력 해시가 같으면 완료된 LLM 결과를 재사용합니다. 재수집은 원격 수정·삭제와 조회 범위의 영향을 받습니다. RSS 이벤트 로그는 피드에서 밀려난 수집 항목을 보존하며, 과거 입력 그대로의 재합성은 보관된 큐 입력이 있을 때만 가능합니다.
 - **현재만 실체화** — 미래 날짜는 페이지를 만들지 않음(forecast는 지식이 아님). 날짜가 오면 지식이 됩니다.
 - **vault의 언어는 설정이 정한다** — `vault.locale`(ko | en)은 라벨만 바꾸는 스위치가 아니라 **Lorekeeper가 덧붙이는 모든 문장의 언어**입니다. 요약·주간 테마·개념 정의·탐구 페이지가 그 언어로 쓰이고, 개념의 이름은 그 개념을 쓴 출처가 적은 형태를 그대로 따릅니다 — 번역하지 않으므로, 출처가 다른 언어로 적은 용어는 그 철자를 유지합니다. 원문도 번역하지 않습니다.
 - **그래프가 부기를 한다** — `backlinks-sync`(개념의 인용·카운트·요약 입력 재도출, 근거가 바뀐 요약은 큐로), `lint`(고아·깨진링크·중복개념), `merge`(중복 개념 통합), `cluster`/`suggest-links`(관계 발견).
@@ -291,8 +297,15 @@ lore schedule | crontab -     # cron 발행
 lore brief --date yesterday   # 그날의 지식 — 새로 안 것(한 줄씩)과 다시 본 것(이름만)
 lore fetch <url>              # 링크 하나를 읽어 inbox에 저장(출처 주소를 달아서)
 lore wiki search <질의>       # 질의가 닿는 페이지 — 이름으로 맞았는지 본문에서 맞았는지까지
-                              #   개념 이름으로 물으면 그 개념의 다른 이름으로 쓰인 본문까지 읽습니다
-                              #   (`지식그래프`↔`지식 그래프`, `MCP`↔`Model Context Protocol`)
+                              # 등록된 alias로 쓰인 본문까지 검색 (`지식그래프`↔`지식 그래프`)
+lore wiki browse --category ai-ml --type concept --limit 20 --json # 분류별 탐색; next_offset으로 다음 페이지
+lore graph --json neighbors wiki/concepts/example.md # 출처를 포함한 양방향 링크 탐색
+lore graph --json neighbors wiki/concepts/example.md --type concept # 관련 개념만 탐색; --type document로 원문 조회
+lore wiki prepare             # 검색 판본 생성; 반복 검색에 --snapshot <id> 사용
+lore wiki search "정확한 문자열" --body --json # 원문 행·문맥·판본; 정규식은 --regex
+lore wiki document-identity plan --source ID --manifest /tmp/identity.json # 기존 사본의 식별자 이관 검증
+lore wiki read wiki/concepts/example.md # 목차 → --section ID; 후속 읽기에 --revision 사용
+lore wiki links wiki/concepts/example.md --limit 20 # 연결된 원문 행·설명·리비전 조회
 lore wiki concepts            # 개념 목록
 lore resolve <name>           # 어떤 개념 페이지가 그 이름을 갖는지 (0 소유 / 1 없음 / 2 중복)
 lore wiki index / log / map   # 주제별 인덱스 / 시간순 타임라인 / 인용 클러스터 맵 재생성
@@ -307,7 +320,11 @@ lore doctor                   # 페이지 계약 감사(텍스트 청결도·미
 lore extract status           # 프로젝트 지식 추출이 저장소보다 얼마나 뒤처졌는지
 lore maintenance              # 보관기한 지난 ingest 로그·드레인된 큐 파일 정리
 lore queue status / prune     # LLM 작업 큐 상태 / 죽은 작업 정리
-lore queue apply              # 드레인이 낸 개념 추출을 페이지로 실체화
+lore queue apply              # 검증된 요약·테마·정제·개념 결과를 중앙 적용
+lore queue check              # 미완료 작업·미게시 결과·중단된 변경을 JSON으로 검사
+lore wiki reviews --check     # 증거 변경·잘못된 검토 검사(미해결 검토는 통과)
+lore queue packet --task-id ID # 병렬 작업용 출처·revision 묶음 (본문은 --include-content)
+lore queue regenerate --task-id ID --dry-run # 보관 입력 재합성 미리보기
 lore queue count              # current 작업 수만 정수로 출력(스크립트용)
 lore config vault-root        # vault 절대경로만 출력(스크립트용)
 lore schema                   # wiki/AGENTS.md(페이지 포맷 스키마) 생성
@@ -330,6 +347,7 @@ lore schema                   # wiki/AGENTS.md(페이지 포맷 스키마) 생�
 | `/lore-capture` | 작업 중 떠오른 인사이트를 즉시 vault에 포착 |
 | `/lore-extract` | 프로젝트 repo의 전이가능한 지식을 일괄 추출 (scan→run→audit) |
 | `/lore-ingest` | `lore` CLI 래퍼 (수집·합성·상태·스케줄) |
+| `/lore-day` | 오늘의 할 일·지식 브리핑·리마인더·마감 |
 
 > 예: `/lore-wiki query "RAG 검색 품질을 어떻게 올리지?"` → vault의 개념들을 교차 인용해 답하고, 좋은 답은 `wiki/explorations/`에 페이지로 환류합니다.
 
@@ -341,7 +359,7 @@ lore schema                   # wiki/AGENTS.md(페이지 포맷 스키마) 생�
 
 | 모드 | 기본 | 설명 |
 |---|:---:|---|
-| `queue` | ✓ | `<vault>/.lorekeeper/queue/`에 JSONL 작업을 쌓고, `/lore-process`가 Claude Code 세션으로 처리 — **API 키·별도 과금 없음** |
+| `queue` | ✓ | `<vault>/.lorekeeper/queue/`에 JSONL 작업을 쌓고, `/lore-process`가 Claude Code 세션으로 처리 — **별도 LLM API 연동 불필요** |
 | `noop` | | LLM 작업 없음 — 개발·CI·템플릿만 필요할 때 |
 
 무인 운영은 `lore-daily.sh`가 맡습니다. 드레인은 `claude -p` 세션으로 도는데, `-p` 모드는 물어볼 수 없어 프롬프트가 필요한 동작은 그냥 거부되므로 프로토콜이 쓰는 도구를 `--allowedTools`로 명시해야 합니다 — 스크립트가 그 목록과 무인 실행임을 알리는 프리앰블을 함께 넘깁니다. 스크립트는 단계 하나가 실패해도 다음 단계를 건너뛰지 않습니다: 한 소스의 수집 실패는 나머지 소스의 큐를 처리하지 않을 이유가 되지 않기 때문입니다.
@@ -384,7 +402,7 @@ lore self deploy      # 재배포만 (self status가 보고한 차이를 고침)
 lore self uninstall   # 설치한 것만 제거 — vault는 건드리지 않음
 ```
 
-스킬·파이프라인·템플릿·`config.example.yaml`은 **바이너리에 내장**되어 있습니다. 별도로 내려받는 아티팩트가 없으니 버전이 어긋날 수 없고, `lore self deploy`가 사본을 씁니다. `lore self update`는 큐에 처리 대기 중인 작업이 있으면 거부하고, 실행 중인 버전보다 오래된 릴리스도 거부합니다(`--version`으로 명시하면 되돌릴 수 있음).
+스킬·파이프라인·템플릿·`config.example.yaml`은 **바이너리에 내장**되어 있습니다. 배포된 사본은 변경되거나 뒤처질 수 있으며 `lore self status`로 확인합니다. `lore self deploy`가 사본을 씁니다. `lore self update`는 큐에 처리 대기 중인 작업이 있으면 거부하고, 실행 중인 버전보다 오래된 릴리스도 거부합니다(`--version`으로 명시하면 되돌릴 수 있음).
 
 ---
 
@@ -412,25 +430,30 @@ lore schedule --format launchd --bin "$(command -v lore)" \
               --pipeline-dir ~/.local/share/lorekeeper/pipelines               # macOS
 ```
 
+예약 스크립트는 `/bin/bash`로 직접 실행되어 작업별 이름이 표시됩니다. 월간·분기·연간 검토는 각 주기를 유지하며 저장소 쓰기 잠금을 기다립니다. 유지보수와 큐 정리는 한 작업으로 순차 실행됩니다. 기존 예약을 교체할 때는 `com.lorekeeper.queue-prune` LaunchAgent도 해제·제거하세요. `--template-dir` 지정은 예약 환경에도 전달됩니다.
+
 `ingest.schedule`은 **전체 소스를 한 번에** 도는 `lore ingest` 한 줄을 발행합니다(work-log가 cross-source 일일 집계라 소스별 분할 실행은 페이지를 부분 덮어씀). 각 합성 주기(weekly/monthly/quarterly/annual)는 자기 cron을 발행하고, `maintenance.schedule`이 있으면 청소 작업도 자동화됩니다.
 
-무인 운영용으로 두 개의 파이프라인 스크립트(`lore-daily.sh`, `lore-weekly.sh`)가 함께 설치됩니다 — 일일 수집+큐 처리+그래프 정합, 주간 합성+지식 감사. 시스템 스케줄러(launchd/cron)가 이를 실행하므로 Claude 데스크탑이 떠 있지 않아도 동작합니다.
+무인 운영용으로 `lore-daily.sh`(일일 수집+큐 처리+그래프 정합), `lore-weekly.sh`(주간 합성+지식 감사)와 월간·분기·연간·유지보수용 진입 스크립트가 함께 설치됩니다. 시스템 스케줄러(launchd/cron)가 이를 실행하므로 Claude 데스크탑이 떠 있지 않아도 동작합니다.
 
 `--pipeline-dir`가 그 스크립트를 **실제로 스케줄에 태우는** 플래그입니다. `lore ingest`와 `lore synthesis weekly`는 파이프라인의 첫 단계일 뿐이고 큐 드레인과 `queue apply`는 스크립트에만 있으므로, 이 플래그 없이 발행하면 매일 수집만 하고 요약·개념은 영원히 비어 있게 됩니다. 스케줄러는 환경을 거의 물려주지 않으므로 스크립트가 필요로 하는 `PATH`/`lore`/`claude`/config 경로도 함께 실립니다 — 추측이 아니라 이 명령을 실행한 세션에서 그대로 상속합니다. macOS는 launchd를 권합니다: 잠든 사이 놓친 작업을 깨어나면 실행하지만 cron은 조용히 건너뜁니다.
 
 ### 볼트를 git으로 관리하기 (선택)
 
-LLM이 쓰는 절은 다시 쓸 때 **대체**되고 개념 병합은 페이지를 **삭제**하므로, 잘못된 실행을 되돌릴 수 있는 사본은 실행 전에 떠 둔 것뿐입니다. 볼트를 git 저장소로 만들어 두면 파이프라인이 실행마다 한 번 커밋합니다 — 실행 하나가 커밋 하나라서 무엇이 바뀌었는지 `git diff`로 보고 `git checkout`으로 되돌립니다. 저장소가 아니면 이 단계는 존재하지 않으며, 어떤 설정도 필요 없습니다.
+재합성은 본문을 대체하고 병합은 페이지를 삭제하므로, 중요한 변경 전에는 별도 백업이나 검토한 Git 커밋을 남기십시오. 파이프라인은 사용자의 동시 편집을 구별할 수 없어 자동으로 stage하거나 commit하지 않습니다. 복구 journal은 중단된 변경을 이어가기 위한 기록이며 과거 버전 백업을 대신하지 않습니다.
 
 ```bash
 cd "$(lore config vault-root)"
 git init
 git config core.precomposeunicode true        # macOS: 한글 파일명을 NFC로 저장
-printf '.lorekeeper/\n.obsidian/\nwiki/index.md\nwiki/log.md\nwiki/map.md\n' > .gitignore
-git add -A && git commit -m "vault"
+# 기존 .gitignore에 아래 항목을 추가하고 중복·사용자 설정을 확인
+printf '.lorekeeper/\n.obsidian/\n' >> .gitignore
+git status --short
+git diff
+# 공개해도 되는 파일만 선택해서 git add한 뒤 commit
 ```
 
-`.lorekeeper/`는 반드시 제외하십시오 — `credentials.json`이 그 안에 있습니다. 제외되지 않은 채로는 파이프라인이 커밋을 거부합니다. `wiki/index.md`·`log.md`·`map.md`는 `lore wiki refresh`가 매번 다시 만드는 파생물이라 이력에 둘 이유가 없습니다. 볼트에는 메일·메신저·이슈 본문이 그대로 들어 있으니, 원격 저장소는 회사 정책이 허용하는 곳에만 두거나 로컬 전용으로 쓰십시오.
+`.lorekeeper/`에는 운영 기록과 보관된 입력이 있으므로 이력에서 제외하십시오. 자격증명 파일도 별도로 제외되어 있는지 확인하십시오. `wiki/index.md`·`catalog/`·`log.md`·`map.md`는 재생성 가능한 파생물이며, 경로는 `vault.dirs.wiki` 설정에 맞춰 제외할 수 있습니다. 원격 저장소를 쓴다면 원문 데이터의 공유 범위를 먼저 확인하십시오.
 
 ---
 
@@ -442,4 +465,4 @@ git add -A && git commit -m "vault"
 
 ## 기술 스택
 
-Rust 1.97 · 2024 edition. `tokio`/`reqwest`(비동기 소스), `jiff`(타임존 정확 날짜), `minijinja`(템플릿), `petgraph`(링크 그래프), `blake3`(이벤트·캐시 해시). 라이선스: MIT.
+Rust 2024 edition · 빌드 1.99.1 · 최소 지원 1.97. `tokio`/`reqwest`(비동기 소스), `jiff`(타임존 정확 날짜), `serde-saphyr`(YAML), `minijinja`(템플릿), `feed-rs`(피드), `petgraph`(링크 그래프), `blake3`(이벤트·캐시 해시). 라이선스: MIT.

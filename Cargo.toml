@@ -6,7 +6,7 @@ members = ["crates/*"]
 # Declared once and inherited by every member, so a release bumps one line rather than
 # seven that nothing compared: six of them fed no artifact, and only a mismatch on `lore`
 # was ever observable.
-version = "0.36.2"
+version = "0.46.0"
 edition = "2024"
 rust-version = "1.97"
 license = "MIT"
@@ -36,7 +36,9 @@ encoding_rs = "0.8"
 mime = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yaml_ng = "0.10"
+serde-saphyr = { version = "2.0.0", default-features = false, features = [
+  "deserialize",
+] }
 strum = { version = "0.28", features = ["derive"] }
 clap = { version = "4", features = ["derive", "env"] }
 jiff = { version = "0.2", features = ["serde"] }
@@ -44,7 +46,7 @@ thiserror = "2"
 miette = { version = "7", features = ["fancy"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-minijinja = { version = "2", features = ["loader", "json"] }
+minijinja = { version = "3", features = ["serde", "json"] }
 blake3 = "1"
 semver = "1"
 tar = "0.4"
@@ -54,7 +56,7 @@ htmd = "0.5"
 # `Node`, so a second copy would make the two types incompatible rather than merely
 # duplicated. A different version here is a loud compile error, never a silent drift.
 markup5ever_rcdom = "0.38"
-feed-rs = "2"
+feed-rs = "3"
 dom_smoothie = "0.18"
 url = "2"
 base64 = "0.23"
@@ -62,6 +64,8 @@ sha2 = "0.11"
 rand = "0.10"
 dialoguer = "0.12"
 unicode-normalization = "0.1"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+pulldown-cmark = { version = "0.13.4", default-features = false }
 petgraph = "0.8"
 rayon = "1"
 same-file = "1"

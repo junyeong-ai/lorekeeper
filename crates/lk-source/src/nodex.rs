@@ -11,12 +11,9 @@
 //! happens to have named. The repository stays its store — the page carries its address —
 //! and the document's own `kind` rides along as a tag.
 //!
-//! `nodex` is what makes admission structural rather than a guess at a repository's layout.
-//! It answers with a document's `kind`, its `status`, and the date it declares — the same
-//! class of fact a Jira issue's `statusCategory` is — so a superseded decision is excluded
-//! because it says it is superseded, not because a heuristic read its prose. A repository
-//! that has not declared a document graph has no such answers, and it is not this source's
-//! job to invent them: `/lore-extract` is the path for one, under a person's judgment.
+//! `nodex` supplies document identity, kind and lifecycle state. Archived and superseded
+//! records remain historical evidence; their declared state travels with the copied body.
+//! Admission follows the requested date window and kinds, not an inference from prose.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -28,12 +25,6 @@ use lk_core::event::RawItem;
 
 use crate::{ExtractContext, Source, SourceError};
 
-/// The only non-terminal status `nodex` defines: every other value it carries means the
-/// document has been superseded or archived, and its knowledge lives in whatever replaced it.
-/// Admitting both would put a decision and its reversal in the graph with nothing to tell a
-/// reader which one still holds.
-const ACTIVE: &str = "active";
-
 pub struct NodexSource;
 
 #[derive(Debug, Deserialize)]
@@ -43,10 +34,20 @@ struct NodexParams {
     /// scheduled run starts in no particular directory, and a relative path would read a
     /// different repository — or none — depending on who launched it.
     repo: PathBuf,
+    /// Reconcile current inventory independently of author-declared dates.
+    #[serde(default)]
+    reconcile: bool,
+    /// Portable repository namespace; a checkout path is only a location.
+    #[serde(default)]
+    repository_id: Option<String>,
     /// Document kinds to ingest, from the repository's own `kinds.allowed`. Empty admits
     /// every kind.
     #[serde(default)]
     kinds: Vec<String>,
+    /// Exact document identities for a bounded backfill. Every requested identity must
+    /// occur in the selected date/kind window; an empty list selects the whole window.
+    #[serde(default)]
+    document_ids: Vec<String>,
     #[serde(default = "default_lookback")]
     lookback_hours: u32,
     /// How many of the window's documents this source will ingest in one run. A guard against
@@ -88,6 +89,9 @@ const INITIAL_REACH: usize = 500;
 /// `lookback_hours` the operator meant differently — not something the adapter can settle
 /// by asking again.
 const MAX_REACH: usize = 64_000;
+// Snapshot and verified-body envelopes below are the public nodex 0.52 contract.
+const NODEX_COMPATIBILITY: &str = ">=0.52.0, <0.53";
+const INVENTORY_FIELDS: &str = "id,title,kind,status,path,created,updated,reviewed,supersedes,superseded_by,implements,related,covers,tags";
 
 /// One document, as `nodex query recent` reports it.
 #[derive(Debug, Deserialize)]
@@ -108,10 +112,34 @@ struct RecentData {
 /// `nodex`'s reply envelope. Every operational command answers in it, so one shape reads
 /// both the answer and the refusal.
 #[derive(Debug, Deserialize)]
-struct Envelope {
+struct Envelope<T> {
     ok: bool,
-    data: Option<RecentData>,
+    data: Option<T>,
     error: Option<EnvelopeError>,
+    snapshot: Option<Snapshot>,
+    #[serde(default)]
+    warnings: Vec<NodexWarning>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Snapshot {
+    verification: String,
+    unbuildable: usize,
+    unfollowed: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NodexWarning {
+    code: String,
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct NodeDetail {
+    node: serde_json::Value,
+    body: String,
+    #[serde(default)]
+    outgoing: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -127,6 +155,25 @@ pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
 
 impl crate::ValidatedParams for NodexParams {
     fn validate(&self) -> Result<(), SourceError> {
+        if self.reconcile
+            && self
+                .repository_id
+                .as_deref()
+                .is_none_or(|id| id.trim().is_empty())
+        {
+            return Err(SourceError::InvalidParams(
+                "nodex reconciliation requires a nonempty `repository_id`".into(),
+            ));
+        }
+        if self
+            .repository_id
+            .as_deref()
+            .is_some_and(|id| id.trim().is_empty())
+        {
+            return Err(SourceError::InvalidParams(
+                "nodex `repository_id` must not be blank".into(),
+            ));
+        }
         if !self.repo.is_absolute() {
             return Err(SourceError::InvalidParams(format!(
                 "nodex `repo` must be an absolute path, got '{}'",
@@ -143,12 +190,36 @@ impl crate::ValidatedParams for NodexParams {
                 "nodex `kinds` entries must not be empty".into(),
             ));
         }
+        let unique: std::collections::BTreeSet<_> = self.document_ids.iter().collect();
+        if self.document_ids.iter().any(|id| id.trim().is_empty())
+            || unique.len() != self.document_ids.len()
+        {
+            return Err(SourceError::InvalidParams(
+                "nodex `document_ids` must contain unique, nonempty identities".into(),
+            ));
+        }
         Ok(())
     }
 }
 
+/// The CLI may disable its target-day filter only for explicitly selected reconciliation.
+/// This parses the same typed params as extraction; callers never infer a mode from metadata.
+#[cfg(test)]
+fn is_reconciliation(params: &serde_json::Value) -> Result<bool, SourceError> {
+    Ok(crate::parse_validated::<NodexParams>(params)?.reconcile)
+}
+
 #[async_trait]
 impl Source for NodexSource {
+    fn selection(&self, params: &serde_json::Value) -> Result<crate::Selection, SourceError> {
+        let p: NodexParams = crate::parse_validated(params)?;
+        Ok(if p.reconcile {
+            crate::Selection::DocumentSnapshot
+        } else {
+            crate::Selection::DateWindow
+        })
+    }
+
     async fn extract(
         &self,
         params: &serde_json::Value,
@@ -167,30 +238,69 @@ impl Source for NodexSource {
         // day it was re-read would put a second copy of knowledge the vault already holds onto
         // a later page and run the extraction over it again. Two queries rather than one
         // answer plus a guess at which field nodex reports when several match.
+        // `check` builds in memory and exposes scope-declaration warnings that current
+        // query envelopes do not carry. Its unrelated rule findings do not govern ingestion.
+        run_nodex::<serde_json::Value>(&p.repo, last_day, &["check", "--severity", "error"], false)
+            .await?;
+        let lens: serde_json::Value =
+            run_nodex(&p.repo, last_day, &["export", "config"], false).await?;
+        let mut inventory = None;
         let mut items: Vec<RecentItem> = Vec::new();
-        for field in ["created", "updated"] {
-            items.extend(query_window(&p.repo, field, first_day, last_day).await?);
+        if p.reconcile {
+            let listing: serde_json::Value = run_nodex(
+                &p.repo,
+                last_day,
+                &[
+                    "query",
+                    "nodes",
+                    "--require-current",
+                    "--fields",
+                    INVENTORY_FIELDS,
+                ],
+                true,
+            )
+            .await?;
+            let rows = listing
+                .get("items")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| SourceError::Parse("nodex inventory omitted items".into()))?;
+            if listing.get("total").and_then(|v| v.as_u64()) != Some(rows.len() as u64) {
+                return Err(SourceError::Parse("nodex inventory was truncated".into()));
+            }
+            inventory = Some(listing.clone());
+            for row in rows {
+                let mut row = row.clone();
+                row["date"] = serde_json::json!(last_day.to_string());
+                items.push(
+                    serde_json::from_value(row)
+                        .map_err(|e| SourceError::Parse(format!("nodex inventory item: {e}")))?,
+                );
+            }
+        } else {
+            for field in ["created", "updated"] {
+                items.extend(query_window(&p.repo, field, first_day, last_day).await?);
+            }
         }
-        // What the declared fields say belongs to this window. A document excluded by
-        // `status`, `kind` or its date was never attempted, so it cannot stand for a read that
-        // failed — the count of attempts is taken from here rather than from what the query
-        // returned, which reaches past the window on both sides.
         let admitted: Vec<RecentItem> = latest_per_document(items)
             .into_iter()
             .filter(|item| {
-                item.status == ACTIVE
-                    && (first_day..=last_day).contains(&item.date)
+                (p.reconcile || (first_day..=last_day).contains(&item.date))
                     && (p.kinds.is_empty() || p.kinds.iter().any(|k| k == &item.kind))
             })
             .collect();
+        let admitted = select_documents(admitted, &p.document_ids)?;
         // Refused whole rather than ingested in part. Which documents a partial run kept would
         // be decided by the order the index happened to list them, so the vault would differ
         // between two runs asking the same question — and the operator would have no way to
         // see that from the pages.
         if admitted.len() > p.max_documents {
             return Err(SourceError::InvalidParams(format!(
-                "{first_day}..={last_day} holds {} documents, past `max_documents` ({}) — \
-                 narrow `lookback_hours`, or raise the cap for a deliberate backfill",
+                "{} holds {} selected documents, past `max_documents` ({}) — narrow the selection or raise the cap deliberately",
+                if p.reconcile {
+                    "current inventory".to_owned()
+                } else {
+                    format!("{first_day}..={last_day}")
+                },
                 admitted.len(),
                 p.max_documents
             )));
@@ -210,25 +320,107 @@ impl Source for NodexSource {
                     item.id, item.path
                 ))
             })?;
-            match read_document(&p.repo, &item, p.base_url.as_deref(), ctx) {
-                Ok(raw) => kept.push(raw),
-                // One unreadable file must not cost the others their day: the repository is
-                // the store, and a document this cannot read is still there to be read
-                // tomorrow.
-                Err(e) => tracing::warn!(
-                    document = %item.id,
-                    error = %e,
-                    "nodex: skipping document (read failed)"
-                ),
+            let detail: NodeDetail = run_nodex(
+                &p.repo,
+                last_day,
+                &["query", "node", &item.id, "--with-body"],
+                true,
+            )
+            .await?;
+            verify_selection(&item, &detail.node, p.reconcile)?;
+            kept.push(read_document_revision(
+                &p.repo,
+                &item,
+                p.base_url.as_deref(),
+                ctx,
+                Some(&detail),
+                p.reconcile,
+                p.repository_id.as_deref(),
+            )?);
+        }
+        if let Some(before) = inventory {
+            let after: serde_json::Value = run_nodex(
+                &p.repo,
+                last_day,
+                &[
+                    "query",
+                    "nodes",
+                    "--require-current",
+                    "--fields",
+                    INVENTORY_FIELDS,
+                ],
+                true,
+            )
+            .await?;
+            if before != after {
+                return Err(SourceError::Parse(
+                    "nodex inventory changed during reconciliation".into(),
+                ));
             }
         }
         // A repository whose working tree moved out from under the query answers with
         // documents and yields none of them. `lore health` reads the ingest log as its only
         // evidence a source is alive, and that log records one bit, so an empty success here
         // would let the source report fresh every morning while collecting nothing.
+        let final_lens: serde_json::Value =
+            run_nodex(&p.repo, last_day, &["export", "config"], false).await?;
+        if lens != final_lens {
+            return Err(SourceError::Parse(
+                "nodex configuration changed during observation".into(),
+            ));
+        }
+        // Normal date runs also require the final graph's content currentness. Reconcile
+        // already performs the full final inventory query above.
+        if !p.reconcile {
+            let _: serde_json::Value = run_nodex(
+                &p.repo,
+                last_day,
+                &[
+                    "query",
+                    "nodes",
+                    "--require-current",
+                    "--fields",
+                    INVENTORY_FIELDS,
+                ],
+                true,
+            )
+            .await?;
+        }
+        // No selected file may move while another document is being observed. This is a
+        // revision-bound inventory, not a claim to hold a filesystem-wide writer lock.
+        for raw in &kept {
+            let file = raw.metadata["source_file"]
+                .as_str()
+                .ok_or_else(|| SourceError::Parse("nodex omitted source location".into()))?;
+            let expected = raw.metadata["source_record"]["content_revision"]
+                .as_str()
+                .ok_or_else(|| SourceError::Parse("nodex omitted content revision".into()))?;
+            verify_file_revision(Path::new(file), expected)?;
+        }
         crate::require_any_observation("document", kept.len(), attempted)?;
         Ok(kept)
     }
+}
+
+fn select_documents(
+    items: Vec<RecentItem>,
+    requested: &[String],
+) -> Result<Vec<RecentItem>, SourceError> {
+    if requested.is_empty() {
+        return Ok(items);
+    }
+    let mut missing: std::collections::BTreeSet<_> = requested.iter().map(String::as_str).collect();
+    let selected = items
+        .into_iter()
+        .filter(|item| missing.remove(item.id.as_str()))
+        .collect();
+    if !missing.is_empty() {
+        return Err(SourceError::InvalidParams(format!(
+            "requested document IDs absent from the selected date/kind scope or current inventory: {}",
+            missing.into_iter().collect::<Vec<_>>().join(", ")
+        )));
+    }
+    Ok(selected)
 }
 
 /// One observation per document, dated by the newest date it declares inside the window.
@@ -312,46 +504,158 @@ async fn query_recent(
     last_day: jiff::civil::Date,
     limit: usize,
 ) -> Result<Vec<RecentItem>, SourceError> {
-    let output = tokio::process::Command::new("nodex")
-        .arg("-C")
-        .arg(repo)
-        .arg("--today")
-        .arg(last_day.to_string())
-        .args(["query", "recent", "--field"])
-        .arg(field)
-        .arg("--since")
-        .arg(first_day.yesterday().unwrap_or(first_day).to_string())
-        .arg("--limit")
-        .arg(limit.to_string())
-        .stdin(Stdio::null())
-        .output()
-        .await
-        .map_err(|e| {
-            SourceError::Parse(format!(
-                "running `nodex` for {}: {e} — the repository declares a document graph, so \
-                 the binary that reads it has to be on PATH",
-                repo.display()
-            ))
-        })?;
+    let first = first_day.yesterday().unwrap_or(first_day).to_string();
+    let limit = limit.to_string();
+    let data: RecentData = run_nodex(
+        repo,
+        last_day,
+        &[
+            "query",
+            "recent",
+            "--require-current",
+            "--field",
+            field,
+            "--since",
+            &first,
+            "--limit",
+            &limit,
+        ],
+        true,
+    )
+    .await?;
+    Ok(data.items)
+}
 
-    let envelope: Envelope = serde_json::from_slice(&output.stdout).map_err(|e| {
-        SourceError::Parse(format!(
-            "nodex answered something other than its JSON envelope ({e}): {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))
-    })?;
+#[cfg(test)]
+fn decode_envelope<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+    success: bool,
+    query: bool,
+) -> Result<T, SourceError> {
+    decode_observation(bytes, success, query, false)
+}
+
+fn decode_observation<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+    success: bool,
+    query: bool,
+    verified_body: bool,
+) -> Result<T, SourceError> {
+    let envelope: Envelope<T> = serde_json::from_slice(bytes)
+        .map_err(|e| SourceError::Parse(format!("nodex envelope: {e}")))?;
     if !envelope.ok {
-        let error = envelope.error.unwrap_or(EnvelopeError {
+        let e = envelope.error.unwrap_or(EnvelopeError {
             code: "UNKNOWN".into(),
-            message: "refused without naming a reason".into(),
+            message: "refused without reason".into(),
         });
         return Err(SourceError::Parse(format!(
             "nodex refused ({}): {}",
-            error.code,
-            error.message.trim()
+            e.code, e.message
         )));
     }
-    Ok(envelope.data.map(|d| d.items).unwrap_or_default())
+    for w in envelope.warnings {
+        if matches!(
+            w.code.as_str(),
+            "scope_coverage" | "snapshot_divergence" | "file_skipped" | "binary_compat"
+        ) {
+            return Err(SourceError::Parse(format!(
+                "nodex incomplete/unsupported observation ({}): {}",
+                w.code, w.message
+            )));
+        }
+    }
+    if query {
+        let snap = envelope.snapshot.ok_or_else(|| {
+            SourceError::Parse("nodex query omitted snapshot verification".into())
+        })?;
+        if !(snap.verification == "content" || (verified_body && snap.verification == "membership"))
+            || snap.unbuildable != 0
+            || snap.unfollowed != Some(0)
+        {
+            return Err(SourceError::Parse(format!(
+                "nodex incomplete snapshot: verification={}, unbuildable={}, unfollowed={:?}",
+                snap.verification, snap.unbuildable, snap.unfollowed
+            )));
+        }
+    }
+    if !success {
+        return Err(SourceError::Parse("nodex exited unsuccessfully".into()));
+    }
+    envelope
+        .data
+        .ok_or_else(|| SourceError::Parse("nodex success omitted data".into()))
+}
+
+async fn run_nodex<T: serde::de::DeserializeOwned>(
+    repo: &Path,
+    today: jiff::civil::Date,
+    args: &[&str],
+    query: bool,
+) -> Result<T, SourceError> {
+    let output = tokio::process::Command::new("nodex")
+        .arg("-C")
+        .arg(repo)
+        .arg("--check-version")
+        .arg(NODEX_COMPATIBILITY)
+        .arg("--today")
+        .arg(today.to_string())
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .map_err(|e| SourceError::Parse(format!("running nodex: {e}")))?;
+    // check's exit 1 is a rule verdict, not a failure to observe the graph.
+    decode_observation(
+        &output.stdout,
+        output.status.success()
+            || (args.first() == Some(&"check") && output.status.code() == Some(1)),
+        query,
+        args.starts_with(&["query", "node"]) && args.contains(&"--with-body"),
+    )
+}
+
+fn verify_selection(
+    item: &RecentItem,
+    node: &serde_json::Value,
+    reconcile: bool,
+) -> Result<(), SourceError> {
+    for (field, expected) in [
+        ("id", &item.id),
+        ("path", &item.path),
+        ("title", &item.title),
+        ("kind", &item.kind),
+        ("status", &item.status),
+    ] {
+        if node.get(field).and_then(|v| v.as_str()) != Some(expected.as_str()) {
+            return Err(SourceError::Parse(format!(
+                "{} changed {field} during observation",
+                item.id
+            )));
+        }
+    }
+    if !reconcile
+        && !["created", "updated"].iter().any(|key| {
+            node.get(key)
+                .and_then(|v| v.as_str())
+                .is_some_and(|date| date == item.date.to_string())
+        })
+    {
+        return Err(SourceError::Parse(format!(
+            "{} changed its selected date",
+            item.id
+        )));
+    }
+    if node
+        .get("parse_issues")
+        .and_then(|v| v.as_array())
+        .is_some_and(|v| !v.is_empty())
+    {
+        return Err(SourceError::Parse(format!(
+            "{} has malformed authored metadata",
+            item.id
+        )));
+    }
+    Ok(())
 }
 
 /// Point a document's own links back at the repository they resolve in.
@@ -472,21 +776,96 @@ fn contained(path: &str) -> Result<(), &'static str> {
 /// Read one document's prose. The frontmatter is dropped: it is `nodex`'s own record of the
 /// document, already read above, and carrying it through would put a second copy of every
 /// field into the page an extraction reads.
+#[cfg(test)]
 fn read_document(
     repo: &Path,
     item: &RecentItem,
     base_url: Option<&str>,
     ctx: &ExtractContext,
 ) -> Result<RawItem, SourceError> {
+    read_document_revision(repo, item, base_url, ctx, None, false, None)
+}
+
+fn read_document_revision(
+    repo: &Path,
+    item: &RecentItem,
+    base_url: Option<&str>,
+    ctx: &ExtractContext,
+    detail: Option<&NodeDetail>,
+    reconcile: bool,
+    repository_id: Option<&str>,
+) -> Result<RawItem, SourceError> {
     let path = repo.join(&item.path);
     let content = std::fs::read_to_string(&path)
         .map_err(|e| SourceError::Parse(format!("read {}: {e}", path.display())))?;
+    if let Some(detail) = detail {
+        let revision = content_revision(content.as_bytes());
+        if detail.node.get("content_hash").and_then(|v| v.as_str()) != Some(revision.as_str()) {
+            return Err(SourceError::Parse(format!(
+                "{} changed content after verified nodex read",
+                item.path
+            )));
+        }
+    }
+    let page = lk_core::frontmatter::parse_page(&content)
+        .map_err(|error| SourceError::Parse(format!("read {}: {error}", path.display())))?;
+    if page
+        .frontmatter
+        .get("status")
+        .and_then(|value| value.as_str())
+        .is_some_and(|status| status != item.status)
+    {
+        return Err(SourceError::Parse(format!(
+            "{} changed status after the nodex query",
+            item.path
+        )));
+    }
     let body = repoint_links(
-        &lk_core::frontmatter::split_page(&content).body,
+        detail.map_or(page.body.as_str(), |d| d.body.as_str()),
         repo,
         &item.path,
         base_url,
     );
+    let authored_date = ["created", "updated"]
+        .iter()
+        .filter_map(|key| {
+            detail
+                .and_then(|d| d.node.get(key))
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<jiff::civil::Date>().ok())
+        })
+        .max();
+    let date = if reconcile {
+        authored_date.unwrap_or(ctx.target_date)
+    } else {
+        item.date
+    };
+    let mut record = serde_json::json!({
+        "id": item.id, "kind": item.kind, "status": item.status,
+        "superseded_by": page.frontmatter.get("superseded_by"),
+        "revision": lk_core::concept::source_revision(&page),
+        "created": detail.and_then(|d| d.node.get("created")),
+        "updated": detail.and_then(|d| d.node.get("updated")),
+        "timestamp_basis": if reconcile && authored_date.is_none() { "observed" } else { "authored" },
+    });
+    if let Some(detail) = detail {
+        record["content_revision"] = detail.node["content_hash"].clone();
+        for key in [
+            "superseded_by",
+            "supersedes",
+            "implements",
+            "related",
+            "covers",
+            "reviewed",
+        ] {
+            record[key] = detail
+                .node
+                .get(key)
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+        }
+        record["relations"] = serde_json::json!(detail.outgoing);
+    }
 
     Ok(RawItem {
         // The repository's own vocabulary, carried so a reader can ask for decision records
@@ -502,8 +881,7 @@ fn read_document(
                 lk_core::link::encode_dest(&item.path)
             )
         }),
-        timestamp: item
-            .date
+        timestamp: date
             .to_zoned(ctx.timezone.clone())
             .map_err(|e| {
                 SourceError::Parse(format!("{} declares an impossible date: {e}", item.id))
@@ -517,25 +895,240 @@ fn read_document(
         work: None,
         metadata: serde_json::json!({
             "kind": item.kind,
-            // Where the document IS, which is what makes the page findable as THIS document on
-            // the next run. It cannot be the URL: `base_url` is optional, and without one a
-            // page carried no identity at all, so every run minted a new one beside yesterday's.
-            //
-            // The path is ABSOLUTE, the same convention `manual` uses, and it is therefore tied
-            // to `params.repo`: moving the checkout, renaming its directory, or ingesting one
-            // vault from a second machine re-mints every page once, since each existing page
-            // keeps the path it was written with. A repo-relative path would survive that and
-            // collide instead — two repositories both holding `docs/adr/001.md` would answer to
-            // one page, which loses a document where this duplicates one.
+            "source_record": record,
+            "source_identity": repository_id.map(|repository| serde_json::json!({"repository": repository, "document": item.id})),
+            // A location, not a portable identity. Older ingests without repository_id
+            // retain their original path-based identity; migration is the pipeline's seam.
             "source_file": path.to_string_lossy(),
             "path": item.path,
         }),
     })
 }
 
+fn content_revision(content: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(content)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn verify_file_revision(path: &Path, expected: &str) -> Result<(), SourceError> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| SourceError::Parse(format!("read {}: {e}", path.display())))?;
+    if content_revision(&bytes) != expected {
+        return Err(SourceError::Parse(format!(
+            "{} changed during nodex observation",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn complete_envelope() -> serde_json::Value {
+        serde_json::json!({"ok":true,"data":{"items":[]},"snapshot":{"verification":"content","unbuildable":0,"unfollowed":0}})
+    }
+
+    #[test]
+    fn a_current_snapshot_is_not_necessarily_a_complete_observation() {
+        let clean = complete_envelope();
+        assert!(
+            decode_envelope::<serde_json::Value>(&serde_json::to_vec(&clean).unwrap(), true, true)
+                .is_ok()
+        );
+        for (field, value) in [
+            ("verification", serde_json::json!("unavailable")),
+            ("verification", serde_json::json!("membership")),
+            ("unbuildable", serde_json::json!(1)),
+            ("unfollowed", serde_json::json!(1)),
+            ("unfollowed", serde_json::Value::Null),
+        ] {
+            let mut e = clean.clone();
+            e["snapshot"][field] = value;
+            assert!(
+                decode_envelope::<serde_json::Value>(&serde_json::to_vec(&e).unwrap(), true, true)
+                    .is_err()
+            );
+        }
+        let mut member = clean.clone();
+        member["snapshot"]["verification"] = serde_json::json!("membership");
+        assert!(
+            decode_observation::<serde_json::Value>(
+                &serde_json::to_vec(&member).unwrap(),
+                true,
+                true,
+                true
+            )
+            .is_ok()
+        );
+        assert!(
+            decode_observation::<serde_json::Value>(
+                &serde_json::to_vec(&member).unwrap(),
+                true,
+                true,
+                false
+            )
+            .is_err()
+        );
+        // An unrelated check rule finding carries ok:true and exit 1, not an I/O error.
+        let verdict = serde_json::json!({"ok":true,"data":{"has_errors":true,"violations":[]}});
+        assert!(
+            decode_observation::<serde_json::Value>(
+                &serde_json::to_vec(&verdict).unwrap(),
+                true,
+                false,
+                false
+            )
+            .is_ok()
+        );
+        let mut missing = clean.clone();
+        missing.as_object_mut().unwrap().remove("snapshot");
+        assert!(
+            decode_envelope::<serde_json::Value>(
+                &serde_json::to_vec(&missing).unwrap(),
+                true,
+                true
+            )
+            .is_err()
+        );
+        for code in [
+            "scope_coverage",
+            "snapshot_divergence",
+            "file_skipped",
+            "binary_compat",
+        ] {
+            let mut e = clean.clone();
+            e["warnings"] = serde_json::json!([{"code":code,"message":"gap"}]);
+            assert!(
+                decode_envelope::<serde_json::Value>(&serde_json::to_vec(&e).unwrap(), true, true)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn reconciliation_is_explicit_and_requires_portable_namespace() {
+        assert!(!is_reconciliation(&params(serde_json::json!({}))).unwrap());
+        assert!(is_reconciliation(&params(serde_json::json!({"reconcile":true}))).is_err());
+        assert!(is_reconciliation(&params(serde_json::json!({"reconcile":true,"repository_id":"org/repository","document_ids":["hub"]}))).unwrap());
+    }
+
+    #[test]
+    fn verified_metadata_and_bytes_cannot_be_mixed_with_a_new_revision() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("docs")).unwrap();
+        let original = "---\nstatus: active\n---\n# hub\nOriginal body.\n";
+        let path = root.path().join("docs/hub.md");
+        std::fs::write(&path, original).unwrap();
+        let item = item("hub", "2026-10-17");
+        let detail = NodeDetail {
+            node: serde_json::json!({"id":"hub","title":"hub","kind":"learning","status":"active","path":"docs/hub.md","content_hash":content_revision(original.as_bytes()),"supersedes":["predecessor"],"implements":["spec-example"]}),
+            body: "# hub\nOriginal body.\n".into(),
+            outgoing: vec![
+                serde_json::json!({"relation":"supersedes","target":{"id":"predecessor"}}),
+            ],
+        };
+        let ctx = ExtractContext {
+            target_date: "2026-10-17".parse().unwrap(),
+            timezone: jiff::tz::TimeZone::UTC,
+            locale: lk_core::i18n::Locale::En,
+            identity: Default::default(),
+            vault_root: root.path().to_owned(),
+        };
+        verify_selection(&item, &detail.node, true).unwrap();
+        let raw = read_document_revision(
+            root.path(),
+            &item,
+            None,
+            &ctx,
+            Some(&detail),
+            true,
+            Some("org/repository"),
+        )
+        .unwrap();
+        assert_eq!(
+            raw.metadata["source_identity"],
+            serde_json::json!({"repository":"org/repository","document":"hub"})
+        );
+        assert_eq!(
+            raw.metadata["source_record"]["created"],
+            serde_json::Value::Null
+        );
+        assert_eq!(raw.metadata["source_record"]["timestamp_basis"], "observed");
+        let mut dated = NodeDetail {
+            node: detail.node.clone(),
+            body: detail.body.clone(),
+            outgoing: detail.outgoing.clone(),
+        };
+        dated.node["created"] = serde_json::json!("2026-09-01");
+        let historical = read_document_revision(
+            root.path(),
+            &item,
+            None,
+            &ctx,
+            Some(&dated),
+            true,
+            Some("org/repository"),
+        )
+        .unwrap();
+        assert_eq!(
+            historical.timestamp,
+            "2026-09-01"
+                .parse::<jiff::civil::Date>()
+                .unwrap()
+                .to_zoned(ctx.timezone.clone())
+                .unwrap()
+                .timestamp()
+        );
+        assert_eq!(
+            historical.metadata["source_record"]["timestamp_basis"],
+            "authored"
+        );
+        assert_eq!(
+            raw.metadata["source_record"]["supersedes"],
+            serde_json::json!(["predecessor"])
+        );
+        assert_eq!(
+            raw.metadata["source_record"]["implements"],
+            serde_json::json!(["spec-example"])
+        );
+        assert_eq!(
+            raw.timestamp,
+            ctx.target_date
+                .to_zoned(ctx.timezone.clone())
+                .unwrap()
+                .timestamp()
+        );
+        std::fs::write(
+            &path,
+            original.replace("Original body.", "Changed without a date or status edit."),
+        )
+        .unwrap();
+        assert!(
+            read_document_revision(
+                root.path(),
+                &item,
+                None,
+                &ctx,
+                Some(&detail),
+                true,
+                Some("org/repository")
+            )
+            .is_err()
+        );
+        assert!(
+            verify_file_revision(&path, detail.node["content_hash"].as_str().unwrap()).is_err()
+        );
+        for field in ["id", "title", "kind", "status", "path"] {
+            let mut node = detail.node.clone();
+            node[field] = serde_json::json!("changed");
+            assert!(verify_selection(&item, &node, true).is_err());
+        }
+    }
 
     fn params(extra: serde_json::Value) -> serde_json::Value {
         let mut base = serde_json::json!({ "repo": "/tmp/repo" });
@@ -546,6 +1139,56 @@ mod tests {
         };
         base_map.extend(extra_map);
         base
+    }
+
+    #[test]
+    fn historical_documents_keep_declared_state_and_authored_source_revision() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("docs")).unwrap();
+        let content = "---\nstatus: archived\n---\n# Evidence\nObserved result.\n";
+        std::fs::write(root.path().join("docs/history.md"), content).unwrap();
+        let mut item = item("history", "2026-10-14");
+        item.status = "archived".into();
+        let context = ExtractContext {
+            target_date: "2026-10-16".parse().unwrap(),
+            timezone: jiff::tz::TimeZone::UTC,
+            locale: lk_core::i18n::Locale::En,
+            identity: Default::default(),
+            vault_root: root.path().to_path_buf(),
+        };
+        let raw = read_document(root.path(), &item, None, &context).unwrap();
+        assert_eq!(raw.metadata["source_record"]["status"], "archived");
+        assert_eq!(
+            raw.metadata["source_record"]["revision"],
+            lk_core::concept::source_revision(&lk_core::frontmatter::parse_page(content).unwrap())
+        );
+        assert!(raw.body.contains("Observed result."));
+        item.status = "active".into();
+        assert!(read_document(root.path(), &item, None, &context).is_err());
+    }
+
+    #[test]
+    fn explicit_selection_is_complete_and_identity_exact() {
+        let selected = select_documents(
+            vec![
+                item("a", "2026-10-14"),
+                item("A", "2026-10-14"),
+                item("b", "2026-10-14"),
+            ],
+            &["A".into()],
+        )
+        .unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].id, "A");
+        assert!(
+            select_documents(
+                vec![item("a", "2026-10-14")],
+                &["a".into(), "missing".into()]
+            )
+            .is_err()
+        );
+        assert!(validate_params(&params(serde_json::json!({"document_ids": ["a", "a"]}))).is_err());
+        assert!(validate_params(&params(serde_json::json!({"document_ids": [" "]}))).is_err());
     }
 
     /// A relative repo path reads whichever directory the process happened to start in — for a
@@ -593,7 +1236,7 @@ mod tests {
             id: id.into(),
             title: id.into(),
             kind: "learning".into(),
-            status: ACTIVE.into(),
+            status: "active".into(),
             path: format!("docs/{id}.md"),
             date: date.parse().unwrap(),
         }
@@ -818,7 +1461,7 @@ mod tests {
     /// whose graph stopped building would otherwise report fresh forever.
     #[test]
     fn a_refusal_is_an_error_not_an_empty_day() {
-        let envelope: Envelope = serde_json::from_str(
+        let envelope: Envelope<RecentData> = serde_json::from_str(
             r#"{"ok":false,"error":{"code":"VERSION_MISMATCH","message":"binary out of range"}}"#,
         )
         .unwrap();

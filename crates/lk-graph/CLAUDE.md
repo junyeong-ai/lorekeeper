@@ -18,18 +18,19 @@ on-disk state, never from a cached snapshot.
   `scope.dirs` (derived from `vault.dirs.wiki` when absent), `metrics.*`
   (`min_hub_degree`, `orphan_exclude`), `cluster.*`.
   All `deny_unknown_fields`. Validated: relative, no `..`.
-- **Link resolution happens at scan time** (`scan::parse_file`): every internal inline
-  markdown-link destination is resolved against its page's own location
-  (`lk_core::link::resolve_dest`, `.md` destinations only — anchors stripped, images/
-  external schemes skipped), and each resolved link carries BOTH of the things its consumers
-  ask for (`scan::Link`): the `dest` — the vault-relative path it names, NFC-normalized — and
-  the `id` that address belongs to. They are not interchangeable. Only a path can answer "is
-  there a file there", because slugifying is lossy: `Bad_Name.md` and `bad-name.md` share an
-  id while only one of them exists, so an id-based existence check reports a link to the other
-  one sound. Only an id can be a node key. The `id` is DERIVED from the `dest`, so the pair
-  cannot drift. A destination that escapes the vault root is kept verbatim; it names no file,
-  so `broken` reports it. Concept `aliases` frontmatter is registry metadata for the LLM's
-  dedup (and Obsidian display), never link resolution.
+- **Addresses, graph keys and aliases are separate.** `scan::parse_file` resolves inline
+  links lexically against their source page and retains the actual destination spelling;
+  an escaping destination carries no graph key. `scan::page_id` preserves case and punctuation
+  and omits only `.md`. `path_slug` is a normalization/collision diagnostic, never a source
+  revision key or rewrite selector. Pure `VaultExistence::build` accepts exact addresses only.
+  Production `build_at(root, ...)` uses `lk_vault::ExistingPageResolver` to validate actual
+  filesystem aliases once per distinct linked address, then caches the actual owner's key.
+  An absent Linux case spelling is broken; a real macOS case alias reaches its actual file.
+  An exact existing address is never reported as another file's respelling. Concept metadata
+  aliases never resolve file links. Merge edits use `same_existing_file`, not slug equality.
+  Traversal errors abort scanning: an unseen subtree cannot prove no historical review exists.
+  Scanned Markdown addresses and traversed directories must resolve inside the vault through
+  `lk_vault::page_path`. Internal aliases remain valid; escaping addresses abort the scan.
 - **One scan, three views** (`scan::VaultViews`): the walk is the vault ROOT, always, and the
   narrowing is a filter over the result. `scanned` is every page — the existence universe, and
   the view the mutators repoint links across. `link_sources` is `scope.dirs` ∪ every page
@@ -41,7 +42,7 @@ on-disk state, never from a cached snapshot.
   walk that had already dropped it cannot tell "not there" from "not looked at", in whichever
   direction a caller resolves it — which is why the mutating commands read these same views
   rather than building their own scan.
-  Scope membership is decided on the page ID, so a vault whose directory is spelled `Wiki`
+  Scope membership is decided on a separately folded directory prefix, so a vault whose directory is spelled `Wiki`
   while the config says `wiki` is still analysed; a raw prefix test answers no there while
   `is_dir` passes on a case-insensitive volume, and every command reports an empty vault, green.
   `scan_vault` skips dot-directories, so `.trash` — where Obsidian puts a DELETED page — never
@@ -50,9 +51,9 @@ on-disk state, never from a cached snapshot.
   page linking one links something real) and `is_knowledge` (…and it is not a generated catalog
   — the orphan-connectivity question, where counting a link to `index.md` would exempt the very
   pages detection looks for). Reserved meta pages
-  (`lk_core::vault_path::RESERVED_WIKI_FILES`) are never orphans or index-drift.
+  (`lk_core::vault_path::RESERVED_WIKI_FILES`) and generated catalog children are never knowledge nodes or citation sources.
 - **Index drift is asked of the catalog's own builder** (`index_drift::diff` →
-  `lk_vault::build_index`): `index.md` is a materialized view, so drift is the difference
+  `lk_vault::build_catalog`): the entire index tree is a materialized view, so drift is the difference
   between the catalog on disk and the one a re-derivation produces now. A second definition of
   what belongs in the catalog disagrees with the builder's on any page the builder does not
   catalog — drift reports it, `--fix` appends it, the next `wiki index` drops it, and the vault
@@ -68,16 +69,19 @@ on-disk state, never from a cached snapshot.
   in the pipeline, so a stale link in one is repaired by the same run rather than reported — but
   they remain valid DESTINATIONS.
 - **Exit codes**: 0 = every claim the vault makes holds, 1 = it contradicts itself, 2 = runtime
-  error. Non-zero is reserved for a claim that is FALSE and has a named repair — a link whose
+  error. Exit 1 identifies a structural contradiction with a named repair — a link whose
   destination is absent, a catalog that disagrees with the disk, a category outside the
   configured vocabulary, one name answering to two pages, two files answering to one address,
   a filename that disagrees with its normalized slug, a `source_count` no sweep could write. What a vault in good standing
   legitimately carries is reported and exits 0: `lint`'s observation channel, `orphans`,
   and `hubs`/`cluster`/`export`/`suggest-links`.
-- **`LintReport` is two channels, and the split IS the exit code**: `violations`
+- **`LintReport` separates findings from incomplete checks**: `violations`
   (broken/index-drift/invalid-categories/duplicate-concepts/address-collisions/unnormalized)
-  decides it, `observations`
-  (orphans/hubs/unresolved-conflicts) never does. Every extraction mints concepts before
+  decides exit 1, `observations`
+  (orphans/hubs/unresolved-conflicts) never does. `errors` records checks that could not
+  complete and takes precedence with exit 2. An unreadable catalog input leaves
+  `violations.index` null while retaining other known findings; neither lint nor status
+  reports that vault as sound. Every extraction mints concepts before
   anything cites them, so an orphan-counting exit code is permanently non-zero and therefore
   carries no information — which is what had callers wrapping the command in `|| true` and
   skills naming the lists to ignore, and a broken link got ignored along with them.
@@ -96,16 +100,16 @@ on-disk state, never from a cached snapshot.
   high-degree hubs — so co-citation by one busy document/exploration page can never outrank a
   real shared niche concept. Parameter-free weighting (no magic threshold). Read-only,
   deterministic.
-- **`map::build_map`** (`lore wiki map` → `<wiki>/map.md`): MATERIALIZES the Louvain
-  communities (which `cluster` otherwise computes and discards) into a navigable page —
-  concepts grouped by citation cluster, hub-first, each linked relative to the map with a
-  leaf display (`[x](concepts/x.md)`), under a `type: map` frontmatter. A read-only
-  materialized view (regenerated whole, byte-deterministic) like `index.md`/`log.md` —
-  pure markdown builder, the CLI writes it. It NEVER writes Related-section edges into
-  concept pages: communities are co-citation, not curated relatedness, so the page is
-  labelled a citation map. `map.md` is in
-  `RESERVED_WIKI_FILES` (never an orphan/drift finding). This is the deterministic,
-  embedding-free "navigate, don't retrieve" entry point AGENTS.md points agents to.
+- **`map::build_map_catalog`** (`lore wiki map`): materializes Louvain communities into
+  a bounded navigable tree. `map.md` is the entry, `catalog/map/` holds generated details;
+  small maps remain inline. `build_map` returns only the entry string; publication uses
+  the complete catalog through the existing writer session. Shared vault navigation
+  bounds every page to 100 rows or branches and preserves all concept destinations.
+  Group membership derives from document citations and concept links; it never creates
+  Related-section edges or inferred topic labels. Documents and explorations remain
+  clustering evidence, not listed destinations. Hub/degree order and singleton grouping
+  are deterministic, and relationship meaning stays in the linked pages. Generated
+  details are reserved meta pages, not knowledge nodes or citation sources.
 - **Mutations gated**: `index_drift::fix()`, `normalize::apply()`,
   `backlinks::sync_concept_backlinks` and `merge::merge_concepts` touch the filesystem — the
   first two only with `--fix`, the last two only without `--dry-run`. All renames pre-checked.
@@ -115,19 +119,18 @@ on-disk state, never from a cached snapshot.
   `2026-w30`) would rewrite it into a path the pipeline never writes. The link rewrite
   reads EVERY page dir, like `merge`, because a citation of a renamed page usually lives
   outside the wiki — a daily page is the ordinary case. Rewriting only the rename scope
-  strands those citations, and `broken` cannot report it: it matches destinations at
-  `path_slug`, so a link to the old spelling still resolves to the renamed page's id.
+  strands those citations. A graph key is not an alternative spelling of the removed address.
 - **Age is not a signal.** There is deliberately no staleness/decay check: reference
   knowledge does not expire by going unmentioned, so "old and uncited" identifies
   nothing actionable and would misdirect curator attention. A concept becomes due for
   review when its EVIDENCE changes — which `backlinks-sync` detects by digesting the citation
-  SET, and hands to the queue as a synthesis rewrite — or when its structure is defective
+  paths and authored revisions, and hands them to the queue as a synthesis rewrite — or when its structure is defective
   (`lint`). Never because time passed.
 - **`backlinks::sync_concept_backlinks` is the sole deriver of every evidence-dependent
   field on a concept page**: the `## Sources` body (`- [title](relative-path)` entries,
   destinations relative to the concept page), the frontmatter `source_count`, AND the
   `llm_inputs.synthesis` input both its `## Synthesis` and its `## Related` are owed against.
-  One sweep because they are one fact — the set of pages citing the concept — and a page that
+  One sweep derives the citing pages and their authored revisions; a page that
   could not record all three records none of them. What is owed therefore carries BOTH
   headings (`ConceptResynthesis::anchor` and `related_anchor`), each spelled as the page
   spells it: the relations are the same evidence asked a different question, so one task
@@ -139,10 +142,8 @@ on-disk state, never from a cached snapshot.
   authored synthesis, and naming only the latter let the former be replaced in a scheduled
   run with nothing printed about it. Uses full-vault scope (not `graph.scope.dirs`) so
   `<daily>`/`<personal>`/`<synthesis>` pages are included.
-  **The verdict is the candidate page against the page on disk**, not a field-by-field
-  comparison: everything derived is rendered into the candidate, so whatever differs is by
-  definition drift — which is how a source page RETITLED gets its citation line corrected
-  while the synthesis, keyed on the SET, stays answered.
+  An unreadable source blocks reconciliation before writes: missing links in an unreadable
+  page are not evidence of deletion. Revisions are computed during the existing vault scan.
   **A page that already holds a written synthesis and has recorded no input is ADOPTED**: its
   prose becomes the answer for the evidence the page carries, and the rewrite is owed from the
   next time that evidence moves. Without it an upgrade replaces every authored synthesis in
@@ -212,7 +213,9 @@ on-disk state, never from a cached snapshot.
   machine-owned ONLY under the `## Sources` heading (matched across all locales, column-0
   exact like `backlinks-sync`); bullets under `## Related` (human-curated) or any
   synthesis prose count as authored, so the merge ABORTS before mutating unless
-  `--force`. `--dry-run` previews without the gate firing. Run `backlinks-sync` afterward
+  `--force`. Historical review evidence must be archived at its recorded revision before
+  its address can be removed; force does not bypass that requirement. Unreadable metadata
+  prevents destructive preflight. `--dry-run` previews without the gate firing. Run `backlinks-sync` afterward
   to re-derive the merged concept's `## Sources` + `source_count`. Duplicate *detection*
   (below) only reports the pages that answer to one name; this is the execution
   counterpart a human triggers, because it deletes a page.
@@ -239,41 +242,11 @@ on-disk state, never from a cached snapshot.
   or an EMPTY one — is not flagged: that is the uncategorised state, and it is what the
   rest of the vault already means by an empty value (`templates/concept.md.jinja` renders
   the field under `{% if category %}`, `wiki concepts` filters it out of the registry).
-- **`concept_lint::find_duplicate_concepts` reports NAME COLLISIONS, not similarity.**
-  Each page claims a set of names — its slug, `title`, and every `aliases` entry — and a
-  finding is two pages claiming one name. `lk_core::concept::identity_key` is that rule —
-  `slugify` (the normalization that mints page ids and keys the pipeline's alias index)
-  keeping only the breaks that mean something: every break is typography (`vector-db` ~
-  `vectordb` ~ `Vector DB`, and `claude-35` ~ `claude35`) EXCEPT one between two numerals,
-  which is the name (`claude-3-5` ≠ `claude-35`). Pages are grouped by key in a `BTreeMap`
-  — ordered rather than hashed, so output order needs no final sort — which costs a log
-  factor no vault will notice and replaces the O(n²) pair scan the similarity check needed.
-  **A finding is therefore never a similarity guess**: the two names reduce to one identity
-  under a rule with no score and no threshold. The rule does NOT fold only typography: `C`,
-  `C++` and `C#` all slugify to `c`, so they claim one ADDRESS and the pair is genuinely
-  reportable — whichever page owns `c` is where every extraction naming any of them lands. The
-  remedy is to disambiguate the name, and `identity_key` records why the addressing cannot do it
-  for you. What the lint CANNOT see is the defect that
-  never becomes two pages — the router folding an extraction into an established page
-  leaves nothing to compare — which is why the fold itself has to be narrow rather than
-  the lint forgiving.
-  **There is deliberately no score, no threshold, and no morphology.** The predecessor
-  scored slug character bigrams (Sørensen-Dice ≥ `concept_near_duplicate_threshold`, since
-  removed from config); measured on a 1,599-concept vault it returned 298 findings
-  containing one real duplicate, because character overlap is morphology — it fires on
-  shared namespace prefixes (`amazon-sagemaker-ai` ~ `amazon-sagemaker-hyperpod`), shared
-  head nouns (`robot-foundation-model` ~ `tabular-foundation-model`) and coincidence
-  (`agentops` ~ `gentoo`) while missing acronym pairs outright. Two softer keys were
-  measured on the same vault and cut for the same reason: an order-insensitive token
-  multiset found NOTHING the exact key did not (no two slugs are permutations) while
-  assuming word order carries no meaning, and per-token plural stripping bought exactly one
-  finding at the cost of collapsing `http` onto `https`. A permanently-red lint is worse
-  than a silent one, so precision wins and recall goes where it can be judged. The exact
-  rule also needs no `is_version_variant` escape hatch: `gpt-4`/`gpt-5` and
-  `gemini-3-1-flash-lite`/`gemini-3-5-flash-lite` simply claim different names. Everything
-  about MEANING — plurals, acronyms (`k8s` ↔ `kubernetes`), a team's shorthand — is out of
-  scope BY CONSTRUCTION and belongs to `/lore-wiki audit` layer 5. Read-only; `graph merge`
-  is the remedy a human triggers.
+- **`find_duplicate_concepts` reports shared declared names.** Titles and aliases use
+  the same identity key as the resolver. Filenames are addresses, not implicit aliases.
+  A shared name may be a duplicate or a distinct sense; the finding requires review,
+  and the pipeline refuses to choose an owner automatically.
+
 - **`concept_lint::find_unresolved_conflicts`**: reports concept pages whose body carries an
   unresolved `> [!conflict]` callout — a contradiction the drain that wrote the synthesis
   observed between two of the cited sources. The marker lives in the LLM-owned synthesis body
@@ -288,10 +261,9 @@ on-disk state, never from a cached snapshot.
   exactly — `[!note]`/`[!warning]` never fire. Read-only continuous tracking: the
   lint surfaces every open callout; what closes one is the disagreement going away in the
   sources, which the next rewrite then stops restating.
-  This is the only contradiction mechanism — there is no automatic contradiction *detection*
-  (it would false-positive on emphasis differences); flagging is an explicit LLM judgment,
-  made where the sources are already being read, and `/lore-wiki audit` judges the open ones
-  rather than hunting for new ones.
+  Contradiction assessment is an explicit semantic judgment. Durable exploration reviews
+  preserve material findings and evidence revisions; callouts are navigation cues.
+  `/lore-wiki audit` checks both recorded findings and direct evidence for new disagreements.
 - **A page that states INTENT is neither evidence nor a link to check.** `ScannedPage` carries
   the page's `type`, and `scan::states_intent` takes a `task-board` out of `link_sources`, out
   of `pages`, and — asked again in `backlinks`, which reads the whole vault rather than the
@@ -305,3 +277,10 @@ on-disk state, never from a cached snapshot.
   Recognised by what the page DECLARES rather than where it sits, because its file name is
   configurable and this crate resolves its own configuration without reading `personal`. The
   page still EXISTS, so a link TO it resolves.
+
+- **`graph neighbors`** navigates direct links over `link_sources`, including managed daily
+  evidence outside the clustering scope. Exact `.md` addresses select a page. Generated
+  catalogs and task boards stay outside this view. Incoming/outgoing flags describe links,
+  not support, contradiction or causal semantics; the linked prose owns that judgment.
+  Neighbor types come from declared frontmatter, never from directory names. The CLI
+  filters exact types and direction before pagination; type facets describe the unfiltered neighbors.

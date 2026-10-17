@@ -20,7 +20,7 @@ use walkdir::WalkDir;
 
 use crate::GraphError;
 
-/// A scanned vault page: its slug id, vault-relative path, display title, and its outgoing
+/// A scanned vault page: its lossless address id, vault-relative path, display title, and its outgoing
 /// links (deduped by address, first-appearance order).
 ///
 /// Resolution happens at scan time: each internal markdown-link destination is resolved
@@ -34,6 +34,7 @@ pub struct ScannedPage {
     /// What the page's `type` frontmatter declares it to be, where it declares one.
     pub format: Option<String>,
     pub outgoing: Vec<Link>,
+    pub revision: Option<String>,
 }
 
 /// One resolved link, carried as both of the things a consumer asks it for.
@@ -58,7 +59,7 @@ impl Link {
     /// A link to a vault-relative address. The id is DERIVED, so the pair cannot drift.
     pub fn to(dest: &str) -> Self {
         Self {
-            id: Some(path_slug(Path::new(dest))),
+            id: Some(page_id(Path::new(dest))),
             dest: dest.to_owned(),
         }
     }
@@ -101,16 +102,26 @@ pub fn scan_vault(root: &Path, follow_links: bool) -> Result<Vec<ScannedPage>, G
     for entry in walker {
         let entry = match entry {
             Ok(e) => e,
-            Err(e) => {
-                tracing::warn!(error = %e, "skipping unreadable path");
-                continue;
-            }
+            Err(e) => return Err(GraphError::Io(format!("incomplete vault traversal: {e}"))),
         };
         let path = entry.path();
+        if entry.depth() > 0
+            && (entry.file_type().is_dir() || path.extension().is_some_and(|ext| ext == "md"))
+        {
+            lk_vault::page_path(root, path.strip_prefix(root).unwrap_or(path)).map_err(|e| {
+                GraphError::Io(format!("invalid vault address {}: {e}", path.display()))
+            })?;
+        }
         // `is_file` FOLLOWS the link, so a symlinked page is a page: it is readable at exactly
         // this address, and a link to it resolves in every editor. `follow_links` decides
         // whether the walk descends symlinked directories, which is a separate question.
         if path.is_file() && path.extension().is_some_and(|ext| ext == "md") {
+            if path.strip_prefix(root).unwrap_or(path).to_str().is_none() {
+                return Err(GraphError::Io(format!(
+                    "page address is not UTF-8 and cannot be represented losslessly: {}",
+                    path.display()
+                )));
+            }
             file_paths.push(path.to_path_buf());
         }
     }
@@ -127,7 +138,8 @@ pub fn scan_vault(root: &Path, follow_links: bool) -> Result<Vec<ScannedPage>, G
                 tracing::warn!(path = %path.display(), error = %e, "unreadable page: id only");
                 let rel = path.strip_prefix(root).unwrap_or(path);
                 ScannedPage {
-                    id: path_slug(rel),
+                    revision: None,
+                    id: page_id(rel),
                     path: rel.to_path_buf(),
                     format: None,
                     title: path
@@ -176,7 +188,7 @@ impl VaultViews {
         }
 
         let scanned = scan_vault(root, graph.scope.follow_links)?;
-        let existence = VaultExistence::build(&scanned, dirs);
+        let existence = VaultExistence::build_at(root, &scanned, dirs)?;
         let excluded = Excludes::compile(&graph.scope.exclude)?;
 
         let managed = page_dirs(dirs);
@@ -235,7 +247,8 @@ pub(crate) fn under(id: &str, dir: &Path) -> bool {
     if prefix.is_empty() {
         return true;
     }
-    id == prefix || id.starts_with(&format!("{prefix}/"))
+    let folded = lk_core::fs::fold_name(id);
+    folded == prefix || folded.starts_with(&format!("{prefix}/"))
 }
 
 /// The directory a configured vault-relative path names, matched segment by segment under the
@@ -361,7 +374,7 @@ fn parse_file(path: &Path, root: &Path) -> Result<ScannedPage, String> {
         // Escapes the vault root: keep the destination as written — it names no file in the
         // vault, so it is reported broken rather than dropped, and it carries no page id.
         let link = match link::resolve_dest(rel, &dest) {
-            Some(resolved) => Link::to(&rel_str(&resolved)),
+            Some(resolved) => Link::to(&address(&resolved)),
             None => Link::outside(&dest),
         };
         // Deduped by ADDRESS, not by id: two dead spellings of one id are two broken links,
@@ -372,7 +385,8 @@ fn parse_file(path: &Path, root: &Path) -> Result<ScannedPage, String> {
     }
 
     Ok(ScannedPage {
-        id: path_slug(rel),
+        revision: parsed.as_ref().map(lk_core::concept::source_revision),
+        id: page_id(rel),
         path: rel.to_path_buf(),
         format,
         title,
@@ -404,112 +418,101 @@ fn extract_first_heading(body: &str) -> Option<String> {
 /// Built from a scan of the vault ROOT, so "absent" means absent from the vault.
 #[derive(Debug, Clone)]
 pub struct VaultExistence {
-    /// Every page ADDRESS the scan found, keyed by [`lk_core::fs::fold_name`] and holding the
-    /// spelling as it is on disk. Catalogs INCLUDED, since a catalog is a file a page may
-    /// legitimately link.
-    ///
-    /// Keyed folded because that is how an address resolves; the value is kept because the
-    /// difference between the two is itself reportable — a link that only resolves under the
-    /// fold is dead on a filesystem that does not fold.
-    paths: HashMap<String, String>,
-    /// Every page id, minus the generated catalogs: the connectivity question orphan detection
-    /// asks.
-    /// `index.md` links every page it catalogs, so counting a link to it as a connection would
-    /// mask exactly the orphans that detection exists to find.
+    exact_ids: HashMap<String, String>,
+    /// Requested alias -> actual scanned address, verified on this filesystem.
+    aliases: HashMap<String, String>,
     knowledge: HashSet<String>,
-    /// Page ids that are the resolved target of a link from *another* page
-    /// (self-links excluded). Drives orphan inbound exemption.
     linked: HashSet<String>,
 }
 
 impl VaultExistence {
-    /// Derive the universe from a page scan. The caller passes every page the vault has —
-    /// integrity commands scan from the vault ROOT for exactly this reason — so an id absent
-    /// from `ids` is absent from the vault, not merely from somewhere nobody looked.
+    /// Pure construction establishes only exact addresses, never filesystem aliases.
     pub fn build(pages: &[ScannedPage], dirs: &VaultDirs) -> Self {
-        // Navigation/catalog meta-files (index.md, log.md, map.md, AGENTS.md) are generated
-        // artifacts, not knowledge. They are real files, so they RESOLVE as link targets; what
-        // they must not do is count as connectivity, since index.md links every page it catalogs
-        // and would mark every concept "linked", defeating orphan detection.
         let is_reserved = reserved_page_predicate(Path::new(&dirs.wiki));
-        let mut paths: HashMap<String, String> = HashMap::with_capacity(pages.len());
-        let mut knowledge = HashSet::with_capacity(pages.len());
-        for page in pages {
-            let spelled = rel_str(&page.path);
-            // First spelling wins, and the scan is sorted, so two files that fold together
-            // resolve to the same one every run. That they are two is `address_collisions`.
-            paths
-                .entry(lk_core::fs::fold_name(&spelled))
-                .or_insert(spelled);
-            if !is_reserved(page.id.as_str()) {
-                knowledge.insert(page.id.clone());
-            }
-        }
-
-        // Connectivity asks the same question `reached` answers, so it asks `reached` — a
-        // second spelling of the rule here is a second answer to "what does this link reach",
-        // and the three consumers that disagreed over exactly that is what the rule exists to
-        // prevent. Collected first because reading it borrows the set being filled.
         let mut existence = Self {
-            paths,
-            knowledge,
+            exact_ids: pages
+                .iter()
+                .map(|page| (address(&page.path), page.id.clone()))
+                .collect(),
+            aliases: HashMap::new(),
+            knowledge: pages
+                .iter()
+                .filter(|page| !is_reserved(&page.id))
+                .map(|page| page.id.clone())
+                .collect(),
             linked: HashSet::new(),
         };
-        existence.linked = pages
-            .iter()
-            .filter(|page| !is_reserved(page.id.as_str()))
-            .flat_map(|page| {
-                page.outgoing.iter().filter_map(|link| {
-                    let id = existence.reached(link)?;
-                    (id != page.id && existence.is_knowledge(id)).then(|| id.to_owned())
-                })
-            })
-            .collect();
+        existence.refresh_linked(pages, dirs);
         existence
     }
 
-    /// Whether a link's address names a file in the vault — a knowledge page or a generated
-    /// catalog, both of which are files on disk.
-    ///
-    /// Compared under [`lk_core::fs::fold_name`], the rule the directory segments of an address
-    /// already resolve by, so one address resolves one way along its whole path:
-    /// `wiki/concepts/foo.md` and a file stored as `.../Foo.md` are one file on the filesystem
-    /// this vault is most often edited on, and `cat` opens it at either spelling.
-    ///
-    /// What a CASE difference costs when the vault syncs to a filesystem that keeps the two
-    /// apart is [`Self::respelled`]'s question, reported under its own violation channel with the
-    /// repair the link needs. Neither `unnormalized` nor `address_collisions` covers it — the
-    /// first judges a FILE's name and the file here is already its own slug, the second needs two
-    /// files and there is one. A NORMALIZATION difference is `unnormalized`'s: both sides here
-    /// have been through [`rel_str`], so by this point there is none left to see.
+    /// Production boundary: resolve each distinct non-exact destination once against
+    /// the actual filesystem. A Linux case miss never becomes evidence of a page.
+    pub fn build_at(
+        root: &Path,
+        pages: &[ScannedPage],
+        dirs: &VaultDirs,
+    ) -> Result<Self, GraphError> {
+        let mut existence = Self::build(pages, dirs);
+        let mut resolver =
+            lk_vault::ExistingPageResolver::new(root, pages.iter().map(|page| page.path.clone()))
+                .map_err(|error| GraphError::Io(error.to_string()))?;
+        let destinations: HashSet<_> = pages
+            .iter()
+            .flat_map(|page| page.outgoing.iter())
+            .filter(|link| link.id.is_some())
+            .map(|link| link.dest.as_str())
+            .collect();
+        for dest in destinations {
+            if existence.exact_ids.contains_key(dest) {
+                continue;
+            }
+            if let Some(actual) = resolver
+                .resolve(Path::new(dest))
+                .map_err(|error| GraphError::Io(error.to_string()))?
+            {
+                existence.aliases.insert(dest.to_string(), address(&actual));
+            }
+        }
+        existence.refresh_linked(pages, dirs);
+        Ok(existence)
+    }
+
+    fn refresh_linked(&mut self, pages: &[ScannedPage], dirs: &VaultDirs) {
+        let is_reserved = reserved_page_predicate(Path::new(&dirs.wiki));
+        self.linked = pages
+            .iter()
+            .filter(|page| !is_reserved(&page.id))
+            .flat_map(|page| {
+                page.outgoing.iter().filter_map(|link| {
+                    let id = self.reached(link)?;
+                    (id != page.id && self.is_knowledge(id)).then(|| id.to_owned())
+                })
+            })
+            .collect();
+    }
+
     pub fn is_resolvable(&self, dest: &str) -> bool {
-        self.paths.contains_key(&lk_core::fs::fold_name(dest))
+        self.exact_ids.contains_key(dest) || self.aliases.contains_key(dest)
     }
 
-    /// The on-disk spelling of the file `dest` reaches, when it differs from `dest` itself.
-    ///
-    /// The other half of the fold: `wiki/concepts/ALPHA.md` opens `alpha.md` here and opens
-    /// nothing on ext4, and neither `unnormalized` (which judges a FILE's name) nor
-    /// `address_collisions` (which needs two files) has anything to say about it — the file is
-    /// its own slug and there is only one of it. Reporting the difference is what makes folding
-    /// a resolution rule rather than a way to lose the question.
+    /// An exact existing address is never another file's respelling.
     pub fn respelled<'a>(&'a self, dest: &str) -> Option<&'a str> {
-        let on_disk = self.paths.get(&lk_core::fs::fold_name(dest))?;
-        (on_disk != dest).then_some(on_disk.as_str())
-    }
-
-    /// The page a link actually REACHES: its id, and only when the address it names is a file.
-    ///
-    /// A link is one thing to a reader — it opens a page or it does not — so it has to be one
-    /// thing to the graph. Reading the id alone lets a dead spelling that slugifies onto a real
-    /// page become an edge, a citation in that page's `## Sources`, and an orphan exemption,
-    /// while `broken` reports the very same link missing: one vault, three answers. Every
-    /// consumer that turns a link into a graph fact goes through here.
-    pub fn reached<'a>(&self, link: &'a Link) -> Option<&'a str> {
-        if !self.is_resolvable(&link.dest) {
+        if self.exact_ids.contains_key(dest) {
             return None;
         }
-        link.id.as_deref()
+        self.aliases.get(dest).map(String::as_str)
+    }
+
+    pub fn reached<'a>(&'a self, link: &Link) -> Option<&'a str> {
+        self.exact_ids
+            .get(&link.dest)
+            .or_else(|| {
+                self.aliases
+                    .get(&link.dest)
+                    .and_then(|actual| self.exact_ids.get(actual))
+            })
+            .map(String::as_str)
     }
 
     /// Whether a resolved link target addresses a KNOWLEDGE page — the question orphan
@@ -578,7 +581,22 @@ pub fn reserved_page_ids(wiki_dir: &Path) -> Vec<String> {
 /// that merge separate communities and mask real orphans.
 pub fn reserved_page_predicate(wiki_dir: &Path) -> impl Fn(&str) -> bool {
     let ids: HashSet<String> = reserved_page_ids(wiki_dir).into_iter().collect();
-    move |id: &str| ids.contains(id)
+    let catalog = format!(
+        "{}/",
+        dir_slug(&wiki_dir.join(lk_core::vault_path::CATALOG_SUBDIR))
+    );
+    move |id: &str| {
+        ids.contains(&path_slug(Path::new(id))) || dir_slug(Path::new(id)).starts_with(&catalog)
+    }
+}
+
+/// A lossless textual page key. Slug normalization is deliberately not identity.
+pub fn page_id(path: &Path) -> String {
+    address(&path.with_extension(""))
+}
+
+fn address(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 /// A vault-relative path as one comparable address: separators normalized to `/`, and the text
@@ -610,13 +628,13 @@ pub struct AddressCollision {
 }
 
 pub fn address_collisions(pages: &[ScannedPage]) -> Vec<AddressCollision> {
-    let mut by_id: std::collections::BTreeMap<&str, Vec<String>> =
+    let mut by_id: std::collections::BTreeMap<String, Vec<String>> =
         std::collections::BTreeMap::new();
     for page in pages {
         by_id
-            .entry(page.id.as_str())
+            .entry(path_slug(&page.path))
             .or_default()
-            .push(rel_str(&page.path));
+            .push(address(&page.path));
     }
     by_id
         .into_iter()
@@ -682,11 +700,128 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pure_existence_never_infers_case_aliases_or_respells_exact_addresses() {
+        let pages = vec![
+            ScannedPage {
+                id: "wiki/lower".into(),
+                path: "wiki/lower.md".into(),
+                ..Default::default()
+            },
+            ScannedPage {
+                id: "wiki/Lower".into(),
+                path: "wiki/Lower.md".into(),
+                ..Default::default()
+            },
+        ];
+        let existence = VaultExistence::build(&pages, &VaultDirs::default());
+        assert!(!existence.is_resolvable("wiki/LOWER.md"));
+        assert_eq!(existence.reached(&Link::to("wiki/LOWER.md")), None);
+        assert_eq!(existence.respelled("wiki/lower.md"), None);
+        assert_eq!(existence.respelled("wiki/Lower.md"), None);
+        assert_eq!(
+            existence.reached(&Link::to("wiki/Lower.md")),
+            Some("wiki/Lower")
+        );
+    }
+
+    #[test]
+    fn production_existence_checks_case_aliases_once_on_the_host_filesystem() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("wiki")).unwrap();
+        std::fs::write(root.path().join("wiki/lower.md"), "# Lower\n").unwrap();
+        std::fs::write(root.path().join("wiki/citer.md"), "[Lower](LOWER.md)\n").unwrap();
+        let pages = scan_vault(root.path(), false).unwrap();
+        let existence =
+            VaultExistence::build_at(root.path(), &pages, &VaultDirs::default()).unwrap();
+        let aliases = root.path().join("wiki/LOWER.md").is_file();
+        assert_eq!(existence.is_resolvable("wiki/LOWER.md"), aliases);
+        assert_eq!(
+            existence.reached(&Link::to("wiki/LOWER.md")),
+            aliases.then_some("wiki/lower")
+        );
+        assert_eq!(
+            existence.respelled("wiki/LOWER.md"),
+            aliases.then_some("wiki/lower.md")
+        );
+    }
+
+    #[test]
+    fn page_keys_keep_distinct_punctuation_and_exact_case() {
+        assert_ne!(
+            page_id(Path::new("wiki/a-b.md")),
+            page_id(Path::new("wiki/a_b.md"))
+        );
+        let pages = vec![
+            ScannedPage {
+                id: page_id(Path::new("wiki/a-b.md")),
+                path: "wiki/a-b.md".into(),
+                ..Default::default()
+            },
+            ScannedPage {
+                id: page_id(Path::new("wiki/a_b.md")),
+                path: "wiki/a_b.md".into(),
+                ..Default::default()
+            },
+        ];
+        let existence = VaultExistence::build(&pages, &VaultDirs::default());
+        assert_eq!(
+            existence.reached(&Link::to("wiki/a-b.md")),
+            Some("wiki/a-b")
+        );
+        assert_eq!(
+            existence.reached(&Link::to("wiki/a_b.md")),
+            Some("wiki/a_b")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn incomplete_directory_traversal_is_an_error() {
+        let root = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(root.path(), root.path().join("loop")).unwrap();
+        let error = scan_vault(root.path(), true).unwrap_err();
+        assert!(error.to_string().contains("incomplete vault traversal"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_accepts_internal_aliases_and_rejects_external_pages_and_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("page.md"), "Internal page.").unwrap();
+        std::fs::write(outside.path().join("page.md"), "External page.").unwrap();
+        let alias = root.path().join("alias.md");
+        std::os::unix::fs::symlink("page.md", &alias).unwrap();
+        assert_eq!(scan_vault(root.path(), false).unwrap().len(), 2);
+        std::fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("page.md"), &alias).unwrap();
+        for follow in [false, true] {
+            assert!(
+                scan_vault(root.path(), follow)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("escapes vault")
+            );
+        }
+        std::fs::remove_file(alias).unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("external")).unwrap();
+        assert_eq!(scan_vault(root.path(), false).unwrap().len(), 1);
+        assert!(
+            scan_vault(root.path(), true)
+                .unwrap_err()
+                .to_string()
+                .contains("escapes vault")
+        );
+    }
+
+    #[test]
     fn reserved_predicate_excludes_only_meta_files() {
         let is_reserved = reserved_page_predicate(Path::new("wiki"));
         assert!(is_reserved("wiki/index"));
         assert!(is_reserved("wiki/log"));
         assert!(is_reserved("wiki/map"));
+        assert!(is_reserved("wiki/catalog/0-0"));
+        assert!(!is_reserved("wiki/catalogue/topic"));
         assert!(is_reserved("wiki/agents"));
         // Real knowledge nodes are NOT reserved.
         assert!(!is_reserved("wiki/concepts/rag"));
@@ -852,7 +987,7 @@ mod tests {
                     .iter()
                     .map(|p| p.id.as_str())
                     .collect::<Vec<_>>(),
-                vec!["wiki/concepts/x"]
+                vec!["Wiki/concepts/x"]
             );
         } else {
             assert!(
@@ -943,14 +1078,16 @@ mod tests {
         std::fs::write(concepts.join("cites.md"), "# Cites\n\n[개념](개념.md)\n").unwrap();
 
         let pages = scan_vault(tmp.path(), false).unwrap();
-        let existence = VaultExistence::build(&pages, &VaultDirs::default());
+        let existence =
+            VaultExistence::build_at(tmp.path(), &pages, &VaultDirs::default()).unwrap();
         let citer = pages
             .iter()
             .find(|p| p.id == "wiki/concepts/cites")
             .unwrap();
-        assert!(
+        assert_eq!(
             existence.is_resolvable(&citer.outgoing[0].dest),
-            "a composed link must resolve to the decomposed file it names"
+            tmp.path().join(&citer.outgoing[0].dest).is_file(),
+            "Unicode aliases follow the actual filesystem, not a normalization guess"
         );
     }
 
@@ -989,11 +1126,13 @@ mod tests {
                 title: "t".to_owned(),
                 format: None,
                 outgoing: vec![Link::to("wiki/concepts/confluence-cloud.md")],
+                revision: None,
             },
             ScannedPage {
                 id: "wiki/concepts/confluence-cloud".to_owned(),
                 path: PathBuf::from("wiki/concepts/confluence-cloud.md"),
                 title: "Confluence Cloud".to_owned(),
+                revision: None,
                 format: None,
                 outgoing: vec![],
             },

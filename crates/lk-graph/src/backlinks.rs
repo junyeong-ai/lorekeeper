@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
-use lk_core::concept::citation_digest;
+use lk_core::concept::{Citation, citation_digest};
 use lk_core::config::VaultDirs;
 use lk_core::frontmatter;
 use lk_core::link;
@@ -25,8 +25,8 @@ use lk_vault::{
 use serde::Serialize;
 
 use crate::GraphError;
+use crate::scan::page_id;
 use crate::scan::{ScannedPage, VaultExistence, is_concept_page, is_valid_source};
-use lk_core::vault_path::path_slug;
 
 /// Outcome of one concept page's reconciliation.
 #[derive(Debug, Clone, Serialize)]
@@ -76,7 +76,7 @@ pub struct ConceptResynthesis {
     pub related_anchor: Option<String>,
     /// The pages citing this concept, sorted — the evidence the rewritten synthesis
     /// answers to.
-    pub citations: Vec<String>,
+    pub citations: Vec<Citation>,
     /// The bodies the rewrite will REPLACE — one entry per section it writes that holds
     /// one, in the order it writes them.
     ///
@@ -176,6 +176,13 @@ pub fn sync_concept_backlinks(
     dirs: &VaultDirs,
     synthesis: SynthesisPolicy,
 ) -> Result<BacklinksSyncResult, GraphError> {
+    if let Some(page) = pages.iter().find(|page| {
+        is_valid_source(&page.path, dirs)
+            && !crate::scan::states_intent(page)
+            && page.revision.is_none()
+    }) {
+        return Err(GraphError::UnreadableSource(page.path.clone()));
+    }
     // Reverse index: concept page id → sorted set of source page ids that cite it.
     // Each link already carries its resolved page id (scan resolves every destination
     // against its page's location), so crediting is a set-membership check — `## Sources`
@@ -184,7 +191,7 @@ pub fn sync_concept_backlinks(
     // `## Related`, and navigation pages aren't sources. BTreeMap/BTreeSet keep the
     // rendered body deterministic.
     // `pages` here is a full-vault scan of every page dir, so it IS the vault.
-    let existence = VaultExistence::build(pages, dirs);
+    let existence = VaultExistence::build_at(vault_root, pages, dirs)?;
     let by_id: HashMap<&str, &ScannedPage> = pages.iter().map(|p| (p.id.as_str(), p)).collect();
     let mut incoming: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for page in pages {
@@ -234,6 +241,20 @@ pub fn sync_concept_backlinks(
             .map(|set| set.iter().cloned().collect())
             .unwrap_or_default();
         sources.sort();
+
+        let citations: Vec<Citation> = sources
+            .iter()
+            .map(|id| {
+                let source = by_id[id.as_str()];
+                Citation::at_revision(
+                    &source.path,
+                    source
+                        .revision
+                        .clone()
+                        .expect("source revisions validated before reconciliation"),
+                )
+            })
+            .collect();
 
         let full_path = vault_root.join(&page.path);
         let raw = std::fs::read_to_string(&full_path)
@@ -296,7 +317,7 @@ pub fn sync_concept_backlinks(
         let owed_input = (synthesis == SynthesisPolicy::Record
             && !sources.is_empty()
             && synthesis_section.is_some())
-        .then(|| citation_digest(&sources));
+        .then(|| citation_digest(&citations));
         let completion_key = frontmatter::field::completion(frontmatter::field::SYNTHESIS);
         let recorded_answer = llm_input(&parsed, &completion_key);
         let recorded_input = llm_input(&parsed, frontmatter::field::SYNTHESIS);
@@ -350,7 +371,7 @@ pub fn sync_concept_backlinks(
                 related_anchor: related
                     .as_ref()
                     .map(|section| format!("## {}", section.heading)),
-                citations: sources.clone(),
+                citations,
                 discarding: [Some(section), related.as_ref()]
                     .into_iter()
                     .flatten()
@@ -418,11 +439,7 @@ pub fn sync_concept_backlinks(
             continue;
         };
 
-        // The verdict is the page this sweep would write against the page on disk, not a
-        // field-by-field comparison: everything derived is rendered into the candidate, so
-        // whatever differs is by definition drift. A source page RETITLED changes its
-        // citation's display text without changing which page is cited — the set is the
-        // same, so the synthesis stays answered while the line naming it is corrected.
+        // Compare the complete derived page, including citation labels and evidence revisions.
         if updated_content == raw {
             report.unchanged += 1;
             continue;
@@ -491,7 +508,7 @@ pub(crate) fn parse_existing_sources(
     link::extract_dests(body)
         .into_iter()
         .filter_map(|dest| link::resolve_dest(concept_path, &dest))
-        .map(|resolved| path_slug(&resolved))
+        .map(|resolved| page_id(&resolved))
         .filter(|id| !id.is_empty())
         .collect()
 }
@@ -540,8 +557,40 @@ mod tests {
     use crate::scan::Link;
     use tempfile::TempDir;
 
+    fn fixture_digest(ids: &[String]) -> String {
+        citation_digest(
+            &ids.iter()
+                .map(|id| Citation {
+                    path: format!("{id}.md"),
+                    revision: "revision".into(),
+                })
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    // A ScannedPage asserts that its address was enumerated on disk. Older
+    // fixtures wrote only the concept being edited; make the source addresses
+    // real as well now that production validates filesystem alias ownership.
+    fn sync_fixture(
+        pages: &[ScannedPage],
+        root: &Path,
+        dry_run: bool,
+        dirs: &VaultDirs,
+        synthesis: SynthesisPolicy,
+    ) -> Result<BacklinksSyncResult, GraphError> {
+        for page in pages {
+            let path = root.join(&page.path);
+            if !path.exists() {
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, format!("# {}\n", page.title)).unwrap();
+            }
+        }
+        super::sync_concept_backlinks(pages, root, dry_run, dirs, synthesis)
+    }
+
     fn build_page(id: &str, rel: &str, outgoing: &[&str]) -> ScannedPage {
         ScannedPage {
+            revision: Some("revision".into()),
             id: id.to_owned(),
             path: PathBuf::from(rel),
             title: id.to_owned(),
@@ -582,13 +631,77 @@ mod tests {
 
     /// The `llm_inputs` block of a page whose synthesis was written from `citations`.
     fn synthesized_from(citations: &[&str]) -> String {
-        let digest = citation_digest(
+        let digest = fixture_digest(
             &citations
                 .iter()
                 .map(|s| (*s).to_owned())
                 .collect::<Vec<_>>(),
         );
         format!("  synthesis: \"{digest}\"\n  synthesis_done: \"{digest}\"\n")
+    }
+
+    #[test]
+    fn a_case_alias_is_evidence_only_when_the_filesystem_reaches_it() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("wiki/concepts")).unwrap();
+        std::fs::create_dir_all(root.path().join("daily/news")).unwrap();
+        std::fs::write(
+            root.path().join("wiki/concepts/topic.md"),
+            "---\ntype: concept\ntitle: Topic\n---\n## Synthesis\n\n## Sources\n\n## Related\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("daily/news/day.md"),
+            "---\ntype: daily\ntitle: Day\n---\n[Topic](../../wiki/concepts/TOPIC.md)\n",
+        )
+        .unwrap();
+        let aliases = root.path().join("wiki/concepts/TOPIC.md").is_file();
+        let pages = crate::scan::scan_vault(root.path(), false).unwrap();
+        super::sync_concept_backlinks(
+            &pages,
+            root.path(),
+            false,
+            &VaultDirs::default(),
+            SynthesisPolicy::Record,
+        )
+        .unwrap();
+        let output = std::fs::read_to_string(root.path().join("wiki/concepts/topic.md")).unwrap();
+        assert!(output.contains(&format!("source_count: {}", usize::from(aliases))));
+        assert_eq!(output.contains("[Day]"), aliases);
+    }
+
+    #[test]
+    fn punctuation_distinct_source_addresses_keep_their_own_revision() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("wiki/concepts")).unwrap();
+        std::fs::create_dir_all(root.path().join("wiki/documents")).unwrap();
+        std::fs::write(root.path().join("wiki/concepts/topic.md"), "---\ntype: concept\ntitle: Topic\n---\n# Topic\n\n## Synthesis\n\n## Sources\n\n## Related\n").unwrap();
+        std::fs::write(
+            root.path().join("wiki/documents/a-b.md"),
+            "---\ntype: document\ntitle: Citing\n---\n[Topic](../concepts/topic.md)\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("wiki/documents/a_b.md"),
+            "---\ntype: document\ntitle: Unrelated\n---\nDifferent evidence.\n",
+        )
+        .unwrap();
+        let pages = crate::scan::scan_vault(root.path(), false).unwrap();
+        let report = sync_fixture(
+            &pages,
+            root.path(),
+            false,
+            &VaultDirs::default(),
+            SynthesisPolicy::Record,
+        )
+        .unwrap();
+        let output = std::fs::read_to_string(root.path().join("wiki/concepts/topic.md")).unwrap();
+        assert!(output.contains("[Citing](../documents/a-b.md)"), "{output}");
+        assert!(!output.contains("a_b.md"));
+        assert_eq!(
+            report.resynthesize[0].citations[0].path,
+            "wiki/documents/a-b.md"
+        );
     }
 
     #[test]
@@ -606,7 +719,7 @@ mod tests {
             ),
         ];
 
-        let report = sync_concept_backlinks(
+        let report = sync_fixture(
             &pages,
             dir.path(),
             false,
@@ -653,7 +766,7 @@ mod tests {
             ),
         ];
 
-        let report = sync_concept_backlinks(
+        let report = sync_fixture(
             &pages,
             dir.path(),
             false,
@@ -680,7 +793,7 @@ mod tests {
             &[],
         )];
 
-        let report = sync_concept_backlinks(
+        let report = sync_fixture(
             &pages,
             dir.path(),
             false,
@@ -717,7 +830,7 @@ mod tests {
             ),
         ];
 
-        sync_concept_backlinks(
+        sync_fixture(
             &pages,
             dir.path(),
             false,
@@ -748,7 +861,7 @@ mod tests {
             ),
         ];
 
-        let report = sync_concept_backlinks(
+        let report = sync_fixture(
             &pages,
             dir.path(),
             true,
@@ -778,7 +891,7 @@ mod tests {
         ];
 
         // First run rewrites the page.
-        let first = sync_concept_backlinks(
+        let first = sync_fixture(
             &pages,
             dir.path(),
             false,
@@ -789,7 +902,7 @@ mod tests {
         assert_eq!(first.updated.len(), 1);
 
         // Second run: every concept page is already in sync.
-        let second = sync_concept_backlinks(
+        let second = sync_fixture(
             &pages,
             dir.path(),
             false,
@@ -821,7 +934,7 @@ mod tests {
             ),
         ];
 
-        sync_concept_backlinks(
+        sync_fixture(
             &pages,
             dir.path(),
             false,
@@ -847,7 +960,7 @@ mod tests {
             &["wiki/concepts/oy365"],
         )];
 
-        let report = sync_concept_backlinks(
+        let report = sync_fixture(
             &pages,
             dir.path(),
             false,
@@ -876,7 +989,7 @@ mod tests {
             ),
         ];
 
-        let report = sync_concept_backlinks(
+        let report = sync_fixture(
             &pages,
             dir.path(),
             false,
@@ -905,7 +1018,7 @@ mod tests {
             ),
         ];
 
-        let report = sync_concept_backlinks(
+        let report = sync_fixture(
             &pages,
             dir.path(),
             false,
@@ -916,12 +1029,12 @@ mod tests {
         assert_eq!(report.resynthesize.len(), 1, "{report:?}");
         let owed = &report.resynthesize[0];
         assert_eq!(owed.anchor, "## 핵심");
-        assert_eq!(owed.citations, vec!["daily/slack/2026-05-20"]);
+        assert_eq!(owed.citations[0].path, "daily/slack/2026-05-20.md");
 
         // The page now records the input its synthesis is owed against, so the drain that
         // writes the section has something to stamp against.
         let content = std::fs::read_to_string(dir.path().join("wiki/concepts/oy365.md")).unwrap();
-        let digest = citation_digest(&["daily/slack/2026-05-20".to_owned()]);
+        let digest = fixture_digest(&["daily/slack/2026-05-20".to_owned()]);
         assert!(
             content.contains(&format!("synthesis: \"{digest}\"")),
             "{content}"
@@ -950,7 +1063,7 @@ mod tests {
             ),
         ];
 
-        let report = sync_concept_backlinks(
+        let report = sync_fixture(
             &pages,
             dir.path(),
             false,
@@ -962,17 +1075,14 @@ mod tests {
         assert_eq!(report.unchanged, 1);
     }
 
-    /// A source page that is RETITLED changes how a citation reads and not what it is. The
-    /// input is the citation set, so the sources body is rewritten with the new display text
-    /// while the synthesis stays answered — a digest taken over the rendered list would
-    /// re-enqueue every concept the retitled page cites.
+    /// Repairing a citation label does not change the source revision it already answers.
     #[test]
-    fn retitling_a_source_does_not_owe_a_new_synthesis() {
+    fn a_stale_citation_label_does_not_owe_a_new_synthesis() {
         let dir = TempDir::new().unwrap();
         write_concept_page(
             &dir,
             "oy365",
-            &["- [Old Title](../../wiki/documents/spec.md)"],
+            &["- [Stale Label](../../wiki/documents/spec.md)"],
             &synthesized_from(&["wiki/documents/spec"]),
         );
 
@@ -981,13 +1091,13 @@ mod tests {
             "wiki/documents/spec.md",
             &["wiki/concepts/oy365"],
         );
-        source.title = "New Title".into();
+        source.title = "Current Title".into();
         let pages = vec![
             build_page("wiki/concepts/oy365", "wiki/concepts/oy365.md", &[]),
             source,
         ];
 
-        let report = sync_concept_backlinks(
+        let report = sync_fixture(
             &pages,
             dir.path(),
             false,
@@ -997,11 +1107,11 @@ mod tests {
         .unwrap();
         assert!(
             report.resynthesize.is_empty(),
-            "the evidence is the same page: {report:?}"
+            "the source revision is unchanged: {report:?}"
         );
         let content = std::fs::read_to_string(dir.path().join("wiki/concepts/oy365.md")).unwrap();
         assert!(
-            content.contains("[New Title]"),
+            content.contains("[Current Title]"),
             "the citation names the page it points at as that page is titled today:\n{content}"
         );
     }
@@ -1017,7 +1127,7 @@ mod tests {
             &["- [daily/slack/2026-05-20](../../daily/slack/2026-05-20.md)"],
             &format!(
                 "  synthesis: \"{}\"\n",
-                citation_digest(&["daily/slack/2026-05-20".to_owned()])
+                fixture_digest(&["daily/slack/2026-05-20".to_owned()])
             ),
         );
 
@@ -1030,7 +1140,7 @@ mod tests {
             ),
         ];
 
-        let report = sync_concept_backlinks(
+        let report = sync_fixture(
             &pages,
             dir.path(),
             false,
@@ -1063,7 +1173,7 @@ mod tests {
             ),
         ];
 
-        let report = sync_concept_backlinks(
+        let report = sync_fixture(
             &pages,
             dir.path(),
             false,
@@ -1084,7 +1194,7 @@ mod tests {
 
         // Both markers, so the page reads as answered rather than as work nothing did.
         let content = std::fs::read_to_string(dir.path().join("wiki/concepts/legacy.md")).unwrap();
-        let digest = citation_digest(&["daily/slack/2026-05-20".to_owned()]);
+        let digest = fixture_digest(&["daily/slack/2026-05-20".to_owned()]);
         assert!(
             content.contains(&format!("synthesis: \"{digest}\"")),
             "{content}"
@@ -1118,7 +1228,7 @@ mod tests {
             ),
         ];
 
-        let report = sync_concept_backlinks(
+        let report = sync_fixture(
             &pages,
             dir.path(),
             false,
@@ -1164,7 +1274,7 @@ mod tests {
                 ),
             ];
 
-            let report = sync_concept_backlinks(
+            let report = sync_fixture(
                 &pages,
                 dir.path(),
                 false,
@@ -1215,7 +1325,7 @@ mod tests {
                 ),
             ];
 
-            let report = sync_concept_backlinks(
+            let report = sync_fixture(
                 &pages,
                 dir.path(),
                 false,
@@ -1252,7 +1362,7 @@ mod tests {
             ),
         ];
 
-        let report = sync_concept_backlinks(
+        let report = sync_fixture(
             &pages,
             dir.path(),
             false,
@@ -1288,7 +1398,7 @@ mod tests {
             ),
         ];
 
-        let report = sync_concept_backlinks(
+        let report = sync_fixture(
             &pages,
             dir.path(),
             false,
@@ -1300,7 +1410,7 @@ mod tests {
         assert_eq!(report.adopted.len(), 1, "{report:?}");
 
         let content = std::fs::read_to_string(&path).unwrap();
-        let digest = citation_digest(&["daily/slack/2026-05-20".to_owned()]);
+        let digest = fixture_digest(&["daily/slack/2026-05-20".to_owned()]);
         assert!(
             content.contains(&format!("llm_inputs:\n  synthesis: \"{digest}\"")),
             "{content}"
@@ -1322,7 +1432,7 @@ mod tests {
             &[],
         )];
 
-        let report = sync_concept_backlinks(
+        let report = sync_fixture(
             &pages,
             dir.path(),
             false,
@@ -1357,7 +1467,7 @@ mod tests {
             &[],
         )];
 
-        let report = sync_concept_backlinks(
+        let report = sync_fixture(
             &pages,
             dir.path(),
             false,
@@ -1369,7 +1479,7 @@ mod tests {
         assert_eq!(report.updated.len(), 1, "the sources list is now empty");
 
         let content = std::fs::read_to_string(dir.path().join("wiki/concepts/oy365.md")).unwrap();
-        let digest = citation_digest(&["daily/slack/2026-05-20".to_owned()]);
+        let digest = fixture_digest(&["daily/slack/2026-05-20".to_owned()]);
         assert!(
             content.contains(&format!("synthesis_done: \"{digest}\"")),
             "the answered input survives losing its evidence:\n{content}"
@@ -1385,7 +1495,7 @@ mod tests {
     #[test]
     fn losing_every_citation_withdraws_an_input_nothing_answered() {
         let dir = TempDir::new().unwrap();
-        let digest = citation_digest(&["daily/slack/2026-05-20".to_owned()]);
+        let digest = fixture_digest(&["daily/slack/2026-05-20".to_owned()]);
         write_concept_page(
             &dir,
             "oy365",
@@ -1399,7 +1509,7 @@ mod tests {
             &[],
         )];
 
-        let report = sync_concept_backlinks(
+        let report = sync_fixture(
             &pages,
             dir.path(),
             false,
@@ -1432,7 +1542,7 @@ mod tests {
     #[test]
     fn a_run_with_no_llm_plane_withdraws_nothing_from_a_cited_page() {
         let dir = TempDir::new().unwrap();
-        let digest = citation_digest(&["daily/slack/2026-05-20".to_owned()]);
+        let digest = fixture_digest(&["daily/slack/2026-05-20".to_owned()]);
         write_concept_page(
             &dir,
             "oy365",
@@ -1449,7 +1559,7 @@ mod tests {
             ),
         ];
 
-        let report = sync_concept_backlinks(
+        let report = sync_fixture(
             &pages,
             dir.path(),
             false,
@@ -1489,7 +1599,7 @@ mod tests {
             ),
         ];
 
-        let report = sync_concept_backlinks(
+        let report = sync_fixture(
             &pages,
             dir.path(),
             false,
@@ -1527,7 +1637,7 @@ mod tests {
             ),
         ];
 
-        let report = sync_concept_backlinks(
+        let report = sync_fixture(
             &pages,
             dir.path(),
             false,

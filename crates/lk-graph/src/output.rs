@@ -65,7 +65,7 @@ pub struct RenameSuggestion {
 #[derive(Debug, Serialize)]
 pub struct Violations {
     pub broken: Vec<BrokenLink>,
-    pub index: IndexSyncReport,
+    pub index: Option<IndexSyncReport>,
     pub invalid_categories: Vec<InvalidCategoryConcept>,
     pub duplicate_concepts: Vec<DuplicateConcept>,
     pub address_collisions: Vec<AddressCollision>,
@@ -98,6 +98,8 @@ pub struct LintReport {
     pub components: usize,
     pub violations: Violations,
     pub observations: Observations,
+    /// Checks that could not complete; their absence of findings is not a clean verdict.
+    pub errors: Vec<String>,
 }
 
 impl Violations {
@@ -117,7 +119,7 @@ impl Violations {
             respelled_links,
         } = self;
         broken.len()
-            + index.count()
+            + index.as_ref().map_or(0, IndexSyncReport::count)
             + invalid_categories.len()
             + duplicate_concepts.len()
             + address_collisions.len()
@@ -315,7 +317,15 @@ pub fn print_lint(r: &LintReport) {
 
     let violations = r.violations.count();
     let observations = r.observations.count();
-    if violations == 0 {
+    if !r.errors.is_empty() {
+        println!("\nIncomplete checks:");
+        for error in &r.errors {
+            println!("  {error}");
+        }
+        println!(
+            "\n{violations} known violation(s), {observations} observation(s); verdict incomplete"
+        );
+    } else if violations == 0 {
         println!("\nNo violations ({observations} observation(s))");
     } else {
         println!("\n{violations} violation(s), {observations} observation(s)");
@@ -346,7 +356,9 @@ fn print_violations(v: &Violations) {
         }
     }
 
-    if index.count() > 0 {
+    if let Some(index) = index
+        && index.count() > 0
+    {
         println!("\nIndex drift:");
         for p in &index.missing_from_index {
             println!("  +index  {p}");
@@ -777,13 +789,13 @@ mod tests {
                 source: "a".into(),
                 target: "b".into(),
             }],
-            index: IndexSyncReport {
+            index: Some(IndexSyncReport {
                 stale: false,
                 absent: false,
                 missing_from_index: vec!["c".into()],
                 missing_from_disk: vec!["d".into()],
                 fixed: None,
-            },
+            }),
             invalid_categories: vec![InvalidCategoryConcept {
                 path: "wiki/concepts/e.md".into(),
                 slug: "e".into(),

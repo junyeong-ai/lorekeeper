@@ -1,7 +1,7 @@
 ---
 name: lore-ingest
-version: 0.36.2
-description: Daily knowledge ingestion pipeline — collects from Gmail, Google Drive, Google Calendar, Slack, Jira, RSS, and a manual inbox into an Obsidian vault. Deduplicates, classifies, extracts concepts, writes structured pages. Optionally tracks your own work into a work-log when the `personal:` module is configured. Idempotent, phased ingest with a no-data-loss guarantee.
+version: 0.46.0
+description: Daily knowledge ingestion pipeline — collects from Gmail, Google Drive, Google Calendar, Slack, Jira, RSS, and a manual inbox into an Obsidian vault. Deduplicates, classifies, extracts concepts, writes structured pages. Optionally tracks your own work into a work-log when the `personal:` module is configured. Phased ingest with atomic per-page writes and durable published queue tasks.
 argument-hint: "<subcommand> [args]"
 disable-model-invocation: true
 allowed-tools: |
@@ -83,8 +83,8 @@ defaults are usually wrong, and both fail SILENTLY:
   `lore-weekly.sh`. `lore ingest` and `lore synthesis weekly` are only stage ONE of those
   scripts: the queue drain and `lore queue apply` live in the scripts alone, so without
   this flag the schedule ingests every morning and never fills a summary or materializes
-  a concept. Only those two jobs take it — the janitors and monthly+ syntheses have no
-  LLM stage.
+  a concept. Only those two jobs take it. Monthly/quarterly/annual syntheses enqueue
+  narrative tasks that the next daily drain processes; the janitors have no LLM work.
 
 Every emitted path must be absolute (`--bin`, `--pipeline-dir`): launchd searches no
 `PATH` and expands no `~`.
@@ -125,12 +125,14 @@ Default provider is `queue` (buffers tasks to JSONL for `/lore-process`).
 
 ## Ingest flow
 
-There is no commit step. A daily page is re-rendered in full every run, so any
-write or flush failure just leaves the affected pages for the next run to reproduce
-byte-identically (idempotent — that is the no-data-loss guarantee). Per-source
-transactionality applies only to the LLM queue: each source opens a queue boundary
-and a source whose plan fails rolls back its own buffered tasks, so the flushed
-queue never references an unwritten page.
+Pages are replaced atomically per file; a run is not a multi-page transaction.
+After a write or queue-flush failure, retry from retained inputs where available.
+A remote re-fetch may return edited, deleted or expired events, even on the same day,
+so byte-identical recovery requires identical retained inputs. Per-source queue
+boundaries roll back buffered tasks when source planning fails; the queue is
+published only after vault writes succeed. The scheduled pipeline logs an explicit
+automatic-commit skip: it cannot prove which working-tree changes belong to its run.
+Review and commit vault changes separately; existing staging remains untouched.
 
 1. **Plan each source** — fetch, normalize, intra-batch dedup, classify. A source
    that fails is recorded and skipped; the run continues with the rest.
@@ -157,9 +159,12 @@ stale. A daily run is `lore ingest` → `/lore-process`, not `lore ingest` alone
 
 ## Safety notes
 
-- Re-running for TODAY is safe: a daily page is a materialized view re-rendered in full
-  from the source window, and the same window returns the same events, so a duplicate run
-  reproduces the same bytes. Only wasteful, never corrupting.
+- Re-running for TODAY re-fetches the source window. The output is reproducible only
+  when the inputs are identical: upstream edits/deletions and rolling windows can
+  change it within the same day. Use `--dry-run` to inspect returned event counts,
+  and retain a copy before a replacement whose evidence cannot be replayed. Counts
+  alone cannot detect changed content. RSS retained event logs offer replay that
+  other adapters may not provide.
 - `lore ingest --date <past>` re-materializes that day — and RE-FETCHES it. A source whose
   window has passed returns fewer events than the page already holds (an RSS feed drops
   older items; a Gmail `newer_than:` query stops matching), and the re-render replaces the

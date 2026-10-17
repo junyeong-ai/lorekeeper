@@ -67,8 +67,11 @@ impl Frontmatter {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VaultPage {
+    /// Exact input bytes, retained for optimistic publication guards. Not persisted as page data.
+    #[serde(skip)]
+    pub original: Option<String>,
     pub frontmatter: Frontmatter,
     pub body: String,
 }
@@ -161,10 +164,11 @@ pub fn parse_page(content: &str) -> Result<VaultPage, String> {
         return Err("unclosed frontmatter block".to_string());
     }
 
-    let fields: BTreeMap<String, serde_json::Value> = serde_yaml_ng::from_str(&parts.yaml)
-        .map_err(|e| format!("invalid frontmatter YAML: {e}"))?;
+    let fields: BTreeMap<String, serde_json::Value> =
+        crate::yaml::from_str(&parts.yaml).map_err(|e| format!("invalid frontmatter YAML: {e}"))?;
 
     Ok(VaultPage {
+        original: Some(content.to_owned()),
         frontmatter: Frontmatter { fields },
         body: parts.body,
     })

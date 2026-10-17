@@ -125,7 +125,7 @@ pub async fn run(
 
     let jobs = build_jobs(&config, &flags, pipeline_dir);
 
-    let env = match pipeline_dir {
+    let mut env = match pipeline_dir {
         Some(dir) if !dir.is_absolute() => {
             return Err(miette::miette!(
                 "--pipeline-dir must be absolute: a scheduler starts the job with no useful \
@@ -142,12 +142,12 @@ pub async fn run(
             let absent: Vec<&str> = jobs
                 .iter()
                 .filter_map(|job| job.program.as_deref())
-                .filter(|program| !std::path::Path::new(program).exists())
+                .filter(|program| !is_executable_file(std::path::Path::new(program)))
                 .collect();
             if !absent.is_empty() {
                 eprintln!(
-                    "warning: these scheduled scripts are not there — a scheduler will fail them \
-                     silently. Re-run the installer, or point --pipeline-dir at where they were \
+                    "warning: these scheduled scripts are missing or not executable. \
+                     Re-run the installer, or point --pipeline-dir at where they were \
                      installed.\n  {}",
                     absent.join("\n  ")
                 );
@@ -174,6 +174,14 @@ pub async fn run(
             Vec::new()
         }
     };
+    if let Some(path) = &opts.template_dir {
+        let path = if path.is_absolute() {
+            path.clone()
+        } else {
+            cwd.join(path)
+        };
+        env.push(("LORE_TEMPLATE_DIR".into(), path.display().to_string()));
+    }
     match format {
         Format::Cron => print_cron(bin, &cwd, &jobs, &env)?,
         Format::Launchd => print_launchd(bin, &cwd, &jobs, &env, pipeline_dir)?,
@@ -214,13 +222,8 @@ fn build_jobs(
             args,
         }
     };
-    // The daily ingest and the weekly synthesis are the FIRST stage of a pipeline, not the
-    // whole job: each later stage consumes what the previous produced, and the queue drain
-    // needs an LLM session `lore` deliberately does not invoke. Scheduling the bare
-    // subcommand ingests every morning and never drains or applies, so summaries and
-    // concepts stay empty while tasks pile up. With the scripts installed those two jobs run
-    // them; every other job is a plain `lore` invocation with no LLM stage, which is why the
-    // scripts themselves say those belong on their own schedules.
+    // Pipeline scripts supply the semantic stages for daily/weekly jobs and named
+    // entry points for the other schedules. Periods retain independent calendar triggers.
     //
     // A job's NAME is its scheduling slot — the config key it comes from — never the program
     // that fills it. Renaming the slot when the program changes would leave an operator who
@@ -249,17 +252,25 @@ fn build_jobs(
             None => lore_job(
                 "synthesis-weekly",
                 sched,
-                &["synthesis", "weekly", "--previous"],
+                &["synthesis", "weekly", "--previous", "--wait-for-vault"],
             ),
         });
     }
     if let Some(personal) = &config.personal {
         for (period, sched) in personal.review_schedules() {
-            jobs.push(lore_job(
-                &format!("synthesis-{period}"),
-                sched,
-                &["synthesis", period, "--previous"],
-            ));
+            jobs.push(match pipeline_dir {
+                Some(dir) => pipeline_job(
+                    dir,
+                    &format!("synthesis-{period}"),
+                    sched,
+                    &format!("lore-{period}.sh"),
+                ),
+                None => lore_job(
+                    &format!("synthesis-{period}"),
+                    sched,
+                    &["synthesis", period, "--previous", "--wait-for-vault"],
+                ),
+            });
         }
     }
     // Only where the intent plane is on, and only with a pipeline dir: the notifier is a
@@ -280,8 +291,20 @@ fn build_jobs(
         });
     }
     if let Some(ref sched) = config.maintenance.schedule {
-        jobs.push(lore_job("maintenance", sched, &["maintenance"]));
-        jobs.push(lore_job("queue-prune", sched, &["queue", "prune"]));
+        if let Some(dir) = pipeline_dir {
+            jobs.push(pipeline_job(
+                dir,
+                "maintenance",
+                sched,
+                "lore-maintenance.sh",
+            ));
+        } else {
+            jobs.push(lore_job(
+                "maintenance",
+                sched,
+                &["maintenance", "--prune-queue", "--wait-for-vault"],
+            ));
+        }
     }
     jobs
 }
@@ -392,6 +415,7 @@ fn print_launchd(
     println!("# is unwritable can fail to spawn — so make it first:");
     println!("#   mkdir -p {home}/Library/Logs/lorekeeper");
     println!("#");
+    println!("# Retention includes queue pruning; remove any old com.lorekeeper.queue-prune job.");
     println!("# Write each block below to the path in its header, then load it:");
     println!("#   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<file>");
     println!("#   launchctl kickstart -p gui/$(id -u)/<label>   # run once now");
@@ -426,15 +450,10 @@ fn print_launchd(
         println!("  <key>Label</key><string>{label}</string>");
         println!("  <key>ProgramArguments</key>");
         println!("  <array>");
-        // A pipeline runs under an explicit interpreter rather than its shebang: the script
-        // is installed by a shell installer that may not have kept the executable bit, and
-        // launchd reports a failure to exec as an opaque status.
-        if let Some(program) = &job.program {
-            println!("    <string>/bin/bash</string>");
-            println!("    <string>{}</string>", xml_escape(program));
-        } else {
-            println!("    <string>{}</string>", xml_escape(bin));
-        }
+        println!(
+            "    <string>{}</string>",
+            xml_escape(job.program.as_deref().unwrap_or(bin))
+        );
         for arg in &job.args {
             println!("    <string>{}</string>", xml_escape(arg));
         }
@@ -659,11 +678,19 @@ mod tests {
     }
 
     #[test]
-    fn a_pipeline_dir_replaces_the_two_jobs_that_are_only_a_pipeline_stage() {
+    fn pipeline_entries_preserve_schedules_and_combine_the_retention_job() {
         // Ingest and weekly synthesis are the FIRST stage of their pipeline; the queue drain
         // and `queue apply` exist only in the scripts. Scheduling the bare subcommands
         // ingests every morning and never materializes a summary or a concept.
-        let config = config_with_schedules();
+        let mut config = config_with_schedules();
+        let mut personal = lk_core::config::PersonalConfig::default();
+        personal.monthly.enabled = true;
+        personal.monthly.schedule = Some("0 8 1 * *".into());
+        personal.quarterly.enabled = true;
+        personal.quarterly.schedule = Some("0 8 1 1,4,7,10 *".into());
+        personal.annual.enabled = true;
+        personal.annual.schedule = Some("0 8 1 1 *".into());
+        config.personal = Some(personal);
         let dir = std::path::Path::new("/data/pipelines");
         let jobs = build_jobs(&config, &[], Some(dir));
 
@@ -676,9 +703,20 @@ mod tests {
             by_name("synthesis-weekly"),
             Some(Some("/data/pipelines/lore-weekly.sh".to_string()))
         );
-        // The janitors have no LLM stage, so they stay plain `lore` invocations.
-        assert_eq!(by_name("maintenance"), Some(None));
-        assert_eq!(by_name("queue-prune"), Some(None));
+        assert_eq!(
+            by_name("maintenance"),
+            Some(Some("/data/pipelines/lore-maintenance.sh".into()))
+        );
+        assert_eq!(by_name("queue-prune"), None);
+        for (period, schedule) in config.personal.as_ref().unwrap().review_schedules() {
+            let name = format!("synthesis-{period}");
+            let job = jobs.iter().find(|job| job.name == name).unwrap();
+            assert_eq!(
+                job.program.as_deref(),
+                Some(format!("/data/pipelines/lore-{period}.sh").as_str())
+            );
+            assert!(matches!(&job.schedule, When::Calendar(value) if value == schedule));
+        }
     }
 
     #[test]

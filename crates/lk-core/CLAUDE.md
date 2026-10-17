@@ -63,45 +63,12 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   (including spaces, punctuation, and literal `-`) to a separator, collapses runs to a
   single `-`, and trims edges. Concept slugs are always re-normalized through it to
   prevent path injection from LLM output.
-- **`identity_key()` is `slugify` keeping only the separators that MEAN something** — the
-  ADDRESS a name is written at vs the IDENTITY it claims. A slug must stay readable as a
-  filename so it keeps every break; identity keeps a break only where it changes the name.
-  Every break is typography — `Vector DB` / `vector-db` / `vectordb` are one name, as are
-  `claude-35` / `claude35` — EXCEPT one between two NUMERALS, which is the name itself:
-  positional notation makes `3-5` two numerals and `35` one, so `Claude 3.5` ≠ `Claude 35`,
-  `GPT-4.1` ≠ `GPT-41`, `Web 2.0` ≠ `web20`. Dropping every separator folded exactly those
-  together, and version-numbered names are the most common shape in a technology vault. A
-  break on only ONE side of a numeral is still typography (`GPT-4o` = `gpt4o`,
-  `ISO-8601` = `iso8601`). "Numeral" is `char::is_numeric` (Nd ∪ Nl ∪ No), so a digit NFKC
-  leaves alone — Arabic-Indic, Devanagari — counts, while `Ⅴ` decomposes to a letter.
-  Nothing else is folded: word order and every character are identity (`agent-harness` ≠
-  `harness-agent`, `http` ≠ `https`, `doc-hub` ≠ `docs-hub`) — whether two names mean one
-  concept is a judgment, and lives in `/lore-wiki audit`, never here.
-  Two boundaries stay uncrossed on purpose. A digit break is kept even when it only GROUPS
-  one number (`978-0-13-468599-1` ≠ `9780134685991`) — the price of telling `Claude 3.5`
-  from `Claude 35`, paid in a vault full of version numbers and empty of ISBNs. And
-  separator TYPE is gone before this runs (`slugify` maps `:`/`.`/`/`/space alike, so
-  `16:9` = `16-9`); recovering it would cost the slug its filename safety. Single-sourced because
-  two consumers must agree EXACTLY: `lk_pipeline`'s alias index routes an extracted name to
-  the page owning it, and `lk_graph`'s duplicate lint reports two pages owning one name.
-  **The lint only REPORTS; the index ACTS** — it can fold an extraction into an established
-  page, and that fold is not reviewable after the fact (only one page ever exists, so the
-  lint has no pair to compare and the extraction's synthesis is dropped as a later mention).
-  So the fold must be one no reviewer would overturn; that asymmetry, not tidiness, is why
-  it stays this narrow.
-- **`ConceptRegistry` is the one answer to "which page owns this name".** It maps every name
-  a concept page answers to — its own ADDRESS (the file stem), its `title`, and each alias —
-  through `identity_key`, and `resolve` returns `Owned` / `Ambiguous` / `Absent`. Pure over
-  `(slug, title, aliases)` triples, so each caller feeds it from its own I/O: `lk-pipeline`
-  from a `VaultStore` while routing an extraction, `lore resolve` from a directory read while
-  answering a skill about to write a page. Two implementations is what lets the write path
-  fold `VectorDB` onto `vector-db` while the read path calls the name free and mints a rival.
-  A page claims its own address unconditionally and an address outranks any other page's name,
-  so a stale alias cannot redirect a concept away from its own page; among equals the earliest
-  registration routes, which makes a citation's destination reproducible without knowing how
-  many pages claim the name. Ambiguity is REPORTED rather than settled — routing still has to
-  pick, and `Resolution::Ambiguous` carries both the pick and every claimant, because a
-  citation landing on the page a reader did not expect is otherwise unexplainable.
+- **Names and addresses are separate.** `identity_key` normalizes NFC and whitespace while preserving case, compatibility characters, symbols
+  and word boundaries. `ConceptRegistry`
+  indexes titles and explicit aliases; a shared name is ambiguous and cannot route a write.
+  `available_slug` reserves a safe filename, adding a deterministic name digest when the
+  base is occupied. Existing addresses never change. A digest is address disambiguation,
+  not a semantic equivalence test.
 - **`ExtractedConcept` carries the name and the OTHER names separately.** `identity_key` is
   exact, so a `name` holding a gloss (`Agent Capability (에이전트 호출 가능 애플리케이션 단위)`)
   answers to neither the term nor the gloss: the page is unreachable by anything a person or a
@@ -109,24 +76,16 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   326 of 2689 pages in the reference vault reached that state because the struct had one field
   for it. `aliases` is where a translation, an expanded acronym or an original-language term
   goes; `lk-pipeline` decides which of them this vault can actually answer with.
-- **`citation_digest`** is the identity of a concept's EVIDENCE: BLAKE3-128 over the sorted,
-  deduplicated set of pages citing it, serialized as a JSON array so no id is confusable with
-  a pair of shorter ones. The SET, never the rendered citation list — a source page that is
-  retitled changes how a citation reads without changing what it is, and a digest over the
-  text would resurface a concept whose material is identical. Single-sourced because three
-  crates must produce the same string: `lk-graph` records it on the page, `lk-queue` carries
-  it as the task's input, and `lk-pipeline` records the ONE citation a created page's
-  grounding sentence answers. Two implementations would be a task that can never match the
-  page it names.
-- **`vault_path::path_slug`** is the node key for a vault-relative path, and it lives here for
-  the same reason: the id is what a CITATION is counted as. `lk-graph` derives a concept's
-  evidence set from these ids and `lk-pipeline` records that set on a page it creates, so a
-  second derivation would have the two disagree about whether a synthesis answers the evidence
-  it was written from. Each segment is named by the rule that segment is named under — a
-  directory by the filesystem (`fs::fold_name`), the file by `slugify` — which is why `daily_/`
-  and `daily/` stay two addresses while two page stems that slugify alike are one.
-  `dir_slug` is the directory-only form; sharing `path_slug` there would slugify the last
-  segment as a page's file and ask for a prefix no page carries.
+- **`Citation`** identifies a source by its vault-relative path and authored revision.
+  `source_revision` hashes the body and frontmatter except `updated`, `source_count`, and
+  `llm_inputs`. `citation_digest` hashes the sorted, deduplicated citations; graph sync,
+  extraction grounding, and queue requests use this same function.
+- **`vault_path::path_slug`** normalizes candidate addresses for slug diagnostics.
+  It is lossy and never identifies graph nodes or evidence. Graph node keys use
+  `lk_graph::scan::page_id`; citations retain actual vault-relative paths.
+- **`yaml::from_str`** is the shared YAML policy for configuration, frontmatter and
+  extraction manifests. YAML 1.2 scalars, literal merge keys and parser budgets are
+  consistent; duplicate keys are errors and diagnostics omit source snippets.
 - **`link`** is the single implementation of the vault's link vocabulary: inline
   markdown links `[Display](relative/path.md)`, destinations relative to the containing
   page and always `.md`-suffixed. Construction (`md_link` + `relative_dest`, CommonMark

@@ -200,6 +200,83 @@ fn sound_vault() -> Workspace {
 }
 
 #[test]
+fn neighbors_filter_declared_types_and_direction_before_pagination() {
+    let ws = Workspace::new();
+    ws.write("wiki/concepts/topic.md", "---\ntype: concept\n---\n[daily](../../daily/source.md)\n[a](a.md)\n[b](../documents/b.md)\n[unknown](unknown.md)\n");
+    ws.write(
+        "daily/source.md",
+        "---\ntype: daily\n---\n[topic](../wiki/concepts/topic.md)\n",
+    );
+    ws.write("wiki/concepts/a.md", "---\ntype: concept\n---\nA\n");
+    ws.write("wiki/documents/b.md", "---\ntype: concept\n---\nB\n");
+    ws.write(
+        "wiki/concepts/c.md",
+        "---\ntype: concept\n---\n[topic](topic.md)\n",
+    );
+    ws.write(
+        "wiki/concepts/unknown.md",
+        "---\ntitle: Unknown\n---\nNo declared type\n",
+    );
+    let query = |options: &[&str]| {
+        let mut args = vec!["graph", "--json", "neighbors", "wiki/concepts/topic.md"];
+        args.extend_from_slice(options);
+        let output = ws.run(&args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["ok"], true);
+        value["data"].clone()
+    };
+    let first = query(&[
+        "--type",
+        "concept",
+        "--direction",
+        "outgoing",
+        "--limit",
+        "1",
+    ]);
+    assert_eq!(first["total"], 2);
+    assert_eq!(first["neighbors"][0]["path"], "wiki/concepts/a.md");
+    assert_eq!(first["next_offset"], 1);
+    assert_eq!(
+        first["formats"],
+        serde_json::json!({"concept": 3, "daily": 1, "": 1})
+    );
+    let second = query(&[
+        "--type",
+        "concept",
+        "--direction",
+        "outgoing",
+        "--limit",
+        "1",
+        "--offset",
+        "1",
+    ]);
+    assert_eq!(second["neighbors"][0]["path"], "wiki/documents/b.md");
+    assert_eq!(second["neighbors"][0]["format"], "concept");
+    assert!(second["next_offset"].is_null());
+    let incoming = query(&["--type", "concept", "--direction", "incoming"]);
+    assert_eq!(incoming["total"], 1);
+    assert_eq!(incoming["neighbors"][0]["path"], "wiki/concepts/c.md");
+    assert_eq!(query(&["--direction", "mutual"])["total"], 1);
+    assert_eq!(query(&["--direction", "incoming"])["total"], 2);
+    assert_eq!(
+        query(&["--type", ""])["neighbors"][0]["path"],
+        "wiki/concepts/unknown.md"
+    );
+    assert_eq!(query(&["--type", "Concept"])["total"], 0);
+    assert!(
+        query(&["--offset", "50"])["neighbors"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn an_uncited_concept_and_an_open_conflict_are_reported_and_exit_zero() {
     let ws = sound_vault();
     let out = ws.run(&["graph", "lint"]);
@@ -339,11 +416,16 @@ fn a_page_with_unparseable_frontmatter_still_reports_its_broken_link() {
          - [Ghost](../../wiki/concepts/ghost.md)\n",
     );
 
-    let raw = ws.stdout(&["graph", "--json", "lint"]);
+    let output = ws.run(&["graph", "--json", "lint"]);
+    assert_eq!(output.status.code(), Some(2));
+    let raw = String::from_utf8(output.stdout).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
     let broken = parsed["data"]["violations"]["broken"]
         .as_array()
         .expect("broken array");
+    assert_eq!(parsed["ok"], false);
+    assert!(parsed["data"]["violations"]["index"].is_null());
+    assert!(!parsed["data"]["errors"].as_array().unwrap().is_empty());
     assert_eq!(
         broken.len(),
         1,
@@ -577,12 +659,10 @@ fn two_unmanaged_files_at_one_address_do_not_gate() {
     assert!(!stdout.contains("One address"), "{stdout}");
 }
 
-/// `normalize --fix` renames the files and THEN repoints the citations. A page it cannot read
-/// has no links to repoint — the scan already resolved them all — so reading it anyway turns a
-/// foreign file in a user's folder into a run that aborts with the vault half-repointed, and
-/// every re-run aborts at the same file.
+/// Unreadable metadata cannot establish the absence of historical evidence references.
+/// A rename must refuse before moving files or changing any citations.
 #[test]
-fn a_file_the_tool_cannot_read_does_not_abort_a_rename_midway() {
+fn unreadable_metadata_prevents_a_rename_before_any_mutation() {
     let ws = sound_vault();
     ws.write(
         "wiki/concepts/Bad_Name.md",
@@ -616,11 +696,24 @@ fn a_file_the_tool_cannot_read_does_not_abort_a_rename_midway() {
     let out = ws.run(&["graph", "normalize", "--fix"]);
     let stdout = String::from_utf8(out.stdout).expect("utf8");
     let stderr = String::from_utf8(out.stderr).expect("utf8");
-    assert_eq!(out.status.code(), Some(0), "{stdout}{stderr}");
+    assert_eq!(out.status.code(), Some(2), "{stdout}{stderr}");
+    assert!(stderr.contains("cannot establish review evidence safety"));
+    assert!(
+        ws.root
+            .path()
+            .join("vault/wiki/concepts/Bad_Name.md")
+            .exists()
+    );
+    assert!(
+        !ws.root
+            .path()
+            .join("vault/wiki/concepts/bad-name.md")
+            .exists()
+    );
     assert!(
         ws.read("daily/notes/2026-05-24.md")
-            .contains("concepts/bad-name.md"),
-        "the citation must be repointed: {}",
+            .contains("concepts/Bad_Name.md"),
+        "the citation must remain unchanged: {}",
         ws.read("daily/notes/2026-05-24.md")
     );
 }
@@ -889,7 +982,7 @@ fn one_name_answering_to_two_pages_exits_one() {
     );
     ws.write(
         "wiki/concepts/vectordb.md",
-        &concept("vectordb", "VectorDB", "The other."),
+        &concept("vectordb", "Vector DB", "The other."),
     );
     // Re-catalog first, so this fails for the name collision alone.
     assert_eq!(ws.code(&["wiki", "index"]), 0);

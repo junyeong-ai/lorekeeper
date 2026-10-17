@@ -82,6 +82,9 @@ pub enum Command {
     },
     /// Generate synthesis reports
     Synthesis {
+        /// Wait for the vault writer instead of failing when another writer is active
+        #[arg(long, global = true)]
+        wait_for_vault: bool,
         #[command(subcommand)]
         period: commands::synthesis::Period,
     },
@@ -143,6 +146,12 @@ pub enum Command {
     },
     /// Prune the ingest log and drained queue files past the configured retention (default 90 days); streaming event logs are permanent, and each source's latest log entry is kept whatever its age
     Maintenance {
+        /// Also retire completed queue runs and prune stale pending tasks
+        #[arg(long)]
+        prune_queue: bool,
+        /// Wait for the vault writer instead of failing when another writer is active
+        #[arg(long)]
+        wait_for_vault: bool,
         /// Report what would be pruned, and delete nothing
         #[arg(long)]
         dry_run: bool,
@@ -162,8 +171,9 @@ pub enum Command {
     /// Answer which concept page a name addresses — the question the ingest pipeline asks
     /// before it routes an extraction, so a caller can ask it before writing a page
     Resolve {
-        /// The concept name to look up, in any spelling
-        name: String,
+        /// Names to resolve from one registry read; quote each multiword name
+        #[arg(required = true, num_args = 1..)]
+        name: Vec<String>,
         /// Emit the answer as JSON
         #[arg(long)]
         json: bool,
@@ -254,7 +264,10 @@ pub async fn run() -> miette::Result<()> {
         Command::Fetch { url, source } => commands::fetch::run(&opts, &url, source).await,
         Command::Brief { date, json } => commands::brief::run(&opts, date, json).await,
         Command::Agenda { date, json } => commands::agenda::run(&opts, date, json).await,
-        Command::Synthesis { period } => commands::synthesis::run(&opts, period).await,
+        Command::Synthesis {
+            period,
+            wait_for_vault,
+        } => commands::synthesis::run(&opts, period, wait_for_vault).await,
         Command::Health { strict, json } => commands::health::run(&opts, strict, json).await,
         Command::Doctor => commands::doctor::run(&opts).await,
         Command::Extract { cmd } => commands::extract::run(&opts, cmd).await,
@@ -264,7 +277,11 @@ pub async fn run() -> miette::Result<()> {
             format,
             pipeline_dir,
         } => commands::schedule::run(&opts, &bin, format, pipeline_dir.as_deref()).await,
-        Command::Maintenance { dry_run } => commands::maintenance::run(&opts, dry_run).await,
+        Command::Maintenance {
+            dry_run,
+            wait_for_vault,
+            prune_queue,
+        } => commands::maintenance::run(&opts, dry_run, wait_for_vault, prune_queue).await,
         Command::Graph { .. } | Command::Resolve { .. } => unreachable!(),
         Command::Wiki { cmd } => commands::wiki::run(&opts, cmd).await,
         Command::Installation { cmd } => commands::installation::run(&opts, cmd).await,

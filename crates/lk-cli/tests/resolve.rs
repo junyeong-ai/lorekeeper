@@ -48,7 +48,12 @@ fn every_spelling_of_an_owned_name_reaches_its_page() {
         dir.path(),
         "retrieval-augmented-generation",
         "Retrieval-Augmented Generation",
-        &["RAG"],
+        &[
+            "RAG",
+            "rag",
+            "retrieval-augmented-generation",
+            "retrieval augmented generation",
+        ],
     );
 
     for name in [
@@ -88,7 +93,7 @@ fn two_different_names_for_one_thing_are_two_names() {
     write_concept(dir.path(), "kubernetes", "Kubernetes", &[]);
 
     assert_eq!(run(dir.path(), "k8s").status.code(), Some(1));
-    assert_eq!(run(dir.path(), "kubernetes").status.code(), Some(0));
+    assert_eq!(run(dir.path(), "Kubernetes").status.code(), Some(0));
 }
 
 /// Two pages answering to one name is the vault defect `lore graph lint` reports. A citation
@@ -116,10 +121,7 @@ fn a_name_two_pages_answer_to_names_both_and_the_one_a_citation_reaches() {
     let parsed: serde_json::Value =
         serde_json::from_slice(&out.stdout).expect("--json emits an object");
     assert_eq!(parsed["verdict"], "ambiguous");
-    assert_eq!(
-        parsed["routed"]["slug"], "doc-hub",
-        "a page's own address outranks another page's alias: {parsed}"
-    );
+    assert!(parsed.get("routed").is_none());
     assert_eq!(parsed["claimants"].as_array().expect("array").len(), 2);
 }
 
@@ -139,8 +141,8 @@ fn a_page_that_will_not_parse_still_answers_to_its_address() {
 
     let out = run(dir.path(), "VectorDB");
     let stdout = String::from_utf8(out.stdout).expect("utf8");
-    assert_eq!(out.status.code(), Some(0), "{stdout}");
-    assert!(stdout.starts_with("vector-db\t"), "{stdout}");
+    assert_eq!(out.status.code(), Some(3), "{stdout}");
+    assert!(stdout.is_empty());
 }
 
 /// Which page an ambiguous name routes to is decided by REGISTRATION ORDER, so the answer is
@@ -153,22 +155,19 @@ fn a_page_that_will_not_parse_still_answers_to_its_address() {
 fn an_ambiguous_name_routes_the_same_way_the_pipeline_routes_it() {
     let dir = TempDir::new().expect("tempdir");
     // Written in reverse order, so a read that preserved creation order would answer `c-sharp`.
-    write_concept(dir.path(), "c-sharp", "C#", &[]);
-    write_concept(dir.path(), "c-plus-plus", "C++", &[]);
+    write_concept(dir.path(), "c-sharp", "C#", &["Language"]);
+    write_concept(dir.path(), "c-plus-plus", "C++", &["Language"]);
 
     let out = lore()
         .args(["resolve", "--json", "--root"])
         .arg(dir.path())
-        .arg("C")
+        .arg("Language")
         .output()
         .expect("lore runs");
     let parsed: serde_json::Value =
         serde_json::from_slice(&out.stdout).expect("--json emits an object");
     assert_eq!(parsed["verdict"], "ambiguous");
-    assert_eq!(
-        parsed["routed"]["slug"], "c-plus-plus",
-        "the first page in SORTED order routes, which is what the pipeline reads: {parsed}"
-    );
+    assert!(parsed.get("routed").is_none());
     assert_eq!(parsed["claimants"].as_array().expect("array").len(), 2);
 }
 
@@ -179,4 +178,23 @@ fn an_ambiguous_name_routes_the_same_way_the_pipeline_routes_it() {
 fn a_vault_with_no_concepts_yet_answers_absent() {
     let dir = TempDir::new().expect("tempdir");
     assert_eq!(run(dir.path(), "anything").status.code(), Some(1));
+}
+
+#[test]
+fn batch_resolution_preserves_input_order_and_each_verdict() {
+    let root = TempDir::new().unwrap();
+    write_concept(root.path(), "one", "One", &["Shared"]);
+    write_concept(root.path(), "two", "Two", &["Shared"]);
+    let result = lore()
+        .args(["resolve", "--root"])
+        .arg(root.path())
+        .args(["--json", "One", "Missing", "Shared"])
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(2));
+    let answers: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(answers[0]["answer"]["verdict"], "owned");
+    assert_eq!(answers[1]["answer"]["verdict"], "absent");
+    assert_eq!(answers[2]["answer"]["verdict"], "ambiguous");
+    assert_eq!(answers[2]["name"], "Shared");
 }

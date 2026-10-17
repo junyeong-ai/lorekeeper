@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::SourceType;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Event {
     pub id: EventId,
     pub source_id: String,

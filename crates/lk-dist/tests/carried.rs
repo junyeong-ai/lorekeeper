@@ -86,10 +86,13 @@ fn the_binary_carries_the_pipeline_scripts_the_repository_holds() {
         let path = repo_root().join("scripts").join(file.relative);
         assert_eq!(file.contents, read(&path), "{} drifted", path.display());
     }
-    // The three scheduled stages plus the reminder timer. Pinned so a script added to the
-    // repository and not to the manifest is caught by the count rather than by its absence
-    // going unnoticed until someone's reminders stop firing.
-    assert_eq!(lk_dist::pipeline_names().len(), 4);
+    let mut expected: Vec<_> = std::fs::read_dir(repo_root().join("scripts"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("lore-") && name.ends_with(".sh"))
+        .collect();
+    expected.sort();
+    assert_eq!(lk_dist::pipeline_names(), expected);
 }
 
 #[test]

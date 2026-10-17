@@ -34,9 +34,9 @@ pub fn detect_communities(graph: &WikiGraph, config: &GraphConfig) -> ClusterRes
     // Symmetrize the directed link graph into an undirected weighted graph for
     // Louvain. Each directed edge contributes weight 1.0 in both directions, so a
     // RECIPROCAL pair (A→B and B→A) accumulates weight 2.0 on that bond while a one-way
-    // link stays at 1.0. This is deliberate: a mutual citation is a stronger topical tie
-    // than a one-way mention, and weighting it twice biases community boundaries toward
-    // reciprocity. The choice is internally consistent — `degree` below is derived from
+    // link stays at 1.0. This weights reciprocal links more heavily for navigation;
+    // it does not establish topical similarity or independent corroboration.
+    // The choice is internally consistent — `degree` below is derived from
     // this same adjacency, and `compute_modularity` reads the same weights — so it shifts
     // *where* communities split, never the determinism or termination of the algorithm.
     let mut adjacency: Vec<BTreeMap<usize, f64>> = vec![BTreeMap::new(); n];
@@ -442,6 +442,7 @@ mod tests {
     fn build_page(id: &str, outgoing: &[&str]) -> ScannedPage {
         let name = id.rsplit('/').next().unwrap_or(id);
         ScannedPage {
+            revision: Some("revision".into()),
             id: id.to_owned(),
             path: PathBuf::from(format!("{id}.md")),
             title: name.to_owned(),

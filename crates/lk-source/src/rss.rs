@@ -303,7 +303,7 @@ fn map_entry(
     let author = entry
         .authors
         .first()
-        .map(|a| a.name.clone())
+        .and_then(|a| a.name.clone().or_else(|| a.email.clone()))
         .or_else(|| feed_title.clone())
         .unwrap_or_else(|| feed_id.to_owned());
 
@@ -545,6 +545,20 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn an_email_only_feed_author_keeps_provenance_and_entry_identity() {
+        let xml = r#"<rss version="2.0"><channel><title>Publication</title>
+<link>https://example.com</link><description>Feed</description><item>
+<title>Post</title><guid isPermaLink="false">stable-guid</guid>
+<pubDate>Thu, 21 May 2026 08:00:00 GMT</pubDate>
+<author>editor@example.com</author><description>Body</description>
+</item></channel></rss>"#;
+        let item = map_entry("fixture", &Some("Publication".into()), parse_one(xml)).unwrap();
+        assert_eq!(item.author.as_deref(), Some("editor@example.com"));
+        assert_eq!(item.external_id.as_deref(), Some("fixture:stable-guid"));
+        assert_eq!(item.timestamp.to_string(), "2026-05-21T08:00:00Z");
     }
 
     #[test]

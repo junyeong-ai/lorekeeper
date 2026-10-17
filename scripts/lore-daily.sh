@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Daily Lorekeeper pipeline, runnable with no interactive session.
 #
 # One script rather than three scheduled jobs because each stage consumes what the previous

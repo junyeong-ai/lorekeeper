@@ -13,3 +13,4 @@ pub mod math;
 pub mod origin;
 pub mod text;
 pub mod vault_path;
+pub mod yaml;

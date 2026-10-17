@@ -6,7 +6,6 @@ use lk_core::i18n::Locale;
 use lk_core::link;
 
 use crate::GraphError;
-use lk_core::vault_path::path_slug;
 
 /// A page the catalog does not carry, an entry no page justifies, and whether the catalog
 /// differs from a re-derivation at all.
@@ -27,7 +26,7 @@ pub struct IndexDrift {
     /// state from them describes a file that does not exist.
     pub absent: bool,
     /// The catalog a re-derivation produces right now — what [`fix`] writes.
-    rebuilt: String,
+    rebuilt: lk_vault::IndexCatalog,
 }
 
 impl IndexDrift {
@@ -47,36 +46,23 @@ impl IndexDrift {
 /// stays permanently contradicted.
 pub fn diff(root: &Path, locale: Locale, dirs: &VaultDirs) -> Result<IndexDrift, GraphError> {
     let index_rel = Path::new(&dirs.wiki).join(lk_core::vault_path::INDEX_FILE);
-    let index_path = root.join(&index_rel);
-
-    let rebuilt = lk_vault::build_index(root, locale, dirs)
+    let rebuilt = lk_vault::build_catalog(root, locale, dirs)
         .map_err(|e| GraphError::Io(format!("rebuild {}: {e}", index_rel.display())))?;
-
-    // A MISSING index is a legitimate "not built yet" state → every page reads as missing from
-    // it, prompting `lore wiki index`. A real read error (permissions, corruption) must NOT
-    // masquerade as "in sync" — propagate it.
-    let on_disk = match std::fs::read_to_string(&index_path) {
-        Ok(c) => Some(c),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => {
-            return Err(GraphError::Io(format!(
-                "read {}: {e}",
-                index_path.display()
-            )));
-        }
-    };
-    let absent = on_disk.is_none();
-    let on_disk = on_disk.unwrap_or_default();
-
-    // Both sides read through the same resolution, so a spelling difference between two
-    // renderings of one entry cannot register as drift. Summaries are link-stripped by the
-    // builder, so every link in a catalog is an entry.
-    let catalogued = |content: &str| -> HashSet<String> {
-        link::extract_dests(content)
-            .into_iter()
-            .filter_map(|dest| link::resolve_dest(&index_rel, &dest))
-            .map(|resolved| path_slug(&resolved))
-            .filter(|id| !id.is_empty())
+    let on_disk = lk_vault::IndexCatalog::read(root, dirs)
+        .map_err(|e| GraphError::Io(format!("read catalog: {e}")))?;
+    let absent = !on_disk.pages.contains_key(&index_rel);
+    let reserved = crate::scan::reserved_page_predicate(Path::new(&dirs.wiki));
+    let catalogued = |catalog: &lk_vault::IndexCatalog| -> HashSet<String> {
+        catalog
+            .pages
+            .iter()
+            .flat_map(|(path, content)| {
+                link::extract_dests(content)
+                    .into_iter()
+                    .filter_map(|dest| link::resolve_dest(path, &dest))
+                    .map(|resolved| crate::scan::page_id(&resolved))
+                    .filter(|id| !id.is_empty() && !reserved(id))
+            })
             .collect()
     };
     let expected = catalogued(&rebuilt);
@@ -90,7 +76,7 @@ pub fn diff(root: &Path, locale: Locale, dirs: &VaultDirs) -> Result<IndexDrift,
     Ok(IndexDrift {
         missing_from_index,
         missing_from_disk,
-        stale: rebuilt != on_disk,
+        stale: rebuilt.pages != on_disk.pages,
         absent,
         rebuilt,
     })
@@ -102,7 +88,11 @@ pub fn diff(root: &Path, locale: Locale, dirs: &VaultDirs) -> Result<IndexDrift,
 /// Published through [`lk_vault::VaultWriter`]: this is the same wholesale replacement
 /// `lore wiki index` performs, and `lint` offers the two as alternatives in one sentence, so a
 /// write one of them refuses cannot go through under the other.
-pub fn fix(drift: &IndexDrift, root: &Path, dirs: &VaultDirs) -> Result<usize, GraphError> {
+pub fn fix(
+    drift: &IndexDrift,
+    session: &lk_vault::MutationSession,
+    dirs: &VaultDirs,
+) -> Result<usize, GraphError> {
     if drift.is_in_sync() {
         return Ok(0);
     }
@@ -111,10 +101,10 @@ pub fn fix(drift: &IndexDrift, root: &Path, dirs: &VaultDirs) -> Result<usize, G
     // count and is still rewritten — reporting 0 while writing would be the lie.
     let repaired = (drift.missing_from_index.len() + drift.missing_from_disk.len()).max(1);
 
-    let index_rel = Path::new(&dirs.wiki).join(lk_core::vault_path::INDEX_FILE);
-    lk_vault::VaultWriter::new(root)
-        .write_page_sync(&index_rel, &drift.rebuilt)
-        .map_err(|e| GraphError::Io(format!("write {}: {e}", index_rel.display())))?;
+    drift
+        .rebuilt
+        .publish(session, dirs)
+        .map_err(|e| GraphError::Io(format!("write catalog: {e}")))?;
 
     Ok(repaired)
 }
@@ -123,6 +113,27 @@ pub fn fix(drift: &IndexDrift, root: &Path, dirs: &VaultDirs) -> Result<usize, G
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn drift_in_a_catalog_child_is_detected_and_repaired() {
+        let tmp = TempDir::new().unwrap();
+        let dirs = VaultDirs::default();
+        for number in 0..101 {
+            concept(tmp.path(), &format!("topic-{number}"));
+        }
+        let session = lk_vault::MutationSession::acquire(tmp.path()).unwrap();
+        let drift = diff(tmp.path(), Locale::En, &dirs).unwrap();
+        fix(&drift, &session, &dirs).unwrap();
+        assert!(diff(tmp.path(), Locale::En, &dirs).unwrap().is_in_sync());
+        let child = tmp.path().join("wiki/catalog/0-0.md");
+        std::fs::remove_file(&child).unwrap();
+        let drift = diff(tmp.path(), Locale::En, &dirs).unwrap();
+        assert!(!drift.is_in_sync());
+        assert_eq!(drift.missing_from_index.len(), 100);
+        assert!(drift.missing_from_disk.is_empty());
+        fix(&drift, &session, &dirs).unwrap();
+        assert!(diff(tmp.path(), Locale::En, &dirs).unwrap().is_in_sync());
+    }
 
     fn write(root: &Path, rel: &str, body: &str) {
         let path = root.join(rel);
@@ -219,7 +230,15 @@ mod tests {
         let drift = drift_of(tmp.path());
         assert!(drift.missing_from_index.is_empty());
         assert!(!drift.is_in_sync(), "a stale title is drift");
-        assert_eq!(fix(&drift, tmp.path(), &VaultDirs::default()).unwrap(), 1);
+        assert_eq!(
+            fix(
+                &drift,
+                &lk_vault::MutationSession::acquire(tmp.path()).unwrap(),
+                &VaultDirs::default()
+            )
+            .unwrap(),
+            1
+        );
         assert!(drift_of(tmp.path()).is_in_sync());
     }
 
@@ -253,7 +272,15 @@ mod tests {
         assert!(drift.missing_from_index.is_empty());
         assert!(drift.missing_from_disk.is_empty());
 
-        assert_eq!(fix(&drift, tmp.path(), &VaultDirs::default()).unwrap(), 1);
+        assert_eq!(
+            fix(
+                &drift,
+                &lk_vault::MutationSession::acquire(tmp.path()).unwrap(),
+                &VaultDirs::default()
+            )
+            .unwrap(),
+            1
+        );
         let after = drift_of(tmp.path());
         assert!(!after.absent);
         assert!(after.is_in_sync());
@@ -271,7 +298,12 @@ mod tests {
 
         let drift = drift_of(tmp.path());
         assert_eq!(
-            fix(&drift, tmp.path(), &VaultDirs::default()).unwrap(),
+            fix(
+                &drift,
+                &lk_vault::MutationSession::acquire(tmp.path()).unwrap(),
+                &VaultDirs::default()
+            )
+            .unwrap(),
             2,
             "one page missing from the catalog, one entry no page justifies"
         );
@@ -297,8 +329,12 @@ mod tests {
 
         let drift = drift_of(tmp.path());
         assert!(!drift.is_in_sync());
-        let refusal = fix(&drift, tmp.path(), &VaultDirs::default())
-            .expect_err("a wholesale write over a typed page is refused");
+        let refusal = fix(
+            &drift,
+            &lk_vault::MutationSession::acquire(tmp.path()).unwrap(),
+            &VaultDirs::default(),
+        )
+        .expect_err("a wholesale write over a typed page is refused");
         assert!(
             format!("{refusal}").contains("two page formats cannot share one file"),
             "{refusal}"
@@ -320,6 +356,14 @@ mod tests {
 
         let drift = drift_of(tmp.path());
         assert!(drift.is_in_sync());
-        assert_eq!(fix(&drift, tmp.path(), &VaultDirs::default()).unwrap(), 0);
+        assert_eq!(
+            fix(
+                &drift,
+                &lk_vault::MutationSession::acquire(tmp.path()).unwrap(),
+                &VaultDirs::default()
+            )
+            .unwrap(),
+            0
+        );
     }
 }

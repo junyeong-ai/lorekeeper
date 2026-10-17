@@ -198,10 +198,34 @@ pub struct PageLink {
 /// name instead would rename someone else's link.
 pub fn extract_page_links(body: &str) -> Vec<PageLink> {
     let mut links = Vec::new();
-    let mut fence = FenceState::new();
+    visit_page_links(body, |link, _, _| links.push(link));
+    links
+}
 
-    for line in body.split_inclusive('\n') {
-        let stripped = line.strip_suffix('\n').unwrap_or(line);
+/// A link's exact source line, numbered from one within the supplied body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageLinkOccurrence<'a> {
+    pub link: PageLink,
+    pub line: usize,
+    pub context: &'a str,
+}
+
+pub fn extract_page_link_occurrences(body: &str) -> Vec<PageLinkOccurrence<'_>> {
+    let mut links = Vec::new();
+    visit_page_links(body, |link, line, context| {
+        links.push(PageLinkOccurrence {
+            link,
+            line,
+            context,
+        });
+    });
+    links
+}
+
+fn visit_page_links<'a>(body: &'a str, mut visit: impl FnMut(PageLink, usize, &'a str)) {
+    let mut fence = FenceState::new();
+    for (index, line) in body.split_inclusive('\n').enumerate() {
+        let stripped = line.trim_end_matches(['\r', '\n']);
         let is_marker = fence.apply(stripped);
         if is_marker || !fence.is_closed() {
             continue;
@@ -209,13 +233,11 @@ pub fn extract_page_links(body: &str) -> Vec<PageLink> {
         for_each_code_free_segment(line, |segment| {
             for cap in MD_LINK_RE.captures_iter(segment) {
                 if let Some(link) = internal_page_link(&cap) {
-                    links.push(link);
+                    visit(link, index + 1, stripped);
                 }
             }
         });
     }
-
-    links
 }
 
 /// Extract the decoded page destination of every internal inline link in `body`,

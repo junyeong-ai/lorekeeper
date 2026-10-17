@@ -49,18 +49,32 @@ pub enum Period {
     },
 }
 
-pub async fn run(opts: &super::GlobalOptions, period: Period) -> miette::Result<()> {
+pub async fn run(
+    opts: &super::GlobalOptions,
+    period: Period,
+    wait_for_vault: bool,
+) -> miette::Result<()> {
     let config = load_config(&find_config(opts)?)?;
     let vault_root = config.vault.root_path();
+    let tz = config.vault.timezone();
+    let today = jiff::Timestamp::now().to_zoned(tz).date();
+
+    // Hold the shared vault writer lease before reading evidence or existing pages.
+    // External editors do not participate; publication still validates its own inputs.
+    std::fs::create_dir_all(&vault_root).map_err(|e| miette::miette!("create vault: {e}"))?;
+    let _mutation = if wait_for_vault {
+        eprintln!("Waiting for exclusive vault access...");
+        lk_vault::MutationSession::acquire_waiting(&vault_root)
+    } else {
+        lk_vault::MutationSession::acquire(&vault_root)
+    }
+    .map_err(|e| miette::miette!("vault mutation: {e}"))?;
     let llm = build_llm_client(&config, &vault_root)?;
 
     let ctx = Arc::new(
         lk_pipeline::PipelineContext::build(opts.template_dir.as_deref(), llm.clone(), &config)
             .map_err(|e| miette::miette!("{e}"))?,
     );
-
-    let tz = config.vault.timezone();
-    let today = jiff::Timestamp::now().to_zoned(tz).date();
 
     let synth = lk_pipeline::Synthesizer::new(&vault_root, ctx, &config, today);
     let writer = lk_vault::VaultWriter::new(&vault_root);

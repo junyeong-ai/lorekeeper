@@ -1,10 +1,11 @@
 # Looking up Google (Calendar / Gmail) values (`gws`)
 
-> `gws` prints output to stdout (JSON) and diagnostics to stderr — use `2>/dev/null` when parsing.
+> Parse JSON from stdout and preserve stderr diagnostics. A failed discovery command
+> is an error, not an empty account or an absent calendar.
 
 ## Calendar — calendar id
 ```bash
-gws calendar calendarList list 2>/dev/null
+gws calendar calendarList list
 ```
 Usually `primary` (your own default calendar). For a shared/team calendar, use its id.
 ```yaml
@@ -27,14 +28,16 @@ gws gmail users messages list --params '{"userId":"me","q":"is:unread category:u
 gws gmail users messages list --params '{"userId":"me","q":"is:unread category:social","maxResults":1}' | jq -r '.resultSizeEstimate'
 gws gmail users messages list --params '{"userId":"me","q":"is:unread category:forums","maxResults":1}' | jq -r '.resultSizeEstimate'
 ```
-Usually only `category:primary` is work mail; the rest is bots/marketing. Recommended:
+Categories are mailbox classifications, not reliable labels for work relevance.
+Choose the query scope from the user's needs; the following example collects primary mail
+and excludes other categories, including potentially useful updates:
 ```yaml
 email-digest:
   type: gmail
   enabled: true
   params:
     lookback_hours: 24
-    include_queries: ["category:primary"]   # exclude bots/notifications (GitHub etc.), work mail only
+    include_queries: ["category:primary"]   # primary mail only; include other categories when relevant
   classify:                                   # optional: ordered keyword→category rules (first match wins)
     # keyword values may be in any language — they match the source body verbatim
     - category: action_required

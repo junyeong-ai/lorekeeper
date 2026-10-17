@@ -2,6 +2,21 @@ use std::collections::HashSet;
 
 use lk_core::event::Event;
 
+pub fn ensure_document_events_consistent(events: &[Event]) -> Result<(), crate::PipelineError> {
+    let mut seen = std::collections::HashMap::new();
+    for event in events {
+        if let Some(previous) = seen.insert(event.id.as_str(), event)
+            && previous != event
+        {
+            return Err(crate::PipelineError::Render(format!(
+                "conflicting document event {}: one fetch contains different versions; resolve the source snapshot before retrying",
+                event.id.as_str()
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Collapse repeats of the SAME item within a single fetch batch, keeping the first
 /// occurrence in order.
 ///

@@ -1,59 +1,56 @@
-//! Wiki index builder — a deterministic, hierarchical catalog of every vault page.
-//!
-//! Walks the vault directories (wiki concepts/documents/explorations, daily sources,
-//! personal work-log, and synthesis tiers), parses each markdown file's frontmatter via
-//! [`lk_core::frontmatter::parse_page`], extracts a first-sentence summary from the page
-//! body (see `truncate_summary`), groups entries by category, and renders ONE markdown
-//! document — never split into sub-pages, like `log.md`/`map.md`. No LLM, no heuristics —
-//! running it twice produces the same bytes.
-//!
-//! Section labels and heading targets come from [`lk_core::i18n`] so the index honors
-//! `vault.locale` like the rest of the pipeline.
+//! Deterministic, bounded navigation over all managed vault pages.
 
 use std::collections::{BTreeMap, HashSet};
-use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use lk_core::config::VaultDirs;
-use lk_core::frontmatter::parse_page;
 use lk_core::i18n::Locale;
 use lk_core::link;
 use lk_core::vault_path::{concepts_dir, documents_dir, explorations_dir, work_log_dir};
 use walkdir::WalkDir;
 
-use crate::{VaultError, VaultWriter};
+use crate::navigation::{NavigationCatalog, NavigationKind, NavigationRow as CatalogRow};
+use crate::{MutationSession, VaultError};
 
-/// Build the wiki index body for the vault at `vault_root`, using `locale` to pick
-/// section headings and the body-heading targets used by the one-line extractors.
-///
-/// A single deterministic catalog: every page grouped by category under one `index.md`,
-/// each entry a `[title](relative-path) — first-sentence summary`. Like `log.md`/`map.md` it is never
-/// split — summaries are bounded to one sentence (see `truncate_summary`), so the catalog
-/// stays a scannable one-liner-per-page and grows linearly in node count.
-///
-/// Returns the rendered markdown (caller writes it). Walks the vault filesystem
-/// directly — directories that don't exist are simply skipped (an empty vault yields
-/// just the header).
-pub fn build_index(
+/// Build the entry page of the catalog. Use `build_catalog` when publishing or checking
+/// the complete navigation tree.
+pub fn build_index(root: &Path, locale: Locale, dirs: &VaultDirs) -> Result<String, VaultError> {
+    let catalog = build_catalog(root, locale, dirs)?;
+    Ok(catalog.pages[&Path::new(&dirs.wiki).join(lk_core::vault_path::INDEX_FILE)].clone())
+}
+
+pub fn build_catalog(
     vault_root: &Path,
     locale: Locale,
     dirs: &VaultDirs,
-) -> Result<String, VaultError> {
+) -> Result<IndexCatalog, VaultError> {
     let strings = locale.strings();
+    let reserved = crate::navigation::ReservedNavigationPaths::load(vault_root, dirs)?;
 
     let mut seen: HashSet<PathBuf> = HashSet::new();
-    let concepts = collect_dir_grouped(vault_root, &concepts_dir(dirs), "category", &mut seen);
+    let concepts = collect_dir_grouped(
+        vault_root,
+        &concepts_dir(dirs),
+        "category",
+        &mut seen,
+        &reserved,
+    )?;
     // Group documents by `document_type` — a field EVERY document carries — so the
     // catalog buckets consistently (vs `source_project`, which only some documents have).
-    let documents =
-        collect_dir_grouped(vault_root, &documents_dir(dirs), "document_type", &mut seen);
-    let explorations = collect_dir(vault_root, &explorations_dir(dirs), &mut seen);
+    let documents = collect_dir_grouped(
+        vault_root,
+        &documents_dir(dirs),
+        "document_type",
+        &mut seen,
+        &reserved,
+    )?;
+    let explorations = collect_dir(vault_root, &explorations_dir(dirs), &mut seen, &reserved)?;
 
     // daily/ holds one sub-directory per source ID. We keep them as separate groups so
     // the index shows pages-per-source counts and stable ordering.
     let mut daily_groups: BTreeMap<String, Vec<IndexEntry>> = BTreeMap::new();
-    let daily_root = vault_root.join(&dirs.daily);
-    if daily_root.is_dir() {
+    let daily_root = crate::page_path(vault_root, Path::new(&dirs.daily))?;
+    if directory_exists(&daily_root)? {
         let mut sub_dirs: Vec<(String, PathBuf)> = Vec::new();
         for entry in std::fs::read_dir(&daily_root)? {
             let entry = entry?;
@@ -65,14 +62,14 @@ pub fn build_index(
         sub_dirs.sort_by(|a, b| a.0.cmp(&b.0));
         for (source_id, dir) in sub_dirs {
             let rel = Path::new(&dirs.daily).join(&source_id);
-            let entries = collect_files(&rel, &dir, "category", &mut seen);
+            let entries = collect_files(vault_root, &rel, &dir, "category", &mut seen, &reserved)?;
             if !entries.is_empty() {
                 daily_groups.insert(source_id, entries);
             }
         }
     }
 
-    let work_log = collect_dir(vault_root, &work_log_dir(dirs), &mut seen);
+    let work_log = collect_dir(vault_root, &work_log_dir(dirs), &mut seen, &reserved)?;
 
     // Synthesis tiers are merged into one bucket so the index has a single "synthesis"
     // section. Each entry keeps its full vault-relative path so the link destination is
@@ -86,7 +83,7 @@ pub fn build_index(
         PathBuf::from(&dirs.personal).join(&dirs.annual),
     ];
     for sub in &synthesis_dirs {
-        synthesis.extend(collect_dir(vault_root, sub, &mut seen));
+        synthesis.extend(collect_dir(vault_root, sub, &mut seen, &reserved)?);
     }
     synthesis.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
 
@@ -100,13 +97,36 @@ pub fn build_index(
     // Every entry destination is relative to the index's own location.
     let index_rel = Path::new(&dirs.wiki).join(lk_core::vault_path::INDEX_FILE);
 
-    let mut out = String::new();
-    writeln!(out, "# {}", strings.index_title).unwrap();
-    writeln!(out).unwrap();
-    // No timestamp: the index is a deterministic function of vault content, so an
-    // unchanged vault re-renders byte-identical bytes and a re-run is a true no-op
-    // (the daily scheduled rebuild relies on this).
-    writeln!(out, "> Generated by `lore wiki index` — {total} pages").unwrap();
+    let mut out = Vec::new();
+
+    // Reviews are authored explorations, shown once in their own bounded navigation
+    // group. Evidence membership does not label the cited page as a conflict target.
+    let reviews: BTreeMap<_, _> = crate::list_reviews(vault_root, dirs)?
+        .into_iter()
+        .map(|report| (report.path.clone(), report))
+        .collect();
+    let (review_entries, explorations): (Vec<_>, Vec<_>) = explorations
+        .into_iter()
+        .partition(|entry| reviews.contains_key(&entry.rel_path));
+    if !review_entries.is_empty() {
+        let title = match locale {
+            Locale::Ko => "지식 검토",
+            Locale::En => "Knowledge reviews",
+        };
+        let headings = vec![format!("{title} ({})", review_entries.len())];
+        for entry in &review_entries {
+            let report = &reviews[&entry.rel_path];
+            let mut row = catalog_row(entry, &headings, |body| {
+                extract_across_locales(body, |s| s.exploration_question, first_line_under_heading)
+            });
+            let state = review_state_label(locale, report.effective_state);
+            row.summary = Some(match row.summary {
+                Some(summary) => format!("[{state}] {summary}"),
+                None => format!("[{state}]"),
+            });
+            out.push(row);
+        }
+    }
 
     if !concepts.is_empty() {
         render_grouped_section(
@@ -206,7 +226,26 @@ pub fn build_index(
         );
     }
 
-    Ok(out)
+    Ok(IndexCatalog::build(
+        &index_rel,
+        strings.index_title,
+        total,
+        out,
+    ))
+}
+
+fn review_state_label(locale: Locale, state: crate::ReviewEffectiveState) -> &'static str {
+    use crate::ReviewEffectiveState::*;
+    match (locale, state) {
+        (Locale::Ko, Open) => "미해결",
+        (Locale::Ko, Resolved) => "해결됨",
+        (Locale::Ko, NeedsReassessment) => "재검토 필요",
+        (Locale::Ko, Invalid) => "검토 기록 오류",
+        (Locale::En, Open) => "open",
+        (Locale::En, Resolved) => "resolved",
+        (Locale::En, NeedsReassessment) => "needs reassessment",
+        (Locale::En, Invalid) => "invalid review",
+    }
 }
 
 /// Pull a catalog one-liner out of a logical section, under whichever locale the page was
@@ -226,22 +265,18 @@ fn extract_across_locales(
     crate::section_headings(section).find_map(|heading| extract(body, heading))
 }
 
-/// Build the index and write it atomically to `<vault_root>/<wiki>/index.md`.
-///
-/// The temp file lives next to the final path so the rename is on the same filesystem
-/// and therefore atomic. Returns the absolute path that was written.
+/// Publish the complete catalog through the caller's cooperating mutation session.
 pub async fn write_index(
-    vault_root: &Path,
+    session: &MutationSession,
     locale: Locale,
     dirs: &VaultDirs,
 ) -> Result<PathBuf, VaultError> {
-    let content = build_index(vault_root, locale, dirs)?;
-    let wiki_dir = vault_root.join(&dirs.wiki);
-    let main_rel = Path::new(&dirs.wiki).join(lk_core::vault_path::INDEX_FILE);
-    VaultWriter::new(vault_root)
-        .write_page(&main_rel, &content)
-        .await?;
-    Ok(wiki_dir.join(lk_core::vault_path::INDEX_FILE))
+    let catalog = build_catalog(session.root(), locale, dirs)?;
+    catalog.publish(session, dirs)?;
+    Ok(session
+        .root()
+        .join(&dirs.wiki)
+        .join(lk_core::vault_path::INDEX_FILE))
 }
 
 /// A single catalog entry: vault-relative path, the display title of the entry link,
@@ -255,8 +290,26 @@ struct IndexEntry {
     category: Option<String>,
 }
 
-fn collect_dir(vault_root: &Path, rel: &Path, seen: &mut HashSet<PathBuf>) -> Vec<IndexEntry> {
-    collect_dir_grouped(vault_root, rel, "category", seen)
+fn directory_exists(path: &Path) -> Result<bool, VaultError> {
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_dir() => Ok(true),
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::NotADirectory,
+            format!("catalog directory is not a directory: {}", path.display()),
+        )
+        .into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn collect_dir(
+    vault_root: &Path,
+    rel: &Path,
+    seen: &mut HashSet<PathBuf>,
+    reserved: &crate::navigation::ReservedNavigationPaths,
+) -> Result<Vec<IndexEntry>, VaultError> {
+    collect_dir_grouped(vault_root, rel, "category", seen, reserved)
 }
 
 fn collect_dir_grouped(
@@ -264,12 +317,13 @@ fn collect_dir_grouped(
     rel: &Path,
     group_field: &str,
     seen: &mut HashSet<PathBuf>,
-) -> Vec<IndexEntry> {
-    let abs = vault_root.join(rel);
-    if !abs.is_dir() {
-        return Vec::new();
+    reserved: &crate::navigation::ReservedNavigationPaths,
+) -> Result<Vec<IndexEntry>, VaultError> {
+    let abs = crate::page_path(vault_root, rel)?;
+    if !directory_exists(&abs)? {
+        return Ok(Vec::new());
     }
-    collect_files(rel, &abs, group_field, seen)
+    collect_files(vault_root, rel, &abs, group_field, seen, reserved)
 }
 
 /// `seen` carries canonical page identity across every directory one index run collects, so
@@ -279,20 +333,16 @@ fn collect_dir_grouped(
 /// as a concept and once as whatever the other root makes it. `scan_vault` resolves the same
 /// collision for the link graph; the catalog is the other reader that walks per directory.
 fn collect_files(
+    vault_root: &Path,
     rel_dir: &Path,
     abs_dir: &Path,
     group_field: &str,
     seen: &mut HashSet<PathBuf>,
-) -> Vec<IndexEntry> {
+    reserved: &crate::navigation::ReservedNavigationPaths,
+) -> Result<Vec<IndexEntry>, VaultError> {
     let mut entries: Vec<IndexEntry> = Vec::new();
     for w in WalkDir::new(abs_dir).follow_links(false) {
-        let w = match w {
-            Ok(w) => w,
-            Err(e) => {
-                tracing::warn!(error = %e, dir = %abs_dir.display(), "skipping unreadable path");
-                continue;
-            }
-        };
+        let w = w.map_err(|error| std::io::Error::other(error.to_string()))?;
         if !w.file_type().is_file() {
             continue;
         }
@@ -302,30 +352,15 @@ fn collect_files(
         }
         // Skip Lorekeeper's reserved meta files (index catalog, timeline, navigation map,
         // AGENTS.md schema) — they are not knowledge pages.
-        if let Some(name) = path.file_name().and_then(|n| n.to_str())
-            && lk_core::vault_path::RESERVED_WIKI_FILES.contains(&name)
-        {
+        if reserved.contains(path)? {
             continue;
         }
 
-        if !seen.insert(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())) {
+        if !seen.insert(std::fs::canonicalize(path)?) {
             continue;
         }
 
-        let raw = match std::fs::read_to_string(path) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(error = %e, path = %path.display(), "skipping unreadable file");
-                continue;
-            }
-        };
-        let page = match parse_page(&raw) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(error = %e, path = %path.display(), "skipping malformed frontmatter");
-                continue;
-            }
-        };
+        let page = crate::store::read_page(vault_root, path)?;
         // Files without any frontmatter are skipped — only Lorekeeper-managed pages
         // belong in the index.
         if page.frontmatter.fields.is_empty() {
@@ -375,81 +410,114 @@ fn collect_files(
         });
     }
     entries.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
-    entries
+    Ok(entries)
 }
 
 fn render_group(
-    out: &mut String,
-    index_rel: &Path,
+    rows: &mut Vec<CatalogRow>,
+    _index_rel: &Path,
     title: &str,
     count: usize,
     entries: &[IndexEntry],
     extract: impl Fn(&str) -> Option<String>,
 ) {
-    writeln!(out).unwrap();
-    writeln!(out, "## {title} ({count})").unwrap();
-    writeln!(out).unwrap();
-    for entry in entries {
-        write_entry_line(out, index_rel, entry, &extract);
-    }
+    let headings = vec![format!("{title} ({count})")];
+    rows.extend(
+        entries
+            .iter()
+            .map(|entry| catalog_row(entry, &headings, &extract)),
+    );
 }
 
-/// Render a section grouped by category into `### {group}` sub-headings under one
-/// `## {section_title}`. Single page — never split — so the catalog stays one file like
-/// `log.md`/`map.md`; summaries are bounded by `truncate_summary` to keep each line scannable.
 fn render_grouped_section(
-    out: &mut String,
-    index_rel: &Path,
+    rows: &mut Vec<CatalogRow>,
+    _index_rel: &Path,
     entries: &[IndexEntry],
     extract: impl Fn(&str) -> Option<String>,
     section_title: &str,
     uncategorized_label: &str,
 ) {
-    let mut by_group: BTreeMap<String, Vec<&IndexEntry>> = BTreeMap::new();
-    let mut ungrouped: Vec<&IndexEntry> = Vec::new();
+    let mut groups: BTreeMap<Option<&str>, Vec<&IndexEntry>> = BTreeMap::new();
     for entry in entries {
-        match &entry.category {
-            Some(g) => by_group.entry(g.clone()).or_default().push(entry),
-            None => ungrouped.push(entry),
-        }
+        groups
+            .entry(entry.category.as_deref())
+            .or_default()
+            .push(entry);
     }
-
-    writeln!(out).unwrap();
-    writeln!(out, "## {section_title} ({})", entries.len()).unwrap();
-
-    let groups = by_group.iter().map(|(g, e)| (g.as_str(), e)).chain(
-        std::iter::once((uncategorized_label, &ungrouped)).filter(|_| !ungrouped.is_empty()),
-    );
-    for (group, group_entries) in groups {
-        writeln!(out).unwrap();
-        writeln!(out, "### {group} ({})", group_entries.len()).unwrap();
-        writeln!(out).unwrap();
-        for entry in group_entries {
-            write_entry_line(out, index_rel, entry, &extract);
-        }
+    let ungrouped = groups.remove(&None);
+    for (name, entries_in_group) in groups
+        .into_iter()
+        .chain(ungrouped.map(|entries| (None, entries)))
+    {
+        let headings = vec![
+            format!("{section_title} ({})", entries.len()),
+            format!(
+                "{} ({})",
+                name.unwrap_or(uncategorized_label),
+                entries_in_group.len()
+            ),
+        ];
+        rows.extend(
+            entries_in_group
+                .into_iter()
+                .map(|entry| catalog_row(entry, &headings, &extract)),
+        );
     }
 }
 
-/// One catalog line: `- [title](relative-path) — first-sentence summary` (or just the
-/// link when the page has no extractable summary). The summary is reduced to PLAIN TEXT
-/// first ([`link::strip_links`]) so the only link on the line is the entry's own — a
-/// link sitting in a page's summary prose must not read as a second catalog link (it
-/// would skew `graph index-sync`). Destinations are relative to the index's own
-/// location (`{wiki}/index.md`).
-fn write_entry_line(
-    out: &mut String,
-    index_rel: &Path,
+fn catalog_row(
     entry: &IndexEntry,
+    headings: &[String],
     extract: impl Fn(&str) -> Option<String>,
-) {
-    let dest = link::relative_dest(index_rel, Path::new(&entry.rel_path));
-    let entry_link = link::md_link(&entry.title, &dest);
-    match extract(&entry.body)
-        .map(|s| truncate_summary(&link::strip_links(&s)))
-        .filter(|s| !s.is_empty())
-    {
-        Some(summary) => writeln!(out, "- {entry_link} — {summary}").unwrap(),
-        None => writeln!(out, "- {entry_link}").unwrap(),
+) -> CatalogRow {
+    CatalogRow {
+        headings: headings.to_vec(),
+        title: entry.title.clone(),
+        path: PathBuf::from(&entry.rel_path),
+        summary: extract(&entry.body)
+            .map(|s| truncate_summary(&link::strip_links(&s)))
+            .filter(|s| !s.is_empty()),
+    }
+}
+
+#[cfg(test)]
+use crate::navigation::NAVIGATION_PAGE_ENTRIES as PAGE_ENTRIES;
+
+#[derive(Debug)]
+pub struct IndexCatalog {
+    pub pages: BTreeMap<PathBuf, String>,
+}
+
+impl IndexCatalog {
+    fn build(index: &Path, title: &str, total: usize, rows: Vec<CatalogRow>) -> Self {
+        let header = format!("# {title}\n\n> Generated by `lore wiki index` — {total} pages\n");
+        let catalog = NavigationCatalog::build(
+            NavigationKind::Index,
+            index.parent().unwrap(),
+            title,
+            &header,
+            rows,
+        );
+        Self {
+            pages: catalog.pages,
+        }
+    }
+
+    /// Only this view's marked children are part of the generated catalog.
+    pub fn read(root: &Path, dirs: &VaultDirs) -> Result<Self, VaultError> {
+        let catalog = NavigationCatalog::read(root, Path::new(&dirs.wiki), NavigationKind::Index)?;
+        Ok(Self {
+            pages: catalog.pages,
+        })
+    }
+
+    pub fn publish(&self, session: &MutationSession, dirs: &VaultDirs) -> Result<(), VaultError> {
+        NavigationCatalog::from_pages(
+            NavigationKind::Index,
+            Path::new(&dirs.wiki),
+            self.pages.clone(),
+        )
+        .publish(session)
     }
 }
 
@@ -581,6 +649,73 @@ fn first_subheading_under_heading(body: &str, heading: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reserved_navigation_uses_configured_addresses_not_source_basenames() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs {
+            wiki: "knowledge".into(),
+            daily: "knowledge".into(),
+            ..Default::default()
+        };
+        let expected: HashSet<PathBuf> = [
+            "knowledge/documents/map.md",
+            "knowledge/notes/index.md",
+            "knowledge/notes/AGENTS.md",
+            "knowledge/notes/catalog/log.md",
+            "knowledge/catalogue/entry.md",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+        for path in &expected {
+            write_file(
+                tmp.path(),
+                path.to_str().unwrap(),
+                "---\ntype: document\ntitle: Evidence\n---\n## Summary\nRetained source.\n",
+            );
+        }
+        for name in lk_core::vault_path::RESERVED_WIKI_FILES {
+            write_file(
+                tmp.path(),
+                &format!("knowledge/{name}"),
+                "---\ninvalid: [\n---\nGenerated navigation.\n",
+            );
+        }
+        for path in [
+            "knowledge/catalog/0-0.md",
+            "knowledge/catalog/map/0-0.md",
+            "knowledge/catalog/log/0-0.md",
+        ] {
+            write_file(
+                tmp.path(),
+                path,
+                "---\ninvalid: [\n---\nGenerated navigation.\n",
+            );
+        }
+        let catalog = build_catalog(tmp.path(), Locale::En, &dirs).unwrap();
+        let index = Path::new("knowledge/index.md");
+        let reached: HashSet<_> = link::extract_dests(&catalog.pages[index])
+            .into_iter()
+            .filter_map(|dest| link::resolve_dest(index, &dest))
+            .collect();
+        assert_eq!(reached, expected);
+        let discovery = crate::search(
+            tmp.path(),
+            &dirs,
+            &crate::SearchOptions {
+                include_sources: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let searched: HashSet<_> = discovery
+            .hits
+            .iter()
+            .map(|hit| PathBuf::from(&hit.path))
+            .collect();
+        assert_eq!(searched, reached);
+    }
+
     /// A directory symlink, or `false` where the platform or filesystem refuses one. Windows
     /// needs a privilege most accounts lack, so the caller treats absence as "skip this case".
     fn symlink_dir(target: &std::path::Path, link: &std::path::Path) -> bool {
@@ -593,6 +728,61 @@ mod tests {
 
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn review_navigation_uses_effective_state_and_preserves_bounded_entries() {
+        let tmp = TempDir::new().unwrap();
+        let dirs = VaultDirs::default();
+        write_file(
+            tmp.path(),
+            "wiki/documents/source.md",
+            "---\ntype: document\ntitle: Evidence\n---\nOriginal.\n",
+        );
+        let evidence =
+            crate::inspect_evidence(tmp.path(), &["wiki/documents/source.md".into()]).unwrap();
+        let review = serde_json::json!({"status":"resolved", "evidence":evidence.citations,"resolution":"Compared scope."});
+        for number in 0..101 {
+            write_file(
+                tmp.path(),
+                &format!("wiki/explorations/review-{number}.md"),
+                &format!(
+                    "---\ntype: exploration\ntitle: Review {number}\nreview: {review}\n---\n\n## Question\n\nWhat differs?\n"
+                ),
+            );
+        }
+        write_file(
+            tmp.path(),
+            "wiki/documents/source.md",
+            "---\ntype: document\ntitle: Evidence\n---\nChanged.\n",
+        );
+        for (locale, group, state) in [
+            (Locale::En, "Knowledge reviews", "needs reassessment"),
+            (Locale::Ko, "지식 검토", "재검토 필요"),
+        ] {
+            let catalog = build_catalog(tmp.path(), locale, &dirs).unwrap();
+            assert!(catalog.pages[Path::new("wiki/index.md")].contains(group));
+            let text = catalog
+                .pages
+                .values()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_eq!(text.matches(&format!("[{state}]")).count(), 101);
+            assert!(!text.contains("Evidence](../documents/source.md) — ["));
+            for content in catalog.pages.values() {
+                assert!(
+                    content
+                        .lines()
+                        .filter(|line| line.starts_with("- "))
+                        .count()
+                        <= PAGE_ENTRIES
+                );
+            }
+            for number in 0..101 {
+                assert_eq!(text.matches(&format!("/review-{number}.md)")).count(), 1);
+            }
+        }
+    }
 
     fn write_file(root: &Path, rel: &str, content: &str) {
         let path = root.join(rel);
@@ -628,6 +818,88 @@ mod tests {
             out.matches("rag.md").count(),
             1,
             "one entry per page, whichever root reached it first:\n{out}"
+        );
+    }
+
+    #[test]
+    fn catalog_tree_bounds_each_page_and_keeps_every_exact_address() {
+        let rows: Vec<_> = (0..10_201)
+            .map(|number| CatalogRow {
+                headings: vec!["Concepts".into(), format!("Category {}", number / 300)],
+                title: format!("항목 {number}"),
+                path: PathBuf::from(format!("custom/concepts/Item {number}.md")),
+                summary: Some("Evidence.".into()),
+            })
+            .collect();
+        let expected: HashSet<_> = rows.iter().map(|row| row.path.clone()).collect();
+        let index = Path::new("custom/index.md");
+        let catalog = IndexCatalog::build(index, "Index", rows.len(), rows);
+        let mut reached = HashSet::new();
+        let mut visited = HashSet::new();
+        let mut pending = vec![index.to_path_buf()];
+        while let Some(path) = pending.pop() {
+            if !visited.insert(path.clone()) {
+                continue;
+            }
+            let content = &catalog.pages[&path];
+            assert!(
+                content
+                    .lines()
+                    .filter(|line| line.starts_with("- "))
+                    .count()
+                    <= PAGE_ENTRIES
+            );
+            for dest in link::extract_dests(content) {
+                let resolved = link::resolve_dest(&path, &dest).unwrap();
+                if catalog.pages.contains_key(&resolved) {
+                    pending.push(resolved);
+                } else {
+                    assert!(reached.insert(resolved));
+                }
+            }
+        }
+        assert_eq!(reached, expected);
+        assert_eq!(visited.len(), catalog.pages.len());
+    }
+
+    #[tokio::test]
+    async fn catalog_shrinking_removes_only_owned_pages_and_refuses_collisions() {
+        let tmp = TempDir::new().unwrap();
+        let dirs = VaultDirs::default();
+        for number in 0..101 {
+            write_file(
+                tmp.path(),
+                &format!("wiki/concepts/{number}.md"),
+                &format!("---\ntype: concept\ntitle: Topic {number}\n---\n"),
+            );
+        }
+        write_file(tmp.path(), "wiki/catalog/0-0.md", "authored note");
+        let session = MutationSession::acquire(tmp.path()).unwrap();
+        assert!(write_index(&session, Locale::En, &dirs).await.is_err());
+        assert!(!tmp.path().join("wiki/index.md").exists());
+        std::fs::rename(
+            tmp.path().join("wiki/catalog/0-0.md"),
+            tmp.path().join("wiki/catalog/note.md"),
+        )
+        .unwrap();
+        write_index(&session, Locale::En, &dirs).await.unwrap();
+        let first = IndexCatalog::read(tmp.path(), &dirs).unwrap();
+        assert_eq!(first.pages.len(), 3);
+        write_index(&session, Locale::En, &dirs).await.unwrap();
+        assert_eq!(
+            first.pages,
+            IndexCatalog::read(tmp.path(), &dirs).unwrap().pages
+        );
+        std::fs::remove_file(tmp.path().join("wiki/concepts/100.md")).unwrap();
+        write_index(&session, Locale::En, &dirs).await.unwrap();
+        assert_eq!(
+            IndexCatalog::read(tmp.path(), &dirs).unwrap().pages.len(),
+            1
+        );
+        assert!(!tmp.path().join("wiki/catalog/0-0.md").exists());
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("wiki/catalog/note.md")).unwrap(),
+            "authored note"
         );
     }
 
@@ -827,10 +1099,7 @@ mod tests {
     }
 
     #[test]
-    fn concepts_render_inline_grouped_by_category_never_split() {
-        // The catalog is a SINGLE page: concepts render under `### {category}` sub-headings
-        // inside index.md, never as separate `wiki/index/` sub-page files. (log.md/map.md are
-        // likewise single — see the design rationale on `build_index`.)
+    fn small_catalogs_render_inline_grouped_by_category() {
         let tmp = TempDir::new().unwrap();
         write_file(
             tmp.path(),
@@ -847,7 +1116,7 @@ mod tests {
         assert!(out.contains("### ai-ml (1)"));
         assert!(out.contains("### infra (1)"));
         assert!(out.contains("[RAG](concepts/rag.md) — 검색 증강 생성."));
-        // No split sub-page directory is ever created.
+        // A small catalog needs only its entry page.
         assert!(!tmp.path().join("wiki/index").exists());
     }
 
@@ -963,6 +1232,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unreadable_pages_preserve_the_catalog_and_refuse_incomplete_retrieval() {
+        for damaged in [b"---\ntitle: [\n---\n".as_slice(), &[0xff]] {
+            let tmp = TempDir::new().unwrap();
+            write_file(
+                tmp.path(),
+                "wiki/concepts/x.md",
+                "---\ntitle: X\n---\nBody.\n",
+            );
+            write_file(
+                tmp.path(),
+                "daily/news/2026-10-16.md",
+                "---\ntype: daily\n---\n[X](../../wiki/concepts/x.md)\n",
+            );
+            let index = write_index(
+                &MutationSession::acquire(tmp.path()).unwrap(),
+                Locale::En,
+                &VaultDirs::default(),
+            )
+            .await
+            .unwrap();
+            let before = std::fs::read(&index).unwrap();
+            std::fs::write(tmp.path().join("wiki/concepts/x.md"), damaged).unwrap();
+            assert!(
+                write_index(
+                    &MutationSession::acquire(tmp.path()).unwrap(),
+                    Locale::En,
+                    &VaultDirs::default()
+                )
+                .await
+                .is_err()
+            );
+            assert_eq!(std::fs::read(index).unwrap(), before);
+            assert!(
+                crate::search::search(
+                    tmp.path(),
+                    &VaultDirs::default(),
+                    &crate::SearchOptions {
+                        query: Some("X"),
+                        limit: 20,
+                        ..Default::default()
+                    }
+                )
+                .is_err()
+            );
+            assert!(
+                crate::brief::build_brief(
+                    tmp.path(),
+                    &VaultDirs::default(),
+                    jiff::civil::date(2026, 10, 16)
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn a_catalog_root_that_is_a_file_is_not_an_empty_directory() {
+        for root in ["wiki/concepts", "daily"] {
+            let tmp = TempDir::new().unwrap();
+            write_file(tmp.path(), root, "unexpected file");
+            assert!(build_index(tmp.path(), Locale::En, &VaultDirs::default()).is_err());
+        }
+    }
+
+    #[tokio::test]
     async fn write_index_atomic_no_temp_leftover() {
         let tmp = TempDir::new().unwrap();
         write_file(
@@ -970,9 +1304,13 @@ mod tests {
             "wiki/concepts/x.md",
             "---\nid: x\ntitle: \"X\"\n---\n\n## 핵심\n\nbody\n",
         );
-        let path = write_index(tmp.path(), Locale::Ko, &VaultDirs::default())
-            .await
-            .unwrap();
+        let path = write_index(
+            &MutationSession::acquire(tmp.path()).unwrap(),
+            Locale::Ko,
+            &VaultDirs::default(),
+        )
+        .await
+        .unwrap();
         assert!(path.ends_with("wiki/index.md"));
         let content = tokio::fs::read_to_string(&path).await.unwrap();
         assert!(content.contains("[X](concepts/x.md)"));

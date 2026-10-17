@@ -22,6 +22,7 @@ pub struct WikiGraph {
 pub(crate) struct NodeData {
     pub id: String,
     pub title: String,
+    pub format: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -84,20 +85,10 @@ pub struct RespelledLink {
     pub on_disk: String,
 }
 
-/// Every link that resolves only because the filesystem folds case or Unicode normalization.
-///
-/// The other half of [`crate::scan::VaultExistence::is_resolvable`]'s fold. An address is
-/// compared under `fold_name` because that is what the filesystem this vault is edited on does,
-/// so `wiki/concepts/ALPHA.md` opens `alpha.md` and calling it broken would be false here — and
-/// it is dead the moment the vault syncs to one that keeps the spellings apart. `unnormalized`
-/// judges a FILE's name and this file is already its own slug; `address_collisions` needs two
-/// files and there is one. This is the channel that answers it.
-///
-/// CASE is the difference it sees. Both sides of the comparison have been through
-/// `scan::rel_str`, so a normalization difference is already gone by here — that one is a
-/// property of the FILE's name and `unnormalized` reports it, with the rename that fixes it.
-///
-/// The repair is the link, not the file: rewrite the destination as the file spells it.
+/// Links whose non-exact address was verified to reach another on-disk spelling.
+/// `VaultExistence::build_at` establishes that fact against the actual filesystem;
+/// pure `build` never guesses it. Exact existing addresses are not respellings,
+/// even when another page's name has the same case-folded form.
 pub fn respelled_links(
     pages: &[ScannedPage],
     existence: &VaultExistence,
@@ -134,7 +125,38 @@ pub struct HubPageReference {
     pub incoming: usize,
 }
 
+#[derive(Debug, Serialize)]
+pub struct NeighborPage {
+    pub path: String,
+    pub title: String,
+    pub format: Option<String>,
+    pub incoming: bool,
+    pub outgoing: bool,
+}
+
 impl WikiGraph {
+    /// Direct links only; direction does not assert a semantic relationship type.
+    pub fn page_neighbors(&self, id: &str) -> Option<Vec<NeighborPage>> {
+        let &center = self.id_to_node.get(id)?;
+        let mut pages = std::collections::BTreeMap::new();
+        for direction in [Direction::Incoming, Direction::Outgoing] {
+            for index in self.graph.neighbors_directed(center, direction) {
+                let node = &self.graph[index];
+                let neighbor = pages.entry(&node.id).or_insert_with(|| NeighborPage {
+                    path: format!("{}.md", node.id),
+                    title: node.title.clone(),
+                    format: node.format.clone(),
+                    incoming: false,
+                    outgoing: false,
+                });
+                match direction {
+                    Direction::Incoming => neighbor.incoming = true,
+                    Direction::Outgoing => neighbor.outgoing = true,
+                }
+            }
+        }
+        Some(pages.into_values().collect())
+    }
     /// Build the analysis graph over `pages`, treating that set as the whole
     /// universe: a page with no edges is an orphan. The right model when the scope
     /// *is* the vault (and the convenient default for tests); for a narrowed scope
@@ -173,6 +195,7 @@ impl WikiGraph {
             let node = graph.add_node(NodeData {
                 id: page.id.clone(),
                 title: page.title.clone(),
+                format: page.format.clone(),
             });
             id_to_node.insert(page.id.clone(), node);
         }
@@ -342,6 +365,39 @@ impl WikiGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn neighbors_preserve_direction_and_include_source_pages_without_catalog_edges() {
+        let graph = WikiGraph::build(
+            &[
+                build_page(
+                    "wiki/concepts/topic",
+                    &["daily/source", "wiki/concepts/other"],
+                ),
+                build_page(
+                    "daily/source",
+                    &["wiki/concepts/topic", "wiki/concepts/topic"],
+                ),
+                build_page("wiki/concepts/other", &[]),
+                build_page("wiki/index", &["wiki/concepts/topic"]),
+                build_page("wiki/concepts/alone", &[]),
+            ],
+            &VaultDirs::default(),
+        );
+        let neighbors = graph.page_neighbors("wiki/concepts/topic").unwrap();
+        assert_eq!(neighbors.len(), 2);
+        assert_eq!(neighbors[0].path, "daily/source.md");
+        assert!(neighbors[0].incoming && neighbors[0].outgoing);
+        assert_eq!(neighbors[1].path, "wiki/concepts/other.md");
+        assert!(!neighbors[1].incoming && neighbors[1].outgoing);
+        assert!(
+            graph
+                .page_neighbors("wiki/concepts/alone")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(graph.page_neighbors("wiki/concepts/missing").is_none());
+    }
     use crate::scan::Link;
     use crate::scan::{ScannedPage, VaultExistence};
     use lk_core::config::GraphConfig;
@@ -350,6 +406,7 @@ mod tests {
     fn build_page(id: &str, outgoing: &[&str]) -> ScannedPage {
         let name = id.rsplit('/').next().unwrap_or(id);
         ScannedPage {
+            revision: Some("revision".into()),
             id: id.to_owned(),
             path: PathBuf::from(format!("{id}.md")),
             title: name.to_owned(),

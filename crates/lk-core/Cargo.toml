@@ -12,7 +12,7 @@ workspace = true
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-serde_yaml_ng = { workspace = true }
+serde-saphyr = { workspace = true }
 jiff = { workspace = true }
 blake3 = { workspace = true }
 thiserror = { workspace = true }

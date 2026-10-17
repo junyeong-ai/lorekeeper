@@ -1,9 +1,9 @@
 # Looking up Jira values (`atlassian-cli`)
 
-> Note: `atlassian-cli` uses its own OAuth account. Lorekeeper uses the Jira account
-> (email+token) in `credentials.json`, so if the two point at different instances the
-> results can differ. Always confirm with `lore ingest --dry-run`, which validates
-> against Lorekeeper's account.
+> Discovery uses `atlassian-cli`'s configured account. Lorekeeper separately selects a
+> named credential instance using the source's `instance` field; it supports OAuth,
+> scoped token, API token or PAT authentication. Confirm the intended site/account with
+> `lore ingest --dry-run` before relying on discovered IDs.
 
 ## My issues / project key
 ```bash

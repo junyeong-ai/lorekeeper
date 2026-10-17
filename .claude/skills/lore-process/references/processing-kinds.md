@@ -57,16 +57,24 @@ Rewrite the raw event bodies under `target.anchor` (e.g. `## Key Events` or
 
 For EACH `### event heading` in the section:
 
-1. Replace the raw body with a knowledge summary (2-5 sentences)
-2. Cover: what it is, why it matters, key details/decisions
+1. Replace the raw body with a knowledge summary, usually 2-5 sentences.
+2. Cover what it is, why it matters, and key details/decisions. Preserve definitions, methods,
+   conditions and limitations needed to interpret a result; a whole article's
+   opening paragraph is not a substitute for those findings. Use more space when
+   these distinctions would otherwise be lost. For multi-topic digests, retain
+   the substantive finding for each relevant topic instead of reducing secondary
+   topics to a list of names.
 3. Keep the original `🔗` source link for traceability
 4. Remove noise: HN metadata (Points, Comments, Article URL),
    email signatures, raw thread dumps, Jira checklists
 5. If meeting notes are embedded, distill to decisions + action items
 
 The `### heading` lines themselves must be preserved — only replace the body
-text between headings. Completion stamping (`llm_inputs.refine_events_done`)
-is part of the protocol contract in SKILL.md.
+text between headings. Match each body to its own source link and attribution;
+identical titles do not make events interchangeable. A link-only event cannot
+establish the linked article's findings, and a truncated excerpt supports only
+the content actually retained. Stage the complete replacement section as a `.section.json` result; the applier
+checks the event heading sequence and stamps `llm_inputs.refine_events_done`.
 
 ## `kind: identify-themes`
 
@@ -79,12 +87,13 @@ and descriptions in `input.locale`.
 
 Rewrite one concept page's synthesis, and its relations, from the pages that currently cite it.
 
-`input.citations` lists those pages by id, and the concept page's own sources
-section links every one of them. Read the sources — that is the whole input;
-the task carries no text.
+`input.citations` lists each source's vault-relative `path` and `revision`.
+Read those exact pages. The revision identifies authored content and provenance;
+bookkeeping fields (`updated`, `source_count`, `llm_inputs`) are excluded.
+Do not substitute the concept's previous synthesis for a source.
 
-1. Open `target.vault_path` and follow every link in its sources section.
-2. Write, under `target.anchor`, what the vault now knows about this concept:
+1. Open `target.vault_path` and read every `input.citations[].path` under the vault root.
+2. Draft the `synthesis` result body for `target.anchor`: what the vault now knows about this concept,
    what it is, and what the citing material establishes about it. Write it in the
    language the page is already written in — a `vault.locale` switch renames
    headings and leaves authored bodies alone, so an established page keeps the
@@ -95,64 +104,76 @@ the task carries no text.
 3. **REWRITE the section, never append.** The synthesis states current
    understanding, so an older reading that the evidence has moved past is
    replaced, not kept beside the new one. (Its citations are the opposite —
-   `## Sources` only ever accumulates, and `lore graph backlinks-sync` owns
-   it. Never edit that section here.)
+   `## Sources` is re-derived from current forward links by `lore graph backlinks-sync`. Never edit that section here.)
 4. Every claim must be traceable to one of the cited pages. Write nothing the
    sources do not support, and nothing from your own background knowledge —
    a concept page is what the vault observed, not what is generally true.
 
-   The body you are replacing was written the same way, from the citations of
-   its day. So a substantive claim it carries — a cause, a mechanism, a named
-   remedy, a figure — that none of the current citations supports means one of
-   two things, and you cannot tell which: the claim was never sound, or the
-   page that supported it is not in the citation set (an extraction missed it,
-   or its link was lost). Drop the claim from the synthesis either way, and
-   name what you dropped in one `> [!note]` at the end of the section, stated
-   at the width you actually checked:
+   An unsupported previous claim may be mistaken or may have lost its citation.
+   Remove it from factual synthesis without declaring it false. Keep routine
+   removals in the processing report, not as recurring editorial notes in the
+   concept. If losing a cause, remedy or decision would materially change how
+   someone uses the knowledge, return an evidence-gap review proposal under the
+   coordinator protocol below: the exact claim, pages checked and their revisions,
+   and what evidence is missing. The audit can then search beyond this citation set.
+   For streaming feeds, check the retained pre-refinement events under
+   `.lorekeeper/events/<source-id>/<date>.jsonl` when a daily summary may have lost
+   the relevant details. Propose a source correction with the event ID, URL and
+   reviewed bytes; the coordinator restores supported material before reissuing
+   synthesis against the corrected source. An old concept is not proof of itself.
+   An application example does not define the general concept. Losing its defining
+   scope is a material evidence gap: recover supporting sources before finalizing
+   a rewrite that would reduce the concept to that example.
+   Keep uncertainty in the concept only when it affects a current decision.
+   If the citations merely name the concept without explaining it, state that
+   evidence limit concisely instead of inventing a definition or emitting an empty body.
+5. Compare claims under the same subject, environment, definitions and effective time.
+   A newer document is not automatically more authoritative; a later revision or a different
+   environment may explain the difference. Repeated reports of one source are one evidence
+   lineage, not independent corroboration. `source_count` counts citing pages, not confidence.
+   Use `lore wiki evidence <source-path>...` to inspect recorded source addresses; absent
+   provenance stays unknown. Read actual attributions before claiming independence.
 
-   ```
-   > [!note] 현재 인용 4건에서 확인되지 않은 기존 주장
-   > PSC 이그레스가 `*.run.app`으로 나갈 출구가 없어 실패하며, ALB로 사설 IP에 연결해 해결했다.
-   ```
-
-   Never write that the claim has no basis: you read N pages, and the vault
-   holds more. `/lore-wiki audit` reads these notes against the whole vault and
-   repairs the citation where the support exists — which is the only way a
-   lost citation is ever found, since nothing else reads the previous body.
-   A wording you tightened or a restatement you folded is not a dropped claim
-   and gets no note.
-5. When two cited sources disagree on a fact about the concept, state the
-   disagreement in a `> [!conflict]` callout naming both sides, inside the
-   section. `lore graph lint` surfaces open callouts. You are the only writer of
-   this section, so a callout exists only where THIS rewrite puts one: if the
-   sources you just read still disagree, write it again. A page that carried one
-   before is not evidence either way — read the sources, not the previous body.
-
-   Three things decide whether a callout is worth the reader's time:
-   - **Put the statement on the callout's own line** (`> [!conflict] <what differs>`).
-     That line is what `lore graph lint` reports, so it is where a reader who has not
-     opened the page meets the disagreement.
-   - **Do not record what the evidence settles.** A figure two sources give differently
-     is a disagreement; a figure one source computes wrongly from a number both of them
-     carry is an error, and there the synthesis states the supported value and writes no
-     callout. Check before recording — `261 of 367` is 71%, so a source calling it "over
-     80%" is not a second reading of the evidence.
-   - **Say which kind it is when the answer is not in the vault.** Where both sides are
-     REPORTS of an external fact — a model's parameter count, a funding round's stage —
-     no observation this vault will ever hold settles it, and a callout that says so is
-     answered. One that does not has every later reader, and every audit, re-derive the
-     same judgment from nothing.
-6. Length follows the evidence: one or two sentences for a concept with a
-   single citation, a short paragraph for one with many. Never pad.
-7. **Write the concept's relations under `input.related_anchor`.** The same evidence
+   For a material disagreement, search existing exploration pages and run `lore wiki reviews`.
+   The coordinator (or the sole processor in a serial run) creates or updates one
+   durable review using AGENTS.md's Knowledge reviews contract, recording
+   both claims, their scope and time, direct source links, and what could settle the question.
+   Record direct evidence, never the review itself as its own supporting source.
+   Derived reviews and summaries are interpretations; follow their original sources rather
+   than treating them as independent corroboration. Before reassessing, archive the existing review with `lore wiki evidence --archive` and
+   retain its archive path in the dated reassessment. After actually rereading changed evidence,
+   archive those sources and explicitly replace `review.evidence` with the revisions supporting
+   the current judgment. Do not retain superseded revisions of the same path in that current
+   evidence set or use the archived review as independent evidence. Mark resolved only with a
+   stated reason supported by evidence; otherwise keep open. A concept's synthesis contains
+   a concise `> [!conflict] <what differs>` with a link to the open review. A resolved review
+   remains as the explanation; rewriting a synthesis must never erase its record.
+   Parallel workers return proposals containing these claims, evidence revisions, and
+   an existing review path when found; they never edit shared review pages. The
+   coordinator deduplicates and publishes reviews before the final synthesis snapshot,
+   then refreshes backlinks and task status and reissues affected work. Draft final
+   synthesis against those revisions. Review proposals are not part of the synthesis
+   result JSON; do not add fields to that contract.
+   Do not create a review for superficial wording differences or already-explained scope.
+6. Length follows reusable understanding, not the number of citations. Lead with the
+   definition, boundary and decision-relevant rules. Group evidence by the question it
+   answers, not by source/date. Preserve conditions, exceptions and consequential changes.
+   Keep detailed case histories in their source documents or an existing exploration,
+   linked with enough context to find them. Use subheadings when distinct questions warrant
+   them. If moving a substantial case would lose a needed distinction, propose a scoped
+   exploration to the coordinator before shortening the concept. Workers do not create
+   those shared pages. Do not split by character count or mint a concept per case.
+7. **Draft the `related` result body for `input.related_anchor`.** The same evidence
    answers both sections, which is why one task writes them: the pages citing this
    concept name others alongside it, and which of those the material actually relates
    to this one is what this section states. One link per line, in the form AGENTS.md
    § Links defines — a concept's relations are its siblings, so the destination is the
-   bare `slug.md` and the display text is that page's title:
+   bare `slug.md` and the display text is that page's title. Add a concise explanation
+   of the relationship, its applicable conditions, and a link to the supporting source.
+   Use ordinary prose rather than inventing relation labels or confidence scores:
 
    ```
-   - [Speculative Decoding](speculative-decoding.md)
+   - [Speculative Decoding](speculative-decoding.md) — accelerates decoding by verifying draft tokens; supported by [the evaluation](../documents/decoding-evaluation.md).
    ```
 
    Four rules, and the first two are what keep this section worth reading:
@@ -172,13 +193,14 @@ the task carries no text.
    - **A task carrying no `related_anchor` has no section to write.** The page does not
      have one; writing anyway would edit nothing and report success.
 
-   `synthesis_done` answers for BOTH sections — one input, one act, one marker — so
-   stamp it once, after writing both.
+   Stage both bodies in `<task_id>.synthesis.json` per `queue-format.md`. Only
+   `lore queue apply` publishes them and stamps `synthesis_done`; never edit the
+   concept sections or completion marker directly.
 
-A concept with no citations left keeps whatever the page says — write the
-section from the sources you have; if there are none, leave the existing body
-alone and stamp the marker. The concept became uncited because its sources
-were deleted, which is not a reason to erase what was known about it.
+A concept with no citations left keeps whatever the page says: stage its existing
+synthesis and related bodies unchanged, with the captured target revision, and let
+apply publish the completion marker. Missing citations do not establish why the
+evidence is absent or invalidate existing authored knowledge.
 
 ## `kind: extract-concepts`
 
@@ -189,12 +211,19 @@ materializes both, so that the merge rules (preserved `## Synthesis`, aliases, c
 citation count) and the link/slug format live in one tested place rather than being restated
 here. Your output is judgement — which concepts the page names — and nothing else.
 
+Capture `target_revision` from `lore queue status --json` before reading the target.
+Read its current content alongside the task input. If the target changes before apply,
+read it again and regenerate the extraction; never copy a new revision onto an old answer.
+The applier also requires a matching pending task, target and date. A lost task requires
+explicit recovery as described in `queue-format.md`; normal draining never opts into recovery.
+
 Write one file per task to `<vault>/.lorekeeper/queue/results/{task_id}.json`:
 
 ```json
 {
   "task_id": "<task.task_id>",
   "cache_hash": "<task.cache_hash>",
+  "target_revision": "<queue status target_revision captured before reading>",
   "target": <task.target verbatim>,
   "date": "<task.input.date>",
   "concepts": [{ "name": "…", "category": "…", "aliases": ["…"], "synthesis": "…" }]
@@ -217,8 +246,8 @@ not.
 
 What separates that field from `synthesis` is what a long run drifts across: `name` is what
 the page is CALLED, `synthesis` is what it SAYS. A finding written into `name` addresses
-nothing — no later extraction reproduces it, so its page is cited once and never again, and
-`lore queue apply` refuses the result outright once the address outgrows a filename.
+the wrong subject — later extractions will not reuse a whole finding as a name. Keep the
+claim in the synthesis; the registry allocates a bounded filename independently of the name.
 
 An alias an established page already answers to is dropped with a warning rather than taken —
 the extraction is one source's reading, and the page that earned the name by being cited under
@@ -227,16 +256,18 @@ it keeps it.
 `concepts` may be empty — that is a valid answer for a page with nothing durable in it, and
 it still records that the task was answered. Copy `target` and `cache_hash` through
 unchanged; the applier re-checks the hash against the page and drops the result if the page
-moved on while you were working.
+moved to a different task input. A page revision mismatch retains the result for regeneration.
 
 **What counts as a concept** (keep the graph high-signal, not noisy): extract
 durable, reusable knowledge nodes — technologies, named methods,
-architectures, patterns, standards, organizations. Do NOT mint concepts for
+architectures, patterns, standards, organizations, and stable subjects that connect
+the user's records. Do NOT mint concepts for
 transient specifics, generic English words, dates/numbers, one-off phrasings,
-or anything that would never plausibly be cited by a second source. When in
-doubt, prefer the established broader concept over a narrow variant. A good
-rule: a concept earns a page only if a future unrelated source could
-independently link to it. Fewer, load-bearing concepts beat many shallow ones.
+or names whose only value is a passing mention. Prefer an established broader
+concept when it faithfully covers the evidence. A page should provide a useful
+retrieval destination for future evidence or questions; that evidence may come
+from the same project or personal context. Do not generalise a local finding to
+make it appear reusable.
 
 `input.source_type` carries the originating adapter type; use it to scope
 what counts as a concept (per-type scoping: see
@@ -246,7 +277,10 @@ what counts as a concept (per-type scoping: see
 `AGENTS.md`: `lore resolve` for EVERY form the text writes — a hit on any of them is the
 owner — plus the created-this-run set, plus `lore wiki search` on two or three distinguishing
 terms of each form for the equivalences no rule about spelling can see. The queue task carries
-no concept registry of its own.
+no concept registry of its own. Reuse the resolved canonical title in `name` and keep the
+source's equivalent spelling in `aliases`; a spelling difference alone does not justify a
+new page. If the written forms resolve to different owners, resolve that semantic ambiguity
+before submitting an extraction. Search matches are candidates, not identity decisions.
 
 **Category assignment.** Hard constraint: the `category` value MUST be one of
 the IDs in `input.categories` (verbatim string match) or the field MUST be
@@ -288,3 +322,14 @@ When `input.categories` is absent or empty, omit the field unconditionally.
 - **Synthesis narratives** (`weekly-*`, `monthly-*`, etc.): these pages
   contain multiple `## ` sections (period, categories, etc.) — only the one
   matching `target.anchor` is replaced. Leave all other headings untouched.
+
+
+## Single-section results
+
+For `summarize`, `identify-themes`, and `refine-events`, including work-log and review
+narrative targets, return the generated body in `<task_id>.section.json` according to
+[queue-format.md](queue-format.md). Do not edit the target or stamp any marker.
+An empty body is valid where the generation specification calls for no content.
+For refinement preserve every `###` event heading in its original order and keep each
+body's own source links and attribution. Apply before capturing another task on the
+same page, since publication changes its target revision.

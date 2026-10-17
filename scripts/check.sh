@@ -23,23 +23,24 @@ cargo fmt --all --check
 taplo fmt --check
 
 gate clippy
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
 gate test
 # INSTA_UPDATE pinned: inherited from the environment, `always` makes a changed snapshot
 # rewrite itself and pass, so the gate would report green on a contract nobody read. Accepting
 # a deliberate change stays a separate, explicit `cargo insta accept`.
-INSTA_UPDATE=no cargo nextest run --workspace --all-targets
-cargo test --workspace --doc
+INSTA_UPDATE=no cargo nextest run --locked --workspace --all-targets
+cargo test --locked --workspace --doc
 
 gate shell
 bash -n scripts/*.sh
-shellcheck --severity=warning scripts/*.sh
+shellcheck --severity=warning scripts/*.sh scripts/tests/*.sh
+bash scripts/tests/pipeline-git.sh
 actionlint
 zizmor .github/workflows/
 
 gate doc
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --all-features
 
 gate msrv
 msrv=$(awk -F'"' '
@@ -51,7 +52,7 @@ msrv=$(awk -F'"' '
 # `+<toolchain>` rather than a bare `cargo`: `rust-toolchain.toml` pins the build toolchain for
 # this checkout and would otherwise override the declared floor, turning this into a duplicate
 # of the gate above it.
-cargo "+$msrv" check --workspace --all-targets
+cargo "+$msrv" check --locked --workspace --all-targets --all-features
 
 gate audit
 cargo audit --deny warnings

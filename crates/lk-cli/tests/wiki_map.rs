@@ -54,11 +54,11 @@ fn wiki_map_writes_navigation_map_and_excludes_reserved_files() {
     let map_path = root.join("vault/wiki/map.md");
     let content = std::fs::read_to_string(&map_path).expect("map.md written");
     assert!(
-        content.contains("[alpha](concepts/alpha.md)"),
-        "map lists concepts by relative link with leaf display:\n{content}"
+        content.contains("[Alpha](concepts/alpha.md)"),
+        "map lists concept titles with relative links:\n{content}"
     );
     assert!(
-        content.contains("[beta](concepts/beta.md)"),
+        content.contains("[Beta](concepts/beta.md)"),
         "map lists both concepts:\n{content}"
     );
 

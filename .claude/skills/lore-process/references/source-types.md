@@ -40,13 +40,17 @@ the work-log), apply the generic guidance without a type bias.
   (names, values, thresholds, endpoints) and drop navigation scaffolding
 
 ### `nodex`
+- Read the input's `Source record` as provenance: archived/superseded records describe
+  historical scope. Preserve declared replacements and distinguish observation from a
+  current operating recommendation. A missing state is unknown, not active.
 - A decision record, learning or guide the project wrote for itself, already
   edited prose. The repository remains its home and the vault is the layer above,
   so summarize it for a reader who does not work on this project: the problem, the
   judgment, and what the judgment turns on
 - Keep the specifics that make it checkable — error text, values, thresholds, API
   and platform names — and drop the project's internal coordinates (ticket ids,
-  environment and module names, its own file paths). The page's `source_url` is what
+  environment and module names, its own file paths) only when they do not determine
+  the claim's scope or reproducibility. The page's `source_url` is what
   reaches the full record, so nothing is lost by leaving the project's own vocabulary
   out of the summary
 - A document arguing four attempts at one fix is about where the boundary goes,
@@ -67,7 +71,12 @@ the work-log), apply the generic guidance without a type bias.
 
 ## Extract-concepts (`kind: extract-concepts`) — per-type scoping
 
-Use `input.source_type` to scope what counts as a concept:
+These are candidate subjects, not a requirement to mint a page for every entity.
+Apply the durable-concept criterion in `processing-kinds.md` to every source. People,
+projects, issues and meetings remain source context unless the material establishes
+independently reusable knowledge about them.
+
+Use `input.source_type` to identify candidate subjects:
 - `slack-channel` / `slack-search` / `gmail` → decisions, projects, people
 - `rss` → techniques, products, announcements
 - `jira` → issues, epics
@@ -75,23 +84,18 @@ Use `input.source_type` to scope what counts as a concept:
 - `confluence` → the systems, contracts and decisions the page documents; a page
   the user authored is usually the definitive statement of them, so prefer its
   naming over a synonym seen elsewhere
-- `nodex` → the transferable half, and only that. The repository already holds and
-  searches the project-specific half, so a concept earns a page here when a
-  DIFFERENT project could cite it: a pattern, a failure mode, a platform or
-  framework constraint, a method. Never this repository's module names, ticket ids,
-  environments, config keys or file paths — those name one codebase and no second
-  source can ever cite them. Where a document states a general insight in project
-  terms, name the concept in the general terms and leave the project's word out
-  unless another source would plausibly write it, in which case it is an alias.
-  **A document that DECLARES the concept it establishes has already made that
-  judgment**, and the declaration outranks your reading of the prose: a learning
-  carrying a promotion marker (`[PROMOTES: <id>]`) or a pattern id in its own
-  frontmatter is the repository saying this document is evidence for that
-  pattern. Report every declared id, verbatim as the name — it is an identifier
-  the project minted to be reused, so a later learning writes the same string —
-  and put the prose form beside it as an alias. A declared concept left out is
-  the citation the vault most needs and is least able to recover, because the
-  page that declared it will not be read again
+- `nodex` → reusable patterns, failure modes, platform constraints and methods,
+  plus stable project subjects that connect knowledge across documents. Keep incidental
+  module names, ticket ids, environments, config keys and file paths in the source;
+  their appearance alone does not justify a concept. Use names the material writes.
+  Do not invent a generic principle merely to remove its project context, and preserve
+  the conditions that make an observation transferable.
+  A promotion marker (`[PROMOTES: <id>]`) or a pattern id in the document's own
+  frontmatter explicitly declares an evidence relationship. Resolve that declared id
+  and preserve its citation; use the id as the name when it is absent from the registry.
+  Register the prose form as an alias only when it denotes that same concept.
+  A declaration establishes what the author associates with the document, not that
+  every claim is correct or universal. Reconcile competing evidence during synthesis.
 - `google-drive` / `manual` → document subject matter
 - `tasks` → what the closing note established: the systems touched, the
   constraint found, the decision taken. The task's title names an intention and

@@ -204,15 +204,15 @@ map to `RawItem`.
     close a shape with no channel back, since what a redirected fetch returns is written into
     the reader's own vault on their own machine.
   - **nodex** (`nodex.rs`): a project repository's DECLARED document graph, read by running
-    `nodex query recent` in it. The documents are not copied — the repository remains their
-    store — but each document becomes its own page under `<wiki>/documents/`, because a
+    `nodex query recent` in it. The repository remains the original store; each document is copied into its own page under `<wiki>/documents/`, because a
     decision record is a whole document rather than one item among the many a day holds, and
     the vault search reads the wiki and never the daily pages under it. Its `kind` rides as a
     TAG, so a reader asks for decision records across every project without naming a source.
     The CONCEPTS those documents name are what makes one insight found in three projects
-    converge on one page. Admission is structural because `nodex` answers structurally: `status` is not
-    `active` (superseded/archived) excludes a document as a FACT rather than a heuristic
-    reading its prose, and `kind` is the repository's own vocabulary. `--today` pins the
+    converge on one page. Normal date ingestion uses the declared date and kind, including historical
+    records; explicit reconciliation instead observes the current eligible inventory. `source_record` carries id, status, authored source revision and the declared
+    successor. Archived and superseded records are not current operating contracts, but their
+    observations remain evidence. Missing records are not inferred to be archived. `--today` pins the
     clock so `--date` backfill asks the day's own question; `--since` is a lower bound only,
     so the upper one is applied here against the same declared date. The query is made once
     per FIELD (`created`, then `updated`) and folded to ONE observation per document, never through
@@ -227,7 +227,7 @@ map to `RawItem`.
     shared a title. Keyed on the DATE rather than on which query answered, so the window's
     width cannot decide it and a backfill reproduces what the live run wrote.
     **A document source RE-OBSERVES, so a page has to be findable as its own next run.**
-    `metadata.source_file` carries the document's absolute path for exactly that: identity is
+    `metadata.source_file` retains the document's absolute location for legacy adoption: legacy identity is
     read from `source_file`/`source_url`, and a source setting neither — which `base_url` being
     optional makes the documented case — found a page it could not prove was its own and
     disambiguated around it, minting the whole corpus again every run. **The window is read WHOLE.** `nodex`
@@ -312,3 +312,26 @@ map to `RawItem`.
   URL + ephemeral `127.0.0.1` callback server + code exchange), re-exported as
   `build_google_refresh_token` for the `lore init credentials` wizard. URL-building and
   callback parsing are unit-tested; the live token exchange needs a real Google client.
+
+- **Nodex backfill selection is exact and complete.** `document_ids` restricts the
+  date/kind window before the cap. A missing requested identity or failed selected read
+  rejects the whole source before publication. A current snapshot alone is insufficient:
+  unbuildable documents, unfollowed scope boundaries, unavailable verification and scope
+  coverage gaps refuse the observation instead of claiming an empty or complete success.
+  The adapter does not rebuild a source graph as a side effect and pins its public CLI
+  envelope compatibility to nodex `>=0.52.0, <0.53` with `--check-version`.
+- **Nodex reconciliation is explicit.** `reconcile: true` requires a portable, nonblank
+  `repository_id`. It selects the current inventory independently of declared dates;
+  `kinds` and exact `document_ids` narrow the imported population only after completeness
+  is checked. A subset is not evidence of a deletion outside that subset. The generic
+  `source_identity: {repository, document}` is separate from the checkout's `source_file`
+  location and from the source record's lifecycle evidence. Authored created/updated dates
+  remain provenance; an undated hub uses the observation day with `timestamp_basis: observed`
+  and null authored dates rather than inventing an author date. Future-dated knowledge is
+  still refused by the pipeline's shared upper bound.
+- **Nodex metadata and prose describe one exact revision.** The document's raw bytes must
+  match nodex's SHA-256 `content_hash` before parsing that same buffer. Identity/kind/status
+  and typed lifecycle relations come from the verified node, never an unverified later file.
+  Batch drift refuses the source; one selected read failure is not a partial success.
+  Snapshot fingerprints are internal observation guards, not per-document LLM inputs:
+  changing an unrelated file must not regenerate every unchanged document.

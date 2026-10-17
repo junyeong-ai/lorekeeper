@@ -36,6 +36,8 @@ use lk_vault::{SectionKey, resolve_section};
 /// task it could enqueue.
 #[derive(Debug, Clone)]
 pub struct SectionDecision {
+    /// Provenance follows preserved output; explicit requests follow only their input.
+    pub provenance: std::collections::BTreeMap<String, String>,
     /// The request's `cache_hash` (BLAKE3-128 of its cache identity) — written into
     /// the new render's `llm_inputs.<key>` frontmatter regardless of whether the task
     /// is enqueued, so subsequent runs have a reference point.
@@ -93,9 +95,23 @@ pub fn lookup(
 ) -> SectionDecision {
     let existing_body =
         existing.and_then(|page| resolve_section(&page.body, heading).map(|s| s.body));
+    let input_key = completion_key
+        .strip_suffix("_done")
+        .unwrap_or(completion_key);
+    let mut provenance = std::collections::BTreeMap::new();
+    let request_input = format!("{input_key}_policy_requested_input");
+    let request = format!("{input_key}_policy_requested");
+    if stored_hash(existing, input_key) == Some(&hash)
+        && stored_hash(existing, &request_input) == Some(&hash)
+        && let Some(policy) = stored_hash(existing, &request)
+    {
+        provenance.insert(request, policy.to_owned());
+        provenance.insert(request_input, hash.clone());
+    }
 
     if stored_hash(existing, completion_key) != Some(&hash) {
         return SectionDecision {
+            provenance,
             hash,
             cached: false,
             preserved_body: None,
@@ -117,6 +133,7 @@ pub fn lookup(
             "section marked done but heading not found (custom-template drift?); re-enqueueing"
         );
         return SectionDecision {
+            provenance,
             hash,
             cached: false,
             preserved_body: None,
@@ -124,7 +141,12 @@ pub fn lookup(
         };
     };
 
+    let policy_key = format!("{input_key}_policy_done");
+    if let Some(policy) = stored_hash(existing, &policy_key) {
+        provenance.insert(policy_key, policy.to_owned());
+    }
     SectionDecision {
+        provenance,
         hash,
         cached: true,
         preserved_body: Some(body.trim_matches('\n').to_string()),

@@ -19,7 +19,6 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use lk_core::config::VaultDirs;
-use lk_core::frontmatter::parse_page;
 use lk_core::link;
 use lk_core::vault_path::{concepts_dir, documents_dir, explorations_dir};
 
@@ -58,20 +57,19 @@ pub fn build_brief(
     dirs: &VaultDirs,
     date: jiff::civil::Date,
 ) -> Result<Brief, VaultError> {
-    let concepts_rel = concepts_dir(dirs);
     let mut learned = Vec::new();
     let mut revisited = Vec::new();
 
-    for id in named_on(vault_root, dirs, date) {
-        let rel = concepts_rel.join(format!("{id}.md"));
-        let Ok(content) = std::fs::read_to_string(vault_root.join(&rel)) else {
-            // A citation to a page that is not there is `lore graph lint`'s finding, and
-            // answering it again here would put a second verdict beside it.
-            continue;
-        };
-        let Ok(page) = parse_page(&content) else {
-            tracing::warn!(concept = %id, "skipping page whose frontmatter will not parse");
-            continue;
+    for rel in named_on(vault_root, dirs, date)? {
+        let id = rel
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let page = match crate::store::read_page(vault_root, &vault_root.join(&rel)) {
+            Ok(page) => page,
+            Err(VaultError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
         };
         let introduced = page
             .frontmatter
@@ -115,8 +113,7 @@ pub fn build_brief(
             .then(b.source_count.cmp(&a.source_count))
             .then(a.id.cmp(&b.id))
     });
-    // Most evidence first, then by address. A concept thirty pages cite is the one a reader
-    // has most reason to have an opinion about; nothing here weighs that against anything.
+    // Citing-page count orders navigation; it does not establish independent evidence.
     revisited.sort_by(|a, b| b.source_count.cmp(&a.source_count).then(a.id.cmp(&b.id)));
     Ok(Brief {
         date,
@@ -135,49 +132,68 @@ pub fn build_brief(
 /// A concept page NOTHING cites is absent from every day by construction, which is the rule
 /// working rather than a gap: the day reports what its own material named, and a page with no
 /// citation was named by nothing. Such a page is `lore graph lint`'s orphan finding.
-fn named_on(vault_root: &Path, dirs: &VaultDirs, date: jiff::civil::Date) -> BTreeSet<String> {
+fn named_on(
+    vault_root: &Path,
+    dirs: &VaultDirs,
+    date: jiff::civil::Date,
+) -> Result<BTreeSet<PathBuf>, VaultError> {
     let concepts_rel = concepts_dir(dirs);
+    let paths = crate::search::markdown_files(vault_root, &vault_root.join(&concepts_rel))?
+        .into_iter()
+        .filter_map(|path| path.strip_prefix(vault_root).ok().map(Path::to_path_buf));
+    let mut resolver = crate::ExistingPageResolver::new(vault_root, paths)?;
     let mut named = BTreeSet::new();
-    for rel in pages_of(vault_root, dirs, date) {
-        let Ok(content) = std::fs::read_to_string(vault_root.join(&rel)) else {
-            continue;
-        };
-        let body = match parse_page(&content) {
-            Ok(page) => page.body,
-            Err(_) => content,
-        };
+    for rel in pages_of(vault_root, dirs, date)? {
+        let body = crate::store::read_page(vault_root, &vault_root.join(&rel))?.body;
         for dest in link::extract_dests(&body) {
             let Some(resolved) = link::resolve_dest(&rel, &dest) else {
                 continue;
             };
-            // Gated exactly as the graph gates an edge: a destination landing in the concepts
-            // directory with a `.md` name is a citation, and nothing else is.
-            if resolved.parent() == Some(concepts_rel.as_path())
-                && resolved.extension().is_some_and(|e| e == "md")
-                && let Some(stem) = resolved.file_stem()
+            if resolved.extension().is_some_and(|e| e == "md")
+                && let Some(actual) = resolver.resolve(&resolved)?
+                && actual.parent() == Some(concepts_rel.as_path())
             {
-                named.insert(stem.to_string_lossy().into_owned());
+                named.insert(actual);
             }
         }
     }
-    named
+    Ok(named)
 }
 
 /// The vault-relative pages this date wrote.
-fn pages_of(vault_root: &Path, dirs: &VaultDirs, date: jiff::civil::Date) -> Vec<PathBuf> {
+fn pages_of(
+    vault_root: &Path,
+    dirs: &VaultDirs,
+    date: jiff::civil::Date,
+) -> Result<Vec<PathBuf>, VaultError> {
     let mut pages = Vec::new();
 
     let daily_root = vault_root.join(&dirs.daily);
-    if let Ok(sources) = std::fs::read_dir(&daily_root) {
-        for source in sources.flatten() {
-            if !source.file_type().is_ok_and(|t| t.is_dir()) {
+    let sources = match std::fs::read_dir(&daily_root) {
+        Ok(sources) => Some(sources),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    if let Some(sources) = sources {
+        for source in sources {
+            let source = source?;
+            if !source.file_type()?.is_dir() {
                 continue;
             }
             let rel = Path::new(&dirs.daily)
                 .join(source.file_name())
                 .join(format!("{date}.md"));
-            if vault_root.join(&rel).is_file() {
-                pages.push(rel);
+            match std::fs::metadata(vault_root.join(&rel)) {
+                Ok(metadata) if metadata.is_file() => pages.push(rel),
+                Ok(_) => {
+                    return Err(std::io::Error::other(format!(
+                        "expected source page: {}",
+                        rel.display()
+                    ))
+                    .into());
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
             }
         }
     }
@@ -187,16 +203,13 @@ fn pages_of(vault_root: &Path, dirs: &VaultDirs, date: jiff::civil::Date) -> Vec
     // search uses: a page filed into a subdirectory is one the reader can find, so a day that
     // could not see it would report a different vault than the one they search.
     for rel_dir in [documents_dir(dirs), explorations_dir(dirs)] {
-        for path in crate::search::markdown_files(&vault_root.join(&rel_dir)) {
-            let Ok(content) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let created = parse_page(&content).ok().and_then(|page| {
-                page.frontmatter
-                    .get("created")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| s.parse::<jiff::civil::Date>().ok())
-            });
+        for path in crate::search::markdown_files(vault_root, &vault_root.join(&rel_dir))? {
+            let page = crate::store::read_page(vault_root, &path)?;
+            let created = page
+                .frontmatter
+                .get("created")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<jiff::civil::Date>().ok());
             if created == Some(date)
                 && let Ok(rel) = path.strip_prefix(vault_root)
             {
@@ -204,7 +217,7 @@ fn pages_of(vault_root: &Path, dirs: &VaultDirs, date: jiff::civil::Date) -> Vec
             }
         }
     }
-    pages
+    Ok(pages)
 }
 
 #[cfg(test)]
@@ -228,6 +241,25 @@ mod tests {
     /// The defect that reading the day's own pages avoids: a concept page records when it was
     /// LAST cited, not every day it was, so a concept introduced on one day and named again on
     /// the next went missing from the first — and, no longer new on the second, from every day.
+    #[test]
+    fn brief_uses_the_actual_owner_of_a_filesystem_case_alias() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let concepts = root.path().join(concepts_dir(&dirs));
+        concept(&concepts, "topic", "2026-09-10", 1);
+        write(
+            &root.path().join("daily/news/2026-09-10.md"),
+            "---\ntype: daily\n---\n[Topic](../../wiki/concepts/TOPIC.md)\n",
+        );
+        let exists = concepts.join("TOPIC.md").is_file();
+        let brief = build_brief(root.path(), &dirs, jiff::civil::date(2026, 9, 10)).unwrap();
+        assert_eq!(brief.learned.len(), usize::from(exists));
+        if exists {
+            assert_eq!(brief.learned[0].id, "topic");
+            assert_eq!(brief.learned[0].path, "wiki/concepts/topic.md");
+        }
+    }
+
     #[test]
     fn a_concept_named_again_later_still_belongs_to_the_day_it_was_introduced() {
         let tmp = tempfile::tempdir().unwrap();

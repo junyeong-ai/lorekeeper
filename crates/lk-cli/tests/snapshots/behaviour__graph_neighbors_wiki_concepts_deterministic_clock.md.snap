@@ -1,0 +1,11 @@
+---
+source: crates/lk-cli/tests/behaviour.rs
+assertion_line: 393
+expression: "observe(staged.path(), argv)"
+---
+exit: 0
+--- stdout ---
+both  wiki/concepts/behaviour-snapshot.md  Behaviour snapshot
+outgoing  wiki/concepts/guard-population.md  Guard population
+--- stderr ---
+2 of 2 neighbors (offset 0)

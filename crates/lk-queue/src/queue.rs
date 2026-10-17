@@ -71,6 +71,51 @@ pub struct QueueTask {
 const RELATED_ANCHOR: &str = "related_anchor";
 
 impl QueueTask {
+    /// Missing provenance is legacy/unknown, never an automatic cache invalidation.
+    pub fn generation_policy(&self) -> Result<Option<&str>, String> {
+        match self.input.get("generation_policy") {
+            None => Ok(None),
+            Some(value) if value.as_str() == Some(self.kind.generation_policy()) => {
+                Ok(value.as_str())
+            }
+            Some(_) => Err("unsupported generation policy; use a compatible processor".into()),
+        }
+    }
+
+    /// Reconstruct the original typed request instead of maintaining another hash projection.
+    pub fn validate_retained_input(&self) -> Result<(), String> {
+        if !self.kind.supports_target(self.target.kind) {
+            return Err("task kind does not match target kind".into());
+        }
+        let mut input = self.input.clone();
+        input.insert(
+            "target".into(),
+            serde_json::to_value(&self.target).map_err(|e| e.to_string())?,
+        );
+        let value = serde_json::Value::Object(input);
+        let hash = match self.kind {
+            TaskKind::Summarize | TaskKind::RefineEvents => {
+                serde_json::from_value::<crate::SummarizeRequest>(value).map(|r| r.cache_hash())
+            }
+            TaskKind::ExtractConcepts => {
+                serde_json::from_value::<crate::ExtractConceptsRequest>(value)
+                    .map(|r| r.cache_hash())
+            }
+            TaskKind::IdentifyThemes => {
+                serde_json::from_value::<crate::ThemeRequest>(value).map(|r| r.cache_hash())
+            }
+            TaskKind::SynthesizeConcept => {
+                serde_json::from_value::<crate::ConceptSynthesisRequest>(value)
+                    .map(|r| r.cache_hash())
+            }
+        }
+        .map_err(|e| format!("original typed input is missing or malformed: {e}"))?;
+        if hash != self.cache_hash {
+            return Err("retained input does not match its cache hash".into());
+        }
+        Ok(())
+    }
+
     /// Every section heading this task writes, in the order it writes them.
     ///
     /// Most kinds name one. A `synthesize-concept` task names two — the synthesis heading
@@ -106,9 +151,35 @@ pub struct TaskResult {
     /// The task's `cache_hash`, carried back so the applier can re-check staleness against
     /// the target page: the page may have been re-rendered while the drain was running.
     pub cache_hash: String,
+    pub target_revision: String,
     pub target: TaskTarget,
     pub date: jiff::civil::Date,
     pub concepts: Vec<ReportedConcept>,
+}
+
+/// A synthesis draft against one target snapshot and the task's source revisions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SynthesisResult {
+    pub task_id: String,
+    pub cache_hash: String,
+    pub target_revision: String,
+    pub synthesis: String,
+    pub related: Option<String>,
+}
+
+pub const SYNTHESIS_RESULT_SUFFIX: &str = ".synthesis.json";
+pub const SECTION_RESULT_SUFFIX: &str = ".section.json";
+
+/// A single semantic section, published only against its captured target bytes.
+/// The pending task owns the destination, heading and completion marker.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SectionResult {
+    pub task_id: String,
+    pub cache_hash: String,
+    pub target_revision: String,
+    pub body: String,
 }
 
 /// One concept an extraction named, with the grounding sentence that makes its page worth
@@ -153,7 +224,7 @@ pub enum QueueClaim {
     Unavailable(std::io::Error),
 }
 
-/// Claim the queue for the duration of a run that materializes its results.
+/// Claim the queue while materializing results or pruning pending files.
 ///
 /// Applying a result is a read-modify-write across several files that ends in deleting the
 /// result: two runs at once each read an origin page before the other writes it, so the
@@ -199,16 +270,25 @@ pub struct ResultBatch {
 /// caller REWRITES the log from what it parsed, so skipping would destroy the record.)
 pub fn read_results(queue_dir: &Path) -> std::io::Result<ResultBatch> {
     let dir = queue_dir.join(RESULTS_SUBDIR);
-    if !dir.exists() {
-        return Ok(ResultBatch {
-            ready: Vec::new(),
-            unreadable: Vec::new(),
-        });
-    }
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)?
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ResultBatch {
+                ready: Vec::new(),
+                unreadable: Vec::new(),
+            });
+        }
+        Err(error) => return Err(error),
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|p| {
+            p.extension().and_then(|s| s.to_str()) == Some("json")
+                && !p.to_string_lossy().ends_with(SYNTHESIS_RESULT_SUFFIX)
+                && !p.to_string_lossy().ends_with(SECTION_RESULT_SUFFIX)
+        })
         .collect();
     paths.sort();
 
@@ -219,8 +299,9 @@ pub fn read_results(queue_dir: &Path) -> std::io::Result<ResultBatch> {
     for path in paths {
         // An I/O failure is NOT a malformed file: the bytes may be perfectly good and
         // unreadable for a reason retrying fixes, so it still fails the read.
-        let raw = std::fs::read_to_string(&path)?;
-        match serde_json::from_str::<TaskResult>(&raw) {
+        let raw = std::fs::read(&path)?;
+        // Encoding errors are permanent payload corruption, not filesystem failures.
+        match serde_json::from_slice::<TaskResult>(&raw) {
             Ok(result) => batch.ready.push((path, result)),
             Err(e) => batch.unreadable.push((path, e.to_string())),
         }
@@ -243,6 +324,40 @@ impl TaskKind {
     /// The kebab-case wire name, matching the `#[serde(rename_all = "kebab-case")]`
     /// JSONL encoding (pinned by `as_str_matches_wire_encoding`). The single source
     /// of truth for the textual kind label.
+    /// Semantic policy versions are manually advanced, independently of release versions.
+    pub fn generation_policy(self) -> &'static str {
+        match self {
+            Self::Summarize => "summary-v1",
+            Self::ExtractConcepts => "concept-extraction-v1",
+            Self::IdentifyThemes => "themes-v1",
+            Self::RefineEvents => "event-refinement-v1",
+            Self::SynthesizeConcept => "concept-synthesis-v1",
+        }
+    }
+
+    pub fn supports_target(self, target: crate::TargetKind) -> bool {
+        use crate::TargetKind as T;
+        matches!(
+            (self, target),
+            (
+                Self::Summarize,
+                T::DailySummary
+                    | T::DocumentSummary
+                    | T::WorkLogSynthesis
+                    | T::WeeklyReviewNarrative
+                    | T::MonthlyReviewNarrative
+                    | T::QuarterlyReviewNarrative
+                    | T::AnnualReviewNarrative
+            ) | (Self::IdentifyThemes, T::WeeklySynthesisThemes)
+                | (Self::RefineEvents, T::DailyRefineEvents)
+                | (
+                    Self::ExtractConcepts,
+                    T::DailyConcepts | T::DocumentConcepts
+                )
+                | (Self::SynthesizeConcept, T::ConceptSynthesis)
+        )
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             TaskKind::Summarize => "summarize",
@@ -315,6 +430,7 @@ impl QueueLlmClient {
     async fn enqueue<R: TaskRequest + Send>(&self, prefix: &str, kind: TaskKind, req: R) {
         let mut input = req.task_input();
         input.insert("locale".into(), req.locale().tag().into());
+        input.insert("generation_policy".into(), kind.generation_policy().into());
         let task = QueueTask {
             task_id: self.next_id(prefix),
             kind,
@@ -396,6 +512,19 @@ mod tests {
     use lk_core::i18n::Locale;
     use tempfile::TempDir;
 
+    #[test]
+    fn result_discovery_distinguishes_missing_storage_from_invalid_storage() {
+        let dir = TempDir::new().unwrap();
+        let queue = dir.path().join("queue");
+        let empty = read_results(&queue).unwrap();
+        assert!(empty.ready.is_empty());
+        assert!(empty.unreadable.is_empty());
+
+        std::fs::write(&queue, "not a directory").unwrap();
+        assert!(read_results(&queue).is_err());
+        assert_eq!(std::fs::read_to_string(&queue).unwrap(), "not a directory");
+    }
+
     /// The claim is what makes applying results one-at-a-time, and it has to answer three
     /// ways: held, taken, and unaskable. The third is a filesystem that carries no advisory
     /// lock, which cannot be produced here — what is pinned is that the first two are
@@ -430,6 +559,7 @@ mod tests {
         std::fs::create_dir_all(&results).unwrap();
 
         let good = TaskResult {
+            target_revision: String::new(),
             task_id: "ext-1".into(),
             cache_hash: "h".into(),
             target: crate::TaskTarget {
@@ -458,6 +588,15 @@ mod tests {
             !batch.unreadable[0].1.is_empty(),
             "the reason must be carried for the operator"
         );
+    }
+
+    #[test]
+    fn result_file_io_failure_is_not_misclassified_as_corrupt_content() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(RESULTS_SUBDIR).join("not-a-file.json");
+        std::fs::create_dir_all(&path).unwrap();
+        assert!(read_results(dir.path()).is_err());
+        assert!(path.is_dir());
     }
 
     #[test]
@@ -853,7 +992,10 @@ mod tests {
         );
 
         let synthesis = crate::ConceptSynthesisRequest {
-            citations: vec!["daily/src/2026-01-01".into()],
+            citations: vec![lk_core::concept::Citation {
+                path: "daily/src/2026-01-01.md".into(),
+                revision: "revision".into(),
+            }],
             locale: Locale::Ko,
             related_anchor: None,
             target: TaskTarget {
@@ -883,7 +1025,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let client = QueueLlmClient::new(dir.path().to_path_buf());
         let req = crate::ConceptSynthesisRequest {
-            citations: vec!["daily/src/2026-01-01".into()],
+            citations: vec![lk_core::concept::Citation {
+                path: "daily/src/2026-01-01.md".into(),
+                revision: "revision".into(),
+            }],
             locale: Locale::Ko,
             related_anchor: Some("## 관련".into()),
             target: TaskTarget {
@@ -953,7 +1098,10 @@ mod tests {
             .unwrap();
         client
             .synthesize_concept(crate::ConceptSynthesisRequest {
-                citations: vec!["daily/src/2026-01-01".into()],
+                citations: vec![lk_core::concept::Citation {
+                    path: "daily/src/2026-01-01.md".into(),
+                    revision: "revision".into(),
+                }],
                 locale: Locale::En,
                 related_anchor: None,
                 target: target(TargetKind::ConceptSynthesis),
@@ -969,6 +1117,17 @@ mod tests {
             })
             .await
             .unwrap();
+        client
+            .summarize(SummarizeRequest {
+                text: "event".into(),
+                max_sentences: 0,
+                focus: None,
+                locale: Locale::En,
+                source_type: None,
+                target: target(TargetKind::DailyRefineEvents),
+            })
+            .await
+            .unwrap();
         client.flush().await.unwrap();
 
         let queued = std::fs::read_to_string(client.queue_path()).unwrap();
@@ -976,8 +1135,18 @@ mod tests {
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect();
-        assert_eq!(tasks.len(), 4, "one task per kind enqueued");
-        for task in tasks {
+        assert_eq!(tasks.len(), 5, "one task per kind enqueued");
+        for mut task in tasks {
+            assert_eq!(
+                task.generation_policy().unwrap(),
+                Some(task.kind.generation_policy())
+            );
+            task.validate_retained_input().unwrap();
+            let original_hash = task.cache_hash.clone();
+            task.input.remove("generation_policy");
+            assert_eq!(task.generation_policy().unwrap(), None);
+            task.validate_retained_input().unwrap();
+            assert_eq!(task.cache_hash, original_hash);
             assert_eq!(
                 task.input.get("locale").and_then(|v| v.as_str()),
                 Some("en"),

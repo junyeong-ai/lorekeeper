@@ -5,6 +5,13 @@ expression: "observe(staged.path(), argv)"
 exit: 0
 --- stdout ---
 {
+  "categories": {
+    "engineering": 1
+  },
+  "category": null,
+  "formats": {
+    "concept": 1
+  },
   "hits": [
     {
       "aliases": [
@@ -12,24 +19,24 @@ exit: 0
       ],
       "category": "engineering",
       "excerpt": "A reference date supplied as an argument rather than read from the host, so a date-relative answer is a function of its inputs.",
+      "file_revision": "5ff21ff52d4ae9fcb3a3dfb3c04024bc9477e438e96b78a1d3fd63e8f4b77385",
       "format": "concept",
       "id": "deterministic-clock",
-      "matched": "identity",
+      "matched": "name",
       "path": "wiki/concepts/deterministic-clock.md",
       "source_count": 2,
       "title": "Deterministic clock"
-    },
-    {
-      "category": "engineering",
-      "excerpt": "- deterministic-clock",
-      "format": "concept",
-      "id": "behaviour-snapshot",
-      "matched": "text",
-      "path": "wiki/concepts/behaviour-snapshot.md",
-      "source_count": 3,
-      "title": "Behaviour snapshot"
     }
   ],
-  "query": "deterministic clock"
+  "include_sources": false,
+  "next_offset": null,
+  "offset": 0,
+  "query": "deterministic clock",
+  "source_status": null,
+  "source_statuses": {
+    "": 1
+  },
+  "total": 1,
+  "type": null
 }
 --- stderr ---

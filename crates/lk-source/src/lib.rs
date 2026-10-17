@@ -184,8 +184,18 @@ impl ExtractContext {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Selection {
+    DateWindow,
+    DocumentSnapshot,
+}
+
 #[async_trait]
 pub trait Source: Send + Sync {
+    fn selection(&self, _params: &serde_json::Value) -> Result<Selection, SourceError> {
+        Ok(Selection::DateWindow)
+    }
+
     async fn extract(
         &self,
         params: &serde_json::Value,

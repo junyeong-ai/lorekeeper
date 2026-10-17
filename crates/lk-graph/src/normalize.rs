@@ -4,7 +4,7 @@
 //! The normalization rule itself is `lk_core::slugify` (NFKC-correct) — there is no
 //! local slug function here. This module only owns the rename plan + link rewrite.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use lk_core::concept::slugify;
@@ -13,7 +13,8 @@ use lk_core::vault_path::RESERVED_WIKI_FILES;
 
 use crate::GraphError;
 use crate::scan::ScannedPage;
-use lk_core::vault_path::path_slug;
+#[cfg(test)]
+use crate::scan::page_id as path_slug;
 
 #[derive(Debug, Clone)]
 pub struct Rename {
@@ -25,7 +26,6 @@ pub struct Rename {
 
 pub fn scan(pages: &[ScannedPage]) -> Vec<Rename> {
     let mut renames = Vec::new();
-    let mut claimed_slugs: HashSet<String> = HashSet::new();
 
     for page in pages {
         if let Some(filename) = page.path.file_name().and_then(|f| f.to_str())
@@ -45,15 +45,6 @@ pub fn scan(pages: &[ScannedPage]) -> Vec<Rename> {
         };
 
         if stem != normalized {
-            if !claimed_slugs.insert(normalized.clone()) {
-                tracing::warn!(
-                    path = %page.path.display(),
-                    rename_to = %normalized,
-                    "skipping rename: would collide with another file"
-                );
-                continue;
-            }
-
             let new_path = page.path.with_file_name(format!("{normalized}.md"));
             renames.push(Rename {
                 old_path: page.path.clone(),
@@ -68,33 +59,41 @@ pub fn scan(pages: &[ScannedPage]) -> Vec<Rename> {
     renames
 }
 
-/// Whether two paths name the SAME file on disk, which is not the same question as whether
-/// they are the same string.
-///
-/// The rename this module performs is usually case-only (`Bad_Name` → `bad-name`,
-/// `allUsers-…` → `allusers-…`), and macOS and Windows default to case-INSENSITIVE
-/// filesystems. There the new path already "exists" — as the file being renamed — so an
-/// existence check alone refuses the very repair `--fix` exists to make, on the platform
-/// `lore schedule --format launchd` is written for. `canonicalize` resolves both to the
-/// name the filesystem actually holds, so a case-only rename compares equal while a genuine
-/// collision (two distinct files, as on a case-sensitive volume) still does not.
-fn is_same_file(a: &Path, b: &Path) -> bool {
-    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-        (Ok(a), Ok(b)) => a == b,
-        // Unresolvable means we cannot claim they are the same; the caller then refuses,
-        // which is the safe direction for a destructive rename.
-        _ => false,
-    }
+pub fn apply(renames: &[Rename], pages: &[ScannedPage], root: &Path) -> Result<usize, GraphError> {
+    let session =
+        lk_vault::MutationSession::acquire(root).map_err(|e| GraphError::Io(e.to_string()))?;
+    apply_in_session(renames, pages, &session)
 }
 
-pub fn apply(renames: &[Rename], pages: &[ScannedPage], root: &Path) -> Result<usize, GraphError> {
+pub fn apply_in_session(
+    renames: &[Rename],
+    pages: &[ScannedPage],
+    session: &lk_vault::MutationSession,
+) -> Result<usize, GraphError> {
+    let root = session.root();
     if renames.is_empty() {
         return Ok(0);
     }
 
+    lk_vault::KnowledgeReview::ensure_evidence_paths_preserved(
+        root,
+        &pages
+            .iter()
+            .map(|page| page.path.clone())
+            .collect::<Vec<_>>(),
+        &renames
+            .iter()
+            .map(|rename| rename.old_path.clone())
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|e| GraphError::Io(e.to_string()))?;
+
     for rename in renames {
         let target = root.join(&rename.new_path);
-        if target.exists() && !is_same_file(&root.join(&rename.old_path), &target) {
+        if target.exists()
+            && !lk_vault::same_existing_file(root, &rename.old_path, &rename.new_path)
+                .map_err(|e| GraphError::Io(e.to_string()))?
+        {
             return Err(GraphError::Io(format!(
                 "rename target already exists: {}",
                 target.display()
@@ -102,69 +101,33 @@ pub fn apply(renames: &[Rename], pages: &[ScannedPage], root: &Path) -> Result<u
         }
     }
 
-    // Two maps, two matching semantics. A page's OWN location is exact — the rename
-    // map is keyed by literal path so a just-renamed page is read at its new file.
-    // Link destinations are matched the way the graph matches them — by page id
-    // (`path_slug`) — so a case/punctuation variant spelling of a renamed file's path
-    // is repointed too: exactly the citations scan resolves to it.
     let renamed_paths: HashMap<&Path, &Path> = renames
         .iter()
         .map(|r| (r.old_path.as_path(), r.new_path.as_path()))
         .collect();
-    let renamed_ids: HashMap<String, &Path> = renames
-        .iter()
-        .map(|r| (path_slug(&r.old_path), r.new_path.as_path()))
-        .collect();
-
+    let mut destinations: HashMap<PathBuf, &Path> = HashMap::new();
+    let mut plan = lk_vault::MutationPlan::default();
     for rename in renames {
-        let old = root.join(&rename.old_path);
-        let new = root.join(&rename.new_path);
-        std::fs::rename(&old, &new).map_err(|e| {
-            GraphError::Io(format!(
-                "failed to rename {} -> {}: {e}",
-                old.display(),
-                new.display()
-            ))
-        })?;
+        destinations.insert(rename.old_path.clone(), &rename.new_path);
+        let absolute = root
+            .join(&rename.old_path)
+            .canonicalize()
+            .map_err(|e| GraphError::Io(e.to_string()))?;
+        destinations.insert(absolute, &rename.new_path);
+        let before = std::fs::read_to_string(root.join(&rename.old_path))
+            .map_err(|e| GraphError::Io(e.to_string()))?;
+        plan.rename(&rename.old_path, &rename.new_path, before);
     }
 
     for page in pages {
-        // Only a page that CITES a renamed one, or is itself renamed, has anything to rewrite.
-        // Skipping the rest is not an optimization: this loop runs AFTER the files have moved,
-        // so a page that cannot be read — a non-UTF-8 file in a user's own folder, or one
-        // spelling of a symlinked directory whose other spelling was just renamed — would abort
-        // the run with the vault half-repointed, and every re-run would abort identically.
-        // The scan already resolved every link, so a page with none of them has none to fix.
-        let renamed_self = renamed_paths.get(page.path.as_path()).copied();
-        let cites_renamed = page
-            .outgoing
-            .iter()
-            .filter_map(|link| link.id.as_ref())
-            .any(|id| renamed_ids.contains_key(id));
-        if renamed_self.is_none() && !cites_renamed {
-            continue;
-        }
+        let rel_path = renamed_paths
+            .get(page.path.as_path())
+            .copied()
+            .unwrap_or(&page.path);
+        let content = std::fs::read_to_string(root.join(&page.path))
+            .map_err(|e| GraphError::Io(format!("read {}: {e}", page.path.display())))?;
+        let mut updated = repoint_renamed_links(&content, &page.path, &destinations, root)?;
 
-        // A renamed page keeps its directory (only the filename changes), so links
-        // inside it still resolve from the same base — read it at its new path.
-        let rel_path = renamed_self.unwrap_or(&page.path);
-        let abs_path = root.join(rel_path);
-
-        let content = std::fs::read_to_string(&abs_path)
-            .map_err(|e| GraphError::Io(format!("failed to read {}: {e}", abs_path.display())))?;
-
-        let mut updated = repoint_renamed_links(&content, rel_path, &renamed_ids);
-
-        // A renamed page records its own address in `id`, so leaving that behind would
-        // publish a page whose frontmatter names a file that no longer exists. The stem is
-        // the identity every consumer resolves by, which is exactly why the stale copy is
-        // worth removing rather than tolerating.
-        //
-        // Both `None`s here are the absence of anything to rewrite, not a dropped failure. A
-        // page's graph id comes from its PATH (`lk_core::vault_path::path_slug`), so a page carrying no
-        // frontmatter at all is scanned and renamed like any other — and it has no `id` key to
-        // go stale, which is the only case `set_frontmatter_field` declines. Making either an
-        // error would fail `--fix` on a page it has nothing to do to.
         if renamed_paths.contains_key(page.path.as_path())
             && let Some(new_slug) = rel_path.file_stem().and_then(|s| s.to_str())
             && let Some(with_id) = lk_vault::set_frontmatter_field(
@@ -176,41 +139,48 @@ pub fn apply(renames: &[Rename], pages: &[ScannedPage], root: &Path) -> Result<u
             updated = with_id;
         }
 
-        if updated != content {
-            lk_vault::VaultWriter::new(root)
-                .edit_page_sync(rel_path, &updated)
-                .map_err(|e| {
-                    GraphError::Io(format!("failed to write {}: {e}", rel_path.display()))
-                })?;
-        }
+        plan.edit(rel_path, content, updated);
     }
+    session
+        .apply(plan)
+        .map_err(|e| GraphError::Io(e.to_string()))?;
 
     Ok(renames.len())
 }
 
-/// Repoint every link whose destination resolves to a renamed page at that page's new
-/// path. Destinations are matched by page id (the graph's resolution), gated to `.md`
-/// like extraction. Rewrites OUTSIDE code only: a link shown inside a code fence/span
-/// is a code example, not a graph edge (`extract_dests` ignores it), so rewriting it
-/// would corrupt the document.
 fn repoint_renamed_links(
     content: &str,
     page_path: &Path,
-    path_map: &HashMap<String, &Path>,
-) -> String {
-    link::rewrite_links_outside_code(content, |text, raw_dest| {
+    path_map: &HashMap<PathBuf, &Path>,
+    root: &Path,
+) -> Result<String, GraphError> {
+    let mut error = None;
+    let updated = link::rewrite_links_outside_code(content, |text, raw_dest| {
         let (dest, anchor) = link::split_raw_dest(raw_dest);
         let decoded = link::decode_dest(dest);
         if !Path::new(&decoded).extension().is_some_and(|e| e == "md") {
             return None;
         }
         let resolved = link::resolve_dest(page_path, &decoded)?;
-        let new_path = path_map.get(&path_slug(&resolved))?;
-        // `text` arrives exactly as written (escapes included) — reassemble verbatim
-        // rather than through `md_link`, which would escape it a second time.
-        let new_dest = format!("{}{anchor}", link::relative_dest(page_path, new_path));
+        let target = if let Some(target) = path_map.get(&resolved) {
+            Some(target)
+        } else {
+            match root.join(&resolved).canonicalize() {
+                Ok(path) => path_map.get(&path),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => {
+                    error = Some(e);
+                    None
+                }
+            }
+        }?;
+        let new_dest = format!("{}{anchor}", link::relative_dest(page_path, target));
         Some(format!("[{text}]({new_dest})"))
-    })
+    });
+    match error {
+        Some(e) => Err(GraphError::Io(e.to_string())),
+        None => Ok(updated),
+    }
 }
 
 #[cfg(test)]
@@ -221,6 +191,7 @@ mod tests {
     fn build_page(path: &str, outgoing: &[&str]) -> ScannedPage {
         let rel = PathBuf::from(path);
         ScannedPage {
+            revision: Some("revision".into()),
             id: path_slug(&rel),
             path: rel,
             title: "test".to_owned(),
@@ -230,6 +201,75 @@ mod tests {
                 .map(|s| Link::to(&format!("{s}.md")))
                 .collect(),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_rewrite_resumes_after_the_original_filename_disappears() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir(root.join("notes")).unwrap();
+        std::fs::write(root.join("Bad_Name.md"), "# Original\n").unwrap();
+        std::fs::write(root.join("notes/link.md"), "[Original](../Bad_Name.md)\n").unwrap();
+        let pages = crate::scan::scan_vault(root, false).unwrap();
+        let renames = scan(&pages);
+        let readonly = root.join("notes");
+        std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let result = apply(&renames, &pages, root);
+        std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(!root.join("Bad_Name.md").exists());
+        assert!(root.join("bad-name.md").exists());
+        let pages = crate::scan::scan_vault(root, false).unwrap();
+        assert!(scan(&pages).is_empty());
+        if result.is_err() {
+            apply(&[], &pages, root).unwrap();
+        }
+        assert_eq!(
+            std::fs::read_to_string(root.join("notes/link.md")).unwrap(),
+            "[Original](../bad-name.md)\n"
+        );
+        assert!(!root.join(".lorekeeper/mutation/pending.json").exists());
+    }
+
+    #[test]
+    fn historical_review_evidence_blocks_mutation_before_any_write() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("wiki/concepts")).unwrap();
+        let old = "---\ntype: concept\ntitle: Old\n---\nOld prose.\n";
+        let into = "---\ntype: concept\ntitle: Into\n---\n";
+        std::fs::write(root.join("wiki/concepts/old.md"), old).unwrap();
+        std::fs::write(root.join("wiki/concepts/into.md"), into).unwrap();
+        let review = "---\ntype: exploration\nreview: {status: open, evidence: [{path: wiki/concepts/old.md, revision: historical}]}\n---\n[Old](wiki/concepts/old.md)\n";
+        std::fs::write(root.join("review.md"), review).unwrap();
+        let pages = crate::scan::scan_vault(root, false).unwrap();
+        assert!(
+            apply(
+                &[Rename {
+                    old_path: "wiki/concepts/old.md".into(),
+                    new_path: "wiki/concepts/new.md".into(),
+                    old_slug: "old".into(),
+                    new_slug: "new".into()
+                }],
+                &pages,
+                root
+            )
+            .is_err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("wiki/concepts/old.md")).unwrap(),
+            old
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("wiki/concepts/into.md")).unwrap(),
+            into
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("review.md")).unwrap(),
+            review
+        );
+        assert!(!root.join("wiki/concepts/new.md").exists());
     }
 
     #[test]
@@ -256,9 +296,15 @@ mod tests {
     fn link_repointing_preserves_text_and_anchor() {
         let old = PathBuf::from("wiki/Concept_A.md");
         let new = PathBuf::from("wiki/concept-a.md");
-        let path_map: HashMap<String, &Path> = [(path_slug(&old), new.as_path())].into();
+        let path_map: HashMap<PathBuf, &Path> = [(old, new.as_path())].into();
         let content = "See [A](Concept_A.md) and [A](Concept_A.md#part) and [B](other.md) here.";
-        let updated = repoint_renamed_links(content, Path::new("wiki/linker.md"), &path_map);
+        let updated = repoint_renamed_links(
+            content,
+            Path::new("wiki/linker.md"),
+            &path_map,
+            Path::new("/"),
+        )
+        .unwrap();
         assert_eq!(
             updated,
             "See [A](concept-a.md) and [A](concept-a.md#part) and [B](other.md) here."
@@ -272,23 +318,32 @@ mod tests {
         // rewrite must follow.
         let old_p = PathBuf::from("wiki/Concept_A.md");
         let new_p = PathBuf::from("wiki/concept-a.md");
-        let path_map: HashMap<String, &Path> = [(path_slug(&old_p), new_p.as_path())].into();
+        let path_map: HashMap<PathBuf, &Path> = [(old_p, new_p.as_path())].into();
         let content = "See [A](Concept_A.md \"tip\") here.";
-        let updated = repoint_renamed_links(content, Path::new("wiki/linker.md"), &path_map);
+        let updated = repoint_renamed_links(
+            content,
+            Path::new("wiki/linker.md"),
+            &path_map,
+            Path::new("/"),
+        )
+        .unwrap();
         assert_eq!(updated, "See [A](concept-a.md) here.");
     }
 
     #[test]
-    fn case_variant_destination_is_repointed_like_the_graph_resolves_it() {
-        // scan matches links to pages by id (path_slug), so `[A](concept_a.md)` is a
-        // citation of `wiki/Concept_A.md`. The rename repoint must match at the same
-        // level — a literal-path comparison would miss it and leave the link stale.
+    fn distinct_unresolved_spelling_is_not_repointed() {
         let old = PathBuf::from("wiki/Concept_A.md");
         let new = PathBuf::from("wiki/concept-a.md");
-        let path_map: HashMap<String, &Path> = [(path_slug(&old), new.as_path())].into();
+        let path_map: HashMap<PathBuf, &Path> = [(old, new.as_path())].into();
         let content = "See [A](concept_a.md) and [A](CONCEPT-A.md) here.";
-        let updated = repoint_renamed_links(content, Path::new("wiki/linker.md"), &path_map);
-        assert_eq!(updated, "See [A](concept-a.md) and [A](concept-a.md) here.");
+        let updated = repoint_renamed_links(
+            content,
+            Path::new("wiki/linker.md"),
+            &path_map,
+            Path::new("/"),
+        )
+        .unwrap();
+        assert_eq!(updated, content);
     }
 
     #[test]
@@ -298,7 +353,7 @@ mod tests {
             build_page("wiki/FOO-BAR.md", &[]),
         ];
         let renames = scan(&pages);
-        assert_eq!(renames.len(), 1);
+        assert_eq!(renames.len(), 2);
     }
 
     #[test]
@@ -307,9 +362,15 @@ mod tests {
         // leave it verbatim — only the real prose link is repointed.
         let old = PathBuf::from("wiki/Concept A.md");
         let new = PathBuf::from("wiki/concept-a.md");
-        let path_map: HashMap<String, &Path> = [(path_slug(&old), new.as_path())].into();
+        let path_map: HashMap<PathBuf, &Path> = [(old, new.as_path())].into();
         let content = "Prose [A](Concept%20A.md).\n```\nexample [A](Concept%20A.md)\n```\nInline `[A](Concept%20A.md)`.\n";
-        let updated = repoint_renamed_links(content, Path::new("wiki/linker.md"), &path_map);
+        let updated = repoint_renamed_links(
+            content,
+            Path::new("wiki/linker.md"),
+            &path_map,
+            Path::new("/"),
+        )
+        .unwrap();
         assert!(updated.contains("Prose [A](concept-a.md)."));
         assert!(updated.contains("example [A](Concept%20A.md)"));
         assert!(updated.contains("Inline `[A](Concept%20A.md)`."));

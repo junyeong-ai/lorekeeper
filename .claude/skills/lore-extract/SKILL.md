@@ -1,6 +1,6 @@
 ---
 name: lore-extract
-version: 0.36.2
+version: 0.46.0
 description: Batch-extract transferable knowledge from a project repository into the Lorekeeper vault. Three-phase workflow — scan (discover + persist manifest), run (extract using manifest), audit (verify coverage). Manifest-driven for consistency across runs.
 when_to_use: |
   lore extract, batch extract, extract project knowledge,
@@ -46,6 +46,9 @@ them, so the directly-authored rule in AGENTS.md's ownership legend applies:
 you fill every section yourself, and the Finalize `backlinks-sync` owns the
 concept sources section + `source_count`. Omit the `llm_inputs` frontmatter
 block — it is the pipeline's cache, not part of a directly-authored page.
+
+Direct page authoring must not overlap a queued synthesis worker wave: finish or
+pause that wave before changing its concept targets or citing sources.
 
 ## Extraction manifest
 
@@ -259,18 +262,21 @@ Discover knowledge sources and persist a manifest.
 
    **Nothing here is a mode to configure.** Which questions a repository can answer is read
    from the repository; a `mode` key would make the operator restate it, and the two would
-   disagree at the first change. Scope is derived the same way: a manifest with no
-   `git_head_at_scan` has no baseline and every source is read whole, one with a baseline
-   reads what changed, and a source with no `extracted` entry is read whole whatever the
-   baseline says — which is what lets a project extracted before this was written pick up the
-   facts pass with no new machinery. `--full` re-reads every source while keeping
+   disagree at the first change. Scan compares discovery against `git_head_at_scan`;
+   run compares each source against its own `extracted_at_commit`. An absent or
+   unusable extraction baseline means reading that source whole, even when a fresh
+   scan says the project is current. The facts pass is re-read on every scan.
+   `--full` re-reads every source while keeping
    `strip_patterns` and `concept_mapping`, for a refactor that moved everything.
 
-5. For each source, classify transferability (T1–T4):
-   - **T1**: "constraint", "workaround", "gotcha", cloud platforms
-   - **T2**: framework-specific (ADK, OpenTofu, Langfuse)
-   - **T3**: `[PROMOTES:]`, "Pattern", "Discipline", "Methodology"
-   - **T4**: internal registries, domain business logic
+5. Classify transferability from the source's supported scope (T1–T4):
+   - **T1**: a finding applicable across stacks under its stated conditions.
+   - **T2**: a finding dependent on a particular technology or stack.
+   - **T3**: a reusable method or design pattern with its rationale and limits.
+   - **T4**: local project detail with no supported transferable finding.
+   Keywords and promotion markers locate candidates; they do not establish a level.
+   A platform constraint may be T2, and an internal implementation may establish a T3
+   pattern. Preserve the observed scope rather than generalising to earn inclusion.
 
 6. Group into thematic domains from content analysis.
 
@@ -303,9 +309,13 @@ Extract knowledge using the manifest. Requires a prior scan.
 
 5. For each discovered source (filtered by `--domain` / `--transferability`):
 
-    a. **Skip if already extracted** and source unchanged, asked with the one anchor Phase 1
-      names — unless `--full`, which re-reads every source. A source with no
-      `extracted` entry is read whole whatever the baseline says. A T4 skip is recorded in
+    a. **Skip only if already extracted and unchanged against that entry’s
+      `extracted_at_commit`**, using the per-source content check in Phase 3 step 1.
+      For an entry containing several source paths, check every path.
+      `git_head_at_scan` measures discovery, not extraction freshness: a rescan may
+      advance it while the extracted page remains old. With no usable per-entry
+      baseline (including non-git or ignored sources), read the source whole;
+      `--full` also reads every source. A T4 skip is recorded in
       `extracted` with `vault_page: null` and a `coverage_note`, so the Phase 3 coverage
       check stays complete.
 
@@ -374,7 +384,7 @@ Extract knowledge using the manifest. Requires a prior scan.
       created earlier in this run as the created-this-run set (a batch
       processes many documents, so that set is what closes same-run gaps).
       New concept → fill the Synthesis section, emit the related-concepts
-      section empty (human/audit-curated, never machine-written). The sources
+      section empty; concept synthesis derives evidence-backed relations. The sources
       section / `source_count`
       stay machine-owned (AGENTS.md § Concept convergence); the Finalize
       `backlinks-sync` re-derives both from the document's forward
@@ -392,7 +402,9 @@ Extract knowledge using the manifest. Requires a prior scan.
    lore wiki refresh           # re-derive the catalog, timeline and map these pages join
    lore graph lint             # resolve every violation naming a page this run wrote; one elsewhere in the vault predates you — report it. Observations (orphans, open conflicts) never gate
    ```
-8. Report created/merged/skipped counts.
+8. Run `lore queue status --json`; report created/merged/skipped counts and any
+   pending concept synthesis. Document extraction is complete, but queued concept
+   rewrites require `/lore-process` before reporting semantic completion.
 
 ## Phase 3: Audit
 
@@ -496,4 +508,4 @@ scan, so tracking them buys nothing and costs the row.
 | `/lore-wiki query` | Extracted documents appear in query results |
 | `/lore-wiki audit` | Covers extracted documents in health checks |
 | `/lore-ingest` | Daily source ingestion (separate pipeline) |
-| `/lore-process` | Not needed (this skill writes complete pages) |
+| `/lore-process` | Integrates concept synthesis queued by Finalize; document pages are authored here |

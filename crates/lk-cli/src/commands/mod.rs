@@ -5,6 +5,7 @@ pub mod agenda;
 pub mod brief;
 pub mod config;
 pub mod doctor;
+pub mod document_identity;
 pub mod extract;
 pub mod fetch;
 pub mod graph;

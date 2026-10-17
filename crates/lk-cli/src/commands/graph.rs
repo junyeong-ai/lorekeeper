@@ -17,6 +17,24 @@ struct ResolvedConfig {
     llm: lk_core::config::LlmConfig,
 }
 
+#[derive(Clone, Copy, clap::ValueEnum, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NeighborDirection {
+    Incoming,
+    Outgoing,
+    Mutual,
+}
+
+impl NeighborDirection {
+    fn matches(self, page: &graph::NeighborPage) -> bool {
+        match self {
+            Self::Incoming => page.incoming,
+            Self::Outgoing => page.outgoing,
+            Self::Mutual => page.incoming && page.outgoing,
+        }
+    }
+}
+
 #[derive(clap::Subcommand)]
 pub enum GraphCommand {
     /// Run all graph checks in one pass
@@ -31,6 +49,23 @@ pub enum GraphCommand {
     Orphans,
     /// Find broken links pointing to non-existent pages
     Broken,
+    /// Follow direct incoming/outgoing links across managed pages, including daily evidence
+    Neighbors {
+        /// Exact vault-relative Markdown path returned by search or browse
+        path: PathBuf,
+        /// Exact declared page type; an empty value selects pages without a type
+        #[arg(long = "type")]
+        format: Option<String>,
+        /// Link direction; incoming/outgoing also include mutually linked pages
+        #[arg(long, value_enum)]
+        direction: Option<NeighborDirection>,
+        /// Maximum neighboring pages to return
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Skip this many neighboring pages in path order
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+    },
     /// Detect topic communities via Louvain modularity optimization
     Cluster {
         /// Include the top-degree page id as label per community
@@ -131,26 +166,33 @@ fn lint_report(
     g: &graph::WikiGraph,
     views: &scan::VaultViews,
 ) -> Result<output::LintReport, String> {
-    let drift =
-        index_drift::diff(&rc.root, rc.locale, &rc.vault_dirs).map_err(|e| format!("{e}"))?;
+    let mut errors = Vec::new();
+    let index = match index_drift::diff(&rc.root, rc.locale, &rc.vault_dirs) {
+        Ok(drift) => Some(output::IndexSyncReport {
+            stale: !drift.is_in_sync(),
+            absent: drift.absent,
+            missing_from_index: drift.missing_from_index,
+            missing_from_disk: drift.missing_from_disk,
+            fixed: None,
+        }),
+        Err(error) => {
+            errors.push(format!("index: {error}"));
+            None
+        }
+    };
     // Read the concept pages once; the three concept lints are pure functions over the result
     // rather than each re-walking `{wiki}/concepts/`.
     let concept_pages = concept_lint::scan_concept_pages(&rc.root, &rc.vault_dirs.wiki)
         .map_err(|e| format!("{e}"))?;
 
     Ok(output::LintReport {
+        errors,
         pages: g.node_count(),
         links: g.edge_count(),
         components: g.component_count(),
         violations: output::Violations {
             broken: graph::broken_links(&views.link_sources, &views.existence, &rc.vault_dirs),
-            index: output::IndexSyncReport {
-                stale: !drift.is_in_sync(),
-                absent: drift.absent,
-                missing_from_index: drift.missing_from_index,
-                missing_from_disk: drift.missing_from_disk,
-                fixed: None,
-            },
+            index,
             invalid_categories: concept_lint::find_invalid_categories(
                 &concept_pages,
                 &rc.concept_categories,
@@ -191,18 +233,99 @@ async fn run_inner(
     root_override: Option<PathBuf>,
 ) -> Result<bool, String> {
     let mut rc = resolve_config_full(opts, root_override)?;
+    let mutation = if matches!(
+        &cmd,
+        GraphCommand::Normalize { fix: true }
+            | GraphCommand::Merge { dry_run: false, .. }
+            | GraphCommand::BacklinksSync { dry_run: false }
+            | GraphCommand::IndexSync { fix: true }
+    ) {
+        Some(lk_vault::MutationSession::acquire(&rc.root).map_err(|e| e.to_string())?)
+    } else {
+        None
+    };
+
     let views = scan::VaultViews::resolve(&rc.root, &rc.graph, &rc.vault_dirs)
         .map_err(|e| format!("{e}"))?;
     let g = graph::WikiGraph::build_with_existence(&views.pages, &views.existence, &rc.vault_dirs);
 
     let violated = match cmd {
+        GraphCommand::Neighbors {
+            path,
+            format,
+            direction,
+            limit,
+            offset,
+        } => {
+            if limit == 0 {
+                return Err("--limit must be > 0".into());
+            }
+            if path.extension().is_none_or(|extension| extension != "md") {
+                return Err("expected an exact vault-relative .md path".into());
+            }
+            lk_vault::page_path(&rc.root, &path).map_err(|error| error.to_string())?;
+            let graph = graph::WikiGraph::build_with_existence(
+                &views.link_sources,
+                &views.existence,
+                &rc.vault_dirs,
+            );
+            let id = scan::page_id(&path);
+            let neighbors = graph
+                .page_neighbors(&id)
+                .ok_or_else(|| format!("not a managed knowledge page: {}", path.display()))?;
+            let mut formats = std::collections::BTreeMap::<String, usize>::new();
+            for neighbor in &neighbors {
+                *formats
+                    .entry(neighbor.format.clone().unwrap_or_default())
+                    .or_default() += 1;
+            }
+            let neighbors: Vec<_> = neighbors
+                .into_iter()
+                .filter(|neighbor| {
+                    format.as_ref().is_none_or(|format| {
+                        neighbor.format.as_deref().unwrap_or_default() == format
+                    }) && direction.is_none_or(|direction| direction.matches(neighbor))
+                })
+                .collect();
+            let total = neighbors.len();
+            let neighbors: Vec<_> = neighbors.into_iter().skip(offset).take(limit).collect();
+            let end = offset.saturating_add(neighbors.len());
+            let next_offset = (end < total).then_some(end);
+            if json {
+                output::print_json(
+                    &serde_json::json!({
+                        "path": path, "neighbors": neighbors, "total": total,
+                        "offset": offset, "next_offset": next_offset,
+                        "type": format, "direction": direction, "formats": formats,
+                    }),
+                    false,
+                )?;
+            } else {
+                eprintln!("{} of {total} neighbors (offset {offset})", neighbors.len());
+                for neighbor in neighbors {
+                    let direction = match (neighbor.incoming, neighbor.outgoing) {
+                        (true, true) => "both",
+                        (true, false) => "incoming",
+                        _ => "outgoing",
+                    };
+                    println!("{direction}  {}  {}", neighbor.path, neighbor.title);
+                }
+                if let Some(offset) = next_offset {
+                    eprintln!("next page: repeat with --offset {offset}");
+                }
+            }
+            false
+        }
         GraphCommand::Lint => {
             let report = lint_report(&rc, &g, &views)?;
             let violated = report.violations.count() > 0;
             if json {
-                output::print_json(&report, violated)?;
+                output::print_json(&report, violated || !report.errors.is_empty())?;
             } else {
                 output::print_lint(&report);
+            }
+            if !report.errors.is_empty() {
+                return Err(report.errors.join("; "));
             }
             violated
         }
@@ -285,8 +408,12 @@ async fn run_inner(
             // directions at once — there is no half it can leave behind.
             let fixed = if fix && has {
                 Some(
-                    index_drift::fix(&drift, &rc.root, &rc.vault_dirs)
-                        .map_err(|e| format!("{e}"))?,
+                    index_drift::fix(
+                        &drift,
+                        mutation.as_ref().expect("index fix session"),
+                        &rc.vault_dirs,
+                    )
+                    .map_err(|e| format!("{e}"))?,
                 )
             } else {
                 None
@@ -315,8 +442,14 @@ async fn run_inner(
             let has = !renames.is_empty();
             let applied = if fix && has {
                 Some(
-                    normalize::apply(&renames, &views.scanned, &rc.root)
-                        .map_err(|e| format!("{e}"))?,
+                    normalize::apply_in_session(
+                        &renames,
+                        &views.scanned,
+                        mutation
+                            .as_ref()
+                            .expect("mutation command holds the vault lock"),
+                    )
+                    .map_err(|e| format!("{e}"))?,
                 )
             } else {
                 None
@@ -404,16 +537,27 @@ async fn run_inner(
             dry_run,
             force,
         } => {
-            let result = merge::merge_concepts(
-                &views.scanned,
-                &rc.root,
-                &rc.vault_dirs.wiki,
-                from,
-                into,
-                dry_run,
-                force,
-            )
-            .map_err(|e| format!("{e}"))?;
+            let result = if let Some(session) = mutation.as_ref() {
+                merge::merge_in_session(
+                    &views.scanned,
+                    session,
+                    &rc.vault_dirs.wiki,
+                    from,
+                    into,
+                    force,
+                )
+            } else {
+                merge::merge_concepts(
+                    &views.scanned,
+                    &rc.root,
+                    &rc.vault_dirs.wiki,
+                    from,
+                    into,
+                    dry_run,
+                    force,
+                )
+            }
+            .map_err(|e| e.to_string())?;
             // A successful merge leaves nothing contradicted.
             let violated = false;
             if json {

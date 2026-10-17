@@ -80,6 +80,7 @@ mod tests {
     fn build_page(id: &str, outgoing: &[&str]) -> ScannedPage {
         let name = id.rsplit('/').next().unwrap_or(id);
         ScannedPage {
+            revision: Some("revision".into()),
             id: id.to_owned(),
             path: PathBuf::from(format!("{id}.md")),
             title: name.to_owned(),

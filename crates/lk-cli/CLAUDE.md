@@ -30,12 +30,18 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   re-renders the page complete, while blocking on `had_failure` would freeze the work-log
   on any persistently failing source, news feeds included.
 - **`lore schedule`** emits ONE all-source entry from `ingest.schedule` — never per source —
-  plus synthesis/maintenance/queue-prune entries from their own keys. `build_jobs` is the
+  plus synthesis and combined maintenance/queue-prune entries from their own keys. `build_jobs` is the
   testable job list; `--pipeline-dir` swaps the ingest and weekly-synthesis entries for the
   installed `lore-daily.sh`/`lore-weekly.sh` (those subcommands are only the pipelines' first
   stage — the drain and `queue apply` live in the scripts), and `pipeline_env` attaches the
   `PATH`/`LORE_BIN`/`LORE_CONFIG`/`CLAUDE_BIN` a scheduler does not provide, inherited from
   the session this command runs in.
+  Other scheduled entry scripts name monthly, quarterly, annual and maintenance jobs.
+  Scripts execute directly with `/bin/bash` shebangs; deployment verifies executable bits.
+  Review calendars remain independent and use `--wait-for-vault` for exclusive access.
+  Maintenance holds the same vault lease before reading the ingest log, then prunes the
+  queue with `--prune-queue`. Remove the superseded `com.lorekeeper.queue-prune` agent
+  when installing a generated schedule; the maintenance job owns both operations.
 - **`lore wiki concepts`** keys each entry on the FILE STEM, never the `id` frontmatter: a
   page's address is where it sits, which is what a link resolves to and what `VaultPath::concept`
   builds. Reading `id` would be a second answer to the same question, and a page missing the
@@ -66,38 +72,22 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   `events/{source}/{date}.jsonl` logs are the permanent raw layer (`lore ingest --date
   <past>` re-projects any day from them) and are NEVER pruned. It also never touches
   live `*.jsonl.tmp` — the ingest startup sweep does. With `maintenance.schedule` set,
-  `lore schedule` emits crontab lines for it and for `lore queue prune`, so both
-  janitors run unattended.
+  `lore schedule` emits one combined maintenance job with `--prune-queue`, so both
+  janitors run sequentially unattended.
 - **`lore synthesis <period>`** rejects `--date`/`--year` together with `--previous`
   (clap `conflicts_with`), and flushes the LLM queue after writing its pages.
-- **`lore queue status`** (`commands/queue.rs`) is the authoritative task guard, and it asks
-  TWO independent questions of the target page: is it still the page this task was made for
-  (`llm_inputs.<key>` vs `task.cache_hash`; `missing-target` when the page is gone, `stale`
-  when the hash moved on), and has this exact input already been answered
-  (`llm_inputs.<key>_done` → `done`), and — for work still to be written — does the page
-  still carry the SECTION it names (`missing-target` when not) — and, when the page's
-  frontmatter will not parse, neither question can be asked, which is `unreadable`: not a
-  judgment but the absence of one, so it counts as work LEFT and waits for the page to be
-  repaired. That third question closes a
-  permanent-failure hole: a `vault.locale` switch re-renders every heading while leaving the
-  concept input hash untouched (locale is not in that cache identity), so a task or result
-  queued before the switch stayed hash-current while naming a section that no longer exists,
-  failing `queue apply` — and the whole scheduled pipeline — every run, with `prune`
-  classifying only TASKS and so unable to clear a result. Dropping loses nothing: the page
-  carries no completion marker, so the work is enqueued again under the heading it now has —
-  by the next ingest for every kind an ingest renders, and by `lore graph backlinks-sync` for a
-  concept synthesis, which no ingest enqueues. Same self-healing either way, and the reason
-  that sweep asks `queue status` whether a pending task is still WORK before suppressing a
-  re-queue: a task dead on its anchor would otherwise pin the page it names. A task passing the
-  first, failing the second and having somewhere to land is `current` — the only status that
-  is WORK. **A RESULT never asks the completion question** (`Artifact::Result`): a task is a
-  REQUEST, so an answered section makes it redundant, while a result IS the answer in
-  flight, and for concepts the marker is stamped by the very edit that writes them. Asking
-  it would discard the value about to answer the section — silently and forever, since the
-  marker then keeps the empty section looking cached. Ignoring it is safe as well as
-  necessary: re-applying reproduces the page (`accumulate_concepts` dedups by id, the
-  concept merge preserves). `/lore-process` consumes `--json` and acts on
-  those alone; the check lives here in tested Rust, never re-derived in skill prose.
+- **`lore queue status`** uses the shared task classifier. It validates the typed
+  retained request and generation policy before comparing target input/completion markers.
+  Malformed or mismatched input, unsafe paths and unreadable pages are `unreadable` and
+  remain pending. Missing targets or anchors are `missing-target`; changed input is `stale`;
+  matching completion is `done`. Concept synthesis also checks current source revisions.
+  Only `current` tasks need generation. Workers consume this classification rather than
+  implementing their own marker checks.
+  **Extraction results** use `Artifact::Result`, which ignores completion markers while
+  retaining input and target guards: an in-flight extraction may still need its concept
+  pages and citations materialized. **Section/synthesis results** use task classification;
+  an already-published result is retired without rewriting the page. Every normal result
+  requires a matching validated task; orphan extraction recovery is explicit.
   **`lore queue count` prints only that work count**, because it exists to tell a scheduled
   script whether to spend an LLM session, and a queue of already-answered tasks is not a
   reason to spend one.
@@ -119,15 +109,17 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   `unreadable` task makes prune exit 1 and its `--json` envelope's `ok` false: both leave
   work nothing can drain, both need a human, and the janitor is the only place either
   surfaces (`queue count` omits them so a session is never spent on work no session can do).
-- **`lore queue apply` holds the queue while it materializes it.** Applying is a
+- **Queue writers share an advisory lock.** `queue apply`, `queue prune`, and maintenance
+  of processed queue files hold it for their writes. Skills retire completed runs through
+  `queue prune`, never a direct file move. Applying is a
   read-modify-write across several files ending in a delete, so two runs at once each read an
   origin page before the other writes it: the second write drops the citations the first added,
   and both then delete the evidence. `lk_queue::claim_queue` is an ADVISORY lock rather than a
   pid file, because the kernel releases it when the holder dies — a killed run leaves nothing
   to time out on, which is the whole reason a lock file is the wrong shape here. Contention is
   REFUSED rather than queued: the results stay staged for whichever run gets there. A
-  filesystem that carries no advisory lock (a synced or network vault) is said out loud and the
-  run proceeds, the way a project without git has its staleness reported unasked. The claim is
+  filesystem that cannot provide the advisory lock is refused; results remain staged. Other
+  vault writers do not share this lock, so bulk runs serialize those writers separately. The claim is
   scoped to that write and never to a drain SESSION — a session spans many processes and hours,
   and an exclusive claim held that long needs a liveness answer nothing here can give, which is
   where timeouts and their false positives come in. `--dry-run` writes nothing and so claims
@@ -234,3 +226,20 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   can mint a refresh token via `lk_source::build_google_refresh_token` (browser OAuth
   loopback) or accept a pasted one. `Init` is a subcommand-of-subcommand so future
   scaffolders (`lore init config`) slot in cleanly.
+
+- **Synthesis application is snapshot-checked.** `queue/synthesis.rs` consumes staged
+  `.synthesis.json` results under the queue lock. Changed sources invalidate the task;
+  changed target bytes refuse the result. Both sections and the completion marker publish
+  in one file replacement. A failed lock acquisition refuses the apply operation.
+- **`wiki evidence` and `wiki reviews` report JSON.** Evidence records exact
+  source revisions and groups recorded origin addresses. The default evidence view is
+  read-only; `--archive` holds a vault mutation session and preserves evidence snapshots.
+  Reviews report durable exploration assessments, evidence drift and validation errors
+  without changing their status.
+
+- **Completion is an explicit read-only check.** `queue check` reuses the task classifier
+  and fails for current/unreadable/unparseable work, unpublished result JSON or a pending
+  mutation journal. It never recovers state; stale/done tasks are not outstanding work.
+  `wiki reviews --check` prints the same JSON as the ordinary list, then fails for a
+  `ReviewEffectiveState` requiring attention. Open reviews pass. The pipeline derives
+  backlinks after its final apply before running both checks.

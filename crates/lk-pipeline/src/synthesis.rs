@@ -55,6 +55,7 @@ impl SynthesisSection {
     fn failed() -> Self {
         Self {
             decision: SectionDecision {
+                provenance: Default::default(),
                 hash: String::new(),
                 cached: false,
                 preserved_body: None,

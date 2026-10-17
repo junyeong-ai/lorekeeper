@@ -1,9 +1,8 @@
 ---
 source: crates/lk-cli/tests/behaviour.rs
-assertion_line: 277
 expression: "observe(staged.path(), argv)"
 ---
-exit: 0
+exit: 1
 --- stdout ---
-behaviour-snapshot	Behaviour snapshot	wiki/concepts/behaviour-snapshot.md
 --- stderr ---
+no concept page answers to `BehaviourSnapshot`

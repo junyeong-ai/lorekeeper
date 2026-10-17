@@ -1,3 +1,8 @@
+mod check;
+mod packet;
+mod regenerate;
+mod synthesis;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -7,6 +12,12 @@ use super::{find_config, load_config};
 
 #[derive(clap::Subcommand)]
 pub enum QueueCommand {
+    /// Verify no current tasks, blocked inputs, staged results or interrupted mutations remain.
+    Check {
+        /// Vault root override (default: vault.root from config)
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
     /// Classify every pending queue task against its target page. `/lore-process`
     /// consults this instead of comparing hashes itself: it processes `current` tasks,
     /// skips `done` ones (this exact input is already answered on the page), drops
@@ -21,14 +32,12 @@ pub enum QueueCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Materialize the concept extractions a drain produced.
+    /// Apply staged semantic sections, concept extractions and syntheses.
     ///
-    /// The drain's job ends at judgement: which concepts a page names. Where each one lands
-    /// — created or merged, with its synthesis, aliases, category and citation count intact,
-    /// and the origin page's related-concepts section rebuilt from the same link builder the
-    /// synchronous path uses — is decided here, by the code that already owns those rules.
-    /// Results whose target page moved on since the drain read it are dropped, on the same
-    /// hash the queue uses everywhere else.
+    /// Validate pending task identity and the exact target revision before publishing
+    /// sections and completion markers. Synthesis also validates cited source revisions.
+    /// Superseded task inputs are dropped; changed target files require regenerated results.
+    /// Lost extraction tasks require explicit recovery by task id.
     Apply {
         /// Vault root override (default: vault.root from config)
         #[arg(long)]
@@ -36,6 +45,33 @@ pub enum QueueCommand {
         /// Report what would be written, and write nothing
         #[arg(long)]
         dry_run: bool,
+        /// Recover a specific extraction result whose original queue task was lost
+        #[arg(long, value_name = "TASK_ID")]
+        recover_extraction: Vec<String>,
+    },
+    /// Regenerate one retained task from its original input, without remote fetching.
+    Regenerate {
+        /// Exact task id retained once in the pending or processed queue
+        #[arg(long)]
+        task_id: String,
+        /// Vault root override (default: vault.root from config)
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Validate retained inputs and report the request without writing or recovering
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Export a read-only evidence packet for selected current synthesis tasks.
+    Packet {
+        /// Current synthesis task id to include; repeat to share a deduplicated source table
+        #[arg(long = "task-id", required = true)]
+        task_ids: Vec<String>,
+        /// Vault root override (default: vault.root from config)
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Include exact source and target text in stdout (default: metadata only)
+        #[arg(long)]
+        include_content: bool,
     },
     /// Print the number of tasks that still need an LLM session — the count a drain would
     /// actually do work for — as a bare integer on stdout, and nothing else.
@@ -155,13 +191,30 @@ struct TaskReport {
     kind: String,
     vault_path: String,
     status: TaskStatus,
+    target_revision: Option<String>,
+    generation_policy: Option<String>,
 }
 
 pub async fn run(opts: &super::GlobalOptions, cmd: QueueCommand) -> miette::Result<()> {
     match cmd {
+        QueueCommand::Check { root } => check::run(opts, root),
+        QueueCommand::Regenerate {
+            task_id,
+            root,
+            dry_run,
+        } => regenerate::run(opts, root, task_id, dry_run),
+        QueueCommand::Packet {
+            task_ids,
+            root,
+            include_content,
+        } => packet::run(opts, root, task_ids, include_content),
         QueueCommand::Status { root, json } => status(opts, root, json).await,
         QueueCommand::Count { root } => count(opts, root).await,
-        QueueCommand::Apply { root, dry_run } => apply(opts, root, dry_run).await,
+        QueueCommand::Apply {
+            root,
+            dry_run,
+            recover_extraction,
+        } => apply(opts, root, dry_run, &recover_extraction).await,
         QueueCommand::Prune {
             root,
             json,
@@ -183,13 +236,16 @@ fn resolve_vault_root(
 /// Pending queue files, sorted by name (run-id order). `.jsonl` only — skips the
 /// `processed/` subdir and any `.jsonl.tmp`.
 fn pending_queue_files(queue_dir: &Path) -> miette::Result<Vec<PathBuf>> {
-    if !queue_dir.is_dir() {
-        return Ok(Vec::new());
-    }
-    let mut files: Vec<PathBuf> = std::fs::read_dir(queue_dir)
-        .map_err(|e| miette::miette!("read {}: {e}", queue_dir.display()))?
-        .filter_map(Result::ok)
-        .map(|e| e.path())
+    let entries = match std::fs::read_dir(queue_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(miette::miette!("read {}: {error}", queue_dir.display())),
+    };
+    let mut files: Vec<PathBuf> = entries
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| miette::miette!("read {}: {error}", queue_dir.display()))?
+        .into_iter()
         .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("jsonl"))
         .collect();
     files.sort();
@@ -232,58 +288,91 @@ fn read_tasks(file: &Path) -> miette::Result<QueueFile> {
     Ok(QueueFile { tasks, unparseable })
 }
 
+struct PendingTasks {
+    tasks: BTreeMap<(String, String), QueueTask>,
+    unparseable: usize,
+}
+
+fn read_pending_tasks(queue: &Path) -> miette::Result<PendingTasks> {
+    let mut pending = PendingTasks {
+        tasks: BTreeMap::new(),
+        unparseable: 0,
+    };
+    for file in pending_queue_files(queue)? {
+        let read = match read_tasks(&file) {
+            Ok(read) => read,
+            Err(error) => match std::fs::metadata(&file) {
+                Err(io_error) if io_error.kind() == std::io::ErrorKind::NotFound => continue,
+                _ => return Err(error),
+            },
+        };
+        pending.unparseable += read.unparseable;
+        for task in read.tasks {
+            let key = (task.task_id.clone(), task.cache_hash.clone());
+            if pending.tasks.insert(key, task).is_some() {
+                return Err(miette::miette!("duplicate task identity in pending queue"));
+            }
+        }
+    }
+    Ok(pending)
+}
+
+pub(super) fn claim_writer(
+    queue_dir: &Path,
+    dry_run: bool,
+) -> miette::Result<Option<std::fs::File>> {
+    if dry_run {
+        return Ok(None);
+    }
+    match lk_queue::claim_queue(queue_dir)
+        .map_err(|error| miette::miette!("claim queue: {error}"))?
+    {
+        lk_queue::QueueClaim::Held(file) => Ok(Some(file)),
+        lk_queue::QueueClaim::Busy => Err(miette::miette!(
+            "another queue writer is materializing or pruning this queue; retry after it finishes"
+        )),
+        lk_queue::QueueClaim::Unavailable(error) => Err(miette::miette!(
+            "cannot safely claim the queue writer lock: {error}"
+        )),
+    }
+}
+
 async fn apply(
     opts: &super::GlobalOptions,
     root: Option<PathBuf>,
     dry_run: bool,
+    recover_extraction: &[String],
 ) -> miette::Result<()> {
     let config = load_config(&find_config(opts)?)?;
     let vault_root = root.unwrap_or_else(|| config.vault.root_path());
     let queue_dir = vault_root.join(".lorekeeper").join("queue");
 
-    // Held across the read, the writes and the deletes, and only for a run that performs
-    // them: a dry run writes nothing, so claiming would block a real apply for the length of
-    // a report.
-    let _claim = match dry_run {
-        true => None,
-        false => match lk_queue::claim_queue(&queue_dir)
-            .map_err(|e| miette::miette!("claim queue: {e}"))?
-        {
-            lk_queue::QueueClaim::Held(file) => Some(file),
-            lk_queue::QueueClaim::Busy => {
-                return Err(miette::miette!(
-                    "another `lore queue apply` is materializing this queue — these results \
-                     stay staged for it, or for the next run"
-                ));
-            }
-            lk_queue::QueueClaim::Unavailable(e) => {
-                eprintln!(
-                    "  this filesystem does not carry the queue lock ({e}); a second apply \
-                     running now is not prevented"
-                );
-                None
-            }
-        },
-    };
+    // Global vault claim precedes narrower queue claims everywhere. Recovery runs
+    // before deriving any write from current pages; both claims fail fast if busy.
+    let mutation = (!dry_run)
+        .then(|| lk_vault::MutationSession::acquire(&vault_root))
+        .transpose()
+        .map_err(|error| miette::miette!("claim vault mutation: {error}"))?;
+    let _claim = claim_writer(&queue_dir, dry_run)?;
 
     let batch = lk_queue::read_results(&queue_dir)
         .map_err(|e| miette::miette!("read queue results: {e}"))?;
 
-    // A result that parses can still name a concept no page can be written for, and that is
-    // the same kind of finding as a file that will not parse: content nothing can act on,
-    // which no retry improves. Judged here so it takes the disposition below rather than
-    // surfacing as a write error with half the batch on disk.
-    let mut unusable = batch.unreadable;
-    let mut results = Vec::with_capacity(batch.ready.len());
-    for (path, result) in batch.ready {
-        match lk_pipeline::find_unaddressable_concept(&result)
-            .map(|name| format!("concept `{name}` has no page address"))
+    for task_id in recover_extraction {
+        if !batch
+            .ready
+            .iter()
+            .any(|(_, result)| &result.task_id == task_id)
         {
-            Some(reason) => unusable.push((path, reason)),
-            None => results.push((path, result)),
+            return Err(miette::miette!(
+                "no readable extraction result for recovery: {task_id}"
+            ));
         }
     }
+    let synthesis_result = synthesis::apply(&vault_root, &queue_dir, dry_run)?;
 
+    let unusable = batch.unreadable;
+    let results = batch.ready;
     // A file that will never parse is moved out of the apply path, once and loudly. Leaving
     // it would fail this command — and so the scheduled pipeline — on every run forever,
     // while the concepts it held are re-derived anyway: its page carries no completion
@@ -292,18 +381,24 @@ async fn apply(
     // prevent: a `?` here would strand every ready result behind an unwritable directory,
     // which is the same "one bad file blocks the batch" shape, reached through I/O instead
     // of through parsing. A file that cannot be moved simply stays put and is retried.
-    let unreadable = unusable.len();
-    let mut moved = 0usize;
-    if unreadable > 0 {
+    let unreadable = unusable.len() + synthesis_result.unreadable;
+    let mut moved = synthesis_result.quarantined;
+    if !unusable.is_empty() {
         let corrupt_dir = queue_dir
             .join(lk_queue::RESULTS_SUBDIR)
             .join(lk_queue::CORRUPT_SUBDIR);
-        moved = quarantine(&corrupt_dir, &unusable, dry_run);
+        moved += quarantine(&corrupt_dir, &unusable, dry_run);
     }
 
     if results.is_empty() {
-        eprintln!("queue apply: no results pending");
-        return finish_apply(0, unreadable, moved, dry_run);
+        eprintln!(
+            "queue apply: {} staged sections applied, {} dropped, {} failed{}",
+            synthesis_result.applied,
+            synthesis_result.dropped,
+            synthesis_result.failed,
+            if dry_run { " (dry-run)" } else { "" }
+        );
+        return finish_apply(synthesis_result.failed, unreadable, moved, dry_run);
     }
 
     let ctx = std::sync::Arc::new(
@@ -315,9 +410,11 @@ async fn apply(
         .map_err(|e| miette::miette!("{e}"))?,
     );
     let mut pipeline = lk_pipeline::Pipeline::new(&vault_root, ctx);
-    let writer = lk_vault::VaultWriter::new(&vault_root);
-
-    let (mut applied, mut dropped, mut failed) = (0usize, 0usize, 0usize);
+    let (mut applied, mut dropped, mut failed) = (
+        synthesis_result.applied,
+        synthesis_result.dropped,
+        synthesis_result.failed,
+    );
     // Keyed by page, because ONE page can receive several results in a batch: two ingests
     // before a single drain enqueue the same target twice under the same input hash, and
     // both classify current. Every write lands after this loop, so a second fold that read
@@ -326,6 +423,8 @@ async fn apply(
     // prevent. Within a batch, the pending version IS the page.
     // Each page carries the results that produced it, because whether they may be deleted is
     // decided by whether that page WROTE, and one page can hold several.
+    let pending = read_pending_tasks(&queue_dir)?;
+    let mut origin_revisions: BTreeMap<PathBuf, String> = BTreeMap::new();
     let mut origin_pages: BTreeMap<PathBuf, (String, Vec<PathBuf>)> = BTreeMap::new();
     let mut consumed: Vec<PathBuf> = Vec::new();
 
@@ -357,6 +456,67 @@ async fn apply(
             consumed.push(path.clone());
             continue;
         };
+        if !matches!(
+            result.target.kind,
+            lk_queue::TargetKind::DailyConcepts | lk_queue::TargetKind::DocumentConcepts
+        ) {
+            fail("extraction result requires a daily or document concept target".into());
+            failed += 1;
+            continue;
+        }
+        let task = pending
+            .tasks
+            .get(&(result.task_id.clone(), result.cache_hash.clone()));
+        if task.is_none()
+            && (pending.unparseable > 0 || !recover_extraction.contains(&result.task_id))
+        {
+            let reason = if pending.unparseable > 0 {
+                "no matching readable task; repair unparseable queue lines before deciding this result's fate"
+            } else {
+                "no matching pending task; its run was retired or the task identity is invalid"
+            };
+            if pending.unparseable == 0 && !dry_run {
+                synthesis::quarantine_orphan(&queue_dir, path, reason)?;
+            }
+            fail(reason.into());
+            failed += 1;
+            continue;
+        };
+        if let Some(task) = task
+            && let Err(error) = task
+                .validate_retained_input()
+                .and_then(|()| task.generation_policy().map(|_| ()))
+        {
+            fail(error);
+            failed += 1;
+            continue;
+        }
+        if let Some(task) = task
+            && (task.kind != lk_queue::TaskKind::ExtractConcepts
+                || task.target.vault_path != result.target.vault_path
+                || task.target.kind != result.target.kind
+                || task.target.anchor != result.target.anchor
+                || task.input.get("date").and_then(|value| value.as_str())
+                    != Some(result.date.to_string().as_str()))
+        {
+            fail("extraction result does not match its pending task".into());
+            failed += 1;
+            continue;
+        }
+        if let Some(task) = task
+            && policy_request_status(&vault_root, task) == Some(TaskStatus::Stale)
+        {
+            drop_dead("superseded generation policy");
+            dropped += 1;
+            consumed.push(path.clone());
+            continue;
+        }
+        if task.is_none() {
+            eprintln!(
+                "  recovering extraction {} without its original queue task",
+                result.task_id
+            );
+        }
         match classify_against_page(
             &vault_root,
             &rel_path,
@@ -392,7 +552,7 @@ async fn apply(
         }
         let content = match origin_pages.get(&rel_path) {
             Some((pending, _)) => pending.clone(),
-            None => match std::fs::read_to_string(vault_root.join(&rel_path)) {
+            None => match read_page(&vault_root, &rel_path) {
                 Ok(c) => c,
                 Err(e) => {
                     fail(format!("read {}: {e}", rel_path.display()));
@@ -401,8 +561,27 @@ async fn apply(
                 }
             },
         };
+        let original_revision = origin_revisions
+            .get(&rel_path)
+            .cloned()
+            .unwrap_or_else(|| synthesis::revision(&content));
+        if original_revision != result.target_revision {
+            if let Some(task) = task
+                && classify_task(&vault_root, task, &mut BTreeMap::new())? == TaskStatus::Done
+            {
+                drop_dead("already materialized");
+                dropped += 1;
+                consumed.push(path.clone());
+                continue;
+            }
+            fail("target changed; read the current page and regenerate this result".into());
+            failed += 1;
+            continue;
+        }
         match pipeline.apply_concept_result(result, &content).await {
             Ok(rewritten) => {
+                let rewritten = stamp_policy(&rewritten, task, result.target.kind)?;
+                origin_revisions.insert(rel_path.clone(), original_revision);
                 let page = origin_pages
                     .entry(rel_path)
                     .or_insert_with(|| (String::new(), Vec::new()));
@@ -422,6 +601,17 @@ async fn apply(
         .await
         .map_err(|e| miette::miette!("{e}"))?;
 
+    for (path, expected) in &origin_revisions {
+        let current = read_page(&vault_root, path)
+            .map_err(|error| miette::miette!("read {}: {error}", path.display()))?;
+        if synthesis::revision(&current) != *expected {
+            return Err(miette::miette!(
+                "target changed before publication: {}; regenerate its extraction result",
+                path.display()
+            ));
+        }
+    }
+
     if dry_run {
         for page in &concept_pages {
             super::report_refusals(page, true);
@@ -434,31 +624,45 @@ async fn apply(
         return finish_apply(failed, unreadable, moved, dry_run);
     }
 
-    // Concept pages before origin pages. A crash between the two then leaves concept pages
-    // nothing yet cites — harmless, and the retained result files replay the citation — where
-    // the reverse order would leave citations pointing at pages that do not exist.
+    // One durable write set: concepts precede their origins, and recovery resumes it
+    // before the next cooperating writer reads the vault. Results remain until commit.
+    let mut plan = lk_vault::MutationPlan::default();
     for page in &concept_pages {
-        writer
-            .write_page(page.path.as_ref(), &page.content)
-            .await
-            .map_err(|e| miette::miette!("write {}: {e}", page.path))?;
-        super::report_refusals(page, false);
+        page.plan_publication(&mut plan, &vault_root)
+            .map_err(|e| miette::miette!("prepare {}: {e}", page.path))?;
     }
-
-    // A page this refuses is one result's problem on the same terms as every other: a target
-    // whose frontmatter an earlier drain mangled is refused on every run until a human repairs
-    // it, and aborting here would hold every other page's citations behind it for that whole
-    // time. Its results are kept rather than deleted, so the repair brings the work back.
+    let mut committed_results = Vec::new();
     for (rel_path, (content, results)) in &origin_pages {
-        match writer.write_page(rel_path, content).await {
-            Ok(()) => consumed.extend(results.iter().cloned()),
-            Err(e) => {
-                eprintln!("  ✗ write {}: {e}", rel_path.display());
+        let current = read_page(&vault_root, rel_path);
+        match current {
+            Ok(current) if synthesis::revision(&current) == origin_revisions[rel_path] => {
+                // This content is derived from this exact page and parsed before staging;
+                // keep its expected original bytes rather than capturing a newer version.
+                plan.edit(rel_path.clone(), current, content.clone());
+                committed_results.extend(results.iter().cloned());
+            }
+            other => {
+                let reason = match other {
+                    Err(error) => error.to_string(),
+                    _ => {
+                        "target changed before publication; regenerate its extraction result".into()
+                    }
+                };
+                eprintln!("  ✗ {}: {reason}", rel_path.display());
                 applied -= results.len();
                 failed += results.len();
             }
         }
     }
+    mutation
+        .as_ref()
+        .expect("non-dry-run owns the mutation session")
+        .apply(plan)
+        .map_err(|e| miette::miette!("publish extraction: {e}"))?;
+    for page in &concept_pages {
+        super::report_refusals(page, false);
+    }
+    consumed.extend(committed_results);
 
     for path in &consumed {
         std::fs::remove_file(path)
@@ -513,6 +717,60 @@ fn finish_apply(
     }
 }
 
+fn policy_request_status(root: &Path, task: &QueueTask) -> Option<TaskStatus> {
+    let path = resolve_target_path(&task.target.vault_path)?;
+    let content = read_page(root, &path).ok()?;
+    let page = lk_core::frontmatter::parse_page(&content).ok()?;
+    let inputs = page.frontmatter.get("llm_inputs")?;
+    let key = task.target.kind.llm_inputs_key();
+    if inputs
+        .get(format!("{key}_policy_requested_input"))
+        .and_then(|v| v.as_str())
+        != Some(&task.cache_hash)
+    {
+        return None;
+    }
+    let requested = inputs
+        .get(format!("{key}_policy_requested"))
+        .and_then(|v| v.as_str())?;
+    if task.generation_policy().ok().flatten() != Some(requested) {
+        Some(TaskStatus::Stale)
+    } else {
+        None
+    }
+}
+
+fn stamp_policy(
+    content: &str,
+    task: Option<&QueueTask>,
+    kind: lk_queue::TargetKind,
+) -> miette::Result<String> {
+    let policy = task
+        .map(QueueTask::generation_policy)
+        .transpose()
+        .map_err(|e| miette::miette!("{e}"))?
+        .flatten()
+        .unwrap_or("legacy");
+    let content = lk_vault::set_llm_input(
+        content,
+        &format!("{}_policy_done", kind.llm_inputs_key()),
+        &serde_json::to_string(policy).expect("policy serializes"),
+    )
+    .ok_or_else(|| miette::miette!("cannot stamp generation policy"))?;
+    let content = lk_vault::set_llm_input(
+        &content,
+        &format!("{}_policy_requested", kind.llm_inputs_key()),
+        "null",
+    )
+    .ok_or_else(|| miette::miette!("cannot clear policy request"))?;
+    lk_vault::set_llm_input(
+        &content,
+        &format!("{}_policy_requested_input", kind.llm_inputs_key()),
+        "null",
+    )
+    .ok_or_else(|| miette::miette!("cannot clear policy request input"))
+}
+
 /// Move each unreadable result into `corrupt_dir`, returning how many actually moved.
 ///
 /// Every failure is reported with the OS error that caused it — `EACCES` and `EXDEV` need
@@ -538,6 +796,19 @@ fn quarantine(corrupt_dir: &Path, unreadable: &[(PathBuf, String)], dry_run: boo
     let mut moved = 0;
     for (path, reason) in unreadable {
         let dest = free_path(corrupt_dir, path);
+        let reason_path = dest.with_file_name(format!(
+            "{}.reason.txt",
+            dest.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        if let Err(error) =
+            lk_core::fs::write_atomic(&reason_path, format!("{reason}\n").as_bytes(), None)
+        {
+            eprintln!(
+                "  ✗ cannot preserve quarantine reason for {}: {error}",
+                path.display()
+            );
+            continue;
+        }
         match std::fs::rename(path, &dest) {
             Ok(()) => {
                 eprintln!(
@@ -586,13 +857,14 @@ fn free_path(dir: &Path, source: &Path) -> PathBuf {
 /// under another build's skills is the one genuinely lossy moment in an upgrade.
 pub(crate) struct QueueLoad {
     pub work: usize,
-    /// The task names a target page that will not parse, so nothing can classify it.
+    /// The target is unreadable or the synthesis input is inconsistent, so work is blocked.
     pub unreadable: usize,
     /// The queue LINE decoded no target at all, so the work it names is unknown.
     pub unparseable: usize,
 }
 
 pub(crate) fn queue_load(vault_root: &Path) -> miette::Result<QueueLoad> {
+    let mut revisions = BTreeMap::new();
     let queue_dir = vault_root.join(".lorekeeper").join("queue");
     let mut load = QueueLoad {
         work: 0,
@@ -603,7 +875,7 @@ pub(crate) fn queue_load(vault_root: &Path) -> miette::Result<QueueLoad> {
         let read = read_tasks(&file)?;
         load.unparseable += read.unparseable;
         for task in read.tasks {
-            match classify_task(vault_root, &task)? {
+            match classify_task(vault_root, &task, &mut revisions)? {
                 s if s.is_work() => load.work += 1,
                 TaskStatus::Unreadable => load.unreadable += 1,
                 _ => {}
@@ -629,8 +901,8 @@ async fn count(opts: &super::GlobalOptions, root: Option<PathBuf>) -> miette::Re
     // nothing to look the page up by, and only the queue file itself can be repaired.
     if unreadable > 0 {
         eprintln!(
-            "warning: {unreadable} task(s) name a target page that will not parse — \
-             `lore queue status` names them; they stay pending until the page is repaired."
+            "warning: {unreadable} task(s) have unreadable targets or inconsistent synthesis inputs — \
+             `lore queue status` names them; repair the page or task before retrying."
         );
     }
     if unparseable > 0 {
@@ -648,6 +920,7 @@ async fn status(
     root: Option<PathBuf>,
     json: bool,
 ) -> miette::Result<()> {
+    let mut revisions = BTreeMap::new();
     let vault_root = resolve_vault_root(opts, root)?;
     let queue_dir = vault_root.join(".lorekeeper").join("queue");
 
@@ -657,8 +930,17 @@ async fn status(
         let read = read_tasks(&file)?;
         unparseable += read.unparseable;
         for task in read.tasks {
-            let status = classify_task(&vault_root, &task)?;
+            let status = classify_task(&vault_root, &task, &mut revisions)?;
+            let target_revision = resolve_target_path(&task.target.vault_path)
+                .and_then(|path| read_page(&vault_root, &path).ok())
+                .map(|content| synthesis::revision(&content));
             reports.push(TaskReport {
+                generation_policy: task
+                    .input
+                    .get("generation_policy")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
+                target_revision,
                 task_id: task.task_id,
                 kind: task.kind.as_str().to_string(),
                 vault_path: task.target.vault_path,
@@ -683,6 +965,8 @@ async fn status(
                     "kind": r.kind,
                     "vault_path": r.vault_path,
                     "status": r.status.as_str(),
+                    "target_revision": r.target_revision,
+                    "generation_policy": r.generation_policy,
                 })
             })
             .collect();
@@ -763,16 +1047,16 @@ struct PruneSummary {
 /// is nothing to archive; it is deleted. Rewrites go through `lk_queue::write_tasks_atomic`
 /// (temp + fsync + rename), and a file needing no change stays byte-identical.
 fn prune_queue(vault_root: &Path, queue_dir: &Path, dry_run: bool) -> miette::Result<PruneSummary> {
+    let _claim = claim_writer(queue_dir, dry_run)?;
+    let mut revisions = BTreeMap::new();
     let mut summary = PruneSummary::default();
     for file in pending_queue_files(queue_dir)? {
-        // A drain runs on its own schedule and may have retired this file between the
-        // listing and here. That is the outcome prune wanted for it, and nothing is lost
-        // (the drain read every task before moving it) — failing would abandon every OTHER
-        // file in the directory over a race whose result is already correct.
         let read = match read_tasks(&file) {
             Ok(read) => read,
-            Err(_) if !file.exists() => continue,
-            Err(e) => return Err(e),
+            Err(error) => match std::fs::metadata(&file) {
+                Err(io_error) if io_error.kind() == std::io::ErrorKind::NotFound => continue,
+                _ => return Err(error),
+            },
         };
         // A file holding a line nobody can parse keeps every line: rewriting it would drop
         // work nothing could classify. Its own GC waits for a human; the rest proceeds.
@@ -789,7 +1073,7 @@ fn prune_queue(vault_root: &Path, queue_dir: &Path, dry_run: bool) -> miette::Re
         let mut retained = Vec::with_capacity(tasks.len());
         let (mut dropped, mut work_left) = (0usize, 0usize);
         for task in tasks {
-            match classify_task(vault_root, &task)? {
+            match classify_task(vault_root, &task, &mut revisions)? {
                 TaskStatus::Current => {
                     work_left += 1;
                     summary.kept_current += 1;
@@ -829,21 +1113,7 @@ fn prune_queue(vault_root: &Path, queue_dir: &Path, dry_run: bool) -> miette::Re
                     .map_err(|e| miette::miette!("remove {}: {e}", file.display()))?;
             }
         } else if work_left == 0 {
-            // Retained but no work left, so every retained task is `done`: the run is
-            // finished and nothing else will ever retire it.
-            //
-            // ACQUIRE FIRST, then prune what we own. The rename is atomic and exclusive, so
-            // winning it means no one else can be moving this file. Rewriting the pending
-            // path first would RECREATE a run a concurrent drain had already retired — an
-            // atomic write is temp+rename, which creates regardless of what was there — and
-            // the archive would then hold two records for one run. Pruning after the move
-            // still leaves the archive honest about the tasks the summary counted as
-            // dropped, which is what the rewrite is for.
-            // Counted from the classification, like every other tally here, so `--dry-run`
-            // reports what a real run would do. In the race where a drain wins the acquire,
-            // prune's dead tasks stay in the drain's record and these counts describe a
-            // removal prune did not perform — accepted: the run IS retired and its dead
-            // tasks WERE dead, the archive is simply someone else's copy.
+            // Archive before rewriting so a failed rewrite retains the complete run history.
             summary.files_archived += 1;
             if !dry_run
                 && let Some(archived) = archive_queue_file(queue_dir, &file)?
@@ -863,16 +1133,8 @@ fn prune_queue(vault_root: &Path, queue_dir: &Path, dry_run: bool) -> miette::Re
     Ok(summary)
 }
 
-/// Move a settled run into `processed/`, the same retirement `/lore-process` performs when
-/// every task in a file has succeeded. Returns where it landed — or `None` when there was
-/// nothing left to move.
-///
-/// A drain runs on its own schedule and may have retired this very file between the scan
-/// and here. That is the outcome this wanted, so a vanished source is success — failing
-/// would take down the janitor over a race whose result is already correct. Reporting
-/// WHERE it landed is what lets the caller edit the archived run without ever writing back
-/// to the pending path, which would resurrect a file someone else had already retired.
-/// The archive is a record, so it never overwrites an earlier file of the same name.
+/// Archive a settled run under the queue writer lock, preserving earlier archive names.
+/// A missing source has already been retired; other filesystem failures are reported.
 fn archive_queue_file(queue_dir: &Path, file: &Path) -> miette::Result<Option<PathBuf>> {
     let dir = queue_dir.join(lk_queue::PROCESSED_SUBDIR);
     std::fs::create_dir_all(&dir).map_err(|e| miette::miette!("create {}: {e}", dir.display()))?;
@@ -884,7 +1146,7 @@ fn archive_queue_file(queue_dir: &Path, file: &Path) -> miette::Result<Option<Pa
     }
 }
 
-async fn prune(
+pub(super) async fn prune(
     opts: &super::GlobalOptions,
     root: Option<PathBuf>,
     json: bool,
@@ -948,8 +1210,8 @@ async fn prune(
     if blocked {
         if summary.kept_unreadable > 0 {
             eprintln!(
-                "{} task(s) kept because their target page will not parse — repair the page and \
-                 they become drainable again; `lore queue status` names them.",
+                "{} task(s) kept because their target or synthesis input cannot be validated — \
+                 repair the page or task; `lore queue status` names them.",
                 summary.kept_unreadable
             );
         }
@@ -999,6 +1261,7 @@ pub(super) fn pending_work_inputs(
     vault_root: &Path,
     kind: lk_queue::TargetKind,
 ) -> std::collections::HashSet<(String, String)> {
+    let mut revisions = BTreeMap::new();
     let queue_dir = vault_root.join(".lorekeeper").join("queue");
     let Ok(files) = pending_queue_files(&queue_dir) else {
         return std::collections::HashSet::new();
@@ -1008,12 +1271,15 @@ pub(super) fn pending_work_inputs(
         .filter_map(|file| read_tasks(&file).ok())
         .flat_map(|read| read.tasks)
         .filter(|task| task.target.kind == kind)
-        .filter(|task| classify_task(vault_root, task).is_ok_and(|status| status.is_work()))
+        .filter(|task| {
+            classify_task(vault_root, task, &mut revisions).is_ok_and(|status| status.is_work())
+        })
         .map(|task| (task.target.vault_path.clone(), task.cache_hash.clone()))
         .collect()
 }
 
 pub(super) fn work_in_flight(vault_root: &Path) -> WorkInFlight {
+    let mut revisions = BTreeMap::new();
     let queue_dir = vault_root.join(".lorekeeper").join("queue");
     let mut flight = WorkInFlight {
         keys: std::collections::HashSet::new(),
@@ -1042,7 +1308,7 @@ pub(super) fn work_in_flight(vault_root: &Path) -> WorkInFlight {
             ));
         }
         for task in read.tasks {
-            let status = match classify_task(vault_root, &task) {
+            let status = match classify_task(vault_root, &task, &mut revisions) {
                 Ok(status) => status,
                 Err(e) => {
                     flight.unread.push(format!("{e}"));
@@ -1063,21 +1329,81 @@ pub(super) fn work_in_flight(vault_root: &Path) -> WorkInFlight {
 /// Classify one task by comparing its `cache_hash` to the current input hash the
 /// pipeline stamped into the target page's `llm_inputs.<key>` frontmatter. This is
 /// the deterministic form of the stale-task guard `/lore-process` must honor.
-fn classify_task(vault_root: &Path, task: &QueueTask) -> miette::Result<TaskStatus> {
+fn classify_task(
+    vault_root: &Path,
+    task: &QueueTask,
+    revisions: &mut BTreeMap<PathBuf, Result<String, TaskStatus>>,
+) -> miette::Result<TaskStatus> {
     // A target outside the vault root is a task that can never land, which is exactly what
     // `MissingTarget` means — and the answer has to be a status rather than an error, or one
     // malformed task takes down every command that classifies the queue.
     let Some(rel_path) = resolve_target_path(&task.target.vault_path) else {
         return Ok(TaskStatus::MissingTarget);
     };
-    classify_against_page(
+    if task.generation_policy().is_err() || task.validate_retained_input().is_err() {
+        return Ok(TaskStatus::Unreadable);
+    }
+    if let Some(status) = policy_request_status(vault_root, task) {
+        return Ok(status);
+    }
+    let status = classify_against_page(
         vault_root,
         &rel_path,
         task.target.kind,
         &task.cache_hash,
         &task.anchors(),
         Artifact::Task,
-    )
+    )?;
+    if status != TaskStatus::Current || task.target.kind != lk_queue::TargetKind::ConceptSynthesis {
+        return Ok(status);
+    }
+    let Some(value) = task.input.get("citations") else {
+        return Ok(TaskStatus::Unreadable);
+    };
+    let Ok(citations) = serde_json::from_value::<Vec<lk_core::concept::Citation>>(value.clone())
+    else {
+        return Ok(TaskStatus::Unreadable);
+    };
+    // Bind the semantic payload to the marker before trusting its source guards.
+    // A shortened list must not silently skip evidence while keeping the old hash.
+    if lk_core::concept::citation_digest(&citations) != task.cache_hash {
+        tracing::warn!(task_id = %task.task_id, "synthesis citations do not match cache identity");
+        return Ok(TaskStatus::Unreadable);
+    }
+    for citation in citations {
+        let Some(path) = resolve_target_path(&citation.path) else {
+            return Ok(TaskStatus::Stale);
+        };
+        let revision = revisions
+            .entry(path.clone())
+            .or_insert_with(|| read_source_revision(vault_root, &path));
+        match revision {
+            Ok(revision) if *revision == citation.revision => {}
+            Ok(_) => return Ok(TaskStatus::Stale),
+            Err(status) => return Ok(*status),
+        }
+    }
+    Ok(status)
+}
+
+fn read_page(root: &Path, relative: &Path) -> std::io::Result<String> {
+    std::fs::read_to_string(lk_vault::page_path(root, relative)?)
+}
+
+fn read_source_revision(vault_root: &Path, path: &Path) -> Result<String, TaskStatus> {
+    let content = read_page(vault_root, path).map_err(|e| {
+        tracing::warn!(path = %path.display(), error = %e, "cannot read synthesis source");
+        if e.kind() == std::io::ErrorKind::NotFound {
+            TaskStatus::Stale
+        } else {
+            TaskStatus::Unreadable
+        }
+    })?;
+    let page = lk_core::frontmatter::parse_page(&content).map_err(|e| {
+        tracing::warn!(path = %path.display(), error = %e, "cannot parse synthesis source");
+        TaskStatus::Unreadable
+    })?;
+    Ok(lk_core::concept::source_revision(&page))
 }
 
 /// Resolve a task or result `target.vault_path` to the vault-relative path it addresses,
@@ -1101,8 +1427,10 @@ fn classify_against_page(
     anchors: &[&str],
     artifact: Artifact,
 ) -> miette::Result<TaskStatus> {
-    let page_path = vault_root.join(rel_path);
-    let content = match std::fs::read_to_string(&page_path) {
+    if lk_vault::writable_page_path(vault_root, rel_path).is_err() {
+        return Ok(TaskStatus::Unreadable);
+    }
+    let content = match read_page(vault_root, rel_path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Ok(TaskStatus::MissingTarget);
@@ -1152,6 +1480,52 @@ mod tests {
     use lk_queue::{TargetKind, TaskKind, TaskTarget};
     use tempfile::TempDir;
 
+    fn classify_task(vault_root: &Path, task: &QueueTask) -> miette::Result<TaskStatus> {
+        super::classify_task(vault_root, task, &mut BTreeMap::new())
+    }
+
+    #[test]
+    fn pruning_respects_the_materialization_writer_lock() {
+        let dir = TempDir::new().unwrap();
+        let queue = dir.path().join(".lorekeeper/queue");
+        let claim = lk_queue::claim_queue(&queue).unwrap();
+        assert!(matches!(claim, lk_queue::QueueClaim::Held(_)));
+        let pending = queue.join("empty.jsonl");
+        std::fs::write(&pending, "").unwrap();
+        assert!(prune_queue(dir.path(), &queue, false).is_err());
+        assert!(pending.exists());
+        assert_eq!(
+            prune_queue(dir.path(), &queue, true).unwrap().files_deleted,
+            1
+        );
+        assert!(pending.exists());
+        drop(claim);
+        assert_eq!(
+            prune_queue(dir.path(), &queue, false)
+                .unwrap()
+                .files_deleted,
+            1
+        );
+        assert!(!pending.exists());
+    }
+
+    #[test]
+    fn queue_discovery_distinguishes_missing_storage_from_invalid_storage() {
+        let dir = TempDir::new().unwrap();
+        let queue = dir.path().join(".lorekeeper/queue");
+        assert!(pending_queue_files(&queue).unwrap().is_empty());
+        assert!(synthesis::apply(dir.path(), &queue, true).is_ok());
+
+        std::fs::create_dir_all(queue.parent().unwrap()).unwrap();
+        std::fs::write(&queue, "not a directory").unwrap();
+        assert!(pending_queue_files(&queue).is_err());
+        assert!(queue_load(dir.path()).is_err());
+        assert!(prune_queue(dir.path(), &queue, true).is_err());
+        assert!(synthesis::apply(dir.path(), &queue, true).is_err());
+        assert!(!work_in_flight(dir.path()).unread.is_empty());
+        assert_eq!(std::fs::read_to_string(&queue).unwrap(), "not a directory");
+    }
+
     #[test]
     fn a_target_page_that_will_not_parse_strands_only_its_own_task() {
         // The likeliest author of unparseable frontmatter is the drain, editing a marker line
@@ -1162,12 +1536,18 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("daily/s")).unwrap();
         std::fs::write(
             dir.path().join("daily/s/2026-05-23.md"),
-            "---\nllm_inputs:\n  summary: live\ntitle: Notes: today\n---\n\n## 요약\n\nbody\n",
+            format!(
+                "---\nllm_inputs:\n  summary: {}\ntitle: Notes: today\n---\n\n## 요약\n\nbody\n",
+                summary_hash("live")
+            ),
         )
         .unwrap();
         std::fs::write(
             dir.path().join("daily/s/2026-05-24.md"),
-            "---\nllm_inputs:\n  summary: live\n---\n\n## 요약\n\nbody\n",
+            format!(
+                "---\nllm_inputs:\n  summary: {}\n---\n\n## 요약\n\nbody\n",
+                summary_hash("live")
+            ),
         )
         .unwrap();
         write_queue_file(
@@ -1316,13 +1696,24 @@ mod tests {
         );
     }
 
+    fn summary_input(text: &str) -> lk_queue::Identity {
+        serde_json::json!({"text": text, "max_sentences": 3, "locale": "ko"})
+            .as_object()
+            .unwrap()
+            .clone()
+    }
+
+    fn summary_hash(text: &str) -> String {
+        lk_queue::cache_hash(&summary_input(text))
+    }
+
     fn task(vault_path: &str, hash: &str) -> QueueTask {
         QueueTask {
             task_id: "sum-1".into(),
             kind: TaskKind::Summarize,
             created_at: "2026-05-23T10:00:00Z".parse().unwrap(),
-            cache_hash: hash.into(),
-            input: lk_queue::Identity::new(),
+            cache_hash: summary_hash(hash),
+            input: summary_input(hash),
             target: TaskTarget {
                 vault_path: vault_path.into(),
                 kind: TargetKind::DailySummary,
@@ -1339,15 +1730,20 @@ mod tests {
     fn a_synthesis_task_is_not_work_while_the_relations_heading_is_missing() {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("wiki/concepts")).unwrap();
-        let page = |body: &str| format!("---\nllm_inputs:\n  synthesis: live\n---\n{body}");
+        let hash = lk_core::concept::citation_digest(&[]);
+        let page = |body: &str| format!("---\nllm_inputs:\n  synthesis: {hash}\n---\n{body}");
         let synthesis_task = |vault_path: &str| QueueTask {
             task_id: "syn-1".into(),
             kind: TaskKind::SynthesizeConcept,
             created_at: "2026-05-23T10:00:00Z".parse().unwrap(),
-            cache_hash: "live".into(),
-            input: [("related_anchor".to_string(), "## 관련".into())]
-                .into_iter()
-                .collect(),
+            cache_hash: hash.clone(),
+            input: [
+                ("related_anchor".to_string(), "## 관련".into()),
+                ("citations".to_string(), serde_json::json!([])),
+                ("locale".to_string(), "ko".into()),
+            ]
+            .into_iter()
+            .collect(),
             target: TaskTarget {
                 vault_path: vault_path.into(),
                 kind: TargetKind::ConceptSynthesis,
@@ -1394,7 +1790,10 @@ mod tests {
         write_page(
             dir.path(),
             "daily/s/2026-05-23.md",
-            "id: x\nllm_inputs:\n  summary: abc123\n",
+            &format!(
+                "id: x\nllm_inputs:\n  summary: {}\n",
+                summary_hash("abc123")
+            ),
         );
         let t = task("daily/s/2026-05-23.md", "abc123");
         assert_eq!(classify_task(dir.path(), &t).unwrap(), TaskStatus::Current);
@@ -1406,7 +1805,10 @@ mod tests {
         write_page(
             dir.path(),
             "daily/s/2026-05-23.md",
-            "id: x\nllm_inputs:\n  summary: NEWHASH\n",
+            &format!(
+                "id: x\nllm_inputs:\n  summary: {}\n",
+                summary_hash("NEWHASH")
+            ),
         );
         // Task carries the old hash; the page was re-rendered with a new input.
         let t = task("daily/s/2026-05-23.md", "oldhash");
@@ -1449,7 +1851,7 @@ mod tests {
         write_page(
             dir.path(),
             "daily/s/2026-05-23.md",
-            "id: x\nllm_inputs:\n  summary: live\n",
+            &format!("id: x\nllm_inputs:\n  summary: {}\n", summary_hash("live")),
         );
         let file = write_queue_file(
             &queue_dir,
@@ -1480,7 +1882,7 @@ mod tests {
         let content = std::fs::read_to_string(&file).unwrap();
         assert_eq!(content.lines().count(), 1);
         let survivor: QueueTask = serde_json::from_str(content.trim()).unwrap();
-        assert_eq!(survivor.cache_hash, "live");
+        assert_eq!(survivor.cache_hash, summary_hash("live"));
         assert_eq!(survivor.target.vault_path, "daily/s/2026-05-23.md");
     }
 
@@ -1502,7 +1904,10 @@ mod tests {
         // Same input hash, headings re-rendered in another locale.
         std::fs::write(
             &path,
-            "---\nid: x\nllm_inputs:\n  summary: abc123\n---\n\n## Summary\n\nbody\n",
+            format!(
+                "---\nid: x\nllm_inputs:\n  summary: {}\n---\n\n## Summary\n\nbody\n",
+                summary_hash("abc123")
+            ),
         )
         .unwrap();
         assert_eq!(
@@ -1521,8 +1926,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "---\nid: x\nllm_inputs:\n  summary: newhash\n  summary_done: newhash\n---\n\n\
-             ## Summary\n\nbody\n",
+            format!("---\nid: x\nllm_inputs:\n  summary: {hash}\n  summary_done: {hash}\n---\n\n## Summary\n\nbody\n", hash = summary_hash("newhash")),
         )
         .unwrap();
         assert_eq!(
@@ -1541,7 +1945,11 @@ mod tests {
         write_page(
             dir.path(),
             "daily/s/2026-05-23.md",
-            "id: x\nllm_inputs:\n  summary: abc123\n  summary_done: abc123\n",
+            &format!(
+                "id: x\nllm_inputs:\n  summary: {}\n  summary_done: {}\n",
+                summary_hash("abc123"),
+                summary_hash("abc123")
+            ),
         );
         assert_eq!(
             classify_task(dir.path(), &task("daily/s/2026-05-23.md", "abc123")).unwrap(),
@@ -1558,7 +1966,11 @@ mod tests {
         write_page(
             dir.path(),
             "daily/s/2026-05-23.md",
-            "id: x\nllm_inputs:\n  summary: newhash\n  summary_done: oldhash\n",
+            &format!(
+                "id: x\nllm_inputs:\n  summary: {}\n  summary_done: {}\n",
+                summary_hash("newhash"),
+                summary_hash("oldhash")
+            ),
         );
         assert_eq!(
             classify_task(dir.path(), &task("daily/s/2026-05-23.md", "newhash")).unwrap(),
@@ -1582,7 +1994,11 @@ mod tests {
         write_page(
             dir.path(),
             "daily/s/2026-05-23.md",
-            "id: x\nllm_inputs:\n  summary: live\n  summary_done: live\n",
+            &format!(
+                "id: x\nllm_inputs:\n  summary: {}\n  summary_done: {}\n",
+                summary_hash("live"),
+                summary_hash("live")
+            ),
         );
         let file = write_queue_file(
             &queue_dir,
@@ -1619,7 +2035,11 @@ mod tests {
         write_page(
             dir.path(),
             "daily/s/2026-05-23.md",
-            "id: x\nllm_inputs:\n  summary: live\n  summary_done: live\n",
+            &format!(
+                "id: x\nllm_inputs:\n  summary: {}\n  summary_done: {}\n",
+                summary_hash("live"),
+                summary_hash("live")
+            ),
         );
         write_queue_file(
             &queue_dir,
@@ -1662,7 +2082,11 @@ mod tests {
         write_page(
             dir.path(),
             "daily/s/2026-05-23.md",
-            "id: x\nllm_inputs:\n  summary: live\n  summary_done: live\n",
+            &format!(
+                "id: x\nllm_inputs:\n  summary: {}\n  summary_done: {}\n",
+                summary_hash("live"),
+                summary_hash("live")
+            ),
         );
         let file = write_queue_file(
             &queue_dir,
@@ -1734,12 +2158,16 @@ mod tests {
         write_page(
             dir.path(),
             "daily/s/2026-05-23.md",
-            "id: x\nllm_inputs:\n  summary: live\n  summary_done: live\n",
+            &format!(
+                "id: x\nllm_inputs:\n  summary: {}\n  summary_done: {}\n",
+                summary_hash("live"),
+                summary_hash("live")
+            ),
         );
         write_page(
             dir.path(),
             "daily/s/2026-05-24.md",
-            "id: y\nllm_inputs:\n  summary: live\n",
+            &format!("id: y\nllm_inputs:\n  summary: {}\n", summary_hash("live")),
         );
         let file = write_queue_file(
             &queue_dir,
@@ -1795,7 +2223,7 @@ mod tests {
         write_page(
             dir.path(),
             "daily/s/2026-05-23.md",
-            "id: x\nllm_inputs:\n  summary: live\n",
+            &format!("id: x\nllm_inputs:\n  summary: {}\n", summary_hash("live")),
         );
         // `pending_queue_files` sorts by name, so the vanished one is visited first.
         write_queue_file(
@@ -1833,7 +2261,10 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("daily/s")).unwrap();
         std::fs::write(
             dir.path().join("daily/s/2026-05-23.md"),
-            "---\nllm_inputs:\n  summary: live\ntitle: Notes: today\n---\n\n## 요약\n\nbody\n",
+            format!(
+                "---\nllm_inputs:\n  summary: {}\ntitle: Notes: today\n---\n\n## 요약\n\nbody\n",
+                summary_hash("live")
+            ),
         )
         .unwrap();
         write_queue_file(
@@ -1853,7 +2284,7 @@ mod tests {
         // And the repair does bring it back.
         std::fs::write(
             dir.path().join("daily/s/2026-05-23.md"),
-            "---\nllm_inputs:\n  summary: live\ntitle: \"Notes: today\"\n---\n\n## 요약\n\nbody\n",
+            format!("---\nllm_inputs:\n  summary: {}\ntitle: \"Notes: today\"\n---\n\n## 요약\n\nbody\n", summary_hash("live")),
         )
         .unwrap();
         let tasks = read_tasks(&queue_dir.join("run-1.jsonl")).unwrap().tasks;
@@ -1876,7 +2307,7 @@ mod tests {
         write_page(
             dir.path(),
             "daily/s/2026-05-23.md",
-            "llm_inputs:\n  summary: gone\n",
+            &format!("llm_inputs:\n  summary: {}\n", summary_hash("gone")),
         );
         write_queue_file(
             &queue_dir,
@@ -1918,7 +2349,7 @@ mod tests {
         write_page(
             dir.path(),
             "daily/s/2026-05-23.md",
-            "id: x\nllm_inputs:\n  summary: live\n",
+            &format!("id: x\nllm_inputs:\n  summary: {}\n", summary_hash("live")),
         );
         let file = write_queue_file(
             &queue_dir,

@@ -2859,6 +2859,7 @@ async fn queue_results_materialize_through_the_same_merge_path() {
 
     let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Summary\n\nbody\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
     let result = lk_queue::TaskResult {
+        target_revision: String::new(),
         task_id: "ext-1".into(),
         cache_hash: "h".into(),
         target: lk_queue::TaskTarget {
@@ -2961,6 +2962,7 @@ async fn a_page_without_the_concepts_section_is_an_error_not_a_silent_no_op() {
 
     let page = "---\nid: daily-1\ntype: daily\n---\n\n## Summary\n\nbody\n";
     let result = lk_queue::TaskResult {
+        target_revision: String::new(),
         task_id: "ext-1".into(),
         cache_hash: "h".into(),
         target: lk_queue::TaskTarget {
@@ -3004,6 +3006,7 @@ async fn a_page_that_cannot_record_completion_is_an_error() {
     let page =
         "---\nid: daily-1\ntype: daily\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
     let result = lk_queue::TaskResult {
+        target_revision: String::new(),
         task_id: "ext-1".into(),
         cache_hash: "h".into(),
         target: lk_queue::TaskTarget {
@@ -3064,6 +3067,7 @@ async fn a_concept_that_fails_to_stage_takes_its_whole_result_with_it() {
         synthesis: None,
     };
     let result = |names: &[&str]| lk_queue::TaskResult {
+        target_revision: String::new(),
         task_id: "ext".into(),
         cache_hash: "h".into(),
         target: lk_queue::TaskTarget {
@@ -3135,6 +3139,7 @@ async fn a_grounding_from_a_later_result_still_seeds_a_new_concept_page() {
 
     let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
     let result = |vault_path: &str, synthesis: Option<&str>| lk_queue::TaskResult {
+        target_revision: String::new(),
         task_id: "ext".into(),
         cache_hash: "h".into(),
         target: lk_queue::TaskTarget {
@@ -3178,34 +3183,8 @@ async fn a_grounding_from_a_later_result_still_seeds_a_new_concept_page() {
     );
 }
 
-/// A `tracing` writer that hands every line it is given back to the test.
-#[derive(Clone, Default)]
-struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
-
-impl std::io::Write for CapturedLogs {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl CapturedLogs {
-    fn text(&self) -> String {
-        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
-    }
-}
-
-/// Two pages whose own ADDRESSES claim one identity is the state the duplicate lint exists
-/// to report, and until a human resolves it the router still has to answer. It answers
-/// deterministically — the concepts dir is read in sorted order and the first stem seen
-/// holds the key — and says so with a `tracing::warn`, because a citation landing on the
-/// page a reader did not expect is otherwise unexplainable. Neither page is deleted: the
-/// pair stays on disk for `graph lint` to surface.
 #[tokio::test]
-async fn two_pages_claiming_one_address_resolve_deterministically() {
+async fn ambiguous_names_refuse_writes_without_touching_either_page() {
     let dir = TempDir::new().unwrap();
     let vault = dir.path();
     let config = base_config(vault);
@@ -3217,7 +3196,7 @@ async fn two_pages_claiming_one_address_resolve_deterministically() {
         std::fs::write(
             concepts.join(format!("{slug}.md")),
             format!(
-                "---\nid: {slug}\ntype: concept\ntitle: \"{slug}\"\naliases: [\"{slug}\"]\n\
+                "---\nid: {slug}\ntype: concept\ntitle: \"Claude 35\"\naliases: [\"Claude 35\"]\n\
                  created: 2026-06-06\nupdated: 2026-06-06\nsource_count: 1\n---\n\n\
                  ## Synthesis\n\nBody of {slug}.\n\n## Sources\n\n- x\n"
             ),
@@ -3230,6 +3209,7 @@ async fn two_pages_claiming_one_address_resolve_deterministically() {
 
     let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
     let result = lk_queue::TaskResult {
+        target_revision: String::new(),
         task_id: "ext-1".into(),
         cache_hash: "h".into(),
         target: lk_queue::TaskTarget {
@@ -3240,7 +3220,7 @@ async fn two_pages_claiming_one_address_resolve_deterministically() {
         date: jiff::civil::date(2026, 5, 23),
         concepts: vec![lk_queue::ReportedConcept {
             concept: ExtractedConcept {
-                name: "claude 35".into(),
+                name: "Claude 35".into(),
                 category: None,
                 aliases: Vec::new(),
             },
@@ -3248,38 +3228,8 @@ async fn two_pages_claiming_one_address_resolve_deterministically() {
         }],
     };
 
-    let logs = CapturedLogs::default();
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer({
-            let logs = logs.clone();
-            move || logs.clone()
-        })
-        .with_ansi(false)
-        .finish();
-    // `set_default` rather than `with_default`: the guard spans the await, and
-    // `#[tokio::test]` keeps this on one thread, so the thread-local default holds.
-    let guard = tracing::subscriber::set_default(subscriber);
-    let rewritten = pipeline.apply_concept_result(&result, page).await.unwrap();
-    drop(guard);
-    assert!(
-        rewritten.contains("../../wiki/concepts/claude-35.md"),
-        "the first stem read holds the key, and it must do so every run: {rewritten}"
-    );
-    let logged = logs.text();
-    assert!(
-        logged.contains("more than one concept page answers to this name")
-            && logged.contains("claude-35")
-            && logged.contains("claude35"),
-        "the arbitrary winner must be said out loud, or a citation landing on the \
-         unexpected page is unexplainable:\n{logged}"
-    );
-    let pages = pipeline.render_concept_pages().await.unwrap();
-    assert_eq!(pages.len(), 1);
-    assert!(pages[0].path.to_string().ends_with("claude-35.md"));
-    assert!(
-        concepts.join("claude35.md").exists(),
-        "the losing page must survive for `graph lint` to report the pair"
-    );
+    assert!(pipeline.apply_concept_result(&result, page).await.is_err());
+    assert!(pipeline.render_concept_pages().await.unwrap().is_empty());
 }
 
 /// The narrowest version of the same guarantee, and the one the pipeline actually
@@ -3301,11 +3251,12 @@ async fn two_spellings_in_one_extraction_resolve_to_one_page() {
         concept: ExtractedConcept {
             name: name.into(),
             category: None,
-            aliases: Vec::new(),
+            aliases: vec!["VectorDB".into()],
         },
         synthesis: Some("Seeded on creation.".into()),
     };
     let result = lk_queue::TaskResult {
+        target_revision: String::new(),
         task_id: "ext-1".into(),
         cache_hash: "h".into(),
         target: lk_queue::TaskTarget {
@@ -3344,6 +3295,7 @@ async fn a_page_created_earlier_in_the_run_is_found_by_a_later_spelling() {
 
     let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
     let result = |task: &str, name: &str| lk_queue::TaskResult {
+        target_revision: String::new(),
         task_id: task.into(),
         cache_hash: "h".into(),
         target: lk_queue::TaskTarget {
@@ -3356,7 +3308,7 @@ async fn a_page_created_earlier_in_the_run_is_found_by_a_later_spelling() {
             concept: ExtractedConcept {
                 name: name.into(),
                 category: None,
-                aliases: Vec::new(),
+                aliases: vec!["VectorDB".into()],
             },
             synthesis: Some("Seeded on creation.".into()),
         }],
@@ -3407,6 +3359,7 @@ async fn a_break_between_digits_does_not_fold_one_version_onto_another() {
 
     let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
     let result = lk_queue::TaskResult {
+        target_revision: String::new(),
         task_id: "ext-1".into(),
         cache_hash: "h".into(),
         target: lk_queue::TaskTarget {
@@ -3601,62 +3554,6 @@ async fn a_document_titled_past_the_filename_limit_still_gets_a_page() {
         .expect("the address the pipeline chose is one the filesystem accepts");
 }
 
-/// A concept name is a term, so its slug is never truncated — which leaves a name long enough
-/// to outgrow a path component addressing no page at all. It is refused where the result is
-/// READ, because the two filesystems this vault lives on disagree about the write: ext4 stops
-/// a name at 255 BYTES while APFS stops it at 255 characters, so a Korean name of 114
-/// characters writes here and fails on Linux. The byte limit is the portable one, and refusing
-/// past it is what keeps a vault written on one machine readable on the other.
-#[test]
-fn a_concept_named_past_the_filename_limit_has_no_address() {
-    let reported = |name: &str| lk_queue::ReportedConcept {
-        concept: ExtractedConcept {
-            name: name.into(),
-            category: None,
-            aliases: Vec::new(),
-        },
-        synthesis: None,
-    };
-    let result = |name: &str| lk_queue::TaskResult {
-        task_id: "ext-1".into(),
-        cache_hash: "h".into(),
-        target: lk_queue::TaskTarget {
-            vault_path: "daily/test-source/2026-05-23.md".into(),
-            kind: lk_queue::TargetKind::DailyConcepts,
-            anchor: "## Related Concepts".into(),
-        },
-        date: jiff::civil::date(2026, 5, 23),
-        concepts: vec![reported("Retrieval Augmented Generation"), reported(name)],
-    };
-
-    let term = "구체화 뷰의 내구성 비대칭";
-    assert_eq!(
-        lk_pipeline::find_unaddressable_concept(&result(term)),
-        None,
-        "a term addresses a page"
-    );
-
-    // What a drifting extraction writes instead: the finding rather than the name it goes by.
-    let statement =
-        "정교한 진단 체인이라도 아래 계층의 숨은 기본값 하나를 놓치면 전제가 무효가 된다 "
-            .repeat(3);
-    assert_eq!(
-        lk_pipeline::find_unaddressable_concept(&result(&statement)),
-        Some(statement.as_str()),
-        "the refusal names the concept, and only the one that has no address"
-    );
-
-    // The bound is a path component's, measured the way the stricter filesystem measures it.
-    let filename = |name: &str| {
-        format!(
-            "{}.md",
-            lk_core::concept::slugify(name).expect("the name slugifies")
-        )
-    };
-    assert!(filename(term).len() <= 255, "{}", filename(term));
-    assert!(filename(&statement).len() > 255, "{}", filename(&statement));
-}
-
 /// A source plan that FAILS must leave nothing of its concepts behind.
 /// `render_concept_pages` emits the run-level accumulator unconditionally, so a plan that
 /// folded concepts one at a time would write pages for a daily page it never wrote —
@@ -3814,7 +3711,7 @@ async fn a_name_spelled_without_separators_lands_on_the_established_page() {
     std::fs::create_dir_all(&concepts).unwrap();
     std::fs::write(
         concepts.join("vector-db.md"),
-        "---\nid: vector-db\ntype: concept\ntitle: \"Vector DB\"\naliases: [\"Vector DB\"]\n\
+        "---\nid: vector-db\ntype: concept\ntitle: \"Vector DB\"\naliases: [\"Vector DB\", \"VectorDB\"]\n\
          created: 2026-06-06\nupdated: 2026-06-06\nsource_count: 3\n---\n\n\
          ## Synthesis\n\nEstablished body.\n\n## Sources\n\n- x\n",
     )
@@ -3825,6 +3722,7 @@ async fn a_name_spelled_without_separators_lands_on_the_established_page() {
 
     let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
     let result = lk_queue::TaskResult {
+        target_revision: String::new(),
         task_id: "ext-1".into(),
         cache_hash: "h".into(),
         target: lk_queue::TaskTarget {
@@ -3909,6 +3807,7 @@ async fn stale_alias_loses_to_the_address_owner(claimant: &str) {
 
     let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
     let result = lk_queue::TaskResult {
+        target_revision: String::new(),
         task_id: "ext-1".into(),
         cache_hash: "h".into(),
         target: lk_queue::TaskTarget {
@@ -3919,7 +3818,7 @@ async fn stale_alias_loses_to_the_address_owner(claimant: &str) {
         date: jiff::civil::date(2026, 5, 23),
         concepts: vec![lk_queue::ReportedConcept {
             concept: ExtractedConcept {
-                name: "access-ingress-2axis-model".into(),
+                name: "Access x Ingress 2-Axis Deployment Model".into(),
                 category: None,
                 aliases: Vec::new(),
             },
@@ -3981,6 +3880,7 @@ async fn an_extraction_naming_an_alias_lands_on_the_established_page() {
 
     let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
     let result = lk_queue::TaskResult {
+        target_revision: String::new(),
         task_id: "ext-1".into(),
         cache_hash: "h".into(),
         target: lk_queue::TaskTarget {
@@ -4105,6 +4005,7 @@ async fn applying_a_result_adds_to_a_pages_citations_rather_than_replacing_them(
 
     let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n- [Cited Earlier](../../wiki/concepts/cited-earlier.md)\n\n## Key Events\n\n- a\n";
     let result = lk_queue::TaskResult {
+        target_revision: String::new(),
         task_id: "ext-1".into(),
         cache_hash: "h".into(),
         target: lk_queue::TaskTarget {
@@ -4196,7 +4097,7 @@ async fn a_re_extracted_document_keeps_the_citations_the_one_before_it_created()
         .plan(
             "test-source",
             &source,
-            vec![raw_item("A Note", "edited body", "DOC-A", ts)],
+            vec![raw_item("A renamed Note", "edited body", "DOC-A", ts)],
             &options,
         )
         .await
@@ -4240,15 +4141,21 @@ async fn a_re_observed_document_keeps_its_page_and_its_created_date() {
         "2026-06-14T00:00:00Z".parse().unwrap(),
     );
     first.url = None;
-    first.metadata = serde_json::json!({ "source_file": "/repo/docs/decisions/slot.md" });
+    first.metadata = serde_json::json!({ "source_file": "/repo/docs/decisions/slot.md", "source_record": {"id": "adr-slot", "status": "active", "revision": "first"} });
     let mut second = raw_item(
-        "Slot bindings",
+        "Renamed slot bindings",
         "edited",
         "adr-slot",
         "2026-06-20T00:00:00Z".parse().unwrap(),
     );
     second.url = None;
     second.metadata = first.metadata.clone();
+
+    let mut archived = second.clone();
+    archived.timestamp = "2026-06-21T00:00:00Z".parse().unwrap();
+    archived.metadata["source_record"]["status"] = "archived".into();
+    archived.metadata["source_record"]["revision"] = "archived-revision".into();
+    let mut hashes = Vec::new();
 
     let queue_dir = vault.join(".lorekeeper").join("queue");
     let llm: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir));
@@ -4258,7 +4165,7 @@ async fn a_re_observed_document_keeps_its_page_and_its_created_date() {
         dry_run: false,
     };
 
-    for item in [first, second] {
+    for item in [first, second, archived] {
         // A fresh pipeline per run: each `lore ingest` is its own process, and the slug claims
         // one holds are for the sources of that run alone.
         let mut pipeline = Pipeline::new(vault, build_ctx(&config, llm.clone()));
@@ -4267,6 +4174,8 @@ async fn a_re_observed_document_keeps_its_page_and_its_created_date() {
             .await
             .unwrap();
         assert_eq!(r.document_pages.len(), 1);
+        let parsed = lk_core::frontmatter::parse_page(&r.document_pages[0].content).unwrap();
+        hashes.push(parsed.frontmatter.get("llm_inputs").unwrap()["summary"].clone());
         let writer = lk_vault::VaultWriter::new(vault);
         for out in &r.document_pages {
             writer
@@ -4276,6 +4185,10 @@ async fn a_re_observed_document_keeps_its_page_and_its_created_date() {
         }
     }
 
+    assert_ne!(
+        hashes[1], hashes[2],
+        "a state-only change must invalidate semantic inputs"
+    );
     let pages: Vec<_> = std::fs::read_dir(vault.join("wiki").join("documents"))
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -4292,7 +4205,565 @@ async fn a_re_observed_document_keeps_its_page_and_its_created_date() {
         "created is when the vault first held it"
     );
     assert!(
-        page.contains("updated: 2026-06-20"),
+        page.contains("updated: 2026-06-21"),
         "updated is what moves"
     );
+    let parsed = lk_core::frontmatter::parse_page(&page).unwrap();
+    assert_eq!(
+        parsed.frontmatter.get("source_record").unwrap()["status"],
+        "archived"
+    );
+    assert_eq!(
+        parsed.frontmatter.get("title").unwrap(),
+        "Renamed slot bindings"
+    );
+}
+
+#[tokio::test]
+async fn document_identity_ambiguity_refuses_to_choose_a_page() {
+    for identity_field in ["source_file", "source_url"] {
+        let dir = TempDir::new().unwrap();
+        let vault = dir.path();
+        let mut config = base_config(vault);
+        config.sources.get_mut("test-source").unwrap().source_type = SourceType::Manual;
+        let source = config.sources.get("test-source").unwrap().clone();
+        let mut item = raw_item(
+            "A third title",
+            "changed body",
+            "DOC-A",
+            "2026-05-23T10:00:00Z".parse().unwrap(),
+        );
+        let identity = "https://example.com/document";
+        item.metadata = if identity_field == "source_file" {
+            serde_json::json!({"source_file": identity})
+        } else {
+            serde_json::json!({})
+        };
+        item.url = Some(identity.into());
+        let docs = vault.join("wiki/documents");
+        std::fs::create_dir_all(&docs).unwrap();
+        for name in ["first", "second"] {
+            std::fs::write(
+                docs.join(format!("{name}.md")),
+                format!("---\ntitle: {name}\n{identity_field}: {identity}\n---\nOriginal {name}\n"),
+            )
+            .unwrap();
+        }
+        let mut pipeline = Pipeline::new(vault, build_ctx(&config, Arc::new(NoopLlmClient)));
+        let result = pipeline
+            .plan(
+                "test-source",
+                &source,
+                vec![item],
+                &IngestOptions {
+                    target_date: None,
+                    today: far_future(),
+                    dry_run: false,
+                },
+            )
+            .await;
+        assert!(
+            matches!(result, Err(lk_pipeline::PipelineError::Render(message)) if message.contains("claimed by multiple pages") && message.contains("first") && message.contains("second"))
+        );
+        assert_eq!(std::fs::read_dir(docs).unwrap().count(), 2);
+    }
+}
+
+#[tokio::test]
+async fn symbol_distinct_names_keep_separate_pages_and_resolve_after_reload() {
+    let dir = TempDir::new().unwrap();
+    let config = base_config(dir.path());
+    let ctx = build_ctx(&config, Arc::new(NoopLlmClient));
+    let mut pipeline = Pipeline::new(dir.path(), ctx.clone());
+    let page = "---\ntype: daily\nllm_inputs:\n  concepts: h\n---\n## Related Concepts\n";
+    let long_name = "지식".repeat(100);
+    let result = lk_queue::TaskResult {
+        target_revision: String::new(),
+        task_id: "languages".into(),
+        cache_hash: "h".into(),
+        target: lk_queue::TaskTarget {
+            vault_path: "daily/source/2026-10-16.md".into(),
+            kind: lk_queue::TargetKind::DailyConcepts,
+            anchor: "## Related Concepts".into(),
+        },
+        date: jiff::civil::date(2026, 10, 16),
+        concepts: ["C++", "C#", "C", "CO", "Co", "x²", "x2", long_name.as_str()]
+            .into_iter()
+            .map(|name| lk_queue::ReportedConcept {
+                concept: ExtractedConcept {
+                    name: name.into(),
+                    category: None,
+                    aliases: vec![],
+                },
+                synthesis: Some(format!("Knowledge about {name}.")),
+            })
+            .collect(),
+    };
+    let linked = pipeline.apply_concept_result(&result, page).await.unwrap();
+    let pages = pipeline.render_concept_pages().await.unwrap();
+    assert_eq!(pages.len(), 8);
+    let paths: std::collections::BTreeSet<_> = pages.iter().map(|p| p.path.to_string()).collect();
+    assert_eq!(paths.len(), 8);
+    for p in &pages {
+        assert!(
+            std::path::Path::new(p.path.as_ref())
+                .file_name()
+                .unwrap()
+                .len()
+                <= 255
+        );
+        let path = dir.path().join(p.path.as_ref());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, &p.content).unwrap();
+    }
+    let mut reloaded = Pipeline::new(dir.path(), ctx);
+    let after = reloaded.apply_concept_result(&result, page).await.unwrap();
+    assert_eq!(after, linked);
+}
+
+#[tokio::test]
+async fn repeated_document_origins_refuse_forks_without_reserving_failed_plans() {
+    for source_file in [false, true] {
+        let dir = TempDir::new().unwrap();
+        let mut config = base_config(dir.path());
+        config.sources.get_mut("test-source").unwrap().source_type = SourceType::Manual;
+        let source = config.sources.get("test-source").unwrap();
+        let queue_dir = dir.path().join(".lorekeeper/queue");
+        let llm = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
+        let mut pipeline = Pipeline::new(dir.path(), build_ctx(&config, llm.clone()));
+        let options = IngestOptions {
+            target_date: None,
+            today: far_future(),
+            dry_run: false,
+        };
+        let mut first = raw_item(
+            "First title",
+            "First revision",
+            "A",
+            "2026-05-23T10:00:00Z".parse().unwrap(),
+        );
+        if source_file {
+            first.metadata = serde_json::json!({"source_file": "/repo/shared.md"});
+        }
+        let mut second = first.clone();
+        second.external_id = Some("B".into());
+        second.title = "Changed title".into();
+        second.body = "Second revision".into();
+        let error = pipeline
+            .plan(
+                "test-source",
+                source,
+                vec![first.clone(), second.clone()],
+                &options,
+            )
+            .await
+            .err()
+            .expect("ambiguous input must fail");
+        assert!(
+            error.to_string().contains("repeated document source"),
+            "{error}"
+        );
+        llm.flush().await.unwrap();
+        assert!(!queue_dir.exists() || std::fs::read_dir(&queue_dir).unwrap().next().is_none());
+        let result = pipeline
+            .plan(
+                "test-source",
+                source,
+                vec![first.clone(), first.clone()],
+                &options,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.document_pages.len(), 1);
+        let error = pipeline
+            .plan("other-source", source, vec![second], &options)
+            .await
+            .err()
+            .expect("ambiguous input must fail");
+        assert!(error.to_string().contains("already planned"), "{error}");
+        let mut distinct = first;
+        distinct.url = Some("https://example.com/distinct".into());
+        if source_file {
+            distinct.metadata["source_file"] = "/repo/distinct.md".into();
+        }
+        let other = pipeline
+            .plan("other-source", source, vec![distinct], &options)
+            .await
+            .unwrap();
+        assert_ne!(other.document_pages[0].path, result.document_pages[0].path);
+    }
+}
+
+#[tokio::test]
+async fn conflicting_document_event_versions_are_not_silently_deduplicated() {
+    let dir = TempDir::new().unwrap();
+    let mut config = base_config(dir.path());
+    config.sources.get_mut("test-source").unwrap().source_type = SourceType::Manual;
+    let source = config.sources.get("test-source").unwrap();
+    let mut pipeline = Pipeline::new(dir.path(), build_ctx(&config, Arc::new(NoopLlmClient)));
+    let first = raw_item(
+        "Same document",
+        "First revision",
+        "A",
+        "2026-05-23T10:00:00Z".parse().unwrap(),
+    );
+    let mut second = first.clone();
+    second.body = "Conflicting revision".into();
+    let error = pipeline
+        .plan(
+            "test-source",
+            source,
+            vec![first, second],
+            &IngestOptions {
+                target_date: None,
+                today: far_future(),
+                dry_run: false,
+            },
+        )
+        .await
+        .err()
+        .expect("ambiguous input must fail");
+    assert!(
+        error.to_string().contains("conflicting document event"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn repository_identity_survives_relocation_and_preserves_distinct_namespaces() {
+    let dir = TempDir::new().unwrap();
+    let mut config = base_config(dir.path());
+    config.sources.get_mut("test-source").unwrap().source_type = SourceType::Nodex;
+    let source = config.sources["test-source"].clone();
+    let options = IngestOptions {
+        target_date: None,
+        today: far_future(),
+        dry_run: false,
+    };
+    let mut item = raw_item(
+        "Same title",
+        "original",
+        "id",
+        "2026-06-14T00:00:00Z".parse().unwrap(),
+    );
+    item.url = None;
+    item.metadata = serde_json::json!({
+        "source_file": "/old/checkout/docs/item.md",
+        "source_identity": {"repository": "org/repo", "document": "id"},
+        "source_record": {"id": "id", "status": "active", "revision": "one"}
+    });
+    let mut paths = Vec::new();
+    for step in 0..3 {
+        if step == 1 {
+            item.title = "Renamed title".into();
+            item.body = "same-date changed body".into();
+            item.metadata["source_file"] = "/new/checkout/moved.md".into();
+            item.metadata["source_record"]["revision"] = "two".into();
+        }
+        if step == 2 {
+            item.metadata["source_identity"]["repository"] = "org/another-repo".into();
+        }
+        let mut pipeline = Pipeline::new(dir.path(), build_ctx(&config, Arc::new(NoopLlmClient)));
+        let result = pipeline
+            .plan("test-source", &source, vec![item.clone()], &options)
+            .await
+            .unwrap();
+        let page = &result.document_pages[0];
+        paths.push(page.path.to_string());
+        lk_vault::VaultWriter::new(dir.path())
+            .write_page(page.path.as_ref(), &page.content)
+            .await
+            .unwrap();
+    }
+    assert_eq!(paths[0], paths[1]);
+    assert_ne!(paths[1], paths[2]);
+    let text = std::fs::read_to_string(dir.path().join(&paths[0])).unwrap();
+    assert!(text.contains("same-date changed body"));
+    assert!(text.contains("/new/checkout/moved.md"));
+}
+
+#[tokio::test]
+async fn repository_identity_adopts_only_exact_unambiguous_legacy_provenance() {
+    for (legacy_id, duplicate, should_adopt) in [
+        ("id", false, true),
+        ("another-id", false, false),
+        ("id", true, false),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let mut config = base_config(dir.path());
+        config.sources.get_mut("test-source").unwrap().source_type = SourceType::Nodex;
+        let source = config.sources["test-source"].clone();
+        let writer = lk_vault::VaultWriter::new(dir.path());
+        let legacy = format!(
+            "---\ntitle: Old title\nsource_file: /repo/item.md\nsource_record: {{id: {legacy_id}}}\n---\nold body\n"
+        );
+        writer
+            .write_page(std::path::Path::new("wiki/documents/old-title.md"), &legacy)
+            .await
+            .unwrap();
+        if duplicate {
+            writer
+                .write_page(std::path::Path::new("wiki/documents/duplicate.md"), &legacy)
+                .await
+                .unwrap();
+        }
+        let mut item = raw_item(
+            "New title",
+            "new body",
+            "id",
+            "2026-06-14T00:00:00Z".parse().unwrap(),
+        );
+        item.url = None;
+        item.metadata = serde_json::json!({"source_file":"/repo/item.md", "source_identity":{"repository":"org/repo","document":"id"},"source_record":{"id":"id"}});
+        let mut pipeline = Pipeline::new(dir.path(), build_ctx(&config, Arc::new(NoopLlmClient)));
+        let result = pipeline
+            .plan(
+                "test-source",
+                &source,
+                vec![item],
+                &IngestOptions {
+                    target_date: None,
+                    today: far_future(),
+                    dry_run: false,
+                },
+            )
+            .await;
+        if duplicate {
+            assert!(
+                result
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("ambiguous legacy")
+            );
+        } else {
+            assert_eq!(
+                result.unwrap().document_pages[0].path.to_string() == "wiki/documents/old-title.md",
+                should_adopt
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("wiki/documents/old-title.md")).unwrap(),
+            legacy
+        );
+    }
+}
+
+#[tokio::test]
+async fn location_only_imports_work_but_cannot_be_silently_adopted() {
+    let dir = TempDir::new().unwrap();
+    let mut config = base_config(dir.path());
+    config.sources.get_mut("test-source").unwrap().source_type = SourceType::Nodex;
+    let source = config.sources["test-source"].clone();
+    let options = IngestOptions {
+        target_date: None,
+        today: far_future(),
+        dry_run: false,
+    };
+    let mut item = raw_item(
+        "Legacy",
+        "body",
+        "id",
+        "2026-06-14T00:00:00Z".parse().unwrap(),
+    );
+    item.url = None;
+    item.metadata = serde_json::json!({"source_file":"/repo/item.md","source_identity":null});
+    let mut pipeline = Pipeline::new(dir.path(), build_ctx(&config, Arc::new(NoopLlmClient)));
+    let result = pipeline
+        .plan("test-source", &source, vec![item.clone()], &options)
+        .await
+        .unwrap();
+    let page = &result.document_pages[0];
+    lk_vault::VaultWriter::new(dir.path())
+        .write_page(page.path.as_ref(), &page.content)
+        .await
+        .unwrap();
+    item.metadata["source_identity"] = serde_json::json!({"repository":"org/repo","document":"id"});
+    let mut pipeline = Pipeline::new(dir.path(), build_ctx(&config, Arc::new(NoopLlmClient)));
+    let error = pipeline
+        .plan("test-source", &source, vec![item], &options)
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        error
+            .to_string()
+            .contains("migration requires verified source identity")
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(page.path.as_ref())).unwrap(),
+        page.content
+    );
+}
+
+#[tokio::test]
+async fn nested_document_ownership_is_reused_and_duplicates_across_levels_are_refused() {
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let mut config = base_config(vault);
+    config.sources.get_mut("test-source").unwrap().source_type = SourceType::Nodex;
+    let source = config.sources.get("test-source").unwrap().clone();
+    let identity = serde_json::json!({"repository":"org/repo", "document":"doc"});
+    let mut item = raw_item(
+        "Renamed document",
+        "Current body",
+        "doc",
+        "2026-05-23T10:00:00Z".parse().unwrap(),
+    );
+    item.url = None;
+    item.metadata = serde_json::json!({"source_identity":identity});
+    let nested = vault.join("wiki/documents/sub/original.md");
+    std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+    let original = format!(
+        "---\ntype: document\ntitle: Original\ncreated: 2026-05-01\nsource_identity: {identity}\n---\nOriginal body\n"
+    );
+    std::fs::write(&nested, &original).unwrap();
+    let options = IngestOptions {
+        target_date: None,
+        today: far_future(),
+        dry_run: false,
+    };
+    let mut pipeline = Pipeline::new(vault, build_ctx(&config, Arc::new(NoopLlmClient)));
+    let result = pipeline
+        .plan("test-source", &source, vec![item.clone()], &options)
+        .await
+        .unwrap();
+    assert_eq!(result.document_pages.len(), 1);
+    assert_eq!(
+        result.document_pages[0].path.to_string(),
+        "wiki/documents/sub/original.md"
+    );
+    assert!(
+        result.document_pages[0]
+            .content
+            .contains("created: 2026-05-01")
+    );
+    assert!(!vault.join("wiki/documents/renamed-document.md").exists());
+
+    std::fs::write(vault.join("wiki/documents/duplicate.md"), &original).unwrap();
+    let mut pipeline = Pipeline::new(vault, build_ctx(&config, Arc::new(NoopLlmClient)));
+    let result = pipeline
+        .plan("test-source", &source, vec![item], &options)
+        .await;
+    assert!(
+        matches!(result, Err(lk_pipeline::PipelineError::Render(message)) if message.contains("claimed by multiple pages") && message.contains("sub/original") && message.contains("duplicate"))
+    );
+    assert_eq!(std::fs::read_to_string(nested).unwrap(), original);
+}
+
+#[tokio::test]
+async fn extraction_publication_preserves_concepts_edited_after_staging() {
+    for preexisting in [false, true] {
+        let dir = TempDir::new().unwrap();
+        let vault = dir.path();
+        let config = base_config(vault);
+        let mut pipeline = Pipeline::new(vault, build_ctx(&config, Arc::new(NoopLlmClient)));
+        let concept_path = vault.join("wiki/concepts/guarded.md");
+        std::fs::create_dir_all(concept_path.parent().unwrap()).unwrap();
+        // BOM and CRLF prove the guard carries actual input bytes, not a reserialization.
+        let original = "\u{feff}---\r\ntype: concept\r\ntitle: Guarded\r\n---\r\n## Synthesis\r\nOriginal authored prose\r\n";
+        if preexisting {
+            std::fs::write(&concept_path, original).unwrap();
+        }
+        let origin = "---\ntype: daily\nllm_inputs:\n  concepts: h\n---\n## Related Concepts\n\n";
+        let origin_path = vault.join("daily/test-source/2026-05-23.md");
+        std::fs::create_dir_all(origin_path.parent().unwrap()).unwrap();
+        std::fs::write(&origin_path, origin).unwrap();
+        let result = lk_queue::TaskResult {
+            target_revision: lk_core::concept::file_revision(origin),
+            task_id: "guarded-extraction".into(),
+            cache_hash: "h".into(),
+            target: lk_queue::TaskTarget {
+                vault_path: "daily/test-source/2026-05-23.md".into(),
+                kind: lk_queue::TargetKind::DailyConcepts,
+                anchor: "## Related Concepts".into(),
+            },
+            date: jiff::civil::date(2026, 5, 23),
+            concepts: vec![lk_queue::ReportedConcept {
+                concept: ExtractedConcept {
+                    name: "Guarded".into(),
+                    category: None,
+                    aliases: vec![],
+                },
+                synthesis: None,
+            }],
+        };
+        let rewritten = pipeline
+            .apply_concept_result(&result, origin)
+            .await
+            .unwrap();
+        // Simulate an editor changing or creating the concept after extraction reads it,
+        // before the publication plan is assembled (the old fresh-read guard missed this).
+        let edited = "---\ntype: concept\ntitle: Guarded\n---\nUser's newer prose\n";
+        std::fs::write(&concept_path, edited).unwrap();
+        let pages = pipeline.render_concept_pages().await.unwrap();
+        let session = lk_vault::MutationSession::acquire(vault).unwrap();
+        let mut plan = lk_vault::MutationPlan::default();
+        for page in &pages {
+            page.plan_publication(&mut plan, vault).unwrap();
+        }
+        plan.edit(result.target.vault_path, origin.into(), rewritten);
+        assert!(session.apply(plan).is_err());
+        assert_eq!(std::fs::read_to_string(&concept_path).unwrap(), edited);
+        assert_eq!(std::fs::read_to_string(&origin_path).unwrap(), origin);
+        assert!(!vault.join(".lorekeeper/mutation/pending.json").exists());
+    }
+}
+
+#[tokio::test]
+async fn materialized_source_pages_refuse_edits_after_their_input_snapshot() {
+    for source_type in [SourceType::Gmail, SourceType::Manual] {
+        let dir = TempDir::new().unwrap();
+        let vault = dir.path();
+        let mut config = base_config(vault);
+        config.sources.get_mut("test-source").unwrap().source_type = source_type;
+        let source = config.sources.get("test-source").unwrap();
+        let item = raw_item(
+            "Source document",
+            "Source content",
+            "doc",
+            "2026-05-23T10:00:00Z".parse().unwrap(),
+        );
+        let mut pipeline = Pipeline::new(vault, build_ctx(&config, Arc::new(NoopLlmClient)));
+        let result = pipeline
+            .plan(
+                "test-source",
+                source,
+                vec![item],
+                &IngestOptions {
+                    target_date: None,
+                    today: far_future(),
+                    dry_run: false,
+                },
+            )
+            .await
+            .unwrap();
+        let document = source_type == SourceType::Manual;
+        let page = if document {
+            &result.document_pages[0]
+        } else {
+            &result.daily_pages[0]
+        };
+        let path = vault.join(page.path.as_ref());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let edited = page.content.clone() + "\nNew authored content\n";
+        std::fs::write(&path, &edited).unwrap();
+        let session = lk_vault::MutationSession::acquire(vault).unwrap();
+        if document {
+            assert!(
+                lk_vault::publish_document_expected(
+                    &session,
+                    page.path.as_ref(),
+                    &page.content,
+                    page.expected_original.as_ref()
+                )
+                .is_err()
+            );
+        } else {
+            let mut plan = lk_vault::MutationPlan::default();
+            page.plan_publication(&mut plan, vault).unwrap();
+            assert!(session.apply(plan).is_err());
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), edited);
+    }
 }

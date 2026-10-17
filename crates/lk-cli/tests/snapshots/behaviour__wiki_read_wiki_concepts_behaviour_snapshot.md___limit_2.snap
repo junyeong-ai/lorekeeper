@@ -1,0 +1,31 @@
+---
+source: crates/lk-cli/tests/behaviour.rs
+expression: "observe(staged.path(), argv)"
+---
+exit: 0
+--- stdout ---
+{
+  "path": "wiki/concepts/behaviour-snapshot.md",
+  "title": "Behaviour snapshot",
+  "file_revision": "0910fa9895a91558fab7f71b70e16552d191c6bd23e0e7c1eb4dcf08020b735a",
+  "source_revision": "70dc915f3e0882e16a6fd9f13c9d24b2",
+  "total_sections": 5,
+  "offset": 0,
+  "next_offset": 2,
+  "sections": [
+    {
+      "id": 0,
+      "level": 0,
+      "title": "",
+      "characters": 0
+    },
+    {
+      "id": 1,
+      "level": 1,
+      "title": "Behaviour snapshot",
+      "characters": 318
+    }
+  ],
+  "content": null
+}
+--- stderr ---

@@ -273,19 +273,10 @@ sources:
     labels: [ai-tech]
     extract_concepts: true
 
-  # Your project repositories' own knowledge — the ADRs, learnings and guides they already
-  # keep. The documents stay where they are: the repository stores, validates and searches
-  # them, and a copy in the vault would only be a second store to keep in step. What reaches
-  # the vault is the CONCEPTS they name, which accumulate evidence from every project and
-  # every feed that names them too — that cross-project synthesis is the whole reason this
-  # source exists, and it is the existing concept machinery, not a new one.
-  #
-  # Requires `nodex` on PATH and a `nodex.toml` in the repo: this source reads a DECLARED
-  # document graph rather than guessing at a layout, which is what lets `status` exclude a
-  # superseded decision as a fact rather than a heuristic. A repo without one is
-  # `/lore-extract`'s case — a one-off pass under a person's judgment.
-  # One source per repository. Each document becomes its own page under <wiki>/documents/,
-  # tagged with the kind the repository gave it and linked back to the file it came from.
+  # Optional repository adapter. nodex supplies declared document identity and lifecycle;
+  # Lorekeeper keeps an evidence copy and synthesizes cross-project concepts.
+  # Requires nodex on PATH and a current nodex.toml-governed index for this source only.
+  # Repositories without nodex can use /lore-extract's explicit extraction manifest.
   platform-docs:
     type: nodex
     enabled: false
@@ -293,10 +284,14 @@ sources:
       repo: /absolute/path/to/your/repo   # absolute: a scheduled run starts nowhere in particular
       kinds: [learning, adr, guide]       # from the repo's own kinds.allowed; omit for every kind
       lookback_hours: 24
-      # How many of the window's documents one run may ingest. A wide lookback_hours
-      # for a deliberate backfill needs this raised — the run is refused, never
-      # trimmed, so a page never holds part of a day.
+      # Stable namespace, independent of checkout location; never reuse for another repository.
+      # repository_id: org/repo
+      # Reconcile current documents regardless of authored dates (requires repository_id).
+      # reconcile: true
+      # Refuse the whole selection above this cap; never silently truncate.
       # max_documents: 200
+      # Exact IDs within selected kinds and, unless reconciling, the date window.
+      # document_ids: [exact-document-id]
       # The prefix a document's repo-relative path is appended to, so a citation links back
       # to the real record. Omit it for a repo with no remote — a local path is provenance
       # that resolves nowhere but this machine.
@@ -444,7 +439,7 @@ concepts:
 #   retention_days: 90               # how long pruned history (ingest log entries,
 #                                    # drained queue/processed files) is kept
 #   schedule: "0 6 * * 0"            # cron for `lore schedule` to emit unattended
-#                                    # `lore maintenance` + `lore queue prune` lines
+#                                    # `lore maintenance --prune-queue --wait-for-vault`
 
 # ─── LLM ──────────────────────────────────────────────────
 # provider:
