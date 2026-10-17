@@ -92,8 +92,8 @@ const INITIAL_REACH: usize = 500;
 /// `lookback_hours` the operator meant differently — not something the adapter can settle
 /// by asking again.
 const MAX_REACH: usize = 64_000;
-// Snapshot and verified-body envelopes below are the public nodex 0.54.2 contract.
-const NODEX_COMPATIBILITY: &str = ">=0.54.2, <0.55";
+// Snapshot and verified-body envelopes below are the public nodex 0.55 contract.
+const NODEX_COMPATIBILITY: &str = ">=0.55, <0.56";
 const INVENTORY_FIELDS: &str = "id,title,kind,status,path,created,updated,reviewed,supersedes,superseded_by,implements,related,covers,tags";
 
 /// One document, as `nodex query recent` reports it.
@@ -563,7 +563,7 @@ fn decode_envelope<T: serde::de::DeserializeOwned>(
             message: "refused without reason".into(),
         });
         let remedy = if e.code == "VERSION_MISMATCH" {
-            "; select a supported nodex >=0.54.2, <0.55 executable with params.executable; the repository must permit that version and already have a current compatible index"
+            "; select a supported nodex >=0.55, <0.56 executable with params.executable; the repository must permit that version and already have a current compatible index"
         } else {
             ""
         };
@@ -1024,12 +1024,13 @@ printf '%s' '{"ok":true,"data":{"items":[]},"snapshot":{"verification":"content"
     /// Opt-in contract exercise against separately installed real binaries, never PATH or a
     /// source checkout. The fixture and its graph are disposable; no vault is written.
     #[tokio::test]
-    #[ignore = "requires LORE_TEST_NODEX_053 and LORE_TEST_NODEX_054 absolute binary paths"]
+    #[ignore = "requires LORE_TEST_NODEX_UNSUPPORTED and LORE_TEST_NODEX_SUPPORTED absolute binary paths"]
     async fn selected_real_binaries_preserve_compatibility_and_content_refusal() {
         let supported =
-            PathBuf::from(std::env::var_os("LORE_TEST_NODEX_054").expect("0.54 binary"));
-        let unsupported =
-            PathBuf::from(std::env::var_os("LORE_TEST_NODEX_053").expect("0.53 binary"));
+            PathBuf::from(std::env::var_os("LORE_TEST_NODEX_SUPPORTED").expect("supported binary"));
+        let unsupported = PathBuf::from(
+            std::env::var_os("LORE_TEST_NODEX_UNSUPPORTED").expect("unsupported binary"),
+        );
         assert!(supported.is_absolute() && unsupported.is_absolute());
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir(root.path().join("docs")).unwrap();
@@ -1088,7 +1089,7 @@ template = "{kind}-{path_slug}"
             .unwrap_err()
             .to_string();
         assert!(error.contains("VERSION_MISMATCH"), "{error}");
-        assert!(error.contains("params.executable") && error.contains("0.54.2"));
+        assert!(error.contains("params.executable") && error.contains(NODEX_COMPATIBILITY));
         // Same canonical body, different exact raw revision must still be refused.
         std::fs::write(&path, original.replace("\r\n", "\n")).unwrap();
         let error = NodexSource

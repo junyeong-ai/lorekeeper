@@ -75,7 +75,7 @@ do not imply deletion, archival or false claims.
 
 ### Nodex binary selection
 
-The adapter supports nodex `>=0.54.2, <0.55`. Lore's installer and
+The adapter supports nodex `>=0.55, <0.56`. Lore's installer and
 `lore self update --version` select Lore versions, not nodex versions.
 Set a source's optional `params.executable` to a compatible binary's absolute path.
 Omitted, it uses
