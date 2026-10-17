@@ -206,8 +206,9 @@ map to `RawItem`.
   - **nodex** (`nodex.rs`): a project repository's DECLARED document graph, read by running
     `nodex query recent` in it. The repository remains the original store; each document is copied into its own page under `<wiki>/documents/`, because a
     decision record is a whole document rather than one item among the many a day holds, and
-    the vault search reads the wiki and never the daily pages under it. Its `kind` rides as a
-    TAG, so a reader asks for decision records across every project without naming a source.
+    the default vault search reads wiki pages; `--include-sources` also reaches daily
+    observations. Its `kind` rides as a TAG, so a reader asks for decision records across
+    every project without naming a source.
     The CONCEPTS those documents name are what makes one insight found in three projects
     converge on one page. Normal date ingestion uses the declared date and kind, including historical
     records; explicit reconciliation instead observes the current eligible inventory. `source_record` carries id, status, a versioned observation revision and the declared

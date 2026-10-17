@@ -211,7 +211,7 @@ For an actual reassessment, first preserve the prior review with `lore wiki evid
 
 ### ✅ Result ④ — a knowledge graph forms
 
-`lore graph suggest-links` / `cluster` discover relationships between concepts (ranked by an Adamic-Adar score that down-weights hub co-citations):
+`lore graph cluster` groups concepts; `suggest-links` proposes link candidates ranked by an Adamic-Adar score that down-weights hub co-citations. Semantic relationships require review of source evidence:
 
 ```mermaid
 graph TD
@@ -265,7 +265,7 @@ Each day's ingest grows the concept graph; synthesis summarizes it at ever-highe
 | `google-calendar` | Schedule + meeting notes (auto-extracted from Drive links) | Google OAuth |
 | `google-drive` | Curated docs in a Drive folder | Google OAuth |
 | `rss` | Vendor blogs / news → concepts (no auth, multi-feed) | none |
-| `nodex` | A project repository's own decision and learning records → concepts (needs `nodex.toml` and the `nodex` binary) | none |
+| `nodex` | A project repository's own decision and learning records → concepts (needs `nodex.toml` and nodex `>=0.55,<0.56`; see [binary selection and evidence versions](.claude/skills/lore-setup/references/config.md#nodex-binary-selection)) | none |
 | `manual` | Markdown, text, and HTML files dropped in `inbox/` | none |
 | `tasks` | Your own finished tasks — what `lore task` closed becomes the day's page | none |
 
@@ -280,7 +280,7 @@ The source key becomes the vault subfolder name. You can define several of the s
 - **Inputs and replay** — unchanged input hashes reuse completed LLM results. Refetching can observe remote edits, deletions and different query windows. RSS event logs retain collected entries after they leave the feed; exact-input regeneration requires a retained queue task.
 - **Realized-only** — a future date materializes no page (a forecast isn't knowledge yet). It becomes knowledge once the date arrives.
 - **Config decides the vault's language** — `vault.locale` (ko | en) is not a label switch but **the language of every sentence Lorekeeper adds**: summaries, weekly themes, concept definitions, explorations. A concept's NAME is the form its own source writes, so a term a source writes in another language keeps its spelling. Source content is never translated.
-- **The graph does the bookkeeping** — `backlinks-sync` (re-derive each concept's citations, count and synthesis input, queueing a rewrite when the evidence moves), `lint` (orphans, broken links, duplicate concepts), `merge` (fold duplicate concepts), `cluster` / `suggest-links` (discover relationships).
+- **The graph does the bookkeeping** — `backlinks-sync` (re-derive each concept's citations, count and synthesis input, queueing a rewrite when the evidence moves), `lint` (orphans, broken links, duplicate concepts), `merge` (fold duplicate concepts), `cluster` / `suggest-links` (communities and link candidates).
 
 ---
 

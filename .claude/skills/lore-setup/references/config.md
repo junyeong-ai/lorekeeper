@@ -84,7 +84,7 @@ variable expansion; an explicit failure never retries another binary.
 
 The repository must permit the selected version and already hold an index current for
 it. Binary selection does not override a project version pin or rebuild its index.
-`lore validate` checks the parameter shape; `lore ingest <source-id> --dry-run` checks
+`lore validate` checks the parameter shape; `lore ingest --dry-run <source-id>` checks
 actual source compatibility without vault or queue writes. `doctor` audits page contracts,
 `health` reads collection history, and `self status` checks Lore's installation; none
 certifies the currently selected nodex executable.

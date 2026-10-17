@@ -31,22 +31,24 @@ channel IDs, project keys, and custom-field IDs.
 
 ## Workflow
 
-1. **Source selection** — confirm which sources to collect
-   (Gmail / Calendar / Jira / Slack). If unclear, describe each
-   source's value in one line and recommend.
+1. **Source selection** — use the supported source types in `config.example.yaml`
+   to select the sources matching the user's request. If unclear, explain the relevant
+   choices briefly. Preserve source selections the user already made.
 2. **Discovery** — read the reference file for each selected source
    and run its CLI commands to find IDs/conditions (assume per-account
    auth is already done; if not, guide the user to the relevant CLI login):
    - Slack → `references/slack.md`
    - Jira → `references/jira.md`
    - Google (Calendar/Gmail) → `references/google.md`
+   - Project repositories (`nodex`) → `references/config.md`, Nodex binary selection
+   - Other supported sources → `config.example.yaml` for their parameters
 3. **Write config** — use `references/config.md` schema. Location:
    `./config.yaml` (repo) or `~/.config/lorekeeper/config.yaml`
    (binary install). If a file already exists, merge the source block
    only — never overwrite.
 4. **Validate** — `lore validate`, then `lore schema` if it warns that AGENTS.md is missing
    or out of date (every page-writing skill hard-depends on that file), then
-   `lore ingest --dry-run` to verify auth and extraction.
+   `lore ingest --dry-run <source-id>` for each selected source to verify auth and extraction.
    `lore schema` REPLACES `<wiki>/AGENTS.md` wholesale, and `validate` warns whenever the
    file differs for any reason — including a hand edit, which the bytes cannot be told apart
    from a generator change. It reports `Replaced` rather than `Wrote` when a file was there;

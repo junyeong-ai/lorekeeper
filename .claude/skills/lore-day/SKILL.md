@@ -44,9 +44,10 @@ naming each line and its `why` in their words, and offer the repair the reason i
 under one of the four headings, outdent it, restore `- [ ]`). Never run a command against those
 tasks: they have no id this can reach.
 
-`null` ANYWHERE in the document means the store behind that key could not be READ, which is not
-the same as empty or zero. Say so rather than reporting nothing promised, and read the command's
-stderr — it names the file.
+`null` in `schedule`, `reminders`, `done_today`, or `unrecorded` means the corresponding
+store could not be read. Report that limitation and read stderr for the cause. Optional task
+fields (`due`, `wake`, `origin`) and a reminder's `task` may legitimately be null;
+`unwritable: null` means no board write restriction was reported.
 
 ## Reporting the day is half of it; the other half is what is waiting on them
 

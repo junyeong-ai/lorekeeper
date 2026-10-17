@@ -33,12 +33,14 @@ resolve section headings before inspecting pages.
    drops whatever only that page supported. Nothing derives these: a page mentioning
    a concept's name is not a citation (thousands of pages mention `Anthropic` in
    passing), so the graph cannot add them and you may not add them from a text match.
-   Two signals are exact enough to act on:
-   - **A page that DECLARES a concept and does not cite it.** A promotion marker
-     (`[PROMOTES: <id>]`) or a pattern id in a document's own frontmatter is the
-     source asserting that this document establishes that concept. Where the id
-     resolves (`lore resolve <id>`) and the page's related-concepts section lacks
-     the link, propose adding it as an extraction repair.
+   Two signals identify candidates for evidence review:
+   - **A page that declares a candidate concept and does not cite it.** A promotion
+     marker (`[PROMOTES: <id>]`) or a pattern id in frontmatter identifies an authored
+     association. Read the full source context and the resolved concept's synthesis:
+     distinguish a named subject from a proposed rule, preserve unestablished conditions,
+     and confirm that the evidence belongs to that concept's scope. Only then propose
+     a missing citation as an extraction repair. A marker alone establishes neither
+     a new concept nor the truth or generality of the proposed pattern.
    - **A material evidence gap recorded during synthesis.** Read open evidence-gap
      reviews and processing findings; older concepts may also carry unsupported-claim
      notes. Look for the page that supports the claim across the WHOLE vault,

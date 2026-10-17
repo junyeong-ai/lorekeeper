@@ -169,13 +169,12 @@ stale. A daily run is `lore ingest` → `/lore-process`, not `lore ingest` alone
   and retain a copy before a replacement whose evidence cannot be replayed. Counts
   alone cannot detect changed content. RSS retained event logs offer replay that
   other adapters may not provide.
-- `lore ingest --date <past>` re-materializes that day — and RE-FETCHES it. A source whose
-  window has passed returns fewer events than the page already holds (an RSS feed drops
-  older items; a Gmail `newer_than:` query stops matching), and the re-render replaces the
-  event list with what came back. Measured: a page holding 25 events, re-ingested two months
-  later, kept 10. So it repairs a page whose source can still reproduce it, and truncates one
-  whose source cannot. `--dry-run` reports the event count it would write; compare that
-  against the count the page states before running it for real.
+- `lore ingest --date <past>` re-fetches and re-materializes that day. Complete-refetch
+  sources render from the returned window: a Gmail `newer_than:` filter, remote edits,
+  or deletions can make it incomplete. RSS instead unions fresh events with that date's
+  retained event log, so entries that left the feed remain available. A missing log cannot
+  recover entries absent from the feed. Inspect `--dry-run` counts and source replayability
+  before replacing historical pages; counts alone do not prove identical content.
 - An LLM-owned section (a summary, refined events, concept links) survives a re-render only
   while its `llm_inputs.<key>_done` marker matches the input the render computes. That is the
   ordinary case, and the section is spliced through from the page on disk. Where the marker is
