@@ -91,8 +91,13 @@ Use `input.source_type` to identify candidate subjects:
   Do not invent a generic principle merely to remove its project context, and preserve
   the conditions that make an observation transferable.
   A promotion marker naming a pattern (`[PROMOTES: <id>]`) or a pattern id in the
-  document's own frontmatter declares an evidence relationship. Resolve that identity
-  and preserve its citation; use the id as the name when it is absent from the registry.
+  document's own frontmatter identifies a candidate evidence relationship. Read its
+  surrounding conditions and distinguish a proposed promotion from an established pattern.
+  Resolve the identity and apply the durable-concept and reuse criteria before creating
+  a page; a marker alone does not require a new node. Keep a conditional proposal and
+  its unestablished condition in source-level context. Reuse an existing
+  concept that faithfully covers the evidence without turning a narrower rule into its
+  alias. When a distinct durable pattern needs a new page, use its declared id as the name.
   A marker containing a proposed rule rather than naming a subject is still source
   evidence, but does not make the whole finding a concept name. Preserve that proposal
   in the source summary; do not invent an identity or alias it to a related mechanism.

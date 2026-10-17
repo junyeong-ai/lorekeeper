@@ -46,7 +46,11 @@ on-disk state, never from a cached snapshot.
   while the config says `wiki` is still analysed; a raw prefix test answers no there while
   `is_dir` passes on a case-insensitive volume, and every command reports an empty vault, green.
   `scan_vault` skips dot-directories, so `.trash` — where Obsidian puts a DELETED page — never
-  resolves. `VaultExistence` answers two separate questions and they must not be conflated:
+  resolves. Exact evidence-archive links are separately verified by `lk-vault`: an available
+  archive resolves, a missing archive is broken, and corruption aborts the check. Archives
+  never become graph nodes, citation sources or connectivity evidence, and their historical
+  links are never repointed by graph mutations. `VaultExistence` answers two separate
+  questions and they must not be conflated:
   `is_resolvable` (a file exists at this ADDRESS, **catalogs included** — they are files, so a
   page linking one links something real) and `is_knowledge` (…and it is not a generated catalog
   — the orphan-connectivity question, where counting a link to `index.md` would exempt the very

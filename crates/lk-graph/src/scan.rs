@@ -425,6 +425,7 @@ fn extract_first_heading(body: &str) -> Option<String> {
 #[derive(Debug, Clone)]
 pub struct VaultExistence {
     exact_ids: HashMap<String, String>,
+    archives: HashSet<String>,
     /// Requested alias -> actual scanned address, verified on this filesystem.
     aliases: HashMap<String, String>,
     knowledge: HashSet<String>,
@@ -441,6 +442,7 @@ impl VaultExistence {
                 .map(|page| (address(&page.path), page.id.clone()))
                 .collect(),
             aliases: HashMap::new(),
+            archives: HashSet::new(),
             knowledge: pages
                 .iter()
                 .filter(|page| !is_reserved(&page.id))
@@ -473,6 +475,12 @@ impl VaultExistence {
             if existence.exact_ids.contains_key(dest) {
                 continue;
             }
+            if lk_vault::is_archived_evidence(root, Path::new(dest))
+                .map_err(|error| GraphError::Io(error.to_string()))?
+            {
+                existence.archives.insert(dest.to_string());
+                continue;
+            }
             if let Some(actual) = resolver
                 .resolve(Path::new(dest))
                 .map_err(|error| GraphError::Io(error.to_string()))?
@@ -499,7 +507,9 @@ impl VaultExistence {
     }
 
     pub fn is_resolvable(&self, dest: &str) -> bool {
-        self.exact_ids.contains_key(dest) || self.aliases.contains_key(dest)
+        self.exact_ids.contains_key(dest)
+            || self.aliases.contains_key(dest)
+            || self.archives.contains(dest)
     }
 
     /// An exact existing address is never another file's respelling.
@@ -727,6 +737,44 @@ mod tests {
         assert_eq!(
             existence.reached(&Link::to("wiki/Lower.md")),
             Some("wiki/Lower")
+        );
+    }
+
+    #[test]
+    fn archived_evidence_resolves_without_entering_the_knowledge_graph() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("wiki")).unwrap();
+        std::fs::write(root.path().join("wiki/source.md"), "# Original evidence\n").unwrap();
+        let evidence = lk_vault::archive_evidence(root.path(), &["wiki/source.md".into()]).unwrap();
+        let archive = format!(".lorekeeper/evidence/{}.md", evidence.citations[0].revision);
+        std::fs::remove_file(root.path().join("wiki/source.md")).unwrap();
+        std::fs::create_dir_all(root.path().join(".trash")).unwrap();
+        std::fs::write(root.path().join(".trash/deleted.md"), "# Deleted\n").unwrap();
+        std::fs::write(root.path().join(".lorekeeper/private.md"), "# State\n").unwrap();
+        std::fs::write(
+            root.path().join("wiki/review.md"),
+            format!("# Review\n[Evidence](../{archive})\n[Trash](../.trash/deleted.md)\n[State](../.lorekeeper/private.md)\n"),
+        ).unwrap();
+        let pages = scan_vault(root.path(), false).unwrap();
+        assert_eq!(pages.len(), 1);
+        let dirs = VaultDirs::default();
+        let existence = VaultExistence::build_at(root.path(), &pages, &dirs).unwrap();
+        assert!(existence.is_resolvable(&archive));
+        assert_eq!(existence.reached(&Link::to(&archive)), None);
+        assert!(!existence.is_knowledge(&page_id(Path::new(&archive))));
+        assert!(!existence.is_linked("wiki/review"));
+        let broken = crate::graph::broken_links(&pages, &existence, &dirs);
+        assert_eq!(broken.len(), 2);
+        assert!(broken.iter().all(|link| link.target != archive));
+
+        std::fs::write(root.path().join(&archive), "# Tampered\n").unwrap();
+        assert!(VaultExistence::build_at(root.path(), &pages, &dirs).is_err());
+        std::fs::remove_file(root.path().join(&archive)).unwrap();
+        let existence = VaultExistence::build_at(root.path(), &pages, &dirs).unwrap();
+        assert!(!existence.is_resolvable(&archive));
+        assert_eq!(
+            crate::graph::broken_links(&pages, &existence, &dirs).len(),
+            3
         );
     }
 

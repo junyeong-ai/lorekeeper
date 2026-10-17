@@ -41,8 +41,8 @@ pub use self::provenance::{
 };
 pub use self::review::{
     EvidenceReport, KnowledgeReview, ReviewEffectiveState, ReviewReport, ReviewStatus,
-    archive_evidence, inspect_evidence, list_reviews, load_archived_evidence, publish_document,
-    publish_document_expected, same_existing_file,
+    archive_evidence, inspect_evidence, is_archived_evidence, list_reviews, load_archived_evidence,
+    publish_document, publish_document_expected, same_existing_file,
 };
 pub use self::search::{MatchField, SearchHit, SearchOptions, SearchResult, search};
 pub use self::search_index::{SearchSnapshot, prepare_search};

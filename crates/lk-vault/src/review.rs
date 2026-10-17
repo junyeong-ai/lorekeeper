@@ -165,6 +165,17 @@ fn archive_path(revision: &str) -> Result<std::path::PathBuf, VaultError> {
     Ok(Path::new(".lorekeeper/evidence").join(format!("{revision}.md")))
 }
 
+/// Whether an exact vault address names an available, verified evidence archive.
+pub fn is_archived_evidence(root: &Path, path: &Path) -> Result<bool, VaultError> {
+    let Some(revision) = path.file_stem().and_then(|name| name.to_str()) else {
+        return Ok(false);
+    };
+    if archive_path(revision).ok().as_deref() != Some(path) {
+        return Ok(false);
+    }
+    Ok(load_archived_evidence(root, revision)?.is_some())
+}
+
 /// Retrieve a historical source only after verifying its authored revision.
 /// Missing archives are distinct from corrupt or unreadable archives.
 pub fn load_archived_evidence(
