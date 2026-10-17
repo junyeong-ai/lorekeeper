@@ -169,13 +169,11 @@ pub enum SynthesisPolicy {
     Skip,
 }
 
-pub fn sync_concept_backlinks(
+fn incoming_citations(
     pages: &[ScannedPage],
     vault_root: &Path,
-    dry_run: bool,
     dirs: &VaultDirs,
-    synthesis: SynthesisPolicy,
-) -> Result<BacklinksSyncResult, GraphError> {
+) -> Result<BTreeMap<String, BTreeSet<String>>, GraphError> {
     if let Some(page) = pages.iter().find(|page| {
         is_valid_source(&page.path, dirs)
             && !crate::scan::states_intent(page)
@@ -192,7 +190,6 @@ pub fn sync_concept_backlinks(
     // rendered body deterministic.
     // `pages` here is a full-vault scan of every page dir, so it IS the vault.
     let existence = VaultExistence::build_at(vault_root, pages, dirs)?;
-    let by_id: HashMap<&str, &ScannedPage> = pages.iter().map(|p| (p.id.as_str(), p)).collect();
     let mut incoming: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for page in pages {
         // A page that states intent is not evidence: the board is forward-looking and it
@@ -219,6 +216,81 @@ pub fn sync_concept_backlinks(
             }
         }
     }
+
+    Ok(incoming)
+}
+
+/// Derive one exact concept's current evidence and replacement sections without writes.
+/// This does not depend on retained queue history or an unanswered completion marker.
+pub fn concept_resynthesis(
+    pages: &[ScannedPage],
+    vault_root: &Path,
+    dirs: &VaultDirs,
+    path: &Path,
+) -> Result<ConceptResynthesis, GraphError> {
+    let fail = |message: &str| GraphError::Io(message.to_owned());
+    lk_vault::page_path(vault_root, path).map_err(|e| fail(&e.to_string()))?;
+    let page = pages
+        .iter()
+        .find(|p| p.path == path)
+        .filter(|p| is_concept_page(&p.path, dirs) && p.format.as_deref() == Some("concept"))
+        .ok_or_else(|| fail("expected an exact existing concept Markdown path"))?;
+    let incoming = incoming_citations(pages, vault_root, dirs)?;
+    let sources = incoming
+        .get(&page.id)
+        .ok_or_else(|| fail("concept has no current citations"))?;
+    if sources.is_empty() {
+        return Err(fail("concept has no current citations"));
+    }
+    let by_id: HashMap<&str, &ScannedPage> = pages.iter().map(|p| (p.id.as_str(), p)).collect();
+    let raw = std::fs::read_to_string(
+        lk_vault::page_path(vault_root, path).map_err(|e| fail(&e.to_string()))?,
+    )
+    .map_err(|e| fail(&e.to_string()))?;
+    frontmatter::parse_page(&raw).map_err(|e| fail(&e.to_string()))?;
+    let section = resolve_section(&raw, |s| s.concept_synthesis)
+        .ok_or_else(|| fail("concept lacks synthesis heading"))?;
+    if resolve_section(&raw, |s| s.concept_sources).is_none() {
+        return Err(fail("concept lacks sources heading"));
+    }
+    let related = resolve_section(&raw, |s| s.related);
+    Ok(ConceptResynthesis {
+        path: path.to_path_buf(),
+        anchor: format!("## {}", section.heading),
+        related_anchor: related.as_ref().map(|s| format!("## {}", s.heading)),
+        citations: sources
+            .iter()
+            .map(|id| {
+                let source = by_id[id.as_str()];
+                Citation::at_revision(
+                    &source.path,
+                    source.revision.clone().expect("validated source revision"),
+                )
+            })
+            .collect(),
+        discarding: [Some(&section), related.as_ref()]
+            .into_iter()
+            .flatten()
+            .filter_map(|s| {
+                let body = s.body.trim();
+                (!body.is_empty()).then(|| DiscardedBody {
+                    heading: s.heading.to_owned(),
+                    body: body.to_owned(),
+                })
+            })
+            .collect(),
+    })
+}
+
+pub fn sync_concept_backlinks(
+    pages: &[ScannedPage],
+    vault_root: &Path,
+    dry_run: bool,
+    dirs: &VaultDirs,
+    synthesis: SynthesisPolicy,
+) -> Result<BacklinksSyncResult, GraphError> {
+    let incoming = incoming_citations(pages, vault_root, dirs)?;
+    let by_id: HashMap<&str, &ScannedPage> = pages.iter().map(|p| (p.id.as_str(), p)).collect();
 
     let writer = VaultWriter::new(vault_root);
     let mut report = BacklinksSyncResult {
@@ -345,8 +417,8 @@ pub fn sync_concept_backlinks(
         // follows seconds later in the same run.
         //
         // Adoption costs nothing that is not recovered: the next time the citation set MOVES
-        // the page is owed a rewrite like any other, and forcing one sooner is the lever every
-        // other section already has — delete the `_done` marker.
+        // the page is owed a rewrite like any other. An explicit rewrite from current
+        // citations is requested through `lore graph resynthesize <path>`.
         // What is adopted has to BE an answer. A section holding only a heading, or only a
         // `> [!conflict]` callout, is a marker somebody left rather than a statement about the
         // concept — and adopting a lone callout is the worst of the two, because `graph lint`

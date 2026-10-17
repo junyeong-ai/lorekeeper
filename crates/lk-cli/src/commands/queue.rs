@@ -1242,6 +1242,48 @@ pub(super) struct WorkInFlight {
     /// repair, and it cannot be made about a queue that was not fully read.
     pub unread: Vec<String>,
 }
+/// Find an already-current exact request while refusing an undecidable pending queue.
+pub(super) fn current_synthesis_request(
+    root: &Path,
+    target: &str,
+    hash: &str,
+) -> miette::Result<Option<QueueTask>> {
+    let mut revisions = BTreeMap::new();
+    let mut found = None;
+    for file in pending_queue_files(&root.join(".lorekeeper/queue"))? {
+        let read = read_tasks(&file)?;
+        if read.unparseable > 0 {
+            return Err(miette::miette!(
+                "pending queue has unparseable lines: {}",
+                file.display()
+            ));
+        }
+        for task in read.tasks {
+            if task.target.kind == lk_queue::TargetKind::ConceptSynthesis
+                && task.target.vault_path == target
+                && task.cache_hash == hash
+            {
+                let state = classify_task(root, &task, &mut revisions)?;
+                if state == TaskStatus::Unreadable {
+                    return Err(miette::miette!(
+                        "matching synthesis request is unreadable: {}",
+                        task.task_id
+                    ));
+                }
+                if state == TaskStatus::Current
+                    && task
+                        .input
+                        .get("generation_policy")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(lk_queue::TaskKind::SynthesizeConcept.generation_policy())
+                {
+                    found.get_or_insert(task);
+                }
+            }
+        }
+    }
+    Ok(found)
+}
 
 /// The `(vault_path, cache_hash)` of every pending task of `kind` that still classifies as
 /// WORK — one a drain will act on.

@@ -1,6 +1,6 @@
 ---
 name: lore-wiki
-version: 0.46.1
+version: 0.47.0
 description: Semantic wiki operations for the Lorekeeper vault. Add sources, query with compounding, audit structural and semantic health. Reads AGENTS.md for page formats and section vocabulary — never hardcodes headings. Pairs with `lore` (the deterministic binary) for graph analysis and queue processing.
 when_to_use: |
   wiki query, knowledge search, ask wiki, search vault,
@@ -106,7 +106,9 @@ each as an independent source, and report the aggregate results.
    Observations (orphans, open conflicts) are reported without gating.
 6. Run `lore queue status --json` and report what was created/updated, grouped by
    source file, with any newly queued synthesis still pending. Drain it through
-   `/lore-process` when semantic completion is part of the request.
+   `/lore-process` when semantic completion is part of the request. Authored pages
+   and pending concept rewrites are separate completion claims; unrelated queue
+   work does not expand a bounded add into a global drain.
 
 ### `/lore-wiki query <question>`
 
@@ -187,7 +189,9 @@ Answer a question grounded in vault content, with compounding.
      `lore graph backlinks-sync` (its Grounding links are real citations that
      raise each grounded concept's `source_count`), then `lore wiki refresh` (so the
      exploration is catalogued, the next audit shows no index drift, and its links
-     compound the cluster structure). Tell the user where it landed.
+     compound the cluster structure). Run `lore queue status --json` and report any
+     synthesis queued by reconciliation as pending. Use `/lore-process` when semantic
+     completion is part of the request. Tell the user where the assessment landed.
    - **Ephemeral** (single-fact, navigational lookup) → do not file.
 
    The judgment is per-answer by the model. No frequency rule, no

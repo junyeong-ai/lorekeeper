@@ -1,6 +1,6 @@
 ---
 name: lore-capture
-version: 0.46.1
+version: 0.47.0
 description: Capture high-value insights from active work into the Lorekeeper vault — troubleshooting discoveries, non-obvious constraints, reusable patterns. Operates in the moment while context is alive.
 when_to_use: |
   knowledge capture, lore capture, capture this, record insight,
@@ -142,7 +142,10 @@ lore graph lint             # non-zero means the vault contradicts itself somewh
 
 Show created/merged paths, concept count, and transferability level. Run
 `lore queue status --json` and report synthesis queued by Finalize as pending;
-use `/lore-process` to complete it when requested as part of this work.
+use `/lore-process` to complete it when requested as part of this work. A successful
+capture means the authored pages and reconciliation passed; do not call pending
+concept rewrites semantically complete. Unrelated queue work does not expand this
+capture into a global drain.
 
 ## Quality gate
 

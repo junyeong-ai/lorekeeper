@@ -284,3 +284,12 @@ on-disk state, never from a cached snapshot.
   not support, contradiction or causal semantics; the linked prose owns that judgment.
   Neighbor types come from declared frontmatter, never from directory names. The CLI
   filters exact types and direction before pagination; type facets describe the unfiltered neighbors.
+
+- **Explicit concept rewrites**: `lore graph resynthesize <exact-concept.md>` derives
+  current citations through `backlinks::concept_resynthesis`, sharing the incoming-link
+  evidence derivation with backlinks sync. It requires a declared concept, readable
+  nonempty evidence and existing section headings. The CLI atomically records the
+  input/policy request and publishes one typed task in a mutation journal under the
+  queue writer lock; existing current matching work is reused. It preserves prose
+  until queue apply publishes the new answer. Dry-run neither writes nor recovers.
+  Historical replay remains `queue regenerate --task-id`, requiring retained input.

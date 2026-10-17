@@ -7,6 +7,7 @@ mod jira;
 mod manual;
 pub(crate) mod markdown;
 mod nodex;
+pub use nodex::repoint_document_links;
 pub(crate) mod paging;
 pub(crate) mod retry;
 mod rss;

@@ -624,10 +624,9 @@ pub fn print_backlinks(r: &BacklinksSyncReport) {
         println!(
             "\nAdopted: {} concept page(s) already held a written synthesis and had recorded no \
              input — their prose stands as the answer for the evidence they carry now, and a \
-             rewrite is owed the next time that evidence moves. Delete a page's \
-             `llm_inputs.synthesis_done` to have one written sooner — deleting BOTH keys \
-             re-adopts it instead, because a page that records no input is one this has never \
-             seen",
+             rewrite is owed the next time that evidence moves. Use \
+             `lore graph resynthesize <vault-relative-concept.md>` to request a rewrite \
+             from current citations without editing completion markers",
             r.sync.adopted.len()
         );
         for adopted in &r.sync.adopted {
@@ -648,9 +647,9 @@ pub fn print_backlinks(r: &BacklinksSyncReport) {
             .count();
         if deferred > 0 {
             println!(
-                "  {deferred} of those answer to MORE than one citation — their prose was \
-                 written from less evidence than the page now carries. Delete a page's \
-                 `llm_inputs.synthesis_done` to have it rewritten from all of it"
+                "  {deferred} of those answer to MORE than one citation — the coverage of their \
+                 adopted prose has not been verified. Use \
+                 `lore graph resynthesize <vault-relative-concept.md>` for an explicit rewrite"
             );
         }
     }

@@ -1,6 +1,6 @@
 ---
 name: lore-extract
-version: 0.46.1
+version: 0.47.0
 description: Batch-extract transferable knowledge from a project repository into the Lorekeeper vault. Three-phase workflow — scan (discover + persist manifest), run (extract using manifest), audit (verify coverage). Manifest-driven for consistency across runs.
 when_to_use: |
   lore extract, batch extract, extract project knowledge,
@@ -404,7 +404,9 @@ Extract knowledge using the manifest. Requires a prior scan.
    ```
 8. Run `lore queue status --json`; report created/merged/skipped counts and any
    pending concept synthesis. Document extraction is complete, but queued concept
-   rewrites require `/lore-process` before reporting semantic completion.
+   rewrites require `/lore-process` before reporting semantic completion. Report
+   unrelated pending work separately; a bounded extraction does not authorize a
+   global queue drain.
 
 ## Phase 3: Audit
 

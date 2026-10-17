@@ -1,7 +1,7 @@
 ---
 name: lore-ingest
-version: 0.46.1
-description: Daily knowledge ingestion pipeline — collects from Gmail, Google Drive, Google Calendar, Slack, Jira, RSS, and a manual inbox into an Obsidian vault. Deduplicates, classifies, extracts concepts, writes structured pages. Optionally tracks your own work into a work-log when the `personal:` module is configured. Phased ingest with atomic per-page writes and durable published queue tasks.
+version: 0.47.0
+description: Daily knowledge ingestion pipeline — collects from Gmail, Google Drive, Google Calendar, Slack, Jira, Confluence, RSS, project repositories (nodex), and a manual inbox into an Obsidian vault. Deduplicates, classifies, extracts concepts, writes structured pages. Optionally tracks your own work into a work-log when the `personal:` module is configured. Phased ingest with atomic per-page writes and durable published queue tasks.
 argument-hint: "<subcommand> [args]"
 disable-model-invocation: true
 allowed-tools: |
@@ -83,8 +83,11 @@ defaults are usually wrong, and both fail SILENTLY:
   `lore-weekly.sh`. `lore ingest` and `lore synthesis weekly` are only stage ONE of those
   scripts: the queue drain and `lore queue apply` live in the scripts alone, so without
   this flag the schedule ingests every morning and never fills a summary or materializes
-  a concept. Only those two jobs take it. Monthly/quarterly/annual syntheses enqueue
-  narrative tasks that the next daily drain processes; the janitors have no LLM work.
+  a concept. Monthly/quarterly/annual jobs also use their named entry scripts; these
+  enqueue narrative tasks that the next daily drain processes. Maintenance uses
+  `lore-maintenance.sh` to run retention and queue pruning sequentially. When a task
+  board is configured, this flag also schedules the reminder notifier. The janitors
+  have no LLM work.
 
 Every emitted path must be absolute (`--bin`, `--pipeline-dir`): launchd searches no
 `PATH` and expands no `~`.
@@ -136,13 +139,14 @@ Review and commit vault changes separately; existing staging remains untouched.
 
 1. **Plan each source** — fetch, normalize, intra-batch dedup, classify. A source
    that fails is recorded and skipped; the run continues with the rest.
-2. **Write pages** — atomic per file (tmp + rename). `manual` — and only `manual` — writes
-   `<wiki>/documents/{slug}.md`; every other source type writes
-   `<daily>/{source-id}/DATE.md`. Concept pages are a cross-source aggregate, rendered once
+2. **Write pages** — atomic per file (tmp + rename). Document-unit sources (`manual`
+   and `nodex`) write individual pages under `<wiki>/documents/`; day-unit sources
+   write `<daily>/{source-id}/DATE.md`. Imported repository documents keep their
+   identity and vault address across source renames. Concept pages are a cross-source aggregate, rendered once
    after all sources plan.
 3. **Write work-log** — personal events only, and only when the optional `personal:`
    module is configured (a source must be in `personal.tracked_sources` AND match its
-   adapter `is_self`; `manual`/RSS/Drive have no authorship, so never produce work-log
+   adapter `is_self`; `manual`/nodex/RSS/Drive have no authorship, so never produce work-log
    entries even if listed). FULL ingest only: a source-filtered run skips this step —
    its event set is a structural subset and would overwrite the complete page.
 4. **Flush LLM queue** — one atomic JSONL task file (queue mode).

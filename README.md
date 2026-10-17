@@ -422,6 +422,17 @@ lore init credentials   # 대화형 마법사 — Google 토큰은 브라우저 
 
 ---
 
+
+`lore wiki document-identity plan`에 `--history-ref <전체-커밋-ID>`를 반복 지정하면
+과거 원문 사본도 검증합니다. 계획은 Git blob·작성된 ID·정확히 투영된 본문을 고정하고,
+`check`와 `apply`가 다시 검증합니다. `apply --allow-blocked`는 검증된 부분만 이관하고
+해결되지 않은 페이지는 그대로 둡니다.
+
+현재 인용 근거로 개념 하나를 다시 작성하려면
+`lore graph resynthesize wiki/concepts/example.md --dry-run`으로 확인한 뒤
+`--dry-run` 없이 요청하고 큐를 처리합니다. 과거 작업이 만료되어도 사용할 수 있으며,
+`queue regenerate --task-id`는 원래 입력이 보관된 경우에만 재생합니다.
+
 ## 스케줄링
 
 ```bash
@@ -432,7 +443,7 @@ lore schedule --format launchd --bin "$(command -v lore)" \
 
 예약 스크립트는 `/bin/bash`로 직접 실행되어 작업별 이름이 표시됩니다. 월간·분기·연간 검토는 각 주기를 유지하며 저장소 쓰기 잠금을 기다립니다. 유지보수와 큐 정리는 한 작업으로 순차 실행됩니다. 기존 예약을 교체할 때는 `com.lorekeeper.queue-prune` LaunchAgent도 해제·제거하세요. `--template-dir` 지정은 예약 환경에도 전달됩니다.
 
-`ingest.schedule`은 **전체 소스를 한 번에** 도는 `lore ingest` 한 줄을 발행합니다(work-log가 cross-source 일일 집계라 소스별 분할 실행은 페이지를 부분 덮어씀). 각 합성 주기(weekly/monthly/quarterly/annual)는 자기 cron을 발행하고, `maintenance.schedule`이 있으면 청소 작업도 자동화됩니다.
+`ingest.schedule`은 **전체 소스를 한 번에** 수집하는 작업 하나를 발행합니다. `--pipeline-dir`가 있으면 `lore-daily.sh`, 없으면 `lore ingest`를 실행합니다. 소스를 지정한 수집은 전체 소스의 일일 집계인 work-log를 건너뜁니다. 각 합성 주기(weekly/monthly/quarterly/annual)는 독립된 일정을 유지하며, `maintenance.schedule`은 보존 기간 정리와 큐 정리를 자동화합니다.
 
 무인 운영용으로 `lore-daily.sh`(일일 수집+큐 처리+그래프 정합), `lore-weekly.sh`(주간 합성+지식 감사)와 월간·분기·연간·유지보수용 진입 스크립트가 함께 설치됩니다. 시스템 스케줄러(launchd/cron)가 이를 실행하므로 Claude 데스크탑이 떠 있지 않아도 동작합니다.
 

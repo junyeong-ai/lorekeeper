@@ -13,6 +13,9 @@ pub enum IdentityCommand {
         /// Configured nodex source with a stable repository_id
         #[arg(long)]
         source: String,
+        /// Audited immutable Git commit (full SHA-1); repeat to prove historical copies
+        #[arg(long)]
+        history_ref: Vec<String>,
         /// New manifest path; existing files are refused
         #[arg(long)]
         manifest: PathBuf,
@@ -44,6 +47,8 @@ struct Manifest {
     config_revision: String,
     snapshot: String,
     entries: Vec<Entry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    history_refs: Vec<String>,
 }
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -55,6 +60,167 @@ struct Entry {
     source_record: Option<serde_json::Value>,
     projection_revision: Option<String>,
     blocked: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    historical_proof: Option<HistoricalProof>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct HistoricalProof {
+    commit: String,
+    path: String,
+    blob: String,
+    document: String,
+    projection_revision: String,
+}
+struct HistoricalTree {
+    commit: String,
+    blobs: BTreeMap<String, String>,
+}
+fn git(repo: &Path, args: &[&str]) -> miette::Result<String> {
+    let output = std::process::Command::new("git")
+        .arg("--no-replace-objects")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .map_err(failure)?;
+    if !output.status.success() {
+        return Err(failure(format!(
+            "git {} failed: {}",
+            args[0],
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    String::from_utf8(output.stdout).map_err(failure)
+}
+fn github_repository(remote: &str) -> Option<String> {
+    let path = remote
+        .trim()
+        .strip_prefix("https://github.com/")
+        .or_else(|| remote.trim().strip_prefix("git@github.com:"))
+        .or_else(|| remote.trim().strip_prefix("ssh://git@github.com/"))?;
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let parts: Vec<_> = path.split('/').collect();
+    if parts.len() != 2
+        || parts
+            .iter()
+            .any(|p| p.is_empty() || *p == "." || *p == ".." || p.chars().any(char::is_whitespace))
+    {
+        return None;
+    }
+    Some(format!("github.com/{path}"))
+}
+fn historical_trees(
+    repo: &Path,
+    repository: &str,
+    refs: &[String],
+) -> miette::Result<Vec<HistoricalTree>> {
+    if refs.is_empty() {
+        return Ok(Vec::new());
+    }
+    if github_repository(&git(repo, &["remote", "get-url", "origin"])?).as_deref()
+        != Some(repository)
+    {
+        return Err(failure(
+            "historical proof requires origin to match configured repository_id",
+        ));
+    }
+    let mut trees = Vec::new();
+    for commit in refs {
+        if commit.len() != 40
+            || !commit
+                .bytes()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        {
+            return Err(failure(
+                "history-ref must be a full lowercase 40-character commit ID",
+            ));
+        }
+        if git(repo, &["cat-file", "-t", commit])?.trim() != "commit" {
+            return Err(failure("history-ref is not a commit object"));
+        }
+        let raw = git(repo, &["ls-tree", "-r", "-z", commit])?;
+        let mut blobs = BTreeMap::new();
+        for entry in raw.split('\0').filter(|s| !s.is_empty()) {
+            let (meta, path) = entry
+                .split_once('\t')
+                .ok_or_else(|| failure("invalid git tree entry"))?;
+            let fields: Vec<_> = meta.split_whitespace().collect();
+            if fields.len() == 3 && matches!(fields[0], "100644" | "100755") && fields[1] == "blob"
+            {
+                blobs.insert(path.to_owned(), fields[2].to_owned());
+            }
+        }
+        trees.push(HistoricalTree {
+            commit: commit.clone(),
+            blobs,
+        });
+    }
+    Ok(trees)
+}
+fn historical_match(
+    repo: &Path,
+    trees: &[HistoricalTree],
+    path: &str,
+    target: &str,
+    base_url: Option<&str>,
+) -> miette::Result<Result<Option<HistoricalProof>, String>> {
+    use std::path::Component;
+    if Path::new(path)
+        .components()
+        .any(|c| !matches!(c, Component::Normal(_)))
+        || path.is_empty()
+    {
+        return Err(failure(
+            "historical source path must be a contained normal relative path",
+        ));
+    }
+    let mut matches = Vec::new();
+    let mut bodies = BTreeMap::new();
+    for tree in trees {
+        let Some(blob) = tree.blobs.get(path) else {
+            continue;
+        };
+        if let std::collections::btree_map::Entry::Vacant(entry) = bodies.entry(blob.clone()) {
+            entry.insert(git(repo, &["cat-file", "blob", blob])?);
+        }
+        let page = parse_page(&bodies[blob]).map_err(failure)?;
+        // Historical identity is authored, never inferred from a title or filename.
+        let Some(document) = page
+            .frontmatter
+            .get("id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+        else {
+            continue;
+        };
+        let linked = lk_source::repoint_document_links(&page.body, path, base_url, |p| {
+            tree.blobs.contains_key(p)
+        });
+        let projected =
+            lk_core::markdown::demote_headings(&lk_core::text::collapse_blank_lines(&linked), 4);
+        if matches_projection(target, &projected) {
+            matches.push(HistoricalProof {
+                commit: tree.commit.clone(),
+                path: path.into(),
+                blob: blob.clone(),
+                document: document.into(),
+                projection_revision: revision(projected.trim()),
+            });
+        }
+    }
+    if matches
+        .iter()
+        .map(|p| &p.document)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+        > 1
+    {
+        return Ok(Err(
+            "historical body matches conflicting explicit document IDs".into(),
+        ));
+    }
+    Ok(Ok(matches.into_iter().next()))
 }
 fn failure(error: impl std::fmt::Display) -> miette::Report {
     miette::miette!("{error}")
@@ -94,7 +260,13 @@ pub async fn run(opts: &super::GlobalOptions, command: IdentityCommand) -> miett
         IdentityCommand::Plan { source, .. } => source.clone(),
         _ => expected.as_ref().unwrap().source.clone(),
     };
-    let observed = observe(&config, &source, revision(&config_raw)).await?;
+    let mut history_refs = match &command {
+        IdentityCommand::Plan { history_ref, .. } => history_ref.clone(),
+        _ => expected.as_ref().unwrap().history_refs.clone(),
+    };
+    history_refs.sort();
+    history_refs.dedup();
+    let observed = observe(&config, &source, revision(&config_raw), &history_refs).await?;
     verify_config(&config_path, &config_raw)?;
     if let Some(mut expected) = expected {
         verify_manifest(&mut expected, &observed, &config.vault.root_path())?;
@@ -134,7 +306,7 @@ pub async fn run(opts: &super::GlobalOptions, command: IdentityCommand) -> miett
         let plan = prepare_mutation(&session, &observed)?;
         // Archive publication may take time. Reobserve source, config and targets before commit.
         verify_config(&config_path, &config_raw)?;
-        let refreshed = observe(&config, &source, revision(&config_raw)).await?;
+        let refreshed = observe(&config, &source, revision(&config_raw), &history_refs).await?;
         verify_config(&config_path, &config_raw)?;
         if refreshed != observed {
             return Err(failure("migration inputs changed while archiving"));
@@ -218,6 +390,7 @@ async fn observe(
     config: &lk_core::config::Config,
     source_id: &str,
     config_revision: String,
+    history_refs: &[String],
 ) -> miette::Result<Manifest> {
     let source_config = config
         .sources
@@ -275,9 +448,9 @@ async fn observe(
         source_id,
         config_revision,
         snapshot,
-        &root,
         &repo,
         events,
+        history_refs,
     )
 }
 fn build_manifest(
@@ -285,10 +458,20 @@ fn build_manifest(
     source_id: &str,
     config_revision: String,
     snapshot: String,
-    root: &Path,
     repo: &Path,
     events: Vec<lk_core::event::Event>,
+    history_refs: &[String],
 ) -> miette::Result<Manifest> {
+    let root_path = config.vault.root_path().canonicalize().map_err(failure)?;
+    let root = root_path.as_path();
+    let params = config.sources.get(source_id).map(|s| &s.params);
+    let repository = params
+        .and_then(|p| p.get("repository_id"))
+        .and_then(|v| v.as_str());
+    let base_url = params
+        .and_then(|p| p.get("base_url"))
+        .and_then(|v| v.as_str());
+    let trees = historical_trees(repo, repository.unwrap_or(""), history_refs)?;
     let mut origins = BTreeMap::new();
     let mut source_identities = std::collections::BTreeSet::new();
     for event in events {
@@ -365,13 +548,16 @@ fn build_manifest(
             source_record: None,
             projection_revision: None,
             blocked: None,
+            historical_proof: None,
         };
+        let mut history_eligible = false;
         entry.blocked = if page.frontmatter.get("type").and_then(|v| v.as_str()) != Some("document")
         {
             Some("target does not declare document format".into())
         } else {
             match origins.get(location) {
                 None => {
+                    history_eligible = true;
                     Some("no current source at exact location; historical proof required".into())
                 }
                 Some(event) => {
@@ -389,6 +575,7 @@ fn build_manifest(
                     {
                         Some("source_record ID disagrees".into())
                     } else if !matches_projection(&raw, &event.body) {
+                        history_eligible = true;
                         Some(
                         "copied body differs from production projection; historical proof required"
                             .into(),
@@ -399,6 +586,43 @@ fn build_manifest(
                 }
             }
         };
+        if !trees.is_empty() && history_eligible {
+            let relative = Path::new(location).strip_prefix(repo).map_err(failure)?;
+            // Reject even lexically equivalent escape paths; a historical source need not exist today.
+            let relative = relative
+                .to_str()
+                .ok_or_else(|| failure("non-UTF8 historical source path"))?;
+            match historical_match(repo, &trees, relative, &raw, base_url)? {
+                Err(reason) => entry.blocked = Some(reason),
+                Ok(None) => {}
+                Ok(Some(proof)) => {
+                    let identity = serde_json::json!({"repository":repository.unwrap(), "document":proof.document});
+                    if locations[location] != 1 || owners.contains_key(&identity.to_string()) {
+                        entry.blocked = Some("multiple legacy or stable owners".into());
+                    } else if page
+                        .frontmatter
+                        .get("source_record")
+                        .and_then(|r| r.get("id"))
+                        .is_some_and(|id| id.as_str() != Some(proof.document.as_str()))
+                    {
+                        entry.blocked =
+                            Some("source_record ID disagrees with historical proof".into());
+                    } else if entry
+                        .identity
+                        .as_ref()
+                        .is_some_and(|current| current != &identity)
+                    {
+                        entry.blocked =
+                            Some("current and historical explicit document IDs disagree".into());
+                    } else {
+                        entry.identity = Some(identity);
+                        entry.projection_revision = Some(proof.projection_revision.clone());
+                        entry.historical_proof = Some(proof);
+                        entry.blocked = None;
+                    }
+                }
+            }
+        }
         if entry.blocked.is_none() {
             let after = lk_vault::set_frontmatter_field(
                 &raw,
@@ -410,13 +634,28 @@ fn build_manifest(
         }
         entries.push(entry);
     }
+    let mut bindings = BTreeMap::<String, usize>::new();
+    for entry in &entries {
+        if entry.blocked.is_none() {
+            *bindings
+                .entry(entry.identity.as_ref().unwrap().to_string())
+                .or_default() += 1;
+        }
+    }
+    for entry in &mut entries {
+        if entry.blocked.is_none() && bindings[&entry.identity.as_ref().unwrap().to_string()] > 1 {
+            entry.blocked = Some("multiple legacy or stable owners".into());
+            entry.applied_revision = None;
+        }
+    }
     entries.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(Manifest {
-        version: 1,
+        version: if history_refs.is_empty() { 1 } else { 2 },
         source: source_id.into(),
         config_revision,
         snapshot,
         entries,
+        history_refs: history_refs.to_vec(),
     })
 }
 
@@ -427,6 +666,248 @@ fn matches_projection(raw: &str, projected: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct GitFixture {
+        temp: tempfile::TempDir,
+    }
+    impl GitFixture {
+        fn new() -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            git(temp.path(), &["init", "-q"]).unwrap();
+            git(temp.path(), &["config", "user.email", "test@example.test"]).unwrap();
+            git(temp.path(), &["config", "user.name", "test"]).unwrap();
+            git(
+                temp.path(),
+                &["remote", "add", "origin", "git@github.com:example/repo.git"],
+            )
+            .unwrap();
+            Self { temp }
+        }
+        fn commit(&self, id: &str, body: &str) -> String {
+            std::fs::write(
+                self.temp.path().join("doc.md"),
+                format!("---\nid: {id}\nkind: learning\nstatus: active\n---\n{body}"),
+            )
+            .unwrap();
+            git(self.temp.path(), &["add", "doc.md"]).unwrap();
+            git(self.temp.path(), &["commit", "-qm", "document"]).unwrap();
+            git(self.temp.path(), &["rev-parse", "HEAD"])
+                .unwrap()
+                .trim()
+                .into()
+        }
+        fn trees(&self, refs: &[String]) -> Vec<HistoricalTree> {
+            historical_trees(self.temp.path(), "github.com/example/repo", refs).unwrap()
+        }
+    }
+    #[test]
+    fn historical_copy_uses_sealed_blob_even_after_source_deleted() {
+        let f = GitFixture::new();
+        let old = f.commit("authored-id", "# Heading\n\nOriginal.\n");
+        f.commit("authored-id", "# Heading\n\nChanged.\n");
+        std::fs::remove_file(f.temp.path().join("doc.md")).unwrap();
+        let trees = f.trees(std::slice::from_ref(&old));
+        let target = "## Content\n\n#### Heading\n\nOriginal.\n\n## Summary\nKeep.\n";
+        let proof = historical_match(f.temp.path(), &trees, "doc.md", target, None)
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(proof.document, "authored-id");
+        assert_eq!(proof.commit, old);
+        assert_eq!(
+            git(f.temp.path(), &["rev-parse", &format!("{old}:doc.md")])
+                .unwrap()
+                .trim(),
+            proof.blob
+        );
+        assert!(
+            historical_match(
+                f.temp.path(),
+                &trees,
+                "doc.md",
+                &target.replace("Original.", "Edited."),
+                None
+            )
+            .unwrap()
+            .unwrap()
+            .is_none()
+        );
+    }
+    #[test]
+    fn historical_identical_body_with_conflicting_ids_is_blocked() {
+        let f = GitFixture::new();
+        let a = f.commit("first", "Identical.\n");
+        let b = f.commit("second", "Identical.\n");
+        let trees = f.trees(&[a, b]);
+        assert!(
+            historical_match(
+                f.temp.path(),
+                &trees,
+                "doc.md",
+                "## Content\nIdentical.\n",
+                None
+            )
+            .unwrap()
+            .is_err()
+        );
+    }
+    #[test]
+    fn historical_projection_resolves_links_against_immutable_tree() {
+        let f = GitFixture::new();
+        std::fs::write(f.temp.path().join("other.md"), "Historical destination.").unwrap();
+        git(f.temp.path(), &["add", "other.md"]).unwrap();
+        let commit = f.commit(
+            "first",
+            "# Header\n\n[other](other.md) [absent](absent.md)\n",
+        );
+        std::fs::remove_file(f.temp.path().join("other.md")).unwrap();
+        std::fs::write(f.temp.path().join("absent.md"), "Only present now.").unwrap();
+        let trees = f.trees(&[commit]);
+        let target = "## Content\n\n#### Header\n\n[other](https://github.com/example/repo/blob/main/other.md) absent\n";
+        assert!(
+            historical_match(
+                f.temp.path(),
+                &trees,
+                "doc.md",
+                target,
+                Some("https://github.com/example/repo/blob/main")
+            )
+            .unwrap()
+            .unwrap()
+            .is_some()
+        );
+    }
+    #[test]
+    fn historical_proof_ignores_git_commit_and_blob_replacements() {
+        let f = GitFixture::new();
+        let original = f.commit("original-id", "Original body.\n");
+        let original_blob = git(f.temp.path(), &["rev-parse", &format!("{original}:doc.md")])
+            .unwrap()
+            .trim()
+            .to_owned();
+        let replacement = f.commit("forged-id", "Forged body.\n");
+        let replacement_blob = git(
+            f.temp.path(),
+            &["rev-parse", &format!("{replacement}:doc.md")],
+        )
+        .unwrap()
+        .trim()
+        .to_owned();
+        git(
+            f.temp.path(),
+            &["replace", &original_blob, &replacement_blob],
+        )
+        .unwrap();
+        git(f.temp.path(), &["replace", &original, &replacement]).unwrap();
+        let trees = f.trees(std::slice::from_ref(&original));
+        let proof = historical_match(
+            f.temp.path(),
+            &trees,
+            "doc.md",
+            "## Content\nOriginal body.\n",
+            None,
+        )
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        assert_eq!(proof.document, "original-id");
+        assert_eq!(proof.blob, original_blob);
+        assert_eq!(proof.commit, original);
+        assert!(
+            historical_match(
+                f.temp.path(),
+                &trees,
+                "doc.md",
+                "## Content\nForged body.\n",
+                None
+            )
+            .unwrap()
+            .unwrap()
+            .is_none()
+        );
+    }
+    #[test]
+    fn historical_refs_and_paths_are_strict() {
+        let f = GitFixture::new();
+        let commit = f.commit("first", "Body.\n");
+        let blob = git(f.temp.path(), &["rev-parse", &format!("{commit}:doc.md")])
+            .unwrap()
+            .trim()
+            .to_owned();
+        assert!(historical_trees(f.temp.path(), "github.com/example/repo", &[blob]).is_err());
+        assert!(
+            historical_trees(f.temp.path(), "github.com/example/repo", &["HEAD".into()]).is_err()
+        );
+        assert!(
+            historical_trees(
+                f.temp.path(),
+                "github.com/wrong/repo",
+                std::slice::from_ref(&commit)
+            )
+            .is_err()
+        );
+        let trees = f.trees(&[commit]);
+        for path in ["../doc.md", "/doc.md", "docs/../doc.md"] {
+            assert!(
+                historical_match(f.temp.path(), &trees, path, "## Content\nBody.\n", None).is_err()
+            );
+        }
+    }
+    #[test]
+    fn historical_manifest_wiring_revalidates_and_refuses_ownership_conflicts() {
+        let f = GitFixture::new();
+        let old = f.commit("authored-id", "Historical body.\n");
+        f.commit("authored-id", "Current body.\n");
+        let repo = f.temp.path().canonicalize().unwrap();
+        let root = repo.join("vault");
+        let config: lk_core::config::Config = serde_json::from_value(serde_json::json!({
+            "vault":{"root":root}, "identity":{"name":"test","email":"test@example.test"},
+            "sources":{"repo":{"type":"nodex","params":{"repo":repo,"repository_id":"github.com/example/repo"}}}
+        })).unwrap();
+        let docs = root.join(lk_core::vault_path::documents_dir(&config.vault.dirs));
+        std::fs::create_dir_all(&docs).unwrap();
+        let target = docs.join("copy.md");
+        let raw = format!(
+            "---\ntype: document\nsource_file: {}\n---\n## Content\nHistorical body.\n",
+            serde_json::to_string(&repo.join("doc.md")).unwrap()
+        );
+        std::fs::write(&target, &raw).unwrap();
+        let make = |events| {
+            build_manifest(
+                &config,
+                "repo",
+                "config".into(),
+                "snapshot".into(),
+                &repo,
+                events,
+                std::slice::from_ref(&old),
+            )
+            .unwrap()
+        };
+        // Deleted current source is unnecessary to prove an immutable historical copy.
+        std::fs::remove_file(repo.join("doc.md")).unwrap();
+        let manifest = make(Vec::new());
+        assert_eq!(manifest.version, 2);
+        assert!(manifest.entries[0].blocked.is_none());
+        assert!(manifest.entries[0].historical_proof.is_some());
+        let mut replay = clone_manifest(&manifest);
+        verify_manifest(&mut replay, &make(Vec::new()), &root).unwrap();
+        std::fs::write(&target, raw.replace("Historical body.", "Edited body.")).unwrap();
+        assert!(verify_manifest(&mut replay, &make(Vec::new()), &root).is_err());
+        std::fs::write(&target, &raw).unwrap();
+        std::fs::write(docs.join("duplicate.md"), &raw).unwrap();
+        assert!(make(Vec::new()).entries.iter().all(|e| e.blocked.is_some()));
+        std::fs::remove_file(docs.join("duplicate.md")).unwrap();
+        // A current, explicitly different identity is never overwritten by history.
+        std::fs::write(repo.join("doc.md"), "current bytes").unwrap();
+        let mut event = Fixture::new().events.remove(0);
+        event.body = "Current body.".into();
+        event.metadata = serde_json::json!({"source_file":repo.join("doc.md"),"source_identity":{"repository":"github.com/example/repo","document":"different-id"},"source_record":{"id":"different-id"}});
+        let disagree = make(vec![event]);
+        assert_eq!(
+            disagree.entries[0].blocked.as_deref(),
+            Some("current and historical explicit document IDs disagree")
+        );
+    }
     struct Fixture {
         temp: tempfile::TempDir,
         config: lk_core::config::Config,
@@ -484,9 +965,9 @@ mod tests {
                 "repo",
                 "config".into(),
                 revision(&serde_json::to_string(&self.events).unwrap()),
-                &self.temp.path().canonicalize().unwrap(),
                 &self.temp.path().canonicalize().unwrap().join("repo"),
                 self.events.clone(),
+                &[],
             )
             .unwrap()
         }

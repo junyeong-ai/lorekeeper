@@ -1,3 +1,5 @@
+mod resynthesize;
+
 use std::path::PathBuf;
 
 use lk_core::config::{ConceptCategory, GraphConfig, VaultDirs};
@@ -102,6 +104,14 @@ pub enum GraphCommand {
     /// Rewrite each concept page's `## <Sources>` section from the graph
     BacklinksSync {
         /// Report what would change without writing
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Request a fresh synthesis for one exact concept from its current citations.
+    Resynthesize {
+        /// Exact existing vault-relative concept Markdown path
+        path: PathBuf,
+        /// Preview current evidence and replaced sections without writing
         #[arg(long)]
         dry_run: bool,
     },
@@ -238,6 +248,7 @@ async fn run_inner(
         GraphCommand::Normalize { fix: true }
             | GraphCommand::Merge { dry_run: false, .. }
             | GraphCommand::BacklinksSync { dry_run: false }
+            | GraphCommand::Resynthesize { dry_run: false, .. }
             | GraphCommand::IndexSync { fix: true }
     ) {
         Some(lk_vault::MutationSession::acquire(&rc.root).map_err(|e| e.to_string())?)
@@ -250,6 +261,15 @@ async fn run_inner(
     let g = graph::WikiGraph::build_with_existence(&views.pages, &views.existence, &rc.vault_dirs);
 
     let violated = match cmd {
+        GraphCommand::Resynthesize { path, dry_run } => {
+            let report =
+                resynthesize::request(&rc, &views.scanned, &path, dry_run, mutation.as_ref())?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+            );
+            false
+        }
         GraphCommand::Neighbors {
             path,
             format,

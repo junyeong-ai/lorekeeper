@@ -422,23 +422,28 @@ impl QueueLlmClient {
         format!("{prefix}-{}-{:03}", self.run_id, n)
     }
 
-    /// Buffer one request as a task.
+    /// Build one typed request as a task without publishing or buffering it.
+    /// Callers can include it in a recoverable vault mutation plan.
     ///
     /// The single place a `QueueTask` is built, which is what lets the vault's language be
     /// written into every payload exactly once. `TaskRequest::locale` is the guarantee there
     /// is one to write: a new request kind cannot reach this function without answering it.
-    async fn enqueue<R: TaskRequest + Send>(&self, prefix: &str, kind: TaskKind, req: R) {
+    pub fn build_task<R: TaskRequest>(&self, prefix: &str, kind: TaskKind, req: R) -> QueueTask {
         let mut input = req.task_input();
         input.insert("locale".into(), req.locale().tag().into());
         input.insert("generation_policy".into(), kind.generation_policy().into());
-        let task = QueueTask {
+        QueueTask {
             task_id: self.next_id(prefix),
             kind,
             created_at: jiff::Timestamp::now(),
             cache_hash: req.cache_hash(),
             input,
             target: req.into_target(),
-        };
+        }
+    }
+
+    async fn enqueue<R: TaskRequest + Send>(&self, prefix: &str, kind: TaskKind, req: R) {
+        let task = self.build_task(prefix, kind, req);
         self.buffer.lock().await.tasks.push(task);
     }
 }

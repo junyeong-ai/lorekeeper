@@ -1,6 +1,6 @@
 ---
 name: lore-process
-version: 0.46.1
+version: 0.47.0
 description: Drain the Lorekeeper LLM work queue after `lore ingest` runs in queue mode — fill the empty LLM-owned sections (summaries, refined events, concepts, themes, reviews) of freshly-written vault pages using the active agent session. Idempotent and resumable. Run after each ingest, or on a daily schedule.
 when_to_use: |
   queue process, drain queue, fill summaries,
@@ -49,8 +49,8 @@ you last read them.
    `missing-target` task. It answers three questions per task: is the page still
    the one this task was made for (`cache_hash` vs `llm_inputs.<key>`), has this
    exact input already been answered (`llm_inputs.<key>_done`), and does the page
-   still carry EVERY section the task names — two for a `synthesize-concept` task,
-   one for the rest. Only a task that passes the
+   still carry EVERY section the task names — its synthesis anchor and, when present,
+   `input.related_anchor` for a `synthesize-concept` task; one for the rest. Only a task that passes the
    first, fails the second, and has somewhere to land is work — an anchor the page
    no longer carries means the heading vocabulary changed (a locale switch), which
    no amount of waiting undoes. A task applied earlier in this run
@@ -79,7 +79,7 @@ you last read them.
    under rules that already exist as tested Rust — restating them here would be a
    second implementation, and a drain that wrote them could not run two pages at once.
    `synthesize-concept` also stages a result: only `lore queue apply` publishes its
-   two sections and completion marker after validating source and target revisions.
+   requested sections and completion marker after validating source and target revisions.
 
 ## Materialized-view contract
 
@@ -238,8 +238,11 @@ The essentials: a visible `.jsonl` is fully written and every
    lore queue check            # pending or blocked work and unpublished results
    lore wiki reviews --check   # evidence drift and invalid assessments; open is valid
    ```
-   Run these on EVERY `/lore-process` invocation that processed at least one
-   task — skipping them leaves new concepts with no `## Sources` and a stale
+   Run Finalize on every invocation that processed a task. Even when no current
+   task was found, run `lore queue check` and `lore wiki reviews --check` before
+   reporting completion: zero current tasks alone does not rule out blocked inputs,
+   unpublished results, interrupted mutations or evidence drift. Skipping reconciliation
+   after publication leaves new concepts with no `## Sources` and a stale
    `source_count` until some later run happens to reconcile. If any command
    exits non-zero, treat the run as failed and surface the error in step 6
    instead of reporting success. `lore ingest` never runs these. (The
@@ -254,8 +257,9 @@ The essentials: a visible `.jsonl` is fully written and every
 
 ## Idempotency contract
 
-The queue file is moved to `processed/` ONLY when every task in it has
-succeeded. Failure rules:
+Only `lore queue prune` retires queue files after classification. It removes stale
+and missing-target tasks, archives a run whose remaining tasks are done, and
+preserves unfinished or blocked work. Failure rules:
 
 - **Any task fails** → leave the queue file in place, report the failed
   `task_id` list to the user, and stop. The next `/lore-process` run
@@ -297,6 +301,14 @@ hazard. Atomic queue publication does not freeze target pages: serialize ingest
 and other page writers with a processing wave so they do not invalidate drafts.
 
 ## Regenerating a section
+
+For a deliberate concept rewrite from its **current citations**, including when its
+original task has expired, preview `lore graph resynthesize <exact-concept-path.md> --dry-run`
+and run it without `--dry-run`. This preserves the authored bodies and queues one typed
+synthesis request; an already-current matching request is reused. Drain and Finalize
+normally. Empty or unreadable evidence is refused. This is a new current-evidence
+request, not replay of an unavailable historical input.
+
 
 Use `lore queue regenerate --task-id <retained-task-id> --dry-run` to preview, then
 omit `--dry-run` to request that one task again. The task must exist exactly once in

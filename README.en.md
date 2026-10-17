@@ -429,6 +429,17 @@ lore init credentials   # interactive wizard — Google tokens minted via browse
 
 ---
 
+
+Identity migration also accepts repeatable `--history-ref <full-commit-id>` on
+`lore wiki document-identity plan` to verify historical source copies. The plan seals
+Git blobs, authored IDs and exact projected bodies; `check` and `apply` revalidate them.
+`apply --allow-blocked` migrates the verified subset and leaves unresolved pages untouched.
+
+To deliberately rewrite one concept from its current citations, preview
+`lore graph resynthesize wiki/concepts/example.md --dry-run`, then omit `--dry-run`
+and process the queued task. This works after the historical task has expired;
+`queue regenerate --task-id` still requires retained original input.
+
 ## Scheduling
 
 ```bash
@@ -439,7 +450,7 @@ lore schedule --format launchd --bin "$(command -v lore)" \
 
 Scheduled scripts execute directly with `/bin/bash`. Monthly, quarterly and annual reviews retain their calendars and wait for exclusive vault access. Maintenance and queue pruning run sequentially in one job. When replacing an existing schedule, unload and remove the old `com.lorekeeper.queue-prune` LaunchAgent. Template overrides are carried into the scheduled environment.
 
-`ingest.schedule` emits a single `lore ingest` line that runs **every source in one process** (the work-log is a cross-source daily aggregate, so per-source runs would overwrite it partially). Each synthesis period (weekly/monthly/quarterly/annual) emits its own cron line, and `maintenance.schedule` automates the janitors.
+`ingest.schedule` emits one job that collects **every source in one process**, using `lore-daily.sh` with `--pipeline-dir` and bare `lore ingest` otherwise. A source-filtered ingest skips the cross-source work-log. Each synthesis period (weekly/monthly/quarterly/annual) keeps its own calendar, and `maintenance.schedule` automates retention and queue pruning.
 
 For unattended operation the installer ships `lore-daily.sh` (daily ingest + queue drain + graph reconcile), `lore-weekly.sh` (weekly synthesis + knowledge audit), and separate monthly, quarterly, annual and maintenance entry scripts. A system scheduler (launchd or cron) fires them, so they run whether or not Claude Desktop is open.
 

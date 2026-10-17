@@ -76,6 +76,16 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   janitors run sequentially unattended.
 - **`lore synthesis <period>`** rejects `--date`/`--year` together with `--previous`
   (clap `conflicts_with`), and flushes the LLM queue after writing its pages.
+- **`lore wiki document-identity`** binds legacy document ownership only after exact
+  production-projected Content equality. `plan --history-ref <full-commit-id>` may be
+  repeated to prove historical copies at their recorded, contained source path. The
+  manifest seals audited commit IDs, regular-file blob IDs, explicit authored document
+  IDs and projection hashes; GitHub `origin` must match configured `repository_id`.
+  Historical links resolve against that commit's tree. Conflicting explicit IDs or
+  multiple owners remain blocked. `check` and `apply` reobserve the sealed references,
+  config and target bytes; `--allow-blocked` applies only verified entries. The migration
+  archives prior evidence and adds only `source_identity`; a historical proof does not
+  declare the source's current lifecycle state.
 - **`lore queue status`** uses the shared task classifier. It validates the typed
   retained request and generation policy before comparing target input/completion markers.
   Malformed or mismatched input, unsafe paths and unreadable pages are `unreadable` and

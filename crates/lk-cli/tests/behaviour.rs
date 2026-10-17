@@ -105,6 +105,12 @@ const SWEEP: &[&[&str]] = &[
     &["graph", "normalize"],
     &["graph", "suggest-links"],
     &["graph", "backlinks-sync"],
+    &[
+        "graph",
+        "resynthesize",
+        "wiki/concepts/behaviour-snapshot.md",
+        "--dry-run",
+    ],
     // Each period is named explicitly, so the pin describes the code rather than
     // the calendar: the same argv targets the same period forever.
     &["synthesis", "weekly", "--date", "2026-01-07"],
@@ -233,6 +239,15 @@ const EXEMPT: &[(&[&str], &str)] = &[
 /// Each is a stated gap: the pin still catches a change to the guard's own
 /// wording or exit code, and states that it catches nothing past it.
 const GUARD_ONLY: &[(&[&str], &str)] = &[
+    (
+        &[
+            "graph",
+            "resynthesize",
+            "wiki/concepts/behaviour-snapshot.md",
+            "--dry-run",
+        ],
+        "the fixture holds concept-to-concept links but no citing evidence documents; pins the empty-evidence refusal without writes. Resynthesize unit and CLI tests cover actual typed publication and evidence drift",
+    ),
     (
         &["status"],
         "prints one line per enabled source; the corpus enables none, so a source's last-ingest line is never reached",

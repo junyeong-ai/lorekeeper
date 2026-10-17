@@ -678,6 +678,17 @@ fn verify_selection(
 /// An ANCHOR-only link (`#section`) addresses the document itself and is left alone, as is a
 /// link that already names its own host.
 fn repoint_links(body: &str, repo: &Path, doc_path: &str, base_url: Option<&str>) -> String {
+    repoint_document_links(body, doc_path, base_url, |rel| holds(repo, rel))
+}
+
+/// Canonical nodex link projection with explicit repository membership. Historical
+/// readers supply immutable tree membership instead of consulting the live checkout.
+pub fn repoint_document_links(
+    body: &str,
+    doc_path: &str,
+    base_url: Option<&str>,
+    held: impl Fn(&str) -> bool,
+) -> String {
     let dir = Path::new(doc_path).parent().unwrap_or(Path::new(""));
     lk_core::link::rewrite_links_outside_code(body, |text, raw| {
         let (dest, anchor) = lk_core::link::split_raw_dest(raw);
@@ -688,7 +699,7 @@ fn repoint_links(body: &str, repo: &Path, doc_path: &str, base_url: Option<&str>
         let held = [dir.join(&decoded), PathBuf::from(&decoded)]
             .into_iter()
             .filter_map(|candidate| normalize(&candidate))
-            .find(|rel| holds(repo, rel));
+            .find(|rel| held(rel));
         match (held, base_url) {
             (Some(rel), Some(base)) => Some(format!(
                 "[{text}]({}/{}{anchor})",
