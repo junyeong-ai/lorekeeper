@@ -466,16 +466,10 @@ fn a_link_to_a_destination_no_file_answers_exits_one() {
     assert!(stdout.contains("wiki/concepts/Cited_Page.md"), "{stdout}");
 }
 
-/// The other half of that rule: a spelling the FILESYSTEM answers to is not a dead destination.
-///
-/// `Cited.md` and `cited.md` are one file on APFS and NTFS — `cat` opens either — and the
-/// directory segments of an address already resolve by that same fold. Answering the file
-/// segment exactly made one address resolve two ways within a single path: a link a reader can
-/// follow was reported broken, and `backlinks-sync` left the citation out of the cited page's
-/// sources. What the two spellings cost on a filesystem that keeps them apart is a violation
-/// with its own channel and its own repair, asserted below, so folding here hides nothing.
+/// Case aliases follow the actual volume: a folded spelling resolves, while a missing
+/// case-sensitive spelling remains a broken link in both command and JSON views.
 #[test]
-fn a_link_whose_case_the_filesystem_folds_is_not_broken() {
+fn a_case_variant_link_is_broken_only_when_its_address_is_missing() {
     let ws = sound_vault();
     ws.write(
         "daily/notes/2026-05-24.md",
@@ -484,19 +478,33 @@ fn a_link_whose_case_the_filesystem_folds_is_not_broken() {
          ## Related concepts\n\n- [Cited](../../wiki/concepts/Cited.md)\n",
     );
 
+    let alias_exists = ws
+        .root
+        .path()
+        .join("vault/wiki/concepts/Cited.md")
+        .is_file();
+    let broken = usize::from(!alias_exists);
     let out = ws.run(&["graph", "broken"]);
     let stdout = String::from_utf8(out.stdout).expect("utf8");
-    assert_eq!(out.status.code(), Some(0), "{stdout}");
-    assert!(stdout.contains("0 broken link(s)"), "{stdout}");
+    assert_eq!(
+        out.status.code(),
+        Some(i32::from(!alias_exists)),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("{broken} broken link(s)")),
+        "{stdout}"
+    );
 
-    // And the file whose name is not its own slug is still named, under the channel whose
-    // repair is renaming it.
+    // The JSON lint view must make the same judgment as the dedicated command.
     let raw = ws.stdout(&["graph", "--json", "lint"]);
     let parsed: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
-    assert!(
+    assert_eq!(
         parsed["data"]["violations"]["broken"]
             .as_array()
-            .is_some_and(|b| b.is_empty()),
+            .unwrap()
+            .len(),
+        broken,
         "{raw}"
     );
 }
@@ -1184,8 +1192,12 @@ fn a_link_that_only_resolves_under_folding_is_a_violation_of_its_own() {
          ## Related concepts\n\n- [Cited](../../wiki/concepts/CITED.md)\n",
     );
 
-    // Not broken: the file opens at that address here.
-    assert_eq!(ws.code(&["graph", "broken"]), 0);
+    let alias_exists = ws
+        .root
+        .path()
+        .join("vault/wiki/concepts/CITED.md")
+        .is_file();
+    assert_eq!(ws.code(&["graph", "broken"]), i32::from(!alias_exists));
     // And not a filename defect: `cited.md` is its own slug.
     let normalize = ws.stdout(&["graph", "normalize"]);
     assert!(normalize.contains("all slugs normalized"), "{normalize}");
@@ -1195,12 +1207,23 @@ fn a_link_that_only_resolves_under_folding_is_a_violation_of_its_own() {
     let respelled = parsed["data"]["violations"]["respelled_links"]
         .as_array()
         .expect("respelled_links array");
-    assert_eq!(respelled.len(), 1, "{raw}");
-    assert_eq!(
-        respelled[0]["on_disk"].as_str(),
-        Some("wiki/concepts/cited.md"),
-        "the repair names the spelling the file actually has\n{raw}"
-    );
+    assert_eq!(respelled.len(), usize::from(alias_exists), "{raw}");
+    if alias_exists {
+        assert_eq!(
+            respelled[0]["on_disk"].as_str(),
+            Some("wiki/concepts/cited.md"),
+            "the repair names the spelling the file actually has\n{raw}"
+        );
+    } else {
+        assert_eq!(
+            parsed["data"]["violations"]["broken"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1,
+            "{raw}"
+        );
+    }
     assert_eq!(parsed["ok"].as_bool(), Some(false), "{raw}");
     assert_eq!(ws.code(&["graph", "lint"]), 1);
 }

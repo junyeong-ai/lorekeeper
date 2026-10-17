@@ -79,6 +79,6 @@ GitHub 공식 릴리스 메타데이터에서도 checkout v7.0.1, rust-cache v2.
 
 ## 이번 변경 검증
 
-2026-10-17에 Rust 1.99.1로 `scripts/check.sh`의 로컬 전체 검사를 통과했다. 1,376개 테스트, 문서 테스트, Clippy, Rust 1.97 전체 대상·기능 검사, 릴리스 빌드 및 셸·워크플로 검사를 포함한다. Windows 컴파일과 원격 Linux CI는 이 로컬 결과에 포함되지 않는다.
+2026-10-17에 Rust 1.99.1로 `scripts/check.sh`의 로컬 전체 검사를 통과했다. 1,377개 테스트, 문서 테스트, Clippy, Rust 1.97 전체 대상·기능 검사, 릴리스 빌드 및 셸·워크플로 검사를 포함한다. Windows 컴파일과 원격 Linux CI는 이 로컬 결과에 포함되지 않는다.
 
 `cargo audit --deny warnings`와 `cargo deny check`도 통과했다. 사용한 RustSec DB는 `64f92cdc64401fab47baa10e2e11fe382aa57155`이며, 이는 배포 시점 검사이지 10월 15일 당시 보안 상태의 재현이 아니다. 로컬 zizmor는 1.31.1의 기본 offline 모드였고 기존 ignore 1개와 suppression 17개가 있었다. CI에 고정한 기준일 버전이나 온라인 공급망 검사 결과와 구분한다.

@@ -1036,10 +1036,9 @@ mod tests {
 
     #[test]
     fn two_files_whose_names_differ_only_by_normalization_are_an_address_collision() {
-        // Comparing addresses under NFC is what makes a composed link reach a decomposed file.
-        // The price is that a vault holding BOTH spellings as separate files — possible only
-        // where the filesystem preserves and distinguishes them — has two files at one address.
-        // That is reported, by the channel whose subject it is, rather than silently resolved.
+        // Distinct normalization spellings collide on filesystems that fold Unicode names.
+        // Report that portability conflict even when the current filesystem keeps the files
+        // separate. This diagnostic does not make one file resolve as the other.
         use unicode_normalization::UnicodeNormalization;
         let composed = "wiki/concepts/개념.md".to_string();
         let decomposed: String = composed.nfd().collect();
@@ -1063,10 +1062,9 @@ mod tests {
     }
 
     #[test]
-    fn a_decomposed_filename_answers_a_composed_link() {
-        // HFS+ decomposed on write and APFS keeps what it is given, so one vault can hold a
-        // decomposed filename and a composed link to it. They name the same file everywhere;
-        // comparing the bytes would report every link into such a directory broken.
+    fn a_decomposed_filename_answers_a_composed_link_only_when_the_filesystem_does() {
+        // A composed link can reach a decomposed filename on a normalization-folding volume.
+        // On a volume that distinguishes their bytes the missing spelling is a broken link.
         let tmp = tempfile::TempDir::new().unwrap();
         let concepts = tmp.path().join("wiki/concepts");
         std::fs::create_dir_all(&concepts).unwrap();

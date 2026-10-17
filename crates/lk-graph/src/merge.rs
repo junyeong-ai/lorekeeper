@@ -335,9 +335,9 @@ fn rewrite_links(
     let out = link::rewrite_links_outside_code(content, |text, raw_dest| {
         // Does this link target the from concept? Resolve the destination the SAME way
         // the graph does — `.md` destinations only, resolved against this page's
-        // location, then normalized to a page id — so exactly the spellings scan
+        // location, then checked against the actual filesystem — so exactly the spellings scan
         // counts as citations (`../concepts/from.md`, `./from.md`, the OKF absolute
-        // form, case/punctuation variants) are rewritten, no more and no fewer.
+        // form, actual filesystem aliases) are rewritten, no more and no fewer.
         let (dest, anchor) = link::split_raw_dest(raw_dest);
         let decoded = link::decode_dest(dest);
         if !Path::new(&decoded).extension().is_some_and(|e| e == "md") {
@@ -655,36 +655,71 @@ mod tests {
     }
 
     #[test]
-    fn case_variant_destination_is_repointed_like_the_graph_resolves_it() {
-        // scan matches links to pages by id (path_slug), so `[Old](../../wiki/concepts/OLD.md)`
-        // is a citation of `wiki/concepts/old.md`. The merge must repoint it too —
-        // a literal-path comparison would skip it and leave it dangling after the
-        // from page is deleted.
+    fn case_and_unicode_aliases_are_repointed_only_when_the_filesystem_resolves_them() {
+        use unicode_normalization::UnicodeNormalization;
+        let decomposed: String = "개념".nfd().collect();
+        for (from, alias) in [("old", "OLD"), ("개념", decomposed.as_str())] {
+            let tmp = TempDir::new().unwrap();
+            let root = tmp.path();
+            let from_path = format!("wiki/concepts/{from}.md");
+            write(root, &from_path, "---\nid: old\n---\n\n# old\n");
+            write(root, "wiki/concepts/new.md", "---\nid: new\n---\n\n# new\n");
+            let alias_resolves = root.join(format!("wiki/concepts/{alias}.md")).is_file();
+            // Always include the exact address: it must be repointed on every filesystem.
+            // The other spelling is a citation only where it really reaches that file.
+            let original = format!(
+                "See [Exact](../../wiki/concepts/{from}.md) and [Alias](../../wiki/concepts/{alias}.md) and [pdf](../../wiki/concepts/{from}.pdf).\n"
+            );
+            write(root, "daily/x/d.md", &original);
+            let pages = crate::scan::scan_vault(root, false).unwrap();
+            let result = merge_concepts(&pages, root, "wiki", from, "new", false, false).unwrap();
+            assert_eq!(result.rewritten.len(), 1);
+            assert_eq!(result.rewritten[0].links, 1 + usize::from(alias_resolves));
+            let expected_alias = if alias_resolves { "new" } else { alias };
+            assert_eq!(
+                std::fs::read_to_string(root.join("daily/x/d.md")).unwrap(),
+                format!(
+                    "See [Exact](../../wiki/concepts/new.md) and [Alias](../../wiki/concepts/{expected_alias}.md) and [pdf](../../wiki/concepts/{from}.pdf).\n"
+                ),
+                "a missing alias stays untouched; a real alias follows its owner"
+            );
+            assert!(result.deleted);
+            assert!(!root.join(from_path).exists());
+        }
+    }
+
+    #[test]
+    fn a_distinct_case_variant_page_is_never_repointed_as_the_merged_page() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-        write(root, "wiki/concepts/old.md", "---\nid: old\n---\n\n# old\n");
-        write(root, "wiki/concepts/new.md", "---\nid: new\n---\n\n# new\n");
+        write(root, "wiki/concepts/old.md", "---\nid: old\n---\n# old\n");
+        // A second entry is representable only on a case-sensitive filesystem.
+        let uppercase = root.join("wiki/concepts/OLD.md");
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&uppercase)
+        {
+            Ok(_) => std::fs::write(&uppercase, "# distinct page\n").unwrap(),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return,
+            Err(error) => panic!("create distinct case variant: {error}"),
+        }
+        write(root, "wiki/concepts/new.md", "---\nid: new\n---\n# new\n");
         write(
             root,
             "daily/x/d.md",
-            "See [Old](../../wiki/concepts/OLD.md) and [pdf](../../wiki/concepts/old.pdf).\n",
+            "[Lower](../../wiki/concepts/old.md) [Upper](../../wiki/concepts/OLD.md)\n",
         );
-        let pages = vec![
-            page("wiki/concepts/old", "wiki/concepts/old.md", &[]),
-            page("wiki/concepts/new", "wiki/concepts/new.md", &[]),
-            page("daily/x/d", "daily/x/d.md", &["wiki/concepts/old"]),
-        ];
-        let r = merge_concepts(&pages, root, "wiki", "old", "new", false, false).unwrap();
-        assert_eq!(r.rewritten.len(), 1);
+        let pages = crate::scan::scan_vault(root, false).unwrap();
+        let result = merge_concepts(&pages, root, "wiki", "old", "new", false, false).unwrap();
+        assert_eq!(result.rewritten[0].links, 1);
         assert_eq!(
-            r.rewritten[0].links, 1,
-            "only the .md citation is a graph edge"
+            std::fs::read_to_string(root.join("daily/x/d.md")).unwrap(),
+            "[Lower](../../wiki/concepts/new.md) [Upper](../../wiki/concepts/OLD.md)\n"
         );
-        let daily = std::fs::read_to_string(root.join("daily/x/d.md")).unwrap();
         assert_eq!(
-            daily,
-            "See [Old](../../wiki/concepts/new.md) and [pdf](../../wiki/concepts/old.pdf).\n",
-            "the case-variant citation is repointed; the non-.md link is untouched"
+            std::fs::read_to_string(uppercase).unwrap(),
+            "# distinct page\n"
         );
     }
 

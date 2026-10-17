@@ -1,6 +1,6 @@
 ---
 name: lore-ingest
-version: 0.46.0
+version: 0.46.1
 description: Daily knowledge ingestion pipeline — collects from Gmail, Google Drive, Google Calendar, Slack, Jira, RSS, and a manual inbox into an Obsidian vault. Deduplicates, classifies, extracts concepts, writes structured pages. Optionally tracks your own work into a work-log when the `personal:` module is configured. Phased ingest with atomic per-page writes and durable published queue tasks.
 argument-hint: "<subcommand> [args]"
 disable-model-invocation: true
