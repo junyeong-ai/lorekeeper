@@ -332,7 +332,7 @@ map to `RawItem`.
   unbuildable documents, unfollowed scope boundaries, unavailable verification and scope
   coverage gaps refuse the observation instead of claiming an empty or complete success.
   The adapter does not rebuild a source graph as a side effect and pins its public CLI
-  envelope compatibility to nodex `>=0.56, <0.57` with `--check-version`.
+  envelope compatibility to nodex `>=0.57, <0.58` with `--check-version`.
   `params.executable` optionally selects one absolute binary path for every subprocess in
   the observation; omission uses `nodex` on PATH. Explicit launch/version failure never
   falls back to another binary. Param validation stays pure; live compatibility is checked
