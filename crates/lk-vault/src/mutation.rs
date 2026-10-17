@@ -121,6 +121,7 @@ impl MutationPlan {
 
     /// Pin an existing dependency even when no replacement is needed. Unlike `edit`,
     /// this retains an equal-before/after step for preflight and journal replay.
+    /// The dependency must remain unchanged through the rest of the plan and recovery.
     pub fn require_unchanged(&mut self, path: impl Into<PathBuf>, expected: String) {
         self.steps.push(Step::Edit {
             path: path.into(),
@@ -359,6 +360,18 @@ impl MutationSession {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(e.into()),
         }
+        for step in &journal.plan.steps[..completed] {
+            if let Step::Edit {
+                path,
+                before,
+                after,
+            } = step
+                && before == after
+                && self.read(path)?.as_ref() != Some(before)
+            {
+                return Err(Self::conflict(path));
+            }
+        }
         while let Some(step) = journal.plan.steps.get(completed) {
             match step {
                 Step::Create { path, after } => {
@@ -507,6 +520,63 @@ mod tests {
         );
         assert!(!session.journal.exists());
         assert!(!session.journal.with_file_name("progress.json").exists());
+    }
+
+    #[test]
+    fn recovery_rechecks_preserved_dependencies_before_retiring_originals() {
+        for damaged in [None, Some("archive.md"), Some("receipt.json")] {
+            for remove in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                fs::write(root.path().join("original.md"), "original").unwrap();
+                fs::write(root.path().join("sentinel.md"), "expected").unwrap();
+                let session = MutationSession::acquire(root.path()).unwrap();
+                let mut plan = MutationPlan::default();
+                for path in ["archive.md", "receipt.json"] {
+                    plan.create(path, "preserved".into());
+                    plan.require_unchanged(path, "preserved".into());
+                }
+                plan.edit("sentinel.md", "expected".into(), "done".into());
+                plan.remove("original.md", "original".into());
+                let journal = Journal { version: 1, plan };
+                session.save(&journal).unwrap();
+                fs::write(root.path().join("sentinel.md"), "external").unwrap();
+                assert!(session.finish(&journal).is_err());
+                let progress_path = session.journal.with_file_name("progress.json");
+                let progress_bytes = fs::read(&progress_path).unwrap();
+                let progress: Progress = serde_json::from_slice(&progress_bytes).unwrap();
+                assert_eq!(progress.completed, 4);
+                let journal_path = session.journal.clone();
+                let journal_bytes = fs::read(&journal_path).unwrap();
+                if let Some(path) = damaged {
+                    if remove {
+                        fs::remove_file(root.path().join(path)).unwrap();
+                    } else {
+                        fs::write(root.path().join(path), "changed").unwrap();
+                    }
+                }
+                fs::write(root.path().join("sentinel.md"), "expected").unwrap();
+                drop(session);
+                let resumed = MutationSession::acquire(root.path());
+                if damaged.is_some() {
+                    assert!(resumed.is_err());
+                    assert_eq!(
+                        fs::read_to_string(root.path().join("original.md")).unwrap(),
+                        "original"
+                    );
+                    assert_eq!(
+                        fs::read_to_string(root.path().join("sentinel.md")).unwrap(),
+                        "expected"
+                    );
+                    assert_eq!(fs::read(&journal_path).unwrap(), journal_bytes);
+                    assert_eq!(fs::read(&progress_path).unwrap(), progress_bytes);
+                } else {
+                    assert!(resumed.is_ok());
+                    assert!(!root.path().join("original.md").exists());
+                    assert!(!journal_path.exists());
+                    assert!(!progress_path.exists());
+                }
+            }
+        }
     }
 
     #[test]

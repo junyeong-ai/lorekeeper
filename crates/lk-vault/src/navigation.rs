@@ -516,6 +516,7 @@ fn preserve_navigation_file(
         .into()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             plan.create(path.to_owned(), content.to_owned());
+            plan.require_unchanged(path.to_owned(), content.to_owned());
             Ok(())
         }
         Err(error) => Err(error.into()),
