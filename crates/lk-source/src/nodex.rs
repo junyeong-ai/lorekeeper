@@ -34,6 +34,9 @@ struct NodexParams {
     /// scheduled run starts in no particular directory, and a relative path would read a
     /// different repository — or none — depending on who launched it.
     repo: PathBuf,
+    /// Explicit compatible binary; omitted uses `nodex` on PATH. Never a shell command.
+    #[serde(default)]
+    executable: Option<PathBuf>,
     /// Reconcile current inventory independently of author-declared dates.
     #[serde(default)]
     reconcile: bool,
@@ -89,12 +92,12 @@ const INITIAL_REACH: usize = 500;
 /// `lookback_hours` the operator meant differently — not something the adapter can settle
 /// by asking again.
 const MAX_REACH: usize = 64_000;
-// Snapshot and verified-body envelopes below are the public nodex 0.53 contract.
-const NODEX_COMPATIBILITY: &str = ">=0.53.0, <0.54";
+// Snapshot and verified-body envelopes below are the public nodex 0.54.2 contract.
+const NODEX_COMPATIBILITY: &str = ">=0.54.2, <0.55";
 const INVENTORY_FIELDS: &str = "id,title,kind,status,path,created,updated,reviewed,supersedes,superseded_by,implements,related,covers,tags";
 
 /// One document, as `nodex query recent` reports it.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct RecentItem {
     id: String,
     title: String,
@@ -134,12 +137,20 @@ struct NodexWarning {
     message: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct NodeDetail {
     node: serde_json::Value,
     body: String,
-    #[serde(default)]
-    outgoing: Vec<serde_json::Value>,
+    outgoing: Vec<OutgoingEdge>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
+struct OutgoingEdge {
+    relation: String,
+    target: String,
+    // Preserve public reference locations and any future additive edge metadata.
+    #[serde(flatten)]
+    metadata: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -172,6 +183,15 @@ impl crate::ValidatedParams for NodexParams {
         {
             return Err(SourceError::InvalidParams(
                 "nodex `repository_id` must not be blank".into(),
+            ));
+        }
+        if self
+            .executable
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute())
+        {
+            return Err(SourceError::InvalidParams(
+                "nodex `executable` must be an absolute path to one binary".into(),
             ));
         }
         if !self.repo.is_absolute() {
@@ -233,6 +253,11 @@ impl Source for NodexSource {
         let first_day = start.to_zoned(ctx.timezone.clone()).date();
         let last_day = ctx.target_date;
 
+        let executable = p
+            .executable
+            .as_deref()
+            .unwrap_or_else(|| Path::new("nodex"));
+
         // Asked per FIELD rather than through nodex's `any`, which also matches a review
         // stamp. A review is not an edit: the document is unchanged, so re-admitting it on the
         // day it was re-read would put a second copy of knowledge the vault already holds onto
@@ -240,23 +265,24 @@ impl Source for NodexSource {
         // answer plus a guess at which field nodex reports when several match.
         // `check` builds in memory and exposes scope-declaration warnings that current
         // query envelopes do not carry. Its unrelated rule findings do not govern ingestion.
-        run_nodex::<serde_json::Value>(&p.repo, last_day, &["check", "--severity", "error"], false)
-            .await?;
+        run_nodex::<serde_json::Value>(
+            executable,
+            &p.repo,
+            last_day,
+            &["check", "--severity", "error"],
+            false,
+        )
+        .await?;
         let lens: serde_json::Value =
-            run_nodex(&p.repo, last_day, &["export", "config"], false).await?;
+            run_nodex(executable, &p.repo, last_day, &["export", "config"], false).await?;
         let mut inventory = None;
         let mut items: Vec<RecentItem> = Vec::new();
         if p.reconcile {
             let listing: serde_json::Value = run_nodex(
+                executable,
                 &p.repo,
                 last_day,
-                &[
-                    "query",
-                    "nodes",
-                    "--require-current",
-                    "--fields",
-                    INVENTORY_FIELDS,
-                ],
+                &["query", "nodes", "--fields", INVENTORY_FIELDS],
                 true,
             )
             .await?;
@@ -278,7 +304,7 @@ impl Source for NodexSource {
             }
         } else {
             for field in ["created", "updated"] {
-                items.extend(query_window(&p.repo, field, first_day, last_day).await?);
+                items.extend(query_window(executable, &p.repo, field, first_day, last_day).await?);
             }
         }
         let admitted: Vec<RecentItem> = latest_per_document(items)
@@ -308,6 +334,7 @@ impl Source for NodexSource {
 
         let attempted = admitted.len();
         let mut kept = Vec::new();
+        let mut observations = Vec::new();
         for item in admitted {
             // A path that leaves the repository is refused before it is read, and refusing it
             // ends the SOURCE rather than skipping the document. A read that failed is one
@@ -321,6 +348,7 @@ impl Source for NodexSource {
                 ))
             })?;
             let detail: NodeDetail = run_nodex(
+                executable,
                 &p.repo,
                 last_day,
                 &["query", "node", &item.id, "--with-body"],
@@ -328,27 +356,24 @@ impl Source for NodexSource {
             )
             .await?;
             verify_selection(&item, &detail.node, p.reconcile)?;
-            kept.push(read_document_revision(
+            let raw = build_document_observation(
                 &p.repo,
                 &item,
                 p.base_url.as_deref(),
                 ctx,
-                Some(&detail),
+                &detail,
                 p.reconcile,
                 p.repository_id.as_deref(),
-            )?);
+            )?;
+            observations.push((item, observation_revision(&detail)?));
+            kept.push(raw);
         }
         if let Some(before) = inventory {
             let after: serde_json::Value = run_nodex(
+                executable,
                 &p.repo,
                 last_day,
-                &[
-                    "query",
-                    "nodes",
-                    "--require-current",
-                    "--fields",
-                    INVENTORY_FIELDS,
-                ],
+                &["query", "nodes", "--fields", INVENTORY_FIELDS],
                 true,
             )
             .await?;
@@ -358,44 +383,48 @@ impl Source for NodexSource {
                 ));
             }
         }
-        // A repository whose working tree moved out from under the query answers with
-        // documents and yields none of them. `lore health` reads the ingest log as its only
-        // evidence a source is alive, and that log records one bit, so an empty success here
-        // would let the source report fresh every morning while collecting nothing.
-        let final_lens: serde_json::Value =
-            run_nodex(&p.repo, last_day, &["export", "config"], false).await?;
-        if lens != final_lens {
-            return Err(SourceError::Parse(
-                "nodex configuration changed during observation".into(),
-            ));
-        }
         // Normal date runs also require the final graph's content currentness. Reconcile
         // already performs the full final inventory query above.
         if !p.reconcile {
             let _: serde_json::Value = run_nodex(
+                executable,
                 &p.repo,
                 last_day,
-                &[
-                    "query",
-                    "nodes",
-                    "--require-current",
-                    "--fields",
-                    INVENTORY_FIELDS,
-                ],
+                &["query", "nodes", "--fields", INVENTORY_FIELDS],
                 true,
             )
             .await?;
         }
-        // No selected file may move while another document is being observed. This is a
-        // revision-bound inventory, not a claim to hold a filesystem-wide writer lock.
-        for raw in &kept {
-            let file = raw.metadata["source_file"]
-                .as_str()
-                .ok_or_else(|| SourceError::Parse("nodex omitted source location".into()))?;
-            let expected = raw.metadata["source_record"]["content_revision"]
-                .as_str()
-                .ok_or_else(|| SourceError::Parse("nodex omitted content revision".into()))?;
-            verify_file_revision(Path::new(file), expected)?;
+        // Requery public observations, including resolved outgoing edges whose targets can
+        // change without changing this file. Link projection also depends on live paths.
+        // These are bounded live checks, not a filesystem-wide writer lock.
+        for ((item, before), raw) in observations.into_iter().zip(&kept) {
+            let after: NodeDetail = run_nodex(
+                executable,
+                &p.repo,
+                last_day,
+                &["query", "node", &item.id, "--with-body"],
+                true,
+            )
+            .await?;
+            verify_selection(&item, &after.node, p.reconcile)?;
+            verify_observation(
+                &item,
+                &before,
+                &after,
+                &raw.body,
+                &p.repo,
+                p.base_url.as_deref(),
+            )?;
+        }
+        // Configuration is another input to every public observation, including link
+        // resolution. Check it again after all selected observations have been revalidated.
+        let final_lens: serde_json::Value =
+            run_nodex(executable, &p.repo, last_day, &["export", "config"], false).await?;
+        if lens != final_lens {
+            return Err(SourceError::Parse(
+                "nodex configuration changed during observation".into(),
+            ));
         }
         crate::require_any_observation("document", kept.len(), attempted)?;
         Ok(kept)
@@ -446,6 +475,7 @@ fn latest_per_document(mut items: Vec<RecentItem>) -> Vec<RecentItem> {
 /// first, so a limit that stops before the window leaves the answer entirely outside it — and
 /// the filter downstream then drops every row and reports a day on which nothing happened.
 async fn query_window(
+    executable: &Path,
     repo: &Path,
     field: &str,
     first_day: jiff::civil::Date,
@@ -453,7 +483,7 @@ async fn query_window(
 ) -> Result<Vec<RecentItem>, SourceError> {
     let mut reach = INITIAL_REACH;
     loop {
-        let page = query_recent(repo, field, first_day, last_day, reach).await?;
+        let page = query_recent(executable, repo, field, first_day, last_day, reach).await?;
         if spans_window(&page, reach, first_day) {
             return Ok(page);
         }
@@ -498,6 +528,7 @@ fn spans_window(page: &[RecentItem], reach: usize, first_day: jiff::civil::Date)
 /// cut in the middle of that day's documents looks exactly like one that read them all. A row
 /// dated before the window is the proof, and the caller's own date filter drops it.
 async fn query_recent(
+    executable: &Path,
     repo: &Path,
     field: &str,
     first_day: jiff::civil::Date,
@@ -507,18 +538,11 @@ async fn query_recent(
     let first = first_day.yesterday().unwrap_or(first_day).to_string();
     let limit = limit.to_string();
     let data: RecentData = run_nodex(
+        executable,
         repo,
         last_day,
         &[
-            "query",
-            "recent",
-            "--require-current",
-            "--field",
-            field,
-            "--since",
-            &first,
-            "--limit",
-            &limit,
+            "query", "recent", "--field", field, "--since", &first, "--limit", &limit,
         ],
         true,
     )
@@ -526,20 +550,10 @@ async fn query_recent(
     Ok(data.items)
 }
 
-#[cfg(test)]
 fn decode_envelope<T: serde::de::DeserializeOwned>(
     bytes: &[u8],
     success: bool,
     query: bool,
-) -> Result<T, SourceError> {
-    decode_observation(bytes, success, query, false)
-}
-
-fn decode_observation<T: serde::de::DeserializeOwned>(
-    bytes: &[u8],
-    success: bool,
-    query: bool,
-    verified_body: bool,
 ) -> Result<T, SourceError> {
     let envelope: Envelope<T> = serde_json::from_slice(bytes)
         .map_err(|e| SourceError::Parse(format!("nodex envelope: {e}")))?;
@@ -548,8 +562,13 @@ fn decode_observation<T: serde::de::DeserializeOwned>(
             code: "UNKNOWN".into(),
             message: "refused without reason".into(),
         });
+        let remedy = if e.code == "VERSION_MISMATCH" {
+            "; select a supported nodex >=0.54.2, <0.55 executable with params.executable; the repository must permit that version and already have a current compatible index"
+        } else {
+            ""
+        };
         return Err(SourceError::Parse(format!(
-            "nodex refused ({}): {}",
+            "nodex refused ({}): {}{remedy}",
             e.code, e.message
         )));
     }
@@ -568,10 +587,7 @@ fn decode_observation<T: serde::de::DeserializeOwned>(
         let snap = envelope.snapshot.ok_or_else(|| {
             SourceError::Parse("nodex query omitted snapshot verification".into())
         })?;
-        if !(snap.verification == "content" || (verified_body && snap.verification == "membership"))
-            || snap.unbuildable != 0
-            || snap.unfollowed != Some(0)
-        {
+        if snap.verification != "content" || snap.unbuildable != 0 || snap.unfollowed != Some(0) {
             return Err(SourceError::Parse(format!(
                 "nodex incomplete snapshot: verification={}, unbuildable={}, unfollowed={:?}",
                 snap.verification, snap.unbuildable, snap.unfollowed
@@ -587,12 +603,13 @@ fn decode_observation<T: serde::de::DeserializeOwned>(
 }
 
 async fn run_nodex<T: serde::de::DeserializeOwned>(
+    executable: &Path,
     repo: &Path,
     today: jiff::civil::Date,
     args: &[&str],
     query: bool,
 ) -> Result<T, SourceError> {
-    let output = tokio::process::Command::new("nodex")
+    let output = tokio::process::Command::new(executable)
         .arg("-C")
         .arg(repo)
         .arg("--check-version")
@@ -603,15 +620,21 @@ async fn run_nodex<T: serde::de::DeserializeOwned>(
         .stdin(Stdio::null())
         .output()
         .await
-        .map_err(|e| SourceError::Parse(format!("running nodex: {e}")))?;
+        .map_err(|e| SourceError::Parse(format!(
+            "running nodex executable {} (requires {NODEX_COMPATIBILITY}): {e}; set params.executable to an absolute compatible binary path; no other executable was tried",
+            executable.display()
+        )))?;
     // check's exit 1 is a rule verdict, not a failure to observe the graph.
-    decode_observation(
+    decode_envelope(
         &output.stdout,
         output.status.success()
             || (args.first() == Some(&"check") && output.status.code() == Some(1)),
         query,
-        args.starts_with(&["query", "node"]) && args.contains(&"--with-body"),
     )
+    .map_err(|error| SourceError::Parse(format!(
+        "nodex executable {} (requires {NODEX_COMPATIBILITY}): {error}; no other executable was tried",
+        executable.display()
+    )))
 }
 
 fn verify_selection(
@@ -784,64 +807,24 @@ fn contained(path: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Read one document's prose. The frontmatter is dropped: it is `nodex`'s own record of the
-/// document, already read above, and carrying it through would put a second copy of every
-/// field into the page an extraction reads.
-#[cfg(test)]
-fn read_document(
+/// Consume one verified public observation; never reread or parse the source file.
+fn build_document_observation(
     repo: &Path,
     item: &RecentItem,
     base_url: Option<&str>,
     ctx: &ExtractContext,
-) -> Result<RawItem, SourceError> {
-    read_document_revision(repo, item, base_url, ctx, None, false, None)
-}
-
-fn read_document_revision(
-    repo: &Path,
-    item: &RecentItem,
-    base_url: Option<&str>,
-    ctx: &ExtractContext,
-    detail: Option<&NodeDetail>,
+    detail: &NodeDetail,
     reconcile: bool,
     repository_id: Option<&str>,
 ) -> Result<RawItem, SourceError> {
     let path = repo.join(&item.path);
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| SourceError::Parse(format!("read {}: {e}", path.display())))?;
-    if let Some(detail) = detail {
-        let revision = content_revision(content.as_bytes());
-        if detail.node.get("content_hash").and_then(|v| v.as_str()) != Some(revision.as_str()) {
-            return Err(SourceError::Parse(format!(
-                "{} changed content after verified nodex read",
-                item.path
-            )));
-        }
-    }
-    let page = lk_core::frontmatter::parse_page(&content)
-        .map_err(|error| SourceError::Parse(format!("read {}: {error}", path.display())))?;
-    if page
-        .frontmatter
-        .get("status")
-        .and_then(|value| value.as_str())
-        .is_some_and(|status| status != item.status)
-    {
-        return Err(SourceError::Parse(format!(
-            "{} changed status after the nodex query",
-            item.path
-        )));
-    }
-    let body = repoint_links(
-        detail.map_or(page.body.as_str(), |d| d.body.as_str()),
-        repo,
-        &item.path,
-        base_url,
-    );
+    let body = repoint_links(&detail.body, repo, &item.path, base_url);
     let authored_date = ["created", "updated"]
         .iter()
         .filter_map(|key| {
             detail
-                .and_then(|d| d.node.get(key))
+                .node
+                .get(key)
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.parse::<jiff::civil::Date>().ok())
         })
@@ -853,30 +836,26 @@ fn read_document_revision(
     };
     let mut record = serde_json::json!({
         "id": item.id, "kind": item.kind, "status": item.status,
-        "superseded_by": page.frontmatter.get("superseded_by"),
-        "revision": lk_core::concept::source_revision(&page),
-        "created": detail.and_then(|d| d.node.get("created")),
-        "updated": detail.and_then(|d| d.node.get("updated")),
+        "observation_revision": observation_revision(detail)?,
+        "created": detail.node.get("created"),
+        "updated": detail.node.get("updated"),
         "timestamp_basis": if reconcile && authored_date.is_none() { "observed" } else { "authored" },
     });
-    if let Some(detail) = detail {
-        record["content_revision"] = detail.node["content_hash"].clone();
-        for key in [
-            "superseded_by",
-            "supersedes",
-            "implements",
-            "related",
-            "covers",
-            "reviewed",
-        ] {
-            record[key] = detail
-                .node
-                .get(key)
-                .cloned()
-                .unwrap_or(serde_json::Value::Null);
-        }
-        record["relations"] = serde_json::json!(detail.outgoing);
+    for key in [
+        "superseded_by",
+        "supersedes",
+        "implements",
+        "related",
+        "covers",
+        "reviewed",
+    ] {
+        record[key] = detail
+            .node
+            .get(key)
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
     }
+    record["relations"] = serde_json::json!(detail.outgoing);
 
     Ok(RawItem {
         // The repository's own vocabulary, carried so a reader can ask for decision records
@@ -916,21 +895,51 @@ fn read_document_revision(
     })
 }
 
-fn content_revision(content: &[u8]) -> String {
-    use sha2::Digest;
-    sha2::Sha256::digest(content)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+const OBSERVATION_SCHEME: &str = "nodex-query-node-v1:sha256";
+
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+struct ObservationRevision {
+    scheme: &'static str,
+    value: String,
 }
 
-fn verify_file_revision(path: &Path, expected: &str) -> Result<(), SourceError> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| SourceError::Parse(format!("read {}: {e}", path.display())))?;
-    if content_revision(&bytes) != expected {
+fn observation_revision(detail: &NodeDetail) -> Result<ObservationRevision, SourceError> {
+    use sha2::Digest;
+    // serde_json's default Map is sorted; arrays retain the public response's order.
+    // Incoming edges are not source declarations and are deliberately not collected.
+    let payload =
+        serde_json::json!({"node": detail.node, "body": detail.body, "outgoing": detail.outgoing});
+    let bytes = serde_json::to_vec(&payload)
+        .map_err(|e| SourceError::Parse(format!("nodex observation: {e}")))?;
+    let mut digest = sha2::Sha256::new();
+    digest.update(OBSERVATION_SCHEME.as_bytes());
+    digest.update(b"\0");
+    digest.update(bytes);
+    let value: String = digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Ok(ObservationRevision {
+        scheme: OBSERVATION_SCHEME,
+        value,
+    })
+}
+
+fn verify_observation(
+    item: &RecentItem,
+    before: &ObservationRevision,
+    after: &NodeDetail,
+    projected_body: &str,
+    repo: &Path,
+    base_url: Option<&str>,
+) -> Result<(), SourceError> {
+    if *before != observation_revision(after)?
+        || repoint_links(&after.body, repo, &item.path, base_url) != projected_body
+    {
         return Err(SourceError::Parse(format!(
             "{} changed during nodex observation",
-            path.display()
+            item.id
         )));
     }
     Ok(())
@@ -939,6 +948,210 @@ fn verify_file_revision(path: &Path, expected: &str) -> Result<(), SourceError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn executable_selection_is_explicit_and_validated_without_io() {
+        assert!(
+            crate::parse_validated::<NodexParams>(&params(serde_json::json!({})))
+                .unwrap()
+                .executable
+                .is_none()
+        );
+        let root = tempfile::tempdir().unwrap();
+        let absolute = root.path().join("not installed/노덱스");
+        assert!(validate_params(&params(serde_json::json!({"executable": absolute}))).is_ok());
+        for path in ["", "nodex", "./nodex", "~/bin/nodex"] {
+            assert!(validate_params(&params(serde_json::json!({"executable": path}))).is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn selected_executable_receives_guards_and_failure_never_falls_back() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("노덱스 binary");
+        std::fs::write(&executable, r#"#!/bin/sh
+printf '%s\n' "$@" > "$0.args"
+printf '%s' '{"ok":true,"data":{"items":[]},"snapshot":{"verification":"content","unbuildable":0,"unfollowed":0}}'
+"#).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let day = "2026-10-17".parse().unwrap();
+        assert!(
+            query_window(&executable, root.path(), "created", day, day)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let args =
+            std::fs::read_to_string(executable.with_file_name("노덱스 binary.args")).unwrap();
+        assert_eq!(
+            args.lines().collect::<Vec<_>>(),
+            vec![
+                "-C",
+                root.path().to_str().unwrap(),
+                "--check-version",
+                NODEX_COMPATIBILITY,
+                "--today",
+                "2026-10-17",
+                "query",
+                "recent",
+                "--field",
+                "created",
+                "--since",
+                "2026-10-16",
+                "--limit",
+                "500"
+            ]
+        );
+        // An absolute executable's launch failure must be returned, never retried on PATH.
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let error =
+            run_nodex::<serde_json::Value>(&executable, root.path(), day, &["check"], false)
+                .await
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains(executable.to_str().unwrap()));
+        assert!(error.contains("no other executable was tried"));
+        std::fs::remove_file(&executable).unwrap();
+        assert!(
+            run_nodex::<serde_json::Value>(&executable, root.path(), day, &["check"], false)
+                .await
+                .is_err()
+        );
+    }
+
+    /// Opt-in contract exercise against separately installed real binaries, never PATH or a
+    /// source checkout. The fixture and its graph are disposable; no vault is written.
+    #[tokio::test]
+    #[ignore = "requires LORE_TEST_NODEX_053 and LORE_TEST_NODEX_054 absolute binary paths"]
+    async fn selected_real_binaries_preserve_compatibility_and_content_refusal() {
+        let supported =
+            PathBuf::from(std::env::var_os("LORE_TEST_NODEX_054").expect("0.54 binary"));
+        let unsupported =
+            PathBuf::from(std::env::var_os("LORE_TEST_NODEX_053").expect("0.53 binary"));
+        assert!(supported.is_absolute() && unsupported.is_absolute());
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("docs")).unwrap();
+        std::fs::write(
+            root.path().join("nodex.toml"),
+            r#"[scope]
+include = ["docs/**/*.md"]
+[kinds]
+allowed = ["generic"]
+[statuses]
+allowed = ["draft", "active", "superseded", "archived"]
+terminal = ["superseded", "archived"]
+initial = "draft"
+[[identity.kind_rules]]
+glob = "docs/**"
+kind = "generic"
+[[identity.id_rules]]
+kind = "*"
+template = "{kind}-{path_slug}"
+"#,
+        )
+        .unwrap();
+        let path = root.path().join("docs/a.md");
+        let original = "---\r\nid: a\r\ntitle: Alpha\r\nkind: generic\r\nstatus: active\r\ncreated: 2026-10-17\r\n---\r\n# Alpha\r\nBody.\r\n";
+        std::fs::write(&path, original).unwrap();
+        let built = std::process::Command::new(&supported)
+            .arg("-C")
+            .arg(root.path())
+            .arg("build")
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "{}",
+            String::from_utf8_lossy(&built.stdout)
+        );
+        let ctx = ExtractContext {
+            target_date: "2026-10-17".parse().unwrap(),
+            timezone: jiff::tz::TimeZone::UTC,
+            locale: lk_core::i18n::Locale::En,
+            identity: Default::default(),
+            vault_root: root.path().join("unused-vault"),
+        };
+        let selected = serde_json::json!({"repo":root.path(), "executable":supported, "reconcile":true, "repository_id":"fixture/repo"});
+        let raw = NodexSource.extract(&selected, &ctx).await.unwrap();
+        assert_eq!(raw.len(), 1);
+        assert_eq!(
+            raw[0].metadata["source_record"]["observation_revision"]["scheme"],
+            OBSERVATION_SCHEME
+        );
+        let mut rejected = selected.clone();
+        rejected["executable"] = serde_json::json!(unsupported);
+        let error = NodexSource
+            .extract(&rejected, &ctx)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("VERSION_MISMATCH"), "{error}");
+        assert!(error.contains("params.executable") && error.contains("0.54.2"));
+        // Same canonical body, different exact raw revision must still be refused.
+        std::fs::write(&path, original.replace("\r\n", "\n")).unwrap();
+        let error = NodexSource
+            .extract(&selected, &ctx)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("GRAPH_OUTDATED"), "{error}");
+        let rebuilt = std::process::Command::new(&supported)
+            .arg("-C")
+            .arg(root.path())
+            .arg("build")
+            .output()
+            .unwrap();
+        assert!(rebuilt.status.success());
+        let canonical = NodexSource.extract(&selected, &ctx).await.unwrap();
+        assert_eq!(
+            raw[0].metadata["source_record"]["observation_revision"],
+            canonical[0].metadata["source_record"]["observation_revision"],
+            "rebuilt formatting-only changes are the same public observation, never a claim of equal raw bytes"
+        );
+        // A rebuilding writer can change body without changing inventory fields.
+        // Exercise the entire first-read/final-requery loop, not only its comparison helper.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let wrapper = root.path().join("changing-nodex");
+            let script = format!(
+                r#"#!/bin/sh
+{binary:?} "$@" > "$0.output"
+rc=$?
+case "$*" in
+  *"query node a --with-body"*)
+    if [ ! -f "$0.changed" ]; then
+      touch "$0.changed"
+      printf '\nChanged between selected reads.\n' >> {path:?}
+      {binary:?} -C {repo:?} build >/dev/null || exit 2
+    fi
+    ;;
+esac
+cat "$0.output"
+exit "$rc"
+"#,
+                binary = supported,
+                path = path,
+                repo = root.path()
+            );
+            std::fs::write(&wrapper, script).unwrap();
+            std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let mut changing = selected.clone();
+            changing["executable"] = serde_json::json!(wrapper);
+            let error = NodexSource
+                .extract(&changing, &ctx)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("changed during nodex observation"),
+                "{error}"
+            );
+        }
+        assert!(!ctx.vault_root.exists());
+    }
 
     fn complete_envelope() -> serde_json::Value {
         serde_json::json!({"ok":true,"data":{"items":[]},"snapshot":{"verification":"content","unbuildable":0,"unfollowed":0}})
@@ -965,33 +1178,12 @@ mod tests {
                     .is_err()
             );
         }
-        let mut member = clean.clone();
-        member["snapshot"]["verification"] = serde_json::json!("membership");
-        assert!(
-            decode_observation::<serde_json::Value>(
-                &serde_json::to_vec(&member).unwrap(),
-                true,
-                true,
-                true
-            )
-            .is_ok()
-        );
-        assert!(
-            decode_observation::<serde_json::Value>(
-                &serde_json::to_vec(&member).unwrap(),
-                true,
-                true,
-                false
-            )
-            .is_err()
-        );
         // An unrelated check rule finding carries ok:true and exit 1, not an I/O error.
         let verdict = serde_json::json!({"ok":true,"data":{"has_errors":true,"violations":[]}});
         assert!(
-            decode_observation::<serde_json::Value>(
+            decode_envelope::<serde_json::Value>(
                 &serde_json::to_vec(&verdict).unwrap(),
                 true,
-                false,
                 false
             )
             .is_ok()
@@ -1028,21 +1220,20 @@ mod tests {
         assert!(is_reconciliation(&params(serde_json::json!({"reconcile":true,"repository_id":"org/repository","document_ids":["hub"]}))).unwrap());
     }
 
+    fn observation() -> NodeDetail {
+        NodeDetail {
+            node: serde_json::json!({"id":"hub","title":"hub","kind":"learning","status":"archived","path":"docs/hub.md","inferred_fields":["title"]}),
+            body: String::new(),
+            outgoing: vec![],
+        }
+    }
+
     #[test]
-    fn verified_metadata_and_bytes_cannot_be_mixed_with_a_new_revision() {
+    fn public_observation_binds_metadata_body_and_outgoing_without_raw_claims() {
         let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir(root.path().join("docs")).unwrap();
-        let original = "---\nstatus: active\n---\n# hub\nOriginal body.\n";
-        let path = root.path().join("docs/hub.md");
-        std::fs::write(&path, original).unwrap();
-        let item = item("hub", "2026-10-17");
-        let detail = NodeDetail {
-            node: serde_json::json!({"id":"hub","title":"hub","kind":"learning","status":"active","path":"docs/hub.md","content_hash":content_revision(original.as_bytes()),"supersedes":["predecessor"],"implements":["spec-example"]}),
-            body: "# hub\nOriginal body.\n".into(),
-            outgoing: vec![
-                serde_json::json!({"relation":"supersedes","target":{"id":"predecessor"}}),
-            ],
-        };
+        let detail = observation();
+        let mut selected = item("hub", "2026-10-17");
+        selected.status = "archived".into();
         let ctx = ExtractContext {
             target_date: "2026-10-17".parse().unwrap(),
             timezone: jiff::tz::TimeZone::UTC,
@@ -1050,95 +1241,144 @@ mod tests {
             identity: Default::default(),
             vault_root: root.path().to_owned(),
         };
-        verify_selection(&item, &detail.node, true).unwrap();
-        let raw = read_document_revision(
+        verify_selection(&selected, &detail.node, true).unwrap();
+        let raw = build_document_observation(
             root.path(),
-            &item,
+            &selected,
             None,
             &ctx,
-            Some(&detail),
+            &detail,
             true,
-            Some("org/repository"),
+            Some("org/repo"),
         )
         .unwrap();
+        assert!(raw.body.is_empty());
+        assert_eq!(raw.metadata["source_record"]["status"], "archived");
+        assert_eq!(raw.metadata["source_record"]["timestamp_basis"], "observed");
+        assert_eq!(
+            raw.metadata["source_record"]["observation_revision"]["scheme"],
+            OBSERVATION_SCHEME
+        );
+        assert!(raw.metadata["source_record"].get("revision").is_none());
+        assert!(
+            raw.metadata["source_record"]
+                .get("content_revision")
+                .is_none()
+        );
         assert_eq!(
             raw.metadata["source_identity"],
-            serde_json::json!({"repository":"org/repository","document":"hub"})
+            serde_json::json!({"repository":"org/repo","document":"hub"})
         );
-        assert_eq!(
-            raw.metadata["source_record"]["created"],
-            serde_json::Value::Null
+        assert!(
+            !root.path().join("docs/hub.md").exists(),
+            "collection never needs a second source-file read"
         );
-        assert_eq!(raw.metadata["source_record"]["timestamp_basis"], "observed");
-        let mut dated = NodeDetail {
-            node: detail.node.clone(),
-            body: detail.body.clone(),
-            outgoing: detail.outgoing.clone(),
-        };
+        for changed in [
+            NodeDetail {
+                node: serde_json::json!({"id":"hub","attrs":{"a":1}}),
+                ..detail.clone()
+            },
+            NodeDetail {
+                body: "changed".into(),
+                ..detail.clone()
+            },
+            NodeDetail {
+                outgoing: vec![
+                    serde_json::from_value(
+                        serde_json::json!({"relation":"references","target":"other"}),
+                    )
+                    .unwrap(),
+                ],
+                ..detail.clone()
+            },
+        ] {
+            assert!(
+                verify_observation(
+                    &selected,
+                    &observation_revision(&detail).unwrap(),
+                    &changed,
+                    "",
+                    root.path(),
+                    None
+                )
+                .is_err()
+            );
+        }
+        let value = serde_json::json!({"node":detail.node,"body":"","outgoing":[]});
+        assert!(serde_json::from_value::<NodeDetail>(value.clone()).is_ok());
+        for field in ["body", "outgoing"] {
+            let mut missing = value.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<NodeDetail>(missing).is_err());
+        }
+        for field in ["id", "path", "title", "kind", "status"] {
+            let mut node = detail.node.clone();
+            node[field] = serde_json::json!("changed");
+            assert!(verify_selection(&selected, &node, true).is_err());
+        }
+        assert!(verify_selection(&selected, &detail.node, false).is_err());
+        let mut malformed = detail.node.clone();
+        malformed["parse_issues"] = serde_json::json!([{"field":"created"}]);
+        assert!(verify_selection(&selected, &malformed, true).is_err());
+        for malformed in [
+            serde_json::json!({"node":detail.node,"body":"","outgoing":[{"relation":"references"}]}),
+            serde_json::json!({"node":detail.node,"body":null,"outgoing":[]}),
+        ] {
+            assert!(serde_json::from_value::<NodeDetail>(malformed).is_err());
+        }
+        let mut dated = detail.clone();
         dated.node["created"] = serde_json::json!("2026-09-01");
-        let historical = read_document_revision(
-            root.path(),
-            &item,
-            None,
-            &ctx,
-            Some(&dated),
-            true,
-            Some("org/repository"),
-        )
-        .unwrap();
-        assert_eq!(
-            historical.timestamp,
-            "2026-09-01"
-                .parse::<jiff::civil::Date>()
-                .unwrap()
-                .to_zoned(ctx.timezone.clone())
-                .unwrap()
-                .timestamp()
-        );
+        let historical =
+            build_document_observation(root.path(), &selected, None, &ctx, &dated, true, None)
+                .unwrap();
         assert_eq!(
             historical.metadata["source_record"]["timestamp_basis"],
             "authored"
         );
         assert_eq!(
-            raw.metadata["source_record"]["supersedes"],
-            serde_json::json!(["predecessor"])
+            historical
+                .timestamp
+                .to_zoned(ctx.timezone)
+                .date()
+                .to_string(),
+            "2026-09-01"
         );
-        assert_eq!(
-            raw.metadata["source_record"]["implements"],
-            serde_json::json!(["spec-example"])
+    }
+
+    #[test]
+    fn final_observation_rechecks_filesystem_dependent_link_projection() {
+        let root = repo_with(&[]);
+        let mut detail = observation();
+        detail.body = "[target](target.md)".into();
+        let selected = item("hub", "2026-10-17");
+        let before = repoint_links(
+            &detail.body,
+            root.path(),
+            &selected.path,
+            Some("https://host/repo"),
         );
-        assert_eq!(
-            raw.timestamp,
-            ctx.target_date
-                .to_zoned(ctx.timezone.clone())
-                .unwrap()
-                .timestamp()
-        );
-        std::fs::write(
-            &path,
-            original.replace("Original body.", "Changed without a date or status edit."),
+        verify_observation(
+            &selected,
+            &observation_revision(&detail).unwrap(),
+            &detail,
+            &before,
+            root.path(),
+            Some("https://host/repo"),
         )
         .unwrap();
+        std::fs::create_dir_all(root.path().join("docs")).unwrap();
+        std::fs::write(root.path().join("docs/target.md"), "target").unwrap();
         assert!(
-            read_document_revision(
+            verify_observation(
+                &selected,
+                &observation_revision(&detail).unwrap(),
+                &detail,
+                &before,
                 root.path(),
-                &item,
-                None,
-                &ctx,
-                Some(&detail),
-                true,
-                Some("org/repository")
+                Some("https://host/repo")
             )
             .is_err()
         );
-        assert!(
-            verify_file_revision(&path, detail.node["content_hash"].as_str().unwrap()).is_err()
-        );
-        for field in ["id", "title", "kind", "status", "path"] {
-            let mut node = detail.node.clone();
-            node[field] = serde_json::json!("changed");
-            assert!(verify_selection(&item, &node, true).is_err());
-        }
     }
 
     fn params(extra: serde_json::Value) -> serde_json::Value {
@@ -1150,32 +1390,6 @@ mod tests {
         };
         base_map.extend(extra_map);
         base
-    }
-
-    #[test]
-    fn historical_documents_keep_declared_state_and_authored_source_revision() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir(root.path().join("docs")).unwrap();
-        let content = "---\nstatus: archived\n---\n# Evidence\nObserved result.\n";
-        std::fs::write(root.path().join("docs/history.md"), content).unwrap();
-        let mut item = item("history", "2026-10-14");
-        item.status = "archived".into();
-        let context = ExtractContext {
-            target_date: "2026-10-16".parse().unwrap(),
-            timezone: jiff::tz::TimeZone::UTC,
-            locale: lk_core::i18n::Locale::En,
-            identity: Default::default(),
-            vault_root: root.path().to_path_buf(),
-        };
-        let raw = read_document(root.path(), &item, None, &context).unwrap();
-        assert_eq!(raw.metadata["source_record"]["status"], "archived");
-        assert_eq!(
-            raw.metadata["source_record"]["revision"],
-            lk_core::concept::source_revision(&lk_core::frontmatter::parse_page(content).unwrap())
-        );
-        assert!(raw.body.contains("Observed result."));
-        item.status = "active".into();
-        assert!(read_document(root.path(), &item, None, &context).is_err());
     }
 
     #[test]

@@ -210,7 +210,7 @@ map to `RawItem`.
     TAG, so a reader asks for decision records across every project without naming a source.
     The CONCEPTS those documents name are what makes one insight found in three projects
     converge on one page. Normal date ingestion uses the declared date and kind, including historical
-    records; explicit reconciliation instead observes the current eligible inventory. `source_record` carries id, status, authored source revision and the declared
+    records; explicit reconciliation instead observes the current eligible inventory. `source_record` carries id, status, a versioned observation revision and the declared
     successor. Archived and superseded records are not current operating contracts, but their
     observations remain evidence. Missing records are not inferred to be archived. `--today` pins the
     clock so `--date` backfill asks the day's own question; `--since` is a lower bound only,
@@ -319,7 +319,11 @@ map to `RawItem`.
   unbuildable documents, unfollowed scope boundaries, unavailable verification and scope
   coverage gaps refuse the observation instead of claiming an empty or complete success.
   The adapter does not rebuild a source graph as a side effect and pins its public CLI
-  envelope compatibility to nodex `>=0.53.0, <0.54` with `--check-version`.
+  envelope compatibility to nodex `>=0.54.2, <0.55` with `--check-version`.
+  `params.executable` optionally selects one absolute binary path for every subprocess in
+  the observation; omission uses `nodex` on PATH. Explicit launch/version failure never
+  falls back to another binary. Param validation stays pure; live compatibility is checked
+  at execution. Selecting a binary never rebuilds the index or overrides the project pin.
 - **Nodex reconciliation is explicit.** `reconcile: true` requires a portable, nonblank
   `repository_id`. It selects the current inventory independently of declared dates;
   `kinds` and exact `document_ids` narrow the imported population only after completeness
@@ -329,9 +333,13 @@ map to `RawItem`.
   remain provenance; an undated hub uses the observation day with `timestamp_basis: observed`
   and null authored dates rather than inventing an author date. Future-dated knowledge is
   still refused by the pipeline's shared upper bound.
-- **Nodex metadata and prose describe one exact revision.** The document's raw bytes must
-  match nodex's SHA-256 `content_hash` before parsing that same buffer. Identity/kind/status
-  and typed lifecycle relations come from the verified node, never an unverified later file.
-  Batch drift refuses the source; one selected read failure is not a partial success.
+- **Nodex metadata and prose come from one verified public response.** Collect the node,
+  canonical body and outgoing relations together, without reparsing a separate source-file
+  read. `observation_revision` carries a scheme and digest of that observation; it never
+  claims raw-file equality or replaces the meaning of earlier `content_revision` evidence.
+  Requery selected observations and repeat link projection before returning; changed
+  observations or projected links refuse the source. Inventory and config checks remain
+  mandatory. These bounded reads do not lock out external editors or certify raw formatting.
+  One selected read failure is not a partial success.
   Snapshot fingerprints are internal observation guards, not per-document LLM inputs:
   changing an unrelated file must not regenerate every unchanged document.

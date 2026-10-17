@@ -1,6 +1,6 @@
 ---
 name: lore-process
-version: 0.48.1
+version: 0.49.0
 description: Drain the Lorekeeper LLM work queue after `lore ingest` runs in queue mode — fill the empty LLM-owned sections (summaries, refined events, concepts, themes, reviews) of freshly-written vault pages using the active agent session. Idempotent and resumable. Run after each ingest, or on a daily schedule.
 when_to_use: |
   queue process, drain queue, fill summaries,
@@ -55,8 +55,8 @@ you last read them.
    no longer carries means the heading vocabulary changed (a locale switch), which
    no amount of waiting undoes. A task applied earlier in this run
    reads `done` and is skipped. Every staged task remains `current` until apply
-   publishes the result and stamps its marker. Apply after each task; never loop
-   on classification alone without publishing results.
+   publishes the result and stamps its marker. Apply after each task or a reviewed
+   independent batch under step 3d; never loop on classification alone without publishing results.
 2. **Locate a section only by a heading the TASK carries** — `target.anchor`, and
    `input.related_anchor` for the second section a `synthesize-concept` task fills. Each is
    the exact `## …` heading the pipeline wrote, resolved from i18n at queue time. Never
@@ -183,11 +183,22 @@ The essentials: a visible `.jsonl` is fully written and every
 
       See [queue-format.md](references/queue-format.md) for the exact contracts.
       Write each result atomically through a temporary file and rename. Run
-      `lore queue apply` after each task before capturing the next target revision:
-      several tasks can share one page, and a successful earlier publication changes
-      its exact bytes. Parallel workers must coordinate targets; if another task or
+      `lore queue apply` before capturing a subsequent task on the same target:
+      a successful earlier publication changes its exact bytes. If another task or
       editor changes a target, reread and regenerate rather than relabeling the old result.
-      A failed apply stops this run and preserves uncommitted work for diagnosis.
+
+      A coordinator may batch reviewed results of the same kind for distinct targets
+      in one apply, provided no result changes another task's evidence. Freeze ingest
+      and all other page writers during the wave, reconcile
+      names and aliases across the batch, and place only those approved results in
+      `results/`: apply consumes the whole directory. Finish the summary wave before
+      capturing targets and drafting extraction. Batching extraction shares one concept
+      registry load; it does not relax any task, evidence or target revision guard.
+
+      Apply is not all-or-nothing: valid results may be published while others fail.
+      On a nonzero exit, stop and inspect status, remaining results, quarantine and
+      alias warnings before regenerating affected work. Never assume rollback or
+      attach new guards to old drafts.
 
    e. **On task failure** (page not found, edit error, malformed task):
       record the failed `task_id` and the reason. **Abort processing of
@@ -214,10 +225,11 @@ The essentials: a visible `.jsonl` is fully written and every
    Applying BEFORE the move is also what keeps `lore resolve` authoritative: concept pages
    are what it reads, so a result not yet applied is a concept it cannot see, and a long run
    would otherwise need a second answer to the naming question carried alongside the first.
-   Applying per task makes new concepts visible before the next extraction. A failing apply
-   stops the run — everything after it would decide names against a vault missing what this
-   run already found — and a result it QUARANTINES is one naming a concept no page can be
-   written for, which is a name to correct rather than a file to retry.
+   Apply makes new concepts visible to the next extraction wave; within an independent
+   batch, the coordinator must reconcile names before publication as required by step 3d.
+   A failing apply stops the run: inspect what was published and what remains before
+   deciding further names. Quarantined results require diagnosis and correction, not
+   blind retry.
 
 5. **Finalize (mandatory — do not skip).** The apply here covers whatever the last file
    left pending; `lore graph backlinks-sync` and `lore wiki refresh` are owed once, at the

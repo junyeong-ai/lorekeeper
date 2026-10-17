@@ -90,10 +90,13 @@ Use `input.source_type` to identify candidate subjects:
   their appearance alone does not justify a concept. Use names the material writes.
   Do not invent a generic principle merely to remove its project context, and preserve
   the conditions that make an observation transferable.
-  A promotion marker (`[PROMOTES: <id>]`) or a pattern id in the document's own
-  frontmatter explicitly declares an evidence relationship. Resolve that declared id
+  A promotion marker naming a pattern (`[PROMOTES: <id>]`) or a pattern id in the
+  document's own frontmatter declares an evidence relationship. Resolve that identity
   and preserve its citation; use the id as the name when it is absent from the registry.
-  Register the prose form as an alias only when it denotes that same concept.
+  A marker containing a proposed rule rather than naming a subject is still source
+  evidence, but does not make the whole finding a concept name. Preserve that proposal
+  in the source summary; do not invent an identity or alias it to a related mechanism.
+  Register a prose name as an alias only when it denotes the same named concept.
   A declaration establishes what the author associates with the document, not that
   every claim is correct or universal. Reconcile competing evidence during synthesis.
 - `google-drive` / `manual` → document subject matter

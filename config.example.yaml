@@ -275,13 +275,15 @@ sources:
 
   # Optional repository adapter. nodex supplies declared document identity and lifecycle;
   # Lorekeeper keeps an evidence copy and synthesizes cross-project concepts.
-  # Requires nodex on PATH and a current nodex.toml-governed index for this source only.
+  # Requires nodex >=0.54.2,<0.55 and a current index compatible with that binary.
   # Repositories without nodex can use /lore-extract's explicit extraction manifest.
   platform-docs:
     type: nodex
     enabled: false
     params:
       repo: /absolute/path/to/your/repo   # absolute: a scheduled run starts nowhere in particular
+      # Optional side-by-side binary; omitted uses nodex on PATH. No shell/tilde expansion.
+      # executable: /absolute/path/to/tools/nodex-0.54.2/nodex
       kinds: [learning, adr, guide]       # from the repo's own kinds.allowed; omit for every kind
       lookback_hours: 24
       # Stable namespace, independent of checkout location; never reuse for another repository.

@@ -731,7 +731,7 @@ pub fn render_agents_md(
         .unwrap();
 
         if schema.type_name == "document" {
-            out.push_str("\nOptional `source_identity` records a stable repository namespace and document ID, independent of title and checkout location. Legacy location-only ownership requires verified migration. `source_record` preserves an imported document\'s provider id, declared status, authored source revision and declared `superseded_by` value. Archived or superseded means historical scope, not falsehood. Missing metadata means unknown; a successor value is not an automatically resolved vault link. Status changes invalidate semantic inputs.\n");
+            out.push_str("\nOptional `source_identity` records a stable repository namespace and document ID, independent of title and checkout location. Legacy location-only ownership requires verified migration. `source_record` preserves an imported document\'s provider id, declared status, source revision evidence and declared `superseded_by` value. Nodex `observation_revision` carries an explicit scheme and digest of verified metadata, canonical body and outgoing relations; it is not a raw-file SHA. Earlier `revision` and `content_revision` records retain their original meaning. Archived or superseded means historical scope, not falsehood. Missing metadata means unknown; a successor value is not an automatically resolved vault link. Status changes invalidate semantic inputs.\n");
             writeln!(
                 out,
                 "\n`document_type` values: {} (FORMAT only; subject-matter goes in `tags`).",
