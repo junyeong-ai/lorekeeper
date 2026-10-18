@@ -81,3 +81,11 @@ and captures its canonical absolute path in cron/launchd environments. An unset
 value keeps Claude's default behavior. Only the profile path is captured; API keys
 or credential contents are not copied. Regenerate and reload definitions after
 changing the selected profile.
+
+Schedule definitions also preserve explicitly set `HTTP_PROXY`, `HTTPS_PROXY`,
+`ALL_PROXY`, `NO_PROXY` and their lowercase forms, including empty values. Casing
+and client precedence remain unchanged. Proxy endpoints must be absolute,
+credential-free URLs (scheme, host, optional port/root slash; no userinfo, query,
+fragment or other path); `NO_PROXY` is preserved as text. Invalid UTF-8/control
+characters are refused without printing values. Regenerate and reload definitions
+when network settings change; credentials/API keys are not captured.

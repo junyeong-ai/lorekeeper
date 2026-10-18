@@ -109,6 +109,57 @@ fn pipeline_env(
     env
 }
 
+const PROXY_ENV_KEYS: [&str; 8] = [
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+];
+
+/// Keep casing and explicit emptiness: each network client owns precedence.
+fn proxy_env(
+    mut lookup: impl FnMut(&str) -> Option<std::ffi::OsString>,
+) -> miette::Result<Vec<(String, String)>> {
+    let mut captured = Vec::new();
+    for key in PROXY_ENV_KEYS {
+        let Some(raw) = lookup(key) else { continue };
+        let invalid = || {
+            miette::miette!(
+                "invalid {key}: expected UTF-8, control-free text; proxy endpoints must be absolute credential-free URLs without query, fragment or non-root path"
+            )
+        };
+        let value = raw.into_string().map_err(|_| invalid())?;
+        if value.chars().any(char::is_control) {
+            return Err(invalid());
+        }
+        if !value.is_empty() && !key.eq_ignore_ascii_case("no_proxy") {
+            let url = url::Url::parse(&value).map_err(|_| invalid())?;
+            if value.trim() != value
+                || !value.get(..url.scheme().len() + 3).is_some_and(|prefix| {
+                    prefix.eq_ignore_ascii_case(&format!("{}://", url.scheme()))
+                })
+                || url.host_str().is_none()
+                // The URL parser normalizes an empty userinfo marker away.
+                // With paths/query/fragment excluded, a literal @ is userinfo syntax.
+                || value.contains('@')
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.query().is_some()
+                || url.fragment().is_some()
+                || !matches!(url.path(), "" | "/")
+            {
+                return Err(invalid());
+            }
+        }
+        captured.push((key.to_owned(), value));
+    }
+    Ok(captured)
+}
+
 fn resolve_existing_dir(
     name: &str,
     value: Option<&std::ffi::OsStr>,
@@ -257,6 +308,7 @@ pub async fn run(
             Vec::new()
         }
     };
+    env.extend(proxy_env(|key| std::env::var_os(key))?);
     if let Some(path) = &opts.template_dir {
         let path = if path.is_absolute() {
             path.clone()
@@ -435,12 +487,23 @@ fn print_cron(
     // instead of repeating a full PATH on each one.
     if !env.is_empty() {
         out.push("# Environment the pipelines need to find their own tools:".into());
-        out.extend(env.iter().map(|(key, value)| format!("{key}={value}")));
+        out.extend(
+            env.iter()
+                .filter(|(key, _)| !PROXY_ENV_KEYS.contains(&key.as_str()))
+                .map(|(key, value)| format!("{key}={value}")),
+        );
         out.push(String::new());
     }
 
     for job in jobs {
-        let mut command = shell_escape(job.program.as_deref().unwrap_or(bin));
+        let mut command = String::new();
+        for (key, value) in env
+            .iter()
+            .filter(|(key, _)| PROXY_ENV_KEYS.contains(&key.as_str()))
+        {
+            command.push_str(&format!("{key}={} ", shell_escape(value)));
+        }
+        command.push_str(&shell_escape(job.program.as_deref().unwrap_or(bin)));
         for arg in &job.args {
             command.push(' ');
             command.push_str(&shell_escape(arg));
@@ -473,6 +536,34 @@ fn print_launchd(
     namespace: &str,
     log_dir: Option<&std::path::Path>,
 ) -> miette::Result<()> {
+    validate_xml_text("binary", bin)?;
+    validate_xml_text("working directory", &cwd.display().to_string())?;
+    // Resolve every calendar and validate every emitted field before writing a header.
+    let mut intervals = Vec::with_capacity(jobs.len());
+    for job in jobs {
+        validate_xml_text("job label", &format!("{namespace}.{}", job.name))?;
+        validate_xml_text("job program", job.program.as_deref().unwrap_or(bin))?;
+        for arg in &job.args {
+            validate_xml_text("job argument", arg)?;
+        }
+        for (key, value) in env
+            .iter()
+            .filter(|(key, _)| job.is_pipeline() || PROXY_ENV_KEYS.contains(&key.as_str()))
+        {
+            validate_xml_text("environment key", key)?;
+            validate_xml_text(key, value)?;
+        }
+        intervals.push(match &job.schedule {
+            When::Calendar(expr) => Some(cron_to_calendar_intervals(expr).ok_or_else(|| {
+                miette::miette!(
+                    "schedule `{expr}` for `{}` uses cron syntax launchd cannot express. \
+                     Use --format cron or simplify its schedule.",
+                    job.name
+                )
+            })?),
+            When::EveryMinutes(_) => None,
+        });
+    }
     // Every path in a plist must be absolute. launchd execs the program directly and does
     // NOT search a PATH, and it expands no shell syntax — neither a bare name nor a `~` nor
     // a relative path resolves. Each yields a job that fails to spawn with nothing but a
@@ -515,6 +606,17 @@ fn print_launchd(
                 namespace
             });
     let log_dir = log_dir.unwrap_or(&default_log_dir);
+    validate_xml_text("HOME", &home)?;
+    validate_xml_text("log directory", &log_dir.display().to_string())?;
+    for job in jobs {
+        validate_xml_text(
+            "job log path",
+            &log_dir
+                .join(format!("{}.log", job.name))
+                .display()
+                .to_string(),
+        )?;
+    }
     println!("# lorekeeper scheduled tasks (launchd)");
     println!("#");
     println!("# launchd does not create the log directory, and a job whose StandardOutPath");
@@ -536,21 +638,8 @@ fn print_launchd(
     println!("# dropping it. Logs land in {}.", log_dir.display());
     println!();
 
-    for job in jobs {
+    for (job, intervals) in jobs.iter().zip(intervals) {
         let label = format!("{namespace}.{}", job.name);
-        let intervals = match &job.schedule {
-            When::Calendar(expr) => Some(cron_to_calendar_intervals(expr).ok_or_else(|| {
-                miette::miette!(
-                    "schedule `{expr}` for `{}` uses cron syntax launchd cannot express \
-                     (step/range values). Use `--format cron`, or simplify the expression.",
-                    job.name
-                )
-            })?),
-            // launchd expresses a repeat natively, so there is nothing to translate and
-            // nothing to refuse.
-            When::EveryMinutes(_) => None,
-        };
-
         println!("# ── {home}/Library/LaunchAgents/{label}.plist");
         println!(r#"<?xml version="1.0" encoding="UTF-8"?>"#);
         println!(
@@ -569,10 +658,14 @@ fn print_launchd(
             println!("    <string>{}</string>", xml_escape(arg));
         }
         println!("  </array>");
-        if job.is_pipeline() && !env.is_empty() {
+        let job_env: Vec<_> = env
+            .iter()
+            .filter(|(key, _)| job.is_pipeline() || PROXY_ENV_KEYS.contains(&key.as_str()))
+            .collect();
+        if !job_env.is_empty() {
             println!("  <key>EnvironmentVariables</key>");
             println!("  <dict>");
-            for (key, value) in env {
+            for (key, value) in job_env {
                 println!(
                     "    <key>{}</key><string>{}</string>",
                     xml_escape(key),
@@ -721,10 +814,25 @@ fn cron_to_calendar_intervals(expr: &str) -> Option<Vec<CalendarInterval>> {
     Some(out)
 }
 
+fn validate_xml_text(field: &str, value: &str) -> miette::Result<()> {
+    if value.chars().all(|c| {
+        matches!(c,
+        '\u{9}' | '\u{a}' | '\u{d}' | '\u{20}'..='\u{d7ff}' |
+        '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}')
+    }) {
+        Ok(())
+    } else {
+        Err(miette::miette!("invalid XML 1.0 text in {field}"))
+    }
+}
+
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+        .replace('\r', "&#13;")
+        .replace('\n', "&#10;")
+        .replace('\t', "&#9;")
 }
 
 /// Minimal shell-escape: leaves safe identifiers untouched, otherwise wraps in single quotes.
@@ -997,5 +1105,9 @@ mod tests {
     #[test]
     fn xml_escape_protects_plist_structure() {
         assert_eq!(xml_escape("a&b<c>d"), "a&amp;b&lt;c&gt;d");
+        assert_eq!(xml_escape("\r\n\t"), "&#13;&#10;&#9;");
+        assert!(validate_xml_text("test", "\r\n\t文😀").is_ok());
+        assert!(validate_xml_text("test", "\u{fffe}").is_err());
+        assert!(validate_xml_text("test", "\u{ffff}").is_err());
     }
 }

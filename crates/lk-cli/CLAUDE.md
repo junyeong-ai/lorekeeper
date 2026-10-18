@@ -35,6 +35,9 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   custom namespaces use separate default logs. `--log-dir` is an explicit absolute
   path. These options only render definitions: never register jobs or create log
   directories here. Reject unsafe namespaces before any output.
+- Preserve explicitly set standard proxy variables in both formats and direct jobs,
+  including casing and empty values. Refuse credential-bearing proxy endpoints
+  without printing their values; do not capture arbitrary environment variables.
 
 ## Ingest and originals (`commands/ingest.rs`)
 

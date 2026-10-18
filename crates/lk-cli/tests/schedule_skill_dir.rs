@@ -20,6 +20,18 @@ fn schedule_profile(
         }
     }
     command.env_remove("CLAUDE_CONFIG_DIR");
+    for key in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+    ] {
+        command.env_remove(key);
+    }
     command.env("ANTHROPIC_API_KEY", "fixture-key-must-not-be-exported");
     if let Some(dir) = profile {
         command.env("CLAUDE_CONFIG_DIR", dir);
