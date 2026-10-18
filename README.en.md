@@ -286,6 +286,8 @@ Each day's ingest grows the concept graph; synthesis summarizes it at ever-highe
 
 The source key becomes the vault subfolder name. You can define several of the same type (e.g. `team-slack`, `ai-news`). Full reference: [`config.example.yaml`](config.example.yaml).
 
+To start with external knowledge, enable `ai-news` or `tech-news` in the example and disable account-based sources you do not use. The starter feeds cover official announcements, model methods, AI implementation, product evaluation and Korean engineering accounts; additional labs, newsletters and aggregators are optional. `fetch_full_text` retrieves articles from short feeds, but access failures retain only the feed text. `focus` guides summaries and concept extraction without filtering raw collection. Current feed listings and query caps guarantee neither complete history nor factual accuracy.
+
 ---
 
 ## Core ideas

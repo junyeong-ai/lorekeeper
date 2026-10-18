@@ -1,6 +1,9 @@
 # Lorekeeper configuration
 # Copy to config.yaml and customize for your environment.
 # config.yaml is gitignored — safe for personal settings.
+# This is a reference catalog, not a ready-to-run account configuration. Keep only
+# the sources you want; /lore-setup discovers account IDs and validates your selection.
+# RSS needs no account: enable ai-news or tech-news for a knowledge-only start.
 #
 # Location (auto-discovered in this order):
 #   1. --config / LORE_CONFIG
@@ -47,7 +50,7 @@ ingest:
   schedule: "0 7 * * *"          # every day 07:00 (sources use lookback windows)
 
 # ─── Source definitions ───────────────────────────────────
-# key = source ID = subdirectory name under daily/
+# key = stable source ID; daily sources use daily/<id>, document sources use wiki/documents.
 # You can define several sources of the same type.
 sources:
 
@@ -213,61 +216,76 @@ sources:
   # classify empty to avoid keyword misclassification; structuring is left to concept
   # extraction + `lore graph cluster`/`suggest-links`.
 
-  # RSS/Atom feeds — poll vendor blogs and aggregators with no auth. One source handles many feeds.
+  # RSS/Atom needs no authentication. Start with the selected feeds below; uncomment
+  # complementary sources when you need their coverage, rather than enabling every feed.
+  # Keep feed IDs stable: they namespace retained observations, not display labels.
+  # A feed must supply published/updated dates; missing dates are not replaced with today.
+  # fetch_full_text requests the linked page when RSS supplies only an excerpt/link.
+  # It adds HTTP work; failures retain the feed text and cannot establish unread article claims.
   ai-news:
     type: rss
     enabled: false
     params:
-      lookback_hours: 72            # feeds (labs, newsletters) don't publish daily; a wider
-                                    # window + idempotent event-log union avoids missing posts
-      max_items_per_feed: 50
+      # Target civil day plus three earlier days, filtered against the current feed.
+      # Feeds are finite listings: this does not guarantee historical coverage or recovery
+      # after a long outage. Retained event logs preserve observations already collected.
+      lookback_hours: 72
+      max_items_per_feed: 100        # safety cap, not a relevance filter; raise if a run reports truncation
       feeds:
-        # Vendors — most include the full body in RSS, so fetch_full_text isn't needed
-        - { id: openai,            url: "https://openai.com/news/rss.xml" }
-        - { id: deepmind,          url: "https://deepmind.google/blog/rss.xml" }
-        - { id: google-ai,         url: "https://blog.google/technology/ai/rss/" }
-        - { id: hf-blog,           url: "https://huggingface.co/blog/feed.xml" }
-        # Cloud / applied / labs
-        - { id: aws-ml,            url: "https://aws.amazon.com/blogs/machine-learning/feed/" }
-        - { id: ms-research,       url: "https://www.microsoft.com/en-us/research/feed/" }
-        - { id: bair,              url: "https://bair.berkeley.edu/blog/feed.xml" }
-        # Practitioners / deep dives — feeds that ship only excerpts use fetch_full_text to pull the article
-        - { id: sebastian-raschka, url: "https://magazine.sebastianraschka.com/feed", fetch_full_text: true }
-        - { id: simon-willison,    url: "https://simonwillison.net/atom/everything/", fetch_full_text: true }
-        # Aggregators / newsletters (RSS) — excerpt-only, full-text extraction recommended
-        - { id: import-ai,         url: "https://importai.substack.com/feed", fetch_full_text: true }
-        - { id: latent-space,      url: "https://www.latent.space/feed", fetch_full_text: true }
-        - { id: the-gradient,      url: "https://thegradient.pub/rss/" }
-        # Korean-language AI
-        - { id: aitimes,           url: "https://www.aitimes.com/rss/allArticle.xml" }
-        # Optional (high-volume research firehose — keep max_items_per_feed small if enabled):
-        # - { id: arxiv-cs-lg,     url: "http://export.arxiv.org/rss/cs.LG" }
+        # Official announcements/research and open-model engineering. These feeds provide
+        # excerpts or links; vendor claims remain attributed, not independent validation.
+        - { id: openai,            url: "https://openai.com/news/rss.xml", fetch_full_text: true }
+        - { id: deepmind,          url: "https://deepmind.google/blog/rss.xml", fetch_full_text: true }
+        - { id: hf-blog,           url: "https://huggingface.co/blog/feed.xml", fetch_full_text: true }
+        # Practitioners: model methods, AI implementation and product evaluation.
+        # These feeds already carry article bodies; no second fetch is needed by default.
+        - { id: sebastian-raschka, url: "https://magazine.sebastianraschka.com/feed" }
+        - { id: simon-willison,    url: "https://simonwillison.net/tags/ai.atom" }
+        - { id: hamel-husain,      url: "https://hamel.dev/index.xml" }
+        # Optional: broader vendor coverage, applied cloud work and academic research.
+        # - { id: google-ai,       url: "https://blog.google/innovation-and-ai/technology/ai/rss/", fetch_full_text: true }
+        # - { id: aws-ml,          url: "https://aws.amazon.com/blogs/machine-learning/feed/" }
+        # - { id: ms-research,     url: "https://www.microsoft.com/en-us/research/feed/" }
+        # - { id: bair,            url: "https://bair.berkeley.edu/blog/feed.xml" }
+        # Optional: research/policy interpretation, AI engineering interviews and essays.
+        # Publication cadence varies; a quiet feed is not necessarily broken.
+        # - { id: import-ai,       url: "https://importai.substack.com/feed" }
+        # - { id: latent-space,    url: "https://www.latent.space/feed" }
+        # - { id: the-gradient,    url: "https://thegradient.pub/rss/" }
     labels: [ai-tech]
     extract_concepts: true
-    focus: "AI/ML 모델·기법·아키텍처·인프라·도구·연구 등 AI 기술 주제."
+    focus: >
+      AI/ML의 모델·학습·추론·데이터·에이전트·평가·안전성·거버넌스와 실제 엔지니어링의 기법·제약을 다룬다.
+      개념은 본문이 정의·작동 방식·적용 조건을 설명하는 지속적인 탐색 주제로 추출한다.
+      이름만 나열된 제품 발표·투자·가격·행사 소식은 새 개념의 근거로 삼지 않는다.
+      벤더의 주장, 연구 결과, 실무자의 해석을 구분하고 버전·환경·한계와 출처를 보존한다.
 
-  # Broad tech trends + Korean — aggregators (HN/GeekNews) + domestic engineering blogs.
-  # Aggregators mix in non-technical noise (obituaries/politics/lifestyle), so the focus
-  # filter (an LLM relevance gate) conceptualizes only technical topics — noise never piles up in the graph.
+  # Engineering accounts from domestic practitioners. Aggregators are optional discovery
+  # channels: they add volume and may repeat the same primary article across feeds.
+  # focus guides summaries and concept extraction; it does not filter raw collection.
   tech-news:
     type: rss
     enabled: false
     params:
       lookback_hours: 72
-      max_items_per_feed: 25
+      max_items_per_feed: 100
       feeds:
-        # Aggregators (English/Korean)
-        - { id: hacker-news, url: "https://hnrss.org/frontpage?points=100" }
-        - { id: geeknews,    url: "https://news.hada.io/rss/news" }
-        # Domestic engineering blogs (in-depth)
+        # In-depth engineering: systems, architecture, delivery and production lessons.
         - { id: naver-d2,    url: "https://d2.naver.com/d2.atom" }
-        - { id: kakao-tech,  url: "https://tech.kakao.com/feed/" }
+        - { id: kakao-tech,  url: "https://tech.kakao.com/feed", fetch_full_text: true }
         - { id: woowahan,    url: "https://techblog.woowahan.com/feed/" }
         - { id: toss-tech,   url: "https://toss.tech/rss.xml" }
-        - { id: yozm-it,     url: "https://yozm.wishket.com/magazine/feed/" }
+        # Optional: English/Korean discovery. HN points select popularity, not accuracy;
+        # GeekNews links to its own summaries/discussion, not necessarily the primary article.
+        # - { id: hacker-news, url: "https://hnrss.org/frontpage?points=100", fetch_full_text: true }
+        # - { id: geeknews,    url: "https://news.hada.io/rss/news", fetch_full_text: true }
     labels: [tech]
     extract_concepts: true
-    focus: "소프트웨어 엔지니어링·AI/ML·시스템·개발 도구·인프라 등 기술 주제만. 인물 부고·생활·정치·일반 시사 등 비기술 항목은 개념화하지 말 것."
+    focus: >
+      소프트웨어 설계·개발 방법·시스템·데이터·보안·운영·개발 도구의 실제 기법과 트레이드오프를 다룬다.
+      개념은 본문이 설명하는 지속적인 탐색 주제로 추출하고 일회성 홍보·인물 소식·생활·정치·일반 시사는 제외한다.
+      집계 사이트의 소개·댓글과 원저자의 설명을 구분하며 제목·링크만으로 원문의 결론을 추론하지 않는다.
+      사례의 환경·버전·적용 조건과 한계를 보존하고 같은 기사를 재인용한 소식들을 독립적인 검증으로 세지 않는다.
 
   # Email newsletters (subscriptions with no RSS) — routed in Gmail by the `ai-news` label (set the filter once).
   # email-digest excludes the same mail via `-label:ai-news`, so they aren't ingested twice.
@@ -292,14 +310,19 @@ sources:
       repo: /absolute/path/to/your/repo   # absolute: a scheduled run starts nowhere in particular
       # Optional side-by-side binary; omitted uses nodex on PATH. No shell/tilde expansion.
       # executable: /absolute/path/to/tools/nodex-0.57.0/nodex
-      kinds: [learning, adr, guide]       # from the repo's own kinds.allowed; omit for every kind
-      lookback_hours: 24
       # Stable namespace, independent of checkout location; never reuse for another repository.
-      # repository_id: org/repo
-      # Reconcile current documents regardless of authored dates (requires repository_id).
-      # reconcile: true
+      repository_id: github.com/org/repo
+      # Choose exact kinds from `nodex export enums`; repositories may call decisions
+      # `decision` or `adr`. This list is an example, not a shared kind vocabulary.
+      kinds: [learning, decision]
+      # Reconcile current inventory, including undated lessons and lifecycle-only edits.
+      # This reads the local checkout, never pulls Git or deletes retired vault evidence.
+      reconcile: true
       # Refuse the whole selection above this cap; never silently truncate.
-      # max_documents: 200
+      max_documents: 200
+      # For a large repository, select the relevant kinds/IDs deliberately. A cheaper
+      # date-window alternative is reconcile: false + lookback_hours: 24, but it admits
+      # only author-dated changes, not every changed body or lifecycle attribute.
       # Exact IDs within selected kinds and, unless reconciling, the date window.
       # document_ids: [exact-document-id]
       # The prefix a document's repo-relative path is appended to, so a citation links back
@@ -313,6 +336,7 @@ sources:
     focus: >
       여러 프로젝트에 옮겨 쓸 수 있는 패턴·실패 모드·플랫폼 제약·방법론만 개념화할 것.
       이 저장소에만 해당하는 모듈명·티켓 번호·환경명·설정 키·파일 경로는 개념화하지 말 것.
+      관찰·가설·규칙을 구분하고 원문이 밝힌 버전·환경·적용 조건 및 결정의 상태·대체 관계를 보존할 것.
 
   # Manual curation — drop files into the <vault>/inbox/ directory and they become
   # individual wiki/documents/{slug}.md document pages (LLM summary + concept extraction included).
@@ -415,6 +439,9 @@ synthesis:
 # ─── Concept categorization ───────────────────────────────
 # Concept categorization for wiki/concepts/ pages.
 # Categories give the LLM a fixed vocabulary when assigning topics.
+# They are broad browse facets, not a concept hierarchy or proof of equivalence.
+# Start with a small stable vocabulary; concept definitions and supported relations
+# live in the concept pages. Keep established IDs/addresses when refining labels.
 # Omit the entire block to skip categorization.
 concepts:
   categories:
