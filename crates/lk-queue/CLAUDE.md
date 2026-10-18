@@ -1,187 +1,75 @@
 # lk-queue
 
-Semantic task queue abstraction. The `LlmClient` trait is the only seam the pipeline
-knows about; provider choice is config-driven (`build_llm_client` in lk-cli).
+Typed semantic requests/results and buffered JSONL persistence. CLI application,
+classification and recovery live in `lk-cli/src/commands/queue*`; page publication
+lives in `lk-vault`/`lk-pipeline`.
 
-- **Trait surface**: `summarize`, `extract_concepts`, `identify_themes`,
-  `synthesize_concept`, `flush`, and the per-source transaction pair
-  `begin_source`/`rollback_source`. `synthesize_concept` is the one the pipeline never calls:
-  a concept's synthesis is owed against the set of pages citing it, so `lore graph
-  backlinks-sync` — the only thing that derives that set — is what queues it.
-  The CLI opens a boundary
-  before planning each source and rolls back if that source's plan fails partway, so a
-  half-produced source's buffered tasks never reach the flushed file — preserving the
-  invariant that a queued task always targets a written page. Both default to no-ops, so
-  non-buffering providers (noop/mock) are unaffected.
-  `identify_themes` returns structured `Vec<Theme>` (JSON parsed) and has a default
-  no-op implementation so noop/mock clients work without overriding it. `flush` is the
-  transactional commit point for buffered side-effects. (Classification is deterministic
-  in the pipeline — keyword rules, no LLM task — so the trait has no `classify`.)
-- **Concept dedup is skill-side, not per-task**: the queue task carries no concept
-  registry. `/lore-process` asks the on-disk answer per name (`lore resolve`, then `lore wiki search`
-  — slugs, names, aliases) and reuses an established name instead of forking a variant, so
-  the per-task payload stays O(1) as the vault grows. `ExtractConceptsRequest` carries only
-  `categories: Vec<CategoryReference>` (config-driven category list), serialized into the task
-  `input` for `/lore-process`.
-- **`focus`** (`Option<String>` on both requests, from `SourceConfig.focus`) is a
-  source's natural-language relevance criterion. The queue serializes it into the
-  task `input` so `/lore-process` applies the filter. `None` = no filtering.
-  This is how a broad source (a news aggregator carrying human-interest or politics)
-  contributes focused tech knowledge without polluting the concept graph — the filter
-  runs at LLM summarization/concept-extraction time in the skill.
-- **`QueueError::is_fatal()`** is true for `QueueIo` (a persistence failure that must
-  abort the run).
-- **`TaskTarget { vault_path, kind, anchor }`** rides through the trait so queue mode
-  records where each result should land. `anchor` is the exact `## …` heading the pipeline
-  wrote, resolved from i18n at construction time — the skill locates by `target.anchor`
-  instead of a hardcoded kind→heading table. It once also carried a precomputed
-  `concepts_dir` for the skill to concatenate concept links from; concept extraction now
-  returns VALUES and `lore queue apply` renders the links itself, so the field had no
-  reader and is gone. A target says where a result lands, not how to write one.
-- **`TaskRequest` is what the four request types have in common**, and the reason
-  `QueueLlmClient` builds every task in one function: a request answers `locale`,
-  `task_input`, `cache_hash` and `into_target`, and the builder writes the locale into the
-  payload. Every task ends as prose on a page, so every task states the language the vault
-  is authored in — `vault.locale`, and nothing else. The two concept kinds shipped without
-  the field and the drain inferred a language from the pages around the target, which reads
-  correctly in an established vault and has nothing to read in a new one. Asking for it on
-  the trait is what makes a new request type unable to omit it.
-- **Each request type exposes two JSON projections.**
-  - `task_input()` — payload serialized into the queue file. Carries every field
-    `/lore-process` needs to do its work (`source_type` plus the cache-identity fields);
-    the vault's language is added by the queue builder rather than by each impl.
-  - `cache_identity()` — the subset hashed for caching. Restricted to fields that
-    actually shape the LLM's output: `summarize` hashes `text` + `max_sentences` +
-    `locale` + `focus`; `extract-concepts` hashes `text` + `source_id` + `date` + `focus`
-    + `categories` (`source_id`/`date` scope a concept extraction to one source+day).
-    A locale switch therefore re-derives a summary and a week's themes — they are views
-    over an input — and leaves the two kinds that write onto a concept page alone, whose
-    body accumulates across every source citing it. Hashing the locale into
-    `extract-concepts` would re-enqueue an extraction for every daily page and document in
-    the vault to produce the same concepts under a different grounding sentence.
-    The condition that breaks: a task's `locale` is stamped at enqueue and nothing revisits a
-    task already flushed, so a locale switch BETWEEN an enqueue and its drain leaves that task
-    carrying the old language — and a second ingest of the same page before the drain enqueues
-    a second task with the same `cache_hash` and the new one, since `llm_cache` gates on the
-    `_done` marker and not on a pending task. `queue apply` fills only an empty section, so
-    the older result wins and the newer is dropped. What is at stake is one grounding sentence
-    on one created page, correctable by hand; what a fix would cost is cross-run pending-task
-    state in a funnel that deliberately holds none.
-    A `concept-synthesis` task carries the page's `## Related` heading beside its synthesis
-    heading (`related_anchor`, `None` where the page has no such section) because both sections
-    answer to that one citation set and one act writes them; like `source_type` it is payload
-    only, since a heading is not part of what the answer would be. **`QueueTask::anchors`
-    answers with every heading a task writes**, and it is what `classify_task` checks against
-    the page, so the second one cannot be validated in one command and forgotten in the next:
-    one marker answers for the pair, so a task judged work on the strength of the synthesis
-    heading alone would have the drain fill one section and stamp both answered — with no
-    re-queue until the citation set next moves.
-    `concept-synthesis` hashes source paths and authored revisions through
-    `lk_core::concept::citation_digest`, so the page's recorded input and the task's
-    `cache_hash` are the same string by construction rather than by two implementations
-    agreeing. `vault.locale` is deliberately absent from it: a concept page's authored body is
-    never translated by a locale switch — `lk_vault::resolve_section` finds it under every
-    locale's heading precisely so a switch renames the heading and leaves the prose — so
-    folding the locale in would rewrite every synthesis in the vault the first time it moved.
-    `source_type` is in `task_input` but NOT the identity — it scopes extraction without
-    shaping the prompt's semantic output. `categories` is sorted by `id` so configuration field
-    order can't perturb the hash. `target` is excluded — it describes where the result
-    lands, not the prompt.
-- **`Request::cache_hash()`** (BLAKE3-128, 32 hex of `cache_identity()`) is
-  stamped into `QueueTask.cache_hash` at enqueue time and pre-recorded by the
-  pipeline in the page's `llm_inputs.<key>` frontmatter — for EVERY kind, so
-  `llm_inputs.<key>` always holds the current input's hash. The skill MUST verify
-  `page.llm_inputs.<key> == task.cache_hash` before writing; a mismatch means
-  the task is stale (page was re-rendered between enqueue and processing) and
-  must be dropped. Without that guard a stale task overwrites the section with
-  content keyed to an older input and the next ingest's cache lookup freezes
-  the mismatch forever. The comparison is computed in tested Rust by
-  **`lore queue status`** (`commands::queue::classify_task`), which reads each
-  pending task's target page and classifies it `current` / `done` / `stale` /
-  `missing-target` / `unreadable` (`done` is what `queue count` and `queue prune` hinge on;
-  `unreadable` includes invalid retained inputs, unsupported policies, unsafe paths and
-  unreadable target/source pages; it is retained until the underlying cause is repaired). A queue LINE that will not parse is separate from all five: it names work
-  nothing can classify, so its file is kept whole and `prune` reports it as `unparseable`,
-  with the tasks held alongside it as `blocked`;
-  `/lore-process` consults that classification and processes only `current` tasks
-  rather than re-deriving the hash check in prose.
-- **`TargetKind::llm_inputs_key`** is the single source of truth mapping each task
-  kind to its `llm_inputs.<key>` input field; **`TargetKind::completion_key`** is the
-  companion source for its `llm_inputs.<key>_done` completion marker. Completion is
-  UNIFORMLY marker-signalled — every kind has a `*_done` marker, always `llm_inputs_key()`
-  + `_done`. There is no body-emptiness completion path: a non-empty body never means
-  "done", because too many sections can be legitimately empty (a focus-filtered summary,
-  an extraction that found nothing, a trivial-only work-log, an empty-period review). A
-  per-kind "can this be empty?" judgment proved intractable (it was wrong for concepts,
-  themes, work-log, summaries, and narratives in turn), so the model removes the judgment
-  entirely: the pipeline pre-stamps the input key as the stale-task reference and the
-  `lore queue apply` stamps the marker when publishing; a cache hit is `marker == input key`, never inferred
-  from the body. The pipeline, work-log, and synthesis derive both keys from these.
-  Adding a `TargetKind` is compiler-forced to choose both.
-  The skill-side mirror is enforced too: `tests/skill_contract.rs` iterates the full
-  kind space via `strum::EnumIter` (macro-generated from the variant list, so the
-  iteration can never drift from the enum — never hand-maintain a variant array) and
-  requires every wire name and marker completion key to appear in the `/lore-process`
-  skill files, with each kind's `llm_inputs` key on the same table row as its wire
-  name — renaming or adding a kind fails the test until the skill documentation is
-  updated.
-- **Providers**:
-  - `QueueLlmClient` — buffers tasks in memory; `flush` holds the queue claim and reuses
-    pending requests with exactly equal kind, cache hash, full input and target. Attempt IDs
-    and creation times do not participate; processed history cannot suppress fresh work.
-    Malformed pending lines remain byte-for-byte in place and are reported, never reused.
-    Actual I/O, lock or publication failures preserve the buffer for retry. New requests use
-    `write_tasks_atomic` (temp + fsync + rename, cleaning the temp on rename failure),
-    also used by `lore queue prune` to rewrite files. Journaled commands publish their
-    encoded tasks through a recoverable vault mutation plan.
-    Invariant: a `.jsonl` file becomes visible only after its target pages
-    were written, so it never references a page that doesn't exist.
-  - `NoopLlmClient` — empty results (uses default trait impls). For dev/CI.
-  - `MockLlmClient` — tests only, with configurable `summary`, `concepts`, `themes`.
-    Behind the `test-util` feature (dependents enable it as a dev-dependency), so it is
-    never compiled into the release binary.
-- **Every semantic result is staged.** Single-section tasks return `SectionResult` in
-  `<task_id>.section.json`; concept synthesis returns `<task_id>.synthesis.json`.
-  Workers never edit target pages or completion markers. `extract-concepts` returns values: its output lands on concept pages SHARED between origin pages, so the drain
-  writes a [`TaskResult`] to `<queue>/results/{task_id}.json` and `lore queue apply` merges
-  it through `lk-pipeline`'s `ConceptDrafts` — the same code the synchronous LLM route uses.
-  The result carries `target` and `cache_hash` verbatim and the `target_revision` captured
-  before reading the page. The applier requires a matching pending extraction task, checks
-  its target and date, and verifies the page revision before materializing the result.
-  A changed page requires a new extraction; an old answer cannot be relabeled as current.
-  Lost extraction tasks can be recovered explicitly with `queue apply --recover-extraction
-  <task_id>`, using the current file revision reported by `wiki evidence`; normal draining
-  rejects orphan results. Recovery retains the same target revision checks.
-  `read_results` splits the directory into `ready` and `unreadable` rather than failing on a
-  malformed file, and `queue apply` moves the unreadable ones to `results/corrupt/`. Failing
-  the read stranded every other pending result behind one truncated write on every run
-  forever — nothing prunes results, so only a human noticing a red pipeline would clear it.
-  The extraction is not lost with the file: the drain writes results only, `queue apply` is
-  what stamps the completion marker, so an unapplied result leaves its page unmarked and the
-  next ingest that RE-RENDERS that page re-enqueues the task off the unchanged input hash
-  (a page whose date has scrolled out of the lookback window needs `--date` backfill). The
-  file is moved rather than deleted because, unlike a structurally valid result, a truncated
-  one may still be readable by a human — and nothing prunes `corrupt/`, by design.
-  (`lk-pipeline`'s `event_log` stays strict about a corrupt line for a reason that does NOT
-  transfer: its caller rewrites the log from what it parsed, so a skip would destroy the
-  record.)
+## Requests and cache identity (`lib.rs`)
 
-- **Concept synthesis returns a staged result.** `<task_id>.synthesis.json` is owned by
-  the CLI synthesis applier, separate from extraction results. It contains both section
-  bodies and the target snapshot from `queue status`. The applier revalidates source
-  revisions and the target, publishes both sections and their marker together, and retains
-  failed results. Apply holds the vault mutation session before the queue claim.
-  Extraction concept and origin writes share one recoverable mutation plan. External
-  editors do not participate in these locks. Permanent decode failures preserve bytes
-  and a diagnostic sidecar in quarantine; actual I/O errors remain failures.
+- `LlmClient` is the pipeline seam: summarize, extract, themes, concept synthesis,
+  flush, begin/rollback source. Classification is deterministic, not an LLM method.
+  Backlinks-sync owns automatic citation-set derivation; explicit resynthesize and
+  regenerate also use guarded queue publication. Source rollback must
+  discard a failed plan's buffered requests; flush follows target publication.
+- `TaskRequest` supplies locale, task input, cache hash and target through one
+  builder. Every payload states vault locale and source-specific focus/context;
+  concept discovery uses public resolve/search, not an embedded growing registry.
+- `task_input()` contains worker context; `cache_identity()` only output-affecting
+  fields. Keep their distinction and backwards-compatible serialization explicit:
+  summary hashes text/max_sentences/locale/focus; themes text/max_themes/locale;
+  extraction text/source_id/date/focus/sorted categories and optional RSS manifest.
+  Concept synthesis uses shared `citation_digest`, not a second hash implementation.
+- Locale changes rederive summary/themes, not accumulated concept extraction or
+  authored synthesis. Target/heading/source_type are payload context, not cache
+  identity. An already queued task keeps its enqueue locale; do not invent a
+  cross-run pending-state cache to change that behavior implicitly.
+- `TaskTarget.anchor` is the rendered heading, not a worker-inferred kind table.
+  Synthesis optionally includes `related_anchor`: both sections share one input
+  and marker. `QueueTask::anchors` must enumerate every owned section.
+- `TargetKind::{llm_inputs_key,completion_key}` own marker names for every kind.
+  Completion is matching `_done`, including empty results, never body fullness.
+  Keep `tests/skill_contract.rs` exhaustive through `EnumIter`, not a hand list.
 
-- **Retained input validation** reconstructs the typed request and recomputes its cache
-  identity before normal classification or result application. Missing or mismatched
-  inputs are unreadable, even when completion markers match; pruning retains them for
-  diagnosis. Packet export and explicit regeneration use the same validation.
+## Pending work (`queue.rs`)
 
-- **RSS evidence policies dispatch per typed request.** A provided bound manifest selects
-  `concept-extraction-rss-v2` and participates in that request's cache identity. Event selectors
-  select `concept-synthesis-rss-v2`; page-only v1 requests keep their wire/hash and policy.
-  Typed retained-input validation refuses malformed or downgraded v2 data. Reported concepts
-  may explicitly select provided event/payload pairs; omission is not retraction.
+- A pending task must target a published page. `flush` claims the queue and reuses
+  only pending requests with equal kind/hash/full input/target; attempt ID/time do
+  not matter. Processed history cannot suppress fresh work.
+- Publish JSONL atomically through shared file primitives; preserve the buffer on
+  I/O/lock/publication failure. `QueueIo` is fatal. Preserve malformed pending lines
+  byte-for-byte and report them rather than reusing or discarding unknown work.
+- Retained input is reconstructed as its typed request and its hash recomputed
+  before classification, packet export, regeneration or apply. Matching markers
+  cannot excuse malformed inputs or an unsupported policy.
+- CLI status is authoritative: only `current` is work. Stale/missing targets are
+  distinct from `done`; unreadable tasks remain for diagnosis. An unparseable line
+  blocks its file rather than licensing partial destructive pruning. Prune retains
+  answered history until the whole run can retire to `processed/`.
+
+## Staged results and publication
+
+- Workers write typed values only: section/synthesis JSON or extraction
+  `TaskResult`. Never edit page sections or markers directly. Use the task's exact
+  identity and the target revision captured before reading; do not relabel a stale
+  answer. Synthesis carries both core and related bodies.
+- The CLI applier requires matching pending work, validated retained input/policy,
+  exact target/input identity, every owned anchor and current source dependencies.
+  Bodies and completion publish together. Extraction concept/origin edits share a
+  recoverable mutation plan. Lock order is vault mutation session then queue claim;
+  external editors do not participate.
+- Orphan extraction recovery is explicit (`--recover-extraction`) and retains
+  revision checks. Permanent malformed results retain bytes plus diagnostics in
+  quarantine; actual I/O failures remain retryable errors. Do not make one corrupt
+  result strand all valid answers or silently delete it.
+
+## RSS evidence policy
+
+A provided bound manifest selects `concept-extraction-rss-v2` and enters cache
+identity; selectors select `concept-synthesis-rss-v2`. Page-only v1 inputs retain
+wire/hash/policy. Typed validation refuses malformed/downgraded v2 requests.
+Selections may name only provided immutable event/payload pairs; omission does not
+retract prior evidence. Original membership/content guards remain necessary even
+when a daily page's interpretation changed independently.
+
+`NoopLlmClient` returns empty values. `MockLlmClient` is `test-util` only, never a
+release provider. Provider selection belongs to CLI `build_llm_client`.

@@ -55,7 +55,7 @@ flowchart LR
 
 ---
 
-## 빠른 시작 (5분)
+## 빠른 시작
 
 > **시작하기 전에 준비물** — 어렵지 않습니다:
 > - 💻 **macOS 또는 Linux** (Windows는 PowerShell 설치 스크립트 제공)
@@ -146,15 +146,15 @@ tags: ["document"]
 
 ## 요약
 청크를 2000→400 토큰으로 줄이고, 대화형 질문을 standalone 쿼리로 재작성하고,
-유사도를 L2→cosine으로 바꿔 Recall@5를 0.62 → 0.91로 끌어올렸다. 핵심 교훈:
-검색 품질은 임베딩 모델 선택보다 **청크 단위와 질문 형식**에 좌우된다.
+유사도를 L2→cosine으로 바꿔 이 메모의 Recall@5가 0.62 → 0.91로 개선되었다. 세 변경을 함께 적용한
+관찰이므로 각 변경의 개별 효과나 다른 환경에서의 우열은 확인되지 않았다.
 
 ## 내용
 … (원본을 정규화해 보존) …
 
 ## 관련 개념
 - [Retrieval-Augmented Generation](../../wiki/concepts/retrieval-augmented-generation.md)
-- [벡터 데이터베이스](../../wiki/concepts/벡터-데이터베이스.md)
+- [벡터 데이터베이스](../../wiki/concepts/vector-database.md)
 - [청킹](../../wiki/concepts/청킹.md)
 - [질의 재작성](../../wiki/concepts/질의-재작성.md)
 ```
@@ -175,8 +175,8 @@ source_count: 2          # ← 두 문서가 이 한 개념을 인용
 
 ## 핵심
 벡터 데이터베이스는 고차원 임베딩을 저장하고 근사 최근접 탐색(ANN)을 제공한다.
-선택은 쿼리 지연시간보다 **운영 단순성**에 좌우되는 경우가 많다 — 관계형 데이터
-옆에 벡터를 두면(pgvector) 별도 stateful 시스템을 피할 수 있다.
+두 번째 메모의 기존 PostgreSQL 환경에서는 별도 시스템의 운영 부담을 줄이기 위해
+pgvector를 선택했다. 이 결정의 조건과 첫 메모의 검색 품질 관찰은 별도로 유지한다.
 
 ## 출처
 - [프로덕션 벡터 DB 선택](../../wiki/documents/프로덕션-벡터-db-선택.md)
@@ -185,29 +185,37 @@ source_count: 2          # ← 두 문서가 이 한 개념을 인용
 
 > `Vector DB`라고 쓰든 `벡터 데이터베이스`라고 쓰든 **한 페이지**로 모입니다(alias로 등록). 같은 지식이 흩어지지 않는 것 — 이게 "복리로 쌓인다"의 핵심입니다.
 
-### ✅ 결과 ③ — 선택적 주제별 인덱스 내보내기 (`wiki/index.md`)
+### ✅ 결과 ③ — 필요한 만큼 펼쳐 보는 탐색
 
-```markdown
-# 위키 인덱스
-
-## 개념 (16)
-
-### ai-ml (6)
-- [벡터 데이터베이스](concepts/vector-database.md) — 고차원 임베딩을 저장하고 ANN 탐색을 제공. 선택은 쿼리 지연보다 운영 단순성에 좌우…
-- [RAG](concepts/retrieval-augmented-generation.md) — 외부 코퍼스 검색 문맥에 LM 출력을 grounding. 답 품질은 임베딩 모델보다 검색 단계가 지배…
-- [청킹](concepts/chunking.md) — 문서를 임베딩·검색 단위로 쪼개는 것. 입도가 검색 품질을 크게 좌우…
-
-### infrastructure (10)
-- [Kubernetes](concepts/kubernetes.md) — 컨테이너 오케스트레이션. 안정 운영은 pod 메모리·재시작 지표 관찰에 달림…
+```bash
+lore wiki prepare                           # 재사용할 SQLite 검색 판본 생성
+lore wiki search "Vector DB" --snapshot <id> --limit 10 --json
+lore wiki browse --type concept --category ai-ml --limit 20 --json
+lore wiki read wiki/concepts/vector-database.md # 목차와 revision 확인 → 필요한 section 선택
+lore wiki links wiki/concepts/vector-database.md --limit 20
+lore wiki reviews        # 현재 미해결 판단을 별도로 확인
 ```
 
-Markdown 내보내기를 켠 큰 볼트에서는 `index.md`를 진입점으로 각 페이지 최대 100개 항목의 탐색 트리를 생성합니다. 작은 그룹은 통째로 배치하고, 100개를 넘는 그룹만 나눕니다. 그룹명과 분할 순번을 따라 탐색하며, 인용은 목록의 번호 파일이 아닌 원래 지식 페이지를 가리킵니다. `catalog/`는 재생성 가능한 목록이며 지식·근거 그래프에 포함되지 않습니다. `log.md`는 기록된 `created` 날짜순 목록으로, 원문 작성일이 포함되므로 수집 이력과 다릅니다.
+Markdown이 지식의 정본이고 `.lorekeeper/search.sqlite`는 재생성 가능한 탐색 계층입니다.
+처음에는 이름·별칭·짧은 본문·출처 식별 정보로 후보를 좁히고, 선택한 페이지의 절·관계·근거·보존 원본을 차례로 읽습니다.
+본문의 정확한 문자열과 정규식은 `wiki search --body`와 `--regex`로 찾습니다.
+검색 순위나 출처 수는 사실의 신뢰도 점수가 아닙니다.
 
-Markdown이 지식의 정본이며 `.lorekeeper/search.sqlite`는 `lore wiki prepare`로 재생성하는 검색 판본입니다. `--snapshot`은 캡처한 내용을 조회하므로 외부 편집을 자동 반영하지 않습니다. 변경 후에는 다시 준비하고, 근거로 사용할 페이지는 반환된 revision으로 확인합니다. SQLite를 사용해도 기본 Obsidian 페이지에 동적 목록이 생기지는 않습니다. Obsidian에서는 그룹별 링크와 검색을, CLI에서는 `wiki search`·`browse`·`links`를 사용합니다.
+`--snapshot`은 준비 시점의 내용을 조회합니다. 변경 후 다시 준비하고, 근거를 읽을 때는 반환된 revision으로 확인합니다.
+페이지/링크 목록은 `next_offset`으로 이어서 읽습니다. 스냅샷 링크 조회에는 같은 snapshot을 사용하며 실시간 `--revision`을 함께 지정하지 않습니다.
 
-지식 검토는 카탈로그의 선두 그룹에서 현재 상태와 함께 찾습니다. 증거가 바뀐 해결 기록은 원래 판단을 보존하면서 `재검토 필요`로 표시합니다. 예약 파이프라인은 마지막에 `queue check`와 `wiki reviews --check`를 실행합니다. 열린 검토 자체는 실패가 아니며, 검증된 보관본이 있는 역사적 증거의 원본 삭제도 오류로 취급하지 않습니다.
+기본 `index.md`는 작은 진입 안내입니다. Markdown 내보내기를 명시적으로 켜면 `catalog/`·`log.md`·`map.md`를 생성합니다.
+이들은 원문과 의미 관계를 복제하는 저장소가 아니라 선택적 탐색용 파생물이며, 카탈로그 페이지는 최대 100개 항목으로 나뉩니다.
+`log.md`의 `created` 순서는 수집 이력과 다릅니다. `--snapshot` 탐색은 SQLite를 사용하고, 생략한 검색·목록 조회는 현재 Markdown을 읽습니다.
+Obsidian에서는 원래 지식 페이지의 링크와 검색을 그대로 사용합니다.
 
-증거 변경을 실제로 재검토할 때는 먼저 `lore wiki evidence --archive <검토 경로>`로 이전 검토 전체를 보존합니다. 새 근거도 읽고 보관한 다음 현재 `review.evidence`를 명시적으로 교체하고, 본문에 날짜·판단·이전 검토의 `.lorekeeper/evidence/<revision>.md` 경로를 남기십시오. 오래된 판단의 revision만 자동으로 새 값으로 바꾸지 않습니다.
+충돌은 같은 조건에서 서로 양립할 수 없는 주장인지 근거를 읽고 판단합니다. 날짜가 최신이거나 출처가 많다는 이유로 자동 해결하지 않습니다.
+`wiki reviews`로 현재 열린 검토를 찾고, 증거가 바뀐 해결 기록은 과거 판단을 보존한 채 재검토합니다.
+예약 파이프라인의 `queue check`와 `wiki reviews --check`는 미완료 작업·증거 변경을 검사하지만, 의미적 진실 전체를 증명하지는 않습니다.
+
+실제 재검토 전에는 `lore wiki evidence --archive <검토 경로>`로 이전 판단을 보존합니다.
+새 근거를 읽고 보관한 다음 `review.evidence`를 명시적으로 교체하고, 날짜·판단·이전 보관본 경로를 본문에 기록합니다.
+판단을 재검토하지 않은 채 revision만 새 값으로 바꾸지 않습니다.
 
 ### ✅ 결과 ④ — 지식 그래프가 형성됩니다
 
@@ -361,8 +369,7 @@ lore schema                   # wiki/AGENTS.md(페이지 포맷 스키마) 생�
 |---|---|
 | `/lore-process` | 수집 후 LLM 큐를 비움 — 요약·개념·테마·리뷰 채우기 |
 | `/lore-setup` | 워크스페이스를 들여다보며 config 작성 — Slack 채널·Jira 프로젝트·캘린더 ID 자동 발견 |
-| `/lore-wiki` | 시맨틱 질의(compounding) · 소스 추가 · 구조/의미 감사 |
-| `/lore-capture` | 작업 중 떠오른 인사이트를 즉시 vault에 포착 |
+| `/lore-wiki` | `query` 근거 기반 질의 · `add` 소스 추가 · `capture` 작업 중 발견 기록 · `audit` 구조/의미 감사 |
 | `/lore-extract` | 프로젝트 repo의 전이가능한 지식을 일괄 추출 (scan→run→audit) |
 | `/lore-ingest` | `lore` CLI 래퍼 (수집·합성·상태·스케줄) |
 | `/lore-day` | 오늘의 할 일·지식 브리핑·리마인더·마감 |

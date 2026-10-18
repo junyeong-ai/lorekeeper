@@ -1,5 +1,10 @@
 # Source-type-aware synthesis & extraction
 
+## Contents
+
+- [Summary strategy by source type](#summarize-kind-summarize--per-type-strategy)
+- [Extraction scope by source type](#extract-concepts-kind-extract-concepts--per-type-scoping)
+
 `input.source_type` carries the adapter type verbatim from config (the source's
 `type:` field) — **never guess it from the vault path**. Adapt the synthesis /
 extraction strategy to it. When `source_type` is absent (cross-source tasks such as

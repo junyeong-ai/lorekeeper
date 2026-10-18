@@ -1,5 +1,16 @@
 # Per-kind generation specs
 
+## Contents
+
+- [Shared relevance and language](#relevance-focus-all-kinds)
+- [Summaries](#kind-summarize)
+- [Event refinement](#kind-refine-events)
+- [Themes](#kind-identify-themes)
+- [Concept synthesis and reviews](#kind-synthesize-concept)
+- [Concept extraction](#kind-extract-concepts)
+- [Target formatting](#per-kind-target-formatting)
+- [Section result contract](#single-section-results)
+
 How to produce the content for each task kind. The SKILL.md protocol decides
 WHETHER a task runs (stale-task guard) and WHERE the output lands
 (`target.anchor`); this reference defines WHAT good output looks like per kind.

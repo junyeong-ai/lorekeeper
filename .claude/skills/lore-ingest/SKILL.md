@@ -1,211 +1,71 @@
 ---
 name: lore-ingest
-version: 0.57.0
-description: Daily knowledge ingestion pipeline — collects from Gmail, Google Drive, Google Calendar, Slack, Jira, Confluence, RSS, project repositories (nodex), and a manual inbox into an Obsidian vault. Deduplicates, classifies, extracts concepts, writes structured pages. Optionally tracks your own work into a work-log when the `personal:` module is configured. Phased ingest with atomic per-page writes and durable published queue tasks.
+version: 0.58.0
+description: Runs Lorekeeper collection and operations commands for configured sources, manual inboxes, period synthesis, schedules and maintenance. Collection writes structured pages and queues semantic work; lore-process completes that work.
 argument-hint: "<subcommand> [args]"
 disable-model-invocation: true
 allowed-tools: |
   Bash(lore *)
   Bash(crontab *)
+  Read
 ---
 
-# lore-ingest — Daily knowledge ingestion for Obsidian
+# Lorekeeper collection and operations
 
-Run the `lore` CLI for ad-hoc ingest, synthesis, and operations. The
-CLI is config-driven (`./config.yaml` or `LORE_CONFIG`) and writes to
-an Obsidian vault. All commands accept `--config <path>` to override.
+Run the CLI for the requested collection or operational action. Use command help
+for current flags; read only the relevant reference:
 
-## Command reference
+| Task | Reference |
+|---|---|
+| Collect all/one source, backfill, retry, or inspect raw inbox preservation | [Ingestion](references/ingestion.md) before collecting |
+| Select a CLI operation or period synthesis | [Commands](references/commands.md) |
+| Install or change a schedule | [Scheduling](references/scheduling.md) |
 
-| Command | Purpose |
-|---------|---------|
-| `lore validate` | Parse + validate config, print summary |
-| `lore ingest` | Collect ALL enabled sources, write pages; render the cross-source work-log when a `personal:` module is configured |
-| `lore ingest <source>` | Refresh one source's pages only — never rewrites the work-log (it sees a subset) |
-| `lore ingest --dry-run` | Preview without vault writes |
-| `lore ingest --date YYYY-MM-DD` | Re-materialize a specific day — RE-FETCHES it; see Safety notes before using it on a past date |
-| `lore synthesis weekly [--previous]` | Weekly synthesis + personal review |
-| `lore synthesis monthly [--previous]` | Monthly performance review |
-| `lore synthesis quarterly [--previous]` | Quarterly review with category stats |
-| `lore synthesis annual [--previous]` | Annual review from quarterly reviews |
-| `lore agenda [--date YYYY-MM-DD]` | The day read off the task board: what is committed to it, what woke, what is due. A view — it writes nothing, and names `lore task sync` when an editor has changed the board since |
-| `lore task add <text> [--state] [--due] [--link URL] [--label]` | Write down something to do (default section: `next`). `--link` records where it came from — the Slack thread, the Jira issue, the mail — as an absolute URL in the task's own text, so it survives onto the archived page and stays out of the link graph. A vault path is refused |
-| `lore task list [--state] [--json]` | The board, by section |
-| `lore task done <id> [--note]` | Close a task. The note becomes the archived page's body, and through it the concept extraction — which is how work performed compounds the way work read does |
-| `lore task drop <id>` · `move <id> <state>` · `wait <id> --until <date>` | Take it off the board, move it between sections, park it until a day |
-| `lore task propose` | Put what the sources say is still OPEN into the board's proposed section. An observation proposes and never creates: accept by dragging the line into another section, decline with `lore task drop`. Nothing is proposed twice — the board says what is open and the history says what was answered |
-| `lore task candidate --source <id> --summary <text> --url <URL>` | Name work read out of a page by JUDGMENT, for the next `propose` to offer. Refused for a source `personal.tasks.propose_from` does not name, because unlike a status field a reading of prose can be wrong |
-| `lore task sync` | Record what an editor did: adopt lines typed by hand, close lines ticked, wake what is due |
-| `lore task rollover` | Close the day — carry every still-committed task, counting each carry so a task carried too long reads as the diagnosis it is |
-| `lore resolve <name>` | Which concept page a name addresses, by the rule ingest routes an extraction by. Exit 0 owned, 1 absent, 2 more than one page answers to it |
-| `lore status` | One line per subsystem — the installation, source currency, the LLM queue, page contracts, the link graph — each naming the command that owns it. Reports without gating; the per-source timestamps are `lore health` |
-| `lore health [--strict]` | Warn if any source is overdue vs `ingest.schedule` (2 missed fires; 48h fallback). `--strict` also fails when a source has NEVER ingested, which a first install has and a broken one looks identical to |
-| `lore performance` | Performance category distribution |
-| `lore doctor` | Audit materialized pages against the contracts they must satisfy — text cleanliness, a section whose input was recorded and never answered, and credentials in issuer-published forms. Non-zero on a defect or an unreadable page; a credential is REPORTED and does not gate, because its repair is at the issuer and editing the page would not undo the leak |
-| `lore schedule --format launchd --bin <abs> --pipeline-dir <dir>` | Print scheduled-task definitions. Both flags are required in practice — see the notes below; the bare form is rarely the one you want |
-| `lore maintenance [--dry-run]` | Prune operational history (ingest log, drained queue files) past `maintenance.retention_days` (default 90d). Streaming event logs are permanent, and each source's latest log entry survives any horizon — it is the state `lore health` reads, not history |
-| `lore queue prune [--dry-run]` | Leave the queue holding only work that still needs an LLM session: drop dead tasks (stale / missing-target), retire a run whose every task is already answered |
-| `lore self status` | What this installation is, and whether every deployed copy — skills, pipelines, templates, config example, `AGENTS.md` — still matches the running binary. Non-zero when any differs |
-| `lore workflow -- claude` | Start a manual Unix agent session under the semantic workflow lease before reading inputs; add `--wait` to wait for another consumer. Scheduled headless calls already acquire it |
-| `lore self deploy` | Rewrite those copies from what the binary carries. This is the repair `lore self status` reports, and what an install and an update both run |
-| `lore self update [--version V]` | Replace the binary with a published release, then redeploy. Refuses while the queue still holds work, and refuses a release older than the running one unless `--version` names it deliberately |
-| `lore self uninstall` | Remove the binary and everything it deployed. The vault is never touched |
+For morning brief/task-board requests, use `/lore-day`; for wiki evidence lookup,
+use `/lore-wiki`. Configuration discovery is `--config`/`LORE_CONFIG`, then
+`./config.yaml`, then `~/.config/lorekeeper/config.yaml`. Relative `vault.root`
+resolves against the config file's directory. Templates are embedded unless
+`--template-dir` selects an override.
 
-## Trigger mapping
+## Collection is not semantic completion
 
-- "ingest today" → `lore ingest`
-- "ingest email only" → `lore ingest email-digest`
-- "weekly review" → `lore synthesis weekly --previous`
-- "monthly review" → `lore synthesis monthly --previous`
-- "quarterly review" → `lore synthesis quarterly --previous`
-- "annual review" → `lore synthesis annual --previous`
-- "show performance" → `lore performance`
-- "오늘 뭐 하지" / "what's on today" → the `lore-day` skill, which runs the board off `lore agenda --json`
-- "이거 해야 해" / "add a task" → `lore task add`
-- "오늘 뭐 해야 하지" / "what should I pick up" → the `lore-day` skill; the board and its proposals are its ground, not this one's
-- "check status" → `lore status`
-- "health check" → `lore health`
-- "generate cron" / "schedule it" → `lore schedule` (read the flag notes first)
-- "prune old logs" → `lore maintenance`
-- "clean dead queue tasks" → `lore queue prune`
-- "check the vault for defects" → `lore doctor`
-- "is my install current" / "update lore" → `lore self status` / `lore self update`
+`lore ingest` collects and normalizes observations, writes pages atomically per
+file, then publishes queue tasks. Document-unit sources (`manual`, `nodex`) write
+documents; day-unit sources write daily aggregates. Follow the source descriptor,
+not a hardcoded source-name rule. Concept pages aggregate evidence across sources.
 
-## Scheduling flags
+In queue mode, run `/lore-process` afterward. It owns the typed publication,
+reconciliation and completion checks. An empty inbox only means collection is
+finished; it says nothing about pending synthesis or unresolved knowledge reviews.
+Do not call queued pages fully knowledge-integrated.
 
-`lore schedule` with no flags emits cron entries running the bare subcommands. Both
-defaults are usually wrong, and both fail SILENTLY:
+A run is not a multi-page transaction. Never archive raw inputs after partial
+writes or queue failure. Exact replay requires retained identical inputs; refetch
+can return edited, missing or expired evidence. `lore ingest --date <past>` is a
+refetch, not restoration from an immutable historical snapshot.
 
-- **`--format launchd` on macOS.** `StartCalendarInterval` runs a job missed while the
-  machine slept as soon as it wakes; cron just skips it — and a closed laptop at 09:00
-  is the normal case, so cron simply never ingests. Syntax launchd cannot express
-  (`*/5`, `1-5`) is refused rather than approximated.
-- **`--pipeline-dir <dir>`** points the ingest and weekly jobs at `lore-daily.sh` /
-  `lore-weekly.sh`. `lore ingest` and `lore synthesis weekly` are only stage ONE of those
-  scripts: the queue drain and `lore queue apply` live in the scripts alone, so without
-  this flag the schedule ingests every morning and never fills a summary or materializes
-  a concept. Monthly/quarterly/annual jobs also use their named entry scripts; these
-  enqueue narrative tasks that the next daily drain processes. Maintenance uses
-  `lore-maintenance.sh` to run retention and queue pruning sequentially. When a task
-  board is configured, this flag also schedules the reminder notifier. The janitors
-  have no LLM work.
+A filtered ingest cannot regenerate the full cross-source work-log. Personal
+tracking requires the configured module, selected sources and adapter ownership;
+manual/nodex/RSS/Drive cannot acquire authorship from mentions or inclusion alone.
 
-Every emitted path must be absolute (`--bin`, `--pipeline-dir`): launchd searches no
-`PATH` and expands no `~`.
+## Operational boundaries
 
-## Output semantics
+- Use `lore validate` for config and `lore status` for subsystem routing.
+  `lore health` measures collection freshness, not semantic quality. It can exit
+  nonzero for overdue sources; `--strict` also reports never-collected sources.
+- `lore doctor` reports defects/unreadable pages and credentials in known issuer
+  formats. Editing source text is not credential rotation; use the issuer.
+- `lore queue prune` alone retires classified queue work. Maintenance preserves
+  each source's latest collection state and permanent streaming evidence logs.
+- `lore self status` checks deployed artifacts; `self deploy` restores copies from
+  the running binary. `self update` refuses pending semantic work. Do not overwrite
+  intentional local artifact edits without accounting for them.
+- Scheduled pipelines do not auto-commit user edits. Review the vault separately.
+- Data goes to stdout and diagnostics to stderr. Use JSON/bare-value contracts,
+  not parsed terminal tables. Graph violations gate; hubs/orphans/open reviews are
+  observations, not automatic failures.
 
-- Progress and diagnostics → **stderr**
-- Data (cron lines) → **stdout**
-- Exit codes: `0` success, non-zero on any failure. Findings-style commands
-  have their own conventions: `lore health` exits `1` when a source is overdue,
-  `lore graph *` uses `0` no contradiction / `1` the vault contradicts itself
-  (broken link, index drift, unknown category, one name on two pages, two files on
-  one address, an unnormalized slug) / `2` runtime error. A report about a healthy vault exits
-  `0` even when it lists things — orphans, hubs, open conflicts, the audit
-  worklist — so no `lore graph` call needs its exit code suppressed.
-
-## Configuration
-
-Required: `./config.yaml` or `LORE_CONFIG` / `--config`.
-
-Relative `vault.root` resolves against the config file's parent
-directory, not CWD.
-
-Templates are embedded in the binary. Override with `--template-dir`.
-
-## Credentials
-
-| Source | Env vars |
-|--------|---------|
-| Google (Gmail/Drive/Calendar) | `LORE_GOOGLE_CLIENT_ID`, `LORE_GOOGLE_CLIENT_SECRET`, `LORE_GOOGLE_REFRESH_TOKEN` |
-| Slack | `LORE_SLACK_TOKEN` |
-| Atlassian (Jira/Confluence) | `LORE_ATLASSIAN_SITE_URL` + `LORE_ATLASSIAN_PAT`, or `+ LORE_ATLASSIAN_EMAIL` + `LORE_ATLASSIAN_API_TOKEN` |
-
-OAuth is not env-supplied: its refresh token rotates and must be written back, so `lore init credentials` owns it.
-
-Default provider is `queue` (buffers tasks to JSONL for `/lore-process`).
-`provider: noop` selects `NoopLlmClient` (no summarisation/concepts).
-
-## Ingest flow
-
-Pages are replaced atomically per file; a run is not a multi-page transaction.
-After a write or queue-flush failure, retry from retained inputs where available.
-A remote re-fetch may return edited, deleted or expired events, even on the same day,
-so byte-identical recovery requires identical retained inputs. Per-source queue
-boundaries roll back buffered tasks when source planning fails; the queue is
-published only after vault writes succeed. The scheduled pipeline logs an explicit
-automatic-commit skip: it cannot prove which working-tree changes belong to its run.
-Review and commit vault changes separately; existing staging remains untouched.
-
-1. **Plan each source** — fetch, normalize, intra-batch dedup, classify. A source
-   that fails is recorded and skipped; the run continues with the rest.
-2. **Write pages** — atomic per file (tmp + rename). Document-unit sources (`manual`
-   and `nodex`) write individual pages under `<wiki>/documents/`; day-unit sources
-   write `<daily>/{source-id}/DATE.md`. Imported repository documents keep their
-   identity and vault address across source renames. Concept pages are a cross-source aggregate, rendered once
-   after all sources plan.
-3. **Write work-log** — personal events only, and only when the optional `personal:`
-   module is configured (a source must be in `personal.tracked_sources` AND match its
-   adapter `is_self`; `manual`/nodex/RSS/Drive have no authorship, so never produce work-log
-   entries even if listed). FULL ingest only: a source-filtered run skips this step —
-   its event set is a structural subset and would overwrite the complete page.
-4. **Flush LLM queue** — one atomic JSONL task file (queue mode).
-5. **Archive** — eligible `manual` inbox entries move to `archived/{date}/` when
-   enabled, only after original preservation, every vault write and the queue flush
-   succeeded. Partial dependency coverage, changed bytes, shared entry dependencies
-   or a failed entry in the same manual source prevent retirement.
-   Existing archive entries are never replaced; identical bytes may reuse an entry.
-   An empty inbox means collection finished, not that semantic tasks or reviews finished.
-
-The manual adapter reads top-level UTF-8 Markdown, text and HTML files. Unsupported
-formats and subdirectories are not ingestion units; failed reads are reported, and
-failure of every eligible read fails the source. Original YAML is preserved under
-`source_record.manual_frontmatter` as source evidence, never as page identity or
-completion state. Before page publication, the adapter preserves exact entry bytes
-and supported local dependencies under `.lorekeeper/evidence/manual/`. Identical
-file bytes share storage across bundle revisions. `source_record.manual_original`
-identifies the immutable manifest; `lore wiki original <document-path>` verifies it
-and lists members. Assets remain in the inbox; they are not independent ingestion units.
-
-Explicit relative Markdown links and supported HTML resources are captured within
-the inbox boundary. Missing, escaping or symlink dependencies fail capture. CSS/SVG
-and other unsupported resource constructs are reported as incomplete coverage and
-keep the entry for retry; HTML `base`, implicit Obsidian basename lookup and local
-raw-HTML links in Markdown are refused. Inspect `unsupported` before assuming a
-self-contained export. Each entry is a separate observation, not an atomic inbox
-snapshot. Capture is bounded to 32 MiB per text, 64 MiB per member, 2048 members,
-32 dependency levels and 8192 member records per source. Each source allows
-256 MiB of captured bytes and 256 MiB of derived text; captures across an ingest
-are limited to 512 MiB. Split unlinked batches or provide smaller self-contained
-exports when those limits fail.
-
-In **queue mode** (the default), phases 1–5 leave summary/concept/work-log
-sections empty and emit JSONL tasks. They are NOT knowledge yet — run
-**`/lore-process`** afterward to drain the queue (fill summaries, create/merge
-concept pages, work-log topic synthesis). Its own Finalize step reconciles the
-graph and the generated wiki pages; that list lives there rather than being
-restated here, because a partial copy of it is how the knowledge timeline went
-stale. A daily run is `lore ingest` → `/lore-process`, not `lore ingest` alone.
-
-## Safety notes
-
-- Re-running for TODAY re-fetches the source window. The output is reproducible only
-  when the inputs are identical: upstream edits/deletions and rolling windows can
-  change it within the same day. Use `--dry-run` to inspect returned event counts,
-  and retain a copy before a replacement whose evidence cannot be replayed. Counts
-  alone cannot detect changed content. RSS retained event logs offer replay that
-  other adapters may not provide.
-- `lore ingest --date <past>` re-fetches and re-materializes that day. Complete-refetch
-  sources render from the returned window: a Gmail `newer_than:` filter, remote edits,
-  or deletions can make it incomplete. RSS instead unions fresh events with that date's
-  retained event log, so entries that left the feed remain available. A missing log cannot
-  recover entries absent from the feed. Inspect `--dry-run` counts and source replayability
-  before replacing historical pages; counts alone do not prove identical content.
-- An LLM-owned section (a summary, refined events, concept links) survives a re-render only
-  while its `llm_inputs.<key>_done` marker matches the input the render computes. That is the
-  ordinary case, and the section is spliced through from the page on disk. Where the marker is
-  absent or stale the section is ANSWERED AGAIN, which means it is written empty and re-queued
-  — so a body nobody recorded (written by hand, or by a drain that did not stamp) is lost.
-  `lore ingest` names each section it is about to empty before it writes; `lore doctor` lists
-  the pages in that state.
+Credentials belong to `lore init credentials`. Environment overrides include
+Google client ID/secret/refresh token, Slack tokens, and supported Atlassian API
+credentials. Rotating OAuth refresh tokens require the credential store. Source
+setup belongs to `/lore-setup`; this skill does not discover or invent account IDs.

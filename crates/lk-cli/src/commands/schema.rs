@@ -409,7 +409,10 @@ fn alias_rule(language: &str) -> String {
          spelling nobody searches for, and inventing one costs a rival page rather than \
          preventing it. An alias must name the SAME concept in the same scope: a method, \
          component, broader category, narrower application or distinct version is a \
-         relationship, not an alternative name."
+         relationship, not an alternative name. Co-occurrence or a conditional claim does not \
+         establish identity: an input, precondition or outcome is not automatically another \
+         name for the operation or observation. Omit uncertain aliases and preserve the source \
+         wording in its evidence until equivalence is established."
     )
 }
 
@@ -489,6 +492,16 @@ fn convergence_body(language: &str, strings: &Strings) -> Vec<String> {
             .to_string(),
         "5. **Slug normalization** is `lore`'s slugify, exactly: NFKC → lowercase → \
          non-alphanumeric to hyphen → collapse runs → trim edges."
+            .to_string(),
+        String::new(),
+        "**Authored synthesis adoption is a baseline, not semantic verification.** \
+         Backlink reconciliation can preserve written prose and record its current citation \
+         input without an LLM rewrite. Inspect its adoption report, especially when several \
+         sources are involved. Before claiming this operation integrated the evidence, read \
+         those sources against the complete synthesis. When a rewrite is needed within the \
+         authorized scope, use `lore graph resynthesize <exact-concept-path>` and process the \
+         typed request; do not hand-write completion markers or rewrite unrelated concepts. \
+         A zero queue count alone does not verify adopted prose."
             .to_string(),
         String::new(),
         format!(
@@ -725,7 +738,7 @@ pub fn render_agents_md(
     }
 
     writeln!(out).unwrap();
-    out.push_str("## Knowledge reviews\n\nAn exploration may carry optional `review` metadata. It is an authored assessment, never a regenerated concept section.\n\n```yaml\nreview:\n  status: open # open or resolved\n  evidence:\n    - path: wiki/documents/example.md\n      revision: <revision from lore wiki evidence>\n  resolution: null\n```\n\nUse configured vault paths. `lore wiki evidence <path>...` supplies exact revisions and recorded source addresses. Before publishing a review, use `lore wiki evidence --archive <path>...` to retain verified evidence content under `.lorekeeper/evidence/<revision>.md`. Historical evidence stays retrievable after source changes; never replace a recorded revision merely to match current content. Equal addresses expose shared provenance; different or absent addresses do not establish independence. `source_count` counts citing pages, not independent evidence or confidence.\n\nRecord the competing claims, scope, effective time and source links in the exploration body. A resolved review requires a nonempty `resolution` explaining the evidence and reasoning. Before reassessing, archive the existing review with `lore wiki evidence --archive` and record its archive path in a dated reassessment. After actually rereading changed sources, archive them and explicitly replace `review.evidence` with the revisions supporting the current judgment; historical revisions remain in the archived prior review, not alongside newer revisions of the same path in the current evidence set. An archived review is judgment history, not independent evidence. `lore wiki reviews` reports the recorded status and its effective state without rewriting history. `lore wiki reviews --check` fails for evidence drift or invalid records, but accepts open reviews. Link a concept's conflict callout to the corresponding review.\n\n");
+    out.push_str("## Knowledge reviews\n\nAn exploration may carry optional `review` metadata. It is an authored assessment, never a regenerated concept section.\n\n```yaml\nreview:\n  status: open # open or resolved\n  evidence:\n    - path: wiki/documents/example.md\n      revision: <revision from lore wiki evidence>\n  resolution: null\n```\n\nUse configured vault paths. `lore wiki evidence <path>...` supplies exact revisions and recorded source addresses. Before publishing a review, use `lore wiki evidence --archive <path>...` to retain verified evidence content under `.lorekeeper/evidence/<revision>.md`. Historical evidence stays retrievable after source changes; never replace a recorded revision merely to match current content. Equal addresses expose shared provenance; different or absent addresses do not establish independence. `source_count` counts citing pages, not independent evidence or confidence.\n\nRecord the competing claims, scope, effective time and source links in the exploration body. Distinguish what should apply (a policy or decision) from what actually ran. Chronology alone does not establish supersession or authority, and observed configuration proves behavior rather than which policy is authorized. State what evidence would settle the exact question. A resolved review requires a nonempty `resolution` explaining the evidence and reasoning. Before reassessing, archive the existing review with `lore wiki evidence --archive` and record its archive path in a dated reassessment. After actually rereading changed sources, archive them and explicitly replace `review.evidence` with the revisions supporting the current judgment; historical revisions remain in the archived prior review, not alongside newer revisions of the same path in the current evidence set. An archived review is judgment history, not independent evidence. `lore wiki reviews` reports the recorded status and its effective state without rewriting history. `lore wiki reviews --check` fails for evidence drift or invalid records, but accepts open reviews. Link a concept's conflict callout to the corresponding review.\n\n");
     writeln!(out, "## Concept convergence").unwrap();
     for line in convergence_body(locale.english_name(), strings) {
         writeln!(out, "{line}").unwrap();

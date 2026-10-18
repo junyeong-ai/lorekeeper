@@ -1,361 +1,122 @@
 # lk-source
 
-Source adapters. Each implements `Source::extract(params, ctx) -> Result<Vec<RawItem>, SourceError>`;
-`build_source(source_type, ..)` is the factory. No dedup/render here — just fetch +
-map to `RawItem`.
+Source adapters return observations; the pipeline owns deduplication/rendering.
+Follow the root CLAUDE.md for shared IO/config/error contracts. `Source::extract`
+uses validated params and context; do not add per-adapter output pipelines.
 
-- **Params are validated BY CONSTRUCTION, at consumption.** `parse_validated::<P>()` does
-  the two-step `parse_params` (deserialize into the `#[serde(deny_unknown_fields)]` struct)
-  then `P::validate()` (the `ValidatedParams` trait — semantic checks: caps `> 0`, required
-  non-empty fields, value formats; pure, no I/O). BOTH the offline `validate_params(source_type,
-  params)` dispatch (`lore validate`) AND every adapter's `extract` route through
-  `parse_validated`, so an invariant can never be enforced in the config check yet skipped at
-  runtime — a direct `extract` call can't reach the body with unvalidated params (e.g. gmail
-  could otherwise assemble `() after:…`; manual could scan/archive the vault root). A new
-  adapter inherits the guarantee the moment it `impl ValidatedParams for XParams` and parses
-  via `parse_validated` — never call `parse_params` directly from an adapter. `classify` is
-  NOT a param — it's a top-level `SourceConfig` field.
-- **`ExtractContext::day_window(lookback, lookahead)`** anchors a query window to the
-  target day's bounds in the configured timezone — never `now`. Time-windowed adapters
-  must build their windows from it so `lore ingest --date <past>` backfills the right day
-  (the pipeline still date-filters afterward).
-- **Per-item isolation stops where NOTHING was reached.** RSS skips an unreachable feed and
-  Drive skips an undownloadable file so one broken item doesn't cost the others their day.
-  Both then go through `require_any_observation`: if EVERY attempt failed the adapter returns
-  `SourceError::NothingObserved` instead of an empty success. **The unit is the thing fetched, the guard takes what was OBSERVED (never what failed, and
-  never a subtraction — see `require_any_observation` for the `usize` underflow that would
-  silently disarm it in release), and "read" covers usable as well as reachable** — a Drive file whose metadata will not
-  parse yielded nothing just as surely as one that would not download, and an RSS feed that
-  answered with entries none of which can become an observation was not read either. RSS
-  therefore separates MAPPING from WINDOWING (`map_entry` decides only whether an entry can
-  become an item; the caller decides whether it belongs to this day), because an entry dated
-  for another day is a perfectly good observation — conflating the two would make every quiet
-  feed look broken, the false positive this must never produce. The window was never observed,
-  and downstream cannot tell that apart from a quiet day — `lore ingest` logs `Skipped`
-  either way, and `lore health` reads that log as its only evidence the source is alive. An
-  empty listing (nothing attempted) is genuinely empty and stays a success. **A PARTIAL
-  outage stays invisible to the ingest log by design** — four of five feeds dead still
-  reports a collection, because the source WAS observed and the log records only that one
-  bit. Surfacing degradation rather than absence needs a per-source expectation and a
-  threshold, which is a finding-style check (`doctor`/`lint`), not a freshness signal; the
-  individual failures are `tracing::warn`ed meanwhile. A new
-  many-item adapter inherits the guarantee by counting its failures and calling the rule.
-- **Confluence storage format is XHTML, and three of its constructs break the HTML rule.**
-  `markdown::html_to_markdown` is loss-averse — an unmapped construct degrades to its text —
-  which is right until the text is not prose — and what the text IS, not where it came from,
-  is the test: a `<style>` or `<script>` block out of an email or a feed is machine state on the
-  same grounds as any `ac:` construct, and one real vault page carries an RSS feed's CSS rules
-  mid-article because it was not. (1) `ac:parameter`, a task's `ac:task-id`/`-uuid`, and
-  `ac:adf-attribute` carry MACHINE STATE, and degraded they weld onto the surrounding words
-  unseparated (`170e6f1a-9cincompleteShip the thing`); they are dropped, at the documented cost
-  that a body-less macro loses its visible label. `ac:task-status` is not among them — see
-  below: it is translated, not dropped. (2) Some constructs
-  carry what the reader saw in an ATTRIBUTE, so degrading found nothing to degrade and the
-  thing vanished silently — every Confluence→Confluence cross-reference, and the same for an
-  external reference, an inline date and an emoji. `ATTRIBUTE_BORNE_TEXT` pairs each element
-  with the attribute that carries its value, and the handler prefers the element's own text
-  where it has any (only `time` does), so one rule covers all of them; `ri:user` is
-  deliberately absent, since an opaque account id is machine state. (3) CDATA is not HTML: an
-  HTML5 parser reads `<![CDATA[…]]>` as a bogus COMMENT and drops it, so every code macro
-  arrived EMPTY — one real page grew 4.6x once `normalize_storage_format` unwrapped it ahead
-  of the converter. Only a section that CLOSES is one: every HTML source shares this converter,
-  so an unterminated `<![CDATA[` is likelier prose about XML than a truncated Confluence body,
-  and reading the document's remainder as its content escaped the rest of a newsletter into
-  literal markup. Having judged it TEXT it is escaped as text, the same as an unwrapped
-  section: left as live bytes it was still markup to the parser — `<!…` opens a bogus comment
-  running to the next `>`, which inside the `<pre><code>` a code macro becomes is the one in
-  `</code>`, so the body disappeared and the element never closed. Recovering that text is only half the job: an unknown `ac:plain-text-body`
-  degrades to a PARAGRAPH, which the converter then markdown-escapes (`[1, 2]` → `\[1, 2\]`,
-  backslashes injected into JSON), so it is mapped to `<pre><code>` — the one form that both
-  fences and stops escaping. All of this was invisible until a real page was drained.
-- **An XHTML empty element must be made empty before anything reads it.** HTML has no
-  self-closing syntax for a non-void element, so a parser reads `<ac:parameter ac:name="icon"/>`
-  as an OPEN tag and hands it every following sibling as a CHILD. Both rules above answer from
-  the element ALONE — one drops it, the other replaces it with an attribute — so those adopted
-  siblings are discarded with it: an unset parameter (which Confluence writes exactly this way,
-  BEFORE the body) deletes the macro's entire content, and a self-closed `<ac:task-id/>` deletes
-  the task list. `normalize_storage_format` therefore gives every non-void self-closed tag an
-  explicit end tag, which is what makes ignoring a handled element's children correct BY
-  CONSTRUCTION rather than by luck — and it holds for constructs nobody has enumerated yet,
-  where a per-handler patch would not. It follows the tokenizer's tag states rather than
-  matching `/>`, so a slash inside a quoted attribute value stays value text; void elements are
-  left alone (`<br></br>` is TWO breaks), and so is anything inside a comment or a RAW-TEXT
-  element (`script`/`style`/`textarea`/`title`/…), whose content is text — rewriting there
-  injected a `</div>` into a JavaScript string, the pre-parse pass corrupting the document it
-  exists to leave alone. `noscript` is one of them — scripting is a parser's default — and it is
-  ordinary in email and fetched articles. What ENDS such a span is an end tag whose NAME matches,
-  which HTML decides on the character after it, **ASCII** whitespace / `/` / `>`: matching the
-  name as a mere prefix ended the span at a person typing `</textareas>`, and `char::is_whitespace`
-  ends it at `</textarea\u{3000}>` where a parser would not — the same early ending twice over,
-  and everything after it gets rewritten. A text box is the raw-text element a person types prose
-  into, and its content is KEPT rather than dropped, so nothing masks the bug there. **One gap
-  here is deliberate**:
-  `unwrap_cdata` does not share the skips, so inside a RAWTEXT element it escapes text a parser
-  would have read as text — a section that closes, and the bare opening token of one that does
-  not — leaving literal entities. The exposure is the raw-text elements that are KEPT, `noscript`
-  among them, and those elements ARE reachable (RSS full-text fetching pulls arbitrary pages);
-  what is unobserved is one of them whose content also spells CDATA syntax. Pinned by
-  a test, argued in `normalize_storage_format`, left because closing it
-  costs either a second scanner that can diverge or a merged walk whose ordering invariant is
-  harder to audit than the call order it replaces. The same pass renames the storage-format containers that HAVE an exact
-  HTML counterpart (`REWRITTEN_ELEMENTS`), because structure has to reach the converter as
-  structure: an `ac:task-list` must arrive as `<ul>` to come out a list, and unmapped its items
-  ran together into one string. Both halves are matched BY NAME — testing for a bare open token
-  while replacing every close tag left an attributed one unmatched on open and matched on close,
-  closing an enclosing block early. `ac:task-status` is NOT machine state: the reader sees a
-  ticked box, so it is translated to one, and only its `complete`/`incomplete` spelling is the
-  machine's. An `ac:adf-extension`'s children are ALTERNATIVE renderings of one thing (Cloud
-  emits both for every bodied extension, so both printed), and exactly one is emitted: the
-  `ac:adf-node`, falling back to `ac:adf-fallback` only where the node renders to nothing — asked
-  BY NAME, because a rule keyed to position carries the premise that the stand-in comes second,
-  and a premise that fails does so silently. The mirror case is a link carrying BOTH a target label
-  and the display text its author typed: emitted as siblings they weld (`Design Notesthe
-  notes`), so the body contributes a separator and `ac:link` trims it back off, confining the
-  space to the gap between them.
-- **Ownership (root invariant) — the per-adapter exact-match fields**: each adapter sets
-  `RawItem::is_self` by EXACT-matching its structured authorship field to
-  `ExtractContext::identity` — Gmail `From` vs `identity.email`, Slack author id vs
-  `identity.slack_id`, Jira assignee vs the authenticated account, Calendar
-  organizer/attendee vs `identity.email`. No-authorship sources (Drive/RSS/Manual) set `false`.
-- Adapter contracts (invariants that define correctness):
-  - **Drive**: `folder`/`file_pattern` go through `escape_drive_literal` (`\` and `'`)
-    before interpolation into the query string.
-  - **Calendar**: `calendar_id` is percent-encoded via `Url::path_segments_mut`; all-day
-    events parse `start.date` as a civil date in the vault tz. Events with unparseable
-    timestamps are skipped. `description` is HTML → `markdown::html_to_markdown`.
-  - **Gmail**: uses epoch-second `after:`/`before:` from `day_window` (timezone-exact);
-    the `include_queries` OR group is parenthesized so the bounds bind to every term.
-    `include_queries` is REQUIRED and each entry must be non-blank — `validate_params`
-    rejects an empty list AND any blank-after-trim entry (which would assemble an empty `()`
-    clause). With no stable filter the window would fall to mailbox read-state and the daily
-    page would drift between runs, breaking complete-refetch. Using `is:unread` *inside* an
-    explicit query is the operator's visible choice — only the silent empty default is forbidden.
-  - **Atlassian (`atlassian/`)**: the shared auth + routing facade both Atlassian adapters
-    use. `AtlassianAuth` answers three questions — `api_base(product)`, `header()`,
-    `deployment()` — so no adapter branches on the credential form. `Deployment` is DERIVED
-    from the auth method (oauth/scoped-token/api-token ⇒ Cloud, pat ⇒ DataCenter) and owns
-    every Cloud/Server dialect difference in one place: search path, pagination style
-    (`JiraPaging::Token` vs `Offset`), and the user-identity key (`accountId` vs
-    `name`/`username`). The method also fixes the HOST, because each credential is honored
-    by exactly one: `oauth` and `scoped-token` route through
-    `api.atlassian.com/ex/{product}/{cloud_id}`, while `api-token` and `pat` talk to
-    `site_url` (Confluence Cloud adds `/wiki`, Data Center already has its context path).
-    The two Cloud account-token shapes are therefore separate methods rather than one with a
-    routing flag — the site IGNORES a scoped token instead of refusing it, so a misrouted
-    one reads as an anonymous 401. A PAT authenticates as **Bearer, not Basic** — sending it
-    as a Basic password is the classic Data Center misconfiguration. Refresh tokens ROTATE, so
-    the refresh is the one request deliberately NOT wrapped in `send_with_retry` (replaying
-    a committed rotation strands the grant), the successor is persisted before returning,
-    and the ONE `AtlassianAuth` per instance must be shared across adapters.
-  - **Jira**: on Cloud, `GET /rest/api/3/search/jql` (the old `/search` was removed, returns
-    410) paginated via `nextPageToken`; on Data Center, v2 `/search` paginated by `startAt`
-    against the reported `total`. The dialect comes from `Deployment`, never from sniffing. `description` is ADF
-    JSON → `markdown::adf_to_markdown`. The user supplies a
-    `jql` query string directly in config; convention is to search by `updated` for daily
-    work snapshots. `duedate` + a configurable `start_date_field` (the Jira start-date
-    custom field, e.g. `customfield_10015`) render as a status/period header. The authenticated `accountId` (the exact ownership key) is fetched from
-    `/myself` ONCE and cached on the source (`OnceCell`); a fetch failure is PROPAGATED,
-    never degraded to "no owner" — silently marking every assigned issue not-self would
-    erase a batch's personal contribution with no signal.
-  - **Slack**: every call goes through `slack_post` as `x-www-form-urlencoded` (JSON is
-    rejected by read methods like `search.messages`). Cursor pagination is single-sourced
-    in `slack::paginate` (collect-all up to a cap; `tracing::warn!`s when it truncates) and
-    the `next_cursor` envelope is one `ResponseMetadata`; `resolve_channel_id` keeps its own
-    find-by-name loop for early exit. `resolve_channel_id` passes bare ids
-    (`C…/G…/D…`) through and only name-resolves `#name`. `slack-channel` reads whole channels
-    (= team activity); `watch_users` (author or `<@id>` mention) narrows to focus people,
-    `include_threads` pulls `conversations.replies` for context, `exclude_bots` (default
-    true) drops bot posts from root + replies. Text → `markdown::slack_to_markdown`, then
-    `split_first_line` derives the title (promoting+stripping the first line only when it
-    reads like a heading — never a code fence/mention/URL, which would corrupt the body).
-    `search.messages` (slack-search) is user-token-only per Slack. Tokens: `history_token`
-    prefers bot (xoxb), `search_token` requires user (xoxp).
-  - **Confluence** (`confluence.rs`): CQL search over `/rest/api/content/search`, following
-    the server-supplied `_links.next` (re-anchored on the API base, which is a different
-    host than the one that produced it) under the shared `page_step` termination rule. The
-    user's `cql` selects WHICH pages and must carry NO time clause — `validate_params`
-    rejects one — because the adapter appends the `day_window` itself; a hand-written
-    `lastModified` would anchor the query to the wall clock and break `--date` backfill.
-    `external_id` is `confluence:{id}:v{version}`, making an edit a new event and an
-    unchanged re-fetch a dedup no-op. `is_self` = the CURRENT version's author (Cloud
-    `accountId` / DC `username`) matching the authenticated account, and `only_my_edits`
-    (default true) drops pages last touched by someone else. Storage format is XHTML → the
-    shared `markdown::html_to_markdown`.
-  - **RSS** (`rss.rs`): one source polls many public feeds (`feeds: [{id, url}]`) via
-    `feed-rs` (RSS/Atom/JSON Feed) — no credentials. A feed that 404s or fails to parse is
-    `tracing::warn!`-skipped, never aborting the source. `body` is `content`→`summary` HTML
-    run through `markdown::html_to_markdown`. An entry with no `published`/`updated` date is
-    skipped (NOT dated to `now` — that would misfile old posts onto today); likewise a
-    title-less entry. Provenance: entry author → feed title → configured feed id.
-    `fetch_full_text` feeds fetch the article and run it through
-    `markdown::readable_html_to_markdown`, which returns `None` when readability finds no
-    article core; on `None` (or a result shorter than the summary) the known-clean feed
-    summary is kept, so boilerplate never overwrites it.
-  - **`fetch::readable`** is the one page fetcher, shared by RSS's full-text leg and `lore
-    fetch`. It streams the body and REFUSES past `MAX_BODY_BYTES` rather than truncating —
-    readability would extract whatever a prefix held and the page would assert an article
-    nobody published — and a timeout bounds a stalled response, never a fast enormous one.
-    Streaming costs `Response::text`'s charset handling, so `declared_charset` reads the
-    `Content-Type` charset and `encoding_rs` applies it: reading a EUC-KR page as UTF-8
-    replaces every Korean character rather than degrading, and the garbage would enter the
-    vault with no error. Header only — a `<meta charset>` means decoding twice, which is a
-    browser's job. Redirects are followed wherever they lead, private addresses included: a
-    rule refusing those breaks an on-prem Atlassian instance and an intranet-hosted feed to
-    close a shape with no channel back, since what a redirected fetch returns is written into
-    the reader's own vault on their own machine.
-  - **nodex** (`nodex.rs`): a project repository's DECLARED document graph, read by running
-    `nodex query recent` in it. The repository remains the original store; each document is copied into its own page under `<wiki>/documents/`, because a
-    decision record is a whole document rather than one item among the many a day holds, and
-    the default vault search reads wiki pages; `--include-sources` also reaches daily
-    observations. Its `kind` rides as a TAG, so a reader asks for decision records across
-    every project without naming a source.
-    The CONCEPTS those documents name are what makes one insight found in three projects
-    converge on one page. Normal date ingestion uses the declared date and kind, including historical
-    records; explicit reconciliation instead observes the current eligible inventory. `source_record` carries id, status, a versioned observation revision and the declared
-    successor. Archived and superseded records are not current operating contracts, but their
-    observations remain evidence. Missing records are not inferred to be archived. `--today` pins the
-    clock so `--date` backfill asks the day's own question; `--since` is a lower bound only,
-    so the upper one is applied here against the same declared date. The query is made once
-    per FIELD (`created`, then `updated`) and folded to ONE observation per document, never through
-    nodex's `any`: that also matches a REVIEW stamp, and a review is not an edit — re-admitting an unchanged
-    document on the day it was re-read would put a second copy of knowledge the vault holds
-    onto a later page and run the extraction over it again. Two queries rather than one answer
-    plus a guess at which field nodex reports when several match. The answers fold to ONE
-    observation per document, dated by the NEWEST date it declares inside the window: a
-    document source writes one page per document, so two rows about one document are two facts
-    about one thing — kept as two they put its prose, its concepts and its citations on two
-    pages, the second taking a content-hash suffix as though it were a different document that
-    shared a title. Keyed on the DATE rather than on which query answered, so the window's
-    width cannot decide it and a backfill reproduces what the live run wrote.
-    **A document source RE-OBSERVES, so a page has to be findable as its own next run.**
-    `metadata.source_file` retains the document's absolute location for legacy adoption: legacy identity is
-    read from `source_file`/`source_url`, and a source setting neither — which `base_url` being
-    optional makes the documented case — found a page it could not prove was its own and
-    disambiguated around it, minting the whole corpus again every run. **The window is read WHOLE.** `nodex`
-    bounds a query from below (`--since`) and answers newest-first, so `--limit` cuts at the
-    RECENT end — ahead of the window whenever the window is not the newest days. A single
-    capped query therefore left a backfill holding only documents newer than the day it asked
-    about, filtered every one of them out and reported a quiet day: measured at 2 events where
-    11 belonged. `query_window` grows the reach until the answer reads PAST the window's first
-    day or the repository runs out — the query is bounded one day BELOW the window so that
-    proof exists at all, since an answer reaching only as far as the first day is exactly what
-    a page cut in the middle of that day's documents looks like, and `max_documents` caps what the WINDOW yields — refusing the run
-    whole rather than ingesting a part, since which documents a partial run kept would be
-    decided by the order the index listed them. **What nodex returns is
-    CHECKED, not trusted**: a document's own relative links are rewritten to `base_url`
-    addresses only where the repository HOLDS that file — asked through `canonicalize` rather
-    than `is_file`, which folds case on macOS and Windows and so would mint a URL a
-    case-sensitive host answers 404 to; and a `path`
-    that is absolute or climbs with `..` is refused — `Path::join` DISCARDS its base for an
-    absolute operand, so such an answer reads a file the repository does not contain straight
-    onto a vault page. That refusal ends the SOURCE rather than skipping the document: a read
-    that failed is one document missing, while a path the query had no business naming is the
-    answer itself being wrong. `is_self` is always
-    false and `author` carries the document KIND: a repository records no author per
-    document, and the commit that last touched a file is not a claim about who wrote what is
-    in it. `base_url` is configured rather than derived from `git remote` — deriving it needs
-    three guesses (remote form, default branch, host layout) where one config line is exact,
-    and a repo without a remote states no URL at all rather than a local path that resolves
-    nowhere else. A repository with no `nodex.toml` is NOT this adapter's case and no
-    fallback discovery exists for it: `/lore-extract` is the path, under a person's judgment.
-  - **Error isolation**: individual item failures (thread fetch, file download, timestamp
-    parse) are caught with `tracing::warn!` and skipped — one inaccessible thread or file
-    does not abort the entire source.
-  - **No silent truncation (complete-refetch contract)**: every windowed/listing adapter
-    paginates to the END of its window or listing — a single-page fetch would silently
-    lose knowledge the daily page is re-rendered from. Termination is single-sourced in
-    `paging::page_step`: a listing ends ONLY when the continuation signal is absent — a
-    page may legitimately arrive EMPTY with a token still present (server-side
-    filtering), so an empty page never terminates; a hard page budget (`paging::MAX_PAGES`)
-    keeps an unattended ingest finite against a server streaming tokens without progress
-    (loud warn when it trips). Caps are guards against pathological volume, all
-    config-exposed and validated `> 0`: `slack-channel`
-    `max_messages_per_channel`/`max_thread_messages`, `slack-search`
-    `max_matches_per_query`, `gmail` `max_messages`, `google-calendar`
-    `max_events`, `google-drive` `max_files`, `jira` `max_issues`.
-    Every adapter `tracing::warn!`s ONLY when the cap may have dropped items (overshoot
-    or a pending next page — never a false alarm at an exact-cap fetch; "may have been
-    dropped" because a pending page can turn out empty), so truncation is always
-    observable and the operator can raise the cap. slack-channel routes through the
-    shared `paginate` helper (cursor continuation; a non-empty `next_cursor` is the one
-    authoritative signal — `has_more` is advisory and not consulted); slack-search
-    paginates `search.messages` by page number (`messages.paging.page` of `.pages`);
-    Gmail/Calendar/Drive/Jira each loop with `page_step` directly.
-  - **Transient-failure retry**: Slack retries inside `slack_post`; Google (token refresh)
-    and Jira (`/myself`, search) wrap idempotent requests in `retry::send_with_retry`
-    (bounded retries on 429/5xx + connect/timeout, honoring numeric `Retry-After`), so a
-    single provider hiccup doesn't abort an unattended ingest. Per-item Google fetches keep
-    their warn-and-skip isolation. Extend new idempotent calls with the same helper.
-- **Manual originals** (`manual.rs`, `manual_bundle.rs`): `capture_manual` returns RawItems
-  and a bounded byte-capture sidechannel; the CLI publishes originals before pages, flushes
-  the queue, then optionally retires unchanged entries. `Source`/`RawItem` do not carry blobs.
-  `source_file` remains location ownership; `source_record.manual_original` is a separate
-  typed manifest/entry reference even without YAML. Source YAML stays under `manual_frontmatter`.
-  Capture is bounded to 256 MiB/2048 entries per source, entry text 32 MiB, member 64 MiB,
-  dependency depth 32 and 2048 members per bundle; a source batch also caps total member
-  records at 8192 and derived text at 256 MiB. The CLI additionally bounds retained captures across
-  sources to 512 MiB. Limits refuse, never truncate; linked closure size is not reduced merely
-  by splitting the inbox. Each selected file's bytes are read once; conversion/hash derive from
-  that capture. The explicit inbox directory is the local boundary, never a whole-inbox copy.
-  Parsed Markdown Link/Image events (including explicit-relative Obsidian links/embeds) and
-  supported HTML URL attributes discover dependencies. The tested event serializer writes
-  standard Markdown links, not a handwritten destination parser. Implicit Obsidian extension/
-  basename lookup and embed options refuse. Missing, escaping, nonregular or symlink members
-  refuse; HTML `base` and local raw-HTML resources inside Markdown refuse rather than render
-  against the wrong base. CSS/SVG and unsupported HTML URL surfaces are explicit partial
-  coverage and block input retirement. No network assets are fetched. UTF-8 entry support
-  remains unchanged; binary attachments are byte-preserved. New paths are only derived-view
-  rewrites; original bytes are untouched. `archive_after_ingest=false` disables retirement,
-  not original storage. Attachments are never removed; an entry used by another captured
-  bundle is retained as a shared attachment, and any entry-capture failure blocks retirement
-  for that source alone. The unchanged-bundle check before
-  retirement is an observation, not a lease against external editors or an atomic snapshot.
-  Existing `resolve_inbox_dir` still expands `~`, anchors relative paths to the vault and
-  refuses vault-root/ancestor inboxes; selection is case-insensitive by configured extension.
-  Per-entry failures remain observable even with successful neighbors; no observation fails
-  the source. `lore fetch` remains an inbox writer and has no separate ingestion path.
-- `Source` has no `source_type()` accessor — the factory selects by the input enum.
-- `markdown` module normalizes rich text to Markdown, loss-aversely (unmapped constructs
-  degrade to their text): `adf_to_markdown`, `html_to_markdown` (via `htmd`),
-  `slack_to_markdown`, and `readable_html_to_markdown` (readability article extraction
-  returning `None` + `tracing::warn!` when no article core is found — the caller owns the
-  fallback: RSS keeps the feed summary, manual converts the whole user-chosen page). Keeps
-  LLM/vault input clean instead of ADF/HTML/token soup.
-- `google/oauth.rs` mints a Google refresh token via an OAuth loopback flow (consent
-  URL + ephemeral `127.0.0.1` callback server + code exchange), re-exported as
-  `build_google_refresh_token` for the `lore init credentials` wizard. URL-building and
-  callback parsing are unit-tested; the live token exchange needs a real Google client.
+## Shared adapter contracts (`lib.rs`, `paging.rs`, `fetch.rs`)
 
-- **Nodex backfill selection is exact and complete.** `document_ids` restricts the
-  date/kind window before the cap. A missing requested identity or failed selected read
-  rejects the whole source before publication. A current snapshot alone is insufficient:
-  unbuildable documents, unfollowed scope boundaries, unavailable verification and scope
-  coverage gaps refuse the observation instead of claiming an empty or complete success.
-  The adapter does not rebuild a source graph as a side effect and pins its public CLI
-  envelope compatibility to nodex `>=0.57, <0.58` with `--check-version`.
-  `params.executable` optionally selects one absolute binary path for every subprocess in
-  the observation; omission uses `nodex` on PATH. Explicit launch/version failure never
-  falls back to another binary. Param validation stays pure; live compatibility is checked
-  at execution. Selecting a binary never rebuilds the index or overrides the project pin.
-- **Nodex reconciliation is explicit.** `reconcile: true` requires a portable, nonblank
-  `repository_id`. It selects the current inventory independently of declared dates;
-  `kinds` and exact `document_ids` narrow the imported population only after completeness
-  is checked. A subset is not evidence of a deletion outside that subset. The generic
-  `source_identity: {repository, document}` is separate from the checkout's `source_file`
-  location and from the source record's lifecycle evidence. Authored created/updated dates
-  remain provenance; an undated hub uses the observation day with `timestamp_basis: observed`
-  and null authored dates rather than inventing an author date. Future-dated knowledge is
-  still refused by the pipeline's shared upper bound.
-- **Nodex metadata and prose come from one verified public response.** Collect the node,
-  canonical body and outgoing relations together, without reparsing a separate source-file
-  read. Preserve the public node's `attrs` under `source_record.attributes`, including
-  nested values: substantive knowledge may be authored in attributes instead of the body.
-  They remain source declarations, never top-level identity or completion state.
-  `observation_revision` carries a scheme and digest of that observation; it never
-  claims raw-file equality or replaces the meaning of earlier `content_revision` evidence.
-  Requery selected observations and repeat link projection before returning; changed
-  observations or projected links refuse the source. Inventory and config checks remain
-  mandatory. These bounded reads do not lock out external editors or certify raw formatting.
-  One selected read failure is not a partial success.
-  Snapshot fingerprints are internal observation guards, not per-document LLM inputs:
-  changing an unrelated file must not regenerate every unchanged document.
+- Runtime and offline validation share `parse_validated`: reject unknown fields and
+  invalid semantic values. Diagnose top-level source fields separately from params.
+- Use the requested date's `day_window` in the vault timezone, not today's clock.
+- `require_any_observation` counts reachable usable observations before window
+  filtering. A genuinely empty listing succeeds; all attempted observations failing
+  is `NothingObserved`. Partial success warns, not a fabricated quality percentage.
+- Pagination follows the provider's continuation even after an empty page. Require
+  positive caps; warn when overshoot/pending continuation proves truncation, not
+  merely when the result happens to equal the cap. Keep the `MAX_PAGES` guard.
+- Retry idempotent requests for 429/5xx/connect/timeout with numeric Retry-After;
+  rotating-token refresh is not an idempotent retry. Report incomplete reach.
+- Shared readable fetching streams a bounded body and refuses over-limit responses,
+  rather than truncating. Timeout is not a memory cap. Decode the HTTP Content-Type
+  charset once via encoding_rs; do not reinterpret an already decoded meta charset.
+  Private redirect targets are intentionally supported for intranet sources.
+- `is_self` uses structured identity: Gmail From email, Slack user ID, Jira assignee,
+  Calendar organizer/attendee. Drive/RSS/manual are false; nodex's authored kind is
+  not a Git author identity.
+
+## Provider-specific seams
+
+- `atlassian/`: auth method determines deployment routing. OAuth/scoped token uses
+  api.atlassian.com product/cloud ID; API token/PAT uses the site (PAT Bearer).
+  Keep Cloud/Server pagination and user identity separate. Persist a rotated refresh
+  token before use and share one auth owner; do not retry refresh blindly.
+- `jira.rs`: Cloud v3 search/jql uses tokens; Server/DC v2 uses offsets/total. Cache
+  `/myself` with OnceCell and fail on identity failure. Preserve ADF and due/start
+  date headers rather than losing work semantics in text conversion.
+- `confluence.rs`: validate user CQL without rewriting its meaning; append the date
+  window. Re-anchor next links to the authenticated API base and follow `page_step`.
+  External identity includes version; `only_my_edits` compares the current author.
+- `gmail.rs`: epoch bounds and parenthesized OR terms; queries are required/nonblank.
+  An unread-only filter is an explicit user choice, not an implicit default.
+- `slack.rs`: form-encode API calls. Cursor pagination is authoritative, not
+  `has_more`; distinguish bare channel IDs from `#` lookup. Watch-user author/mention
+  semantics, thread/bot filters, and user-token search remain explicit. Split only
+  headings, not code, mentions, or URLs.
+- `calendar.rs`: construct URL path segments safely. All-day civil dates use the
+  vault timezone; skip invalid timestamps diagnostically. `drive.rs` query literals
+  escape both backslash and apostrophe.
+- `rss.rs`: prefer HTML content then summary; use published/updated dates, never
+  acquisition-now as publication. Require a title. Author falls back to feed title
+  then feed ID. Full-text fallback keeps the summary if extraction is absent/shorter.
+
+## HTML/storage normalization (`markdown.rs`)
+
+Use parser/token-state behavior, not regex replacement of arbitrary markup.
+
+- Remove machine-only storage parameters, task IDs/UUIDs/ADF attributes, script and
+  style; translate task status into a checkbox. For attribute-borne text prefer
+  existing text/time; never expose opaque `ri:user` IDs as readable identity.
+- Unwrap only closed CDATA with correct escaping. Unterminated CDATA stays literal;
+  plain-text-body becomes pre/code. Self-closing non-void storage tags require
+  explicit close tags; keep HTML void elements alone. Respect comments, raw-text
+  elements, and HTML ASCII end-tag boundaries while rewriting known storage tags.
+- Select a usable ADF representation by node identity, with named fallback when
+  empty, not positional duplication. Preserve spacing between link text and target.
+- Do not claim fully lossless HTML normalization: the CDATA prepass has a documented
+  raw-text interaction. Change that seam deliberately with a reproducing fixture,
+  not an unrelated broad sanitizer rewrite.
+
+## Public nodex boundary (`nodex.rs`)
+
+- Read the declared public graph, NEVER substitute filesystem discovery. Require
+  nodex.toml and a current compatible public index. Current subprocess compatibility
+  is `>=0.57, <0.58`, checked publicly; an explicit executable applies to every call,
+  without fallback or changing the repository's own version pin.
+- Query created and updated separately, then fold selected documents by identity.
+  Grow query reach past the window's first day; one below-bound observation proves
+  completion. A reach/window cap fails the source instead of returning a partial
+  inventory as complete. Invalid public paths likewise fail, not skip.
+- Require complete current inventory before kind/explicit-ID filtering. Missing,
+  unbuildable, or unavailable coverage is not permission to rebuild or approximate.
+  Every requested document ID must resolve; selection happens before document caps.
+- Repository ID is portable identity; document identity is distinct from location and
+  lifecycle. `source_file` remains the legacy absolute ownership reference. Optional
+  base URLs are configured, never inferred from a remote. Undated observed records
+  do not acquire invented authored timestamps; pipeline upper bounds still apply.
+- Consume one verified public response for node, canonical body, and relations.
+  Preserve nonempty nested `attributes` as `source_record.attributes`; omit empty
+  attributes to avoid input noise. They are neither identity nor lifecycle state.
+  `observation_revision` is a semantic observation digest, not raw-byte hash or a
+  replacement for the provider's content revision.
+- Reobserve selected documents and compare the full projection before returning;
+  inventory/config checks are mandatory too. A snapshot fingerprint is not a
+  per-document cache key. Reproject only actual contained canonical links with
+  case preserved; reject escaping paths rather than guessing a destination.
+
+## Manual original bundles (`manual.rs`, `manual_bundle.rs`)
+
+- Capture is a sidechannel, not blob fields on `Source`/`RawItem`. Keep `source_file`
+  ownership distinct from typed `manual_original` and preserved `manual_frontmatter`.
+  Read entry bytes once for conversion/hash/preservation. Archive=false still
+  preserves originals; it only disables retirement.
+- The configured inbox is the explicit boundary, not an implicit whole-vault copy.
+  Reject a vault root/ancestor inbox. Select entry extensions case-insensitively;
+  refuse symlink/nonregular/missing members, escapes, absolute paths, Windows drive
+  and UNC syntax before URI classification. Do not fetch remote dependencies.
+- Markdown uses pulldown-cmark Link/Image/WikiLink events and a serializer. Support
+  explicit relative wiki filenames, not Obsidian basename/implicit-extension lookup
+  or embed options. Reject HTML base and raw HTML local links in Markdown rather
+  than rewrite against a wrong base. HTML URL surfaces not fully supported, external
+  CSS/SVG dependency closure, and similar unsupported constructs yield partial
+  coverage/no retirement. Preserving their bytes is not proving full closure.
+- Limits are intentional: 32 MiB entry, 64 MiB member, 2 MiB manifest, depth32/2048 bundle members;
+  256 MiB/2048 entries per source, 8192 aggregate member records/256 MiB derived
+  documents; CLI aggregate capture cap512 MiB. Closure overflow is an explicit error,
+  not silently solved by splitting top-level entries. Binary attachments stay bytes;
+  text entry conversion requires supported decoding.
+- Retirement requires complete preserved bytes and unchanged entry. Never remove
+  attachments. Cross-entry references protect referenced entries even when an event
+  is filtered out; any entry capture failure holds retirement for that source.
+  These checks are not a global inbox snapshot or a lease against external editors.
+  Publication order and immutable object/bundle storage belong to vault/CLI owners.

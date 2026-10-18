@@ -1,11 +1,10 @@
 ---
 name: lore-setup
-version: 0.57.0
-description: Build or edit a Lorekeeper config.yaml by inspecting the user's real workspace — discovers Slack channel IDs, Jira projects and custom-field IDs, Google calendars, and Gmail query categories via their CLIs, then writes a validated config. Use when the user wants help setting up Lorekeeper, adding a source, or finding the concrete IDs a source needs. Read-only against the user's accounts; only writes config.yaml after confirmation.
+version: 0.58.0
+description: Builds or edits Lorekeeper source configuration using the user's workspace metadata. Discovers concrete Slack, Jira or Google IDs when needed, preserves existing source selections, and validates the requested local configuration. Credential login uses lore init credentials.
 when_to_use: |
-  setup Lorekeeper, configure sources, build config,
-  find channel id, find jira project, add source,
-  find calendar, build my config, edit config
+  Lorekeeper setup, configure Lorekeeper sources, add a Lorekeeper source,
+  로어키퍼 초기 설정, 로어키퍼 수집 소스 추가
 argument-hint: "[source-type]"
 allowed-tools: |
   Bash(slack-cli *)
@@ -42,7 +41,8 @@ channel IDs, project keys, and custom-field IDs.
    - Google (Calendar/Gmail) → `references/google.md`
    - Project repositories (`nodex`) → `references/config.md`, Nodex binary selection
    - Other supported sources → `config.example.yaml` for their parameters
-3. **Write config** — use `references/config.md` schema. Location:
+3. **Write config** — use `references/config.md` schema within the user's authorized
+   source selections. Ask only for missing choices that change that scope. Location:
    `./config.yaml` (repo) or `~/.config/lorekeeper/config.yaml`
    (binary install). If a file already exists, merge the source block
    only — never overwrite.

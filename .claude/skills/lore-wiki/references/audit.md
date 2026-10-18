@@ -1,5 +1,11 @@
 # `/lore-wiki audit` — five-layer procedure
 
+## Contents
+
+The numbered layers below cover structure, missing citations/relations,
+contradictions, evidence gaps and concept identity. Report findings and proposed
+repairs; a clean structural pass is not a semantic completeness verdict.
+
 Surface findings and proposed repairs for human review — never auto-resolve or
 edit pages during the audit. Execute separately authorized repairs after reporting.
 Read AGENTS.md to
@@ -21,8 +27,8 @@ resolve section headings before inspecting pages.
    "no violations" with "healthy".
 2. **Missing cross-references** — two kinds, and they are found differently.
 
-   Between concepts: run `lore graph --json suggest-links` (never exits non-zero —
-   always inspect the pairs). Clusters generate candidates; they do not establish a
+   Between concepts: run `lore graph --json suggest-links`. Inspect the pairs;
+   candidates do not gate, but runtime failures must be reported. Clusters generate candidates; they do not establish a
    relation. Read the sources and propose a link only when its explanation states a
    useful, supported relationship, such as a component, prerequisite, alternative,
    or limitation. Sharing a topic or appearing in the same article is insufficient.
@@ -92,8 +98,9 @@ resolve section headings before inspecting pages.
    sources whenever source paths or authored revisions change, so it survives only by being written
    again — a statement about the last rewrite, not a ledger entry. What that means
    for you: a disagreement worth keeping belongs somewhere the machine does not
-   own. Report it, and if it matters beyond this page, file it as an exploration
-   page whose Grounding cites both sides.
+   own. Report it and propose an exploration whose Grounding cites both sides.
+   Draft the scope and evidence in the audit report; publish the review only as
+   separately authorized repair work.
 4. **Frontiers — data gaps + new directions**. Report:
    - Durable subjects established by daily pages that have no suitable concept page.
      Check the registry and existing broader pages; incidental mentions alone do not

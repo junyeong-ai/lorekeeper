@@ -71,6 +71,14 @@ pub struct SearchHit {
     pub file_revision: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_record: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_identity: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_file: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub metadata_issues: Vec<String>,
 }
 
 /// Metadata browsing order. Search relevance ordering is unchanged.
@@ -170,6 +178,96 @@ pub struct SearchResult {
     pub categories: BTreeMap<String, usize>,
     pub source_statuses: BTreeMap<String, usize>,
     pub formats: BTreeMap<String, usize>,
+}
+
+/// Discovery exposes recorded navigation fields; full source metadata remains in the page.
+fn source_record_preview(
+    page: &crate::VaultPage,
+    issues: &mut Vec<String>,
+) -> Option<serde_json::Value> {
+    let value = page.frontmatter.get("source_record")?;
+    if value.is_null() {
+        return Some(serde_json::Value::Null);
+    }
+    let Some(record) = value.as_object() else {
+        issues.push("source_record must be an object or null".into());
+        return None;
+    };
+    let mut selected = serde_json::Map::new();
+    for key in [
+        "id",
+        "kind",
+        "status",
+        "superseded_by",
+        "created",
+        "updated",
+        "reviewed",
+        "timestamp_basis",
+    ] {
+        if let Some(value) = record.get(key) {
+            if value.is_string() || value.is_null() {
+                selected.insert(key.into(), value.clone());
+            } else {
+                issues.push(format!("source_record.{key} must be a string or null"));
+            }
+        }
+    }
+    Some(serde_json::Value::Object(selected))
+}
+
+fn source_identity_preview(
+    page: &crate::VaultPage,
+    issues: &mut Vec<String>,
+) -> Option<serde_json::Value> {
+    let value = page.frontmatter.get("source_identity")?;
+    if value.is_null() {
+        return Some(serde_json::Value::Null);
+    }
+    let Some(identity) = value.as_object() else {
+        issues.push("source_identity must be an object or null".into());
+        return None;
+    };
+    let mut selected = serde_json::Map::new();
+    for key in ["repository", "document"] {
+        match identity.get(key) {
+            Some(serde_json::Value::String(value)) if !value.trim().is_empty() => {
+                selected.insert(key.into(), value.clone().into());
+            }
+            _ => issues.push(format!("source_identity.{key} must be a nonblank string")),
+        }
+    }
+    Some(serde_json::Value::Object(selected))
+}
+
+fn source_file_preview(
+    page: &crate::VaultPage,
+    issues: &mut Vec<String>,
+) -> Option<serde_json::Value> {
+    let value = page.frontmatter.get("source_file")?;
+    if value.is_null()
+        || value.is_string()
+        || value
+            .as_array()
+            .is_some_and(|items| items.iter().all(serde_json::Value::is_string))
+    {
+        Some(value.clone())
+    } else {
+        issues.push("source_file must be a string, an array of strings, or null".into());
+        None
+    }
+}
+
+fn source_url_preview(
+    page: &crate::VaultPage,
+    issues: &mut Vec<String>,
+) -> Option<serde_json::Value> {
+    let value = page.frontmatter.get("source_url")?;
+    if value.is_string() || value.is_null() {
+        Some(value.clone())
+    } else {
+        issues.push("source_url must be a string or null".into());
+        None
+    }
 }
 
 pub fn search(
@@ -368,46 +466,57 @@ pub(super) fn search_pages(
         .into_iter()
         .skip(options.offset)
         .take(options.limit)
-        .map(|(entry, matched)| SearchHit {
-            excerpt: excerpt(&entry.page.body, matched, terms, spellings),
-            file_revision: entry.file_revision.clone(),
-            source_record: entry.page.frontmatter.get("source_record").cloned(),
-            id: entry.id.clone(),
-            path: entry.rel_path.to_string_lossy().into_owned(),
-            title: entry.title.clone(),
-            aliases: entry.aliases.clone(),
-            format: entry
-                .page
-                .frontmatter
-                .get("type")
-                .and_then(|v| v.as_str())
-                .map(String::from),
-            category: entry
-                .page
-                .frontmatter
-                .get("category")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(String::from),
-            created: entry
-                .page
-                .frontmatter
-                .get("created")
-                .and_then(|v| v.as_str())
-                .map(|value| value.chars().take(160).collect()),
-            created_status: match entry.page.frontmatter.get("created") {
-                None | Some(serde_json::Value::Null) => CreatedStatus::Missing,
-                Some(_) if entry.created_date().is_some() => CreatedStatus::Valid,
-                Some(_) => CreatedStatus::Invalid,
-            },
-            created_truncated: entry
-                .page
-                .frontmatter
-                .get("created")
-                .and_then(|v| v.as_str())
-                .is_some_and(|value| value.chars().count() > 160),
-            source_count: entry.page.frontmatter.source_count().unwrap_or(0),
-            matched,
+        .map(|(entry, matched)| {
+            let mut metadata_issues = Vec::new();
+            let source_record = source_record_preview(&entry.page, &mut metadata_issues);
+            let source_identity = source_identity_preview(&entry.page, &mut metadata_issues);
+            let source_file = source_file_preview(&entry.page, &mut metadata_issues);
+            let source_url = source_url_preview(&entry.page, &mut metadata_issues);
+            SearchHit {
+                excerpt: excerpt(&entry.page.body, matched, terms, spellings),
+                file_revision: entry.file_revision.clone(),
+                source_record,
+                source_identity,
+                source_file,
+                source_url,
+                metadata_issues,
+                id: entry.id.clone(),
+                path: entry.rel_path.to_string_lossy().into_owned(),
+                title: entry.title.clone(),
+                aliases: entry.aliases.clone(),
+                format: entry
+                    .page
+                    .frontmatter
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                category: entry
+                    .page
+                    .frontmatter
+                    .get("category")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(String::from),
+                created: entry
+                    .page
+                    .frontmatter
+                    .get("created")
+                    .and_then(|v| v.as_str())
+                    .map(|value| value.chars().take(160).collect()),
+                created_status: match entry.page.frontmatter.get("created") {
+                    None | Some(serde_json::Value::Null) => CreatedStatus::Missing,
+                    Some(_) if entry.created_date().is_some() => CreatedStatus::Valid,
+                    Some(_) => CreatedStatus::Invalid,
+                },
+                created_truncated: entry
+                    .page
+                    .frontmatter
+                    .get("created")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|value| value.chars().count() > 160),
+                source_count: entry.page.frontmatter.source_count().unwrap_or(0),
+                matched,
+            }
         })
         .collect::<Vec<_>>();
     let end = options.offset.saturating_add(hits.len());
@@ -1001,6 +1110,150 @@ mod tests {
         assert!(exhausted.hits.is_empty());
         assert_eq!(exhausted.total, 3);
         assert_eq!(exhausted.next_offset, None);
+    }
+
+    #[test]
+    fn discovery_metadata_stays_compact_without_losing_source_evidence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let documents = tmp.path().join(documents_dir(&dirs));
+        let record = serde_json::json!({
+            "id": "record", "kind": "adr", "status": "superseded",
+            "superseded_by": "successor", "created": "2026-06-01",
+            "updated": "2026-10-18", "reviewed": null, "timestamp_basis": "authored",
+            "relations": (0..100).map(|i| serde_json::json!({
+                "relation": "related", "target": format!("target-{i}"),
+                "reference": {"location": "L20", "detail": "x".repeat(300)}
+            })).collect::<Vec<_>>(),
+            "attributes": {"prompt": "Read the complete original. ".repeat(2000)},
+            "manual_original": {"manifest": "original-manifest", "members": ["entry.md"]}
+        });
+        let raw = format!(
+            "---\ntype: document\ntitle: Needle\nsource_identity: {{repository: example/repo, document: record}}\nsource_file: [docs/record.md]\nsource_url: https://example.test/pinned/record.md\nsource_record: {record}\n---\n## Summary\nNeedle evidence.\n"
+        );
+        write(&documents, "record.md", &raw);
+        let options = SearchOptions {
+            query: Some("Needle"),
+            ..Default::default()
+        };
+        let live = super::search(tmp.path(), &dirs, &options).unwrap();
+        let hit = &live.hits[0];
+        let serialized = serde_json::to_string(hit).unwrap();
+        assert!(raw.len() > 50_000);
+        assert!(serialized.len() < 2_000);
+        assert_eq!(hit.source_record.as_ref().unwrap()["status"], "superseded");
+        assert_eq!(
+            hit.source_record.as_ref().unwrap()["superseded_by"],
+            "successor"
+        );
+        assert!(
+            hit.source_record
+                .as_ref()
+                .unwrap()
+                .get("relations")
+                .is_none()
+        );
+        assert!(
+            hit.source_record
+                .as_ref()
+                .unwrap()
+                .get("attributes")
+                .is_none()
+        );
+        assert!(
+            hit.source_record
+                .as_ref()
+                .unwrap()
+                .get("manual_original")
+                .is_none()
+        );
+        assert_eq!(hit.source_identity.as_ref().unwrap()["document"], "record");
+        assert_eq!(hit.source_file, Some(serde_json::json!(["docs/record.md"])));
+        assert_eq!(
+            hit.source_url,
+            Some(serde_json::json!("https://example.test/pinned/record.md"))
+        );
+        assert_eq!(hit.file_revision, lk_core::concept::file_revision(&raw));
+        assert!(hit.metadata_issues.is_empty());
+        let session = crate::MutationSession::acquire(tmp.path()).unwrap();
+        let snapshot = crate::prepare_search(&session, &dirs).unwrap();
+        let indexed = super::search(
+            tmp.path(),
+            &dirs,
+            &SearchOptions {
+                snapshot: Some(&snapshot.snapshot),
+                ..options
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&live.hits).unwrap(),
+            serde_json::to_value(&indexed.hits).unwrap()
+        );
+        let connection = rusqlite::Connection::open_with_flags(
+            tmp.path().join(super::super::search_index::INDEX_PATH),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let payload: String = connection
+            .query_row(
+                "SELECT payload FROM pages WHERE path = 'wiki/documents/record.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let preserved: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(preserved["page"]["frontmatter"]["source_record"], record);
+        assert_eq!(
+            std::fs::read_to_string(documents.join("record.md")).unwrap(),
+            raw
+        );
+    }
+
+    #[test]
+    fn discovery_metadata_marks_invalid_values_without_inventing_source_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let documents = tmp.path().join(documents_dir(&dirs));
+        for (name, fields) in [
+            ("absent", ""),
+            ("null", "source_record: null\n"),
+            (
+                "invalid",
+                "source_record: [active]\nsource_identity: broken\nsource_file: {path: wrong}\nsource_url: 123\n",
+            ),
+            (
+                "invalid-status",
+                "source_record: {id: record, status: {active: true}}\nsource_identity: {repository: example/repo}\n",
+            ),
+        ] {
+            write(
+                &documents,
+                &format!("{name}.md"),
+                &format!(
+                    "---\ntype: document\ntitle: {name}\n{fields}---\n## Summary\nEvidence.\n"
+                ),
+            );
+        }
+        let result = super::search(tmp.path(), &dirs, &SearchOptions::default()).unwrap();
+        let hit = |name: &str| result.hits.iter().find(|hit| hit.title == name).unwrap();
+        let absent = serde_json::to_value(hit("absent")).unwrap();
+        assert!(absent.get("source_record").is_none());
+        assert!(absent.get("metadata_issues").is_none());
+        assert_eq!(hit("null").source_record, Some(serde_json::Value::Null));
+        assert!(hit("null").metadata_issues.is_empty());
+        assert!(hit("invalid").source_record.is_none());
+        assert_eq!(hit("invalid").metadata_issues.len(), 4);
+        assert!(
+            hit("invalid-status")
+                .source_record
+                .as_ref()
+                .unwrap()
+                .get("status")
+                .is_none()
+        );
+        assert_eq!(hit("invalid-status").metadata_issues.len(), 2);
+        assert_eq!(result.source_statuses[""], 4);
     }
 
     #[test]

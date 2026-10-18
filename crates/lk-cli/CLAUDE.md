@@ -1,318 +1,145 @@
 # lk-cli
 
-The `lore` binary. `main.rs` defines the clap surface; `commands/` has one module per
-subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`,
-`build_llm_client`, `parse_date`).
+Clap front door and orchestration (`main.rs`, `commands/`). Follow the root
+CLAUDE.md for shared architecture, output, locks, and mutation rules. Delegate
+meaning to the owning crate; do not recreate its parser/status model in a command.
 
-- **Global flags** `--config`/`LORE_CONFIG` and `--template-dir`/`LORE_TEMPLATE_DIR` are
-  injected into the cron lines `lore schedule` generates, so scheduled runs don't depend on
-  CWD. Templates are embedded in the binary by default; `--template-dir` overrides them.
-- **`find_config`** resolves in order: `--config`/`LORE_CONFIG` → `./config.yaml` →
-  `~/.config/lorekeeper/config.yaml` (XDG). The XDG path is what makes a binary-only install
-  (no repo) work. There is no `config.example.yaml` fallback — running with the example's
-  placeholder values silently is a footgun. A vault-relative config can't be auto-found
-  (the vault path lives *inside* the config). It `canonicalize`s the located path at this
-  single I/O boundary, so the returned path is always absolute: `Config::load` then resolves
-  a relative `vault.root` against an absolute config dir, making `vault.root` — and every
-  path derived from it in every crate — CWD-independent by construction (lk-core needs no
-  `current_dir`).
-- **`build_llm_client`** maps `llm.provider` to a client: `queue` buffers pending tasks
-  to `<vault>/.lorekeeper/queue/*.jsonl` for `/lore-process` to fill via the LLM; `noop`
-  discards them (dry-run, CI, or ingest-only runs with no LLM work).
-- **`lore ingest`** owns the ingest phase flow and the exit code: any source/extract/pipeline
-  failure (`had_failure`) or write/flush failure returns non-zero — including under
-  `--dry-run`. Dry-run plans normally but skips every vault write, the tmp sweep, and the
-  ingest log, so it leaves the vault untouched.
-- **Work-log gate**: the work-log renders only on a FULL ingest (`source.is_none()`) — a
-  filtered `lore ingest <id>` sees a structural subset of personal events and must never
-  rewrite the cross-source page (it prints why instead). A transient source failure inside
-  a full run still writes: the failure is loud (non-zero exit) and the next full run
-  re-renders the page complete, while blocking on `had_failure` would freeze the work-log
-  on any persistently failing source, news feeds included.
-- **`lore workflow -- COMMAND` is a separate Unix foreground lease.** It resolves the
-  canonical vault once, locks `.lorekeeper/workflow.lock`, clears only the descriptor's
-  CLOEXEC flag through safe rustix and execs the literal command. Default contention starts
-  no child; `--wait` explicitly blocks. The lease is not a mutation session and does not
-  recover a journal. Child CLI commands use normal short writer locks without reacquiring
-  workflow. Inherited-descriptor closure or detached work is outside the guarantee; Windows
-  is unsupported. No PID/TTL/environment ownership bypass exists. Scheduled headless
-  skill calls acquire it once around their LLM read/judge/publish session; manual agents
-  start under it before reading inputs. Existing sessions and installed schedules are not auto-adopted.
-- **`lore schedule`** emits ONE all-source entry from `ingest.schedule` — never per source —
-  plus synthesis and combined maintenance/queue-prune entries from their own keys. `build_jobs` is the
-  testable job list; `--pipeline-dir` swaps the ingest and weekly-synthesis entries for the
-  installed `lore-daily.sh`/`lore-weekly.sh` (those subcommands are only the pipelines' first
-  stage — the drain and `queue apply` live in the scripts), and `pipeline_env` attaches the
-  `PATH`/`LORE_BIN`/`LORE_CONFIG`/`CLAUDE_BIN` a scheduler does not provide, inherited from
-  the session this command runs in.
-  Other scheduled entry scripts name monthly, quarterly, annual and maintenance jobs.
-  Scripts execute directly with `/bin/bash` shebangs; deployment verifies executable bits.
-  Review calendars remain independent and use `--wait-for-vault` for exclusive access.
-  Maintenance holds the same vault lease before reading the ingest log, then prunes the
-  queue with `--prune-queue`. Remove the superseded `com.lorekeeper.queue-prune` agent
-  when installing a generated schedule; the maintenance job owns both operations.
-- **`wiki refresh` prepares SQLite navigation before page publication.** Default
-  `vault.navigation.markdown_exports: false` publishes a small marked entry guide and
-  retires only marked generated exports through one mutation plan. It prints the prepared
-  snapshot ID for explicit browse/search/links reuse; default live reads remain live.
-  `true` refreshes the full catalog/log/map instead. Explicit `wiki index/log/map` and
-  `graph index-sync` remain export commands independent of that setting. Graph lint checks
-  catalog currency only when automatic exports are enabled, so optional exports do not
-  create a permanent synchronization obligation. Unmarked existing entries fail safely.
-  Enabled manual inboxes use the shared adapter resolver and canonical filesystem aliases;
-  overlap with export namespaces refuses refresh before capture or retirement.
-- **`lore wiki concepts`** keys each entry on the FILE STEM, never the `id` frontmatter: a
-  page's address is where it sits, which is what a link resolves to and what `VaultPath::concept`
-  builds. Reading `id` would be a second answer to the same question, and a page missing the
-  field — hand-authored, or edited in Obsidian — would have no address at all and drop out of a
-  registry whose whole job is completeness. A page whose `id` disagrees with its filename is
-  `graph normalize`'s finding, not a reason for this to disagree with the resolver.
-- **`lore graph backlinks-sync` queues the synthesis rewrites it discovers**, through the same
-  `LlmClient` ingest uses — but only under a provider that can answer them. `noop` records no
-  input either: the input is a promise something will answer it, `lore doctor` reports one with
-  no answer, and nothing re-renders a concept page's markers, so a promise written where no
-  drain can run is a finding that never clears. It also skips a page whose task is already
-  pending, because this sweep runs on every pipeline pass and by hand, and identical `current`
-  tasks all survive `queue prune` and are all drained.
-- **`lore ingest` startup** sweeps stale `*.jsonl.tmp` from crashed runs and
-  warns if pending queue files exist (run `/lore-process` first to avoid duplicate
-  LLM work).
-- **`lore maintenance`** prunes the ingest log and drained `queue/processed/` files past
-  `maintenance.retention_days` — operational history only, and `--dry-run` reports the same
-  counts without deleting. **It keeps each source's newest COLLECTED entry whatever its age**:
-  the log is both a history and the store `IngestLog::find_last_collection` reads, so
-  pruning that line would prune STATE. It must be the newest *collected* one, not the newest
-  overall — a source failing daily has a recent `failed` entry the reader skips and a much
-  older success it actually returns, so protecting the newest line protects the wrong one
-  and lets the success age out. Either way the source then stops reading `stale` (non-zero)
-  to read "never ingested" (silent without `--strict`) — the health signal going quiet as
-  the outage ages. The
-  streaming
-  `events/{source}/{date}.jsonl` logs are the permanent raw layer (`lore ingest --date
-  <past>` re-projects any day from them) and are NEVER pruned. It also never touches
-  live `*.jsonl.tmp` — the ingest startup sweep does. With `maintenance.schedule` set,
-  `lore schedule` emits one combined maintenance job with `--prune-queue`, so both
-  janitors run sequentially unattended.
-- **`lore synthesis <period>`** rejects `--date`/`--year` together with `--previous`
-  (clap `conflicts_with`), and flushes the LLM queue after writing its pages.
-- **`lore wiki document-identity`** binds legacy document ownership only after exact
-  production-projected Content equality. `plan --history-ref <full-commit-id>` may be
-  repeated to prove historical copies at their recorded, contained source path. The
-  manifest seals audited commit IDs, regular-file blob IDs, explicit authored document
-  IDs and projection hashes; GitHub `origin` must match configured `repository_id`.
-  Historical links resolve against that commit's tree. Conflicting explicit IDs or
-  multiple owners remain blocked. `check` and `apply` reobserve the sealed references,
-  config and target bytes; `--allow-blocked` applies only verified entries. The migration
-  archives prior evidence and adds only `source_identity`; a historical proof does not
-  declare the source's current lifecycle state.
-- **`lore queue status`** uses the shared task classifier. It validates the typed
-  retained request and generation policy before comparing target input/completion markers.
-  Malformed or mismatched input, unsafe paths and unreadable pages are `unreadable` and
-  remain pending. Missing targets or anchors are `missing-target`; changed input is `stale`;
-  matching completion is `done`. Concept synthesis also checks current source revisions.
-  Only `current` tasks need generation. Workers consume this classification rather than
-  implementing their own marker checks.
-  **Extraction results** use `Artifact::Result`, which ignores completion markers while
-  retaining input and target guards: an in-flight extraction may still need its concept
-  pages and citations materialized. **Section/synthesis results** use task classification;
-  an already-published result is retired without rewriting the page. Every normal result
-  requires a matching validated task; orphan extraction recovery is explicit.
-  **`lore queue count` prints only that work count**, because it exists to tell a scheduled
-  script whether to spend an LLM session, and a queue of already-answered tasks is not a
-  reason to spend one.
-- **`lore queue prune`** applies the same classification destructively, leaving the pending
-  queue holding only work. Dead tasks (`stale`, `missing-target`) are dropped — exactly what
-  `/lore-process` would discard without editing. A `done` task is KEPT, so the record a
-  drain archives stays whole; but a run whose every remaining task is `done` needs no
-  session, so nothing would ever archive it and `lore ingest` would warn about pending work
-  forever — it is retired to `processed/` as it stands, the same retirement a drain performs
-  on a finished run. An `unreadable` task counts as work LEFT, so its run is never retired:
-  archiving it would put it where nothing reclassifies it, and the page repair this status
-  waits for could never bring it back. A file left holding nothing was all dead tasks, so it
-  never edited a page and is deleted rather than archived. Rewrites go through
-  `lk_queue::write_tasks_atomic` (the one writer for queue files); a file needing no change
-  stays byte-identical. `--dry-run` reports the same counts with zero writes.
-  A file holding a LINE nobody can parse is never rewritten — that would drop work nothing
-  could classify — so it is reported as `unparseable` with its tasks counted as `blocked`,
-  deliberately not under a classification prune did not act on. Either that or an
-  `unreadable` task makes prune exit 1 and its `--json` envelope's `ok` false: both leave
-  work nothing can drain, both need a human, and the janitor is the only place either
-  surfaces (`queue count` omits them so a session is never spent on work no session can do).
-- **Queue writers share an advisory lock.** `queue apply`, `queue prune`, and maintenance
-  of processed queue files hold it for their writes. Skills retire completed runs through
-  `queue prune`, never a direct file move. Applying is a
-  read-modify-write across several files ending in a delete, so two runs at once each read an
-  origin page before the other writes it: the second write drops the citations the first added,
-  and both then delete the evidence. `lk_queue::claim_queue` is an ADVISORY lock rather than a
-  pid file, because the kernel releases it when the holder dies — a killed run leaves nothing
-  to time out on, which is the whole reason a lock file is the wrong shape here. Contention is
-  REFUSED rather than queued: the results stay staged for whichever run gets there. A
-  filesystem that cannot provide the advisory lock is refused; results remain staged. Other
-  vault writers do not share this lock, so bulk runs serialize those writers separately. The claim is
-  scoped to that write and never to a drain SESSION. The separate Unix workflow lease
-  coordinates cooperating foreground sessions without holding the queue claim across
-  children. `--dry-run` writes nothing and so claims nothing.
-  **Nothing one result gets wrong reaches the batch**, and the writes are where that was
-  breached: a page the writer REFUSES — frontmatter a drain mangled while stamping a marker —
-  aborted the run with concept pages on disk and no citations, and aborted again at the same
-  file every run after, since nothing prunes results. Each page now carries the results that
-  produced it, so a refused page fails those and the rest of the batch writes. An `unreadable`
-  target is the same judgment one step earlier and is REPORTED rather than dropped: it is the
-  absence of a verdict, not a dead result, and consuming it would spend an extraction on a page
-  that could not receive it — `Stale` and `MissingTarget` are the ones a newer task or a
-  re-render already answers for.
-  It materializes the concept extractions a drain wrote to
-  `queue/results/*.json` through the same `ConceptDrafts` merge the ingest path uses, then
-  deletes each result it consumed — so an empty `results/` after a pipeline run is evidence
-  of success, not of a drain that produced nothing. A result file that fails to PARSE is not
-  fatal and is not left to be retried forever: it moves to `results/{CORRUPT_SUBDIR}/` via
-  `quarantine`, under a name `free_path` guarantees is unused so an earlier quarantined file
-  is never overwritten, and `finish_apply` reports all/some/none distinctly. I/O errors
-  still fail the command — only malformed CONTENT is quarantined, because a disk that
-  cannot be read is not a corrupt payload.
-- **`lore self`** (`commands/installation.rs`) is the installation's own lifecycle. `status`
-  compares every deployed copy — skills, pipelines, templates, config example, and the vault's
-  `AGENTS.md` — against what this binary carries, and exits non-zero on any difference; `deploy`
-  is the repair, and is what both installers run after placing the binary. `update` replaces the
-  binary and then runs `self deploy` and `schema` THROUGH THE NEW ONE: this process holds the
-  predecessor's embedded artifacts and page-format table, so writing them from here would deploy
-  the version being replaced. It refuses while `queue count` is non-zero, because a task is
-  written by one build and answered under whichever build's skills are deployed when the drain
-  runs. `uninstall` removes the binary and everything it deployed and never touches the vault —
-  the vault is the user's knowledge and their credentials, and the tool is the disposable half.
-- **`lore status`** (`commands/status.rs`) is the front door: one line per subsystem — the
-  installation, source currency, the LLM queue, page contracts, the link graph — each computed
-  by the code its own command exits on (`health::freshness`, `queue::queue_load`,
-  `doctor::audit`, `graph::lint`) rather than re-derived, and each naming that command. It
-  reports and does not gate: a summary that failed the shell would be a sixth gate rather than a
-  front door.
-- **`lore task` / `lore agenda`** (`commands/task.rs`, `commands/agenda.rs`) drive the intent
-  plane. Every mutation follows one shape — read the board, reconcile whatever an editor did to
-  it since, apply the change, write the board and record the history — and reconciling FIRST is
-  what stops a command acting on a board that moved underneath it: a box ticked on a phone an
-  hour ago is a completion, and closing a second task without noticing it would write the board
-  back with that one re-opened. `IntentPlane::commit` writes the log before the page, because a
-  transition without its board move is re-derived by the next reconcile while a board without
-  its transition is work that left no record. `lore agenda` is a VIEW: it writes nothing, not
-  even the reconcile, and reports what an editor changed by naming `lore task sync` — a page
-  would be a forward-looking materialization, which is the one thing this vault forbids.
-- **`parse_date` names a day relative to the VAULT's, and names all three.** A shell computing
-  one instead answers in the machine's zone, and on a host an hour the other side of
-  `vault.timezone` that is a different day — which is why the scheduled close says the word
-  `yesterday` rather than `date -v-1d`. The words are `yesterday`, `today` and `tomorrow`,
-  because the commands taking a day point in both directions: `--closing` names a day that
-  ENDED while `--due` and `--until` name one ahead. Holding only the backward half left the
-  forward flags unable to say the one word they need, and guarded nothing — the same future day
-  was always writable as a literal. What a day must BE is a bound stated where that command's
-  meaning lives, which is where a reason can be given for it.
-- **`lore agenda --json` says what it could not SEE, and every way the day is not what it looks
-  like.** A store it could not read answers `null` rather than `[]` — a caller cannot otherwise
-  tell "nothing is promised" from "I lost your promises", and the reason goes to stderr for every
-  one of them, so a session knows WHICH file to have repaired. A task the page holds that no
-  section could PLACE is named in `unplaced` with its line and its reason; a board every write
-  will be REFUSED on says so in `unwritable`, because the duplicated id that refuses it is itself
-  PLACED and so reaches no other field. Each was reported to a person on stderr and to nobody on
-  stdout, which is the half the skill is told to read. The contract also carries the JUDGMENTS
-  the terminal renders rather than the numbers they come from — `carried_too_long` beside
-  `carried`, since the threshold is in `config.yaml` and a skill running on `Bash(lore *)` cannot
-  read it — the completions themselves rather than a count of them, since the notes are what
-  closing the day is FOR, and `timezone`, so a wall-clock time can be resolved without asking a
-  machine whose own zone may be a different day.
-- **"No task answers to `<id>`" is an ANSWER only where the parse placed everything.** Finding
-  an id is proof on its own; not finding one means nothing where a line naming a task was
-  dropped, and the id may be sitting on exactly that line. `is_moot` applied the rule and two
-  other sites asserted the negative flat, so a person was told their task does not exist while
-  they were looking at it — and the skill is told to report the message rather than retry.
-- **`lore config board-path`** exists so the scheduled day-close can ask whether the intent
-  plane is configured at all instead of failing nightly on every install that never turned it
-  on — the same machine contract `vault-root` and `queue count` are, for the same reason.
-- **`lore fetch <url>`** (`commands/fetch.rs`) writes an article into the `manual` source's
-  inbox and stops — the next ingest reads it as it reads anything a person dropped there, so
-  nothing downstream learns a new case. The inbox is resolved through
-  `lk_source::manual_inbox_dir` rather than joined here, because that resolution expands `~`,
-  anchors a relative path at the vault root rather than the CWD, and refuses one reaching the
-  vault root. Several enabled `manual` sources is a REFUSAL naming them, not a pick: two
-  inboxes are two deliberately separate streams. The file carries `title` and `source_url` as
-  frontmatter because the address has to reach the document page, or the citation points at a
-  copy nobody can check. A page with no article body is refused rather than absorbed as
-  boilerplate — the same judgment RSS makes when it keeps the feed summary. `publish_article`
-  tries the title, 8/16/full digest suffixes and finally full-digest counters through
-  `lk_core::fs::publish_exclusive`: every candidate is atomically created or exact-byte reused,
-  never overwritten after an existence check. Symlinks/directories occupy every suffix,
-  and I/O errors abort instead of meaning absent. The base stem remains bounded at 200 bytes
-  on a character boundary; longer suffixes shorten it further so the whole filename fits
-  255 bytes. Concurrent fetches with one title preserve distinct article bytes.
-- **`lore wiki search` refuses rather than approximates.** An empty query has no answer to give
-  — reporting that nothing holds it would read as a fact about the vault — and a `--limit 0`
-  admits no page from the first one on, which is every other cap's rule in this workspace.
-- **`lore brief`** (`commands/brief.rs`) is a VIEW like `lore agenda`, and the other half of
-  the day: the board says what was promised, this says what was learned. It writes nothing and
-  derives nothing — the concept pages already record when each entered and when it was last
-  cited. `/lore-day` reads both.
-- **`lore init credentials`** (in `init.rs`) is the interactive credential wizard. UX
-  (dialoguer prompts, masked secrets, TTY guard) lives here; the JSON shape + atomic
-  `0600` write live in `lk_source::credentials` (`load_file`/`load`/`save`). The Google branch
-  can mint a refresh token via `lk_source::build_google_refresh_token` (browser OAuth
-  loopback) or accept a pasted one. `Init` is a subcommand-of-subcommand so future
-  scaffolders (`lore init config`) slot in cleanly.
+## Configuration and workflow sessions
 
-- **Synthesis application is snapshot-checked.** `queue/synthesis.rs` consumes staged
-  `.synthesis.json` results under the queue lock. Changed sources invalidate the task;
-  changed target bytes refuse the result. Both sections and the completion marker publish
-  in one file replacement. A failed lock acquisition refuses the apply operation.
-- **`wiki evidence` and `wiki reviews` report JSON.** Evidence records exact
-  source revisions and groups recorded origin addresses. The default evidence view is
-  read-only; `--archive` holds a vault mutation session and preserves evidence snapshots.
-  Reviews report durable exploration assessments, evidence drift and validation errors
-  without changing their status.
+- `commands/mod.rs` resolves flag/environment config, working-directory config,
+  then XDG config; never silently use config.example.yaml. Resolve the selected
+  config absolutely; relative vault roots are relative to that config.
+- `commands/workflow.rs` is a Unix foreground coordinator for long LLM consumers,
+  not a vault mutation lock. It locks canonical-vault `.lorekeeper/workflow.lock`,
+  clears only FD_CLOEXEC, and `exec`s literal argv. Busy defaults to nonzero with no
+  child; `--wait` explicitly waits. Pass selected absolute LORE_CONFIG and optional
+  LORE_TEMPLATE_DIR to the child via Command.env, not global environment mutation.
+- The lease lasts only while a participating process retains the descriptor.
+  Detached programs or programs closing inherited descriptors are outside that
+  guarantee. No PID/TTL cleanup, env-bool bypass, or reentrancy guess. Windows is
+  explicitly unsupported. Ordinary short CLI writers do not reacquire the lease;
+  they retain their own locks/revision guards. Workflow does not recover journals.
+- Scheduled coordination wraps only `claude_skill` in scripts/lore-pipeline.sh,
+  including its capture→LLM→apply lifetime. Do not wrap every scheduled writer:
+  period intent, reminders, and maintenance retain their own short-lock contracts.
+  Manual agents acquire once before reading inputs, not again inside a skill.
+- `commands/schedule.rs` emits one all-source ingest plus independent period and
+  maintenance jobs. Use absolute installed Bash scripts/executable mode and captured
+  PATH/LORE_BIN/LORE_CONFIG/CLAUDE_BIN. Preserve cron versus launchd calendar/interval
+  meaning; reject unsupported translation instead of approximating it. Reminder
+  scheduling may use a separate board/pipeline directory.
 
-- **Completion is an explicit read-only check.** `queue check` reuses the task classifier
-  and fails for current/unreadable/unparseable work, unpublished result JSON or a pending
-  mutation journal. It never recovers state; stale/done tasks are not outstanding work.
-  `wiki reviews --check` prints the same JSON as the ordinary list, then fails for a
-  `ReviewEffectiveState` requiring attention. Open reviews pass. The pipeline derives
-  backlinks after its final apply before running both checks.
+## Ingest and originals (`commands/ingest.rs`)
 
-- **`lore wiki provenance <document-path>`** is read-only JSON for exact imported-document
-  identities, lifecycle metadata and declared relations; it is distinct from `wiki evidence`
-  (review snapshots) and `wiki document-identity` (ownership migration). `--direction` chooses
-  outgoing/incoming/both declarations; `--relation` is exact. `--limit 1..100` bounds all entries,
-  including invalid metadata and ambiguous target candidates. Pin subsequent pages using the
-  returned collection `revision`; this command never creates a search snapshot or writes pages.
+- Dry run creates no vault files, tmp results, logs, or queue writes; real source
+  errors still return nonzero. A noop provider makes no promise to queue work.
+- Work-log generation belongs to full ingest only, not filtered runs. A full run
+  with partial source failure still writes its work-log and reports failure.
+  Startup tmp sweeping/pending diagnostics must preserve recoverable work.
+- Manual original publication is immutable bytes→complete manifest→page journal→
+  queue flush→optional retirement. Keep source ownership separate from original
+  references; archive=false still preserves original bytes. Capture limits are
+  source-local plus a 512 MiB CLI aggregate bound, not unbounded whole-inbox memory.
+- Keep all capture dependency information, even for events removed by the pipeline.
+  Referenced entries are not retired; any capture failure holds that source's
+  retirement. Attachments are never removed. Retirement rechecks consumed bytes.
+- `fetch` uses the same unique enabled manual-inbox resolver. Preserve title/source
+  URL frontmatter and require body. Publish exclusive collision suffixes
+  (8/16/full digest then counter), never overwrite an occupied/nonregular path;
+  keep filenames within the byte bound.
 
-- **Manual original publication precedes document journal publication.** Ingest retains the
-  adapter's bounded capture sidechannel (256 MiB per source; 512 MiB across planned sources),
-  publishes immutable byte objects/member hardlinks and the complete manifest, writes guarded
-  pages, flushes semantic tasks, then optionally retires unchanged input entries. Failed or
-  partial dependency coverage never authorizes retirement; attachments are not removed.
-  A source with any entry-capture failure retains all its entries; cross-entry dependencies
-  are retained as shared attachments.
-  `wiki original` is read-only JSON: paginated manifest members with limit/next_offset,
-  bounded coverage sample/count and verified entry/selected-member availability. `--revision`
-  pins the manifest; `--member` requests a 64 KiB UTF-8 preview or binary file address.
-  It does not open a browser or fall back to a mutable inbox path. Source location ownership
-  remains unchanged by this independent provenance store.
+## Canonical pages and derived discovery (`commands/wiki.rs`, `graph.rs`)
 
-- **RSS `wiki original`** returns bounded metadata before text. Pin collection `revision`
-  and choose `--event EVENT_ID`; `--text-offset`/`--text-limit` paginate Unicode title/body
-  characters and `next_offset` signals remaining text. `event_timestamp` is the adapter’s published-or-updated time, not acquisition
-  time; `captured_at` remains null. Existing manual `--member` JSON shape is preserved.
-  Synthesis packets attach verified RSS discovery plus selected-event command arguments,
-  never every raw article. Commands carry the exact selected vault root; explicit `--root` works without config. A legacy log
-  remains `legacy_unbound`, not a task read receipt or a historical input assertion.
+- Markdown is canonical; SQLite is a prepared derived query snapshot. Refresh
+  prepares it first. Default navigation is a small marked guide; giant index/log/map
+  are opt-in exports. Explicit export/index-sync requests remain explicit even
+  when automatic exports are disabled.
+- Use captured config to refuse canonical manual-inbox overlap before capture or
+  navigation mutation at EVERY export entrypoint. Typed root, symlink, and marked
+  child guards remain in force. Never infer legacy ownership from filename/content.
+- Refresh's explicit repeated `--archive-replace PATH=FILE_REVISION` accepts exact
+  root paths only. Validate full revisions first; one MutationPlan preserves exact
+  original archives+receipt and replaces/retires roots plus marked children. Reused
+  archive/receipt bytes are guarded too. Authored children remain. Default is strict;
+  reject this migration with automatic exports enabled and explain the two steps.
+- Browse metadata with query=None; reject query-only/date-sort combinations in the
+  library too. Created means declared authored date, not ingestion time. Preserve
+  missing/invalid visibility, stable path ties, scope/filter/facet/pagination meaning.
+  Search rejects an empty query; limit0 returns no hits. Do not reintroduce full
+  corpus metadata decode/sort for SQL browse or load concept vocabulary there.
+- Concept filenames are addresses, not necessarily IDs or implicit aliases. Use
+  exact public resolution and return the resolved canonical title.
+- Evidence/review discovery defaults to read-only JSON. Evidence archive is a writer.
+  Open valid reviews and drift needing attention are distinct, not all “resolved.”
+  Provenance is metadata-first, bounded and revision-pinned; relation/direction are
+  explicit. Discovery must not incidentally prepare a new snapshot.
 
-- **RSS event-aware tasks** retain exact target guards while validating immutable payloads
-  and current explicit selection membership. A removed pair is stale; corrupt evidence is
-  unreadable. Packet v2 exposes selected-event argv with exact root and payload revision,
-  without copying article bodies. Page-only packet v1 and task hashes remain supported.
-  Event retraction shares the archive-before-edit publisher and guards preserved originals;
-  merge/normalize update typed addresses with links. `wiki links` live and prepared views
-  expose bounded typed selection metadata, and `wiki original --evidence-concept` reads the
-  complete inventory or a selected historical payload. Older observations are not current
-  provider truth. `source_count` is still the number of originating pages.
+## Queue processing (`commands/queue/`, `commands/synthesis.rs`)
 
-- **RSS pair retraction preserves authored links.** The shared citation parser's
-  `GeneratedOnly` mode applies only to explicit event-pair removal: partial removal
-  edits declarations only, and the last pair removes standalone generated items.
-  Authored prose stays page-level evidence. Ordinary whole-citation removal remains
-  `Strict` and refuses prose or occurrences outside the generated section.
+- The shared typed classifier owns current/stale/done/unreadable decisions. Validate
+  input kind/policy, target revisions, and synthesis citation guards. Missing or
+  unreadable evidence is not a stale task that can safely disappear.
+- Queue counts describe current work, not raw lines. Prune only eligible dead work,
+  remove empty files, archive all-done files, preserve unreadable/unparseable data.
+  A file with unparseable lines is not rewritable. Use the shared queue reader and
+  atomic writer; do not add another UTF-8/JSONL interpretation.
+- Extraction result application may ignore a prior done marker while retaining exact
+  input/target guards. Already-done section/synthesis tasks can retire normally.
+  Stage matching task/result pairs; no orphan application except explicit recovery.
+- Hold the vault claim for each apply, not an entire LLM session; vault→queue is the
+  lock order. Distinguish a page-local failure, quarantined malformed result, and
+  fatal IO. Aggregate output honestly reports all/some/none applied.
+- Synthesis owns both sections and its completion marker atomically, with exact
+  source/target/queue guards. Do not split core and related publication. Explicit
+  year/date conflicts with `--previous` fail before flushing work.
+- Backlinks queues synthesis only with an answering provider; noop neither changes
+  that promise nor fabricates input. Reuse exact pending requests through lk-queue.
+- `queue check` is read-only: report current/unreadable/unparseable tasks,
+  unpublished results, and pending journals without recovery. Final checks follow
+  backlink reconciliation, not precede it.
+- Document identity adoption compares the production projection and guarded current
+  observation, including full commit refs, blob/document identity, manifest, and
+  remote ownership. A blocked mismatch is not adoption. Archival source identity
+  does not itself decide lifecycle state.
+
+## Task intent (`commands/task.rs`, delegated to lk-task)
+
+- Reconcile→requested change→commit; recheck parsed board bytes before history,
+  history before board, reminder retirement after successful publication best-effort.
+  Read-only agenda/brief must not mutate. Hold PlaneLock for plane writes only.
+- Parse yesterday/today/tomorrow in the vault timezone with command-specific bounds;
+  a close targets an ended day. Board state, completion history, carried_too_long,
+  schedules, and reminder status have separate meanings, not one generic “done.”
+- JSON preserves unplaced tasks, unwritable diagnostics, timezone and completion
+  information. Unavailable stores are null, not empty; incomplete parsing cannot
+  prove a task absent. `status` delegates each subsystem's state to its owner.
+- Maintenance reads store lifetime declarations. Keep newest collected source
+  currency even when old, and preserve raw stream logs. Never prune another live
+  worker's tmp directory or treat a disabled source as removed.
+
+## Original query authority
+
+- `wiki original` is metadata-first with explicit member totals/limit/next_offset
+  and bounded 64 KiB UTF-8 previews. It does not launch a browser or fall back to the
+  mutable inbox. Verification scope must be clear even when only entry bytes are
+  checked by the default view.
+- RSS selection pins collection revision and EventId; paginate in Unicode-safe
+  units. Published/updated is not acquisition time (`captured_at` may be null).
+  Root/explicit-root commands need no unrelated config discovery.
+- `legacy_unbound` is current retained evidence, not proof of historical page/input
+  binding. Never promote it to exact provider-wire/acquisition provenance.
+- Typed event tasks validate selected membership and payload: removed pair is stale,
+  corrupt selection unreadable. Packetv2 carries selection argv; preserve oldv1
+  semantics. Normalize/merge/repoint typed declarations together with links.
+  Source counts count origin pages, not selected events.
+- GeneratedOnly pair retraction can remove generated occurrences/declarations while
+  authored prose still supplies page evidence. Normal whole-link removal remains
+  strict; do not use partial declarations to erase authored text.
+
+## Installation and credentials
+
+`commands/installation.rs` performs artifact/schema synchronization using the NEW
+binary and refuses unsafe update over pending queue work. Uninstall never removes
+user vaults. Delegate byte coherence/target/release validation to lk-dist.
+Credential wizard requires a TTY/dialoguer flow; persist shared credentials through
+atomic mode0600 writes. Avoid command-specific alternate credential stores.

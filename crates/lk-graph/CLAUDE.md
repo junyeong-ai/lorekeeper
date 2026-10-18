@@ -1,322 +1,101 @@
 # lk-graph
 
-Link graph analysis. Pure deterministic — no HTTP, no LLM. The vault writes are the mutations
-below: `index-sync`/`normalize` with `--fix`, and `backlinks-sync` and `merge` without
-`--dry-run`. Every check re-scans the vault — markdown
-parsing is rayon-parallel and cheap, so analysis is always computed from current
-on-disk state, never from a cached snapshot.
+Deterministic graph analysis and Markdown mutations; no HTTP, LLM, or async runtime.
+Follow the root CLAUDE.md for shared mutation/journal rules. Live graph mutations
+read current Markdown. Prepared SQLite relationship queries belong to `lk-vault`
+and CLI discovery, not a second graph authority.
 
-- **deps**: `lk-core` (slugify, frontmatter, link) + `lk-vault` (the writer for the
-  gated mutations) + `petgraph` + `rayon` + `walkdir`. No reqwest/tokio — independent of
-  the ingestion stack.
-- **Output type naming**: CLI-facing presentation structs in `output.rs` are `*Report`
-  (`HubsReport`, `LintReport`, `BacklinksSyncReport`, …). Domain-module computation/
-  operation outcomes are `*Result` (`ClusterResult`, `SuggestResult`, `MergeResult`,
-  `BacklinksSyncResult`). A domain `*Result` may be wrapped by an `output.rs` `*Report`
-  for display (e.g. `BacklinksSyncResult` → `BacklinksSyncReport`).
-- **Config**: `config.yaml` `graph:` section (`GraphConfig` in lk-core).
-  `scope.dirs` (derived from `vault.dirs.wiki` when absent), `metrics.*`
-  (`min_hub_degree`, `orphan_exclude`), `cluster.*`.
-  All `deny_unknown_fields`. Validated: relative, no `..`.
-- **Addresses, graph keys and aliases are separate.** `scan::parse_file` resolves inline
-  links lexically against their source page and retains the actual destination spelling;
-  an escaping destination carries no graph key. `scan::page_id` preserves case and punctuation
-  and omits only `.md`. `path_slug` is a normalization/collision diagnostic, never a source
-  revision key or rewrite selector. Pure `VaultExistence::build` accepts exact addresses only.
-  Production `build_at(root, ...)` uses `lk_vault::ExistingPageResolver` to validate actual
-  filesystem aliases once per distinct linked address, then caches the actual owner's key.
-  An absent Linux case spelling is broken; a real macOS case alias reaches its actual file.
-  An exact existing address is never reported as another file's respelling. Concept metadata
-  aliases never resolve file links. Merge edits use `same_existing_file`, not slug equality.
-  Traversal errors abort scanning: an unseen subtree cannot prove no historical review exists.
-  Scanned Markdown addresses and traversed directories must resolve inside the vault through
-  `lk_vault::page_path`. Internal aliases remain valid; escaping addresses abort the scan.
-- **One scan, three views** (`scan::VaultViews`): the walk is the vault ROOT, always, and the
-  narrowing is a filter over the result. `scanned` is every page — the existence universe, and
-  the view the mutators repoint links across. `link_sources` is `scope.dirs` ∪ every page
-  directory: the pages this tool writes, and a stray link in a user's own note is neither its
-  output nor its to repair. `pages` is the analysis scope — the graph's nodes, what
-  `hubs`/`cluster`/`suggest-links`/`normalize` read.
-  `scope.dirs` and `scope.exclude` narrow the last two, NEVER the first: an excluded page
-  still exists, still resolves a link, and still has its own links repointed by a rename. A
-  walk that had already dropped it cannot tell "not there" from "not looked at", in whichever
-  direction a caller resolves it — which is why the mutating commands read these same views
-  rather than building their own scan.
-  Scope membership is decided on a separately folded directory prefix, so a vault whose directory is spelled `Wiki`
-  while the config says `wiki` is still analysed; a raw prefix test answers no there while
-  `is_dir` passes on a case-insensitive volume, and every command reports an empty vault, green.
-  `scan_vault` skips dot-directories, so `.trash` — where Obsidian puts a DELETED page — never
-  resolves. Exact evidence-archive links are separately verified by `lk-vault`: an available
-  archive resolves, a missing archive is broken, and corruption aborts the check. Archives
-  never become graph nodes, citation sources or connectivity evidence, and their historical
-  links are never repointed by graph mutations. `VaultExistence` answers two separate
-  questions and they must not be conflated:
-  `is_resolvable` (a file exists at this ADDRESS, **catalogs included** — they are files, so a
-  page linking one links something real) and `is_knowledge` (…and it is not a generated catalog
-  — the orphan-connectivity question, where counting a link to `index.md` would exempt the very
-  pages detection looks for). Reserved meta pages
-  (`lk_core::vault_path::RESERVED_WIKI_FILES`) and generated catalog children are never knowledge nodes or citation sources.
-- **Catalog export drift is asked of the catalog's own builder** (`index_drift::diff` →
-  `lk_vault::build_catalog`): the entire index tree is a materialized view, so drift is the difference
-  between the catalog on disk and the one a re-derivation produces now. A second definition of
-  what belongs in the catalog disagrees with the builder's on any page the builder does not
-  catalog — drift reports it, `--fix` appends it, the next `wiki index` drops it, and the vault
-  stays permanently red with two repairs undoing each other. For the same reason the repair is
-  the whole catalog, resolving both directions at once, and no analysis-scope or
-  `orphan_exclude` filter reaches it: an observation-tuning knob must not decide a violation.
-  CLI `graph lint` includes this catalog check only with
-  `vault.navigation.markdown_exports: true`. SQLite-default navigation does not claim optional
-  export currency; explicit `graph index-sync` still checks and repairs an opt-in catalog.
-- **`graph::broken_links` is a free function over (pages, existence), not a `WikiGraph`
-  method** — a broken link involves no node, edge or community, so computing it inside the graph
-  would scope it to `graph.scope.dirs` on the SOURCE side, and a link is broken wherever it was
-  written (`queue apply` writes concept links on daily pages). Both `lint` and `broken` pass
-  every scanned page; the scope narrowing applies only to the graph's nodes. Reserved meta pages
-  are skipped as SOURCES — they are optional navigation exports rather than authored evidence; enabled exports are
-  refreshed before lint in the pipeline — but
-  they remain valid DESTINATIONS.
-- **Exit codes**: 0 = every claim the vault makes holds, 1 = it contradicts itself, 2 = runtime
-  error. Exit 1 identifies a structural contradiction with a named repair — a link whose
-  destination is absent, a catalog that disagrees with the disk, a category outside the
-  configured vocabulary, one name answering to two pages, two files answering to one address,
-  a filename that disagrees with its normalized slug, a `source_count` no sweep could write. What a vault in good standing
-  legitimately carries is reported and exits 0: `lint`'s observation channel, `orphans`,
-  and `hubs`/`cluster`/`export`/`suggest-links`.
-- **`LintReport` separates findings from incomplete checks**: `violations`
-  (broken/index-drift/invalid-categories/duplicate-concepts/address-collisions/unnormalized)
-  decides exit 1, `observations`
-  (orphans/hubs/unresolved-conflicts) never does. `errors` records checks that could not
-  complete and takes precedence with exit 2. An unreadable catalog input leaves
-  `violations.index` null while retaining other known findings; neither lint nor status
-  reports that vault as sound. Every extraction mints concepts before
-  anything cites them, so an orphan-counting exit code is permanently non-zero and therefore
-  carries no information — which is what had callers wrapping the command in `|| true` and
-  skills naming the lists to ignore, and a broken link got ignored along with them.
-  `Violations::count`/`Observations::count` are what the exit code and the summary line read,
-  and each DESTRUCTURES its own struct — including the nested `IndexSyncReport`, which counts
-  what it holds — so adding a field to a channel does not compile until it is counted. A test
-  over a hand-built fixture cannot establish that, since a new field satisfies the compiler as
-  `Vec::new()`; the serde test covers the other half, that the fields are counted correctly, one
-  `.len()` per list, none doubled.
-- **`suggest_links`**: pairs in the same Louvain community with no edge that share at
-  least `graph.cluster.suggest_min_shared_neighbors` neighbors, ranked by their
-  **Adamic–Adar index** (Σ 1/ln|N(z)| over shared neighbors z), descending. It runs on the
-  analysis scope (`graph.scope.dirs`, the wiki by default), so daily/personal pages are
-  never nodes or neighbors here. Two filters stack: the count floor rejects the
-  single-shared-neighbor case outright, then Adamic–Adar discounts shared neighbors that are
-  high-degree hubs — so co-citation by one busy document/exploration page can never outrank a
-  real shared niche concept. Parameter-free weighting (no magic threshold). Read-only,
-  deterministic.
-- **`map::build_map_catalog`** (`lore wiki map`): materializes Louvain communities into
-  a bounded navigable tree. `map.md` is the entry, `catalog/map/` holds generated details;
-  small maps remain inline. `build_map` returns only the entry string; publication uses
-  the complete catalog through the existing writer session. Shared vault navigation
-  bounds every page to 100 rows or branches and preserves all concept destinations.
-  Group membership derives from document citations and concept links; it never creates
-  Related-section edges or inferred topic labels. Documents and explorations remain
-  clustering evidence, not listed destinations. Hub/degree order and singleton grouping
-  are deterministic, and relationship meaning stays in the linked pages. Generated
-  details are reserved meta pages, not knowledge nodes or citation sources.
-- **Mutations gated**: `index_drift::fix()`, `normalize::apply()`,
-  `backlinks::sync_concept_backlinks` and `merge::merge_concepts` touch the filesystem — the
-  first two only with `--fix`, the last two only without `--dry-run`. All renames pre-checked.
-- **`normalize` reads two different page sets, and conflating them is a defect.** Rename
-  candidates come from the ANALYSIS scope (`graph.scope.dirs`, the wiki): only the wiki's
-  pages are addressed by slug, and slugifying a dated filename elsewhere (`2026-W30` →
-  `2026-w30`) would rewrite it into a path the pipeline never writes. The link rewrite
-  reads EVERY page dir, like `merge`, because a citation of a renamed page usually lives
-  outside the wiki — a daily page is the ordinary case. Rewriting only the rename scope
-  strands those citations. A graph key is not an alternative spelling of the removed address.
-- **Age is not a signal.** There is deliberately no staleness/decay check: reference
-  knowledge does not expire by going unmentioned, so "old and uncited" identifies
-  nothing actionable and would misdirect curator attention. A concept becomes due for
-  review when its EVIDENCE changes — which `backlinks-sync` detects by digesting the citation
-  paths and authored revisions, and hands them to the queue as a synthesis rewrite — or when its structure is defective
-  (`lint`). Never because time passed.
-- **`backlinks::sync_concept_backlinks` is the sole deriver of every evidence-dependent
-  field on a concept page**: the `## Sources` body (`- [title](relative-path)` entries,
-  destinations relative to the concept page), the frontmatter `source_count`, AND the
-  `llm_inputs.synthesis` input both its `## Synthesis` and its `## Related` are owed against.
-  One sweep derives the citing pages and their authored revisions; a page that
-  could not record all three records none of them. What is owed therefore carries BOTH
-  headings (`ConceptResynthesis::anchor` and `related_anchor`), each spelled as the page
-  spells it: the relations are the same evidence asked a different question, so one task
-  writes both and one marker answers for the pair. `related_anchor` is `None` where the page
-  has no such section, because `replace_section` leaves a page unchanged when the heading is
-  absent and a writer handed one would report a write that never happened.
-  **`discarding` names what the rewrite replaces in BOTH sections**, one `DiscardedBody` per
-  section that holds one: an authored relations body is exactly as unrecoverable as an
-  authored synthesis, and naming only the latter let the former be replaced in a scheduled
-  run with nothing printed about it. Uses full-vault scope (not `graph.scope.dirs`) so
-  `<daily>`/`<personal>`/`<synthesis>` pages are included.
-  An unreadable source blocks reconciliation before writes: missing links in an unreadable
-  page are not evidence of deletion. Revisions are computed during the existing vault scan.
-  **A page that already holds a written synthesis and has recorded no input is ADOPTED**: its
-  prose becomes the answer for the evidence the page carries, and the rewrite is owed from the
-  next time that evidence moves. Without it an upgrade replaces every authored synthesis in
-  the vault in its first unattended run — the sweep and the drain are adjacent stages, so the
-  warning reaches a scheduler's log seconds before the rewrite it warns about, and for a vault
-  not in git that is gone. What is adopted has to BE an answer: a body of nothing but headings
-  or a `> [!conflict]` callout is a marker somebody left, and adopting a lone callout has
-  `lint` report an open disagreement nothing is scheduled to restate.
-  **Adoption carries its citation count because above ONE it is a deferral.** At one citation
-  the prose was written from the single source that exists and adopting it is simply right.
-  Above one it is a January sentence standing as the answer for a set spanning six months —
-  and since adoption stamps the page fully answered, `doctor` reads it green and nothing is
-  queued, so the sweep's own report is the ONLY place that deferral is ever stated. It names
-  how many, with the `llm_inputs.synthesis_done` lever that turns one back into work.
-  The population it reaches is authored prose: a page the ingest pipeline created records the
-  one citation its grounding sentence answers, so it arrives here already stating what it was
-  written from. Before that it did not, and a backfill — thousands of pages created, one sweep
-  at the end — adopted every creation sentence as the answer for the whole citation set.
-  **A concept nothing cites records no input and is owed nothing**: there is no evidence for a
-  synthesis to answer to, a queued task would send a drain to read an empty set, and a
-  recorded-but-unanswerable input would have `lore doctor` report it forever. A concept whose
-  last citation was deleted KEEPS the input it already answered — its synthesis still states
-  what the vault learned, and no rewrite could improve on it from a set that is now empty, and
-  a citation that comes BACK returns the digest to a value the `_done` marker already matches,
-  so the page costs no rewrite for having been away.
-  **An input it never answered is WITHDRAWN instead**, and the condition is the citation set
-  going empty — never "nothing is owed", which is true for three unrelated reasons. Under
-  `SynthesisPolicy::Skip` a fully cited page would otherwise lose the input its queued task is
-  keyed to, and a run whose whole purpose is to touch no LLM plane would destroy that work;
-  a page with no synthesis heading is already handled by the queue's anchor check, and
-  withdrawing it would remove the only durable trace that it owes something, where the
-  heading-missing report names a repair a human can perform. The promise has to be withdrawn
-  by the sweep that made it, because nothing else knows it was made: left behind, the queued
-  task keeps classifying `current` and a drain writes a synthesis of pages the vault no longer
-  holds. **Withdrawal removes the INPUT and never the answer**, which is what bounds it: a page
-  that has ever recorded one keeps its `_done` through any number of empty-and-refilled
-  citation sets, and since adoption requires no recorded answer, such a page can never be
-  re-adopted — when its citations return it is owed a rewrite, or owed nothing if the digest
-  lands back on the value `_done` already carries. Only a page that never recorded an answer
-  is returned to the ADOPTABLE state: one carrying prose and an input but no completion —
-  written before adoption existed, or whose synthesis was never drained — where losing every
-  citation and regaining one converts the owed rewrite into an adoption of the prose already
-  there. Consistent rather than lossy, and a multi-citation page still surfaces in the
-  deferral line.
-  It never calls an LLM: it returns `resynthesize`, and `lore graph backlinks-sync` in lk-cli
-  turns that into queued work through the same `LlmClient` ingest uses. `--dry-run` enqueues
-  nothing, like every other write it withholds. Only
-  non-concept content pages qualify as sources — `<daily>`, `<personal>`, `<synthesis>`,
-  `<wiki>/documents`, and `<wiki>/explorations` (a concept-to-concept link belongs in
-  `## Related`, and navigation pages never appear).
-  The actual heading text is resolved from `locale.strings()` at runtime (e.g.
-  `Sources`/`Related` under `locale: en`, localized otherwise) — never a hardcoded
-  literal. It is ALSO the SOLE owner of the frontmatter `source_count` (= number of
-  incoming citations): ingest preserves the on-disk value across re-render (0 for a new
-  page) and `backlinks-sync` re-derives the real count from the link graph, so it
-  reflects source deletions and can never be inflated by a crash or an idempotent re-ingest.
-  Forward links identify originating pages; validated RSS declarations select article
-  versions. `## Sources` is the derived origin-page view; concept frontmatter carries
-  no `sources` array.
-- **`merge::merge_concepts`** (`lore graph merge <from> <into>`) folds a duplicate
-  concept into a canonical one: it repoints every link that RESOLVES to `from`'s page —
-  any spelling: canonical relative, dot-relative, the OKF `/`-absolute form — at `into`
-  across the FULL vault (display text and heading anchors preserved verbatim), folds
-  `from`'s title + aliases into `into`'s `aliases` (so the synonym stays in the dedup
-  registry — durable because ingest preserves concept `aliases` across re-render), then
-  deletes the `from` page. It never copies/fabricates prose. **Authored-body guard**:
-  `concept_has_authored_body` is section-aware — a `- [title](dest)` bullet is
-  machine-owned ONLY under the `## Sources` heading (matched across all locales, column-0
-  exact like `backlinks-sync`); bullets under `## Related` (human-curated) or any
-  synthesis prose count as authored, so the merge ABORTS before mutating unless
-  `--force`. Historical review evidence must be archived at its recorded revision before
-  its address can be removed; force does not bypass that requirement. Unreadable metadata
-  prevents destructive preflight. `--dry-run` previews without the gate firing. Run `backlinks-sync` afterward
-  to re-derive the merged concept's `## Sources` + `source_count`. Duplicate *detection*
-  (below) only reports the pages that answer to one name; this is the execution
-  counterpart a human triggers, because it deletes a page.
-- **`## Related` records semantic judgment.** Louvain communities encode
-  "co-cited together" (the in-scope graph is dominated by document/exploration→concept edges), not
-  topical relatedness, so auto-writing community co-membership as Related edges
-  manufactures co-occurrence noise and self-reinforcing cliques. Related links are
-  instead authored through evidence-backed synthesis or `lore-wiki audit`: `suggest_links`
-  proposes candidates and an LLM confirms genuine relationships before any edge is written. `## Sources`
-  (citation-derived, `backlinks-sync`) is the only machine-maintained concept relation.
-- **`concept_lint::scan_concept_pages`** reads `{wiki}/concepts/*.md` ONCE into `Vec<ConceptPage>`
-  (slug = file stem, path, category, `names` = slug + `title` + `aliases`, body), sorted by
-  slug. The three concept lints below are pure functions over `&[ConceptPage]` — `graph lint`
-  walks the concepts dir a single time, not once per check. A page with malformed frontmatter
-  still yields one (slug from file stem, no category, slug-only names, empty body) so
-  slug-only checks see it while content checks skip it.
-- **`concept_lint::find_invalid_categories`**: surfaces concept pages whose `category`
-  frontmatter value is not in `config.concepts.categories[].id`. The ingest
-  pipeline strips invalid categories synchronously, but queue-mode concept
-  page creation is done by `/lore-process` which can emit a category the
-  skill invented. Lint reports them so `graph lint` exits non-zero and the
-  drift is observable; nothing is mutated automatically. Empty configured
-  list (categorisation off) suppresses every finding. A page with no `category` field —
-  or an EMPTY one — is not flagged: that is the uncategorised state, and it is what the
-  rest of the vault already means by an empty value (`templates/concept.md.jinja` renders
-  the field under `{% if category %}`, `wiki concepts` filters it out of the registry).
-- **`find_duplicate_concepts` reports shared declared names.** Titles and aliases use
-  the same identity key as the resolver. Filenames are addresses, not implicit aliases.
-  A shared name may be a duplicate or a distinct sense; the finding requires review,
-  and the pipeline refuses to choose an owner automatically.
+## Addresses, scopes, and scan views (`scan.rs`)
 
-- **`concept_lint::find_unresolved_conflicts`**: reports concept pages whose body carries an
-  unresolved `> [!conflict]` callout — a contradiction the drain that wrote the synthesis
-  observed between two of the cited sources. The marker lives in the LLM-owned synthesis body
-  (NOT frontmatter, which ingest re-render regenerates from the template), so it survives
-  re-ingest via `preserved_synthesis` — but NOT across a synthesis rewrite, which replaces the
-  section wholesale. A callout is therefore a statement about the last rewrite rather than a
-  durable record: it exists while each rewrite keeps finding the disagreement, and nothing
-  mechanically preserves it. The old `audited_sources_hash` gave durability only because
-  nothing rewrote that section; claiming it still holds would be an assertion about an LLM
-  re-deriving the same judgment, stated as an invariant. The scan is fence-aware (a callout quoted in a
-  code block is content, not a marker) and matches the callout type `conflict`
-  exactly — `[!note]`/`[!warning]` never fire. Read-only continuous tracking: the
-  lint surfaces every open callout; what closes one is the disagreement going away in the
-  sources, which the next rewrite then stops restating.
-  Contradiction assessment is an explicit semantic judgment. Durable exploration reviews
-  preserve material findings and evidence revisions; callouts are navigation cues.
-  `/lore-wiki audit` checks both recorded findings and direct evidence for new disagreements.
-- **A page that states INTENT is neither evidence nor a link to check.** `ScannedPage` carries
-  the page's `type`, and `scan::states_intent` takes a `task-board` out of `link_sources`, out
-  of `pages`, and — asked again in `backlinks`, which reads the whole vault rather than the
-  analysis scope because a citation lives wherever it was written — out of what may cite a
-  concept. The board is the one managed page that is forward-looking and that SHRINKS: a line
-  leaves it when the box is ticked. As evidence it would make a concept's `## Sources` and
-  `source_count` appear when a to-do was written down and disappear when it was finished,
-  against the rule that concept links only ever accumulate, and queue a synthesis rewrite on
-  each move. As a checked link source it would fail the nightly lint for naming a page that does
-  not exist yet, which on a realized-only vault is exactly what a task about tomorrow does.
-  Recognised by what the page DECLARES rather than where it sits, because its file name is
-  configurable and this crate resolves its own configuration without reading `personal`. The
-  page still EXISTS, so a link TO it resolves.
+- `GraphConfig` rejects unknown fields and escaping paths. Page addresses retain
+  case and punctuation; optional `.md` omission is a resolver key, not a rename.
+  A slug is diagnostic/address information, not an inferred semantic alias.
+- Filesystem aliases use actual same-file resolution in `build_at`, never slug
+  similarity. Escaping/traversal is an error, not an unresolved harmless link.
+- Keep three views distinct: scanned existence, configured link sources, and
+  analysis pages. Excluded pages can still resolve and be repointed. Scope prefixes
+  are folded consistently; do not let an analysis filter hide broken source links.
+- Hidden directories are skipped except the exact verified evidence archive path:
+  an archive is resolvable only through its existing hash validator. It is NOT a
+  knowledge node, citation source, connectivity participant, or repoint target.
+- `is_resolvable` is broader than `is_knowledge`. Reserved catalogs are valid link
+  destinations but not knowledge/source nodes. Declared task boards likewise exist
+  as destinations while excluded from graph analysis/source and broken-link scans.
+- Standalone broken-link checks inspect the full scanned source universe except
+  reserved meta pages/task boards, not only the configured analysis subset.
 
-- **`graph neighbors`** navigates direct links over `link_sources`, including managed daily
-  evidence outside the clustering scope. Exact `.md` addresses select a page. Generated
-  catalogs and task boards stay outside this view. Incoming/outgoing flags describe links,
-  not support, contradiction or causal semantics; the linked prose owns that judgment.
-  Neighbor types come from declared frontmatter, never from directory names. The CLI
-  filters exact types and direction before pagination; type facets describe the unfiltered neighbors.
+## Derived navigation and diagnostics
 
-- **Explicit concept rewrites**: `lore graph resynthesize <exact-concept.md>` derives
-  current citations through `backlinks::concept_resynthesis`, sharing the incoming-link
-  evidence derivation with backlinks sync. It requires a declared concept, readable
-  nonempty evidence and existing section headings. The CLI atomically records the
-  input/policy request and publishes one typed task in a mutation journal under the
-  queue writer lock; existing current matching work is reused. It preserves prose
-  until queue apply publishes the new answer. Dry-run neither writes nor recovers.
-  Historical replay remains `queue regenerate --task-id`, requiring retained input.
+- Markdown remains canonical; navigation exports are optional derived views.
+  `index_drift.rs` compares the complete expected tree from the same builder used
+  to publish it. CLI lint checks export drift only when exports are enabled;
+  explicit `graph index-sync` still checks its requested export.
+- `map.rs` communities are co-citation groupings, not a taxonomy or semantic
+  equivalence. Preserve original destinations and bounded tree pagination (100-row
+  leaves/branches); pack whole small groups rather than creating one file per group.
+  Document/exploration nodes are not a substitute for the concept map's scope.
+- Exit codes distinguish clean (0), structural violations (1), and execution errors
+  (2, taking priority). Error JSON has unavailable checks as null, not reassuring
+  zeroes. Destructure check counts exhaustively so new checks cannot disappear.
+- Adamic–Adar proposals require configured shared-neighbor evidence within the same
+  community and deterministic ordering. Their score is not a meaning judgment.
+  Evidence changes, not age decay, drive reevaluation.
+- `graph.rs::page_neighbors` returns direct incoming/outgoing links. CLI discovery
+  applies declared direction/type/scope before pagination; facets describe the
+  pre-filter scope. Direct links do not establish causation.
 
-- **Citation retraction is explicit and narrow.** `graph retract-citation ORIGIN CONCEPT
-  --revision FILE_REVISION` operates only on standalone generated items in the real
-  source's existing related-concepts section. It refuses other occurrences, mixed prose,
-  ambiguous sections, stale bytes and relevant active/blocked work or unpublished drafts.
-  The CLI holds the mutation session then queue claim, archives the old authored evidence
-  through `publish_document_expected`, and journals the exact-byte origin edit. Concept
-  bodies, markers and generated backlinks are untouched; reconcile backlinks and process
-  synthesis afterward. Preview never archives, recovers a journal or writes. Source
-  eligibility is shared with backlinks through `scan::is_citation_origin`.
+## Concept names and diagnostics (`concept_lint.rs`)
 
-- **Bound RSS forward links may carry explicit event evidence.** Backlinks derives typed
-  event citations only from validated `concept_evidence` declarations and real generated
-  links. Other occurrences retain page evidence. Source count and Sources remain origin-page
-  based; the synthesis digest uses the actual selected dependency set. Legacy pages do not
-  migrate implicitly. Merge and normalize repoint declared addresses with the same exact
-  filesystem identity as Markdown links, preserving immutable originals in the write plan.
-  `retract-citation --event ID --event-revision REV` removes only that pair; the last pair
-  removes its generated link. Ordinary retraction removes all bindings for that citation.
+Names are declared title and aliases (file-stem fallback when title is missing),
+not an additional implicit filename alias. Duplicate declared names report ambiguity;
+they never authorize an automatic merge. A malformed frontmatter page retains its
+file address for address-only diagnostics, not invented parsed metadata/body.
+
+An empty category configuration disables that check; missing/empty category is
+uncategorized, while a present invalidly typed value remains diagnosable. Conflict
+callouts are fence-aware informational content. Durable open/resolved judgments
+belong to exploration reviews, not a machine-persisted callout inferred by location.
+
+## Repointing and merging (`normalize.rs`, `merge.rs`)
+
+- Choose normalization candidates in analysis scope, but rewrite affected links
+  throughout the vault. A merge must find all supported address spellings, retain
+  labels/anchors, and fold declared title/aliases without copying prose blindly.
+- Related prose is authored content too: refuse merging it unless explicitly forced.
+  Force does not bypass unreadable metadata or immutable evidence protection.
+  A dry run previews without writes; backlink reconciliation follows publication.
+- Repoint validated RSS event bindings with their typed addresses/original guards;
+  changing visible links alone must not leave stale provenance declarations.
+
+## Backlinks and synthesis requests (`backlinks.rs`)
+
+- This is the sole derivation of Sources, `source_count`, and synthesis input.
+  Derive citations from actual source concept/related anchors with exact authored
+  revisions. Update the three together; unreadable sources forbid publication.
+  Report discarded anchor sections rather than pretending their evidence remained.
+- Sources are managed non-concept content, excluding catalogs/task boards. Do not
+  revive a frontmatter `sources` array as authority. Validated RSS event dependencies
+  contribute selected event digests; `source_count` still counts origin pages.
+- Authored concepts with substantive prose but no input may be adopted. Headings
+  and callout-only content do not qualify; defer/report multi-citation adoption
+  when required instead of silently manufacturing a completed input.
+- An empty citation set creates no new synthesis request. Preserve an answered
+  input/done pair. Withdraw only an unanswered input whose evidence became empty;
+  Skip or a missing anchor is not permission to erase an answer.
+- Explicit resynthesis requires an exact readable concept, nonempty valid citations,
+  and real owned anchors. CLI journals request and typed task under vault→queue
+  lock order, reusing matching current work and preserving body. Dry run is inert;
+  historical task regeneration is a separate retained-task contract.
+
+## Citation retraction (`lk-cli/commands/graph/retract_citation.rs`)
+
+A normal retraction removes an explicitly generated standalone concept citation,
+with exact source/concept revisions. Refuse mixed authored prose, ambiguity, pending
+overlapping tasks, or unpublished results. Archive old evidence and use the existing
+transaction/journal; do not directly edit concept markers or run incidental backlink
+writes. Preview does not recover journals.
+
+For typed RSS pair retraction, `GeneratedOnly` removes only selected generated
+occurrences/declarations. The last pair may remove a generated link; authored prose
+still provides page-level evidence. Ordinary whole-link removal remains strict and
+must not be weakened to accommodate a partial pair operation.

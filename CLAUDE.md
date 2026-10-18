@@ -1,283 +1,98 @@
 # Lorekeeper
 
-Config-driven knowledge ingestion pipeline for Obsidian wikis. A Rust CLI (`lore`)
-collects daily data from heterogeneous sources, deduplicates, classifies, extracts
-concepts, and writes structured markdown pages. Includes graph analysis for wiki
-structural health.
+Rust CLI (`lore`) for config-driven ingestion into an Obsidian knowledge vault.
+Markdown pages are authoritative; SQLite navigation is a rebuildable query view.
 
-## Architecture
+## Find the owner before changing a contract
 
-```
-Data Sources              lore (Rust CLI)            Obsidian Vault (vault.dirs.*)
-────────────              ───────────────            ──────────────────────────────
-Google Drive ──┐          ┌─ Extract (per-source)    <daily>/{source-id}/
-Project repos ─┤ (nodex)  │
-Gmail ─────────┤          ├─ Normalize → Event       <personal>/work-log/
-Slack ─────────┼─ config ─┤  Collapse dup (intra-batch)<personal>/{weekly,monthly,quarterly,annual}/
-Jira ──────────┤  .yaml   ├─ Classify (labels)       <synthesis>/{weekly}/
-Calendar ──────┤          ├─ Concepts (LLM)          <wiki>/concepts/
-RSS/Atom ──────┤          ├─ Render (templates)      <wiki>/documents/
-Manual inbox ──┘          ├─ SQLite navigation       .lorekeeper/ (prepared browse/search/links)
-                          ├─ Entry guide             <wiki>/index.md
-                          ├─ Optional index export   <wiki>/index.md → catalog/
-                          ├─ Optional timeline     <wiki>/log.md → catalog/log/
-                          ├─ Optional map     <wiki>/map.md → catalog/map/
-                          ├─ Resolve (name → page)
-                          └─ Graph (lint, cluster,   <wiki>/AGENTS.md
-                               suggest-links, merge,
-                               backlinks-sync, …)
-```
+Read the crate's `CLAUDE.md` when working there; do not copy its rules into this file.
 
-## Workspace
+| Area | Owner |
+|---|---|
+| Config, names/addresses, links, citations, locale, atomic files | `crates/lk-core/` |
+| Page/section I/O, templates, reviews, originals, mutation journal, navigation | `crates/lk-vault/` |
+| Adapter identity/auth, fetch windows, normalization, per-item failures | `crates/lk-source/` |
+| Render/cache, document identity, concept accumulation, rollups | `crates/lk-pipeline/` |
+| Typed semantic requests/results, cache identity, queue persistence | `crates/lk-queue/` |
+| Link graph, backlinks/evidence reconciliation, merge/retraction | `crates/lk-graph/` |
+| Intent board/state transitions/completed-task observations | `crates/lk-task/` |
+| Embedded artifacts, release verification and installation | `crates/lk-dist/` |
+| Commands, apply/status/packet guards, workflow lease, scheduling | `crates/lk-cli/src/commands/` |
 
-Each crate has its own `CLAUDE.md` with the invariants for working inside it
-(loaded on demand when you open files there).
+Templates live in `templates/`. Source descriptors in `lk-core::config` decide
+whether an observation becomes a daily aggregate or a document; never special-case
+one source to infer that distinction.
 
-```
-crates/
-  lk-core/      Domain types, config, i18n, slugify (NFKC), frontmatter, link, vault paths, atomic write
-  lk-vault/     Obsidian vault I/O: atomic write, templates (embedded), ingest log
-  lk-source/    Source adapters + factory, markdown normalization (ADF/HTML/Slack→MD)
-  lk-pipeline/  Pipeline (per-source plan), intra-batch dedup, classify, concepts, synthesis
-  lk-queue/     Semantic task queue: LlmClient trait, QueueLlmClient (JSONL), noop (+ mock for tests)
-  lk-graph/     Link graph analysis: lint, hubs, cluster, suggest-links (no HTTP/async)
-  lk-task/      The intent plane: the task board's grammar, its state machine, the transition
-                log, and the observation a completed task becomes
-  lk-dist/      The installation as a thing with invariants: the release-target table, release
-                resolution/download/verification, the artifacts the binary carries, and the
-                coherence report `lore self` acts on
-  lk-cli/       Binary `lore` — one module per subcommand under commands/
-templates/      Jinja2 markdown templates (.md.jinja), compiled into the binary
-```
+## Verify changes
 
-## Development
-
-```bash
-scripts/check.sh                   # every gate CI runs, failing on the first that does
-cargo check                        # type check
-cargo fmt                          # format
-lore validate                      # verify config.yaml + source params
-lore ingest ai-news                # run a single source
-lore schema                        # generate <wiki>/AGENTS.md
-lore wiki prepare                  # reusable, explicitly selected lexical search snapshot
-lore wiki read wiki/concepts/example.md # bounded outline and revision-checked section reads
-lore wiki original wiki/documents/example.md # verified manual-original member discovery and selected reads
-lore wiki original daily/tech-news/2026-10-18.md # bounded RSS inventory; select --event ID --revision REV
-lore wiki browse --json             # bounded catalog with category/type filters and pagination
-lore graph --json neighbors wiki/concepts/example.md # direct links, including daily evidence
-lore wiki links wiki/concepts/example.md # paginated explicit links with source lines and revision
-lore wiki provenance wiki/documents/example.md # exact source-ID relations, including declared successors
-lore wiki concepts                 # list all concept pages
-lore wiki search <query> --json    # which pages a query reaches, and whether they NAME it or merely mention it
-lore brief --date yesterday        # a day's knowledge: what the vault learned, and what it saw again
-lore fetch <url>                   # save a page's article into the manual inbox, with its address
-lore resolve <name>                # which concept page a name addresses (0 owned/1 absent/2 ambiguous)
-lore graph lint                    # structural health check
-lore graph retract-citation daily/source/date.md wiki/concepts/example.md --revision REV --dry-run # preview a reviewed citation correction
-lore doctor                        # page contracts: text cleanliness, unanswered sections, credentials
-lore queue status                  # classify pending LLM tasks (current/stale/missing)
-lore queue count                   # bare integer: current tasks (machine contract for scripts)
-lore queue check                   # read-only JSON completion check; nonzero for blocked work
-lore wiki reviews --check           # evidence drift/invalid records fail; open reviews pass
-lore queue apply                   # validate and publish staged sections and extracted concepts
-lore queue packet --task-id ID     # revision-checked synthesis evidence for workers
-lore queue regenerate --task-id ID --dry-run # preview regeneration from retained input
-lore config vault-root             # bare path (machine contract for scripts)
-lore config schema-path            # bare path to the vault's AGENTS.md (the wiki dir is configurable)
-lore extract status                # how far each project's knowledge extraction has fallen behind its repository
-lore status                        # one line per subsystem, each naming the command that owns it
-lore self status                   # is every deployed copy still the one this binary carries
-lore self deploy                   # rewrite the skills, pipelines, templates and config example
-lore self update                   # replace the binary with a release, then redeploy
-lore agenda                        # the day read off the task board (a view; writes nothing)
-lore task add "…" / done / sync    # the board: intent in, completed work out
-lore task propose                  # what the sources say is still open, offered — never committed
-lore task remind add "…" --at 15:00  # say something at a time (fired by a timer, off the board)
-lore agenda --json                 # the day as a contract, for a skill rather than an eye
-lore health --json                 # source currency as a contract — a dead source reads like a quiet day
-lore task rollover --closing yesterday  # close the day that ended — carry what is still committed
-```
-
-**A release's bump size follows what the change reaches, not its commit type.** The CLI
-surface, a config key, or a page format declared in the generated `AGENTS.md` is at least
-MINOR — something downstream has to react to it. A correction to text people and agents read
-(README, `AGENTS.md` prose, an embedded skill or pipeline body) is PATCH however the commit is
-typed. No gate derives this from a diff; the ones that exist pin the tag to the crate version
-and that to every skill stamp.
-
-Default `wiki refresh` prepares SQLite navigation and a small permanent entry guide.
-Full Markdown catalog/log/map exports are optional via `vault.navigation.markdown_exports`
-(default false), or explicit `wiki index/log/map`. Graph lint requires export currency only
-when automatic exports are enabled. A retrieval session prepares once and explicitly reuses
-that snapshot for browse/search/links, then reads current pages with revision guards.
-
-## Config
-
-User settings in `config.yaml` (gitignored); copy `config.example.yaml`.
-Auto-discovered: `./config.yaml` → `~/.config/lorekeeper/config.yaml`.
-`vault.root` resolves relative to the config file's directory, not the CWD.
+- Run focused tests for the affected behavior; `scripts/check.sh` is the complete CI
+  gate runner. `cargo check` checks types; `cargo fmt` formats Rust.
+- For paths, aliases and Unicode, verify case-sensitive behavior: macOS may fold
+  case and NFC/NFD where Linux does not. Probe legitimate platform differences.
+- CLI/config/generated page-format surface changes are at least MINOR; corrections
+  to README, schema prose, embedded skills or pipeline text are PATCH. Bump size
+  follows the changed contract, not commit type; release gates also check stamps.
+- Use CLI help for command syntax. Machine consumers use JSON/bare-value contracts,
+  not parsed terminal tables; align terminal columns by display width (`commands::pad`).
 
 ## Cross-cutting invariants
 
-- **Source ID = vault directory**: the key under `sources:` becomes `<daily>/{id}/`. Must not contain `/` or `\`, and must not be `.` or `..`.
-- **What one observation IS decides the page it becomes**, and `SourceType::descriptor().unit` is where that is declared. A mail, a message, an issue update and a feed entry are each too small to stand alone — the day that groups them is what makes them legible, so they aggregate onto a daily page. A file handed to the vault and a repository's decision record are whole documents their authors wrote, so each becomes its own `<wiki>/documents/` page, where `lore wiki search` reaches it by name: default search reads knowledge pages; `--include-sources` explicitly includes daily observations. The trait lives in the descriptor rather than in a condition naming one source, because the match is exhaustive — asked as `== SourceType::Manual`, the question went unasked when `nodex` was added and a repository's ADRs landed in dated pages the search does not read.
-- **Vault directories configurable**: all top-level vault paths (`<daily>`, `<personal>`, `<synthesis>`, `<wiki>`) are set via `vault.dirs.*` in config.yaml. Their fixed leaf subdirectories (`concepts`, `documents`, `explorations`, `work-log`) are single-sourced as `lk_core::vault_path` constants. Every crate builds paths through `VaultPath` builders or those constants — never an inline string literal.
-- **Date derivation**: `timestamp.to_zoned(vault.timezone()).date()` — always via configured timezone, never UTC.
-- **Multi-date batches**: events spanning several dates produce one `<daily>/` page per date.
-- **Ownership decided by the adapter**: each source sets `RawItem::is_self` by exact-matching its structured authorship field against the user — Gmail `From`/Calendar organizer-or-attendee vs `identity.email`, Slack author vs `identity.slack_id`, Jira assignee vs the authenticated `/myself` account. `is_personal` = `is_self && source ∈ personal.tracked_sources` (so an absent `personal:` module means nothing is personal). The pipeline never infers ownership from free-form text, so recipients/CCs/mentions never pollute the personal work-log or reviews.
-- **The personal module is optional; the core is domain-neutral.** `config.personal` (`Option<PersonalConfig>`) owns the entire personal-productivity subsystem: the work-log, the weekly/monthly/quarterly/annual reviews, the contribution taxonomy (`performance_categories` + maps + the classify `performance_category` bridge), and `tracked_sources` (which sources count as "mine"). ABSENT (the default) = a pure knowledge engine: no work-log, no reviews, no `is_personal`, and `lore schema` omits those page formats from `AGENTS.md`. Every personal behavior is gated on `config.personal.is_some()`; nothing in the ingest→concept→wiki→graph core depends on it. Cross-source weekly *synthesis* (themes, `<synthesis>/weekly/`) is core knowledge synthesis and stays regardless.
-- **The vault is realized-only — forecasts never materialize** (`event.date > today`): a date after today is a FORECAST, so `Pipeline::plan` writes NO page for it (no daily page, concepts, or citations) — one chokepoint that keeps every downstream consumer clean by construction. Two defense-in-depth gates enforce the same `today` boundary (wall-clock, vault tz, independent of `--date`) off the page-render path: `render_work_log` drops future events and `Synthesizer::read_date_range` caps reads at today. A forecast becomes knowledge once its date arrives. `is_personal` is time-agnostic.
-- **Atlassian auth is one facade over named instances.** `credentials.atlassian` is a MAP of instances (`default`, `cloud`, `onprem`, …) because one org routinely runs a Cloud tenant *and* an on-prem Data Center wiki; a source picks one with its typed `instance` field (optional when only one exists) — credential routing is a source-level concern the factory resolves, so it sits beside `classify` rather than inside the untyped `params`. Each instance declares `method`: `oauth` (Cloud gateway), `scoped-token` (Cloud gateway, Basic), `api-token` (Cloud site, Basic), or `pat` (Data Center Bearer). Each variant carries only its own fields, so an impossible pairing is unrepresentable — and **`Deployment` (Cloud vs DataCenter) is DERIVED from the method, never configured**, since each credential form exists on exactly one deployment. `AtlassianAuth` answers the only three questions adapters ask (base URL, `Authorization` header, REST dialect); adapters never branch on the method, so a new method is a change in `lk-source::atlassian` alone. **The method chooses the HOST; an IP allowlist judges the PRINCIPAL.** Cloud answers at the site (`{org}.atlassian.net`) and at the gateway (`api.atlassian.com`); an account token comes in two shapes and each is honored by exactly one — classic at the site, scoped at the gateway — while the site does not refuse a scoped token so much as ignore it, an anonymous 401 naming nothing. The allowlist is a separate axis and cuts across both: it answers `403 "your IP address is not listed"` to an account token at EITHER host while admitting an org-approved app from the same address at the same moment, so on such an instance `oauth` is the only method that reaches the API from an address the list does not name. The token methods are for instances without a list, or for addresses on one. `AtlassianAuth::explain_failure` names the causes a given failure could have at the point of it — keyed on the CONFIGURED METHOD and the status code, never on matching text in the provider's body, so an OAuth 403 is never called an allowlist problem and a token's 403 names the allowlist beside the alternatives rather than as the answer. Knowing only the method and the status, naming the candidates is the most it can honestly do. **Atlassian ROTATES refresh tokens** (each refresh invalidates the one it used), so: the successor is persisted to `credentials.json` as part of completing a refresh; one `AtlassianAuth` per instance is SHARED across every adapter in a run (two would invalidate each other mid-run); the refresh request is deliberately NOT retried (a lost response leaves the rotation either uncommitted or committed, and failing keeps the predecessor on disk — which recovers the first case on the next run and is no worse in the second, where the grant needs re-authorizing either way); and Lorekeeper needs its OWN OAuth app — a grant shared with another client breaks both daily.
-- **Concept evidence is an explicit, revision-pinned dependency set.** `backlinks-sync`
-  derives source links, `source_count`, and the synthesis input together. `Citation` carries
-  a vault-relative path and `source_revision` for page evidence; `citation_digest` hashes the sorted set.
-  Explicit bound-RSS selections add a typed `rss_event` selector and immutable payload
-  revision; unrelated daily interpretation does not change those dependencies.
-  Legacy and unbound occurrences remain page evidence, including mixed prose links.
-  Bookkeeping (`updated`, `source_count`, `llm_inputs`) is excluded; body and other frontmatter
-  are input. A new grounding records the revision of the origin page after its links land.
-  The synthesis and relations share one completion marker. An unreadable source prevents
-  reconciliation, and queued work checks page revisions or explicit event membership and
-  verified immutable objects before processing. `source_count` remains originating-page count.
-  A concept with no remaining sources retains its last answered synthesis.
+- **Use shared representations.** Paths go through `VaultPath`/`vault_path` constants,
+  links through `lk_core::link`, names through `ConceptRegistry`, evidence through
+  `Citation`/`citation_digest`. A slug is a filename, not name identity; preserve
+  established addresses and resolve declared titles/aliases before creating a page.
+- **Keep the vault portable.** Every page declares its format in `type`. Internal
+  links are CommonMark `[label](relative/path.md)`, not wikilinks. Exact addresses
+  survive rewriting; names are source-written, while generated prose uses `vault.locale`.
+  Generated `<wiki>/AGENTS.md` spec prose is English; its headings are localized
+  and its language policy names the configured locale. Source text is not translated.
+- **Publish semantic values, not ad-hoc edits.** Workers stage typed results. The
+  applier verifies task/input identity, target revision, all owned headings and
+  evidence, then publishes bodies and completion markers together. Empty-but-done
+  is valid; a filled body is not completion. See `lk-queue` and `lk-pipeline`.
+- **Evidence is explicit.** Backlinks derive source links, count and synthesis input
+  together. Normal extraction accumulates established citations, but retention is
+  not renewed semantic approval. Correct mistaken links through revision-guarded
+  `graph retract-citation`, then reconcile backlinks and synthesize affected concepts.
+- **Originals and interpretations are different authorities.** Bound RSS originals
+  are immutable pre-classification captures; explicit selectors pin event payload
+  revisions. Legacy logs are `legacy_unbound`, not historical derivation proof.
+  URLs, matching source/date/config or omitted summary text do not establish that
+  proof. Never infer selectors or silently upgrade page-only evidence. See the
+  core/vault/queue RSS contracts before changing these paths.
+- **Cooperating writers use `MutationSession`.** Recover pending journals before
+  deriving writes; journal complete guarded plans before mutation. External editors
+  are outside that lock. Read-only and `--dry-run` paths never write or recover.
+- **Long workflows use a separate cooperative lease.** `lore workflow -- COMMAND`
+  owns the canonical vault's Unix `workflow.lock` across evidence reading and
+  publication; short mutation/queue locks remain inside commands, never across an
+  LLM session. Default contention refuses; waiting is explicit. Closing inherited
+  descriptors/detaching work breaks the guarantee. No PID/TTL bypass or Windows support.
+- **Preserve observations.** Dates use configured vault timezone. Future events do
+  not materialize. Each adapter decides ownership from its structured identity rules, not
+  free-text mentions; Calendar includes matching organizers or attendees. Optional `personal` gates personal pages, not weekly knowledge
+  synthesis. Failed-all fetches are errors; a genuinely empty observation is success.
+- **Retain state, not just history.** Maintenance keeps each source's latest
+  collected log entry even beyond retention. Manual inputs retire only after all
+  page writes and queue flush succeed; exact regeneration uses retained input,
+  not a potentially changed refetch. Credentials are reported, never scrubbed from
+  source text; rotation at the issuer is the repair.
+- **Installation and scheduling are explicit.** `lk-dist` owns embedded artifact
+  coherence. Scheduled scripts compose CLI stages and never auto-commit user edits.
+  Full-source ingest alone rewrites the cross-source work-log; filtered ingest
+  cannot replace it with a subset. Navigation refresh defaults to SQLite plus an
+  entry guide; Markdown catalog/log/map exports are optional derived output.
 
-- **The applier publishes queued bodies and completion markers together.** Workers stage results and never edit those pages directly. `llm_cache` decides a section's fate purely on `llm_inputs.<key>_done`, never on whether the body looks filled — so a section written without one is erased by the next render and its task re-enqueued forever. `lk_vault::set_llm_input` is the single writer for those nested markers (`set_frontmatter_field` owns top-level keys and cannot reach them), and `record_llm_input` is the one place allowed to ADD the mapping — a marker stamped where the pipeline never rendered one would claim a render that never happened, but a concept's synthesis input is DERIVED by `backlinks-sync`, so there the writer establishes it rather than a reader hoping to find it.
-- **Name resolution is shared.** `ConceptRegistry` indexes declared titles and aliases,
-  independently of file addresses. Ambiguous names cannot route writes. `lore resolve --json`
-  reports an unoccupied `proposed_path` for absent names. Search expands only through declared
-  aliases; `--include-sources` also searches daily observations and managed reviews.
+## Naming
 
-- **A concept's slug is resolved once, never re-derived.** A page's id is NOT always `slugify(title)`: a renamed or merged concept keeps its original id and records the other names as aliases, which is what keeps existing citations resolving. `ConceptDrafts` builds an alias index from the vault and returns the resolved `ConceptIdentity` from every merge; `render::concept_links` renders from THAT, so a citation and the page it points at cannot disagree. Computing the slug in both places is what mints a second page beside the canonical one and splits its citations. The registry reserves existing file addresses separately from declared titles and aliases, so an address remains occupied without becoming an implicit name — `lore graph lint` reports two pages answering to one name as a duplicate.
-- **`day_window` bounds land on civil midnight**, with padding rounded outward to whole days. The pipeline renders a daily page for every date a batch touches and a complete-refetch source renders it from the fetch alone, so a window ending mid-day hands it a PARTIAL day that overwrites that date's page with the fragment. Absolute-hour arithmetic cannot guarantee this: on a DST fall-back day `day_start - 24h` lands an hour AFTER the previous midnight.
-- **All semantic workers return staged values.** Extraction, concept synthesis and single-section
-  tasks write result JSON only. `queue apply` validates the matching task, target revision,
-  input identity and section contract before publishing content and completion markers.
-  Extraction uses one recoverable mutation plan for concept and origin pages. A malformed
-  result is preserved in quarantine; an I/O failure remains an explicit retryable error.
-- **Cooperating page writers share a vault mutation session.** Ingest, synthesis, graph
-  mutations, wiki generation, schema and queue apply recover any pending journal before
-  reading inputs. Merge, normalize and extraction persist their complete write plan before
-  changing pages. Recovery resumes known steps and stops at conflicting edits. External
-  editors do not participate in this lock; read-only and dry-run commands never recover.
+- `new`: cheap field construction; `from_*`: convert one value; `build_*`/`::build`:
+  computed/fallible construction (including test factories); `with_*`: builder mutation.
+- `find_*`: optional search; `load_*`: I/O; `resolve_*`: name to value/address;
+  `get_*`: present in-memory accessor; `lookup`: keyed cache query.
+- Predicates use `is_*`/`has_*`. Types spell words fully (`GraphCommand`, not `Cmd`);
+  locals may abbreviate. Public errors have typed domain surfaces.
+- `*Result` is a domain outcome. Add `*Report` only when presentation adds structure;
+  do not wrap an already display-ready result. Wire enum names use kebab-case.
 
-- **A queued task's fate is decided deterministically, never by an LLM session.** `lore queue status` classifies each pending task in tested Rust from two independent facts on its target page: is the page still the one the task was made for (`llm_inputs.<key>` vs `cache_hash` — else `stale`, or `missing-target` if the page is gone), and has this exact input already been answered (`llm_inputs.<key>_done` — then `done`). Only a task passing the first and failing the second is WORK — and then only if the page still carries EVERY section it names (`QueueTask::anchors` — two for a concept synthesis whose page carries a related-concepts heading, one otherwise and one for every other kind), since a page's headings come from the render and an anchor the page lacks means the heading vocabulary changed since (a `vault.locale` switch does exactly this without touching the concept input hash, which does not include locale). Asking about one of two is what let a task be judged work on the strength of its synthesis heading while its relations heading was gone, after which the drain fills one section and the single marker reports the pair answered; waiting cannot bring it back, and dropping loses nothing because the absent completion marker makes the next ingest re-enqueue the work under the heading the page now has — except for a concept synthesis, which no ingest enqueues: `lore graph backlinks-sync` is its only source, and it re-queues on the same marker, so the work returns from there instead. Work is what `/lore-process` acts on and the only thing `lore queue count` counts; a drained RESULT is classified by the same code but never asks the completion question, because a task is a request while a result is the answer in flight — and for concepts the marker is written by the very edit that applies it — a scheduled pipeline must not spend a session on a queue holding nothing to do. `lore queue prune` applies the same classification destructively: dead tasks are dropped, an answered task is kept so the run's record stays whole, and a run whose every remaining task is answered is retired to `processed/` exactly as a drain retires a finished run — otherwise nothing would ever archive it and it would sit in the queue warning about pending work forever.
-- **Per-item isolation stops where NOTHING was reached.** An adapter that fetches many independent things (RSS feeds, Drive files) warns past a single failure so one broken item doesn't cost the others their day — but if EVERY attempt failed it returns an error, because an empty success is indistinguishable from a quiet day and the ingest log records only that one bit. `lore health` reads that log as its sole evidence a source is alive, so swallowing a total outage would let a source whose URLs have all moved report fresh forever. `lk_source::require_any_observation` is the single rule and it takes what was OBSERVED, never a count of failures and never a subtraction — "read" covers usable as well as reachable, since a file whose metadata will not parse is as absent as one that would not download. An empty listing (nothing attempted) stays a success, and so does an entry dated for another day: RSS decides mapping and windowing separately so a quiet feed can never look like a broken one.
-- **Retention prunes history; it may not prune state.** The ingest log is both a run history and the store `find_last_collection` reads, so `lore maintenance` keeps each source's newest COLLECTED entry whatever its age — the exact line that reader returns, not merely the newest one, since a source failing daily has a recent failure the reader skips in front of the older success it wants. Without that, every entry for a source dead longer than the horizon disappears and it stops reading `stale` (non-zero) and starts reading "never ingested" (silent without `--strict`) — the alarm turning itself off exactly as the problem ages. `--dry-run` reports the same counts and deletes nothing, like every other mutating command.
-- **Ingest recovery**: plan → write daily/concept → work-log → flush LLM queue → log, then archive manual inputs only after all vault writes and the queue flush succeed. A retry fetches sources again; remote edits, deletions and window changes can alter the input. Exact historical regeneration requires retained task input, not a refetch. Unchanged input preserves completed semantic sections through their cache markers.
-- **A living document carries its version in its identity.** Source revisions may change on refetch, including edited messages and issues. Confluence exposes an explicit page version, so the confluence adapter's `external_id` is `confluence:{page_id}:v{version}` — an unchanged page re-fetched tomorrow reproduces the same id (dedup absorbs it, the `llm_inputs` hash keeps the LLM idle), while an edit mints a NEW event that flows through summarize/concept extraction again. Freshness therefore falls out of the existing materialized-view machinery with no reconciliation pass. Ownership is **last-writer**, not contributor: `is_self` compares the *current version's* author to the authenticated account, because CQL's `contributor = currentUser()` also matches pages someone else last edited — knowledge to read, never the user's own work-log entry.
-- **Intent is a third plane, joined to the other two at exactly two points.** Everything else here runs one direction — a source is observed, the observation becomes a page, the pages become knowledge — and every invariant enforces it: the vault is realized-only, forecasts never materialize, the work-log records PERFORMED contribution. A task is the other direction: a claim about the future, authored by a person, whose state changes by their hand rather than by a re-fetch. So it is not a new kind of page in the existing plane. An observation may PROPOSE a task and never creates one — structurally where a source's own field answers it (a Jira issue assigned and not `done`, via `RawItem::work`), by declared judgment where only prose could (`lore task candidate`, for the sources `personal.tasks.propose_from` names), landing as a `Proposed` line whose two answers already existed: drag it to accept, `lore task drop` to decline. A third answer is the SOURCE's and reaches only an unanswered proposal: an adapter answers for every item its fetch returned, so work OBSERVED to have left the open set withdraws the line it proposed, while absence withdraws nothing — a query bounded by time returns nothing on a quiet day, and reading that as "all finished" retired every proposal the source still held open. A withdrawal records no answer against the origin, so a reopened issue is offered again. A completed task BECOMES an observation, through a built-in `tasks` SOURCE that reads the transition log — which is why there is no archival machinery at all, the daily page, the work-log, the contribution categories, the concept extraction and every review already consume events. That closes the loop the rest of this tool only half serves: today the vault compounds what was READ, and a completion's closing note is how what was DONE compounds too. Nothing forward-looking is ever materialized — only a completion becomes an event, dated when it happened, never when it was due. `<personal>/tasks.md` is the truth rather than a rendering of a store kept elsewhere, because the vault is the product: a box ticked on a phone has to count, and the state machine reads the section HEADING a line sits under, so dragging it in an editor is the state change. Where a task CAME FROM — the Slack thread, the Jira issue, the mail, the meeting — is an absolute URL in its visible title (`lore task add --link`), never a vault path: it is copied verbatim onto the archive page, so a relative destination would resolve somewhere else from there; the board is a valid citation SOURCE, so a vault destination would make a concept's evidence appear when a task was written down and vanish when it was finished; and the vault is realized-only, so the page a forward-looking task is about may not exist yet. `lk_core::link::is_external` keeps a scheme-bearing destination out of the graph entirely, which is what makes all three go away at once. The board declares `type: task-board` and the graph excludes that format from both link views and from what may cite a concept — it is the one managed page that is forward-looking and that SHRINKS, so counting it as evidence would make a concept's `source_count` appear when a to-do was written down and disappear when it was finished.
-- **The installation declares itself the way the vault does.** Every page states its format and what it was derived from, a command checks those declarations, and another repairs what the check reports — and that discipline used to stop at the vault boundary, so a scheduled install could fall a year behind while `lore health` reported green (it measures ingested-data freshness, the only thing that declared itself). The skills, the pipeline scripts, the rendering templates and the config example are therefore COMPILED INTO the binary (`lk-dist::embedded`, collected by a build script from the tree rather than a list), so they cannot be a different version from it — one artifact, and `lore self deploy` writes the copies. What is left to check is whether a deployed copy still equals what the binary carries, which is a BYTE comparison rather than a version string and so has no reading in which a copy is merely probably current; an absent group (an install that took no skills, a machine with no scheduler) is absent, not stale. `<wiki>/AGENTS.md` is the one managed artifact that lives in the user's vault, and it is rendered from the binary's page-format table — nothing rejects a stale one the way the vault rejects a broken link, so it carries a `generator` frontmatter key and `lore self update` re-runs `lore schema` through the NEW binary as part of the update. `lore status` composes this with source currency, the queue, page contracts and the graph verdict — each computed by the code its own command exits on — and reports without gating, because the command that owns a subsystem is the one whose exit code answers for it.
-- **An update is refused rather than approximated.** The API settles which release is latest and the `/releases/latest` web view answers only where the API could not — the view is a cache that trails by minutes right after a release, which is exactly when someone updates, and an answer taken from it says so. Precedence is semver's with build metadata cleared (`Version`'s own `Ord` orders by it, because `Ord` must agree with `Eq`), so `1.2.3+build.5` and `1.2.3` are one version; a channel answering older than the running binary is REFUSED, since a rollback and a stale read are the same shape, and going back takes an explicit `--version`. The archive is verified against its published digest in-process (`sha2`, never a shelled-out `shasum` that may not exist), one named member is read out of it rather than unpacked (nothing writes a path the archive chose, so there is no traversal rule to get right), and the swap keeps the previous bytes until the replacement has PROVEN it runs and reports the requested version — the only check that answers for the kernel, the architecture and the platform's code signing at once. Windows is refused outright and named `install.ps1`, because it cannot rename over a running executable and a half-implemented swap leaves no binary at all. An update also refuses while the queue holds work: a task is written by one build and answered under whichever build's skills are deployed when the drain runs.
-- **Foreground workflows use a separate Unix advisory lease.** `lore workflow -- COMMAND`
-  locks the canonical vault's `.lorekeeper/workflow.lock` and execs the command with the
-  locked descriptor inherited. Scheduled headless skill calls wait for it; deterministic writers retain short locks.
-  Manual review/publication sessions start under it before reading evidence. Default contention
-  refuses before running the command, while `--wait` is explicit. Child CLI commands retain
-  their short mutation/queue locks; never hold those locks across an LLM session. Programs
-  that close inherited descriptors or detach work are outside the lease guarantee. It is
-  cooperative, has no PID/TTL bypass, and is unsupported on Windows.
-- **Scheduled pipelines compose CLI stages.** `scripts/lore-pipeline.sh` provides the shared runner; daily and weekly scripts declare their stages. `pipeline_finish` reports their outcome and never stages or commits Git changes: concurrent user edits cannot be attributed to a run. Backups and user-reviewed commits are separate from mutation-journal recovery.
-- **The filesystem this is developed on folds case; CI runs one that does not.** macOS resolves
-  `Wiki` to a `wiki/` directory and APFS folds NFC against NFD, so a page's path, a configured
-  `vault.dirs` root, and two roots that look distinct can all mean something different on Linux.
-  A test that writes down the local answer passes here and fails there — which is how two of
-  them shipped. Run the suite against a case-sensitive volume before believing it:
-  `hdiutil create -size 500m -fs "Case-sensitive APFS" -volname CS -quiet /tmp/cs.dmg && hdiutil
-  attach /tmp/cs.dmg -mountpoint /tmp/cs && mkdir -p /tmp/cs/tmp && TMPDIR=/tmp/cs/tmp cargo
-  nextest run --workspace`. That volume still folds NFC against NFD, so the normalization half
-  needs real Linux. Where a behaviour legitimately differs, probe rather than assume — the
-  `filesystem_folds_case` helper in `commands::validate::tests` is the shape.
-- **A view a skill reads is a CONTRACT, not a rendering.** The user does not type these
-  commands — a skill does, on their behalf — so `lore agenda --json` carries every section the
-  terminal shows, with dates unformatted and the origin URL a task came from resolved, and
-  `lore-day` is the skill that runs the day off it. Asking an agent to parse aligned columns is
-  the same mistake `lore queue count` and `lore config vault-root` exist to prevent, and the
-  columns exist to be scanned by eye. A ticked line carries `done`, because a finished task reported as today's business is what the contract exists to prevent. `lk_core::link::first_external_dest` is the mirror of the
-  graph's own extraction: a task's origin is external precisely so the graph never sees it,
-  which means the graph's extractor cannot be what reads it back. `lore brief --json` is the
-  other half of the same day and a view on the same terms: the board says what was promised,
-  it says what was learned, and `lore health --json` is what keeps the second honest: a source
-  that stopped talking and a quiet day read alike from a brief, so the morning asks the command
-  that owns source currency rather than inferring it from a thin one. Its split is a FACT about
-  the pages — whether the vault already held the concept — never a judgment about importance, so what was learned carries the line
-  each page opens with and what was merely named again carries names only. Which concepts a
-  day named is read off THAT DAY'S PAGES, never off `updated` on the concept: a concept page
-  records when it was LAST cited and not every day it was, so reading it there loses every
-  concept that was named again later — which is to say every concept worth having.
-- **Every column is padded by DISPLAY WIDTH.** `{:<n}` counts `char`s, and a Hangul syllable, a
-  CJK ideograph, a kana and an emoji each take two columns — so a Korean vault's every list came
-  out ragged, with the annotation landing wherever the titles happened to end. `commands::pad`
-  measures through UAX#11 rather than a range table written here, because "which characters are
-  wide" gains answers per Unicode release. Over-long text is returned whole: a clipped title is
-  one nobody can search for, and the column exists to align the common case rather than to
-  enforce a width.
-- **`lore schedule` emits cron OR launchd** (`--format`). On macOS launchd is correct: `StartCalendarInterval` runs a job missed during sleep as soon as the machine wakes, whereas cron silently skips it — and a closed laptop at 09:00 is the normal case. Cron syntax launchd cannot express (`*/5`, `1-5`) is REFUSED, never approximated, since a silently different schedule is worse than a rejected one — what is refused is a TRANSLATION, so a job whose schedule is natively a repeat (the reminder timer) emits `*/5 * * * *` for cron and `StartInterval` for launchd, each in its own vocabulary; every emitted path must be absolute (`--bin`, `--pipeline-dir`) because launchd searches no `PATH` and expands no `~`.
-- **`--pipeline-dir` selects the installed scheduling entry scripts.** Ingest uses
-  `lore-daily.sh`; weekly, monthly, quarterly and annual synthesis use their corresponding
-  scripts; maintenance combines cleanup and queue pruning in `lore-maintenance.sh`.
-  The scripts own the queue drain and publication stages that bare subcommands do not run.
-  Reminder delivery requires `lore-remind.sh` and the configured intent plane; without a
-  pipeline directory no reminder timer is emitted, and the scheduler reports that omission.
-  Scheduled entries inherit `PATH`/`LORE_BIN`/`LORE_CONFIG`/`CLAUDE_BIN` from the invoking
-  environment. Installation paths are absolute, and refusal messages preserve supplied flags.
-- **One all-source ingest is the scheduling unit**: the work-log is a cross-source daily aggregate, so `ingest.schedule` is the single ingest cron key and `lore schedule` emits ONE `lore ingest` line — never per source. The work-log renders only on a full ingest: a filtered `lore ingest <source>` sees a structural subset of personal events and never rewrites the cross-source page (a transient source failure inside a full run still writes — loud non-zero exit, complete again on the next full run).
-- **Daily pages re-render in full each run; STREAMING sources project from an event log.** A complete-refetch source (Gmail/Jira/Calendar/Slack/Drive) reproduces its whole window on demand and renders from the fetch. A streaming source (RSS — `SourceType::descriptor().streaming`, a rolling capped feed) can't, so it projects from a durable per-date event log (`.lorekeeper/events/{source}/{date}.jsonl`, raw pre-LLM events): each run UNIONs fetch + stored log (`EventId` key, fresh wins), so a scrolled-out item is never lost and a deleted page self-heals (`lore ingest --date <past>` repairs any day). Raw-layer duplication is provenance; convergence happens at the concept/graph layer (one concept = one page).
-- **Every LLM-owned section in the vault is a materialized view, the concept synthesis included.** Each has an input key recording what it is owed against and a `_done` companion recording what it was written from, and `llm_cache::lookup` compares only those two — never whether the body looks filled. What differs for a concept is who computes the input: a daily page's is computed by the render that writes it, while a concept's is the source paths and authored revisions, which only `backlinks-sync` derives. So that sweep records it and queues the rewrite, the worker stages the sections and `queue apply` publishes them with the marker, and a concept cited by thirty pages over eight months answers with a synthesis written from thirty rather than from the first one. A page that already held written prose when the sweep first saw it is ADOPTED rather than replaced — its text stands as the answer for the evidence it carries, and the rewrite is owed from the next move — because the alternative is an upgrade that replaces every authored synthesis in the vault unattended. Adoption is for prose nothing recorded an input for, which after this is authored prose alone: a page the pipeline created states the one citation its grounding sentence answers, so the deferral adoption would otherwise make — one sentence standing as the answer for however many pages cite the concept when the sweep first runs, which in a backfill is all of them — cannot arise. The sequence is why `sync_graph` drains twice: the citations only exist after `queue apply`, and leaving the rewrite for tomorrow would put every concept page a day behind its own sources and leave a queue file pending at every ingest, whose startup warning would then never clear.
-- **Daily pages are materialized views**: structural fields (frontmatter, raw event list, headings) are re-rendered every ingest; semantic fields (summary, refined events, concept links) are LLM-owned, preserved across re-renders, and invalidated by a BLAKE3-128 hash in the page's `llm_inputs` frontmatter — so re-ingesting unchanged data enqueues zero LLM tasks. Completion detection and cache-shape mechanics live in `lk-pipeline`.
-- **Normal ingestion preserves established concept citations.** Both the plan render and
-  `lore queue apply` use `render::accumulate_concepts`: a new extraction adds citations
-  without silently removing earlier ones. `backlinks-sync` derives concept evidence and
-  synthesis inputs from those forward links. Retention does not certify that an edited
-  source still supports every earlier claim. For a mistaken citation, review the complete
-  source and concept scope, then use `lore graph retract-citation` with its revision guard
-  and dry-run preview. The explicit repair archives prior evidence and refuses overlapping
-  pending work; reconcile backlinks and process the resulting synthesis afterward.
-  Carried links use the destination format emitted by the concept-link builder; arbitrary
-  nested links cannot be re-rendered through it without changing their address.
-
-- **The vault at rest is an Open Knowledge Format bundle.** Every page carries a `type` frontmatter field naming its page format (`concept`, `daily`, `document`, … — the AGENTS.md format ids; OKF's one required key), and every internal reference is an inline markdown link `[Display](relative/path.md)` — destination relative to the containing page, `.md`-suffixed, CommonMark percent-encoded — the one form Obsidian, GitHub, and OKF consumers all resolve. Never `[[wikilinks]]`. `lk_core::link` single-sources the whole vocabulary (build/extract/rewrite/resolve), and `render::concepts_dir_dest` computes a page's concept-link base once so nothing downstream does path arithmetic. Graph node keys retain exact file addresses. Rewriters resolve actual files before planning changes; slug normalization never decides which existing file a link addresses. `okf_version` stays undeclared by design (it may only live in a bundle-root index.md, which would claim a file in the user's vault root; the spec mandates best-effort consumption without it).
-- **Domain logic lives in lk-core.** Name identity preserves symbols and word boundaries;
-  filename slugification is a separate operation. Frontmatter, links, citation revisions,
-  and atomic file publication are shared implementations across crates.
-
-- **READ tolerates any locale's heading; only WRITE uses the current one.** A `vault.locale` switch renames every heading at once, so a reader that searched only the new spelling finds no body to preserve and none to report — and overwrites an answered section with an empty one, on every page in the vault, reporting a clean run. `lk_vault::resolve_section` is that reader, once: it answers with the spelling the page actually carries, preferring a non-blank body over a blank one (mid-switch a page carries both, and the answer must not be the thing dropped) while still answering with a blank one when it is the only one there (a section can be legitimately empty, and calling it absent would re-enqueue it forever). Every consumer — the render's preserved bodies, the cache lookup, the citation sweep, the catalog, the synthesis rollup, the merge guard — goes through it, so the rule cannot hold in one place and not another.
-- **A credential in a page is reported, never rewritten.** `lore doctor` names the forms whose issuer publishes a grammar (a reserved prefix plus that issuer's alphabet at the width it mints); anything unprefixed is out of scope BY CONSTRUCTION, because nothing in free text tells a key from a hash and a check that guessed would fire on every commit id. Rotation at the issuer is the repair — it invalidates every copy at once, where editing the page only makes the leak harder to find and leaves the vault asserting something no source said.
-- **`vault.locale` is the language the vault is AUTHORED in, not a label table.** It switches every structural label (templates read `{{ i18n.* }}`), and it is equally what every word Lorekeeper adds gets written in — which reaches the semantic plane through `lk_queue::TaskRequest`, whose `locale` every request answers and the queue writes into every task payload. It shipped as labels alone, so the two kinds that write a CONCEPT page carried no language and the drain inferred one from the pages around the target: correct-looking in an established vault, and nothing to read in a new one, which is how an English vault got Korean concept pages. Whether the locale also enters a task's cache identity splits on what the section is — a re-derived view against an authored body that accumulates — and `lk-queue/CLAUDE.md` holds that split. `lore schema` generates `<wiki>/AGENTS.md` with its page-format **headings/labels** from the i18n bundle and its **prose English by design** (an agent-facing spec), and that prose NAMES the vault's language rather than assuming one — a naming policy reading "prefer the established Korean" instructed an English vault's own agents to write Korean. Source content is never translated, and a NAME is not prose: a concept's name is the form its source writes, in whatever language that is — copied rather than chosen, because "has this field settled on a form in this language" is a judgment with no stable answer for a term a source is introducing, and two answers to it in one batch is how one concept becomes two pages.
-- **`--dry-run` is side-effect-free**: no vault writes, no log.
-
-## Source types
-
-| Type | Adapter | Use for |
-|------|---------|---------|
-| `google-drive` | Drive API | File-based sources (curated docs in a Drive folder) |
-| `gmail` | Gmail API | Email digest; newsletters split out via a Gmail label (`label:` / `-label:`) |
-| `slack-channel` | Slack API | Channel reader (threads, bot filter, watch_users) |
-| `slack-search` | Slack API | Keyword trend search (user token required) |
-| `jira` | Jira REST API | Issue tracking (ADF→Markdown, status/period snapshot) |
-| `confluence` | Confluence REST API | Wiki pages I wrote/edited (CQL, storage-format→Markdown); version-keyed so an edit re-enters the pipeline |
-| `google-calendar` | Calendar API | Schedule tracking (HTML→Markdown) |
-| `rss` | RSS/Atom (`feed-rs`) | External knowledge feeds (vendor blogs, news) → concepts; no auth, multi-feed, per-feed error isolation (but a source that reached NO feed fails) |
-| `nodex` | `nodex` CLI | A project repository's declared document graph — each ADR, learning or guide becomes a `<wiki>/documents/` page tagged with its own kind, linked back to the repository that stores it |
-| `manual` | Local inbox | User-curated md/txt/markdown/html/htm entries; preserves exact originals and supported local dependencies before pages, then retires eligible unchanged inputs after writes and queue flush |
-| `tasks` | The intent plane's transition log | The user's own completed tasks — what `lore task` closed becomes that day's page, the work-log and a review |
-
-## Naming conventions
-
-Single-sourced so new code reads like existing code without guessing:
-
-- **Constructors**: `new` (cheap, infallible-or-trivially-validating field construction — no I/O, no sub-system building) · `from_*` (convert ONE value, e.g. `Locale::from_tag`) · `build_*` / `::build` (computed/fallible construction — I/O, sub-object construction, or derivation; free fn OR associated method, e.g. `build_source`, `build_index`, `WikiGraph::build`, `VaultExistence::build`, `TemplateEngine::build`, `PipelineContext::build`) · `with_*` (builder mutator). Test-fixture factories use `build_*` (e.g. `build_event`, `build_page`) — never an off-vocabulary verb like `make_*`.
-- **Accessors**: `find_*` (search, may return empty) · `load_*` (read from disk/IO, e.g. `load_config`, `Credentials::load`/`load_file`) · `resolve_*` (name → value/address) · `get_*` (in-memory present accessor) · `lookup` (keyed cache query).
-- **Return types**: `*Result` = domain computation outcome · `*Report` = a CLI-facing presentation of one (lk-graph `output.rs`), introduced ONLY when display adds fields/structure beyond the `*Result` (counts, applied/fixed flags); a display-ready `*Result` (e.g. `ClusterResult`, `MergeResult`) is printed directly — an empty pass-through `*Report` is ceremony, not consistency.
-- **Predicates** `is_*` (state) / `has_*` (possession), always prefixed (e.g. `is_resolvable`, not `resolves`). Each crate's public error SURFACE is a domain-named, typed `<Crate>Error` (a leaf parse/validate helper may return a `String` message that a caller wraps into its typed error — the payload is text, the surface is not); most crates have a single `<Crate>Error`, but a foundational crate may carry several domain errors (lk-core `ConfigError`). Enum variants PascalCase, `#[serde(rename_all = "kebab-case")]` on the wire · types spell words in full (`GraphCommand`, `CategoryReference`, `PipelineContext` — never `Cmd`/`Ref`/`Ctx`), locals may abbreviate (`ctx`).
-
-
-- **RSS original authority is distinct from interpretation.** New ingest binds the rendered
-  daily to a typed immutable pre-classification collection manifest. `wiki original` discovers
-  it metadata-first and reads selected title/body text with revision-pinned character pagination.
-  Legacy event logs remain read-only `legacy_unbound`, not proof of historical derivation.
-  Provider URLs and source/date/config identity do not prove retained input equality. Original
-  storage is permanent evidence; queue retention and derived summary omission do not define
-  its authority. New bound RSS tasks may declare concept/event selections; old page-only
-  JSON, hashes and tasks stay unchanged. No legacy promotion or event inference is automatic.
-  Merge/normalize/retraction update explicit links and declarations together, and staged
-  publication guards exact targets, membership and preserved originals through recovery.
+Config discovery is `./config.yaml` then `~/.config/lorekeeper/config.yaml`;
+relative `vault.root` is relative to that config file, not the working directory.

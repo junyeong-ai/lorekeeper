@@ -54,7 +54,7 @@ flowchart LR
 
 ---
 
-## Quick start (5 minutes)
+## Quick start
 
 > **Before you start, you'll need** — nothing exotic:
 > - 💻 **macOS or Linux** (Windows ships a PowerShell installer)
@@ -147,8 +147,8 @@ tags: ["document"]
 ## Summary
 Re-chunking from 2000→400 tokens, rewriting conversational questions into standalone
 queries, and switching similarity from L2 to cosine lifted Recall@5 from 0.62 → 0.91.
-The load-bearing lesson: retrieval quality is dominated by **chunk granularity and
-query formulation**, not by the choice of embedding model.
+This note reports a joint intervention; it does not isolate the effect of each
+change or establish a ranking across other environments.
 
 ## Content
 … (normalized, preserved from the original) …
@@ -176,9 +176,9 @@ source_count: 2          # ← two documents cite this one concept
 
 ## Synthesis
 A vector database stores high-dimensional embeddings and serves approximate
-nearest-neighbor (ANN) search over them. The choice is often driven less by query
-latency than by **operational simplicity** — co-locating vectors with relational data
-(e.g. pgvector on Postgres) avoids running a separate stateful system.
+nearest-neighbor (ANN) search over them. The second note chose pgvector in an existing
+PostgreSQL environment to reduce the cost of operating a separate system. Keep the
+conditions of that decision separate from the first note's retrieval-quality observation.
 
 ## Sources
 - [Choosing a Vector Database for Production](../../wiki/documents/choosing-a-vector-database-for-production.md)
@@ -187,27 +187,42 @@ latency than by **operational simplicity** — co-locating vectors with relation
 
 > Whether you write `Vector DB` or `Vector Database`, it lands on **one page** (registered as an alias). Knowledge not fragmenting — that *is* the "compounds over time" promise.
 
-### ✅ Result ③ — optional by-topic index export (`wiki/index.md`)
+### ✅ Result ③ — disclose detail as needed
 
-```markdown
-# Wiki Index
-
-## Concepts (16)
-
-### ai-ml (6)
-- [Vector Database](concepts/vector-database.md) — stores high-dimensional embeddings and serves ANN search; selection is driven by operational simplicity more than query latency…
-- [RAG](concepts/retrieval-augmented-generation.md) — grounds an LM's output in retrieved passages; answer quality is dominated by the retrieval stage, not the embedding model…
-- [Chunking](concepts/chunking.md) — splitting documents into embed/retrieve units; granularity strongly governs retrieval quality…
-
-### infrastructure (10)
-- [Kubernetes](concepts/kubernetes.md) — container orchestration; reliable operation depends on observing pod memory and restart signals…
+```bash
+lore wiki prepare                           # create a reusable SQLite snapshot
+lore wiki search "Vector DB" --snapshot <id> --limit 10 --json
+lore wiki browse --type concept --category ai-ml --limit 20 --json
+lore wiki read wiki/concepts/vector-database.md # outline/revision → select a section
+lore wiki links wiki/concepts/vector-database.md --limit 20
+lore wiki reviews        # inspect unresolved judgments separately
 ```
 
-When Markdown exports are enabled, larger vaults use `index.md` as the entry to a navigation tree with at most 100 entries per page. Generated `catalog/` pages are navigation, not evidence or knowledge nodes.
+Markdown is authoritative; `.lorekeeper/search.sqlite` is a rebuildable navigation layer.
+Start with names, aliases, excerpts and source identifiers, then read selected sections,
+relationships, evidence and preserved originals. `wiki search --body` supports literal
+text and `--regex` searches. Ranking and citation counts are not confidence scores.
 
-Knowledge reviews appear in the catalog’s first group with their current effective state. Changed evidence marks a resolved judgment as needing reassessment while preserving its history. Scheduled pipelines finish with `queue check` and `wiki reviews --check`. Open reviews pass; a deleted historical source remains valid when its recorded revision has a verified archive.
+A snapshot contains captured content. Prepare again after changes and verify evidence
+using the returned revision. Follow `next_offset` for page/link inventories. Snapshot
+link pagination keeps the same snapshot; do not combine it with live `--revision`.
 
-For an actual reassessment, first preserve the prior review with `lore wiki evidence --archive <review-path>`. Read and archive the new evidence, explicitly replace the current `review.evidence`, and record a dated judgment with the prior review’s `.lorekeeper/evidence/<revision>.md` path in the body. Never update revision labels on an old judgment without reassessing it.
+The default `index.md` is a small entry guide. Explicitly enabling Markdown exports
+also generates `catalog/`, `log.md` and `map.md`, with at most 100 catalog entries
+per page. These are optional derived navigation, not duplicate knowledge or evidence.
+The log sorts declared creation dates, which are not collection history. `--snapshot` search,
+filters and pagination use SQLite; omitting it reads current Markdown; Obsidian still follows the original page links.
+
+A conflict requires incompatible claims under comparable conditions. A newer date
+or more citations cannot resolve it automatically. `wiki reviews` exposes current
+judgments; evidence changes require reassessment while preserving prior decisions.
+Scheduled `queue check` and `wiki reviews --check` detect unfinished work and evidence
+drift, not universal semantic truth.
+
+Before reassessment, archive the prior judgment with
+`lore wiki evidence --archive <review-path>`. Read and archive new evidence, explicitly
+replace `review.evidence`, and record a dated judgment with the prior archive path.
+Never update revision labels without reassessing the judgment.
 
 ### ✅ Result ④ — a knowledge graph forms
 
@@ -359,8 +374,7 @@ Skills that pair with the deterministic `lore` binary — the *judgment* parts r
 |---|---|
 | `/lore-process` | Drains the LLM queue after ingest — fills summaries, concepts, themes, reviews |
 | `/lore-setup` | Builds your config by inspecting your workspace — discovers Slack channel / Jira project / calendar IDs |
-| `/lore-wiki` | Semantic query (with compounding) · add sources · structural + semantic audit |
-| `/lore-capture` | Capture an insight from active work straight into the vault |
+| `/lore-wiki` | Evidence-based `query`, source `add`, current-work `capture`, structural/semantic `audit` |
 | `/lore-extract` | Batch-extract transferable knowledge from a project repo (scan→run→audit) |
 | `/lore-ingest` | Wraps the `lore` CLI (ingest, synthesis, status, schedule) |
 | `/lore-day` | Daily agenda, knowledge briefing, reminders and closing the day |

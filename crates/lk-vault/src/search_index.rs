@@ -310,6 +310,35 @@ pub(super) fn search(
     ))
 }
 
+/// Exact captured metadata filters shared by browse and raw-body traversal.
+fn scalar_filter(options: &SearchOptions<'_>) -> (String, Vec<rusqlite::types::Value>) {
+    let scope = if options.include_sources {
+        "1"
+    } else {
+        "knowledge = 1"
+    };
+    let mut predicates = vec![scope.to_string()];
+    let mut arguments = Vec::<rusqlite::types::Value>::new();
+    for (column, value) in [
+        ("category", options.category),
+        ("format", options.format),
+        ("source_status", options.source_status),
+    ] {
+        if let Some(value) = value {
+            arguments.push(value.to_string().into());
+            predicates.push(format!("{column} = ?{}", arguments.len()));
+        }
+    }
+    for (operator, value) in [(">=", options.created_from), ("<=", options.created_to)] {
+        if let Some(value) = value {
+            arguments.push(value.to_string().into());
+            predicates.push(format!("created_date {operator} ?{}", arguments.len()));
+        }
+    }
+    let filter = predicates.join(" AND ");
+    (filter, arguments)
+}
+
 /// Browse scalar metadata in SQLite; deserialize only the requested page of hits.
 fn browse(
     connection: &Connection,
@@ -332,25 +361,7 @@ fn browse(
     let categories = facets("category")?;
     let formats = facets("format")?;
     let source_statuses = facets("source_status")?;
-    let mut predicates = vec![scope.to_string()];
-    let mut arguments = Vec::<rusqlite::types::Value>::new();
-    for (column, value) in [
-        ("category", options.category),
-        ("format", options.format),
-        ("source_status", options.source_status),
-    ] {
-        if let Some(value) = value {
-            arguments.push(value.to_string().into());
-            predicates.push(format!("{column} = ?{}", arguments.len()));
-        }
-    }
-    for (operator, value) in [(">=", options.created_from), ("<=", options.created_to)] {
-        if let Some(value) = value {
-            arguments.push(value.to_string().into());
-            predicates.push(format!("created_date {operator} ?{}", arguments.len()));
-        }
-    }
-    let filter = predicates.join(" AND ");
+    let (filter, mut arguments) = scalar_filter(options);
     let total: i64 = connection.query_row(
         &format!("SELECT COUNT(*) FROM pages WHERE {filter}"),
         rusqlite::params_from_iter(&arguments),
@@ -420,7 +431,7 @@ pub(super) fn verify_snapshot(
 pub(super) fn visit_body_pages(
     root: &Path,
     dirs: &VaultDirs,
-    include_sources: bool,
+    options: &SearchOptions<'_>,
     expected: &str,
     mut visit: impl FnMut(Page, usize) -> Result<(), VaultError>,
 ) -> Result<(), VaultError> {
@@ -428,9 +439,13 @@ pub(super) fn visit_body_pages(
     let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let transaction = connection.transaction()?;
     verify_snapshot(&transaction, root, dirs, expected)?;
-    let mut statement =
-        transaction.prepare("SELECT payload FROM pages WHERE ?1 OR knowledge = 1 ORDER BY id")?;
-    let rows = statement.query_map([include_sources], |row| row.get::<_, String>(0))?;
+    let (filter, arguments) = scalar_filter(options);
+    let mut statement = transaction.prepare(&format!(
+        "SELECT payload FROM pages WHERE {filter} ORDER BY id"
+    ))?;
+    let rows = statement.query_map(rusqlite::params_from_iter(&arguments), |row| {
+        row.get::<_, String>(0)
+    })?;
     for row in rows {
         let page: Page = serde_json::from_str(&row?)
             .map_err(|error| VaultError::Serialization(error.to_string()))?;

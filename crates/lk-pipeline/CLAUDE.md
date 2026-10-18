@@ -1,262 +1,106 @@
 # lk-pipeline
 
-Deterministic transform stages between `lk-source` and `lk-vault`. Shares an
-`Arc<PipelineContext>` (engine, llm, dirs, `personal: Option<PersonalConfig>`, timezone,
-locale, concept_categories) with the `Synthesizer`. `personal` is `None` for a
-domain-neutral engine — then no work-log, reviews, or `is_personal` are produced.
+Deterministic transforms from source observations to planned vault pages.
+`PipelineContext` shares templates, LLM, dirs, timezone, locale and optional personal
+configuration. Publication is guarded, not a second uncoordinated render path.
 
-- **Streaming sources project from the event log** (root invariant) — the crate mechanics:
-  for a streaming source (`SourceType::descriptor().streaming`, RSS), `plan` UNIONs the fetch with that date's
-  `.lorekeeper/events/{source}/{date}.jsonl` by `EventId` (`event_log::merge_by_id`, fresh
-  wins so a still-in-feed item picks up an in-place edit), persists it (unless dry-run), and
-  renders from the merged set. The log holds RAW (pre-LLM) bodies, so a re-render always feeds
-  refine raw text — no per-block refine state. `event_log::read` is STRICT on a corrupt line
-  (errors, leaves the file intact) — silently dropping it would rewrite the reduced set and
-  lose the event. `manual` is exempt (document pages, one per inbox file).
-- **`Pipeline::plan` is per-source and takes `&mut self`**; one `Pipeline` owns one
-  ingest run exclusively (no shared-ref concurrency). It returns that source's daily
-  pages and merges any extracted concepts into a **run-level** `ConceptDrafts`
-  accumulator. Concept pages are a cross-source aggregate, rendered ONCE via
-  `render_concept_pages()` after all sources are planned — never per source (that would
-  let a later source's write clobber an earlier one).
-  **Every concept is READ before any is folded** — `ConceptDrafts::stage` for all of them,
-  then `commit` — on all three paths that touch the accumulator (`plan`, `plan_documents`,
-  `apply_concept_result`). Folding one at a time would leave the earlier ones in an
-  accumulator `render_concept_pages()` emits unconditionally, so a read failing partway
-  writes concept pages for an origin page that plan never wrote — orphans on a run that
-  reported failure. Reading is the only fallible half, which is what makes the split work.
-- **Materialized-view render**: a daily page is two layers. The **structural** layer
-  (frontmatter, raw event list, all `## ` headings) is re-rendered every ingest from
-  the template. The **semantic** layer (summary body, refined event bodies, concept
-  links) is owned by the LLM via the queue and **preserved across re-renders**.
-  `Pipeline::plan`, `work_log`, and `synthesis` all implement this with:
-  1. Compute `Request::cache_hash()` for every LLM task that would fire.
-  2. Look up the previous render via the `VaultStore` seam (`FsVault`; `InMemoryVault` for
-     tests) and ask `llm_cache::lookup` whether the page's `*_done` completion marker
-     already equals that hash (the body is never consulted). If yes, skip the LLM enqueue
-     and stash the existing body as `preserved_body`.
-  3. Render the fresh template (heading is always emitted; the body is empty when the
-     LLM hasn't produced it).
-  4. `render::splice_preserved_sections` replaces each fresh empty body with its
-     `preserved_body` so the on-disk page round-trips unchanged when nothing changed.
-     It returns `Option`: if a cached body's heading is absent from the fresh render
-     (a custom template renamed the section), it returns `None` and the caller skips
-     the write — keeping the previous page rather than dropping the preserved body.
-  5. The fresh frontmatter records the hash in `llm_inputs.<key>` (the stale-task
-     reference) regardless of whether the task was enqueued, and re-emits the `*_done`
-     marker on a cache hit, so the cache is self-perpetuating.
-  The pattern applies uniformly to daily, document, work-log, AND synthesis pages —
-  every page with an LLM-owned section is a materialized view. `TargetKind::llm_inputs_key`
-  is the single source of truth mapping a task kind to its frontmatter key.
-  Manual override: a vault editor deleting the `llm_inputs.<key>_done` marker line
-  invalidates the cache for the next run — wiping the body alone does NOT (the body is
-  data, the marker is completion state). No flag, no out-of-band invalidation API.
-  **Completion is uniformly marker-signalled (`TargetKind::completion_key`).** Every
-  LLM-owned section has an input key (`summary`/`refine_events`/`concepts`/`themes`/
-  `topic_summary`/`narrative`) pre-stamped with the current-input hash (the stale-task
-  reference — `llm_inputs.<key>` always equals the current input), and a companion
-  `llm_inputs.<key>_done` marker `/lore-process` writes when it finishes, EVEN with an
-  empty result. There is NO body-emptiness completion signal: a non-empty body never
-  means "done", because too many sections can be legitimately empty (a focus-filtered
-  summary that matched nothing, an extraction that found nothing, a trivial-only
-  work-log, an empty-period review) — a per-kind "can this be empty?" judgment proved
-  intractable, so no kind makes it. `llm_cache::lookup` returns cached only when the
-  marker equals the current hash, never consulting the body, so an empty-but-done result
-  stays cached instead of re-enqueueing forever. The render re-emits each `*_done` marker
-  ONLY on a cache hit (where `lookup` proved it equals the current input hash), so a stale
-  marker is dropped on a miss instead of riding a changed-input render forward. Every
-  template emits its section's `*_done` key conditionally (mirroring the input key), so
-  the marker reaches the page — the `empty_*_is_cached_not_re_enqueued` tests guard that
-  the template doesn't silently drop it. A queued task whose `cache_hash`
-  differs from the input key is unambiguously stale and dropped; a first run, a crash
-  before flush, an unprocessed page, OR a changed-input re-ingest all converge. Force a
-  re-run by deleting the `*_done` line — wiping the body alone does NOT (it is data, not
-  completion state).
-- **Concept links ACCUMULATE; every other semantic section is replaced.** `render::accumulate_concepts`
-  is the one rule, and both writers go through it: the plan render (which passes the existing
-  section's links alongside whatever the extraction resolved) and `apply_concept_result` (which
-  passes the section it is about to rewrite). Restating the section instead would un-cite every
-  concept page the superseded extraction created — see the root invariant for why that is
-  unrecoverable. On the queue path a cache miss leaves the extraction empty, so accumulating is
-  what keeps the page's citations through the window between ingest and drain; on a synchronous
-  provider it merges the two sets. Only the reported concepts are staged into the run's drafts —
-  a carried citation names a page that already exists, and re-deriving it from link text would
-  mint a page from a display name. Carried links are gated exactly as `lk-graph` gates an edge
-  (resolved against the citing page, `.md`, landing in the concepts directory), so anything else
-  in the section is left to the body it lives in.
-- **Cache identity vs queue payload**: `Request::cache_identity()` in `lk-queue` is the
-  hashable subset that shapes the LLM's output; `Request::task_input()` is the queue
-  payload (identity PLUS `source_type`). `cache_hash()` BLAKE3-128s the identity;
-  `categories`
-  is sorted before hashing so config field order can't perturb the cache.
-- **`dedup::deduplicate(events)`** is the ONLY deduplication — pure, stateless,
-  in-memory, scoped to ONE source's single fetch. It collapses by EXACT identity ONLY:
-  a shared `EventId` (`source:date:hash(external_id)`), keeping the first occurrence. Two
-  events merge iff one fetch surfaced the literal same item twice (paginated history
-  overlap); since `EventId` IS the identity, this is provably lossless — single-key dedup
-  with first-wins can never drop a distinct observation, and has no transitivity gap.
-  Nothing else is a merge signal: a shared url, title, or body does NOT merge. The same
-  article carried by two RSS feeds keeps both (each feed namespaces its `external_id`); a
-  recurring same-title event (a daily "Standup") always survives. url/title are deliberately
-  NOT dedup keys — a url is not a reliable identity (shared meeting/landing links), so keying
-  on it would false-merge. Cross-run (event log) and cross-source (concept/graph layer)
-  convergence is owned elsewhere: the same item on two sources stays on both timelines
-  (provenance) and converges at the page layer via `concept-merge` / `backlinks-sync` /
-  `duplicate-concepts`.
-- **classify**: ownership (`is_self`, root invariant; set by the adapter) is carried by
-  `normalize` to `Event::is_self`; `assign_personal(events, tracked)` sets `is_personal` +
-  the `personal` label only when the source is in `personal.tracked_sources` (so an absent
-  personal module means no event is ever personal).
-  `classify_by_keywords` reads `SourceConfig.classify` (ordered `Vec<ClassifyRule>`, first
-  match wins) and uses `contains_bounded` (standard `\w` token boundary — ASCII-alphanumeric
-  + `_`, so a keyword matches inside hyphen/dot compounds like `AI`→`AI-powered`,
-  `GPT`→`GPT-4`; CJK matches across attached particles so `검토`→`검토를`/`재검토`). Keywords
-  lowercased once per call. Deterministic; an unmatched event stays uncategorized (general
-  section / `uncategorized` work-log) — a safe default, no LLM step.
-- **Canonical event order is single-sourced.** Every page that materializes events sorts
-  them through `Event::canonical_cmp` (newest first, ties broken by `id` for a total order)
-  BEFORE any bucketing, hashing, or rendering — both the streaming event-log union
-  (`merge_by_id`) and the complete-refetch daily path (`plan`). So a page's bytes and its
-  LLM-input hash never depend on the adapter/API return order: re-ingesting the same set in
-  a different order is byte-identical and enqueues zero tasks. Don't sort events ad hoc
-  anywhere else — route through the one comparator.
-- **Document addresses follow source identity, not mutable titles.** The run loads exact
-  `source_identity` ownership (repository namespace + document ID), or legacy
-  `source_file`/`source_url`, once across all Markdown descendants of the documents
-  directory, retaining nested relative addresses. A unique existing owner keeps its address when
-  the title changes; multiple owners refuse ingestion rather than selecting or merging one.
-  The same ownership constraint covers planned pages across sources before publication.
-  A source batch must have one observation per document origin; overlapping collections
-  fail before rendering. Exact repeated events may collapse, but different payloads under
-  one event id fail rather than selecting a version. Only successful plans reserve ownership.
-  New documents start with a title slug, but a same-titled *different* document never overwrites another's page.
-  A candidate slug is claimed only when it is free in this batch AND its on-disk page (if any)
-  is the SAME document — compared by the page's `source_file`/`source_url` identity. Otherwise
-  a suffix from the document's own `EventId` trailing hash is appended and lengthened until the
-  candidate is genuinely free, and past the full hash a numeric tail keeps lengthening it. The
-  candidate therefore always changes, so termination rests on that rather than on the hash being
-  unique — collision-freedom is not assumed anywhere. This catches
-  both intra-batch collisions and the cross-run case (a prior run's archived note's page still
-  on disk). Re-ingesting the same document reuses its slug (identity match) → idempotent.
-- **Legacy document adoption requires identity evidence.** Exact location plus a matching
-  source record ID can adopt a page into a repository namespace. Missing source IDs or
-  multiple owners stop ingestion for explicit migration. Titles and similar content never
-  authorize adoption. A removed source is not automatically archived or deleted.
-- **Concept merge** reads existing `created`/`updated` frontmatter (the keys actually
-  written), preserves the original title, category, AND `aliases` (established identity =
-  first writer wins) — a synonym a human or `/lore-wiki audit` registered survives the
-  re-render instead of being reset to `[title]` (the title is always re-emitted as the
-  first alias). A re-extraction whose category DISAGREES with the established one is a
-  genuine conflict — kept established, but `tracing::warn`ed so a possibly-wrong day-1
-  assignment doesn't silently calcify. `merge` only widens the `first_seen`/`last_seen`
-  window (`observe`); it does NOT count citations. `source_count` starts at `0` on a page this
-  creates and is re-emitted verbatim from the existing page on a re-render, so ingest never
-  moves it; it is owned solely by `lore graph backlinks-sync`, which re-derives it
-  exactly from the link graph — so a crash or an idempotent re-ingest can never inflate
-  it. Duplicate concept creation is prevented skill-side by asking this crate's own question:
-  `lore resolve <name>` answers from the same `ConceptRegistry` the router uses, so a skill
-  reuses an established page instead of forking a variant — the pipeline embeds no registry in
-  the task, and the registry a skill reads for the equivalences spelling cannot see
-  (asked per name through `lore resolve` and `lore wiki search`) is a second, narrower step
-  rather than the primary one.
-- **Ingest publication checks the snapshot used to derive the page.** Daily, document
-  and concept renders retain `VaultPage.original`; a reader omitting that snapshot is
-  refused. `RenderResult.expected_original` carries those exact bytes, or expected
-  absence for a new page. Daily and concept writers use `plan_publication` and
-  `MutationPlan::publish_expected`; document writers use `publish_document_expected`
-  to preserve evidence archival as well as the derivation guard. Rereading at publication
-  time would accept an intervening edit as the baseline and overwrite it with an older draft.
-- **An extraction's ALIASES are adopted only where nothing else claims them.** A concept's
-  name is its address and its lookup key and the lookup is exact, so a name carrying a gloss
-  answers to neither half — `ConceptDrafts::stage` takes the other spellings as data instead,
-  resolves each against the registry, and registers only those that are `Absent` or already
-  route to this page — where "already" includes a name resolved EARLIER IN THE SAME RESULT,
-  since resolution records its decision as it goes. A name an established page answers to is REFUSED and warned: the
-  extraction is one source's reading of what a term also means, while the page earned that
-  name by being cited under it. Never matched approximately — an alias exists precisely to
-  make an exact lookup succeed. A draft's `aliases` are only ever added to, because a citation
-  somewhere may already address the page through one. Within ONE extraction the outcome depends
-  on the order concepts are reported in — `{name: X, aliases: [Y]}` before `{name: Y}` converges
-  both on X, the reverse mints `y.md` and refuses the alias — which is the same
-  first-answerer-keeps-the-name rule either way, and deterministic for a given result, but it is
-  what a reader looking at a split concept has to know.
-  **A refusal that MINTED a page beside the one holding the name is carried out to whoever
-  writes it.** Nothing downstream can find it afterwards — the two pages share no name for a
-  later check to compare — so the record travels on the `RenderResult` of whichever of the two
-  this run writes LAST, and the writer says it in the same step. Anchored there rather than
-  reported per batch because a write failing part-way through would lose every record whose
-  page THIS RUN HAD ALREADY WRITTEN: the retry finds those established and records nothing. A
-  page that was on disk before the run is the case that is never at risk, and telling the two
-  apart is the whole of the rule — a concept cited again today is a draft as well. A record is
-  carried only where both pages exist — an owner this run claimed for a name and never wrote a
-  page for is a resolution an abandoned batch left behind, and the merge it would name could
-  not be run. Reported, never gated: folding two concept pages is a judgment, and the page is
-  materialized either way.
-- **Name resolution uses `ConceptRegistry`.** Read every page's title and aliases;
-  unreadable or malformed registry pages fail the operation rather than dropping unknown
-  names. Ambiguous names refuse staging. Allocate an unoccupied address for an absent
-  name and register it before resolving the next concept in the batch.
-- **A concept page's `llm_inputs` are carried, except the one fact only the render knows.**
-  A concept's synthesis is owed against source paths and authored revisions, which `lore graph
-  backlinks-sync` derives, so established markers are re-emitted unchanged — dropping them
-  would re-enqueue every concept a run touched, and judging them would need a link graph the
-  render cannot see. What the render does know is the page it is CREATING and the one citation
-  creating it: after staging and rendering the origin links, `StagedConcept::ground` takes
-  the grounding sentence and the completed origin page's revision (`Grounding`), and a page seeded from it records that
-  single citation's digest as both `synthesis` and `synthesis_done`. Without the record the
-  sentence reaches the sweep indistinguishable from authored prose and is ADOPTED as the answer
-  for however many pages cite the concept by then — which in a backfill is the whole set, with
-  the page stamped fully answered so no rewrite is ever owed. An input the sweep already
-  recorded is left alone: it is that sweep's promise and the queued task's cache key.
-- **`theme` vs `topic` are deliberately distinct, not drift.** A weekly-synthesis
-  `Theme` (`identify_themes`) is a cross-source cluster spanning a whole week; a work-log
-  `topic_summary`/`topic_heading` is a single day's per-source activity grouping. They sit
-  at different altitudes (like `category` vs `performance_category`), so the vocabulary is
-  kept separate on purpose — do NOT unify them into one term (it would also collide with
-  graph "topic communities").
-- **Synthesizer** methods are `try_weekly_synthesis` (cross-source themes) +
-  `try_{weekly,monthly,quarterly,annual}_review` (personal performance reviews). Each is a
-  materialized view like a daily page: `summarize_section` (or, for weekly themes,
-  an inlined `identify_themes` path) computes `cache_hash`, looks up the existing
-  page via `lookup`, gates the LLM call on `decision.enqueue()`, and `render_section`
-  stamps `llm_inputs.<key>` + splices the preserved body on a cache hit. A transient
-  LLM failure yields `SynthesisSection::failed()` (`narrative: None`) so the caller
-  skips the page rather than stamping an empty hash. Every `TaskTarget` carries
-  `anchor` — the exact `## …` heading resolved from i18n at construction time — so
-  the skill never needs a hardcoded kind→heading table.
-- **Synthesis fallback cascade** is **per-missing-child**, not all-or-nothing: each
-  month of a quarter independently falls back to its weekly reviews when its monthly
-  review is absent (`month_child_narrative`), and each quarter of a year falls back to
-  its months — then weeks — when its quarterly review is absent (`quarter_child_narrative`).
-  So a quarter whose latest month isn't summarized yet still includes that month rather
-  than omitting it. An ISO week straddling a month/quarter boundary is read by both
-  adjacent fallback periods: for a narrative rollup that mild redundancy is harmless (the
-  parent summary folds it) and dropping it would lose the later period's real activity,
-  while the numeric category table is computed separately from raw work-log over the exact
-  date range so counts are never double-tallied. Raw daily work-log is never fed to a
-  higher-level synthesis (each level reads only pre-summarized pages).
-- Every page renders through an embedded template; the ad-hoc fallback renderers that once
-  shadowed them are gone, which is why the `##` anchors `/lore-process` locates by and the
-  frontmatter keys synthesis reads (e.g. work-log `categories`) have exactly one source.
+## Source planning (`lib.rs`, `normalize.rs`, `dedup.rs`, `event_log.rs`)
 
-- **Document provenance participates in semantic input.** An imported `source_record` is
-  rendered as metadata and included in summary/extraction requests, so a status-only change
-  cannot reuse a summary claiming current applicability. Original content remains separate
-  from generated interpretation; a source's archived state does not make its claims false.
+- One mutable `Pipeline` owns an ingest run. Plan per source; accumulate concepts
+  across sources and render them once. Stage/read every concept before committing
+  any to the accumulator on plan, documents and applied-extraction paths, so a
+  failed source cannot leave publishable orphan drafts.
+- Normalize event identity from external_id or JSON `[title, body]`. Dedup only
+  exact `EventId` within one fetch, first wins; URL/title/body similarity is not
+  identity. Cross-source observations remain separate provenance.
+- Canonicalize through `Event::canonical_cmp` (newest, then id) before bucketing,
+  hashing and rendering. Adapter return order must not change bytes/cache hashes.
+- Streaming sources union fetched and stored raw events per date, fresh ID wins.
+  Corrupt event-log lines fail without rewriting: skipping would destroy retained
+  observations. Complete-refetch sources render their fetched full civil days.
+- Derive dates in configured timezone; future events never materialize. Adapters
+  own `is_self`; `assign_personal` additionally requires configured tracked sources.
+  Keyword classification is ordered first-match; bounded Latin matching and CJK
+  particle matching stay in the shared classifier. No match remains uncategorized.
 
-- **New RSS daily provenance** captures the accumulated realized day's normalized collection
-  before classification, including items retained from the streaming log. `RenderResult`
-  carries that bounded capture and a typed `source_record.rss_original` reference. The CLI
-  publishes originals before planning the page; `plan_publication` guards original dependencies
-  in the same mutation journal. Capture limits are 4 MiB/event, 64 MiB/source and 256 MiB across
-  CLI-planned RSS sources. Dry-run keeps captures in memory only. Page-only citations and completion ownership remain unchanged. New bound captures may
-  supply explicit event selections under the event-aware extraction policy. A newly rendered page establishes a new binding, never historical
-  proof about an earlier page's derivation from a legacy log.
+## Materialized semantic sections (`llm_cache.rs`, `render.rs`)
 
-- **Event-aware RSS extraction is explicit.** New captures supply a typed manifest in the
-  extraction request. The applier accepts new LLM-selected pairs only from that provided
-  manifest, accumulates them with existing declarations, and publishes them with generated
-  links under the exact origin guard. Old carried pairs retain their original manifest
-  even when the current collection changes. Daily re-renders preserve these declarations.
-  A new single-event grounding records its event citation; multi-evidence creation remains
-  owed a synthesis rather than falsely claiming a single source answered the whole set.
+1. Compute request hash; lookup the existing page through `VaultStore`.
+2. Cache only when `<key>_done` equals current input hash, even for an empty body.
+3. Render structural fields/headings from embedded templates, then splice preserved
+   semantic bodies. If a template lacks a cached heading, skip the write rather
+   than lose answered text.
+4. Always stamp current `<key>`; re-emit `_done` only on a verified cache hit.
+
+Use `TargetKind` keys and locale-tolerant vault section resolution. Deleting `_done`
+invalidates a view; deleting prose does not. Never infer completion from emptiness.
+Use one template path for daily, document, work-log and rollup pages.
+
+Concept links alone **accumulate** through `render::accumulate_concepts` on render
+and apply. Carry only valid concept destinations and preserve their addresses;
+never reconstruct concepts from display labels. Other semantic bodies replace.
+Retention keeps citations through pending extraction but does not certify their
+continued factual support; explicit reviewed retraction is separate.
+
+## Document identity and publication (`document_identity.rs`)
+
+- Address by exact `(repository, document id)` ownership, with explicit legacy
+  source_file/source_url fallback. Load all document descendants once and retain
+  nested addresses. Unique owner keeps its address after title changes; multiple
+  owners or overlapping document observations refuse before rendering.
+- Repeated identical events may collapse; different payloads under one ID fail.
+  Reserve identities only after a successful plan. New-title collisions use the
+  document's event suffix, lengthening through full hash then numeric tails; never
+  assume a suffix is unique or overwrite a different document.
+- Legacy adoption requires exact location and matching source record ID. Similar
+  titles/content never authorize adoption; removed sources are not auto-deleted.
+- `source_record` provenance participates in summary/extraction input. A metadata
+  status change may change applicability even with identical primary body; archived
+  does not mean false. Keep original content separate from interpretation.
+- Capture `VaultPage.original` when reading. `RenderResult.expected_original`
+  guards the exact prior bytes/absence; never reread a newer baseline at publish
+  time. Use `plan_publication`/`publish_expected` or document publication with its
+  evidence archive in the same mutation plan.
+
+## Concept ownership (`concept_draft.rs`)
+
+- Resolve through shared `ConceptRegistry`; unreadable/malformed names fail and
+  ambiguity refuses staging. Register an allocated unoccupied address before the
+  next concept. First established title/category/aliases win; warn category
+  disagreement, widen dates only, preserve `source_count` (backlinks-sync owns it).
+- Resolve each proposed alias; accept only absent or same-owner names, including
+  earlier decisions in this result. Never approximate. Keep established aliases.
+  Result ordering determines first ownership; do not silently merge rival pages.
+- Refused aliases that created a rival must reach the writer on the last materialized
+  page while both owners exist. Report, don't auto-merge: semantic equivalence is a
+  judgment. Preserve this record across partial-write/retry behavior.
+- Carry existing synthesis input/completion markers unchanged. A newly created
+  single-grounding page records its completed origin revision and shared citation
+  digest as input/done, so backlinks cannot adopt one sentence as a synthesis of
+  many sources. Multiple evidence does not pretend a single grounding answered all.
+
+## Rollups (`synthesis.rs`, `work_log.rs`)
+
+- `personal=None` means no work-log or personal reviews; weekly cross-source themes
+  remain. A full ingest alone rewrites the cross-source work-log.
+- Theme = weekly cross-source cluster; topic = daily per-source activity group.
+  Keep those distinct from contribution categories and graph communities.
+- Each rollup uses the same cache/section contract. Transient LLM failure yields
+  `SynthesisSection::failed()` and skips publication, not an empty completed input.
+- Fallback is per missing child: quarter month→weeks, year quarter→months→weeks.
+  Narrative overlap from boundary weeks is acceptable; numeric totals use raw
+  work-log's exact date range. Higher rollups never consume raw daily narratives.
+  Date-range reads cap at today independently of command `--date`.
+
+## RSS originals and selectors
+
+- Capture the accumulated realized day's normalized collection **before** classify.
+  `RenderResult` carries original capture and typed manifest reference; CLI publishes
+  immutable originals before page planning and journals dependency guards with it.
+  Limits: 4MiB/event, 64MiB/source, 256MiB per CLI-planned RSS set. Dry-run is memory-only.
+- New binding is not historical proof about old pages/legacy logs. Page-only task
+  behavior remains unchanged unless explicit event-aware policy is selected.
+- New selections come only from the request's provided manifest; accumulate links
+  and declarations under the exact origin guard. Carried selections retain and
+  verify their historical manifest even after current collection changes. Daily
+  rerenders preserve declarations; omission is not retraction.

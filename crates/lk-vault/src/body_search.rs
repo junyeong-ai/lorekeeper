@@ -182,7 +182,7 @@ pub fn search_body(
         Ok(())
     };
     if let Some(snapshot) = search.snapshot {
-        super::search_index::visit_body_pages(root, dirs, search.include_sources, snapshot, visit)?;
+        super::search_index::visit_body_pages(root, dirs, search, snapshot, visit)?;
     } else {
         visit_pages(root, dirs, search.include_sources, visit)?;
     }
@@ -357,6 +357,123 @@ mod tests {
             "---\ninvalid: [\n---\nneedle\n",
         );
         assert!(search_body(root.path(), &dirs, &options).is_err());
+    }
+
+    #[test]
+    fn snapshot_filters_before_decoding_unselected_payloads() {
+        for (case, good_metadata, bad_metadata, category, format, source_status, include_sources) in [
+            (
+                "scope",
+                "type: document",
+                "type: daily",
+                None,
+                None,
+                None,
+                false,
+            ),
+            (
+                "category",
+                "category: ops",
+                "category: other",
+                Some("ops"),
+                None,
+                None,
+                true,
+            ),
+            (
+                "format",
+                "type: document",
+                "type: concept",
+                None,
+                Some("document"),
+                None,
+                true,
+            ),
+            (
+                "status",
+                "source_record: {status: active}",
+                "source_record: {status: archived}",
+                None,
+                None,
+                Some("active"),
+                true,
+            ),
+            (
+                "empty",
+                "",
+                "category: ops\ntype: document\nsource_record: {status: active}",
+                Some(""),
+                Some(""),
+                Some(""),
+                true,
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let dirs = VaultDirs::default();
+            let good = "wiki/documents/good.md";
+            let bad = if case == "scope" {
+                "daily/feed/bad.md"
+            } else {
+                "wiki/documents/bad.md"
+            };
+            for (path, metadata) in [(good, good_metadata), (bad, bad_metadata)] {
+                write(
+                    root.path(),
+                    path,
+                    &format!(
+                        "---\ntitle: {case}\n{metadata}\n---\n## Claim\nneedle\nneedle again\n"
+                    ),
+                );
+            }
+            let session = crate::MutationSession::acquire(root.path()).unwrap();
+            let snapshot = crate::prepare_search(&session, &dirs).unwrap().snapshot;
+            drop(session);
+            let mut options = BodySearchOptions {
+                search: SearchOptions {
+                    query: Some("needle"),
+                    category,
+                    format,
+                    source_status,
+                    include_sources,
+                    limit: 1,
+                    offset: 1,
+                    ..Default::default()
+                },
+                context: 0,
+                ..Default::default()
+            };
+            let live = search_body(root.path(), &dirs, &options).unwrap();
+            assert_eq!(live.scanned_pages, 1, "{case}");
+            assert_eq!(live.total, 2, "{case}");
+            assert_eq!(live.hits[0].path, good, "{case}");
+            let connection = rusqlite::Connection::open(
+                root.path().join(super::super::search_index::INDEX_PATH),
+            )
+            .unwrap();
+            connection
+                .execute(
+                    "UPDATE pages SET payload = 'not JSON' WHERE path = ?1",
+                    [bad],
+                )
+                .unwrap();
+            drop(connection);
+            options.search.snapshot = Some(&snapshot);
+            let mut captured = search_body(root.path(), &dirs, &options).unwrap();
+            captured.snapshot = None;
+            assert_eq!(
+                serde_json::to_value(captured).unwrap(),
+                serde_json::to_value(live).unwrap(),
+                "{case}"
+            );
+            options.search.include_sources = true;
+            options.search.category = None;
+            options.search.format = None;
+            options.search.source_status = None;
+            assert!(
+                search_body(root.path(), &dirs, &options).is_err(),
+                "corrupt payload must remain observable when selected: {case}"
+            );
+        }
     }
 
     #[test]
