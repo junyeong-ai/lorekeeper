@@ -739,3 +739,47 @@ fn an_excluded_forecast_entry_still_protects_its_consumed_dependency_from_retire
     assert!(stderr_of(&dry).contains("retirement blocked"));
     assert!(!stderr_of(&dry).contains("retirement eligible"));
 }
+
+#[test]
+fn managed_pages_cannot_be_captured_or_retired_as_manual_input() {
+    for managed in [
+        "knowledge/concepts",
+        "observations/source",
+        "me/weekly",
+        "synthesis/weekly",
+        ".lorekeeper/input",
+    ] {
+        let workspace = Workspace::new("");
+        let config_path = workspace.root.path().join("config.yaml");
+        let config = std::fs::read_to_string(&config_path)
+            .unwrap()
+            .replace(
+                "root: vault",
+                "root: vault\n  dirs:\n    wiki: knowledge\n    daily: observations",
+            )
+            .replace("inbox_dir: inbox", &format!("inbox_dir: {managed}"));
+        std::fs::write(&config_path, config).unwrap();
+        let input = workspace.vault().join(managed);
+        std::fs::create_dir_all(&input).unwrap();
+        let page = input.join("existing.md");
+        let original = "---\ntype: concept\ntitle: Existing knowledge\n---\n\nCurated knowledge.\n";
+        std::fs::write(&page, original).unwrap();
+        for args in [
+            vec!["validate"],
+            vec!["ingest", "notes", "--dry-run"],
+            vec!["ingest", "notes"],
+            vec!["fetch", "https://example.com/article"],
+        ] {
+            let output = workspace.run(&args);
+            assert!(!output.status.success(), "{managed}: {args:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("overlaps"),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(std::fs::read_to_string(&page).unwrap(), original);
+            assert!(!input.join("archived").exists());
+            assert!(!workspace.vault().join("knowledge/documents").exists());
+        }
+    }
+}

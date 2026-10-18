@@ -468,6 +468,7 @@ mod tests {
                 slack_id: None,
             },
             vault_root: std::path::PathBuf::from("."),
+            vault_dirs: Default::default(),
         }
     }
 

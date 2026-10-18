@@ -743,43 +743,16 @@ async fn run_search(
     Ok(())
 }
 
-/// Manual input is independent of VaultDirs and may otherwise occupy an export namespace.
+/// Validate input boundaries against the effective root, including `--root` overrides.
 pub(super) fn refuse_navigation_inbox_overlap(
     root: &std::path::Path,
     config: Option<&lk_core::config::Config>,
 ) -> miette::Result<()> {
     let Some(config) = config else { return Ok(()) };
-    let wiki = root.join(&config.vault.dirs.wiki);
-    let namespaces = [
-        wiki.join(lk_core::vault_path::CATALOG_SUBDIR),
-        wiki.join(lk_core::vault_path::INDEX_FILE),
-        wiki.join(lk_core::vault_path::TIMELINE_FILE),
-        wiki.join(lk_core::vault_path::MAP_FILE),
-    ]
-    .map(|path| lk_core::fs::canonical_prefix(&path));
-    for (id, source) in &config.sources {
-        if !source.enabled || source.source_type != lk_core::config::SourceType::Manual {
-            continue;
-        }
-        let inbox = lk_source::manual_inbox_dir(&source.params, root)
-            .map_err(|error| miette::miette!("{id}: {error}"))?;
-        match std::fs::symlink_metadata(&inbox) {
-            Ok(_) => {
-                inbox
-                    .canonicalize()
-                    .map_err(|error| miette::miette!("{id}: resolve inbox: {error}"))?;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(miette::miette!("{id}: inspect inbox: {error}")),
-        }
-        let inbox = lk_core::fs::canonical_prefix(&inbox);
-        if namespaces
-            .iter()
-            .any(|path| path.starts_with(&inbox) || inbox.starts_with(path))
-        {
-            return Err(miette::miette!(
-                "manual source `{id}` inbox overlaps generated navigation; move the inbox or configure a separate wiki directory before exporting or refreshing navigation"
-            ));
+    for (id, source) in config.enabled_sources() {
+        if source.source_type == lk_core::config::SourceType::Manual {
+            lk_source::manual_inbox_dir(&source.params, root, &config.vault.dirs)
+                .map_err(|error| miette::miette!("{id}: {error}"))?;
         }
     }
     Ok(())

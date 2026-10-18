@@ -93,6 +93,8 @@ fn refresh_and_exports_refuse_manual_inbox_overlap_before_capture_or_retirement(
         let approval = format!("knowledge/index.md={}", "0".repeat(64));
         for args in [
             vec!["wiki", "refresh"],
+            vec!["schema"],
+            vec!["init", "schema"],
             vec!["wiki", "refresh", "--archive-replace", approval.as_str()],
             vec!["wiki", "index"],
             vec!["wiki", "log"],
@@ -106,10 +108,7 @@ fn refresh_and_exports_refuse_manual_inbox_overlap_before_capture_or_retirement(
                 .output()
                 .unwrap();
             assert!(!output.status.success(), "{args:?}");
-            assert!(
-                String::from_utf8_lossy(&output.stderr)
-                    .contains("inbox overlaps generated navigation")
-            );
+            assert!(String::from_utf8_lossy(&output.stderr).contains("overlaps"));
             assert_eq!(
                 std::fs::read_to_string(catalog.join("0-0.md")).unwrap(),
                 original

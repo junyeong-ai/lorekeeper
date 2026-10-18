@@ -758,6 +758,7 @@ pub async fn run(
         root: vault_root,
         config,
     } = super::resolve_root_config(opts, root_override)?;
+    super::wiki::refuse_navigation_inbox_overlap(&vault_root, config.as_ref())?;
     let (locale, dirs, personal, board) = match config {
         Some(config) => {
             let board = config

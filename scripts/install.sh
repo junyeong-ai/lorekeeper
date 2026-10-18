@@ -348,8 +348,9 @@ print_pipeline_schedule() {
         printf '       then load each with launchctl bootstrap (the output shows how).\n'
         printf '       launchd runs a job missed during sleep; cron silently skips it.\n'
     else
-        printf '       %slore schedule --pipeline-dir %s/pipelines%s | crontab -\n' \
+        printf '       %slore schedule --pipeline-dir %s/pipelines%s > lorekeeper.cron\n' \
             "$C_BOLD" "$DATA_DIR" "$C_RESET"
+        printf '       Review and merge with crontab -e; preserve existing jobs.\n'
     fi
 }
 
@@ -627,9 +628,9 @@ main() {
     printf '       cp %s/config.example.yaml %s/config.yaml\n' "$CONFIG_DIR" "$CONFIG_DIR"
     printf '       $EDITOR %s/config.yaml\n' "$CONFIG_DIR"
     printf '  %s2.%s %slore init credentials%s   Enter API tokens interactively\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
-    printf '  %s3.%s %slore validate%s           Verify config + credentials\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
-    printf '  %s4.%s %slore ingest --dry-run%s   Preview ingest without writing\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
-    printf '  %s5.%s Schedule the two pipelines, then the janitors:\n' "$C_BOLD" "$C_RESET"
+    printf '  %s3.%s %slore validate%s           Check configuration (no provider requests)\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
+    printf '  %s4.%s %slore ingest --dry-run%s   Check source access without writing pages\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
+    printf '  %s5.%s Generate schedules, then register and inspect an actual run:\n' "$C_BOLD" "$C_RESET"
     print_pipeline_schedule
 }
 

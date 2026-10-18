@@ -425,6 +425,7 @@ async fn observe(
         locale: config.vault.locale(),
         identity: config.identity.clone(),
         vault_root: root.clone(),
+        vault_dirs: config.vault.dirs.clone(),
     };
     let http = lk_source::build_http_client().map_err(failure)?;
     let adapter = lk_source::build_source(

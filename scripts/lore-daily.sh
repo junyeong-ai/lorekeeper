@@ -30,7 +30,7 @@ fi
 
 # The one stage whose failure LOSES data: source windows roll (24h lookbacks) and RSS items
 # scroll out, so a day never ingested is gone unless backfilled by hand.
-run "ingest" lore_cmd ingest
+run "ingest" lore_cmd ingest --wait-for-vault
 
 drain_queue
 

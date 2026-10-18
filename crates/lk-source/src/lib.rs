@@ -144,6 +144,8 @@ pub struct ExtractContext {
     /// manual source's `inbox_dir`). Resolving against it — never the process CWD —
     /// keeps scheduled runs and interactive runs reading the same directories.
     pub vault_root: std::path::PathBuf,
+    /// Managed output namespaces, kept separate from raw input directories.
+    pub vault_dirs: lk_core::config::VaultDirs,
 }
 
 impl ExtractContext {
@@ -425,6 +427,7 @@ mod tests {
             locale: lk_core::i18n::Locale::default(),
             identity: lk_core::config::Identity::default(),
             vault_root: std::path::PathBuf::new(),
+            vault_dirs: Default::default(),
         }
     }
 

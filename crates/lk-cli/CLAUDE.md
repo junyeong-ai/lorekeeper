@@ -25,12 +25,14 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   Manual agents acquire once before reading inputs, not again inside a skill.
 - `commands/schedule.rs` emits one all-source ingest plus independent period and
   maintenance jobs. Use absolute installed Bash scripts/executable mode and captured
-  PATH/LORE_BIN/LORE_CONFIG/CLAUDE_BIN. Preserve cron versus launchd calendar/interval
-  meaning; reject unsupported translation instead of approximating it. Reminder
+  PATH/LORE_BIN/LORE_CONFIG/CLAUDE_BIN and explicit LORE_SKILL_DIR. Preserve cron
+  versus launchd calendar/interval meaning; reject unsupported translation instead of approximating it. Reminder
   scheduling may use a separate board/pipeline directory.
 
 ## Ingest and originals (`commands/ingest.rs`)
 
+- Ingest waits for a cooperating writer only with `--wait-for-vault`; scheduled
+  daily collection uses it. Dry run never takes the writer lock.
 - Dry run creates no vault files, tmp results, logs, or queue writes; real source
   errors still return nonzero. A noop provider makes no promise to queue work.
 - Work-log generation belongs to full ingest only, not filtered runs. A full run

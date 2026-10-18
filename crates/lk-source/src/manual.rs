@@ -68,9 +68,13 @@ pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
 /// join: a `~` expands, a relative path anchors at the vault root rather than the process
 /// CWD, and a path that reaches the vault root is refused. A caller re-deriving it would get
 /// a different directory under a scheduler than under a shell.
-pub fn inbox_dir(params: &serde_json::Value, vault_root: &Path) -> Result<PathBuf, SourceError> {
+pub fn inbox_dir(
+    params: &serde_json::Value,
+    vault_root: &Path,
+    dirs: &lk_core::config::VaultDirs,
+) -> Result<PathBuf, SourceError> {
     let p: ManualParams = crate::parse_validated(params)?;
-    resolve_inbox_dir(&p.inbox_dir, vault_root)
+    resolve_inbox_dir(&p.inbox_dir, vault_root, dirs)
 }
 
 impl crate::ValidatedParams for ManualParams {
@@ -136,23 +140,13 @@ fn validate_inbox_dir(inbox: &Path) -> Result<(), SourceError> {
     Ok(())
 }
 
-/// Resolve the configured inbox path deterministically: `~`/`~/…` expands to the
-/// user's home (config values are written in a shell mindset, but nothing else
-/// expands them) and a relative path anchors at the vault root — never the
-/// process CWD, which differs between an interactive shell and a cron line.
-/// The single resolution used by both `extract` and `archive_consumed_files`,
-/// so the directory scanned and the directory archived into can never diverge.
-///
-/// This is the second of two vault-safety layers, at the only altitude that can see
-/// `vault_root`. Load-time [`validate_inbox_dir`] rejects the lexical escape class
-/// (`..`, empty/root-only) without config context; here — where the path is fully
-/// resolved — the inbox is rejected if it IS the vault root or an ANCESTOR of it,
-/// where the adapter would scan and archive the vault's own pages. The comparison is
-/// on canonicalized paths (when they exist), so an absolute inbox equal to the vault
-/// root, OR a symlinked inbox whose target is the vault root, is caught alike; a
-/// descendant inbox (the normal `<vault>/inbox`) or an unrelated external directory
-/// is allowed. Extraction reports a missing inbox as a source error.
-fn resolve_inbox_dir(configured: &Path, vault_root: &Path) -> Result<PathBuf, SourceError> {
+/// Resolve against the vault, keeping raw input separate from managed output and
+/// private runtime state. Canonical prefixes also cover symlinks and first-run paths.
+fn resolve_inbox_dir(
+    configured: &Path,
+    vault_root: &Path,
+    dirs: &lk_core::config::VaultDirs,
+) -> Result<PathBuf, SourceError> {
     let expanded = lk_core::config::expand_tilde(&configured.to_string_lossy());
     let resolved = if expanded.is_absolute() {
         expanded
@@ -160,13 +154,6 @@ fn resolve_inbox_dir(configured: &Path, vault_root: &Path) -> Result<PathBuf, So
         vault_root.join(expanded)
     };
 
-    // Compare both paths on ONE basis via `canonical_prefix`: each is canonicalized
-    // through its longest EXISTING ancestor (resolving symlinks there) with the
-    // not-yet-created remainder re-appended. Plain `canonicalize` requires the whole
-    // path to exist, which on a first run (vault root not created until the write phase)
-    // would pit a symlink-resolved inbox against a lexical vault root — e.g. `/tmp` →
-    // `/private/tmp` vs lexical `/tmp/vault` — and silently miss that the inbox is the
-    // vault's ancestor. Resolving the shared real prefix identically closes that.
     let resolved_real = lk_core::fs::canonical_prefix(&resolved);
     let vault_real = lk_core::fs::canonical_prefix(vault_root);
     if resolved_real == vault_real || vault_real.starts_with(&resolved_real) {
@@ -177,6 +164,23 @@ fn resolve_inbox_dir(configured: &Path, vault_root: &Path) -> Result<PathBuf, So
             configured.display(),
             vault_root.display()
         )));
+    }
+    for namespace in [
+        &dirs.daily,
+        &dirs.personal,
+        &dirs.synthesis,
+        &dirs.wiki,
+        ".lorekeeper",
+    ] {
+        let managed = lk_core::fs::canonical_prefix(&vault_root.join(namespace));
+        if resolved_real.starts_with(&managed) || managed.starts_with(&resolved_real) {
+            return Err(SourceError::InvalidParams(format!(
+                "manual `inbox_dir` ('{}') overlaps managed vault namespace ('{}'); \
+                 use a dedicated input directory separate from managed pages and runtime state",
+                configured.display(),
+                vault_root.join(namespace).display()
+            )));
+        }
     }
     Ok(resolved)
 }
@@ -399,15 +403,23 @@ fn split_title(body: &str, path: &Path) -> (String, String) {
 pub fn archive_consumed_files(
     params: &serde_json::Value,
     events: &[lk_core::event::Event],
-    date: jiff::civil::Date,
-    vault_root: &Path,
+    ctx: &ExtractContext,
 ) -> Result<(), SourceError> {
     let p: ManualParams = crate::parse_validated(params)?;
     if !p.archive_after_ingest || events.is_empty() {
         return Ok(());
     }
-    let inbox = resolve_inbox_dir(&p.inbox_dir, vault_root)?;
-    let archive_dir = inbox.join("archived").join(date.to_string());
+    let inbox = resolve_inbox_dir(&p.inbox_dir, &ctx.vault_root, &ctx.vault_dirs)?;
+    let archive_dir = inbox.join("archived").join(ctx.target_date.to_string());
+    let inbox_real = inbox
+        .canonicalize()
+        .map_err(|e| SourceError::Parse(format!("resolve inbox: {e}")))?;
+    let archive_real = lk_core::fs::canonical_prefix(&archive_dir);
+    if archive_real == inbox_real || !archive_real.starts_with(&inbox_real) {
+        return Err(SourceError::InvalidParams(
+            "manual archive directory must remain within its inbox".into(),
+        ));
+    }
     std::fs::create_dir_all(&archive_dir)
         .map_err(|e| SourceError::Parse(format!("create archive dir: {e}")))?;
     for event in events {
@@ -415,6 +427,14 @@ pub fn archive_consumed_files(
             continue;
         };
         let src = std::path::PathBuf::from(src_str);
+        if src
+            .parent()
+            .and_then(|parent| parent.canonicalize().ok())
+            .as_ref()
+            != Some(&inbox_real)
+        {
+            continue;
+        }
         if !src
             .symlink_metadata()
             .is_ok_and(|m| m.file_type().is_file())
@@ -559,7 +579,7 @@ pub fn capture_manual(
     ctx: &ExtractContext,
 ) -> Result<ManualExtraction, SourceError> {
     let p: ManualParams = crate::parse_validated(params)?;
-    let inbox = resolve_inbox_dir(&p.inbox_dir, &ctx.vault_root)?;
+    let inbox = resolve_inbox_dir(&p.inbox_dir, &ctx.vault_root, &ctx.vault_dirs)?;
     let root = inbox
         .canonicalize()
         .map_err(|e| SourceError::Parse(format!("read inbox: {e}")))?;
@@ -644,8 +664,7 @@ pub fn archive_manual_originals(
     params: &serde_json::Value,
     events: &[lk_core::event::Event],
     captures: &[lk_core::manual_original::ManualBundleCapture],
-    date: jiff::civil::Date,
-    vault_root: &Path,
+    ctx: &ExtractContext,
 ) -> Result<(), SourceError> {
     let filtered: Vec<_> = events
         .iter()
@@ -684,7 +703,7 @@ pub fn archive_manual_originals(
         })
         .cloned()
         .collect();
-    archive_consumed_files(params, &filtered, date, vault_root)
+    archive_consumed_files(params, &filtered, ctx)
 }
 
 #[cfg(test)]
@@ -703,6 +722,7 @@ mod tests {
             locale: lk_core::i18n::Locale::default(),
             identity: lk_core::config::Identity::default(),
             vault_root: std::path::PathBuf::new(),
+            vault_dirs: Default::default(),
         };
         let params = serde_json::json!({ "inbox_dir": dir, "archive_after_ingest": false });
         let mut items = ManualSource::new().extract(&params, &ctx).await.unwrap();
@@ -810,6 +830,7 @@ mod tests {
             locale: lk_core::i18n::Locale::default(),
             identity: lk_core::config::Identity::default(),
             vault_root: PathBuf::new(),
+            vault_dirs: Default::default(),
         };
         assert!(matches!(
             ManualSource::new().extract(&params, &ctx).await,
@@ -960,6 +981,7 @@ mod tests {
             locale: lk_core::i18n::Locale::default(),
             identity: lk_core::config::Identity::default(),
             vault_root: std::path::PathBuf::new(),
+            vault_dirs: Default::default(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
         assert_eq!(items.len(), 1);
@@ -982,6 +1004,7 @@ mod tests {
             locale: lk_core::i18n::Locale::default(),
             identity: lk_core::config::Identity::default(),
             vault_root: std::path::PathBuf::new(),
+            vault_dirs: Default::default(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
         assert_eq!(items.len(), 1);
@@ -1002,6 +1025,7 @@ mod tests {
             locale: lk_core::i18n::Locale::default(),
             identity: lk_core::config::Identity::default(),
             vault_root: std::path::PathBuf::new(),
+            vault_dirs: Default::default(),
         };
         let err = src.extract(&params, &ctx).await.unwrap_err();
         assert!(
@@ -1025,6 +1049,7 @@ mod tests {
             locale: lk_core::i18n::Locale::default(),
             identity: lk_core::config::Identity::default(),
             vault_root: std::path::PathBuf::new(),
+            vault_dirs: Default::default(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
         // After extract(), file is still in inbox (archival is deferred).
@@ -1052,8 +1077,7 @@ mod tests {
             })
             .collect();
 
-        archive_consumed_files(&params, &events, ctx.target_date, std::path::Path::new(""))
-            .unwrap();
+        archive_consumed_files(&params, &events, &ctx).unwrap();
         assert!(!tmp.path().join("a.md").exists());
         assert!(tmp.path().join("archived/2026-05-24/a.md").exists());
     }
@@ -1076,6 +1100,7 @@ mod tests {
             locale: lk_core::i18n::Locale::default(),
             identity: lk_core::config::Identity::default(),
             vault_root: std::path::PathBuf::new(),
+            vault_dirs: Default::default(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
         let events: Vec<lk_core::event::Event> = items
@@ -1098,8 +1123,7 @@ mod tests {
                 metadata: item.metadata.clone(),
             })
             .collect();
-        archive_consumed_files(&params, &events, ctx.target_date, std::path::Path::new(""))
-            .unwrap();
+        archive_consumed_files(&params, &events, &ctx).unwrap();
 
         // Every scanned file is gone from the inbox top level and present under
         // archived/ — nothing lingers to be re-scanned.
@@ -1127,6 +1151,7 @@ mod tests {
             locale: lk_core::i18n::Locale::default(),
             identity: lk_core::config::Identity::default(),
             vault_root: std::path::PathBuf::new(),
+            vault_dirs: Default::default(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
         let events: Vec<lk_core::event::Event> = items
@@ -1153,8 +1178,7 @@ mod tests {
         // Swap the file's content AFTER extract but BEFORE archive.
         write(&tmp.path().join("a.md"), "# A\n\nedited after extract");
 
-        archive_consumed_files(&params, &events, ctx.target_date, std::path::Path::new(""))
-            .unwrap();
+        archive_consumed_files(&params, &events, &ctx).unwrap();
 
         // The swapped file stays in the inbox (NOT archived); its new content is intact so the
         // next ingest can materialize it.
@@ -1189,6 +1213,7 @@ mod tests {
             locale: lk_core::i18n::Locale::default(),
             identity: lk_core::config::Identity::default(),
             vault_root: std::path::PathBuf::new(),
+            vault_dirs: Default::default(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
         let events: Vec<lk_core::event::Event> = items
@@ -1211,8 +1236,7 @@ mod tests {
                 metadata: item.metadata.clone(),
             })
             .collect();
-        archive_consumed_files(&params, &events, ctx.target_date, std::path::Path::new(""))
-            .unwrap();
+        archive_consumed_files(&params, &events, &ctx).unwrap();
 
         // The earlier archived original is intact; the new one is archived under a distinct
         // (fingerprint-suffixed) name — two files, nothing overwritten.
@@ -1247,6 +1271,7 @@ mod tests {
             locale: lk_core::i18n::Locale::default(),
             identity: lk_core::config::Identity::default(),
             vault_root: std::path::PathBuf::new(),
+            vault_dirs: Default::default(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
         let events: Vec<lk_core::event::Event> = items
@@ -1269,8 +1294,7 @@ mod tests {
                 metadata: item.metadata.clone(),
             })
             .collect();
-        archive_consumed_files(&params, &events, ctx.target_date, std::path::Path::new(""))
-            .unwrap();
+        archive_consumed_files(&params, &events, &ctx).unwrap();
 
         // Exactly one archived file (no duplicate), and the inbox copy is cleared.
         assert_eq!(
@@ -1343,13 +1367,19 @@ mod tests {
         // which is the pure resolution contract under test here.
         // Absolute paths pass through untouched.
         assert_eq!(
-            resolve_inbox_dir(Path::new("/abs/inbox"), Path::new("/vault")).unwrap(),
+            resolve_inbox_dir(
+                Path::new("/abs/inbox"),
+                Path::new("/vault"),
+                &Default::default()
+            )
+            .unwrap(),
             PathBuf::from("/abs/inbox")
         );
         // A relative path anchors at the vault root, never the process CWD —
         // a cron run and an interactive run must read the same inbox.
         assert_eq!(
-            resolve_inbox_dir(Path::new("inbox"), Path::new("/vault")).unwrap(),
+            resolve_inbox_dir(Path::new("inbox"), Path::new("/vault"), &Default::default())
+                .unwrap(),
             PathBuf::from("/vault/inbox")
         );
         // `~/` expands to the home directory (the example config's shape), and where there is
@@ -1357,7 +1387,12 @@ mod tests {
         // path. Decided by the same predicate `expand_tilde` uses — guarding on `var("HOME")`
         // admits `Ok("")`, which the expansion treats as no home, so the guard would let in
         // exactly the case it exists to exclude and then assert the answer for the other one.
-        let resolved = resolve_inbox_dir(Path::new("~/inbox"), Path::new("/vault")).unwrap();
+        let resolved = resolve_inbox_dir(
+            Path::new("~/inbox"),
+            Path::new("/vault"),
+            &Default::default(),
+        )
+        .unwrap();
         match std::env::var_os("HOME")
             .or_else(|| std::env::var_os("USERPROFILE"))
             .filter(|home| !home.is_empty())
@@ -1378,11 +1413,11 @@ mod tests {
         std::fs::create_dir_all(&vault).unwrap();
 
         // Inbox == vault root (absolute).
-        assert!(resolve_inbox_dir(&vault, &vault).is_err());
+        assert!(resolve_inbox_dir(&vault, &vault, &Default::default()).is_err());
         // Inbox is an ancestor of the vault root.
-        assert!(resolve_inbox_dir(tmp.path(), &vault).is_err());
+        assert!(resolve_inbox_dir(tmp.path(), &vault, &Default::default()).is_err());
         // A descendant inbox is the normal, allowed shape.
-        assert!(resolve_inbox_dir(Path::new("inbox"), &vault).is_ok());
+        assert!(resolve_inbox_dir(Path::new("inbox"), &vault, &Default::default()).is_ok());
 
         // A symlinked inbox whose target is the vault root is caught by canonicalize,
         // even though its lexical path looks like an innocent descendant.
@@ -1391,7 +1426,7 @@ mod tests {
             let link = tmp.path().join("link-to-vault");
             std::os::unix::fs::symlink(&vault, &link).unwrap();
             assert!(
-                resolve_inbox_dir(&link, &vault).is_err(),
+                resolve_inbox_dir(&link, &vault, &Default::default()).is_err(),
                 "a symlink resolving to the vault root must be rejected"
             );
         }
@@ -1414,11 +1449,130 @@ mod tests {
         let absent_vault = link.join("vault");
         // inbox = `link` (exists via symlink) is an ancestor of the absent vault root.
         assert!(
-            resolve_inbox_dir(&link, &absent_vault).is_err(),
+            resolve_inbox_dir(&link, &absent_vault, &Default::default()).is_err(),
             "an existing (symlinked) ancestor of a not-yet-created vault root must be rejected"
         );
         // A genuine descendant of the same absent vault root is still allowed.
-        assert!(resolve_inbox_dir(Path::new("inbox"), &absent_vault).is_ok());
+        assert!(resolve_inbox_dir(Path::new("inbox"), &absent_vault, &Default::default()).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retirement_refuses_archive_aliases_and_unowned_entries() {
+        let tmp = TempDir::new().unwrap();
+        let vault = tmp.path().join("vault");
+        let inbox = vault.join("inbox");
+        let managed = vault.join("wiki/concepts");
+        std::fs::create_dir_all(&inbox).unwrap();
+        std::fs::create_dir_all(&managed).unwrap();
+        write(&inbox.join("note.md"), "# Note\n\nEvidence");
+        write(&managed.join("existing.md"), "Curated knowledge");
+        let ctx = ExtractContext {
+            target_date: jiff::civil::date(2026, 5, 24),
+            timezone: jiff::tz::TimeZone::UTC,
+            locale: Default::default(),
+            identity: Default::default(),
+            vault_root: vault,
+            vault_dirs: Default::default(),
+        };
+        let params = serde_json::json!({"inbox_dir": "inbox"});
+        let capture = capture_manual(&params, &ctx).unwrap();
+        let item = &capture.items[0];
+        let mut event = lk_core::event::Event {
+            id: lk_core::event::EventId::new("manual", ctx.target_date, &item.title),
+            source_id: "manual".into(),
+            source_type: lk_core::config::SourceType::Manual,
+            timestamp: item.timestamp,
+            date: ctx.target_date,
+            title: item.title.clone(),
+            body: item.body.clone(),
+            url: None,
+            author: None,
+            labels: vec![],
+            category: None,
+            performance_category: None,
+            is_self: false,
+            is_personal: false,
+            metadata: item.metadata.clone(),
+        };
+        std::fs::create_dir(inbox.join("archived")).unwrap();
+        let archive_date = inbox.join("archived/2026-05-24");
+        for destination in [&inbox, &managed] {
+            std::os::unix::fs::symlink(destination, &archive_date).unwrap();
+            assert!(archive_consumed_files(&params, &[event.clone()], &ctx).is_err());
+            assert!(inbox.join("note.md").exists());
+            assert!(!managed.join("note.md").exists());
+            std::fs::remove_file(&archive_date).unwrap();
+        }
+        event.metadata["source_file"] = managed
+            .join("existing.md")
+            .to_string_lossy()
+            .to_string()
+            .into();
+        event.metadata["source_hash"] = blake3::hash(b"Curated knowledge")
+            .to_hex()
+            .to_string()
+            .into();
+        archive_consumed_files(&params, &[event], &ctx).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(managed.join("existing.md")).unwrap(),
+            "Curated knowledge"
+        );
+        assert!(!archive_date.join("existing.md").exists());
+    }
+
+    #[test]
+    fn inboxes_are_separate_from_custom_managed_roots_before_creation() {
+        let tmp = TempDir::new().unwrap();
+        let vault = tmp.path().join("vault");
+        let dirs = lk_core::config::VaultDirs {
+            wiki: "knowledge/pages".into(),
+            daily: "observations".into(),
+            personal: "personal".into(),
+            synthesis: "reviews".into(),
+            ..Default::default()
+        };
+        for path in [
+            "knowledge",
+            "knowledge/pages",
+            "knowledge/pages/concepts",
+            "observations/input",
+            "personal/inbox",
+            "reviews/input",
+            ".lorekeeper/queue",
+        ] {
+            let params = serde_json::json!({"inbox_dir": path});
+            assert!(inbox_dir(&params, &vault, &dirs).is_err(), "{path}");
+        }
+        for path in [
+            "inbox",
+            "knowledge/raw",
+            "wiki",
+            "weekly",
+            "observations-raw",
+        ] {
+            let params = serde_json::json!({"inbox_dir": path});
+            assert!(inbox_dir(&params, &vault, &dirs).is_ok(), "{path}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inboxes_cannot_alias_managed_roots_in_either_direction() {
+        let tmp = TempDir::new().unwrap();
+        let vault = tmp.path().join("vault");
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&vault).unwrap();
+        std::fs::create_dir_all(&external).unwrap();
+        std::os::unix::fs::symlink(&external, vault.join("wiki")).unwrap();
+        let alias = tmp.path().join("raw-alias");
+        std::os::unix::fs::symlink(&external, &alias).unwrap();
+        for path in [&external, &alias, &alias.join("not-yet-created")] {
+            let params = serde_json::json!({"inbox_dir": path});
+            assert!(inbox_dir(&params, &vault, &Default::default()).is_err());
+        }
+        let params = serde_json::json!({"inbox_dir": "inbox"});
+        assert!(inbox_dir(&params, &vault, &Default::default()).is_ok());
     }
 
     #[tokio::test]
@@ -1437,6 +1591,7 @@ mod tests {
             locale: lk_core::i18n::Locale::default(),
             identity: lk_core::config::Identity::default(),
             vault_root: tmp.path().to_path_buf(),
+            vault_dirs: Default::default(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
         assert_eq!(

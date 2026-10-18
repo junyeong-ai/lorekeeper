@@ -101,8 +101,9 @@ Use parser/token-state behavior, not regex replacement of arbitrary markup.
   Read entry bytes once for conversion/hash/preservation. Archive=false still
   preserves originals; it only disables retirement.
 - The configured inbox is the explicit boundary, not an implicit whole-vault copy.
-  Reject a vault root/ancestor inbox. Select entry extensions case-insensitively;
-  refuse symlink/nonregular/missing members, escapes, absolute paths, Windows drive
+  Reject a vault root/ancestor inbox and overlap with the actual configured managed
+  roots or `.lorekeeper`; compare canonical prefixes, including uncreated paths.
+  Select entry extensions case-insensitively; refuse symlink/nonregular/missing members, escapes, absolute paths, Windows drive
   and UNC syntax before URI classification. Do not fetch remote dependencies.
 - Markdown uses pulldown-cmark Link/Image/WikiLink events and a serializer. Support
   explicit relative wiki filenames, not Obsidian basename/implicit-extension lookup
@@ -118,5 +119,6 @@ Use parser/token-state behavior, not regex replacement of arbitrary markup.
 - Retirement requires complete preserved bytes and unchanged entry. Never remove
   attachments. Cross-entry references protect referenced entries even when an event
   is filtered out; any entry capture failure holds retirement for that source.
+  Retire only direct inbox entries into a strict descendant of that inbox.
   These checks are not a global inbox snapshot or a lease against external editors.
   Publication order and immutable object/bundle storage belong to vault/CLI owners.

@@ -93,8 +93,12 @@ fn resolve_inbox(config: &Config, requested: Option<&str>) -> miette::Result<(St
         }
     };
 
-    let inbox = lk_source::manual_inbox_dir(&source.params, &config.vault.root_path())
-        .map_err(|e| miette::miette!("{id}: {e}"))?;
+    let inbox = lk_source::manual_inbox_dir(
+        &source.params,
+        &config.vault.root_path(),
+        &config.vault.dirs,
+    )
+    .map_err(|e| miette::miette!("{id}: {e}"))?;
     Ok((id.clone(), inbox))
 }
 

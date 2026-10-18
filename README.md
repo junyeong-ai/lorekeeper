@@ -84,9 +84,9 @@ lore validate
 lore ingest                       # 소스 수집 + 구조 페이지 작성 + LLM 작업 큐잉
 #    이어서 Claude Code에서:  /lore-process     ← 요약·개념을 채움
 
-# 6) 매일 자동으로 — 수집만이 아니라 요약·개념까지 채우는 파이프라인 등록
-lore schedule --pipeline-dir ~/.local/share/lorekeeper/pipelines | crontab -
-#    macOS는 launchd 권장 — 아래 "스케줄링" 절 참고
+# 6) 매일 자동으로 — 파이프라인 예약 정의 생성
+lore schedule --pipeline-dir ~/.local/share/lorekeeper/pipelines > lorekeeper.cron
+#    기존 예약을 보존하며 crontab -e에 병합. macOS는 아래 launchd 절 참고
 ```
 
 > Obsidian이 없어도 됩니다 — 결과물은 평범한 마크다운 + 폴더라 그냥 텍스트로 읽힙니다. Obsidian은 그래프 탐색을 예쁘게 보여줄 뿐.
@@ -303,7 +303,7 @@ lore synthesis weekly         # 주간 합성 + 개인 리뷰 (monthly/quarterly
 lore status                   # 하위시스템별 한 줄 요약 (소스별 시각은 lore health)
 lore health                   # 수집이 밀린 소스 경고 (ingest.schedule 기준)
 lore health --json            # 같은 판정을 계약으로 — 스킬이 읽는 형태
-lore schedule | crontab -     # cron 발행
+lore schedule                 # 예약 정의 출력 — OS 등록은 별도
 lore brief --date yesterday   # 그날의 지식 — 새로 안 것(한 줄씩)과 다시 본 것(이름만)
 lore fetch <url>              # 링크 하나를 읽어 inbox에 저장(출처 주소를 달아서)
 lore wiki search <질의>       # 질의가 닿는 페이지 — 이름으로 맞았는지 본문에서 맞았는지까지
@@ -463,10 +463,27 @@ lore init credentials   # 대화형 마법사 — Google 토큰은 브라우저 
 ## 스케줄링
 
 ```bash
-lore schedule --pipeline-dir ~/.local/share/lorekeeper/pipelines | crontab -   # Linux
+lore schedule --pipeline-dir ~/.local/share/lorekeeper/pipelines > lorekeeper.cron   # Linux: 검토 후 crontab -e에 병합
 lore schedule --format launchd --bin "$(command -v lore)" \
               --pipeline-dir ~/.local/share/lorekeeper/pipelines               # macOS
 ```
+
+`lore schedule`은 예약 정의를 출력하며 OS에 등록하지 않습니다. Linux에서는 생성한
+`lorekeeper.cron`을 검토해 `crontab -e`에서 기존 예약과 병합하세요. `crontab -`에 바로
+파이프하면 기존 예약 전체가 교체됩니다. macOS에서는 출력의 각 plist를 표시된
+`~/Library/LaunchAgents/` 경로에 따로 저장하고, 로그 디렉터리를 만든 뒤
+`launchctl bootstrap gui/$(id -u) <plist의 절대 경로>`로 등록합니다.
+`launchctl print gui/$(id -u)/com.lorekeeper.ingest`와 실제 실행 로그로 상태를 확인하세요.
+
+설정의 예약 시각·실행 경로를 바꾸면 정의를 다시 생성해 등록해야 합니다. 기존 launchd
+작업은 해당 plist로 `bootout`한 뒤 새 정의를 `bootstrap`하고, 비활성화·삭제된 작업도
+별도로 해제하세요. Linux는 Lorekeeper 항목만 수정합니다. `self uninstall`은 OS 예약을
+해제하지 않습니다. 예약 시각은 호스트의 현지 시간이며 vault 날짜 계산과 구분됩니다.
+잠자기 후 launchd 실행은 놓친 모든 날짜의 수집을 재생하지 않습니다.
+
+초기 설정은 설정 검증 → 인증이 필요한 소스의 dry-run → 최초 실제 수집과 `/lore-process`
+→ OS 등록 → 실제 예약 실행 확인 순서로 완료를 판단합니다. `validate`는 인증을
+검증하지 않고, ID를 찾는 외부 CLI의 로그인도 Lore 인증을 대신하지 않습니다.
 
 예약된 headless LLM 호출은 `lore workflow --wait -- COMMAND...`를 거쳐 스킬의 읽기·판단·게시 동안 별도 Unix advisory lease를 유지합니다. 스크립트는 `/bin/bash`를 사용하며 결정적 수집·기간 생성·유지보수·알림은 기존의 짧은 writer lock을 유지합니다. 월간·분기·연간 검토는 각 주기를 유지하며 저장소 쓰기 잠금을 기다립니다. 유지보수와 큐 정리는 한 작업으로 순차 실행됩니다. 기존 예약을 교체할 때는 `com.lorekeeper.queue-prune` LaunchAgent도 해제·제거하세요. `--template-dir` 지정은 예약 환경에도 전달됩니다.
 
@@ -484,7 +501,7 @@ lore --config /absolute/config.yaml workflow --wait -- claude
 
 무인 운영용으로 `lore-daily.sh`(일일 수집+큐 처리+그래프 정합), `lore-weekly.sh`(주간 합성+지식 감사)와 월간·분기·연간·유지보수용 진입 스크립트가 함께 설치됩니다. 시스템 스케줄러(launchd/cron)가 이를 실행하므로 Claude 데스크탑이 떠 있지 않아도 동작합니다.
 
-`--pipeline-dir`가 그 스크립트를 **실제로 스케줄에 태우는** 플래그입니다. `lore ingest`와 `lore synthesis weekly`는 파이프라인의 첫 단계일 뿐이고 큐 드레인과 `queue apply`는 스크립트에만 있으므로, 이 플래그 없이 발행하면 매일 수집만 하고 요약·개념은 영원히 비어 있게 됩니다. 스케줄러는 환경을 거의 물려주지 않으므로 스크립트가 필요로 하는 `PATH`/`lore`/`claude`/config 경로도 함께 실립니다 — 추측이 아니라 이 명령을 실행한 세션에서 그대로 상속합니다. macOS는 launchd를 권합니다: 잠든 사이 놓친 작업을 깨어나면 실행하지만 cron은 조용히 건너뜁니다.
+`--pipeline-dir`가 그 스크립트를 **실제로 스케줄에 태우는** 플래그입니다. `lore ingest`와 `lore synthesis weekly`는 파이프라인의 첫 단계일 뿐이고 큐 드레인과 `queue apply`는 스크립트에만 있으므로, 이 플래그 없이 발행하면 매일 수집만 하고 요약·개념은 영원히 비어 있게 됩니다. 스케줄러는 환경을 거의 물려주지 않으므로 스크립트가 필요로 하는 `PATH`/`lore`/`claude`/config 경로도 함께 실립니다 — 추측이 아니라 이 명령을 실행한 세션에서 그대로 상속합니다. macOS는 launchd를 권합니다: 잠든 사이 놓친 실행은 깨어나면 한 번 실행되지만 모든 누락 날짜를 backfill하지는 않습니다. cron은 잠든 동안의 실행을 건너뜁니다.
 
 ### 볼트를 git으로 관리하기 (선택)
 

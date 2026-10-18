@@ -99,6 +99,7 @@ mod tests {
                 ..Default::default()
             },
             vault_root: root.to_path_buf(),
+            vault_dirs: Default::default(),
         }
     }
 

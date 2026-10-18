@@ -278,6 +278,6 @@ Write-Host 'Next steps:'
 Write-Host "  1. Create your config (auto-discovered, no repo needed):"
 Write-Host "       Copy-Item '$cfgDir\config.example.yaml' '$cfgDir\config.yaml'; notepad '$cfgDir\config.yaml'"
 Write-Host "  2. $BinaryName init credentials   Enter API tokens interactively"
-Write-Host "  3. $BinaryName validate           Verify config + credentials"
-Write-Host "  4. $BinaryName ingest --dry-run   Preview ingest without writing"
+Write-Host "  3. $BinaryName validate           Check configuration (no provider requests)"
+Write-Host "  4. $BinaryName ingest --dry-run   Check source access without writing pages"
 Write-Host "  5. $BinaryName schedule           Print the cron cadences from your config"

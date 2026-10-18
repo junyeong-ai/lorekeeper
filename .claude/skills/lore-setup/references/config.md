@@ -12,7 +12,7 @@ vault:
 
 identity:                            # basis for ownership (the personal split, when enabled)
   name: "..."
-  email: "...@company.com"           # Gmail From / Calendar attendee match
+  email: "...@company.com"           # Gmail From / Calendar organizer or attendee match
   slack_id: "U0..."                  # attributes my Slack posts (with personal.tracked_sources)
                                      # (Jira self-detects from the authenticated account — no config)
 
@@ -44,7 +44,7 @@ personal:                            # OPTIONAL personal-productivity module (wo
   monthly:   {enabled: true, schedule: "..."}    # quarterly/annual likewise
 synthesis: {weekly: {...}}           # cross-source weekly themes (domain-neutral)
 concepts:                            # LLM concept-page taxonomy
-  categories: [{id: ..., label: ...}] # also orders/labels the `### category` index groups
+  categories: [{id: ..., label: ...}] # classifies concepts; labels optional Markdown exports
 graph:                               # link graph analysis (lore graph *)
   scope: {dirs: [...]}               # defaults to vault.dirs.wiki
   metrics: {min_hub_degree: 5, orphan_exclude: []}
@@ -52,12 +52,56 @@ graph:                               # link graph analysis (lore graph *)
 llm: {provider: queue}
 ```
 
+## Initial setup
+
+For a new installation, establish the vault path, timezone, locale, identity and
+whether personal tracking is wanted before selecting sources. Enable only the
+requested sources with real IDs; example placeholders are not working accounts.
+A manual inbox can prove the local path without provider credentials. Keep it
+separate from configured daily/personal/synthesis/wiki directories and
+`.lorekeeper`, including symlink targets. Archive=false still preserves originals.
+
+Discovery helpers (`slack-cli`, `atlassian-cli`, `gws`) have their own installation
+and account login. Their success does not authenticate Lore's native adapters.
+Use available helpers to find metadata; otherwise ask for the specific IDs or
+conditions. Never invent them or install unrelated tooling without need.
+Confluence uses a named Atlassian instance and the `confluence` params/CQL example;
+use the selected space/page scope, not a Jira issue query.
+
+Credentials belong to `lore init credentials` in an interactive terminal or the
+supported credential store/environment, never source params. RSS/manual/tasks and
+local nodex sources do not need provider credentials; nodex has its own public
+index and executable prerequisites. A config-only request ends after local
+validation and reports any outstanding authentication or runtime checks.
+
+For a complete initial setup, distinguish these outcomes:
+
+1. `lore validate` accepts the config; it does not contact providers or prove access.
+2. A selected-source `lore ingest --dry-run <id>` succeeds with the intended reach.
+   It contacts the source without writing pages/queue; an empty result can be valid.
+3. The user-invoked `/lore-ingest` and `/lore-process` publish knowledge, then their queue
+   and relationship checks pass. Use a full ingest to produce the personal work-log.
+4. If automation was requested, follow the existing
+   [scheduling procedure](../../lore-ingest/references/scheduling.md), register the
+   definitions with the OS, and inspect an actual scheduled run. Definition output
+   alone is not registration; registration alone is not successful processing.
+
+Report completed, failed and untested stages separately. `health` is collection
+freshness; `self status` is installation coherence. Neither proves semantic quality.
+
 ## Location / validation
 - `./config.yaml` (repo) or `~/.config/lorekeeper/config.yaml` (binary install). Also
   selectable via `--config` / `LORE_CONFIG`. Other locations require that explicit selection;
   `vault.root` resolves against the selected config file, not the working directory.
-- After writing, always verify with `lore validate` → `lore ingest --dry-run`.
+- After writing, run `lore validate`. Run source dry-runs when access verification
+  or complete onboarding was requested; a config-only change reports these as untested.
 - If a config already exists, merge only the relevant source block — never overwrite the whole file.
+
+Scheduled pipeline environments capture the selected config path. For skills
+installed in a project, set `LORE_SKILL_DIR` to the skills directory when running
+`lore schedule --pipeline-dir ...`; an explicit directory is validated and captured
+as an absolute path. Without it, pipelines use `$HOME/.claude/skills`. Changing the
+selection requires regenerating and reloading the schedule.
 
 The optional `nodex` adapter requires a current index (`nodex build` after edits).
 `params.document_ids` selects exact source IDs within the configured kinds and date

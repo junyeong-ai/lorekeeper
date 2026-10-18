@@ -41,9 +41,9 @@ the work-log), apply the generic guidance without a type bias.
 - Summarize key task status changes and deliverables
 
 ### `confluence`
-- A wiki page the user WROTE or last edited — treat it as their own authored
-  reference, not as news: preserve its argument and structure, distil to what a
-  reader would need to act on
+- Treat the page as a document: preserve its argument, structure and reported author/editor.
+  `only_my_edits: false` can include team-authored pages; collection does not make
+  them the user's work. Distil what a reader needs to act on.
 - An edit re-enters the pipeline as a new event (the page version is part of its
   identity), so summarize the page AS IT NOW READS; never describe the change
 - Long pages carry headings, tables and code — keep the load-bearing specifics
@@ -98,9 +98,9 @@ Use `input.source_type` to identify candidate subjects:
 - `rss` → techniques, products, announcements
 - `jira` → issues, epics
 - `google-calendar` → recurring meetings, projects and people discussed
-- `confluence` → the systems, contracts and decisions the page documents; a page
-  the user authored is usually the definitive statement of them, so prefer its
-  naming over a synonym seen elsewhere
+- `confluence` → the systems, contracts and decisions the page documents. Use its
+  declared names and scope; authorship or document type alone does not establish
+  current authority or resolve competing evidence.
 - `nodex` → reusable patterns, failure modes, platform constraints and methods,
   plus stable project subjects that connect knowledge across documents. Keep incidental
   module names, ticket ids, environments, config keys and file paths in the source;

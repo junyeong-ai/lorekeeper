@@ -318,6 +318,8 @@ sources:
     type: manual
     enabled: false
     params:
+      # Relative paths anchor at vault.root. Keep raw input separate from all managed
+      # vault.dirs roots and .lorekeeper, including symlink targets.
       inbox_dir: ~/Documents/Obsidian Vault/inbox
       extensions: [md, txt, markdown, html, htm]
       archive_after_ingest: true  # auto-archive after processing (default true)
@@ -347,7 +349,8 @@ personal:
   # Sources whose own-authored events feed the work-log and reviews. A source not listed
   # here still flows to the concept graph and daily pages — it just isn't "my activity".
   # (Ownership within a tracked source is still exact: Slack uses identity.slack_id, Jira the
-  # authenticated account, Gmail/Calendar identity.email — recipients/mentions never count.)
+  # authenticated account, Gmail From matches identity.email; Calendar matches organizer
+  # or attendees. Email recipients and free-text mentions do not establish authorship.)
   tracked_sources: [team-slack, my-tasks, my-schedule, email-digest, my-work]
   performance_categories:
     - project-delivery
@@ -364,8 +367,8 @@ personal:
     jira: project-delivery
     google-calendar: team-contribution
   # The task board: what you mean to do, which becomes what you did.
-  # Its PRESENCE turns the board on. `lore task` writes <personal>/tasks.md — four sections
-  # (today / next / waiting / someday) of ordinary markdown checkboxes you can also edit in
+  # Its PRESENCE turns the board on. `lore task` writes <personal>/tasks.md — five sections
+  # (today / proposed / next / waiting / someday) of ordinary markdown checkboxes you can also edit in
   # Obsidian, on a phone; `lore task sync` picks up whatever you changed there. Closing a task
   # records it, and the `tasks` source above turns that record into a page.
   tasks:
@@ -454,7 +457,8 @@ concepts:
 #               Code's native LLM session — no API key, no separate billing.
 #               Workflow: `lore ingest` writes structural pages + queue; then run
 #               `/lore-process` in Claude Code to fill summaries and concepts.
-#               For unattended cron: `lore ingest; claude -p "/lore-process"`
+#               For unattended runs, use the installed lore-daily.sh pipeline via
+#               `lore schedule --pipeline-dir /absolute/path/to/pipelines`.
 #               (`;` not `&&`: a partial source failure exits non-zero, and the
 #               healthy sources' queued tasks should still drain)
 #   noop      — no LLM work; daily pages render without summary/concept content.

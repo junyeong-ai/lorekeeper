@@ -1,7 +1,7 @@
 ---
 name: lore-setup
-version: 0.58.0
-description: Builds or edits Lorekeeper source configuration using the user's workspace metadata. Discovers concrete Slack, Jira or Google IDs when needed, preserves existing source selections, and validates the requested local configuration. Credential login uses lore init credentials.
+version: 0.59.0
+description: Guides initial Lorekeeper setup or edits source configuration using workspace metadata. Discovers requested source IDs, preserves existing selections, and distinguishes config validation, native authentication, first processing and optional scheduling.
 when_to_use: |
   Lorekeeper setup, configure Lorekeeper sources, add a Lorekeeper source,
   로어키퍼 초기 설정, 로어키퍼 수집 소스 추가
@@ -25,8 +25,10 @@ allowed-tools: |
 # lore-setup — Interactive config builder
 
 Inspects the user's workspace to discover concrete IDs and conditions,
-then writes a validated `config.yaml`. Eliminates manual lookup of
-channel IDs, project keys, and custom-field IDs.
+then writes a validated `config.yaml`. For a new installation, read
+[initial setup](references/config.md#initial-setup) to separate configuration,
+authentication, first processing and optional automation. An added source does not
+reconfigure the rest of an existing vault.
 
 ## Workflow
 
@@ -34,11 +36,12 @@ channel IDs, project keys, and custom-field IDs.
    to select the sources matching the user's request. If unclear, explain the relevant
    choices briefly. Preserve source selections the user already made.
 2. **Discovery** — read the reference file for each selected source
-   and run its CLI commands to find IDs/conditions (assume per-account
-   auth is already done; if not, guide the user to the relevant CLI login):
+   and use available discovery CLIs to find IDs/conditions. Helper CLI login and
+   Lore adapter credentials are separate; report missing prerequisites:
    - Slack → `references/slack.md`
    - Jira → `references/jira.md`
    - Google (Calendar/Gmail) → `references/google.md`
+   - Confluence → `references/config.md`, Initial setup, and the Confluence example
    - Project repositories (`nodex`) → `references/config.md`, Nodex binary selection
    - Other supported sources → `config.example.yaml` for their parameters
 3. **Write config** — use `references/config.md` schema within the user's authorized
@@ -46,14 +49,19 @@ channel IDs, project keys, and custom-field IDs.
    `./config.yaml` (repo) or `~/.config/lorekeeper/config.yaml`
    (binary install). If a file already exists, merge the source block
    only — never overwrite.
-4. **Validate** — `lore validate`, then `lore schema` if it warns that AGENTS.md is missing
-   or out of date (every page-writing skill hard-depends on that file), then
-   `lore ingest --dry-run <source-id>` for each selected source to verify auth and extraction.
-   `lore schema` REPLACES `<wiki>/AGENTS.md` wholesale, and `validate` warns whenever the
-   file differs for any reason — including a hand edit, which the bytes cannot be told apart
-   from a generator change. It reports `Replaced` rather than `Wrote` when a file was there;
-   if the vault's copy carries anything hand-written, copy it out first, because the next run
-   of this step takes it.
+4. **Validate** — run `lore validate` for local config/params checks. For a config-only
+   request, report outstanding schema/auth/runtime checks without performing them.
+   When source access verification is requested, run `lore ingest --dry-run <source-id>`
+   for the selected sources. For complete onboarding, generate a missing/outdated
+   schema with `lore schema`. This replaces `<wiki>/AGENTS.md` wholesale; preserve any
+   hand-written additions separately before replacing an existing file.
+
+5. **Finish the requested setup** — a configuration-only change reports remaining
+   auth/runtime checks. For complete onboarding, continue with the first real
+   processing stages in `references/config.md`. Collection is the separate,
+   user-invoked `/lore-ingest` step; `/lore-process` owns semantic publication.
+   Do not report those stages complete after configuration. For requested automation,
+   read the [scheduling procedure](../lore-ingest/references/scheduling.md).
 
 ## Design principles
 

@@ -1,21 +1,42 @@
 # Scheduling
 
-`lore schedule` with no flags emits cron entries running the bare subcommands. Both
-defaults are usually wrong, and both fail SILENTLY:
+`lore schedule` prints definitions; OS registration is separate. Choose the scheduler
+and entrypoint for the requested operation:
 
-- **`--format launchd` on macOS.** `StartCalendarInterval` runs a job missed while the
-  machine slept as soon as it wakes; cron just skips it — and a closed laptop at 09:00
-  is the normal case, so cron simply never ingests. Syntax launchd cannot express
-  (`*/5`, `1-5`) is refused rather than approximated.
-- **`--pipeline-dir <dir>`** points the ingest and weekly jobs at `lore-daily.sh` /
-  `lore-weekly.sh`. `lore ingest` and `lore synthesis weekly` are only stage ONE of those
-  scripts: the queue drain and `lore queue apply` live in the scripts alone, so without
-  this flag the schedule ingests every morning and never fills a summary or materializes
-  a concept. Monthly/quarterly/annual jobs also use their named entry scripts; these
-  enqueue narrative tasks that the next daily drain processes. Maintenance uses
-  `lore-maintenance.sh` to run retention and queue pruning sequentially. When a task
-  board is configured, this flag also schedules the reminder notifier. The janitors
-  have no LLM work.
+- On a Mac that sleeps, use **`--format launchd`**. Its calendar timer coalesces
+  missed runs after sleep; cron skips them. Neither backfills every missed source
+  date. Unsupported launchd cron steps/ranges are refused rather than approximated.
+- For queue-mode semantic automation, use **`--pipeline-dir <dir>`**. Daily and
+  weekly jobs use the installed scripts to collect/enqueue, drain, apply and
+  reconcile. Bare subcommands need a separate semantic consumer. Period scripts
+  enqueue monthly/quarterly/annual requests for the daily drain; maintenance runs
+  retention and queue pruning sequentially. A configured task board adds reminders.
+
+Review generated definitions before registration. On Linux, merge Lorekeeper
+entries with `crontab -e`; piping into `crontab -` replaces every existing job.
+On macOS, save each plist at its named LaunchAgents path, create the log directory,
+and `launchctl bootstrap gui/$(id -u) <absolute-plist-path>`. Check `launchctl print`
+and an actual execution log. After changes, boot out the old job before loading its
+replacement; unload removed/disabled jobs too. Uninstall does not unregister jobs.
+The host's local clock drives calendar triggers; vault timezone drives page dates.
+
+Independent triggers do not guarantee completion order after sleep or a slow run.
+A period request captures persisted inputs at execution time, not after tomorrow's
+collection. Do not equate a registered timer or a fresh `health` result with complete
+period or semantic processing.
 
 Every emitted path must be absolute (`--bin`, `--pipeline-dir`): launchd searches no
 `PATH` and expands no `~`.
+
+The daily pipeline calls `lore ingest --wait-for-vault`, so another cooperating
+writer delays collection instead of causing an immediate busy failure. Manual
+ingest still refuses a busy writer by default. `--dry-run` never takes that writer
+lock, even with `--wait-for-vault`.
+
+For a project skill installation, set `LORE_SKILL_DIR` when generating the
+schedule. With `--pipeline-dir`, an explicit value must name an existing directory;
+it is resolved against the generation command's working directory and captured as
+an absolute path in both cron and launchd environments. The pipeline checks the
+particular skill it needs at runtime. With no override, the runtime default remains
+`$HOME/.claude/skills`. Regenerate and reload the scheduled definitions after changing
+the selected directory.

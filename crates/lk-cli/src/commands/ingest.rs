@@ -53,6 +53,7 @@ pub async fn run(
     source: Option<String>,
     date_str: Option<String>,
     dry_run: bool,
+    wait_for_vault: bool,
 ) -> miette::Result<()> {
     let config = load_config(&find_config(opts)?)?;
     let vault_root = config.vault.root_path();
@@ -63,8 +64,13 @@ pub async fn run(
     } else {
         std::fs::create_dir_all(&vault_root).map_err(|e| miette::miette!("create vault: {e}"))?;
         Some(
-            lk_vault::MutationSession::acquire(&vault_root)
-                .map_err(|e| miette::miette!("vault mutation: {e}"))?,
+            if wait_for_vault {
+                eprintln!("Waiting for exclusive vault access...");
+                lk_vault::MutationSession::acquire_waiting(&vault_root)
+            } else {
+                lk_vault::MutationSession::acquire(&vault_root)
+            }
+            .map_err(|e| miette::miette!("vault mutation: {e}"))?,
         )
     };
 
@@ -189,6 +195,7 @@ pub async fn run(
         locale: config.vault.locale(),
         identity: config.identity.clone(),
         vault_root: vault_root.clone(),
+        vault_dirs: config.vault.dirs.clone(),
     };
 
     // Phase 1: Plan all sources (no vault writes yet).
@@ -679,8 +686,7 @@ pub async fn run(
                     &sc.params,
                     &p.result.events,
                     &p.manual_originals,
-                    extract_target,
-                    &vault_root,
+                    &extract_ctx,
                 )
             {
                 tracing::warn!(source = %p.id, error = %e, "manual archive failed");

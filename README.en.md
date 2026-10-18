@@ -84,9 +84,9 @@ lore validate
 lore ingest                       # collect sources, write structural pages, queue LLM tasks
 #    then, in Claude Code:        /lore-process     ← fills summaries & concepts
 
-# 6) On autopilot — schedules the pipeline that fills summaries and concepts, not just ingest
-lore schedule --pipeline-dir ~/.local/share/lorekeeper/pipelines | crontab -
-#    on macOS use launchd — see "Scheduling" below
+# 6) Generate definitions for the pipeline that fills summaries and concepts
+lore schedule --pipeline-dir ~/.local/share/lorekeeper/pipelines > lorekeeper.cron
+#    review and merge with crontab -e; on macOS see "Scheduling" below
 ```
 
 > You don't need Obsidian — the output is plain markdown + folders, readable as text. Obsidian just makes the graph nicer to browse.
@@ -310,7 +310,7 @@ lore synthesis weekly         # weekly synthesis + personal review (monthly/quar
 lore status                   # one line per subsystem (per-source times: lore health)
 lore health                   # warn when a source is overdue vs ingest.schedule
 lore health --json            # the same verdict as a contract, for a skill rather than an eye
-lore schedule | crontab -     # emit cron lines
+lore schedule                 # print definitions; OS registration is separate
 lore brief --date yesterday   # a day's knowledge — what was learned (a line each), what was seen again (names)
 lore fetch <url>              # read a link into the inbox, carrying its address
 lore wiki search <query>      # the pages a query reaches, and whether they NAME it or merely mention it
@@ -476,10 +476,30 @@ and process the queued task. This works after the historical task has expired;
 ## Scheduling
 
 ```bash
-lore schedule --pipeline-dir ~/.local/share/lorekeeper/pipelines | crontab -   # Linux
+lore schedule --pipeline-dir ~/.local/share/lorekeeper/pipelines > lorekeeper.cron   # Linux: review, then merge with crontab -e
 lore schedule --format launchd --bin "$(command -v lore)" \
               --pipeline-dir ~/.local/share/lorekeeper/pipelines               # macOS
 ```
+
+`lore schedule` prints definitions; it does not register them with the OS. On Linux,
+review `lorekeeper.cron` and merge it into existing jobs with `crontab -e`. Piping
+straight into `crontab -` replaces the entire existing crontab. On macOS, save each
+printed plist separately at its named `~/Library/LaunchAgents/` path, create the log
+directory, then register it with
+`launchctl bootstrap gui/$(id -u) <absolute-plist-path>`. Inspect
+`launchctl print gui/$(id -u)/com.lorekeeper.ingest` and an actual execution log.
+
+Changes to schedule times or executable paths require regenerated definitions and
+OS registration. For launchd, boot out the existing job before bootstrapping its new
+plist, and unload disabled or removed jobs. On Linux, edit only the Lorekeeper
+entries. `self uninstall` does not unregister OS jobs. Schedule times use the host's
+local timezone, independently of vault date calculations. Wake recovery does not
+backfill every missed collection date.
+
+Complete onboarding distinguishes config validation, source-access dry runs, first
+real ingestion and `/lore-process`, OS registration, and actual scheduled execution.
+`validate` does not verify credentials. Authentication in metadata-discovery helper
+CLIs does not authenticate Lore's adapters.
 
 Scheduled headless LLM calls run through `lore workflow --wait -- COMMAND...`, holding a separate Unix advisory lease while the skill reads, judges and publishes. The scripts use `/bin/bash`; deterministic collection, period creation, maintenance and reminders retain their short writer locks. Monthly, quarterly and annual reviews retain their calendars and wait for exclusive vault access. Maintenance and queue pruning run sequentially in one job. When replacing an existing schedule, unload and remove the old `com.lorekeeper.queue-prune` LaunchAgent. Template overrides are carried into the scheduled environment.
 
@@ -497,7 +517,7 @@ Manual contention refuses before starting the command unless `--wait` is explici
 
 For unattended operation the installer ships `lore-daily.sh` (daily ingest + queue drain + graph reconcile), `lore-weekly.sh` (weekly synthesis + knowledge audit), and separate monthly, quarterly, annual and maintenance entry scripts. A system scheduler (launchd or cron) fires them, so they run whether or not Claude Desktop is open.
 
-`--pipeline-dir` is what actually puts those scripts on the schedule. `lore ingest` and `lore synthesis weekly` are only a pipeline's FIRST stage — the queue drain and `queue apply` live in the scripts — so emitting without it ingests every morning and leaves summaries and concepts empty forever. A scheduler hands a job almost no environment, so the entry also carries the `PATH`, `lore`, `claude` and config path the scripts need, inherited from the session that ran the command rather than guessed. Prefer launchd on macOS: it runs a job missed during sleep once the machine wakes, where cron silently drops it.
+`--pipeline-dir` is what actually puts those scripts on the schedule. `lore ingest` and `lore synthesis weekly` are only a pipeline's FIRST stage — the queue drain and `queue apply` live in the scripts — so emitting without it ingests every morning and leaves summaries and concepts empty forever. A scheduler hands a job almost no environment, so the entry also carries the `PATH`, `lore`, `claude` and config path the scripts need, inherited from the session that ran the command rather than guessed. Prefer launchd on macOS: it coalesces missed calendar runs after sleep rather than replaying every missed date. Cron skips runs while asleep.
 
 ---
 

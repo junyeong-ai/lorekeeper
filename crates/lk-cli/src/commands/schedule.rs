@@ -61,11 +61,18 @@ impl Job {
 /// operator, so its own `PATH` is the one that resolves their tools today; `claude` is looked
 /// up on that `PATH`, and `lore` and the config are the paths this command already resolved.
 /// Guessing any of them would produce exactly the silently-broken job this exists to prevent.
-fn pipeline_env(bin: &str, config_path: &std::path::Path) -> Vec<(String, String)> {
+fn pipeline_env(
+    bin: &str,
+    config_path: &std::path::Path,
+    skill_dir: Option<&std::path::Path>,
+) -> Vec<(String, String)> {
     let mut env = vec![
         ("LORE_BIN".to_string(), bin.to_string()),
         ("LORE_CONFIG".to_string(), config_path.display().to_string()),
     ];
+    if let Some(dir) = skill_dir {
+        env.push(("LORE_SKILL_DIR".into(), dir.display().to_string()));
+    }
     if let Ok(path) = std::env::var("PATH") {
         env.insert(0, ("PATH".to_string(), path));
     }
@@ -79,6 +86,30 @@ fn pipeline_env(bin: &str, config_path: &std::path::Path) -> Vec<(String, String
         ),
     }
     env
+}
+
+fn resolve_skill_dir(
+    value: Option<&std::ffi::OsStr>,
+) -> miette::Result<Option<std::path::PathBuf>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_empty() {
+        return Err(miette::miette!(
+            "LORE_SKILL_DIR must name an existing directory"
+        ));
+    }
+    let path = std::path::Path::new(value);
+    let absolute = path
+        .canonicalize()
+        .map_err(|e| miette::miette!("resolve LORE_SKILL_DIR {}: {e}", path.display()))?;
+    if !absolute.is_dir() || absolute.to_str().is_none() {
+        return Err(miette::miette!(
+            "LORE_SKILL_DIR must name a directory with a UTF-8 path: {}",
+            path.display()
+        ));
+    }
+    Ok(Some(absolute))
 }
 
 /// First EXECUTABLE named `name` on `PATH`, resolved the way a shell would. A non-executable
@@ -152,7 +183,9 @@ pub async fn run(
                     absent.join("\n  ")
                 );
             }
-            pipeline_env(bin, &config_path)
+            let skill_dir_value = std::env::var_os("LORE_SKILL_DIR");
+            let skill_dir = resolve_skill_dir(skill_dir_value.as_deref())?;
+            pipeline_env(bin, &config_path, skill_dir.as_deref())
         }
         None => {
             // The reminder timer is a shipped SCRIPT, so without a pipeline dir there is

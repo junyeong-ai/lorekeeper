@@ -20,7 +20,12 @@ my-schedule:
 Event descriptions are converted HTML→Markdown automatically.
 
 ## Gmail — which mail to collect
-Inspect the category distribution of unread mail to gauge the noise:
+
+Express Gmail query conditions in `include_queries`, including negation such as
+`"label:work -category:promotions"`. The optional `exclude` block filters subject,
+sender and calendar-invite metadata; its fields are shown in `config.example.yaml`.
+
+When mailbox discovery is needed, inspect the category distribution of unread mail to gauge the noise:
 ```bash
 gws gmail users messages list --params '{"userId":"me","q":"is:unread category:primary","maxResults":1}' | jq -r '.resultSizeEstimate'
 gws gmail users messages list --params '{"userId":"me","q":"is:unread category:promotions","maxResults":1}' | jq -r '.resultSizeEstimate'

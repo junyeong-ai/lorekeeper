@@ -56,6 +56,9 @@ pub enum Command {
         /// Preview without writing to vault
         #[arg(long)]
         dry_run: bool,
+        /// Wait for exclusive vault access instead of refusing a busy writer (ignored for dry-run)
+        #[arg(long)]
+        wait_for_vault: bool,
     },
     /// Save a web page's article into the manual source's inbox, so a link someone sent
     /// becomes vault knowledge on the next ingest
@@ -269,7 +272,8 @@ pub async fn run() -> miette::Result<()> {
             source,
             date,
             dry_run,
-        } => commands::ingest::run(&opts, source, date, dry_run).await,
+            wait_for_vault,
+        } => commands::ingest::run(&opts, source, date, dry_run, wait_for_vault).await,
         Command::Task { cmd } => commands::task::run(&opts, cmd).await,
         Command::Fetch { url, source } => commands::fetch::run(&opts, &url, source).await,
         Command::Brief { date, json } => commands::brief::run(&opts, date, json).await,
