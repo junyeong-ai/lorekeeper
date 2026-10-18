@@ -92,8 +92,8 @@ const INITIAL_REACH: usize = 500;
 /// `lookback_hours` the operator meant differently — not something the adapter can settle
 /// by asking again.
 const MAX_REACH: usize = 64_000;
-// Snapshot and verified-body envelopes below are the public nodex 0.58 contract.
-const NODEX_COMPATIBILITY: &str = ">=0.58, <0.59";
+// Snapshot and verified-body envelopes below are the public nodex 0.59 contract.
+const NODEX_COMPATIBILITY: &str = ">=0.59, <0.60";
 const INVENTORY_FIELDS: &str = "id,title,kind,status,path,created,updated,reviewed,supersedes,superseded_by,implements,related,covers,tags";
 
 /// One document, as `nodex query recent` reports it.
@@ -563,9 +563,11 @@ fn decode_envelope<T: serde::de::DeserializeOwned>(
             message: "refused without reason".into(),
         });
         let remedy = if e.code == "VERSION_MISMATCH" {
-            "; select a supported nodex >=0.58, <0.59 executable with params.executable; the repository must permit that version and already have a current compatible index"
+            format!(
+                "; select a supported nodex {NODEX_COMPATIBILITY} executable with params.executable; the repository must permit that version and already have a current compatible index"
+            )
         } else {
-            ""
+            String::new()
         };
         return Err(SourceError::Parse(format!(
             "nodex refused ({}): {}{remedy}",
@@ -1061,8 +1063,13 @@ template = "{kind}-{path_slug}"
         )
         .unwrap();
         let path = root.path().join("docs/a.md");
-        let original = "---\r\nid: a\r\ntitle: Alpha\r\nkind: generic\r\nstatus: active\r\ncreated: 2026-10-17\r\n---\r\n# Alpha\r\nBody.\r\n";
+        let original = "---\r\nid: a\r\ntitle: Alpha\r\nkind: generic\r\nstatus: active\r\ncreated: 2026-10-17\r\nrelated: [b]\r\n---\r\n# Alpha\r\nBody.\r\n[Beta](b.md)\r\n[Beta again](b.md)\r\n";
         std::fs::write(&path, original).unwrap();
+        std::fs::write(
+            root.path().join("docs/b.md"),
+            "---\nid: b\ntitle: Beta\nkind: generic\nstatus: active\n---\n# Beta\n",
+        )
+        .unwrap();
         let built = std::process::Command::new(&supported)
             .arg("-C")
             .arg(root.path())
@@ -1082,12 +1089,35 @@ template = "{kind}-{path_slug}"
             vault_root: root.path().join("unused-vault"),
             vault_dirs: Default::default(),
         };
-        let selected = serde_json::json!({"repo":root.path(), "executable":supported, "reconcile":true, "repository_id":"fixture/repo"});
+        let selected = serde_json::json!({"repo":root.path(), "executable":supported, "reconcile":true, "repository_id":"fixture/repo", "document_ids":["a"]});
         let raw = NodexSource.extract(&selected, &ctx).await.unwrap();
         assert_eq!(raw.len(), 1);
         assert_eq!(
             raw[0].metadata["source_record"]["observation_revision"]["scheme"],
             OBSERVATION_SCHEME
+        );
+        let relations = raw[0].metadata["source_record"]["relations"]
+            .as_array()
+            .unwrap();
+        let body = relations
+            .iter()
+            .find(|edge| edge["relation"] == "references" && edge["target"] == "b")
+            .unwrap();
+        let references = body["references"].as_array().unwrap();
+        assert_eq!(references.len(), 2);
+        for reference in references {
+            assert_eq!(reference["source"], "a");
+            assert_eq!(reference["syntax"], "markdown");
+            assert_eq!(reference["location"]["type"], "body");
+        }
+        let related = relations
+            .iter()
+            .find(|edge| edge["relation"] == "related" && edge["target"] == "b")
+            .unwrap();
+        assert_eq!(related["references"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            related["references"][0]["location"],
+            serde_json::json!({"type":"frontmatter","field":"related"})
         );
         let mut rejected = selected.clone();
         rejected["executable"] = serde_json::json!(unsupported);
@@ -1247,6 +1277,17 @@ exit "$rc"
             "thresholds": {"days": 14, "enabled": false},
             "llm_inputs": {"summary_done": "source declaration only"}
         });
+        let relations = serde_json::json!([{
+            "relation": "references",
+            "target": "other",
+            "references": [
+                {"source":"hub","syntax":"markdown","target":"other.md",
+                 "location":{"type":"body","start_line":2,"end_line":2}},
+                {"source":"hub","syntax":"markdown","target":"other.md",
+                 "location":{"type":"body","start_line":4,"end_line":4}}
+            ]
+        }]);
+        detail.outgoing = serde_json::from_value(relations.clone()).unwrap();
         let mut selected = item("hub", "2026-10-17");
         selected.status = "archived".into();
         let ctx = ExtractContext {
@@ -1274,6 +1315,7 @@ exit "$rc"
             raw.metadata["source_record"]["attributes"],
             detail.node["attrs"]
         );
+        assert_eq!(raw.metadata["source_record"]["relations"], relations);
         assert!(raw.metadata.get("llm_inputs").is_none());
         assert_eq!(raw.metadata["source_record"]["timestamp_basis"], "observed");
         assert_eq!(
@@ -1325,6 +1367,22 @@ exit "$rc"
                 .is_err()
             );
         }
+        let mut moved_reference = detail.clone();
+        moved_reference.outgoing[0]
+            .metadata
+            .get_mut("references")
+            .unwrap()[1]["location"]["start_line"] = serde_json::json!(5);
+        assert!(
+            verify_observation(
+                &selected,
+                &observation_revision(&detail).unwrap(),
+                &moved_reference,
+                "",
+                root.path(),
+                None,
+            )
+            .is_err()
+        );
         let value = serde_json::json!({"node":detail.node,"body":"","outgoing":[]});
         assert!(serde_json::from_value::<NodeDetail>(value.clone()).is_ok());
         for field in ["body", "outgoing"] {

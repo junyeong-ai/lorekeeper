@@ -135,7 +135,7 @@ do not imply deletion, archival or false claims.
 
 ### Nodex binary selection
 
-The adapter supports nodex `>=0.58, <0.59`. Lore's installer and
+The adapter supports nodex `>=0.59, <0.60`. Lore's installer and
 `lore self update --version` select Lore versions, not nodex versions.
 Set a source's optional `params.executable` to a compatible binary's absolute path.
 Omitted, it uses
@@ -144,6 +144,9 @@ variable expansion; an explicit failure never retries another binary.
 
 The repository must permit the selected version and already hold an index current for
 it. Binary selection does not override a project version pin or rebuild its index.
+When upgrading to 0.59, run `nodex build --full` in each source repository. Relations
+retain every authored `references` location; earlier captured evidence keeps its
+original shape and revision rather than being relabeled as a new observation.
 `lore validate` checks the parameter shape; `lore ingest --dry-run <source-id>` checks
 actual source compatibility without vault or queue writes. `doctor` audits page contracts,
 `health` reads collection history, and `self status` checks Lore's installation; none

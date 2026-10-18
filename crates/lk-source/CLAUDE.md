@@ -79,7 +79,7 @@ Use parser/token-state behavior, not regex replacement of arbitrary markup.
 
 - Read the declared public graph, NEVER substitute filesystem discovery. Require
   nodex.toml and a current compatible public index. Current subprocess compatibility
-  is `>=0.58, <0.59`, checked publicly; an explicit executable applies to every call,
+  is `>=0.59, <0.60`, checked publicly; an explicit executable applies to every call,
   without fallback or changing the repository's own version pin.
 - Query created and updated separately, then fold selected documents by identity.
   Grow query reach past the window's first day; one below-bound observation proves
@@ -93,6 +93,7 @@ Use parser/token-state behavior, not regex replacement of arbitrary markup.
   base URLs are configured, never inferred from a remote. Undated observed records
   do not acquire invented authored timestamps; pipeline upper bounds still apply.
 - Consume one verified public response for node, canonical body, and relations.
+  Preserve all authored `references` and their typed body/frontmatter locations.
   Preserve nonempty nested `attributes` as `source_record.attributes`; omit empty
   attributes to avoid input noise. They are neither identity nor lifecycle state.
   `observation_revision` is a semantic observation digest, not raw-byte hash or a
