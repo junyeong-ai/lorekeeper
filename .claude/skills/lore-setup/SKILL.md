@@ -1,6 +1,6 @@
 ---
 name: lore-setup
-version: 0.61.3
+version: 0.61.4
 description: Guides initial Lorekeeper setup or edits source configuration using workspace metadata. Discovers requested source IDs, preserves existing selections, and distinguishes config validation, native authentication, first processing and optional scheduling.
 when_to_use: |
   Lorekeeper setup, configure Lorekeeper sources, add a Lorekeeper source,
@@ -15,6 +15,7 @@ allowed-tools: |
   Bash(ls *)
   Bash(lore validate)
   Bash(lore schema)
+  Bash(lore schedule *)
   Bash(lore config *)
   Bash(lore ingest --dry-run *)
   Read
@@ -44,8 +45,11 @@ reconfigure the rest of an existing vault.
    - Confluence → `references/config.md`, Initial setup, and the Confluence example
    - Project repositories (`nodex`) → `references/config.md`, Nodex binary selection
    - Other supported sources → `config.example.yaml` for their parameters
-3. **Write config** — use `references/config.md` schema within the user's authorized
-   source selections. Ask only for missing choices that change that scope. Location:
+3. **Write config** — start a new config from `config.starter.yaml` and add only the
+   requested blocks from `config.example.yaml`. The catalog's sources are disabled;
+   enable selected sources after filling their real scope. Use `references/config.md`
+   for surrounding modules; omit personal tracking unless requested. Ask only for
+   missing choices that change that scope. Location:
    `./config.yaml` (repo) or `~/.config/lorekeeper/config.yaml`
    (binary install). If a file already exists, merge the source block
    only — never overwrite.

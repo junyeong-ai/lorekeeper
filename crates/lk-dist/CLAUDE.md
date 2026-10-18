@@ -24,6 +24,8 @@ lives in `lk-cli/commands/installation.rs`.
 - Data directory selection is environment override, recorded `data-dir`, then
   default. Uninstall removes the record as well. Optional deployment locations are
   used only when already present unless the user explicitly selects a level.
+- Installer hints also serve explicitly pinned older binaries. Select a deployed
+  starting example without assuming that every release carries the same files.
 
 ## Coherence (`coherence.rs`)
 

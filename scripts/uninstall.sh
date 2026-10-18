@@ -109,7 +109,7 @@ fi
 # said.
 lore_config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/lorekeeper"
 if [ "$KEEP_DATA" != "1" ]; then
-    for artifact in config.example.yaml data-dir deployed-skills; do
+    for artifact in config.example.yaml config.starter.yaml data-dir deployed-skills; do
         path="${lore_config_dir}/${artifact}"
         [ -f "$path" ] || continue
         if prompt_yesno "Remove $path?"; then

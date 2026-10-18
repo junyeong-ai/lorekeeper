@@ -62,32 +62,51 @@ flowchart LR
 > - 🔑 **Credentials only for the sources you enable** — e.g. Google sign-in for Gmail/Drive/Calendar, a token for Slack
 > - 🗂️ **(optional) Obsidian** — for pretty graph browsing. Without it, the output is still plain markdown
 >
-> 💡 **Want to try it key-free first?** Enable just `rss` and the note `inbox/` — neither needs auth, so it runs immediately.
+> 💡 The starter enables **one local note inbox without provider credentials**. Add RSS, work sources or personal tracking when needed. Summaries and concepts require an authenticated Claude Code session.
 
 ```bash
 # 1) Install — binary + templates + Claude Code skills in one go
 curl -fsSL https://raw.githubusercontent.com/junyeong-ai/lorekeeper/main/scripts/install.sh | bash
 
-# 2) Configure — copy the example and edit for your environment
-cp ~/.config/lorekeeper/config.example.yaml ~/.config/lorekeeper/config.yaml
-$EDITOR ~/.config/lorekeeper/config.yaml
-#    (Not sure what IDs to fill in? Run `/lore-setup` in Claude Code — it finds your
-#     Slack channel / Jira project / calendar IDs for you.)
+# 2) First setup — preserve an existing config.yaml and edit it
+LORE_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/lorekeeper"
+cp -n "$LORE_CONFIG_DIR/config.starter.yaml" "$LORE_CONFIG_DIR/config.yaml"
+${EDITOR:-vi} "$LORE_CONFIG_DIR/config.yaml"  # set vault.root, timezone, locale and identity
 
-# 3) Credentials — interactive wizard (Google tokens minted in your browser)
-lore init credentials
-
-# 4) Validate — checks config only, no network
+# 3) Validate locally and generate the knowledge-writing contract
 lore validate
+lore schema
+mkdir -p "$(lore config vault-root)/inbox"
+```
 
-# 5) Ingest → fill
-lore ingest                       # collect sources, write structural pages, queue LLM tasks
-#    then, in Claude Code:        /lore-process     ← fills summaries & concepts
+Put one note in the vault's `inbox/`, then collect it. `inbox_dir: inbox` follows
+your selected `vault.root`. The starter does not need the provider credential wizard.
 
-# 6) Generate definitions for the pipeline that fills summaries and concepts
+```bash
+# 4) Check input access, then collect for real
+lore ingest --dry-run
+lore ingest
+```
+
+Next, run **`/lore-process`** in Claude Code to publish summaries, concepts and
+relationships. Collection alone does not complete knowledge processing. Then verify:
+
+```bash
+lore queue check
+lore wiki reviews --check
+lore wiki search "your note's topic" --json
+
+# 5) Optional automation: generate definitions, then register with the OS
 lore schedule --pipeline-dir ~/.local/share/lorekeeper/pipelines > lorekeeper.cron
 #    review and merge with crontab -e; on macOS see "Scheduling" below
 ```
+
+`config.example.yaml` is the full option catalog, with every source disabled.
+Copy only the blocks you need into your real `config.yaml`, fill in their scope and
+account values, then enable them. `/lore-setup` helps with those choices and ID discovery.
+For an authenticated source, run `lore init credentials` and then
+`lore ingest --dry-run <source-id>`. Definition generation, OS registration and an
+actual run are separate steps; follow [Scheduling](#scheduling).
 
 > You don't need Obsidian — the output is plain markdown + folders, readable as text. Obsidian just makes the graph nicer to browse.
 
@@ -286,7 +305,7 @@ Each day's ingest grows the concept graph; synthesis summarizes it at ever-highe
 
 The source key becomes the vault subfolder name. You can define several of the same type (e.g. `team-slack`, `ai-news`). Full reference: [`config.example.yaml`](config.example.yaml).
 
-To start with external knowledge, enable `ai-news` or `tech-news` in the example and disable account-based sources you do not use. The starter feeds cover official announcements, model methods, AI implementation, product evaluation and Korean engineering accounts; additional labs, newsletters and aggregators are optional. `fetch_full_text` retrieves articles from short feeds, but access failures retain only the feed text. `focus` guides summaries and concept extraction without filtering raw collection. Current feed listings and query caps guarantee neither complete history nor factual accuracy.
+To add external knowledge, copy the catalog's `ai-news` or `tech-news` block into your actual config and enable it. The selected feeds cover official announcements, model methods, AI implementation, product evaluation and Korean engineering accounts; additional labs, newsletters and aggregators are optional. `fetch_full_text` retrieves articles from short feeds, but access failures retain only the feed text. `focus` guides summaries and concept extraction without filtering raw collection. Current feed listings and query caps guarantee neither complete history nor factual accuracy.
 
 ---
 
@@ -413,6 +432,11 @@ cargo build --release && ./target/release/lore --help
 
 Install flags: `--version`, `--install-dir`, `--data-dir`, `--skill {user,project,none}`, `--from-source`, `--force`, `--yes`, `--dry-run` (`--help` lists them all).
 
+The installer deploys `config.starter.yaml` and `config.example.yaml` in the config
+directory and preserves your `config.yaml`. Beside them, `data-dir` records the
+installation path and `deployed-skills` records deployed skills. These automatic
+records support updates and removal; they contain no credentials.
+
 ### Tasks
 
 ```bash
@@ -444,7 +468,7 @@ lore self deploy      # redeploy only — the repair `self status` reports
 lore self uninstall   # remove what was installed; the vault is never touched
 ```
 
-The skills, pipeline scripts, templates and `config.example.yaml` are **compiled into the binary**, and deployed copies can drift; `lore self status` checks them, while `lore self deploy` writes the copies. `lore self update` refuses while the queue still holds work, and refuses a release older than the running one — pass `--version` to go back deliberately.
+The skills, pipeline scripts, templates and both config examples are **compiled into the binary**, and deployed copies can drift; `lore self status` checks them, while `lore self deploy` writes the copies. `lore self update` refuses while the queue still holds work, and refuses a release older than the running one — pass `--version` to go back deliberately.
 
 ---
 

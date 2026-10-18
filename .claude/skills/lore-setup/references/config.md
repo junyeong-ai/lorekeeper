@@ -1,8 +1,11 @@
 # config.yaml schema
 
-The full example is `config.example.yaml` at the repo root, deployed to
-`~/.config/lorekeeper/config.example.yaml` for binary installs. It owns the supported
-source types and their options; this file summarizes the surrounding structure.
+`config.starter.yaml` enables one local inbox without provider credentials or
+personal tracking. `config.example.yaml` is the full catalog of optional source
+types and modules, with every source disabled. Both ship at the repo root and in
+the installed config directory. Start small, then copy only selected blocks into
+the user's `config.yaml`; this file summarizes the surrounding structure.
+The starter's `ingest.schedule` declares a cadence; it creates no OS registration.
 
 ```yaml
 vault:
@@ -60,6 +63,7 @@ requested sources with real IDs; example placeholders are not working accounts.
 A manual inbox can prove the local path without provider credentials. Keep it
 separate from configured daily/personal/synthesis/wiki directories and
 `.lorekeeper`, including symlink targets. Archive=false still preserves originals.
+Prefer `inbox_dir: inbox` so changing `vault.root` also moves input discovery.
 
 Discovery helpers (`slack-cli`, `atlassian-cli`, `gws`) have their own installation
 and account login. Their success does not authenticate Lore's native adapters.
@@ -87,10 +91,12 @@ The wizard refuses an unreadable or malformed existing store without resetting i
 For a complete initial setup, distinguish these outcomes:
 
 1. `lore validate` accepts the config; it does not contact providers or prove access.
+   For a new vault, generate its writing contract with `lore schema` before processing.
 2. A selected-source `lore ingest --dry-run <id>` succeeds with the intended reach.
    It contacts the source without writing pages/queue; an empty result can be valid.
 3. The user-invoked `/lore-ingest` and `/lore-process` publish knowledge, then their queue
-   and relationship checks pass. Use a full ingest to produce the personal work-log.
+   and relationship checks pass. Check `lore queue check`, `lore wiki reviews --check`
+   and retrieval of the input's topic. Use a full ingest to produce the personal work-log.
 4. If automation was requested, follow the existing
    [scheduling procedure](../../lore-ingest/references/scheduling.md), register the
    definitions with the OS, and inspect an actual scheduled run. Definition output

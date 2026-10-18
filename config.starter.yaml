@@ -1,0 +1,29 @@
+# Copy to config.yaml, then set your vault location and identity.
+# Add selected source/module blocks from config.example.yaml when needed.
+# This local inbox needs no provider credentials. Semantic processing uses Claude Code.
+vault:
+  root: ~/Documents/Obsidian Vault
+  timezone: system
+  locale: ko
+
+identity:
+  name: "Your name"
+  email: "you@example.com"
+
+# Host-local cadence; takes effect only after explicit OS registration.
+ingest:
+  schedule: "0 7 * * *"
+
+sources:
+  manual-inbox:
+    type: manual
+    enabled: true
+    params:
+      inbox_dir: inbox
+      # Originals are preserved; collected entries move to inbox/archived after queue flush.
+      archive_after_ingest: true
+    labels: [knowledge]
+    extract_concepts: true
+
+llm:
+  provider: queue

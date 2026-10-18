@@ -115,9 +115,7 @@ function Install-Binary($src, $destDir) {
     Write-Ok $dest
 }
 
-# Drop config.example.yaml into the config dir `lore` auto-discovers on Windows
-# (`%XDG_CONFIG_HOME%\lorekeeper` else `%USERPROFILE%\.config\lorekeeper`), matching
-# install.sh — so a binary-only install gives the user a starting point to copy to config.yaml.
+# Config discovery matches install.sh: XDG_CONFIG_HOME, then USERPROFILE/.config.
 function Get-ConfigDir {
     if ($env:XDG_CONFIG_HOME) { Join-Path $env:XDG_CONFIG_HOME 'lorekeeper' }
     else { Join-Path $env:USERPROFILE '.config\lorekeeper' }
@@ -279,10 +277,24 @@ Write-Host ''
 Write-Host '✅ Installation complete' -ForegroundColor Green
 Write-Host ''
 $cfgDir = Get-ConfigDir
+$quotedConfigDir = $cfgDir.Replace("'", "''")
+$initialConfig = Join-Path $cfgDir 'config.starter.yaml'
+if (-not (Test-Path -LiteralPath $initialConfig -PathType Leaf)) {
+    $initialConfig = Join-Path $cfgDir 'config.example.yaml'
+}
+if (-not (Test-Path -LiteralPath $initialConfig -PathType Leaf)) {
+    throw 'Installed binary did not deploy a configuration example'
+}
+$quotedInitialConfig = $initialConfig.Replace("'", "''")
 Write-Host 'Next steps:'
 Write-Host "  1. Create your config (auto-discovered, no repo needed):"
-Write-Host "       Copy-Item '$cfgDir\config.example.yaml' '$cfgDir\config.yaml'; notepad '$cfgDir\config.yaml'"
-Write-Host "  2. $BinaryName init credentials   Enter API tokens interactively"
-Write-Host "  3. $BinaryName validate           Check configuration (no provider requests)"
-Write-Host "  4. $BinaryName ingest --dry-run   Check source access without writing pages"
-Write-Host "  5. $BinaryName schedule           Print the cron cadences from your config"
+Write-Host "       if (-not (Test-Path -LiteralPath '$quotedConfigDir\config.yaml')) { Copy-Item -LiteralPath '$quotedInitialConfig' -Destination '$quotedConfigDir\config.yaml' }"
+Write-Host "       notepad '$quotedConfigDir\config.yaml'"
+Write-Host '       Set vault.root, timezone, locale and identity; put a note in its inbox/.'
+Write-Host '       Add selected source/module blocks from config.example.yaml, then enable them.'
+Write-Host "       Authenticated sources only: $BinaryName init credentials"
+Write-Host "  2. $BinaryName validate; $BinaryName schema    Check config and generate the writing contract"
+Write-Host "  3. $BinaryName ingest --dry-run               Check selected source access"
+Write-Host "  4. $BinaryName ingest                         Then run /lore-process in Claude Code"
+Write-Host "  5. $BinaryName queue check; $BinaryName wiki reviews --check"
+Write-Host '       Unattended scheduled pipelines require macOS or Linux.'

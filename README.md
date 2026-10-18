@@ -63,31 +63,50 @@ flowchart LR
 > - 🔑 **쓰려는 소스의 자격증명만** — 예: Gmail/Drive/Calendar는 Google 로그인, Slack은 토큰
 > - 🗂️ **(선택) Obsidian** — 그래프를 예쁘게 탐색용. 없어도 결과물은 평범한 마크다운입니다
 >
-> 💡 **키 없이 먼저 체험**하고 싶다면 `rss`와 메모 `inbox/`만 켜세요 — 인증이 필요 없어 바로 돌아갑니다.
+> 💡 기본 시작 설정은 **인증이 필요 없는 메모 inbox 하나**입니다. RSS·업무 소스·개인 활동 추적은 필요할 때 추가합니다. 요약·개념 생성에는 로그인된 Claude Code가 필요합니다.
 
 ```bash
 # 1) 설치 — 바이너리 + 템플릿 + Claude Code 스킬을 한 번에
 curl -fsSL https://raw.githubusercontent.com/junyeong-ai/lorekeeper/main/scripts/install.sh | bash
 
-# 2) 설정 — 예시를 복사해 내 환경에 맞게 편집
-cp ~/.config/lorekeeper/config.example.yaml ~/.config/lorekeeper/config.yaml
-$EDITOR ~/.config/lorekeeper/config.yaml
-#    (어떤 값을 넣어야 할지 모르겠다면 Claude Code에서 `/lore-setup` — 채널/프로젝트 ID를 직접 찾아줍니다)
+# 2) 처음 설정 — 기존 config.yaml이 있으면 보존하고 편집
+LORE_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/lorekeeper"
+cp -n "$LORE_CONFIG_DIR/config.starter.yaml" "$LORE_CONFIG_DIR/config.yaml"
+${EDITOR:-vi} "$LORE_CONFIG_DIR/config.yaml"  # vault.root, timezone, locale, identity 확인
 
-# 3) 자격증명 — 대화형 마법사 (Google 토큰은 브라우저로 자동 발급)
-lore init credentials
-
-# 4) 검증 — 네트워크 없이 설정만 점검
+# 3) 로컬 검증과 지식 작성 규약 생성
 lore validate
-
-# 5) 수집 → 채우기
-lore ingest                       # 소스 수집 + 구조 페이지 작성 + LLM 작업 큐잉
-#    이어서 Claude Code에서:  /lore-process     ← 요약·개념을 채움
-
-# 6) 매일 자동으로 — 파이프라인 예약 정의 생성
-lore schedule --pipeline-dir ~/.local/share/lorekeeper/pipelines > lorekeeper.cron
-#    기존 예약을 보존하며 crontab -e에 병합. macOS는 아래 launchd 절 참고
+lore schema
+mkdir -p "$(lore config vault-root)/inbox"
 ```
+
+vault의 `inbox/`에 메모 파일 하나를 넣은 뒤 수집합니다. `inbox_dir: inbox`는 변경한
+`vault.root`를 따라갑니다. 기본 설정에는 공급자 인증 마법사가 필요하지 않습니다.
+
+```bash
+# 4) 입력 접근을 확인한 뒤 실제 수집
+lore ingest --dry-run
+lore ingest
+```
+
+이어서 Claude Code에서 **`/lore-process`**를 실행해 요약·개념·관계를 게시합니다.
+수집만 끝난 상태는 지식화 완료가 아닙니다. 처리가 끝나면 다음을 확인합니다.
+
+```bash
+lore queue check
+lore wiki reviews --check
+lore wiki search "메모의 주제" --json
+
+# 5) 자동화가 필요하면 예약 정의 생성 후 OS에 등록
+lore schedule --pipeline-dir ~/.local/share/lorekeeper/pipelines > lorekeeper.cron
+# 기존 예약을 보존하며 병합하고 실제 실행 확인. macOS는 아래 스케줄링 절 참고
+```
+
+`config.example.yaml`은 전체 옵션 카탈로그이며 모든 소스가 비활성 상태입니다.
+필요한 블록만 실제 `config.yaml`에 추가하고 범위·계정 값을 채운 뒤 활성화하세요.
+`/lore-setup`은 이 선택과 ID 탐색을 돕습니다. 인증이 필요한 소스를 추가하면
+`lore init credentials` → 해당 소스의 `lore ingest --dry-run <source-id>` 순서로 확인합니다.
+예약 정의 생성·OS 등록·실제 실행은 각각 별도 단계입니다. [스케줄링](#스케줄링)을 따르세요.
 
 > Obsidian이 없어도 됩니다 — 결과물은 평범한 마크다운 + 폴더라 그냥 텍스트로 읽힙니다. Obsidian은 그래프 탐색을 예쁘게 보여줄 뿐.
 
@@ -279,7 +298,7 @@ flowchart LR
 
 소스 키 = vault의 하위 폴더 이름. 같은 타입을 여러 개 정의할 수 있습니다(예: `team-slack`, `ai-news`). 전체 예시는 [`config.example.yaml`](config.example.yaml).
 
-외부 지식부터 시작하려면 예시의 `ai-news` 또는 `tech-news`를 켜고, 사용하지 않는 계정형 소스는 끄세요. 공식 발표·모델 기법·AI 구현·제품 평가와 국내 개발 사례를 기본으로 두고, 추가 연구소·뉴스레터·집계 피드는 선택하도록 나눴습니다. `fetch_full_text`는 짧은 피드의 본문을 가져오지만 접근 실패 시 피드 텍스트만 남습니다. `focus`는 요약·개념 추출의 범위이며 원본 수집을 차단하지 않습니다. 피드의 현재 목록과 조회 한도는 전체 과거 이력이나 사실의 정확성을 보장하지 않습니다.
+외부 지식을 추가하려면 카탈로그의 `ai-news` 또는 `tech-news` 블록을 실제 설정에 복사해 활성화하세요. 공식 발표·모델 기법·AI 구현·제품 평가와 국내 개발 사례를 기본으로 두고, 추가 연구소·뉴스레터·집계 피드는 선택하도록 나눴습니다. `fetch_full_text`는 짧은 피드의 본문을 가져오지만 접근 실패 시 피드 텍스트만 남습니다. `focus`는 요약·개념 추출의 범위이며 원본 수집을 차단하지 않습니다. 피드의 현재 목록과 조회 한도는 전체 과거 이력이나 사실의 정확성을 보장하지 않습니다.
 
 ---
 
@@ -408,6 +427,11 @@ cargo build --release && ./target/release/lore --help
 
 설치 플래그: `--version`, `--install-dir`, `--data-dir`, `--skill {user,project,none}`, `--from-source`, `--force`, `--yes`, `--dry-run` (`--help`로 전체 확인).
 
+설치기는 설정 디렉터리에 `config.starter.yaml`과 `config.example.yaml`을 배포하며
+사용자의 `config.yaml`은 보존합니다. 같은 디렉터리의 `data-dir`은 설치 경로를,
+`deployed-skills`는 배포한 스킬을 기록합니다. 업데이트·제거에 쓰는 자동 관리 정보이며
+인증정보는 포함하지 않습니다.
+
 ### 할 일 관리
 
 ```bash
@@ -431,7 +455,7 @@ lore self deploy      # 재배포만 (self status가 보고한 차이를 고침)
 lore self uninstall   # 설치한 것만 제거 — vault는 건드리지 않음
 ```
 
-스킬·파이프라인·템플릿·`config.example.yaml`은 **바이너리에 내장**되어 있습니다. 배포된 사본은 변경되거나 뒤처질 수 있으며 `lore self status`로 확인합니다. `lore self deploy`가 사본을 씁니다. `lore self update`는 큐에 처리 대기 중인 작업이 있으면 거부하고, 실행 중인 버전보다 오래된 릴리스도 거부합니다(`--version`으로 명시하면 되돌릴 수 있음).
+스킬·파이프라인·템플릿·시작 설정·전체 옵션 예제은 **바이너리에 내장**되어 있습니다. 배포된 사본은 변경되거나 뒤처질 수 있으며 `lore self status`로 확인합니다. `lore self deploy`가 사본을 씁니다. `lore self update`는 큐에 처리 대기 중인 작업이 있으면 거부하고, 실행 중인 버전보다 오래된 릴리스도 거부합니다(`--version`으로 명시하면 되돌릴 수 있음).
 
 ---
 

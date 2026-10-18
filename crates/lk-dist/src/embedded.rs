@@ -79,7 +79,7 @@ pub fn template_files() -> Vec<EmbeddedFile> {
         .collect()
 }
 
-/// The config example, addressed relative to the config directory.
+/// The starter and reference configs, addressed relative to the config directory.
 ///
 /// A starting point rather than a setting: the file a user edits is `config.yaml` beside it,
 /// which nothing here writes. Carried for the same reason as the rest — an example naming keys

@@ -1542,13 +1542,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_example_config() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config.example.yaml");
-        if path.exists() {
-            let config = Config::load(&path).expect("should parse example config");
-            assert!(!config.sources.is_empty());
-            assert!(config.sources.contains_key("ai-news"));
-        }
+    fn shipped_configs_start_locally_and_keep_optional_sources_disabled() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let reference = Config::load(&root.join("config.example.yaml")).unwrap();
+        assert!(reference.sources.contains_key("ai-news"));
+        assert_eq!(reference.enabled_sources().count(), 0);
+
+        let starter = Config::load(&root.join("config.starter.yaml")).unwrap();
+        assert_eq!(starter.sources.len(), 1);
+        let source = starter.sources.get("manual-inbox").unwrap();
+        assert_eq!(source.source_type, SourceType::Manual);
+        assert!(source.enabled && source.extract_concepts);
+        assert_eq!(source.params["inbox_dir"], "inbox");
+        assert!(starter.personal.is_none());
+        assert!(starter.credentials.file.is_none());
+        assert!(starter.ingest.schedule.is_some());
+        assert_eq!(starter.llm.provider, LlmProvider::Queue);
     }
 
     #[test]

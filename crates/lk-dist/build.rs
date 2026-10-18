@@ -39,10 +39,10 @@ fn main() {
     emit(
         &mut out,
         "CONFIG_FILES",
-        vec![(
-            "config.example.yaml".to_string(),
-            repo.join("config.example.yaml"),
-        )],
+        ["config.example.yaml", "config.starter.yaml"]
+            .into_iter()
+            .map(|name| (name.to_string(), repo.join(name)))
+            .collect(),
     );
 
     let dest = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR")).join("embedded.rs");

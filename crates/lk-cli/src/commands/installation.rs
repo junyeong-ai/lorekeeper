@@ -282,7 +282,7 @@ async fn deploy(
     for (label, outcome) in [
         ("Pipelines  ", installation.deploy_pipelines()),
         ("Templates  ", installation.deploy_templates()),
-        ("Config     ", installation.deploy_config_example()),
+        ("Config     ", installation.deploy_config_examples()),
     ] {
         let dir = outcome.map_err(|e| miette::miette!("{e}"))?;
         eprintln!("{label} → {}", dir.display());
@@ -527,7 +527,11 @@ fn uninstall(installation: &Installation, yes: bool, purge_config: bool) -> miet
         // The records go with the copies they describe. Leaving `data-dir` behind meant a later
         // bare `self deploy` resurrected the very directory this removed, in preference to the
         // default, with nothing said.
-        for name in ["config.example.yaml", "data-dir", "deployed-skills"] {
+        for name in lk_dist::config_files()
+            .iter()
+            .map(|file| file.relative)
+            .chain(["data-dir", "deployed-skills"])
+        {
             remove_file(&installation.config_dir().join(name))?;
         }
     }

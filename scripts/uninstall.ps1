@@ -70,7 +70,7 @@ if ((-not $KeepData) -and (Test-Path $templates)) {
 $configDir = if ($env:XDG_CONFIG_HOME) { Join-Path $env:XDG_CONFIG_HOME 'lorekeeper' }
              else { Join-Path $env:USERPROFILE '.config\lorekeeper' }
 if (-not $KeepData) {
-    foreach ($artifact in @('config.example.yaml', 'data-dir', 'deployed-skills')) {
+    foreach ($artifact in @('config.example.yaml', 'config.starter.yaml', 'data-dir', 'deployed-skills')) {
         $path = Join-Path $configDir $artifact
         if (-not (Test-Path $path)) { continue }
         if (Prompt-YesNo "Remove $path?") {

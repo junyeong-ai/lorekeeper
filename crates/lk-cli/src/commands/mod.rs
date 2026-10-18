@@ -64,7 +64,8 @@ fn locate_config(opts: &GlobalOptions) -> miette::Result<PathBuf> {
     }
     Err(miette::miette!(
         "No config found. Create ./config.yaml or ~/.config/lorekeeper/config.yaml \
-         (copy config.example.yaml), or pass --config / set LORE_CONFIG."
+         (copy config.starter.yaml; config.example.yaml lists optional sources), \
+         or pass --config / set LORE_CONFIG."
     ))
 }
 

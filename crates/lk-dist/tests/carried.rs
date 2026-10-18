@@ -110,14 +110,15 @@ fn the_binary_carries_the_templates_it_renders_with() {
 }
 
 #[test]
-fn the_binary_carries_the_config_example() {
+fn the_binary_carries_the_starter_and_reference_configs() {
     let files = lk_dist::config_files();
-    assert_eq!(files.len(), 1);
-    assert_eq!(files[0].relative, "config.example.yaml");
     assert_eq!(
-        files[0].contents,
-        read(&repo_root().join("config.example.yaml"))
+        files.iter().map(|file| file.relative).collect::<Vec<_>>(),
+        ["config.example.yaml", "config.starter.yaml"]
     );
+    for file in files {
+        assert_eq!(file.contents, read(&repo_root().join(file.relative)));
+    }
 }
 
 /// An archive an installer asks for has to be one the release builds, and a target the release

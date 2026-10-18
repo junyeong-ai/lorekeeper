@@ -243,9 +243,7 @@ install_binary() {
     log_ok "$dest"
 }
 
-# Drop config.example.yaml into the XDG config dir so a binary-only install (no git
-# clone) has a template to copy to config.yaml. `lore` auto-discovers
-# ~/.config/lorekeeper/config.yaml, so this is where users should put their real config.
+# The binary deploys starter and reference configs beside the auto-discovered config.yaml.
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/lorekeeper"
 build_from_source() {
     local repo_dir="$1"
@@ -347,14 +345,14 @@ print_pipeline_schedule() {
     local lore_bin="${INSTALL_DIR}/${BINARY_NAME}"
 
     if [ "$(uname -s)" = "Darwin" ]; then
-        printf '       %slore schedule --format launchd --bin %s \\\n' "$C_BOLD" "$lore_bin"
-        printf '            --pipeline-dir %s/pipelines%s\n' "$DATA_DIR" "$C_RESET"
+        printf '       %slore schedule --format launchd --bin %q \\\n' "$C_BOLD" "$lore_bin"
+        printf '            --pipeline-dir %q%s\n' "$DATA_DIR/pipelines" "$C_RESET"
         printf '       Review the plists it prints, write them to ~/Library/LaunchAgents/,\n'
         printf '       then load each with launchctl bootstrap (the output shows how).\n'
         printf '       launchd runs a job missed during sleep; cron silently skips it.\n'
     else
-        printf '       %slore schedule --pipeline-dir %s/pipelines%s > lorekeeper.cron\n' \
-            "$C_BOLD" "$DATA_DIR" "$C_RESET"
+        printf '       %slore schedule --pipeline-dir %q%s > lorekeeper.cron\n' \
+            "$C_BOLD" "$DATA_DIR/pipelines" "$C_RESET"
         printf '       Review and merge with crontab -e; preserve existing jobs.\n'
     fi
 }
@@ -624,12 +622,22 @@ main() {
     printf '\n%s✅ Installation complete%s\n' "$C_GREEN$C_BOLD" "$C_RESET"
     printf '\nNext steps:\n'
     printf '  %s1.%s Create your config (auto-discovered, no repo needed):\n' "$C_BOLD" "$C_RESET"
-    printf '       cp %s/config.example.yaml %s/config.yaml\n' "$CONFIG_DIR" "$CONFIG_DIR"
-    printf '       $EDITOR %s/config.yaml\n' "$CONFIG_DIR"
-    printf '  %s2.%s %slore init credentials%s   Enter API tokens interactively\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
-    printf '  %s3.%s %slore validate%s           Check configuration (no provider requests)\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
-    printf '  %s4.%s %slore ingest --dry-run%s   Check source access without writing pages\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
-    printf '  %s5.%s Generate schedules, then register and inspect an actual run:\n' "$C_BOLD" "$C_RESET"
+    local initial_config="$CONFIG_DIR/config.starter.yaml"
+    if [ ! -f "$initial_config" ]; then
+        initial_config="$CONFIG_DIR/config.example.yaml"
+    fi
+    [ -f "$initial_config" ] || die "Installed binary did not deploy a configuration example"
+    printf '       cp -n %q %q\n' "$initial_config" "$CONFIG_DIR/config.yaml"
+    printf '       ${EDITOR:-vi} %q\n' "$CONFIG_DIR/config.yaml"
+    printf '       Set vault.root, timezone, locale and identity; put a note in its inbox/.\n'
+    printf '       Select optional source/module blocks from config.example.yaml.\n'
+    printf '       Provider credentials are needed only after selecting an authenticated source:\n'
+    printf '       lore init credentials\n'
+    printf '  %s2.%s lore validate && lore schema    Check config and generate the writing contract\n' "$C_BOLD" "$C_RESET"
+    printf '  %s3.%s lore ingest --dry-run           Check selected source access\n' "$C_BOLD" "$C_RESET"
+    printf '  %s4.%s lore ingest                     Collect, then run /lore-process in Claude Code\n' "$C_BOLD" "$C_RESET"
+    printf '  %s5.%s lore queue check && lore wiki reviews --check\n' "$C_BOLD" "$C_RESET"
+    printf '  %s6.%s Optional schedules: register definitions, then inspect an actual run:\n' "$C_BOLD" "$C_RESET"
     print_pipeline_schedule
 }
 

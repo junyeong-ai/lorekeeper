@@ -323,11 +323,11 @@ impl Installation {
         Ok(dir)
     }
 
-    /// The config example, written beside wherever `config.yaml` is discovered.
+    /// Starter and reference configs, written beside the user's `config.yaml`.
     ///
     /// Written file by file rather than as an exact tree: the directory holds the user's
     /// own `config.yaml`, which this does not own and must not remove.
-    pub fn deploy_config_example(&self) -> Result<PathBuf, DistError> {
+    pub fn deploy_config_examples(&self) -> Result<PathBuf, DistError> {
         let dir = self.config_dir.clone();
         std::fs::create_dir_all(&dir)
             .map_err(|e| DistError::io(format!("create {}", dir.display()), e))?;

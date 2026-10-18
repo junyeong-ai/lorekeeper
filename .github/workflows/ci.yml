@@ -142,6 +142,18 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
           persist-credentials: false
+      - name: Parse PowerShell installers
+        shell: powershell
+        run: |
+          Get-ChildItem scripts -Filter '*.ps1' | ForEach-Object {
+            $parseTokens = $null
+            $parseErrors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName, [ref]$parseTokens, [ref]$parseErrors)
+            if ($parseErrors.Count -gt 0) {
+              throw ($parseErrors | Out-String)
+            }
+          }
       - name: Read repository toolchain
         id: toolchain
         shell: bash

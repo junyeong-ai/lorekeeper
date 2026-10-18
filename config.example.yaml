@@ -1,9 +1,8 @@
 # Lorekeeper configuration
-# Copy to config.yaml and customize for your environment.
-# config.yaml is gitignored — safe for personal settings.
-# This is a reference catalog, not a ready-to-run account configuration. Keep only
-# the sources you want; /lore-setup discovers account IDs and validates your selection.
-# RSS needs no account: enable ai-news or tech-news for a knowledge-only start.
+# Start with config.starter.yaml; copy only the source/module blocks you need from here.
+# This reference catalog keeps every source disabled until you select its real scope.
+# /lore-setup discovers account IDs and validates your selection.
+# RSS needs no account: ai-news and tech-news offer selected and optional feeds.
 #
 # Location (auto-discovered in this order):
 #   1. --config / LORE_CONFIG
@@ -73,7 +72,7 @@ sources:
   # conversation is threaded, so include_threads pulls reply context too.
   team-slack:
     type: slack-channel
-    enabled: true
+    enabled: false
     params:
       # a single `channel`, or channels: ["C0123…", "#name"] (multiple, ids and names mixed)
       channels: ["#aix-team-digest"]
@@ -89,7 +88,7 @@ sources:
   # ── Personal (my activity — collected directly) ──
   my-tasks:
     type: jira
-    enabled: true
+    enabled: false
     # instance: default         # (optional) which credentials.atlassian entry authenticates
                                 # this source; required only when several are configured
     params:
@@ -115,7 +114,7 @@ sources:
   # re-conceptualized. That is the whole freshness mechanism — no separate sync pass.
   my-wiki:
     type: confluence
-    enabled: true
+    enabled: false
     # instance: default
     params:
       # WHICH pages matter. Must NOT contain a time clause: the adapter appends the target
@@ -135,7 +134,7 @@ sources:
 
   my-schedule:
     type: google-calendar
-    enabled: true
+    enabled: false
     params:
       calendar_id: primary
       lookback_hours: 24
@@ -148,7 +147,7 @@ sources:
 
   email-digest:
     type: gmail
-    enabled: true
+    enabled: false
     params:
       lookback_hours: 24
       # max_messages: 200 # (optional) per-day fetch cap; raise for busy accounts or backfills
@@ -162,42 +161,27 @@ sources:
         - "from:@company.com -label:ai-news"      # org broadcast / alias announcements
         # `is:unread` is allowed but read-state-dependent — use it only if you deliberately
         # want "mail I haven't read yet" and accept that re-ingest is not reproducible.
+      # Keep invitations when email is your only meeting source. Exclude only noise
+      # observed in your own mailbox; broad automated-sender rules can hide useful work.
       exclude:
-        # Block only OBSERVED noise deterministically. Do NOT broadly block `noreply@` /
-        # `notifications@` — that false-blocks high-value automated mail (meeting notes, cloud
-        # action alerts). Name the specific senders you actually see as noise.
-        subjects: ["[Automated]"]
-        senders: ["mailer-daemon@", "notifications@github.com", "calendar-notification@"]
-        calendar_invites: true  # auto-exclude calendar invites (my-schedule owns the calendar) (default true)
-    # keyword → category (source level, kept separate from params). Matched in order; first match wins.
-    classify:
-      - category: action_required
-        keywords: ["action required", "please review", "검토 요청", "확인 부탁"]
-      - category: decisions
-        keywords: ["approved", "결재 완료", "승인"]
-      - category: project_updates
-        keywords: ["진행 상황", "업데이트", "progress"]
-      - category: knowledge_sharing
-        keywords: ["공유드립니다", "FYI", "참고"]
-      - category: meeting_followup
-        keywords: ["회의록", "action items", "후속"]
-    # Surface chosen classify categories as dedicated highlight sections at the TOP of the
-    # daily page (above the full event list — never hiding anything). `category` must match a
-    # classify rule above; `label` is the heading, written in your vault's language. Omit
-    # `highlights` entirely (any source type) for a plain chronological page.
-    highlights:
-      - { category: action_required, label: "조치 필요" }
-      - { category: decisions, label: "의사결정" }
-      - { category: project_updates, label: "프로젝트 업데이트" }
-      - { category: knowledge_sharing, label: "지식 공유" }
-      - { category: meeting_followup, label: "미팅 후속" }
+        calendar_invites: false
+        # subjects: []
+        # senders: []
+    # Optional daily-page presentation buckets. First keyword match wins; a match
+    # does not establish intent, approval or factual correctness. Leave absent for
+    # chronological rendering and semantic concept extraction.
+    # classify:
+    #   - category: knowledge_sharing
+    #     keywords: ["FYI", "공유드립니다"]
+    # highlights:
+    #   - { category: knowledge_sharing, label: "지식 공유" }
     labels: [personal, team-ops]
     extract_concepts: true
 
   # ── Trends (trend analysis) ──
   slack-trends:
     type: slack-search
-    enabled: true
+    enabled: false
     params:
       queries:
         - channel: "#ai-general"
@@ -350,7 +334,7 @@ sources:
     params:
       # Relative paths anchor at vault.root. Keep raw input separate from all managed
       # vault.dirs roots and .lorekeeper, including symlink targets.
-      inbox_dir: ~/Documents/Obsidian Vault/inbox
+      inbox_dir: inbox
       extensions: [md, txt, markdown, html, htm]
       archive_after_ingest: true  # auto-archive after processing (default true)
     labels: [knowledge]
