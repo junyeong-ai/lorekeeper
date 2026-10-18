@@ -20,6 +20,7 @@ allowed-tools: |
   Read
   Edit
   Write
+  Glob
 ---
 
 # lore-process — Drain the Lorekeeper LLM queue
@@ -125,15 +126,15 @@ on the matching marker, never on whether a section looks filled.
    (see the vault AGENTS.md § Concept convergence).
 
 2. **List unprocessed queue files** in `<vault>/.lorekeeper/queue/` (top
-   level only — `processed/` is the archive):
-   ```bash
-   ls "$VAULT/.lorekeeper/queue/"*.jsonl 2>/dev/null
-   ```
+   level only — `processed/` is the archive). Use `Glob` with the resolved absolute
+   `<vault>/.lorekeeper/queue/*.jsonl` pattern.
    Order: oldest filename first (filenames are ISO timestamps).
 
 3. **For each queue file** (one file = one ingest run):
 
-   a. Read all tasks: `cat <file> | jq -c '.'`
+   a. Read metadata only: `jq -c '{task_id, kind, target}' '<absolute-file>'`.
+      Load task inputs only when selected for processing; a queue file can contain
+      the same large source body in several generation requests.
 
    b. **Stale-task guard (authoritative).** Run
 
@@ -152,8 +153,10 @@ on the matching marker, never on whether a section looks filled.
       make the task reachable again; moving it to `processed/` prevents that recovery.
 
    c. **For each `current` task**, capture `target_revision` from status before reading
-      the target and drafting. Read the task input and current target; follow the generation
-      specification. The applier owns every completion marker in this table:
+      the target and drafting. Read the exact task with
+      `jq -c 'select(.task_id == "<task-id>")' '<absolute-file>'`, then its current
+      target. Follow the generation specification. The applier owns every completion
+      marker in this table:
 
       | target.kind | input key | completion marker (applier-owned) |
       |-------------|-----------|-------------------------------|
