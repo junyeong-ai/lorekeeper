@@ -1,6 +1,6 @@
 ---
 name: lore-wiki
-version: 0.54.1
+version: 0.55.0
 description: Semantic wiki operations for the Lorekeeper vault. Add sources, query with compounding, audit structural and semantic health. Reads AGENTS.md for page formats and section vocabulary — never hardcodes headings. Pairs with `lore` (the deterministic binary) for graph analysis and queue processing.
 when_to_use: |
   wiki query, knowledge search, ask wiki, search vault,
@@ -150,6 +150,13 @@ Answer a question grounded in vault content, with compounding.
    the verified preserved bytes. Check unsupported coverage before claiming every
    dependency was captured. `available: false` means no preserved-original reference;
    a mutable `source_file` is not a substitute for the historical bytes.
+   For RSS, `lore wiki original <daily-path>` first returns a bounded event inventory.
+   Pin its `revision`, select `--event EVENT_ID`, and follow `--text-offset` until
+   `next_offset` is null. `page_bound_collection` verifies the referenced adapter-collected
+   text; it is not provider HTTP/XML. `legacy_unbound` is retained-log discovery only,
+   not proof of a daily's historical derivation. Acquisition time may be unknown;
+   `event_timestamp` is published-or-updated adapter time, not acquisition time. A summary omission or a live URL refetch
+   cannot establish what the original collection contained.
    Follow declared document relations with `lore wiki provenance <exact-path>`.
    It resolves only exact repository/document identities; missing or ambiguous owners
    remain explicit. Use `--direction incoming|both` or `--relation <name>` to narrow,

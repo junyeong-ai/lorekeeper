@@ -23,6 +23,11 @@ the work-log), apply the generic guidance without a type bias.
 - Focus on key findings, announcements, techniques
 - For technical articles: what it is, why it matters, key numbers
 - Skip author bios, CTAs, navigation artifacts
+- For concept synthesis, use `wiki original <daily-path>` when the refined daily omits
+  a defining mechanism or limitation. Select an event using the returned revision;
+  follow title/body text pagination. `page_bound_collection` is normalized adapter-acquired text,
+  not raw provider bytes; `legacy_unbound` does not prove the page's historical input.
+  A provider URL or matching source/date is not a replacement for that proof.
 
 ### `google-calendar`
 - Highlight meeting outcomes and decisions if notes are present

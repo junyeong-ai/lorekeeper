@@ -9,8 +9,10 @@ mod log;
 mod manual_original;
 mod mutation;
 mod navigation;
+mod original_io;
 mod provenance;
 mod review;
+mod rss_original;
 mod search;
 mod search_index;
 mod section;
@@ -52,6 +54,10 @@ pub use self::review::{
     archive_evidence, inspect_evidence, is_archived_evidence, list_reviews, load_archived_evidence,
     publish_document, publish_document_expected, same_existing_file,
 };
+pub use self::rss_original::{
+    RssOriginalOptions, RssOriginalView, guard_rss_original, inspect_rss_original,
+    publish_rss_original,
+};
 pub use self::search::{
     BrowseSort, CreatedStatus, MatchField, SearchHit, SearchOptions, SearchResult,
     parse_created_date, search,
@@ -70,7 +76,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum VaultError {
-    #[error("manual original: {0}")]
+    #[error("original: {0}")]
     Original(String),
     #[error("search index: {0}")]
     SearchIndex(#[from] rusqlite::Error),

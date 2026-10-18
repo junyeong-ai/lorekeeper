@@ -62,6 +62,7 @@ lore schema                        # generate <wiki>/AGENTS.md
 lore wiki prepare                  # reusable, explicitly selected lexical search snapshot
 lore wiki read wiki/concepts/example.md # bounded outline and revision-checked section reads
 lore wiki original wiki/documents/example.md # verified manual-original member discovery and selected reads
+lore wiki original daily/tech-news/2026-10-18.md # bounded RSS inventory; select --event ID --revision REV
 lore wiki browse --json             # bounded catalog with category/type filters and pagination
 lore graph --json neighbors wiki/concepts/example.md # direct links, including daily evidence
 lore wiki links wiki/concepts/example.md # paginated explicit links with source lines and revision
@@ -257,3 +258,11 @@ Single-sourced so new code reads like existing code without guessing:
 - **Return types**: `*Result` = domain computation outcome · `*Report` = a CLI-facing presentation of one (lk-graph `output.rs`), introduced ONLY when display adds fields/structure beyond the `*Result` (counts, applied/fixed flags); a display-ready `*Result` (e.g. `ClusterResult`, `MergeResult`) is printed directly — an empty pass-through `*Report` is ceremony, not consistency.
 - **Predicates** `is_*` (state) / `has_*` (possession), always prefixed (e.g. `is_resolvable`, not `resolves`). Each crate's public error SURFACE is a domain-named, typed `<Crate>Error` (a leaf parse/validate helper may return a `String` message that a caller wraps into its typed error — the payload is text, the surface is not); most crates have a single `<Crate>Error`, but a foundational crate may carry several domain errors (lk-core `ConfigError`). Enum variants PascalCase, `#[serde(rename_all = "kebab-case")]` on the wire · types spell words in full (`GraphCommand`, `CategoryReference`, `PipelineContext` — never `Cmd`/`Ref`/`Ctx`), locals may abbreviate (`ctx`).
 
+
+- **RSS original authority is distinct from interpretation.** New ingest binds the rendered
+  daily to a typed immutable pre-classification collection manifest. `wiki original` discovers
+  it metadata-first and reads selected title/body text with revision-pinned character pagination.
+  Legacy event logs remain read-only `legacy_unbound`, not proof of historical derivation.
+  Provider URLs and source/date/config identity do not prove retained input equality. Original
+  storage is permanent evidence; queue retention and derived summary omission do not define
+  its authority. Existing page-level citations and semantic invalidation remain unchanged.

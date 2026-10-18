@@ -10,14 +10,26 @@ use super::{find_config, load_config};
 
 #[derive(clap::Subcommand)]
 pub enum WikiCommand {
-    /// Read a verified preserved manual original, never the mutable inbox (JSON)
+    /// Discover preserved manual originals or RSS collection events (read-only JSON)
     Original {
-        /// Exact vault-relative document path
+        /// Explicit vault root; no configuration is required for exact original reads
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Exact vault-relative document or daily page path
         path: PathBuf,
         /// Exact manifest member path; include a bounded UTF-8 preview when selected
         #[arg(long)]
         member: Option<String>,
-        /// Maximum manifest members (1..100)
+        /// Exact RSS event id from discovery; requires --revision
+        #[arg(long, conflicts_with = "member")]
+        event: Option<String>,
+        /// Unicode character offset within selected RSS title + blank line + body
+        #[arg(long, default_value_t = 0, requires = "event")]
+        text_offset: usize,
+        /// Maximum selected RSS text characters (1..65536)
+        #[arg(long, default_value_t = 4096, requires = "event")]
+        text_limit: usize,
+        /// Maximum manifest members or RSS events (1..100)
         #[arg(long, default_value_t = 20)]
         limit: usize,
         /// Skip this many manifest members
@@ -285,15 +297,45 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
             Ok(())
         }
         WikiCommand::Original {
+            root,
             path,
             member,
+            event,
+            text_offset,
+            text_limit,
             limit,
             offset,
             revision,
         } => {
-            let config = load_config(&find_config(opts)?)?;
+            let root = super::resolve_root_config(opts, root)?.root;
+            if let Some(view) = lk_vault::inspect_rss_original(
+                &root,
+                &path,
+                &lk_vault::RssOriginalOptions {
+                    event: event.as_deref(),
+                    offset,
+                    limit,
+                    text_offset,
+                    text_limit,
+                    revision: revision.as_deref(),
+                },
+            )
+            .map_err(|e| miette::miette!("{e}"))?
+            {
+                if member.is_some() {
+                    return Err(miette::miette!("RSS originals use --event, not --member"));
+                }
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&view).map_err(|e| miette::miette!("{e}"))?
+                );
+                return Ok(());
+            }
+            if event.is_some() {
+                return Err(miette::miette!("RSS original unavailable for this page"));
+            }
             let view = lk_vault::inspect_original(
-                &config.vault.root_path(),
+                &root,
                 &path,
                 &lk_vault::OriginalOptions {
                     member: member.as_deref(),

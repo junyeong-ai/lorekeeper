@@ -69,7 +69,10 @@ For EACH `### event heading` in the section:
    opening paragraph is not a substitute for those findings. Use more space when
    these distinctions would otherwise be lost. For multi-topic digests, retain
    the substantive finding for each relevant topic instead of reducing secondary
-   topics to a list of names.
+   topics to a list of names. Keep named tools, models and methods attached to their
+   defining mechanisms, provenance and decision-relevant use conditions. Generic
+   prose such as “evaluation” or “optimization” removes evidence later concept
+   syntheses need. Compare these claims and conditions with the input before publishing.
 3. Keep the original `🔗` source link for traceability
 4. Remove noise: HN metadata (Points, Comments, Article URL),
    email signatures, raw thread dumps, Jira checklists
@@ -121,12 +124,25 @@ Do not substitute the concept's previous synthesis for a source.
    concept. If losing a cause, remedy or decision would materially change how
    someone uses the knowledge, return an evidence-gap review proposal under the
    coordinator protocol below: the exact claim, pages checked and their revisions,
-   and what evidence is missing. The audit can then search beyond this citation set.
-   For streaming feeds, check the retained pre-refinement events under
-   `.lorekeeper/events/<source-id>/<date>.jsonl` when a daily summary may have lost
-   the relevant details. Propose a source correction with the event ID, URL and
-   reviewed bytes; the coordinator restores supported material before reissuing
-   synthesis against the corrected source. An old concept is not proof of itself.
+   and what evidence is missing. Before restoring a citation, inspect existing reviews
+   for a prior retraction or intentional scope decision. A shared term does not establish
+   the same concept; recover evidence within its scope rather than silently widening it.
+   The audit can then search beyond this citation set.
+   For RSS, a refined daily is an interpretation, not the complete collected article.
+   Use packet `original` discovery or `lore wiki original <daily-path>`, select the exact
+   event with `--revision REV --event EVENT_ID`, and follow `--text-offset` / `next_offset`.
+   `page_bound_collection` verifies the page's referenced normalized pre-classification
+   collection, not provider HTTP/XML or a live refetch. `legacy_unbound` exposes a retained
+   event log but does not prove that the current page was derived from those bytes; do not
+   infer that binding from source ID, date or present configuration. Missing originals
+   remain unknown. Attribute a claim to the currently retained collection using its exact
+   log/event revision, provider URL and actual read scope; do not recast it as proof of the
+   past page input or invent an unverified EventID/URL binding. Reading and explicitly
+   attributing that retained evidence does not itself require rewriting a daily. Establishing
+   a durable page-bound authority reference or correcting the page does require reviewed
+   source publication. Do not copy an entire raw inventory into synthesis. Existing task
+   input, citation and target guards remain binding; this distinction never expands or
+   exempts them. An old concept is not proof of itself.
    An application example does not define the general concept. Losing its defining
    scope is a material evidence gap: recover supporting sources before finalizing
    a rewrite that would reduce the concept to that example.

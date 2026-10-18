@@ -203,6 +203,7 @@ pub async fn run(
     }
     let mut planned: Vec<Planned> = Vec::new();
     let mut manual_capture_bytes = 0usize;
+    let mut rss_capture_bytes = 0usize;
     // Set on any source/extract/pipeline/write failure so the process exits non-zero —
     // a cron or CI run must be able to detect a partial failure, not see exit 0.
     let mut had_failure = false;
@@ -370,6 +371,19 @@ pub async fn run(
             eprintln!("  concepts: {}", result.concepts.len());
         }
 
+        let rss_bytes = result
+            .daily_pages
+            .iter()
+            .filter_map(|p| p.rss_original.as_ref())
+            .flat_map(|c| &c.payloads)
+            .map(Vec::len)
+            .sum::<usize>();
+        rss_capture_bytes = rss_capture_bytes.saturating_add(rss_bytes);
+        if rss_capture_bytes > 256 * 1024 * 1024 {
+            return Err(miette::miette!(
+                "RSS originals exceed ingest-wide 256 MiB limit; split the ingest"
+            ));
+        }
         if dry_run {
             for capture in &manual_originals {
                 if !result.events.iter().any(|event| {
@@ -490,7 +504,18 @@ pub async fn run(
         for out in &p.result.daily_pages {
             report_discards(out, dry_run);
             let mut plan = lk_vault::MutationPlan::default();
-            let publication = out.plan_publication(&mut plan, &vault_root).and_then(|()| {
+            let publication = (|| {
+                if let Some(capture) = &out.rss_original {
+                    lk_vault::publish_rss_original(
+                        _mutation
+                            .as_ref()
+                            .expect("writing ingest holds mutation session"),
+                        capture,
+                    )?;
+                }
+                out.plan_publication(&mut plan, &vault_root)
+            })()
+            .and_then(|()| {
                 _mutation
                     .as_ref()
                     .expect("writing ingest holds mutation session")

@@ -268,6 +268,28 @@ impl Pipeline {
         // single-sources the order for every source type through one comparator.
         events.sort_by(Event::canonical_cmp);
 
+        // Preserve the collection contract before configuration-derived labels/ownership.
+        // Capture only realized days; the payload excludes every classification field.
+        let mut rss_originals = std::collections::BTreeMap::new();
+        if config.source_type == lk_core::config::SourceType::Rss {
+            let mut raw_days: BTreeMap<_, Vec<&Event>> = BTreeMap::new();
+            for event in events.iter().filter(|e| e.date <= options.today) {
+                raw_days.entry(event.date).or_default().push(event);
+            }
+            let mut bytes = 0usize;
+            for (date, raw) in raw_days {
+                let capture = lk_core::rss_original::RssOriginalCapture::from_events(&raw)
+                    .map_err(PipelineError::Render)?;
+                bytes += capture.payloads.iter().map(Vec::len).sum::<usize>();
+                if bytes > lk_core::rss_original::MAX_RSS_CAPTURE_BYTES {
+                    return Err(PipelineError::Render(
+                        "RSS originals exceed 64 MiB per source; split the ingest".into(),
+                    ));
+                }
+                rss_originals.insert(date, capture);
+            }
+        }
+
         // Classification is a render-time derivation of current config — re-applied to the
         // whole set so a config change reaches preserved events too. A streaming source's
         // log stores pre-classification, pre-refine events: the source of truth, untouched
@@ -536,10 +558,41 @@ impl Pipeline {
             // from the configured one) yields `None`; skip the write so the previous
             // on-disk page — and its LLM body — is left intact.
             match render::splice_preserved_sections(fresh.content, splices) {
-                Some(spliced) => daily_pages.push(
-                    render::RenderResult::spliced(fresh.path, spliced)
-                        .with_original(existing.as_ref())?,
-                ),
+                Some(spliced) => {
+                    let mut output = render::RenderResult::spliced(fresh.path, spliced)
+                        .with_original(existing.as_ref())?;
+                    if let Some(capture) = rss_originals.remove(date) {
+                        let mut record = existing
+                            .as_ref()
+                            .and_then(|p| p.frontmatter.get("source_record"))
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!({}));
+                        let fields = record.as_object_mut().ok_or_else(|| {
+                            PipelineError::Render("daily source_record must be a mapping".into())
+                        })?;
+                        fields.insert(
+                            lk_core::rss_original::RSS_ORIGINAL_FIELD.into(),
+                            serde_json::to_value(
+                                capture
+                                    .manifest
+                                    .reference()
+                                    .map_err(PipelineError::Render)?,
+                            )
+                            .map_err(|e| PipelineError::Render(e.to_string()))?,
+                        );
+                        output.content = lk_vault::set_frontmatter_field(
+                            &output.content,
+                            "source_record",
+                            &serde_json::to_string(&record)
+                                .map_err(|e| PipelineError::Render(e.to_string()))?,
+                        )
+                        .ok_or_else(|| {
+                            PipelineError::Render("RSS daily template omitted frontmatter".into())
+                        })?;
+                        output.rss_original = Some(capture);
+                    }
+                    daily_pages.push(output);
+                }
                 // A cached section heading is absent from the freshly rendered template
                 // (almost always a custom template that renamed it). The previous on-disk
                 // page is kept intact; warn so the divergence is observable instead of a

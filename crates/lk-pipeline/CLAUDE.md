@@ -243,3 +243,13 @@ domain-neutral engine — then no work-log, reviews, or `is_personal` are produc
   rendered as metadata and included in summary/extraction requests, so a status-only change
   cannot reuse a summary claiming current applicability. Original content remains separate
   from generated interpretation; a source's archived state does not make its claims false.
+
+- **New RSS daily provenance** captures the accumulated realized day's normalized collection
+  before classification, including items retained from the streaming log. `RenderResult`
+  carries that bounded capture and a typed `source_record.rss_original` reference. The CLI
+  publishes originals before planning the page; `plan_publication` guards original dependencies
+  in the same mutation journal. Capture limits are 4 MiB/event, 64 MiB/source and 256 MiB across
+  CLI-planned RSS sources. Dry-run keeps captures in memory only. Existing page citations,
+  semantic input hashes and completion ownership remain unchanged; this is not event-level
+  cache invalidation. A newly rendered page establishes a new binding, never historical
+  proof about an earlier page's derivation from a legacy log.

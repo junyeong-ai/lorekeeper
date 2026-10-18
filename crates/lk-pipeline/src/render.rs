@@ -29,6 +29,7 @@ pub fn llm_inputs_map(
 }
 
 pub struct RenderResult {
+    pub rss_original: Option<lk_core::rss_original::RssOriginalCapture>,
     /// Outer None: unguarded output. Some(None): target was absent when derived.
     pub expected_original: Option<Option<String>>,
     pub path: VaultPath,
@@ -58,6 +59,7 @@ impl RenderResult {
     pub fn fresh(path: VaultPath, content: String) -> Self {
         Self {
             expected_original: None,
+            rss_original: None,
             path,
             content,
             discarded: Vec::new(),
@@ -70,6 +72,7 @@ impl RenderResult {
         Self {
             path,
             expected_original: None,
+            rss_original: None,
             content: spliced.content,
             discarded: spliced.discarded,
             refused: Vec::new(),
@@ -101,6 +104,9 @@ impl RenderResult {
         plan: &mut lk_vault::MutationPlan,
         root: &Path,
     ) -> Result<(), lk_vault::VaultError> {
+        if let Some(capture) = &self.rss_original {
+            lk_vault::guard_rss_original(plan, root, capture)?;
+        }
         match &self.expected_original {
             Some(before) => plan.publish_expected(
                 root,

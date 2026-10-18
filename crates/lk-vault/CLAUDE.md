@@ -286,3 +286,12 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   sample with explicit total/truncation. Raw previews preserve UTF-8 bytes up to a 64 KiB
   boundary; binary members expose their validated path. Hidden originals are not knowledge
   nodes; graph resolvability only accepts exact manifest-listed, digest-verified members.
+
+- **RSS originals** (`rss_original.rs`) use a separate typed namespace under
+  `.lorekeeper/evidence/rss/`: exclusive-publish event JSON first, manifest last. Pages
+  reference only complete validated manifests; publication/recovery guards exact original
+  dependencies. A manifest is bounded metadata, not a check of every unselected payload;
+  selected events are canonical/digest/identity checked and title/body text is character-paginated.
+  Missing/corrupt/ambiguous or symlinked evidence is refused. Legacy event-log discovery is
+  read-only `legacy_unbound`; matching source/date/config does not prove page derivation.
+  No historical backfill, evidence pruning or event-level citation migration is implied.

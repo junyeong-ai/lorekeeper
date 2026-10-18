@@ -39,7 +39,50 @@ struct PacketSource {
     file_revision: String,
     source_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    original: Option<PacketOriginal>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<String>,
+}
+
+#[derive(Serialize)]
+struct PacketOriginal {
+    /// Discovery is verified, but is not a semantic read receipt.
+    discovery: lk_vault::RssOriginalView,
+    discovery_command: Vec<String>,
+    selected_event_command: Vec<String>,
+}
+
+fn original(root: &Path, path: &str) -> miette::Result<Option<PacketOriginal>> {
+    let options = lk_vault::RssOriginalOptions::default();
+    let view = lk_vault::inspect_rss_original(root, Path::new(path), &options)
+        .map_err(|e| miette::miette!("{path} original: {e}"))?
+        .map(|discovery| {
+            let base = vec![
+                "lore".into(),
+                "wiki".into(),
+                "original".into(),
+                path.into(),
+                "--root".into(),
+                root.display().to_string(),
+            ];
+            let mut selected = base.clone();
+            selected.extend([
+                "--revision".into(),
+                discovery.revision.clone(),
+                "--event".into(),
+                "<event_id from discovery>".into(),
+                "--text-offset".into(),
+                "0".into(),
+                "--text-limit".into(),
+                "4096".into(),
+            ]);
+            PacketOriginal {
+                discovery,
+                discovery_command: base,
+                selected_event_command: selected,
+            }
+        });
+    Ok(view)
 }
 
 pub(super) fn run(
@@ -189,6 +232,16 @@ fn build(root: &Path, task_ids: &[String], include_content: bool) -> miette::Res
                 citation.revision.clone(),
                 exact.clone(),
             );
+            let original = original(&root, &citation.path)?;
+            if original
+                .as_ref()
+                .is_some_and(|o| o.discovery.page_revision != exact)
+            {
+                return Err(miette::miette!(
+                    "page changed before original discovery: {}",
+                    citation.path
+                ));
+            }
             let index = *source_keys.entry(key).or_insert_with(|| {
                 let index = sources.len();
                 sources.push(PacketSource {
@@ -200,6 +253,7 @@ fn build(root: &Path, task_ids: &[String], include_content: bool) -> miette::Res
                         .get("source_url")
                         .and_then(|v| v.as_str())
                         .map(str::to_owned),
+                    original,
                     content: include_content.then_some(raw),
                 });
                 index
@@ -220,6 +274,18 @@ fn build(root: &Path, task_ids: &[String], include_content: bool) -> miette::Res
     }
     // No writer lease is acquired: read-only export never mutates or recovers state.
     // Re-read exact files and task identities, refusing drift rather than retagging it.
+    verify_snapshots(&root, &snapshots)?;
+    for source in &sources {
+        let fresh = original(&root, &source.path)?;
+        match (&source.original, &fresh) {
+            (Some(prior), Some(fresh))
+                if prior.discovery.revision == fresh.discovery.revision
+                    && prior.discovery.page_revision == fresh.discovery.page_revision
+                    && fresh.discovery.page_revision == source.file_revision => {}
+            (None, None) => {}
+            _ => return Err(miette::miette!("original or page changed: {}", source.path)),
+        }
+    }
     verify_snapshots(&root, &snapshots)?;
     require_settled(&root)?;
     let current_tasks = selected_tasks(&root, &ids)?;
@@ -269,5 +335,38 @@ mod tests {
         );
         std::fs::write(root.path().join("source.md"), changed).unwrap();
         assert!(verify_snapshots(&canonical, &snapshots).is_err());
+    }
+}
+
+#[cfg(test)]
+mod original_tests {
+    use super::*;
+    #[test]
+    fn packet_original_discovery_does_not_embed_collection_body_or_bind_legacy() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(
+            root.join("daily.md"),
+            "---\ntype: daily\nsource: rss\ncreated: 2026-10-18\n---\nAbridged.\n",
+        )
+        .unwrap();
+        let event:lk_core::event::Event=serde_json::from_value(serde_json::json!({"id":"rss:2026-10-18:0000000000000001","source_id":"rss","source_type":"rss","timestamp":"2026-10-18T00:00:00Z","date":"2026-10-18","title":"Title","body":"large original not copied into the packet","url":null,"author":null,"labels":[],"category":null,"performance_category":null,"is_self":false,"is_personal":false,"metadata":{}})).unwrap();
+        let dir = root.join(".lorekeeper/events/rss");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("2026-10-18.jsonl"),
+            serde_json::to_string(&event).unwrap(),
+        )
+        .unwrap();
+        let discovered = original(root, "daily.md").unwrap().unwrap();
+        assert_eq!(discovered.discovery.authority, "legacy_unbound");
+        let json = serde_json::to_string(&discovered).unwrap();
+        assert!(!json.contains(&event.body));
+        assert!(
+            discovered
+                .selected_event_command
+                .contains(&"--revision".to_owned())
+        );
+        assert!(!root.join(".lorekeeper/evidence").exists());
     }
 }

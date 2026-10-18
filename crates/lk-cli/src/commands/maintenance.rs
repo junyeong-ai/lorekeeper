@@ -179,7 +179,8 @@ pub async fn run(
     // NEVER pruned: they are the permanent raw layer a streaming source projects its daily
     // pages from, so `lore ingest --date <past>` can re-render ANY day — a deleted or
     // damaged page self-heals only as far back as the log exists. Knowledge layers are
-    // permanent; retention applies to operational history only.
+    // permanent; retention applies to operational history only. Immutable RSS/manual
+    // originals in `.lorekeeper/evidence/` are likewise not retention targets.
     //
     // The intent plane's own stores divide the same way. The TRANSITION LOG is knowledge — it
     // is what a completed task becomes, and `lore ingest --date <past>` reproduces a day's

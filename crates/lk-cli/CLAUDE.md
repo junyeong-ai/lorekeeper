@@ -284,3 +284,11 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   pins the manifest; `--member` requests a 64 KiB UTF-8 preview or binary file address.
   It does not open a browser or fall back to a mutable inbox path. Source location ownership
   remains unchanged by this independent provenance store.
+
+- **RSS `wiki original`** returns bounded metadata before text. Pin collection `revision`
+  and choose `--event EVENT_ID`; `--text-offset`/`--text-limit` paginate Unicode title/body
+  characters and `next_offset` signals remaining text. `event_timestamp` is the adapter’s published-or-updated time, not acquisition
+  time; `captured_at` remains null. Existing manual `--member` JSON shape is preserved.
+  Synthesis packets attach verified RSS discovery plus selected-event command arguments,
+  never every raw article. Commands carry the exact selected vault root; explicit `--root` works without config. A legacy log
+  remains `legacy_unbound`, not a task read receipt or a historical input assertion.

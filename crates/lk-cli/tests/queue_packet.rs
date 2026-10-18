@@ -127,3 +127,87 @@ fn pending_mutations_are_reported_without_recovery() {
     );
     assert!(!state.join("lock").exists());
 }
+
+#[test]
+fn rss_original_packet_command_uses_exact_root_even_with_another_configured_vault() {
+    let dir = fixture();
+    let source = "---\ntype: daily\nsource: rss\ncreated: 2026-10-18\n---\nAbridged daily.\n";
+    std::fs::write(dir.path().join("source.md"), source).unwrap();
+    let revision = source_revision(&lk_core::frontmatter::parse_page(source).unwrap());
+    let hash = citation_digest(&[Citation {
+        path: "source.md".into(),
+        revision: revision.clone(),
+    }]);
+    let queue_path = dir.path().join(".lorekeeper/queue/tasks.jsonl");
+    let queue = std::fs::read_to_string(&queue_path)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let mut task: Value = serde_json::from_str(line).unwrap();
+            task["cache_hash"] = json!(hash);
+            task["input"]["citations"][0]["revision"] = json!(revision);
+            let target = dir
+                .path()
+                .join(task["target"]["vault_path"].as_str().unwrap());
+            let old = std::fs::read_to_string(&target).unwrap();
+            let old_hash = lk_core::frontmatter::parse_page(&old)
+                .unwrap()
+                .frontmatter
+                .get("llm_inputs")
+                .unwrap()["synthesis"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            std::fs::write(target, old.replace(&old_hash, &hash)).unwrap();
+            serde_json::to_string(&task).unwrap()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(queue_path, queue).unwrap();
+    let event:lk_core::event::Event=serde_json::from_value(json!({"id":"rss:2026-10-18:0000000000000001","source_id":"rss","source_type":"rss","timestamp":"2026-10-18T00:00:00Z","date":"2026-10-18","title":"Collected title","body":"raw detail absent from daily","url":null,"author":null,"labels":[],"category":null,"performance_category":null,"is_self":false,"is_personal":false,"metadata":{}})).unwrap();
+    let log = dir.path().join(".lorekeeper/events/rss");
+    std::fs::create_dir_all(&log).unwrap();
+    std::fs::write(
+        log.join("2026-10-18.jsonl"),
+        serde_json::to_string(&event).unwrap(),
+    )
+    .unwrap();
+    let out = run(dir.path(), &["--task-id", "first"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let packet: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let original = &packet["sources"][0]["original"];
+    assert_eq!(original["discovery"]["authority"], "legacy_unbound");
+    assert_eq!(
+        original["discovery"]["page_revision"],
+        packet["sources"][0]["file_revision"]
+    );
+    assert!(!String::from_utf8(out.stdout).unwrap().contains(&event.body));
+    let other = tempfile::TempDir::new().unwrap();
+    std::fs::write(other.path().join("config.yaml"),format!("vault:\n  root: {}\nidentity:\n  name: Other\n  email: other@example.com\nsources:\n  notes:\n    type: manual\n    params:\n      inbox_dir: inbox\n",other.path().display())).unwrap();
+    let argv = original["discovery_command"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .skip(1)
+        .map(|v| v.as_str().unwrap())
+        .collect::<Vec<_>>();
+    let out = Command::new(env!("CARGO_BIN_EXE_lore"))
+        .arg("--config")
+        .arg(other.path().join("config.yaml"))
+        .args(argv)
+        .current_dir(other.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let view: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(view["revision"], original["discovery"]["revision"]);
+    assert!(!dir.path().join(".lorekeeper/evidence").exists());
+}

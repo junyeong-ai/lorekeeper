@@ -63,6 +63,8 @@ Frontmatter: `id`, `type`, `title`, `aliases`, `created`, `updated`, `category`,
 
 Frontmatter: `id`, `type`, `title`, `created`, `labels`, `source`, `event_count`
 
+Optional `source_record.rss_original` binds a newly rendered RSS daily to an immutable manifest of adapter-collected, pre-classification text. `lore wiki original <daily-path>` returns a bounded inventory; pin its `revision` and select `--event EVENT_ID`, then follow `--text-offset` and `next_offset`. This is normalized collection text, not provider HTTP/XML. `page_bound_collection` verifies that page reference; `legacy_unbound` discovers retained event-log bytes without proving historical page derivation. `event_timestamp` is published-or-updated adapter time, not acquisition time (`captured_at` may be null). Refined summaries are interpretations, and their omissions do not establish absence from the collection. Original evidence does not add knowledge nodes or change page-level citation/cache guards.
+
 ## document (`wiki/documents/{slug}.md`)
 
 | Section | Heading | Owner |

@@ -4768,3 +4768,67 @@ async fn materialized_source_pages_refuse_edits_after_their_input_snapshot() {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), edited);
     }
 }
+
+#[tokio::test]
+async fn rss_original_reaches_daily_provenance_without_losing_pre_refinement_body() {
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let config = base_config(vault);
+    let mut sc = config.sources["test-source"].clone();
+    sc.source_type = SourceType::Rss;
+    let mut pipeline = Pipeline::new(vault, build_ctx(&config, Arc::new(NoopLlmClient)));
+    let result = pipeline
+        .plan(
+            "test-source",
+            &sc,
+            vec![raw_item(
+                "Original title",
+                "mechanism omitted by an abridged summary",
+                "item",
+                "2026-05-23T10:00:00Z".parse().unwrap(),
+            )],
+            &IngestOptions {
+                target_date: None,
+                today: far_future(),
+                dry_run: true,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        !vault.join(".lorekeeper").exists(),
+        "dry-run must retain capture only in memory"
+    );
+    let output = &result.daily_pages[0];
+    let capture = output.rss_original.as_ref().unwrap();
+    let parsed = lk_core::frontmatter::parse_page(&output.content).unwrap();
+    let reference = serde_json::to_value(capture.manifest.reference().unwrap()).unwrap();
+    assert_eq!(
+        parsed.frontmatter.get("source_record").unwrap()["rss_original"],
+        reference
+    );
+    let payload = lk_core::rss_original::verify_payload(
+        &capture.manifest,
+        &capture.manifest.events[0],
+        &capture.payloads[0],
+    )
+    .unwrap();
+    assert_eq!(payload.body, "mechanism omitted by an abridged summary");
+    assert!(payload.captured_at.is_none());
+    assert!(
+        !String::from_utf8(capture.payloads[0].clone())
+            .unwrap()
+            .contains("\"labels\"")
+    );
+    let session = lk_vault::MutationSession::acquire(vault).unwrap();
+    lk_vault::publish_rss_original(&session, capture).unwrap();
+    let mut plan = lk_vault::MutationPlan::default();
+    output.plan_publication(&mut plan, vault).unwrap();
+    session.apply(plan).unwrap();
+    let page = output.path.as_ref();
+    let original = lk_vault::inspect_rss_original(vault, page, &Default::default())
+        .unwrap()
+        .unwrap();
+    assert_eq!(original.authority, "page_bound_collection");
+    assert_eq!(original.total_events, 1);
+}

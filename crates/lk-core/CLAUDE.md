@@ -221,3 +221,10 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   `<personal>/annual/`. Cross-source weekly themes (core) live under `dirs.synthesis`:
   `<synthesis>/weekly/`. The `weekly` subdir name is shared by both; the rest are
   used only when the personal module is configured.
+
+- **RSS collection originals** (`rss_original.rs`) serialize a v1 typed payload before
+  classification: event identity, published-or-updated adapter timestamp, normalized title/body/URL/author/feed
+  metadata. Labels, ownership and classification are excluded; acquisition time is unknown
+  (`captured_at: null`), never mtime. Recursive object-key ordering plus serde_json scalar
+  encoding is the declared v1 format, not RFC 8785. Exact bytes determine full BLAKE3
+  revisions; source/day/event identity alone cannot identify a content revision.
