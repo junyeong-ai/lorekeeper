@@ -92,8 +92,8 @@ const INITIAL_REACH: usize = 500;
 /// `lookback_hours` the operator meant differently — not something the adapter can settle
 /// by asking again.
 const MAX_REACH: usize = 64_000;
-// Snapshot and verified-body envelopes below are the public nodex 0.57 contract.
-const NODEX_COMPATIBILITY: &str = ">=0.57, <0.58";
+// Snapshot and verified-body envelopes below are the public nodex 0.58 contract.
+const NODEX_COMPATIBILITY: &str = ">=0.58, <0.59";
 const INVENTORY_FIELDS: &str = "id,title,kind,status,path,created,updated,reviewed,supersedes,superseded_by,implements,related,covers,tags";
 
 /// One document, as `nodex query recent` reports it.
@@ -563,7 +563,7 @@ fn decode_envelope<T: serde::de::DeserializeOwned>(
             message: "refused without reason".into(),
         });
         let remedy = if e.code == "VERSION_MISMATCH" {
-            "; select a supported nodex >=0.57, <0.58 executable with params.executable; the repository must permit that version and already have a current compatible index"
+            "; select a supported nodex >=0.58, <0.59 executable with params.executable; the repository must permit that version and already have a current compatible index"
         } else {
             ""
         };

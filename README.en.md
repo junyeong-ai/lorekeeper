@@ -280,7 +280,7 @@ Each day's ingest grows the concept graph; synthesis summarizes it at ever-highe
 | `google-calendar` | Schedule + meeting notes (auto-extracted from Drive links) | Google OAuth |
 | `google-drive` | Curated docs in a Drive folder | Google OAuth |
 | `rss` | Vendor blogs / news → concepts (no auth, multi-feed) | none |
-| `nodex` | A project repository's own decision and learning records → concepts (needs `nodex.toml` and nodex `>=0.57,<0.58`; see [binary selection and evidence versions](.claude/skills/lore-setup/references/config.md#nodex-binary-selection)) | none |
+| `nodex` | A project repository's own decision and learning records → concepts (needs `nodex.toml` and nodex `>=0.58,<0.59`; see [binary selection and evidence versions](.claude/skills/lore-setup/references/config.md#nodex-binary-selection)) | none |
 | `manual` | Markdown, text, and HTML files dropped in `inbox/` | none |
 | `tasks` | Your own finished tasks — what `lore task` closed becomes the day's page | none |
 
@@ -451,6 +451,10 @@ The skills, pipeline scripts, templates and `config.example.yaml` are **compiled
 ## Credentials
 
 Environment variables or `<vault>/.lorekeeper/credentials.json` (0600). Env vars take precedence over the file.
+On macOS and Linux, credential and lock files granting group or other-user permissions
+are refused. Restrict manually created or restored files with `chmod 600` before use.
+Writes always use `0600`; the setup wizard refuses an unreadable or malformed existing
+store rather than initializing it with empty credentials.
 For vaults using the same accounts, optional `credentials.file` selects one shared
 store; relative paths resolve against the config file. Cooperating processes lock
 OAuth refresh and successor persistence together. Do not copy rotating refresh
@@ -464,7 +468,7 @@ lore init credentials   # interactive wizard — Google tokens minted via browse
 - **Slack**: `LORE_SLACK_TOKEN` (bot `xoxb-`) or `LORE_SLACK_USER_TOKEN` (`xoxp-`). `slack-search` requires the user token.
 - **Atlassian** (Jira/Confluence): `LORE_ATLASSIAN_SITE_URL` + `LORE_ATLASSIAN_PAT` (Data Center), or `+ LORE_ATLASSIAN_EMAIL` + `LORE_ATLASSIAN_API_TOKEN` (a Cloud CLASSIC token, addressed at the site). Add `LORE_ATLASSIAN_CLOUD_ID` for a SCOPED token — that value is what selects the gateway route, and without it the token is treated as classic and sent to the site. OAuth is deliberately not env-supplied — its refresh token rotates and must be persisted, so mint it with `lore init credentials`.
 
-> Credentials live only in `credentials.json` (gitignored) — they are never committed to the repo.
+> The default credential file is excluded from Git. Keep explicitly selected shared stores out of commits and synchronization too.
 
 ---
 

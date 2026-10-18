@@ -20,8 +20,8 @@ pub async fn credentials(
     if !std::io::stdin().is_terminal() {
         return Err(miette::miette!(
             "`lore init credentials` is interactive and needs a terminal.\n\
-             Non-interactively, copy credentials.example.json to \
-             <vault>/.lorekeeper/credentials.json and edit it, or set the LORE_* env vars."
+             Non-interactively, create the configured credentials file with owner-only \
+             permissions (0600 on Unix) and edit it, or set the LORE_* env vars."
         ));
     }
 
@@ -37,12 +37,9 @@ pub async fn credentials(
         .lock_async()
         .await
         .map_err(|e| miette::miette!("{e}"))?;
-    // Seed defaults from the existing file, but never let a malformed file block the
-    // wizard — fixing credentials is exactly its job.
-    let mut creds = store_guard.load_file().unwrap_or_else(|e| {
-        eprintln!("! existing credentials.json couldn't be parsed ({e}); starting fresh.");
-        Credentials::default()
-    });
+    let mut creds = store_guard
+        .load_file()
+        .map_err(|e| miette::miette!("{e}"))?;
 
     eprintln!("Configuring credential store: {}", store.path().display());
     eprintln!("Press enter to keep an existing secret. Decline a section to leave it as-is.\n");

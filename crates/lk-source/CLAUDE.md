@@ -35,6 +35,10 @@ uses validated params and context; do not add per-adapter output pipelines.
   api.atlassian.com product/cloud ID; API token/PAT uses the site (PAT Bearer).
   Keep Cloud/Server pagination and user identity separate. Persist a rotated refresh
   token before use and share one auth owner; do not retry refresh blindly.
+- `credentials.rs`: validate regular-file and Unix owner-only permissions on the
+  opened credential descriptor before reading content, and on the companion lock
+  before acquiring it. Missing stores are empty; unreadable or malformed stores
+  fail without reset. Parse diagnostics expose location, never credential values.
 - `jira.rs`: Cloud v3 search/jql uses tokens; Server/DC v2 uses offsets/total. Cache
   `/myself` with OnceCell and fail on identity failure. Preserve ADF and due/start
   date headers rather than losing work semantics in text conversion.
@@ -75,7 +79,7 @@ Use parser/token-state behavior, not regex replacement of arbitrary markup.
 
 - Read the declared public graph, NEVER substitute filesystem discovery. Require
   nodex.toml and a current compatible public index. Current subprocess compatibility
-  is `>=0.57, <0.58`, checked publicly; an explicit executable applies to every call,
+  is `>=0.58, <0.59`, checked publicly; an explicit executable applies to every call,
   without fallback or changing the repository's own version pin.
 - Query created and updated separately, then fold selected documents by identity.
   Grow query reach past the window's first day; one below-bound observation proves

@@ -273,7 +273,7 @@ flowchart LR
 | `google-calendar` | 일정 + 회의록(Drive 링크 자동 추출) | Google OAuth |
 | `google-drive` | Drive 폴더의 큐레이션 문서 | Google OAuth |
 | `rss` | 벤더 블로그·뉴스 → 개념 (인증 불필요, 다중 피드) | 없음 |
-| `nodex` | 프로젝트 저장소가 직접 쓴 결정·학습 기록 → 개념 (`nodex.toml`과 nodex `>=0.57,<0.58` 필요; [실행 파일·근거 버전 설정](.claude/skills/lore-setup/references/config.md#nodex-binary-selection)) | 없음 |
+| `nodex` | 프로젝트 저장소가 직접 쓴 결정·학습 기록 → 개념 (`nodex.toml`과 nodex `>=0.58,<0.59` 필요; [실행 파일·근거 버전 설정](.claude/skills/lore-setup/references/config.md#nodex-binary-selection)) | 없음 |
 | `manual` | `inbox/`에 드롭한 마크다운·텍스트·HTML 파일 | 없음 |
 | `tasks` | 내가 끝낸 작업 — `lore task`로 닫은 항목이 그날의 페이지가 됨 | 없음 |
 
@@ -438,6 +438,9 @@ lore self uninstall   # 설치한 것만 제거 — vault는 건드리지 않음
 ## 자격증명
 
 환경변수 또는 `<vault>/.lorekeeper/credentials.json`(0600). 환경변수가 파일보다 우선.
+macOS·Linux에서는 그룹·다른 사용자에게 권한이 열린 인증 파일과 잠금 파일을 거부합니다.
+수동 생성·복원한 파일은 사용 전에 `chmod 600`으로 제한하세요. 저장·갱신은 항상 `0600`으로 수행하며,
+인증 설정 마법사는 읽기·파싱에 실패한 기존 저장소를 빈 값으로 초기화하지 않습니다.
 여러 vault가 같은 계정을 쓰면 `credentials.file`에 하나의 공유 저장소를 지정할 수 있습니다.
 상대 경로는 설정 파일 기준이며, OAuth 갱신과 후속 토큰 저장은 같은 잠금 안에서 처리합니다.
 회전하는 refresh token을 별도 파일로 복사하지 마세요. 다른 앱은 별도 OAuth 앱을 사용해야 합니다.
@@ -450,7 +453,7 @@ lore init credentials   # 대화형 마법사 — Google 토큰은 브라우저 
 - **Slack**: `LORE_SLACK_TOKEN`(bot `xoxb-`) 또는 `LORE_SLACK_USER_TOKEN`(`xoxp-`). `slack-search`는 user 토큰 필수.
 - **Atlassian** (Jira/Confluence): `LORE_ATLASSIAN_SITE_URL` + `LORE_ATLASSIAN_PAT` (Data Center), or `+ LORE_ATLASSIAN_EMAIL` + `LORE_ATLASSIAN_API_TOKEN` (Cloud 클래식 토큰 — 사이트로 전송). 스코프 토큰이면 `LORE_ATLASSIAN_CLOUD_ID`를 함께 주세요 — 그 값이 게이트웨이 경로를 선택하며, 없으면 클래식으로 취급되어 사이트로 갑니다. OAuth은 리프레시 토큰이 회전하므로 환경변수로 받지 않습니다 — `lore init credentials`로 발급하세요.
 
-> 자격증명은 `credentials.json`(gitignored)에만 — repo에 절대 커밋되지 않습니다.
+> 기본 인증 파일은 Git에서 제외됩니다. 별도로 지정한 공유 저장소도 커밋·동기화 대상에 포함하지 마세요.
 
 ---
 

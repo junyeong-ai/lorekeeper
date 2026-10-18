@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -271,12 +272,29 @@ impl CredentialStore {
     }
 
     pub fn load_file(&self) -> Result<Credentials, SourceError> {
-        match std::fs::read_to_string(&self.path) {
-            Ok(content) => serde_json::from_str(&content)
-                .map_err(|e| SourceError::Auth(format!("failed to parse credentials: {e}"))),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Credentials::default()),
-            Err(e) => Err(auth_io(e)),
+        let mut file = match std::fs::File::open(&self.path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Credentials::default());
+            }
+            Err(e) => return Err(auth_io(e)),
+        };
+        let metadata = file.metadata().map_err(auth_io)?;
+        if !metadata.is_file() {
+            return Err(SourceError::Auth(
+                "credential store must be a regular file".into(),
+            ));
         }
+        require_private_permissions(&metadata, &self.path)?;
+        let mut content = String::new();
+        file.read_to_string(&mut content).map_err(auth_io)?;
+        serde_json::from_str(&content).map_err(|e| {
+            SourceError::Auth(format!(
+                "failed to parse credentials at line {}, column {}",
+                e.line(),
+                e.column()
+            ))
+        })
     }
 
     pub fn load(&self) -> Result<Credentials, SourceError> {
@@ -326,6 +344,7 @@ impl CredentialStore {
                 ));
             }
         }
+        require_private_permissions(&opened, &lock_path)?;
         file.lock().map_err(auth_io)?;
         Ok(CredentialGuard {
             store: self.clone(),
@@ -358,6 +377,25 @@ impl CredentialGuard {
 
 fn auth_io(error: std::io::Error) -> SourceError {
     SourceError::Auth(format!("credential store I/O failed: {error}"))
+}
+
+fn require_private_permissions(
+    metadata: &std::fs::Metadata,
+    path: &Path,
+) -> Result<(), SourceError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(SourceError::Auth(format!(
+                "credential file {} permits group or other-user access; set its permissions to 0600 with chmod 600",
+                path.display()
+            )));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (metadata, path);
+    Ok(())
 }
 
 impl Credentials {
@@ -551,6 +589,66 @@ mod tests {
         assert!(store.load_file().is_ok());
         std::fs::write(store.path(), [0xff, 0xfe]).unwrap();
         assert!(store.load_file().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn credential_reads_require_owner_only_permissions_before_parsing() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let store = CredentialStore::new(&tmp.path().join("credentials.json")).unwrap();
+        store.lock().unwrap().save(&Credentials::default()).unwrap();
+        for mode in [0o600, 0o400] {
+            std::fs::set_permissions(store.path(), std::fs::Permissions::from_mode(mode)).unwrap();
+            assert!(store.load_file().is_ok(), "mode {mode:o}");
+        }
+        std::fs::set_permissions(store.path(), std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::write(store.path(), b"not JSON").unwrap();
+        for mode in [0o640, 0o604, 0o620, 0o602, 0o660, 0o644, 0o666, 0o777] {
+            std::fs::set_permissions(store.path(), std::fs::Permissions::from_mode(mode)).unwrap();
+            let error = store.load_file().unwrap_err().to_string();
+            assert!(error.contains("chmod 600"), "mode {mode:o}: {error}");
+            assert!(!error.contains("parse"), "mode {mode:o}: {error}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn credential_writes_keep_store_and_lock_private_and_reject_a_widened_lock() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let store = CredentialStore::new(&tmp.path().join("credentials.json")).unwrap();
+        store.lock().unwrap().save(&Credentials::default()).unwrap();
+        let lock_path = tmp.path().join("credentials.json.lock");
+        for path in [store.path(), lock_path.as_path()] {
+            assert_eq!(path.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        let original = std::fs::read(store.path()).unwrap();
+        std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let error = store
+            .lock()
+            .err()
+            .expect("insecure lock refused")
+            .to_string();
+        assert!(error.contains("chmod 600"), "{error}");
+        assert_eq!(std::fs::read(store.path()).unwrap(), original);
+        std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        store.lock().unwrap().load_file().unwrap();
+    }
+
+    #[test]
+    fn malformed_credentials_report_location_without_echoing_secret_values() {
+        let tmp = TempDir::new().unwrap();
+        let store = CredentialStore::new(&tmp.path().join("credentials.json")).unwrap();
+        store.lock().unwrap().save(&Credentials::default()).unwrap();
+        let content = r#"{"atlassian":{"default":{"site_url":"https://example.test","method":"sensitive-canary-value"}}}"#;
+        std::fs::write(store.path(), content).unwrap();
+        let error = store.load_file().unwrap_err().to_string();
+        assert!(error.contains("line 1, column"), "{error}");
+        assert!(!error.contains("sensitive-canary-value"), "{error}");
+        assert_eq!(std::fs::read_to_string(store.path()).unwrap(), content);
     }
 
     #[cfg(unix)]

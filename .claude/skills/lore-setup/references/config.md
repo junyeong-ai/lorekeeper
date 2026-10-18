@@ -80,6 +80,9 @@ relative paths resolve against the config file. Cooperating Lore processes lock
 refresh and successor persistence together. Do not copy rotating OAuth refresh
 tokens into independent stores. Other applications using the same grant do not
 participate in this lock and should use their own OAuth app.
+On Unix, existing credential and lock files must grant no group or other-user
+permissions; use `chmod 600` after a manual copy or restore. Writes use `0600`.
+The wizard refuses an unreadable or malformed existing store without resetting it.
 
 For a complete initial setup, distinguish these outcomes:
 
@@ -126,7 +129,7 @@ do not imply deletion, archival or false claims.
 
 ### Nodex binary selection
 
-The adapter supports nodex `>=0.57, <0.58`. Lore's installer and
+The adapter supports nodex `>=0.58, <0.59`. Lore's installer and
 `lore self update --version` select Lore versions, not nodex versions.
 Set a source's optional `params.executable` to a compatible binary's absolute path.
 Omitted, it uses
