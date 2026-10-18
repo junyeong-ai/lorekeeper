@@ -18,7 +18,12 @@ pub(super) struct ApplyResult {
     pub quarantined: usize,
 }
 
-pub(super) fn apply(root: &Path, queue: &Path, dry_run: bool) -> miette::Result<ApplyResult> {
+pub(super) fn apply(
+    root: &Path,
+    queue: &Path,
+    dry_run: bool,
+    session: Option<&lk_vault::MutationSession>,
+) -> miette::Result<ApplyResult> {
     let dir = queue.join(lk_queue::RESULTS_SUBDIR);
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
@@ -43,7 +48,6 @@ pub(super) fn apply(root: &Path, queue: &Path, dry_run: bool) -> miette::Result<
     paths.sort();
     let pending = read_pending_tasks(queue)?;
 
-    let writer = lk_vault::VaultWriter::new(root);
     let mut report = ApplyResult::default();
     for path in paths {
         let mut corrupt = false;
@@ -204,8 +208,23 @@ pub(super) fn apply(root: &Path, queue: &Path, dry_run: bool) -> miette::Result<
                 if let Some(body) = &result.related {
                     validate_links(root, &target, body)?;
                 }
-                writer
-                    .write_page_sync(&target, &content)
+                let mut plan = lk_vault::MutationPlan::default();
+                let citations: Vec<lk_core::concept::Citation> = task
+                    .input
+                    .get("citations")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(|e| miette::miette!("{e}"))?
+                    .unwrap_or_default();
+                for citation in citations.iter().filter(|c| c.rss_event.is_some()) {
+                    lk_vault::guard_rss_citation(&mut plan, root, &target, citation)
+                        .map_err(|e| miette::miette!("{e}"))?;
+                }
+                plan.edit(&target, original, content);
+                session
+                    .ok_or_else(|| miette::miette!("publication requires mutation session"))?
+                    .apply(plan)
                     .map_err(|e| miette::miette!("{e}"))?;
                 std::fs::remove_file(&path).map_err(|e| miette::miette!("{e}"))?;
             }

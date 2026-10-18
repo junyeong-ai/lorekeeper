@@ -26,6 +26,7 @@ fn fixture() -> tempfile::TempDir {
     std::fs::write(dir.path().join("source.md"), source).unwrap();
     let parsed = lk_core::frontmatter::parse_page(source).unwrap();
     let citations = vec![Citation {
+        rss_event: None,
         path: "source.md".into(),
         revision: source_revision(&parsed),
     }];
@@ -135,6 +136,7 @@ fn rss_original_packet_command_uses_exact_root_even_with_another_configured_vaul
     std::fs::write(dir.path().join("source.md"), source).unwrap();
     let revision = source_revision(&lk_core::frontmatter::parse_page(source).unwrap());
     let hash = citation_digest(&[Citation {
+        rss_event: None,
         path: "source.md".into(),
         revision: revision.clone(),
     }]);

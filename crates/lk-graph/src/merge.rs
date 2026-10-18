@@ -205,8 +205,20 @@ fn plan_merge(
         let abs = vault_root.join(&page.path);
         let content = std::fs::read_to_string(&abs)
             .map_err(|e| GraphError::Io(format!("read {}: {e}", abs.display())))?;
-        let (updated, count) =
+        let (mut updated, count) =
             rewrite_links(&content, &page.path, &from_rel, &into_rel, vault_root)?;
+        if count > 0 && page.rss_evidence {
+            lk_vault::rss_concept_citations(vault_root, &page.path, &content)
+                .map_err(|e| GraphError::Io(e.to_string()))?;
+            updated = lk_vault::repoint_rss_evidence(
+                vault_root,
+                &updated,
+                &[(from_rel.clone(), into_rel.clone())],
+            )
+            .map_err(|e| GraphError::Io(e.to_string()))?;
+            lk_vault::guard_rss_evidence(&mut plan, vault_root, &page.path, &updated)
+                .map_err(|e| GraphError::Io(e.to_string()))?;
+        }
         if count > 0 {
             if !dry_run && updated != content {
                 plan.edit(&page.path, content.clone(), updated.clone());
@@ -418,6 +430,7 @@ mod tests {
 
     fn page(id: &str, rel: &str, outgoing: &[&str]) -> ScannedPage {
         ScannedPage {
+            rss_evidence: false,
             revision: Some("revision".into()),
             id: id.to_owned(),
             path: PathBuf::from(rel),

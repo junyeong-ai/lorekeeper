@@ -214,6 +214,12 @@ impl ConceptSynthesisRequest {
 }
 
 impl TaskRequest for ConceptSynthesisRequest {
+    fn evidence_policy(&self) -> Option<&'static str> {
+        self.citations
+            .iter()
+            .any(|c| c.rss_event.is_some())
+            .then_some(lk_core::rss_evidence::SYNTHESIS_POLICY)
+    }
     fn locale(&self) -> Locale {
         self.locale
     }
@@ -252,6 +258,8 @@ pub struct CategoryReference {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ExtractConceptsRequest {
+    #[serde(default)]
+    pub rss_original: Option<lk_core::rss_original::RssOriginalManifest>,
     pub text: String,
     pub source_id: String,
     /// Originating source type. Concept extraction always runs against a single
@@ -316,6 +324,9 @@ pub fn cache_hash(identity: &Identity) -> String {
 /// hashing the locale there would rewrite every concept page in the vault the first time it
 /// moved.
 pub trait TaskRequest {
+    fn evidence_policy(&self) -> Option<&'static str> {
+        None
+    }
     /// The language the vault is authored in.
     fn locale(&self) -> Locale;
 
@@ -390,6 +401,12 @@ impl ExtractConceptsRequest {
         categories.sort_by(|a, b| a.id.cmp(&b.id));
 
         let mut v = Identity::new();
+        if let Some(original) = &self.rss_original {
+            v.insert(
+                "rss_original".into(),
+                serde_json::to_value(original).expect("RSS manifest serializes"),
+            );
+        }
         v.insert("text".into(), self.text.clone().into());
         v.insert("source_id".into(), self.source_id.clone().into());
         v.insert("date".into(), self.date.to_string().into());
@@ -407,6 +424,11 @@ impl ExtractConceptsRequest {
 }
 
 impl TaskRequest for ExtractConceptsRequest {
+    fn evidence_policy(&self) -> Option<&'static str> {
+        self.rss_original
+            .as_ref()
+            .map(|_| lk_core::rss_evidence::EXTRACTION_POLICY)
+    }
     fn locale(&self) -> Locale {
         self.locale
     }

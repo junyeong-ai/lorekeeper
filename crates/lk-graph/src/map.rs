@@ -186,6 +186,7 @@ mod tests {
 
     fn page(id: &str, outgoing: &[&str]) -> ScannedPage {
         ScannedPage {
+            rss_evidence: false,
             revision: Some("revision".into()),
             id: id.to_string(),
             path: PathBuf::from(format!("{id}.md")),

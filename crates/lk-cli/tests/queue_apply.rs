@@ -11,6 +11,7 @@ use std::process::{Command, Output};
 
 fn extraction_request(seed: &str) -> lk_queue::ExtractConceptsRequest {
     lk_queue::ExtractConceptsRequest {
+        rss_original: None,
         text: seed.into(),
         source_id: "notes".into(),
         source_type: lk_core::config::SourceType::Manual,
@@ -87,6 +88,7 @@ impl Workspace {
             },
             date: jiff::civil::date(2026, 5, 23),
             concepts: vec![lk_queue::ReportedConcept {
+                rss_evidence: Vec::new(),
                 concept: lk_core::concept::ExtractedConcept {
                     name: concept.into(),
                     category: None,

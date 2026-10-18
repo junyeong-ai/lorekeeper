@@ -104,6 +104,7 @@ impl RenderResult {
         plan: &mut lk_vault::MutationPlan,
         root: &Path,
     ) -> Result<(), lk_vault::VaultError> {
+        lk_vault::guard_rss_evidence(plan, root, self.path.as_ref(), &self.content)?;
         if let Some(capture) = &self.rss_original {
             lk_vault::guard_rss_original(plan, root, capture)?;
         }

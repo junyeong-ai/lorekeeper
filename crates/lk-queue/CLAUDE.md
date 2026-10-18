@@ -175,3 +175,9 @@ knows about; provider choice is config-driven (`build_llm_client` in lk-cli).
   identity before normal classification or result application. Missing or mismatched
   inputs are unreadable, even when completion markers match; pruning retains them for
   diagnosis. Packet export and explicit regeneration use the same validation.
+
+- **RSS evidence policies dispatch per typed request.** A provided bound manifest selects
+  `concept-extraction-rss-v2` and participates in that request's cache identity. Event selectors
+  select `concept-synthesis-rss-v2`; page-only v1 requests keep their wire/hash and policy.
+  Typed retained-input validation refuses malformed or downgraded v2 data. Reported concepts
+  may explicitly select provided event/payload pairs; omission is not retraction.

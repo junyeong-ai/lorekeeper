@@ -126,6 +126,12 @@ pub enum GraphCommand {
         /// Required exact file revision from `lore wiki read`
         #[arg(long)]
         revision: String,
+        /// Retract only this explicitly selected RSS event/version pair
+        #[arg(long, requires = "event_revision")]
+        event: Option<String>,
+        /// Exact immutable payload revision of the selected RSS event
+        #[arg(long, requires = "event")]
+        event_revision: Option<String>,
         /// Validate and preview without archiving or writing
         #[arg(long)]
         dry_run: bool,
@@ -289,9 +295,14 @@ async fn run_inner(
             origin,
             concept,
             revision,
+            event,
+            event_revision,
             dry_run,
         } => {
-            let report = retract_citation::request(
+            let selection = event.zip(event_revision).map(|(event_id, revision)| {
+                lk_core::rss_evidence::RssEventSelection { event_id, revision }
+            });
+            let report = retract_citation::request_selected(
                 &rc,
                 &views.scanned,
                 &origin,
@@ -299,6 +310,7 @@ async fn run_inner(
                 &revision,
                 dry_run,
                 mutation.as_ref(),
+                selection.as_ref(),
             )?;
             println!(
                 "{}",

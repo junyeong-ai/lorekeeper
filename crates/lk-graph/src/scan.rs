@@ -28,6 +28,7 @@ use crate::GraphError;
 /// plain lookup with no second resolution to disagree about.
 #[derive(Debug, Clone, Default)]
 pub struct ScannedPage {
+    pub rss_evidence: bool,
     pub id: String,
     pub path: PathBuf,
     pub title: String,
@@ -138,6 +139,7 @@ pub fn scan_vault(root: &Path, follow_links: bool) -> Result<Vec<ScannedPage>, G
                 tracing::warn!(path = %path.display(), error = %e, "unreadable page: id only");
                 let rel = path.strip_prefix(root).unwrap_or(path);
                 ScannedPage {
+                    rss_evidence: false,
                     revision: None,
                     id: page_id(rel),
                     path: rel.to_path_buf(),
@@ -391,6 +393,11 @@ fn parse_file(path: &Path, root: &Path) -> Result<ScannedPage, String> {
     }
 
     Ok(ScannedPage {
+        rss_evidence: parsed.as_ref().is_some_and(|p| {
+            p.frontmatter
+                .get(lk_core::rss_evidence::CONCEPT_EVIDENCE_FIELD)
+                .is_some()
+        }),
         revision: parsed.as_ref().map(lk_core::concept::source_revision),
         id: page_id(rel),
         path: rel.to_path_buf(),
@@ -721,11 +728,13 @@ mod tests {
     fn pure_existence_never_infers_case_aliases_or_respells_exact_addresses() {
         let pages = vec![
             ScannedPage {
+                rss_evidence: false,
                 id: "wiki/lower".into(),
                 path: "wiki/lower.md".into(),
                 ..Default::default()
             },
             ScannedPage {
+                rss_evidence: false,
                 id: "wiki/Lower".into(),
                 path: "wiki/Lower.md".into(),
                 ..Default::default()
@@ -858,11 +867,13 @@ mod tests {
         );
         let pages = vec![
             ScannedPage {
+                rss_evidence: false,
                 id: page_id(Path::new("wiki/a-b.md")),
                 path: "wiki/a-b.md".into(),
                 ..Default::default()
             },
             ScannedPage {
+                rss_evidence: false,
                 id: page_id(Path::new("wiki/a_b.md")),
                 path: "wiki/a_b.md".into(),
                 ..Default::default()
@@ -1151,11 +1162,13 @@ mod tests {
 
         let pages = vec![
             ScannedPage {
+                rss_evidence: false,
                 id: path_slug(Path::new(&composed)),
                 path: PathBuf::from(&composed),
                 ..ScannedPage::default()
             },
             ScannedPage {
+                rss_evidence: false,
                 id: path_slug(Path::new(&decomposed)),
                 path: PathBuf::from(&decomposed),
                 ..ScannedPage::default()
@@ -1224,6 +1237,7 @@ mod tests {
     fn vault_existence_tracks_ids_and_linked() {
         let pages = vec![
             ScannedPage {
+                rss_evidence: false,
                 id: "daily/team-slack/2026-05-22".to_owned(),
                 path: PathBuf::from("daily/team-slack/2026-05-22.md"),
                 title: "t".to_owned(),
@@ -1232,6 +1246,7 @@ mod tests {
                 revision: None,
             },
             ScannedPage {
+                rss_evidence: false,
                 id: "wiki/concepts/confluence-cloud".to_owned(),
                 path: PathBuf::from("wiki/concepts/confluence-cloud.md"),
                 title: "Confluence Cloud".to_owned(),
@@ -1445,16 +1460,19 @@ mod tests {
     fn two_files_at_one_address_are_reported() {
         let pages = vec![
             ScannedPage {
+                rss_evidence: false,
                 id: "wiki/documents/a-b".to_owned(),
                 path: PathBuf::from("wiki/documents/A B.md"),
                 ..ScannedPage::default()
             },
             ScannedPage {
+                rss_evidence: false,
                 id: "wiki/documents/a-b".to_owned(),
                 path: PathBuf::from("wiki/documents/a-b.md"),
                 ..ScannedPage::default()
             },
             ScannedPage {
+                rss_evidence: false,
                 id: "wiki/documents/c".to_owned(),
                 path: PathBuf::from("wiki/documents/c.md"),
                 ..ScannedPage::default()

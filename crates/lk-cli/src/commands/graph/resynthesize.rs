@@ -38,6 +38,11 @@ pub(super) fn request(
             .map_err(|e| e.to_string())?;
     let target = path.to_str().ok_or("concept path must be UTF-8")?;
     let hash = lk_core::concept::citation_digest(&evidence.citations);
+    let policy = if evidence.citations.iter().any(|c| c.rss_event.is_some()) {
+        lk_core::rss_evidence::SYNTHESIS_POLICY
+    } else {
+        TaskKind::SynthesizeConcept.generation_policy()
+    };
     if let Some(task) =
         crate::commands::queue::current_synthesis_request(&config.root, target, &hash)
             .map_err(|e| e.to_string())?
@@ -56,7 +61,7 @@ pub(super) fn request(
         ("synthesis_policy_done", "null".to_owned()),
         (
             "synthesis_policy_requested",
-            serde_json::to_string(TaskKind::SynthesizeConcept.generation_policy()).unwrap(),
+            serde_json::to_string(policy).unwrap(),
         ),
         ("synthesis_policy_requested_input", stamp),
     ] {
@@ -94,7 +99,7 @@ pub(super) fn request(
             .map_err(|e| e.to_string())?;
     }
     Ok(
-        serde_json::json!({"ok":true,"data":{"task_id":task.task_id,"already_pending":false,"generation_policy":task.kind.generation_policy(),"dry_run":dry_run,"evidence":evidence}}),
+        serde_json::json!({"ok":true,"data":{"task_id":task.task_id,"already_pending":false,"generation_policy":policy,"dry_run":dry_run,"evidence":evidence}}),
     )
 }
 

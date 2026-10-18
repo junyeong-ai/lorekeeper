@@ -76,7 +76,7 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   326 of 2689 pages in the reference vault reached that state because the struct had one field
   for it. `aliases` is where a translation, an expanded acronym or an original-language term
   goes; `lk-pipeline` decides which of them this vault can actually answer with.
-- **`Citation`** identifies a source by its vault-relative path and authored revision.
+- **`Citation`** page evidence identifies a source by its vault-relative path and authored revision; explicit RSS selectors use the immutable article revision.
   `source_revision` hashes the body and frontmatter except `updated`, `source_count`, and
   `llm_inputs`. `citation_digest` hashes the sorted, deduplicated citations; graph sync,
   extraction grounding, and queue requests use this same function.
@@ -228,3 +228,9 @@ Domain types and config — no I/O, no async. Depended on by every other crate.
   (`captured_at: null`), never mtime. Recursive object-key ordering plus serde_json scalar
   encoding is the declared v1 format, not RFC 8785. Exact bytes determine full BLAKE3
   revisions; source/day/event identity alone cannot identify a content revision.
+
+- **Explicit RSS concept evidence** (`rss_evidence`) carries a versioned selector alongside
+  Citation's path/revision. With no selector the old two-field JSON and digest are byte-identical.
+  The selected revision is a full immutable payload hash, not an EventId or manifest hash.
+  `concept_evidence` declarations identify exact concept addresses and provided-manifest
+  event/version pairs; unknown schemas, malformed selectors and unknown fields are errors.

@@ -109,6 +109,7 @@ pub struct IngestOptions {
 }
 
 pub struct Pipeline {
+    vault_root: std::path::PathBuf,
     ctx: Arc<PipelineContext>,
     reader: Arc<dyn VaultStore>,
     /// Durable per-date record of observed events. A daily page is a projection of it,
@@ -147,6 +148,7 @@ fn bounded_address(slug: &str) -> String {
 impl Pipeline {
     pub fn new(vault_root: &Path, ctx: Arc<PipelineContext>) -> Self {
         Self {
+            vault_root: vault_root.to_owned(),
             ctx,
             reader: Arc::new(FsVault::new(vault_root)),
             event_log: event_log::EventLog::new(vault_root),
@@ -426,6 +428,9 @@ impl Pipeline {
 
             let (concepts_decision, day_concepts) = if config.extract_concepts {
                 let concepts_req = lk_queue::ExtractConceptsRequest {
+                    rss_original: rss_originals
+                        .get(date)
+                        .map(|capture| capture.manifest.clone()),
                     text: combined.clone(),
                     source_id: source_id.to_string(),
                     source_type: config.source_type,
@@ -591,6 +596,20 @@ impl Pipeline {
                         })?;
                         output.rss_original = Some(capture);
                     }
+                    if let Some(value) = existing.as_ref().and_then(|page| {
+                        page.frontmatter
+                            .get(lk_core::rss_evidence::CONCEPT_EVIDENCE_FIELD)
+                    }) {
+                        output.content = lk_vault::set_frontmatter_field(
+                            &output.content,
+                            lk_core::rss_evidence::CONCEPT_EVIDENCE_FIELD,
+                            &serde_json::to_string(value)
+                                .map_err(|e| PipelineError::Render(e.to_string()))?,
+                        )
+                        .ok_or_else(|| {
+                            PipelineError::Render("missing evidence frontmatter".into())
+                        })?;
+                    }
                     daily_pages.push(output);
                 }
                 // A cached section heading is absent from the freshly rendered template
@@ -690,6 +709,16 @@ impl Pipeline {
         result: &lk_queue::TaskResult,
         page: &str,
     ) -> Result<String, PipelineError> {
+        self.apply_concept_result_with_manifest(result, page, None)
+            .await
+    }
+
+    pub async fn apply_concept_result_with_manifest(
+        &mut self,
+        result: &lk_queue::TaskResult,
+        page: &str,
+        manifest: Option<&lk_core::rss_original::RssOriginalManifest>,
+    ) -> Result<String, PipelineError> {
         // Both edits are settled before any concept is folded into the run's drafts.
         // `render_concept_pages` emits those drafts whatever happens here, so a result that
         // failed afterwards would leave concept pages behind with nothing citing them while
@@ -738,6 +767,15 @@ impl Pipeline {
         // updated to cite.
         let mut staged = Vec::with_capacity(result.concepts.len());
         for reported in &result.concepts {
+            if !reported.rss_evidence.is_empty() {
+                let provided = manifest.ok_or_else(|| {
+                    PipelineError::Render("RSS selections require a versioned task manifest".into())
+                })?;
+                for selection in &reported.rss_evidence {
+                    lk_vault::load_rss_selected_payload(&self.vault_root, provided, selection)?;
+                }
+            }
+
             // The same filter the synchronous path applies: an unslugifiable name is
             // dropped, an invented category stripped.
             let Some(concept) =
@@ -751,9 +789,10 @@ impl Pipeline {
                     .stage(&concept, self.reader.as_ref(), &self.ctx.dirs)
                     .await?,
                 reported.synthesis.as_deref(),
+                reported.rss_evidence.clone(),
             ));
         }
-        let identities: Vec<_> = staged.iter().map(|(s, _)| s.identity()).collect();
+        let identities: Vec<_> = staged.iter().map(|(s, _, _)| s.identity()).collect();
 
         let concepts = render::accumulate_concepts(
             // The links to CARRY are read under any locale, for the reason accumulation
@@ -766,14 +805,46 @@ impl Pipeline {
         );
         let links = render::concept_links(&concepts, &result.target.vault_path, &self.ctx.dirs);
         let updated = lk_vault::replace_section(&stamped, heading, &links.join("\n"));
+        let selections = staged
+            .iter()
+            .map(|(s, _, events)| {
+                (
+                    lk_core::vault_path::VaultPath::concept(&self.ctx.dirs, &s.identity().slug)
+                        .to_string(),
+                    events.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let updated = lk_vault::accumulate_rss_evidence(
+            &self.vault_root,
+            Path::new(&result.target.vault_path),
+            &updated,
+            manifest,
+            &selections,
+        )?;
         let page = lk_core::frontmatter::parse_page(&updated)
             .map_err(|e| PipelineError::Render(e.to_string()))?;
         let citation = lk_core::concept::Citation::new(Path::new(&result.target.vault_path), &page);
-        for (mut concept, synthesis) in staged {
+        let event_citations = lk_vault::rss_concept_citations(
+            &self.vault_root,
+            Path::new(&result.target.vault_path),
+            &updated,
+        )?;
+        for (mut concept, synthesis, _) in staged {
             if let Some(text) = synthesis {
                 concept.ground(Grounding {
                     text,
-                    citation: citation.clone(),
+                    citation: event_citations
+                        .get(
+                            &lk_core::vault_path::VaultPath::concept(
+                                &self.ctx.dirs,
+                                &concept.identity().slug,
+                            )
+                            .to_string(),
+                        )
+                        .filter(|set| set.len() == 1)
+                        .map(|set| set[0].clone())
+                        .unwrap_or_else(|| citation.clone()),
                 });
             }
             self.concept_drafts.commit(concept, result.date);
@@ -1130,6 +1201,7 @@ impl Pipeline {
 
             let (concepts_decision, doc_concepts) = if config.extract_concepts {
                 let concepts_req = lk_queue::ExtractConceptsRequest {
+                    rss_original: None,
                     text: combined.clone(),
                     source_id: source_id.to_string(),
                     source_type: config.source_type,

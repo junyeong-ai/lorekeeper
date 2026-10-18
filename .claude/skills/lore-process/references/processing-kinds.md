@@ -101,7 +101,16 @@ Read those exact pages. The revision identifies authored content and provenance;
 bookkeeping fields (`updated`, `source_count`, `llm_inputs`) are excluded.
 Do not substitute the concept's previous synthesis for a source.
 
-1. Open `target.vault_path` and read every `input.citations[].path` under the vault root.
+For a typed RSS event citation, the exact selected immutable article is the evidence;
+the daily is its navigational origin and a derived interpretation. Follow the packet's
+selected-event command, read the supporting article context through `next_offset`, and
+keep historical/provider-attributed claims scoped. Current manifest changes do not make
+that selected observation current truth. A citation without `rss_event` retains the full
+page authored-revision contract. Mixed page/event citations require both kinds of reads.
+
+1. Open `target.vault_path`. Read each page citation's exact source page under the vault
+   root; for event citations, read the packet's selected immutable articles. Read both
+   when the dependency set mixes page and event evidence.
 2. Draft the `synthesis` result body for `target.anchor`: what the vault now knows about this concept,
    what it is, and what the citing material establishes about it. Write it in the
    language the page is already written in — a `vault.locale` switch renames
@@ -251,6 +260,15 @@ Write one file per task to `<vault>/.lorekeeper/queue/results/{task_id}.json`:
   "concepts": [{ "name": "…", "category": "…", "aliases": ["…"], "synthesis": "…" }]
 }
 ```
+
+When `input.rss_original` is present under `concept-extraction-rss-v2`, discover the
+bound original and compare discovery `page_revision` to the captured target revision.
+Read each article you select through the pinned collection revision and full supporting
+context; return `rss_evidence: [{"event_id":"...","revision":"<payload revision>"}]`
+inside that concept object. Every pair must occur in the task's exact provided manifest.
+Do not copy `concept_evidence` metadata from the page as fresh semantic judgment.
+A legacy task cannot acquire event authority by guessing a title, URL, date or EventId.
+Existing selections accumulate even if omitted; explicit retraction is a separate reviewed act.
 
 `synthesis` is one or two sentences grounding the concept, and is used only when the page
 is being CREATED — an established page's synthesis is its accumulated meaning across every

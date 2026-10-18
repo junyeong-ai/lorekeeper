@@ -1,6 +1,6 @@
 ---
 name: lore-process
-version: 0.55.0
+version: 0.56.0
 description: Drain the Lorekeeper LLM work queue after `lore ingest` runs in queue mode — fill the empty LLM-owned sections (summaries, refined events, concepts, themes, reviews) of freshly-written vault pages using the active agent session. Idempotent and resumable. Run after each ingest, or on a daily schedule.
 when_to_use: |
   queue process, drain queue, fill summaries,
@@ -268,6 +268,18 @@ The essentials: a visible `.jsonl` is fully written and every
      messages, then stop — leave remaining files for the next run.
 
 ## Idempotency contract
+
+For a new bound RSS task, explicitly attribute each selected article using the typed
+`rss_evidence` pairs described in `queue-format.md`; never infer an event from its title
+or position. Page-only legacy tasks keep their existing guards. Event-aware synthesis
+uses the packet's exact selected-original commands and treats the daily as interpretation.
+Normal omission is not retraction: a reviewed event pair can be removed with
+`graph retract-citation ORIGIN CONCEPT --revision FILE_REVISION --event EVENT_ID
+--event-revision PAYLOAD_REVISION` after the same pending-work and evidence checks.
+Pair-only retraction preserves authored prose links: a partial retraction changes only
+the declaration, and the last pair removes only the generated list item. Any surviving
+prose link remains page-level evidence. Whole-citation retraction keeps its strict
+refusal of prose or other occurrences.
 
 Only `lore queue prune` retires queue files after classification. It removes stale
 and missing-target tasks, archives a run whose remaining tasks are done, and

@@ -80,11 +80,24 @@ pub fn citation_digest(citations: &[Citation]) -> String {
     blake3::hash(&bytes).to_hex()[..32].to_string()
 }
 
-/// A source page at the revision read by a synthesis.
+/// An originating page, guarded by authored revision or an explicit immutable RSS selection.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Citation {
     pub path: String,
     pub revision: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_rss_selector"
+    )]
+    pub rss_event: Option<crate::rss_evidence::RssEventSelector>,
+}
+
+fn deserialize_rss_selector<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<crate::rss_evidence::RssEventSelector>, D::Error> {
+    crate::rss_evidence::RssEventSelector::deserialize(deserializer).map(Some)
 }
 
 impl Citation {
@@ -96,6 +109,7 @@ impl Citation {
         Self {
             path: path.to_string_lossy().replace('\\', "/"),
             revision,
+            rss_event: None,
         }
     }
 }
@@ -319,8 +333,31 @@ mod tests {
 
     fn citation(path: &str) -> Citation {
         Citation {
+            rss_event: None,
             path: path.into(),
             revision: "revision".into(),
+        }
+    }
+
+    #[test]
+    fn legacy_citation_wire_and_digest_remain_byte_identical() {
+        let raw =
+            r#"{"path":"daily/feed/2026-10-18.md","revision":"0123456789abcdef0123456789abcdef"}"#;
+        let citation: Citation = serde_json::from_str(raw).unwrap();
+        assert!(citation.rss_event.is_none());
+        assert_eq!(serde_json::to_string(&citation).unwrap(), raw);
+        let old_input = format!("[{raw}]");
+        assert_eq!(
+            citation_digest(&[citation]),
+            blake3::hash(old_input.as_bytes()).to_hex()[..32]
+        );
+        for suffix in [
+            r#", "rss_event":null"#,
+            r#", "rss_event":{"schema":"rss-event-evidence-v1"}"#,
+            r#", "unexpected":true"#,
+        ] {
+            let malformed = format!("{}{} }}", &raw[..raw.len() - 1], suffix);
+            assert!(serde_json::from_str::<Citation>(&malformed).is_err());
         }
     }
 

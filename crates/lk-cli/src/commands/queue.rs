@@ -486,7 +486,7 @@ async fn apply(
             ));
         }
     }
-    let synthesis_result = synthesis::apply(&vault_root, &queue_dir, dry_run)?;
+    let synthesis_result = synthesis::apply(&vault_root, &queue_dir, dry_run, mutation.as_ref())?;
 
     let unusable = batch.unreadable;
     let results = batch.ready;
@@ -695,7 +695,17 @@ async fn apply(
             failed += 1;
             continue;
         }
-        match pipeline.apply_concept_result(result, &content).await {
+        let rss_manifest = task
+            .and_then(|t| t.input.get("rss_original"))
+            .map(|v| {
+                serde_json::from_value::<lk_core::rss_original::RssOriginalManifest>(v.clone())
+            })
+            .transpose()
+            .map_err(|e| miette::miette!("RSS manifest: {e}"))?;
+        match pipeline
+            .apply_concept_result_with_manifest(result, &content, rss_manifest.as_ref())
+            .await
+        {
             Ok(rewritten) => {
                 let rewritten = stamp_policy(&rewritten, task, result.target.kind)?;
                 origin_revisions.insert(rel_path.clone(), original_revision);
@@ -755,6 +765,8 @@ async fn apply(
             Ok(current) if synthesis::revision(&current) == origin_revisions[rel_path] => {
                 // This content is derived from this exact page and parsed before staging;
                 // keep its expected original bytes rather than capturing a newer version.
+                lk_vault::guard_rss_evidence(&mut plan, &vault_root, rel_path, content)
+                    .map_err(|e| miette::miette!("RSS evidence: {e}"))?;
                 plan.edit(rel_path.clone(), current, content.clone());
                 committed_results.extend(results.iter().cloned());
             }
@@ -1387,12 +1399,7 @@ pub(super) fn current_synthesis_request(
                         task.task_id
                     ));
                 }
-                if state == TaskStatus::Current
-                    && task
-                        .input
-                        .get("generation_policy")
-                        .and_then(serde_json::Value::as_str)
-                        == Some(lk_queue::TaskKind::SynthesizeConcept.generation_policy())
+                if state == TaskStatus::Current && task.generation_policy().ok().flatten().is_some()
                 {
                     found.get_or_insert(task);
                 }
@@ -1530,6 +1537,14 @@ fn classify_task(
         return Ok(TaskStatus::Unreadable);
     }
     for citation in citations {
+        if citation.rss_event.is_some() {
+            match lk_vault::has_rss_citation(vault_root, &rel_path, &citation) {
+                Ok(true) => {}
+                Ok(false) => return Ok(TaskStatus::Stale),
+                Err(_) => return Ok(TaskStatus::Unreadable),
+            }
+            continue;
+        }
         let Some(path) = resolve_target_path(&citation.path) else {
             return Ok(TaskStatus::Stale);
         };
@@ -1673,14 +1688,14 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let queue = dir.path().join(".lorekeeper/queue");
         assert!(pending_queue_files(&queue).unwrap().is_empty());
-        assert!(synthesis::apply(dir.path(), &queue, true).is_ok());
+        assert!(synthesis::apply(dir.path(), &queue, true, None).is_ok());
 
         std::fs::create_dir_all(queue.parent().unwrap()).unwrap();
         std::fs::write(&queue, "not a directory").unwrap();
         assert!(pending_queue_files(&queue).is_err());
         assert!(queue_load(dir.path()).is_err());
         assert!(prune_queue(dir.path(), &queue, true).is_err());
-        assert!(synthesis::apply(dir.path(), &queue, true).is_err());
+        assert!(synthesis::apply(dir.path(), &queue, true, None).is_err());
         assert!(!work_in_flight(dir.path()).unread.is_empty());
         assert_eq!(std::fs::read_to_string(&queue).unwrap(), "not a directory");
     }

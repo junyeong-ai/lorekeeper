@@ -90,6 +90,24 @@ For `synthesize-concept`, `input.citations` is an array of
 the vault root. `queue status` checks revisions against current source pages; an edit makes
 pending work `stale`, and an unreadable source leaves it `unreadable` until repaired.
 
+New bound RSS extraction uses `concept-extraction-rss-v2` with a typed
+`input.rss_original` manifest. Read selected originals from that inventory; return an
+optional `rss_evidence: [{"event_id":"...","revision":"<payload revision>"}]` on each
+reported concept only after verifying that article supports it. Omission accumulates no
+new event attribution and never retracts an existing one. Legacy/page-only tasks keep
+their original schema and policy; never invent an RSS binding from a title, URL or date.
+
+`concept-synthesis-rss-v2` may mix old page citations with event citations:
+`{"path":"<origin daily>","revision":"<64-hex payload revision>","rss_event":{"schema":"rss-event-evidence-v1","event_id":"..."}}`.
+The optional selector is absent from legacy JSON and its hash remains unchanged.
+Event revisions identify immutable collected observations, not the daily interpretation.
+Use packet `event_evidence[].selected_event_command` and follow text pagination.
+`wiki original ORIGIN --evidence-concept CONCEPT` discovers declared pairs with bounded
+pagination; selecting `--event ID --revision PAYLOAD_REV` reads that exact historical
+selection even when the current collection manifest has moved. The inventory revision
+pins inventory pagination; it is not the selected payload revision. Validate current task
+status and target bytes normally. Do not replace a stale answer's guards.
+
 ## Recovering a lost extraction task
 
 When the original extraction task is unavailable, recover from the stored source page;
@@ -100,6 +118,7 @@ Read the current page and produce the complete extraction result described in
 Do not invent missing source metadata or reuse an old answer with a new revision.
 Use a unique recovery task id and apply that result explicitly:
 `lore queue apply --recover-extraction <task_id>`.
+Recovered page-only extraction cannot introduce new RSS event selections without its retained versioned manifest; existing validated selections remain accumulated.
 Other orphan results remain rejected. Unparseable queue lines must be repaired first.
 If a rejected result is already in `results/orphaned/`, regenerate it from the current
 page in `results/`; preserve the rejected copy and its diagnostic record.

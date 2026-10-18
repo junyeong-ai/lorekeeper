@@ -23,6 +23,8 @@ pub struct IndexedLinkOptions<'a> {
 
 #[derive(Debug, Serialize)]
 pub struct IndexedLink {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rss_evidence: Option<crate::RssEvidencePreview>,
     pub source: String,
     pub source_revision: String,
     pub line: usize,
@@ -97,13 +99,22 @@ pub fn inspect_indexed_links(
     let mut links = Vec::new();
     if options.offset < total {
         let mut statement = transaction.prepare(&format!(
-            "SELECT source, source_revision, line, label, destination, target, context, context_truncated
+            "SELECT source, source_revision, line, label, destination, target, context, context_truncated, rss_evidence
              FROM links WHERE {predicate} ORDER BY source, ordinal LIMIT ?2 OFFSET ?3",
         ))?;
         let rows = statement.query_map(
             params![path, options.limit as i64, options.offset as i64],
             |row| {
+                let evidence: String = row.get(8)?;
+                let rss_evidence = serde_json::from_str(&evidence).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        8,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?;
                 Ok(IndexedLink {
+                    rss_evidence,
                     source: row.get(0)?,
                     source_revision: row.get(1)?,
                     line: usize::try_from(row.get::<_, i64>(2)?).map_err(|error| {

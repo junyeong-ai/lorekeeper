@@ -4,6 +4,7 @@ use std::path::{Component, Path};
 use super::ResolvedConfig;
 
 /// A narrow operation on generated citation-list items, never arbitrary prose links.
+#[cfg(test)]
 pub(super) fn request(
     config: &ResolvedConfig,
     pages: &[lk_graph::scan::ScannedPage],
@@ -12,6 +13,22 @@ pub(super) fn request(
     revision: &str,
     dry_run: bool,
     session: Option<&lk_vault::MutationSession>,
+) -> Result<serde_json::Value, String> {
+    request_selected(
+        config, pages, origin, concept, revision, dry_run, session, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn request_selected(
+    config: &ResolvedConfig,
+    pages: &[lk_graph::scan::ScannedPage],
+    origin: &Path,
+    concept: &Path,
+    revision: &str,
+    dry_run: bool,
+    session: Option<&lk_vault::MutationSession>,
+    selected: Option<&lk_core::rss_evidence::RssEventSelection>,
 ) -> Result<serde_json::Value, String> {
     for path in [origin, concept] {
         if path.extension().is_none_or(|ext| ext != "md")
@@ -90,16 +107,76 @@ pub(super) fn request(
             "concepts, task boards and malformed page types cannot be citation origins".into(),
         );
     }
-    let after = retract(&config.root, origin, concept, &before)?;
+    lk_vault::rss_concept_citations(&config.root, origin, &before).map_err(|e| e.to_string())?;
+    let mut declarations = lk_core::rss_evidence::bindings(&page)?;
+    let mut matching = std::collections::BTreeSet::new();
+    for binding in &declarations {
+        if Path::new(&binding.concept) == concept
+            || lk_vault::same_existing_file(&config.root, Path::new(&binding.concept), concept)
+                .map_err(|e| e.to_string())?
+        {
+            matching.insert(binding.concept.clone());
+        }
+    }
+    let mut removed = 0;
+    for binding in &mut declarations {
+        if matching.contains(&binding.concept) {
+            let count = binding.events.len();
+            binding
+                .events
+                .retain(|event| selected.is_some_and(|selected| event != selected));
+            removed += count - binding.events.len();
+        }
+    }
+    if selected.is_some() && removed == 0 {
+        return Err("selected RSS concept evidence is absent".into());
+    }
+    declarations.retain(|binding| !binding.events.is_empty());
+    let remains = declarations
+        .iter()
+        .any(|binding| matching.contains(&binding.concept));
+    let after = if selected.is_some() && remains {
+        remove_generated_links(
+            &config.root,
+            origin,
+            concept,
+            &before,
+            RetractionScope::GeneratedOnly,
+        )?;
+        before.clone()
+    } else if selected.is_some() {
+        remove_generated_links(
+            &config.root,
+            origin,
+            concept,
+            &before,
+            RetractionScope::GeneratedOnly,
+        )?
+    } else {
+        retract(&config.root, origin, concept, &before)?
+    };
+    let after = if page
+        .frontmatter
+        .get(lk_core::rss_evidence::CONCEPT_EVIDENCE_FIELD)
+        .is_some()
+    {
+        lk_vault::write_bindings(&after, &declarations).map_err(|e| e.to_string())?
+    } else {
+        after
+    };
     let archived_revision = lk_core::concept::source_revision(&page);
     if !dry_run {
         // This existing publisher archives the exact inspected evidence before its
         // journaled edit, checks archive/current byte identity and refuses stale writes.
-        lk_vault::publish_document_expected(
+        let mut plan = lk_vault::MutationPlan::default();
+        lk_vault::guard_rss_evidence(&mut plan, &config.root, origin, &before)
+            .map_err(|e| e.to_string())?;
+        lk_vault::publish_document_expected_with_plan(
             session.ok_or("citation retraction requires a vault mutation session")?,
             origin,
             &after,
             Some(&Some(before.clone())),
+            plan,
         )
         .map_err(|e| e.to_string())?;
     }
@@ -111,7 +188,23 @@ pub(super) fn request(
     }}))
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RetractionScope {
+    Strict,
+    GeneratedOnly,
+}
+
 fn retract(root: &Path, origin: &Path, concept: &Path, before: &str) -> Result<String, String> {
+    remove_generated_links(root, origin, concept, before, RetractionScope::Strict)
+}
+
+fn remove_generated_links(
+    root: &Path,
+    origin: &Path,
+    concept: &Path,
+    before: &str,
+    scope: RetractionScope,
+) -> Result<String, String> {
     let headings: Vec<_> = lk_vault::section_headings(|s| s.related_concepts).collect();
     let mut fence = lk_core::markdown::FenceState::new();
     let count = before
@@ -155,6 +248,9 @@ fn retract(root: &Path, origin: &Path, concept: &Path, before: &str) -> Result<S
         let index = occurrence.line - 1;
         let line = lines[index];
         if offsets[index] < start || offsets[index] + line.len() > end {
+            if scope == RetractionScope::GeneratedOnly {
+                continue;
+            }
             return Err(
                 "concept is also cited outside the related-concepts section; no edit performed"
                     .into(),
@@ -168,6 +264,9 @@ fn retract(root: &Path, origin: &Path, concept: &Path, before: &str) -> Result<S
             )
         );
         if line.trim_end_matches(['\r', '\n']) != expected {
+            if scope == RetractionScope::GeneratedOnly {
+                continue;
+            }
             return Err("citation must be a standalone generated list item; prose and mixed items are not edited".into());
         }
         removed.insert(index);

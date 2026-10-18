@@ -7,6 +7,8 @@ use crate::{ExistingPageResolver, VaultError, page_path, parse_page};
 
 #[derive(Debug, Serialize)]
 pub struct LinkDetail {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rss_evidence: Option<crate::RssEvidencePreview>,
     pub line: usize,
     pub label: String,
     pub destination: String,
@@ -73,6 +75,8 @@ pub fn inspect_links(
         )));
     }
     let page = parse_page(&raw).map_err(VaultError::Frontmatter)?;
+    crate::rss_concept_citations(root, path, &raw)?;
+    let evidence_previews = crate::rss_link_previews(root, path, &raw)?;
     let line_offset = raw.lines().count() - page.body.lines().count();
     let mut links = Vec::new();
     let mut total = 0;
@@ -96,6 +100,9 @@ pub fn inspect_links(
         }
         let (context, context_truncated) = context_preview(occurrence.context);
         links.push(LinkDetail {
+            rss_evidence: evidence_previews
+                .get(&(line_offset + occurrence.line))
+                .cloned(),
             line: line_offset + occurrence.line,
             label: occurrence.link.text,
             destination: occurrence.link.dest,

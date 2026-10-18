@@ -15,6 +15,9 @@ pub enum WikiCommand {
         /// Explicit vault root; no configuration is required for exact original reads
         #[arg(long)]
         root: Option<PathBuf>,
+        /// Read an explicitly declared concept/event payload revision, including historical selections
+        #[arg(long, conflicts_with = "member")]
+        evidence_concept: Option<PathBuf>,
         /// Exact vault-relative document or daily page path
         path: PathBuf,
         /// Exact manifest member path; include a bounded UTF-8 preview when selected
@@ -298,6 +301,7 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
         }
         WikiCommand::Original {
             root,
+            evidence_concept,
             path,
             member,
             event,
@@ -308,6 +312,47 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
             revision,
         } => {
             let root = super::resolve_root_config(opts, root)?.root;
+            if let Some(concept) = evidence_concept {
+                if event.is_none() {
+                    let view = lk_vault::inspect_rss_evidence_inventory(
+                        &root,
+                        &path,
+                        &concept,
+                        revision.as_deref(),
+                        offset,
+                        limit,
+                    )
+                    .map_err(|e| miette::miette!("{e}"))?;
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&view).map_err(|e| miette::miette!("{e}"))?
+                    );
+                    return Ok(());
+                }
+                let citation = lk_core::concept::Citation {
+                    path: path.to_string_lossy().into(),
+                    revision: revision.clone().ok_or_else(|| {
+                        miette::miette!("selected event evidence requires --revision")
+                    })?,
+                    rss_event: Some(lk_core::rss_evidence::RssEventSelector {
+                        schema: lk_core::rss_evidence::RSS_EVIDENCE_SCHEMA.into(),
+                        event_id: event.clone().expect("clap requires event"),
+                    }),
+                };
+                let view = lk_vault::inspect_rss_citation(
+                    &root,
+                    &concept,
+                    &citation,
+                    text_offset,
+                    text_limit,
+                )
+                .map_err(|e| miette::miette!("{e}"))?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&view).map_err(|e| miette::miette!("{e}"))?
+                );
+                return Ok(());
+            }
             if let Some(view) = lk_vault::inspect_rss_original(
                 &root,
                 &path,

@@ -127,6 +127,21 @@ pub fn apply_in_session(
         let content = std::fs::read_to_string(root.join(&page.path))
             .map_err(|e| GraphError::Io(format!("read {}: {e}", page.path.display())))?;
         let mut updated = repoint_renamed_links(&content, &page.path, &destinations, root)?;
+        if page.rss_evidence {
+            lk_vault::rss_concept_citations(root, &page.path, &content)
+                .map_err(|e| GraphError::Io(e.to_string()))?;
+            updated = lk_vault::repoint_rss_evidence(
+                root,
+                &updated,
+                &renames
+                    .iter()
+                    .map(|r| (r.old_path.clone(), r.new_path.clone()))
+                    .collect::<Vec<_>>(),
+            )
+            .map_err(|e| GraphError::Io(e.to_string()))?;
+            lk_vault::guard_rss_evidence(&mut plan, root, rel_path, &updated)
+                .map_err(|e| GraphError::Io(e.to_string()))?;
+        }
 
         if renamed_paths.contains_key(page.path.as_path())
             && let Some(new_slug) = rel_path.file_stem().and_then(|s| s.to_str())
@@ -191,6 +206,7 @@ mod tests {
     fn build_page(path: &str, outgoing: &[&str]) -> ScannedPage {
         let rel = PathBuf::from(path);
         ScannedPage {
+            rss_evidence: false,
             revision: Some("revision".into()),
             id: path_slug(&rel),
             path: rel,

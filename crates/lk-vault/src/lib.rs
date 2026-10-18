@@ -12,6 +12,7 @@ mod navigation;
 mod original_io;
 mod provenance;
 mod review;
+mod rss_evidence;
 mod rss_original;
 mod search;
 mod search_index;
@@ -52,7 +53,14 @@ pub use self::provenance::{
 pub use self::review::{
     EvidenceReport, KnowledgeReview, ReviewEffectiveState, ReviewReport, ReviewStatus,
     archive_evidence, inspect_evidence, is_archived_evidence, list_reviews, load_archived_evidence,
-    publish_document, publish_document_expected, same_existing_file,
+    publish_document, publish_document_expected, publish_document_expected_with_plan,
+    same_existing_file,
+};
+pub use self::rss_evidence::{
+    RssEvidencePreview, accumulate_rss_evidence, guard_rss_citation, guard_rss_evidence,
+    has_rss_citation, inspect_rss_citation, inspect_rss_evidence_inventory, load_rss_manifest,
+    load_rss_selected_payload, repoint_rss_evidence, rss_concept_citations, rss_link_previews,
+    validate_rss_citation, write_bindings,
 };
 pub use self::rss_original::{
     RssOriginalOptions, RssOriginalView, guard_rss_original, inspect_rss_original,

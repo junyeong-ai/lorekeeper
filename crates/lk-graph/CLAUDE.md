@@ -207,8 +207,9 @@ on-disk state, never from a cached snapshot.
   incoming citations): ingest preserves the on-disk value across re-render (0 for a new
   page) and `backlinks-sync` re-derives the real count from the link graph, so it
   reflects source deletions and can never be inflated by a crash or an idempotent re-ingest.
-  The `## Sources` body is the single source-of-truth for citations — concept
-  frontmatter carries no `sources` array.
+  Forward links identify originating pages; validated RSS declarations select article
+  versions. `## Sources` is the derived origin-page view; concept frontmatter carries
+  no `sources` array.
 - **`merge::merge_concepts`** (`lore graph merge <from> <into>`) folds a duplicate
   concept into a canonical one: it repoints every link that RESOLVES to `from`'s page —
   any spelling: canonical relative, dot-relative, the OKF `/`-absolute form — at `into`
@@ -226,12 +227,12 @@ on-disk state, never from a cached snapshot.
   to re-derive the merged concept's `## Sources` + `source_count`. Duplicate *detection*
   (below) only reports the pages that answer to one name; this is the execution
   counterpart a human triggers, because it deletes a page.
-- **`## Related` is NOT machine-written.** Louvain communities encode
+- **`## Related` records semantic judgment.** Louvain communities encode
   "co-cited together" (the in-scope graph is dominated by document/exploration→concept edges), not
   topical relatedness, so auto-writing community co-membership as Related edges
   manufactures co-occurrence noise and self-reinforcing cliques. Related links are
-  instead curated via `lore-wiki audit`: `suggest_links` proposes candidates and an
-  LLM confirms genuine relationships before any edge is written. `## Sources`
+  instead authored through evidence-backed synthesis or `lore-wiki audit`: `suggest_links`
+  proposes candidates and an LLM confirms genuine relationships before any edge is written. `## Sources`
   (citation-derived, `backlinks-sync`) is the only machine-maintained concept relation.
 - **`concept_lint::scan_concept_pages`** reads `{wiki}/concepts/*.md` ONCE into `Vec<ConceptPage>`
   (slug = file stem, path, category, `names` = slug + `title` + `aliases`, body), sorted by
@@ -310,3 +311,12 @@ on-disk state, never from a cached snapshot.
   bodies, markers and generated backlinks are untouched; reconcile backlinks and process
   synthesis afterward. Preview never archives, recovers a journal or writes. Source
   eligibility is shared with backlinks through `scan::is_citation_origin`.
+
+- **Bound RSS forward links may carry explicit event evidence.** Backlinks derives typed
+  event citations only from validated `concept_evidence` declarations and real generated
+  links. Other occurrences retain page evidence. Source count and Sources remain origin-page
+  based; the synthesis digest uses the actual selected dependency set. Legacy pages do not
+  migrate implicitly. Merge and normalize repoint declared addresses with the same exact
+  filesystem identity as Markdown links, preserving immutable originals in the write plan.
+  `retract-citation --event ID --event-revision REV` removes only that pair; the last pair
+  removes its generated link. Ordinary retraction removes all bindings for that citation.

@@ -115,7 +115,7 @@ fn short(value: &str, max: usize) -> (String, bool) {
         value.chars().count() > max,
     )
 }
-fn read_manifest(
+pub(crate) fn read_manifest(
     root: &Path,
     reference: &RssOriginalReference,
 ) -> Result<RssOriginalManifest, VaultError> {

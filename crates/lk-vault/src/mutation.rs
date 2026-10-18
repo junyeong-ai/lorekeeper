@@ -580,6 +580,101 @@ mod tests {
     }
 
     #[test]
+    fn rss_selection_recovery_rechecks_completed_object_and_membership_guards() {
+        for damage in [None, Some("payload"), Some("membership")] {
+            let root = tempfile::tempdir().unwrap();
+            let session = MutationSession::acquire(root.path()).unwrap();
+            let event: lk_core::event::Event = serde_json::from_value(serde_json::json!({"id":"feed:2026-10-18:0000000000000001","source_id":"feed","source_type":"rss","timestamp":"2026-10-18T00:00:00Z","date":"2026-10-18","title":"Original","body":"Explicit mechanism","url":null,"author":null,"labels":[],"category":null,"performance_category":null,"is_self":false,"is_personal":false,"metadata":{}})).unwrap();
+            let capture =
+                lk_core::rss_original::RssOriginalCapture::from_events(&[&event]).unwrap();
+            let reference = crate::publish_rss_original(&session, &capture).unwrap();
+            let origin = Path::new("daily/feed/2026-10-18.md");
+            let concept = Path::new("wiki/concepts/alpha.md");
+            fs::create_dir_all(root.path().join(origin.parent().unwrap())).unwrap();
+            fs::create_dir_all(root.path().join(concept.parent().unwrap())).unwrap();
+            let source = format!(
+                "---\ntype: daily\nsource: feed\ncreated: 2026-10-18\nsource_record: {}\n---\n# Daily\n\n## Related Concepts\n\n- [Alpha](../../wiki/concepts/alpha.md)\n",
+                serde_json::json!({"rss_original":reference})
+            );
+            let selection = lk_core::rss_evidence::RssEventSelection {
+                event_id: event.id.to_string(),
+                revision: capture.manifest.events[0].revision.clone(),
+            };
+            let source = crate::accumulate_rss_evidence(
+                root.path(),
+                origin,
+                &source,
+                Some(&capture.manifest),
+                &[(concept.to_string_lossy().into(), vec![selection.clone()])],
+            )
+            .unwrap();
+            fs::write(root.path().join(origin), &source).unwrap();
+            let before = "---\ntype: concept\n---\n# Alpha\nBefore.";
+            fs::write(root.path().join(concept), before).unwrap();
+            let citation = lk_core::concept::Citation {
+                path: origin.to_string_lossy().into(),
+                revision: selection.revision.clone(),
+                rss_event: Some(lk_core::rss_evidence::RssEventSelector {
+                    schema: lk_core::rss_evidence::RSS_EVIDENCE_SCHEMA.into(),
+                    event_id: selection.event_id,
+                }),
+            };
+            let mut plan = MutationPlan::default();
+            crate::guard_rss_citation(&mut plan, root.path(), concept, &citation).unwrap();
+            plan.edit(concept, before.into(), before.replace("Before", "After"));
+            let journal = Journal { version: 1, plan };
+            session.save(&journal).unwrap();
+            fs::write(root.path().join(concept), "external edit").unwrap();
+            assert!(session.finish(&journal).is_err());
+            let progress = fs::read(session.journal.with_file_name("progress.json")).unwrap();
+            assert!(
+                serde_json::from_slice::<Progress>(&progress)
+                    .unwrap()
+                    .completed
+                    >= 3
+            );
+            if damage == Some("payload") {
+                fs::write(
+                    root.path().join(format!(
+                        "{}/events/{}.json",
+                        lk_core::rss_original::RSS_ORIGINAL_STORE,
+                        selection.revision
+                    )),
+                    "corrupt",
+                )
+                .unwrap();
+            } else if damage == Some("membership") {
+                fs::write(
+                    root.path().join(origin),
+                    source.replace("[Alpha]", "[Changed]"),
+                )
+                .unwrap();
+            }
+            fs::write(root.path().join(concept), before).unwrap();
+            drop(session);
+            let resumed = MutationSession::acquire(root.path());
+            if damage.is_some() {
+                assert!(resumed.is_err());
+                assert_eq!(
+                    fs::read_to_string(root.path().join(concept)).unwrap(),
+                    before
+                );
+                assert_eq!(
+                    fs::read(root.path().join(".lorekeeper/mutation/progress.json")).unwrap(),
+                    progress
+                );
+            } else {
+                assert!(resumed.is_ok());
+                assert!(
+                    fs::read_to_string(root.path().join(concept))
+                        .unwrap()
+                        .contains("After")
+                );
+            }
+        }
+    }
+
+    #[test]
     fn orphaned_progress_is_removed_before_a_new_plan() {
         let root = tempfile::tempdir().unwrap();
         let session = MutationSession::acquire(root.path()).unwrap();

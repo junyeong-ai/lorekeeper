@@ -220,6 +220,90 @@ fn incoming_citations(
     Ok(incoming)
 }
 
+fn rss_evidence(
+    pages: &[ScannedPage],
+    root: &Path,
+    dirs: &VaultDirs,
+) -> Result<BTreeMap<String, BTreeMap<String, Vec<Citation>>>, GraphError> {
+    let mut result = BTreeMap::new();
+    for source in pages
+        .iter()
+        .filter(|p| p.rss_evidence && crate::scan::is_citation_origin(p, dirs))
+    {
+        let raw = std::fs::read_to_string(
+            lk_vault::page_path(root, &source.path).map_err(|e| GraphError::Io(e.to_string()))?,
+        )
+        .map_err(|e| GraphError::Io(e.to_string()))?;
+        let page = frontmatter::parse_page(&raw).map_err(|e| GraphError::Io(e.to_string()))?;
+        if source.revision.as_deref() != Some(lk_core::concept::source_revision(&page).as_str()) {
+            return Err(GraphError::Io("RSS source changed during scan".into()));
+        }
+        let evidence = lk_vault::rss_concept_citations(root, &source.path, &raw)
+            .map_err(|e| GraphError::Io(e.to_string()))?;
+        let mut resolved: BTreeMap<String, Vec<Citation>> = BTreeMap::new();
+        for (concept, citations) in evidence {
+            let direct = pages.iter().find(|p| {
+                p.path == Path::new(&concept)
+                    && is_concept_page(&p.path, dirs)
+                    && p.format.as_deref() == Some("concept")
+            });
+            let matched = if direct.is_some() {
+                direct
+            } else {
+                let full = lk_vault::page_path(root, Path::new(&concept))
+                    .and_then(std::fs::canonicalize)
+                    .map_err(|e| GraphError::Io(e.to_string()))?;
+                let canonical_root =
+                    std::fs::canonicalize(root).map_err(|e| GraphError::Io(e.to_string()))?;
+                let relative = full
+                    .strip_prefix(&canonical_root)
+                    .map_err(|e| GraphError::Io(e.to_string()))?;
+                pages.iter().find(|p| p.path == relative)
+            };
+            let matched = matched
+                .filter(|p| {
+                    is_concept_page(&p.path, dirs) && p.format.as_deref() == Some("concept")
+                })
+                .ok_or_else(|| {
+                    GraphError::Io("RSS evidence concept is not a concept page".into())
+                })?;
+            resolved
+                .entry(matched.path.to_string_lossy().into_owned())
+                .or_default()
+                .extend(citations);
+        }
+        for citations in resolved.values_mut() {
+            citations.sort();
+            citations.dedup();
+        }
+        result.insert(source.id.clone(), resolved);
+    }
+    Ok(result)
+}
+
+fn citations_for(
+    sources: &[String],
+    concept: &Path,
+    by_id: &HashMap<&str, &ScannedPage>,
+    rss: &BTreeMap<String, BTreeMap<String, Vec<Citation>>>,
+) -> Vec<Citation> {
+    sources
+        .iter()
+        .flat_map(|id| {
+            let source = by_id[id.as_str()];
+            rss.get(id)
+                .and_then(|m| m.get(&concept.to_string_lossy().to_string()))
+                .cloned()
+                .unwrap_or_else(|| {
+                    vec![Citation::at_revision(
+                        &source.path,
+                        source.revision.clone().expect("validated source revision"),
+                    )]
+                })
+        })
+        .collect()
+}
+
 /// Derive one exact concept's current evidence and replacement sections without writes.
 /// This does not depend on retained queue history or an unanswered completion marker.
 pub fn concept_resynthesis(
@@ -236,6 +320,7 @@ pub fn concept_resynthesis(
         .filter(|p| is_concept_page(&p.path, dirs) && p.format.as_deref() == Some("concept"))
         .ok_or_else(|| fail("expected an exact existing concept Markdown path"))?;
     let incoming = incoming_citations(pages, vault_root, dirs)?;
+    let rss = rss_evidence(pages, vault_root, dirs)?;
     let sources = incoming
         .get(&page.id)
         .ok_or_else(|| fail("concept has no current citations"))?;
@@ -258,16 +343,12 @@ pub fn concept_resynthesis(
         path: path.to_path_buf(),
         anchor: format!("## {}", section.heading),
         related_anchor: related.as_ref().map(|s| format!("## {}", s.heading)),
-        citations: sources
-            .iter()
-            .map(|id| {
-                let source = by_id[id.as_str()];
-                Citation::at_revision(
-                    &source.path,
-                    source.revision.clone().expect("validated source revision"),
-                )
-            })
-            .collect(),
+        citations: citations_for(
+            &sources.iter().cloned().collect::<Vec<_>>(),
+            path,
+            &by_id,
+            &rss,
+        ),
         discarding: [Some(&section), related.as_ref()]
             .into_iter()
             .flatten()
@@ -290,6 +371,7 @@ pub fn sync_concept_backlinks(
     synthesis: SynthesisPolicy,
 ) -> Result<BacklinksSyncResult, GraphError> {
     let incoming = incoming_citations(pages, vault_root, dirs)?;
+    let rss = rss_evidence(pages, vault_root, dirs)?;
     let by_id: HashMap<&str, &ScannedPage> = pages.iter().map(|p| (p.id.as_str(), p)).collect();
 
     let writer = VaultWriter::new(vault_root);
@@ -314,19 +396,7 @@ pub fn sync_concept_backlinks(
             .unwrap_or_default();
         sources.sort();
 
-        let citations: Vec<Citation> = sources
-            .iter()
-            .map(|id| {
-                let source = by_id[id.as_str()];
-                Citation::at_revision(
-                    &source.path,
-                    source
-                        .revision
-                        .clone()
-                        .expect("source revisions validated before reconciliation"),
-                )
-            })
-            .collect();
+        let citations = citations_for(&sources, &page.path, &by_id, &rss);
 
         let full_path = vault_root.join(&page.path);
         let raw = std::fs::read_to_string(&full_path)
@@ -633,6 +703,7 @@ mod tests {
         citation_digest(
             &ids.iter()
                 .map(|id| Citation {
+                    rss_event: None,
                     path: format!("{id}.md"),
                     revision: "revision".into(),
                 })
@@ -662,6 +733,7 @@ mod tests {
 
     fn build_page(id: &str, rel: &str, outgoing: &[&str]) -> ScannedPage {
         ScannedPage {
+            rss_evidence: false,
             revision: Some("revision".into()),
             id: id.to_owned(),
             path: PathBuf::from(rel),

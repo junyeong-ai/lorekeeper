@@ -18,6 +18,8 @@ struct Packet {
     semantic_validation: &'static str,
     tasks: Vec<PacketTask>,
     sources: Vec<PacketSource>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    event_evidence: Vec<PacketEventEvidence>,
 }
 
 #[derive(Serialize)]
@@ -27,6 +29,8 @@ struct PacketTask {
     /// None means legacy/unknown, never an inferred current policy.
     generation_policy: Option<String>,
     source_indices: Vec<usize>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    event_evidence_indices: Vec<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     target_content: Option<String>,
 }
@@ -42,6 +46,14 @@ struct PacketSource {
     original: Option<PacketOriginal>,
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<String>,
+}
+
+#[derive(Serialize)]
+struct PacketEventEvidence {
+    citation: Citation,
+    concept: String,
+    authority: &'static str,
+    selected_event_command: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -183,6 +195,7 @@ fn build(root: &Path, task_ids: &[String], include_content: bool) -> miette::Res
     let mut sources: Vec<PacketSource> = Vec::new();
     let mut source_index_by_path = BTreeMap::<String, usize>::new();
     let mut exported = Vec::new();
+    let mut event_evidence = Vec::new();
     for task in &tasks {
         let target = if let Some(raw) = snapshots.get(&task.target.vault_path) {
             raw.clone()
@@ -199,9 +212,44 @@ fn build(root: &Path, task_ids: &[String], include_content: bool) -> miette::Res
         )
         .map_err(|e| miette::miette!("{} citations: {e}", task.task_id))?;
         let mut source_indices = BTreeSet::new();
+        let mut event_evidence_indices = Vec::new();
         for citation in citations {
+            if let Some(selector) = &citation.rss_event {
+                lk_vault::validate_rss_citation(
+                    &root,
+                    Path::new(&task.target.vault_path),
+                    &citation,
+                )
+                .map_err(|e| miette::miette!("RSS evidence: {e}"))?;
+                event_evidence_indices.push(event_evidence.len());
+                event_evidence.push(PacketEventEvidence {
+                    citation: citation.clone(),
+                    concept: task.target.vault_path.clone(),
+                    authority: "explicit_immutable_event_selection_not_daily_interpretation",
+                    selected_event_command: vec![
+                        "lore".into(),
+                        "wiki".into(),
+                        "original".into(),
+                        citation.path.clone(),
+                        "--root".into(),
+                        root.display().to_string(),
+                        "--evidence-concept".into(),
+                        task.target.vault_path.clone(),
+                        "--event".into(),
+                        selector.event_id.clone(),
+                        "--revision".into(),
+                        citation.revision.clone(),
+                        "--text-offset".into(),
+                        "0".into(),
+                        "--text-limit".into(),
+                        "4096".into(),
+                    ],
+                });
+            }
             if let Some(index) = source_index_by_path.get(&citation.path) {
-                if sources[*index].authored_revision != citation.revision {
+                if citation.rss_event.is_none()
+                    && sources[*index].authored_revision != citation.revision
+                {
                     return Err(miette::miette!(
                         "selected tasks disagree on source revision: {}",
                         citation.path
@@ -220,7 +268,8 @@ fn build(root: &Path, task_ids: &[String], include_content: bool) -> miette::Res
             };
             let page = lk_core::frontmatter::parse_page(&raw)
                 .map_err(|e| miette::miette!("{}: {e}", citation.path))?;
-            if source_revision(&page) != citation.revision {
+            let authored_revision = source_revision(&page);
+            if citation.rss_event.is_none() && authored_revision != citation.revision {
                 return Err(miette::miette!(
                     "source changed while exporting packet: {}",
                     citation.path
@@ -229,7 +278,7 @@ fn build(root: &Path, task_ids: &[String], include_content: bool) -> miette::Res
             let exact = file_revision(&raw);
             let key = (
                 citation.path.clone(),
-                citation.revision.clone(),
+                authored_revision.clone(),
                 exact.clone(),
             );
             let original = original(&root, &citation.path)?;
@@ -246,7 +295,7 @@ fn build(root: &Path, task_ids: &[String], include_content: bool) -> miette::Res
                 let index = sources.len();
                 sources.push(PacketSource {
                     path: citation.path,
-                    authored_revision: citation.revision,
+                    authored_revision,
                     file_revision: exact,
                     source_url: page
                         .frontmatter
@@ -269,6 +318,7 @@ fn build(root: &Path, task_ids: &[String], include_content: bool) -> miette::Res
                 .map_err(|e| miette::miette!("{e}"))?
                 .map(str::to_owned),
             source_indices: source_indices.into_iter().collect(),
+            event_evidence_indices,
             target_content: include_content.then_some(target),
         });
     }
@@ -297,11 +347,12 @@ fn build(root: &Path, task_ids: &[String], include_content: bool) -> miette::Res
         ));
     }
     Ok(Packet {
-        version: 1,
+        version: if event_evidence.is_empty() { 1 } else { 2 },
         vault_root: root,
         semantic_validation: "not performed: this packet is input evidence, not a read receipt or a completed per-target judgment",
         tasks: exported,
         sources,
+        event_evidence,
     })
 }
 

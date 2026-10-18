@@ -2871,6 +2871,7 @@ async fn queue_results_materialize_through_the_same_merge_path() {
         date: jiff::civil::date(2026, 5, 23),
         concepts: vec![
             lk_queue::ReportedConcept {
+                rss_evidence: Vec::new(),
                 concept: ExtractedConcept {
                     name: "Retrieval Augmented Generation".into(),
                     category: None,
@@ -2881,6 +2882,7 @@ async fn queue_results_materialize_through_the_same_merge_path() {
             // An unknown category is dropped by the same filter the synchronous path uses,
             // rather than reaching a page and surfacing later as a lint finding.
             lk_queue::ReportedConcept {
+                rss_evidence: Vec::new(),
                 concept: ExtractedConcept {
                     name: "Vector Database".into(),
                     category: Some("not-a-real-category".into()),
@@ -2973,6 +2975,7 @@ async fn a_page_without_the_concepts_section_is_an_error_not_a_silent_no_op() {
         },
         date: jiff::civil::date(2026, 5, 23),
         concepts: vec![lk_queue::ReportedConcept {
+            rss_evidence: Vec::new(),
             concept: ExtractedConcept {
                 name: "Retrieval Augmented Generation".into(),
                 category: None,
@@ -3017,6 +3020,7 @@ async fn a_page_that_cannot_record_completion_is_an_error() {
         },
         date: jiff::civil::date(2026, 5, 23),
         concepts: vec![lk_queue::ReportedConcept {
+            rss_evidence: Vec::new(),
             concept: ExtractedConcept {
                 name: "Retrieval Augmented Generation".into(),
                 category: None,
@@ -3060,6 +3064,7 @@ async fn a_concept_that_fails_to_stage_takes_its_whole_result_with_it() {
 
     let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
     let named = |name: &str| lk_queue::ReportedConcept {
+        rss_evidence: Vec::new(),
         concept: ExtractedConcept {
             name: name.into(),
             category: None,
@@ -3150,6 +3155,7 @@ async fn a_grounding_from_a_later_result_still_seeds_a_new_concept_page() {
         },
         date: jiff::civil::date(2026, 5, 23),
         concepts: vec![lk_queue::ReportedConcept {
+            rss_evidence: Vec::new(),
             concept: ExtractedConcept {
                 name: "Retrieval Augmented Generation".into(),
                 category: None,
@@ -3220,6 +3226,7 @@ async fn ambiguous_names_refuse_writes_without_touching_either_page() {
         },
         date: jiff::civil::date(2026, 5, 23),
         concepts: vec![lk_queue::ReportedConcept {
+            rss_evidence: Vec::new(),
             concept: ExtractedConcept {
                 name: "Claude 35".into(),
                 category: None,
@@ -3249,6 +3256,7 @@ async fn two_spellings_in_one_extraction_resolve_to_one_page() {
 
     let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
     let reported = |name: &str| lk_queue::ReportedConcept {
+        rss_evidence: Vec::new(),
         concept: ExtractedConcept {
             name: name.into(),
             category: None,
@@ -3306,6 +3314,7 @@ async fn a_page_created_earlier_in_the_run_is_found_by_a_later_spelling() {
         },
         date: jiff::civil::date(2026, 5, 23),
         concepts: vec![lk_queue::ReportedConcept {
+            rss_evidence: Vec::new(),
             concept: ExtractedConcept {
                 name: name.into(),
                 category: None,
@@ -3370,6 +3379,7 @@ async fn a_break_between_digits_does_not_fold_one_version_onto_another() {
         },
         date: jiff::civil::date(2026, 5, 23),
         concepts: vec![lk_queue::ReportedConcept {
+            rss_evidence: Vec::new(),
             concept: ExtractedConcept {
                 name: "Claude 3.5".into(),
                 category: None,
@@ -3733,6 +3743,7 @@ async fn a_name_spelled_without_separators_lands_on_the_established_page() {
         },
         date: jiff::civil::date(2026, 5, 23),
         concepts: vec![lk_queue::ReportedConcept {
+            rss_evidence: Vec::new(),
             concept: ExtractedConcept {
                 name: "VectorDB".into(),
                 category: None,
@@ -3818,6 +3829,7 @@ async fn stale_alias_loses_to_the_address_owner(claimant: &str) {
         },
         date: jiff::civil::date(2026, 5, 23),
         concepts: vec![lk_queue::ReportedConcept {
+            rss_evidence: Vec::new(),
             concept: ExtractedConcept {
                 name: "Access x Ingress 2-Axis Deployment Model".into(),
                 category: None,
@@ -3891,6 +3903,7 @@ async fn an_extraction_naming_an_alias_lands_on_the_established_page() {
         },
         date: jiff::civil::date(2026, 5, 23),
         concepts: vec![lk_queue::ReportedConcept {
+            rss_evidence: Vec::new(),
             concept: ExtractedConcept {
                 // An alias, not the title — its slugify differs from the page's id.
                 name: "Pre-Build Design Refutation".into(),
@@ -4016,6 +4029,7 @@ async fn applying_a_result_adds_to_a_pages_citations_rather_than_replacing_them(
         },
         date: jiff::civil::date(2026, 5, 23),
         concepts: vec![lk_queue::ReportedConcept {
+            rss_evidence: Vec::new(),
             concept: ExtractedConcept {
                 name: "Reported Now".into(),
                 category: None,
@@ -4291,6 +4305,7 @@ async fn symbol_distinct_names_keep_separate_pages_and_resolve_after_reload() {
         concepts: ["C++", "C#", "C", "CO", "Co", "x²", "x2", long_name.as_str()]
             .into_iter()
             .map(|name| lk_queue::ReportedConcept {
+                rss_evidence: Vec::new(),
                 concept: ExtractedConcept {
                     name: name.into(),
                     category: None,
@@ -4681,6 +4696,7 @@ async fn extraction_publication_preserves_concepts_edited_after_staging() {
             },
             date: jiff::civil::date(2026, 5, 23),
             concepts: vec![lk_queue::ReportedConcept {
+                rss_evidence: Vec::new(),
                 concept: ExtractedConcept {
                     name: "Guarded".into(),
                     category: None,

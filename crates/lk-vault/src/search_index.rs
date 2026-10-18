@@ -8,7 +8,7 @@ use crate::search::{Page, SearchOptions, SearchResult, fold, fold_name, search_t
 use crate::{MutationSession, VaultError};
 
 pub(super) const INDEX_PATH: &str = ".lorekeeper/search.sqlite";
-const VERSION: i32 = 5;
+const VERSION: i32 = 6;
 
 #[derive(Serialize)]
 pub struct SearchSnapshot {
@@ -84,7 +84,7 @@ pub fn prepare_search(
         CREATE TABLE links (source TEXT NOT NULL, ordinal INTEGER NOT NULL,
             source_revision TEXT NOT NULL, line INTEGER NOT NULL, label TEXT NOT NULL,
             destination TEXT NOT NULL, target TEXT, context TEXT NOT NULL,
-            context_truncated INTEGER NOT NULL,
+            context_truncated INTEGER NOT NULL, rss_evidence TEXT NOT NULL,
             PRIMARY KEY (source, ordinal));
         CREATE INDEX links_target ON links(target, source, ordinal);")?;
     {
@@ -93,8 +93,8 @@ pub fn prepare_search(
         )?;
         let mut insert_terms =
             transaction.prepare("INSERT INTO terms(rowid, text) VALUES (?1, ?2)")?;
-        let mut insert_link =
-            transaction.prepare("INSERT INTO links VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)")?;
+        let mut insert_link = transaction
+            .prepare("INSERT INTO links VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)")?;
         for (id, page) in pages.iter().enumerate() {
             let aliases = serde_json::to_string(&page.aliases)
                 .map_err(|e| VaultError::Serialization(e.to_string()))?;
@@ -102,6 +102,11 @@ pub fn prepare_search(
                 .map_err(|e| VaultError::Serialization(e.to_string()))?;
             let mut metadata = page.clone();
             metadata.page.body.clear();
+            metadata
+                .page
+                .frontmatter
+                .fields
+                .remove(lk_core::rss_evidence::CONCEPT_EVIDENCE_FIELD);
             let metadata = serde_json::to_string(&metadata)
                 .map_err(|error| VaultError::Serialization(error.to_string()))?;
             let intro = super::search::excerpt(
@@ -150,6 +155,21 @@ pub fn prepare_search(
                 path_ranks[&page.rel_path] as i64
             ])?;
             insert_terms.execute(params![id as i64, text])?;
+            let evidence_previews = if page
+                .page
+                .frontmatter
+                .get(lk_core::rss_evidence::CONCEPT_EVIDENCE_FIELD)
+                .is_some()
+            {
+                let raw = std::fs::read_to_string(crate::page_path(root, &page.rel_path)?)?;
+                if lk_core::concept::file_revision(&raw) != page.file_revision {
+                    return Err(invalid("evidence source changed during snapshot"));
+                }
+                crate::rss_concept_citations(root, &page.rel_path, &raw)?;
+                crate::rss_link_previews(root, &page.rel_path, &raw)?
+            } else {
+                std::collections::BTreeMap::new()
+            };
             for (ordinal, occurrence) in
                 lk_core::link::extract_page_link_occurrences(&page.page.body)
                     .into_iter()
@@ -158,6 +178,9 @@ pub fn prepare_search(
                 let target = lk_core::link::resolve_dest(&page.rel_path, &occurrence.link.dest);
                 let (context, context_truncated) =
                     crate::links::context_preview(occurrence.context);
+                let evidence = evidence_previews.get(&(page.body_line_offset + occurrence.line));
+                let evidence =
+                    serde_json::to_string(&evidence).map_err(|e| invalid(e.to_string()))?;
                 insert_link.execute(params![
                     page.rel_path.to_string_lossy(),
                     ordinal as i64,
@@ -168,6 +191,7 @@ pub fn prepare_search(
                     target.map(|path| path.to_string_lossy().into_owned()),
                     context,
                     context_truncated,
+                    evidence,
                 ])?;
             }
         }

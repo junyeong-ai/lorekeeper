@@ -71,8 +71,36 @@ pub struct QueueTask {
 const RELATED_ANCHOR: &str = "related_anchor";
 
 impl QueueTask {
-    /// Missing provenance is legacy/unknown, never an automatic cache invalidation.
+    /// Required policy for the typed input shape.
+    pub fn expected_generation_policy(&self) -> &'static str {
+        match self.kind {
+            TaskKind::ExtractConcepts if self.input.contains_key("rss_original") => {
+                lk_core::rss_evidence::EXTRACTION_POLICY
+            }
+            TaskKind::SynthesizeConcept
+                if self
+                    .input
+                    .get("citations")
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|citations| {
+                        citations.iter().any(|c| c.get("rss_event").is_some())
+                    }) =>
+            {
+                lk_core::rss_evidence::SYNTHESIS_POLICY
+            }
+            _ => self.kind.generation_policy(),
+        }
+    }
+
+    /// Missing page-only provenance is legacy/unknown, never an automatic invalidation.
     pub fn generation_policy(&self) -> Result<Option<&str>, String> {
+        let expected = self.expected_generation_policy();
+        if expected != self.kind.generation_policy() {
+            return match self.input.get("generation_policy").and_then(|v| v.as_str()) {
+                Some(policy) if policy == expected => Ok(Some(policy)),
+                _ => Err("RSS evidence requires its versioned generation policy".into()),
+            };
+        }
         match self.input.get("generation_policy") {
             None => Ok(None),
             Some(value) if value.as_str() == Some(self.kind.generation_policy()) => {
@@ -84,6 +112,38 @@ impl QueueTask {
 
     /// Reconstruct the original typed request instead of maintaining another hash projection.
     pub fn validate_retained_input(&self) -> Result<(), String> {
+        if self.expected_generation_policy() != self.kind.generation_policy() {
+            self.generation_policy()?;
+        }
+        if self.kind == TaskKind::ExtractConcepts
+            && let Some(value) = self.input.get("rss_original")
+        {
+            let manifest: lk_core::rss_original::RssOriginalManifest =
+                serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+            manifest.validate()?;
+            if self.input.get("source_type").and_then(|v| v.as_str()) != Some("rss")
+                || self.input.get("source_id").and_then(|v| v.as_str())
+                    != Some(manifest.source_id.as_str())
+                || self.input.get("date").and_then(|v| v.as_str())
+                    != Some(manifest.date.to_string().as_str())
+            {
+                return Err("RSS evidence manifest differs from extraction scope".into());
+            }
+        }
+        if self.kind == TaskKind::SynthesizeConcept {
+            let citations: Vec<lk_core::concept::Citation> = serde_json::from_value(
+                self.input
+                    .get("citations")
+                    .cloned()
+                    .ok_or("missing citations")?,
+            )
+            .map_err(|e| e.to_string())?;
+            for citation in citations {
+                if let Some(event) = citation.rss_event {
+                    event.validate(&citation.revision)?;
+                }
+            }
+        }
         if !self.kind.supports_target(self.target.kind) {
             return Err("task kind does not match target kind".into());
         }
@@ -189,12 +249,42 @@ pub struct SectionResult {
 /// write it, and a concept page created without one is an empty heading nobody can act on.
 /// It applies on CREATION only — an established page's synthesis is its accumulated meaning
 /// and outranks any single mention.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ReportedConcept {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rss_evidence: Vec<lk_core::rss_evidence::RssEventSelection>,
     #[serde(flatten)]
     pub concept: ExtractedConcept,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub synthesis: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for ReportedConcept {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            name: String,
+            #[serde(default)]
+            category: Option<String>,
+            #[serde(default)]
+            aliases: Vec<String>,
+            #[serde(default)]
+            synthesis: Option<String>,
+            #[serde(default)]
+            rss_evidence: Vec<lk_core::rss_evidence::RssEventSelection>,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            concept: ExtractedConcept {
+                name: wire.name,
+                category: wire.category,
+                aliases: wire.aliases,
+            },
+            synthesis: wire.synthesis,
+            rss_evidence: wire.rss_evidence,
+        })
+    }
 }
 
 /// Subdirectory a queue file is moved to once every task in it is settled. Written by
@@ -431,7 +521,12 @@ impl QueueLlmClient {
     pub fn build_task<R: TaskRequest>(&self, prefix: &str, kind: TaskKind, req: R) -> QueueTask {
         let mut input = req.task_input();
         input.insert("locale".into(), req.locale().tag().into());
-        input.insert("generation_policy".into(), kind.generation_policy().into());
+        input.insert(
+            "generation_policy".into(),
+            req.evidence_policy()
+                .unwrap_or(kind.generation_policy())
+                .into(),
+        );
         QueueTask {
             task_id: self.next_id(prefix),
             kind,
@@ -516,6 +611,67 @@ mod tests {
     use crate::TargetKind;
     use lk_core::i18n::Locale;
     use tempfile::TempDir;
+
+    #[test]
+    fn rss_task_policy_dispatch_is_explicit_and_malformed_v2_never_falls_back() {
+        let root = TempDir::new().unwrap();
+        let client = QueueLlmClient::new(root.path().into());
+        let request = crate::ConceptSynthesisRequest {
+            citations: vec![lk_core::concept::Citation {
+                path: "daily/feed/2026-10-18.md".into(),
+                revision: "a".repeat(64),
+                rss_event: Some(lk_core::rss_evidence::RssEventSelector {
+                    schema: lk_core::rss_evidence::RSS_EVIDENCE_SCHEMA.into(),
+                    event_id: "feed:2026-10-18:0000000000000001".into(),
+                }),
+            }],
+            locale: Locale::En,
+            related_anchor: None,
+            target: TaskTarget {
+                vault_path: "wiki/concepts/alpha.md".into(),
+                kind: TargetKind::ConceptSynthesis,
+                anchor: "## Synthesis".into(),
+            },
+        };
+        let task = client.build_task("syn", TaskKind::SynthesizeConcept, request);
+        task.validate_retained_input().unwrap();
+        assert_eq!(
+            task.generation_policy().unwrap(),
+            Some(lk_core::rss_evidence::SYNTHESIS_POLICY)
+        );
+        let mut legacy_policy = task.clone();
+        legacy_policy.input.insert(
+            "generation_policy".into(),
+            TaskKind::SynthesizeConcept.generation_policy().into(),
+        );
+        assert!(legacy_policy.validate_retained_input().is_err());
+        for value in [
+            serde_json::Value::Null,
+            serde_json::json!({"schema":"unknown","event_id":"feed:2026-10-18:0000000000000001"}),
+            serde_json::json!({"schema":"rss-event-evidence-v1","event_id":"feed:2026-10-18:"}),
+        ] {
+            let mut malformed = task.clone();
+            malformed.input.get_mut("citations").unwrap()[0]["rss_event"] = value;
+            assert!(malformed.validate_retained_input().is_err());
+        }
+        assert!(
+            serde_json::from_value::<ReportedConcept>(
+                serde_json::json!({"name":"Alpha","rss_evidenc":[]})
+            )
+            .is_err()
+        );
+        let legacy: ReportedConcept = serde_json::from_value(
+            serde_json::json!({"name":"Alpha","aliases":[],"synthesis":"Definition"}),
+        )
+        .unwrap();
+        assert!(
+            !serde_json::to_value(legacy)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("rss_evidence")
+        );
+    }
 
     #[test]
     fn result_discovery_distinguishes_missing_storage_from_invalid_storage() {
@@ -754,6 +910,7 @@ mod tests {
         let client = QueueLlmClient::new(dir.path().to_path_buf());
 
         let req = ExtractConceptsRequest {
+            rss_original: None,
             text: "Anthropic releases Opus 4.7".into(),
             source_id: "ai-news".into(),
             source_type: lk_core::config::SourceType::Gmail,
@@ -786,6 +943,7 @@ mod tests {
         let client = QueueLlmClient::new(dir.path().to_path_buf());
         client
             .extract_concepts(ExtractConceptsRequest {
+                rss_original: None,
                 text: "mixed feed".into(),
                 source_id: "tech-news".into(),
                 source_type: lk_core::config::SourceType::Gmail,
@@ -864,6 +1022,7 @@ mod tests {
         use crate::CategoryReference;
         let date = jiff::civil::date(2026, 5, 23);
         let a = ExtractConceptsRequest {
+            rss_original: None,
             text: "x".into(),
             source_id: "ai-news".into(),
             source_type: lk_core::config::SourceType::Gmail,
@@ -974,6 +1133,7 @@ mod tests {
         // for every daily page and document in the vault, and a rewrite for every concept,
         // the first time `vault.locale` moved.
         let extract = ExtractConceptsRequest {
+            rss_original: None,
             text: "combined source text".into(),
             source_id: "src".into(),
             source_type: lk_core::config::SourceType::Rss,
@@ -990,6 +1150,7 @@ mod tests {
         assert_eq!(
             extract.cache_hash(),
             ExtractConceptsRequest {
+                rss_original: None,
                 locale: Locale::En,
                 ..extract.clone()
             }
@@ -998,6 +1159,7 @@ mod tests {
 
         let synthesis = crate::ConceptSynthesisRequest {
             citations: vec![lk_core::concept::Citation {
+                rss_event: None,
                 path: "daily/src/2026-01-01.md".into(),
                 revision: "revision".into(),
             }],
@@ -1031,6 +1193,7 @@ mod tests {
         let client = QueueLlmClient::new(dir.path().to_path_buf());
         let req = crate::ConceptSynthesisRequest {
             citations: vec![lk_core::concept::Citation {
+                rss_event: None,
                 path: "daily/src/2026-01-01.md".into(),
                 revision: "revision".into(),
             }],
@@ -1090,6 +1253,7 @@ mod tests {
             .unwrap();
         client
             .extract_concepts(ExtractConceptsRequest {
+                rss_original: None,
                 text: "t".into(),
                 source_id: "src".into(),
                 source_type: lk_core::config::SourceType::Rss,
@@ -1104,6 +1268,7 @@ mod tests {
         client
             .synthesize_concept(crate::ConceptSynthesisRequest {
                 citations: vec![lk_core::concept::Citation {
+                    rss_event: None,
                     path: "daily/src/2026-01-01.md".into(),
                     revision: "revision".into(),
                 }],

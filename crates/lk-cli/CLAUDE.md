@@ -292,3 +292,19 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   Synthesis packets attach verified RSS discovery plus selected-event command arguments,
   never every raw article. Commands carry the exact selected vault root; explicit `--root` works without config. A legacy log
   remains `legacy_unbound`, not a task read receipt or a historical input assertion.
+
+- **RSS event-aware tasks** retain exact target guards while validating immutable payloads
+  and current explicit selection membership. A removed pair is stale; corrupt evidence is
+  unreadable. Packet v2 exposes selected-event argv with exact root and payload revision,
+  without copying article bodies. Page-only packet v1 and task hashes remain supported.
+  Event retraction shares the archive-before-edit publisher and guards preserved originals;
+  merge/normalize update typed addresses with links. `wiki links` live and prepared views
+  expose bounded typed selection metadata, and `wiki original --evidence-concept` reads the
+  complete inventory or a selected historical payload. Older observations are not current
+  provider truth. `source_count` is still the number of originating pages.
+
+- **RSS pair retraction preserves authored links.** The shared citation parser's
+  `GeneratedOnly` mode applies only to explicit event-pair removal: partial removal
+  edits declarations only, and the last pair removes standalone generated items.
+  Authored prose stays page-level evidence. Ordinary whole-citation removal remains
+  `Strict` and refuses prose or occurrences outside the generated section.

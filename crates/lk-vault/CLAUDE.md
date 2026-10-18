@@ -295,3 +295,15 @@ Obsidian vault I/O. All writes go through here so atomicity lives in one place.
   Missing/corrupt/ambiguous or symlinked evidence is refused. Legacy event-log discovery is
   read-only `legacy_unbound`; matching source/date/config does not prove page derivation.
   No historical backfill, evidence pruning or event-level citation migration is implied.
+
+- **RSS event selections** share phase1 immutable objects rather than copying article bodies.
+  The origin's type/source/date, generated link and explicit membership must match. New
+  selections belong to the provided manifest; carried selections validate their historical
+  manifest and object even after the current manifest moves. Bounded selected reads use
+  `wiki original ORIGIN --evidence-concept CONCEPT`; inventory revisions pin membership,
+  while `--event ID --revision PAYLOAD_REV` pins the selected content. No title/position
+  inference or legacy upgrade. Journal guards use verified canonical bytes, not a fresh
+  unverified baseline; recovery rechecks preserved dependencies. Review evidence remains
+  page-only and rejects event selectors explicitly. SQLite links project at most 20 selected
+  pairs per generated link with total/truncated fields; full inventory is separately paginated.
+  This is derived metadata, not a new article store or event fulltext index.

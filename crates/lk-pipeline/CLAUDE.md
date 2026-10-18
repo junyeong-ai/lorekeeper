@@ -249,7 +249,14 @@ domain-neutral engine — then no work-log, reviews, or `is_personal` are produc
   carries that bounded capture and a typed `source_record.rss_original` reference. The CLI
   publishes originals before planning the page; `plan_publication` guards original dependencies
   in the same mutation journal. Capture limits are 4 MiB/event, 64 MiB/source and 256 MiB across
-  CLI-planned RSS sources. Dry-run keeps captures in memory only. Existing page citations,
-  semantic input hashes and completion ownership remain unchanged; this is not event-level
-  cache invalidation. A newly rendered page establishes a new binding, never historical
+  CLI-planned RSS sources. Dry-run keeps captures in memory only. Page-only citations and completion ownership remain unchanged. New bound captures may
+  supply explicit event selections under the event-aware extraction policy. A newly rendered page establishes a new binding, never historical
   proof about an earlier page's derivation from a legacy log.
+
+- **Event-aware RSS extraction is explicit.** New captures supply a typed manifest in the
+  extraction request. The applier accepts new LLM-selected pairs only from that provided
+  manifest, accumulates them with existing declarations, and publishes them with generated
+  links under the exact origin guard. Old carried pairs retain their original manifest
+  even when the current collection changes. Daily re-renders preserve these declarations.
+  A new single-event grounding records its event citation; multi-evidence creation remains
+  owed a synthesis rather than falsely claiming a single source answered the whole set.

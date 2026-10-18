@@ -29,8 +29,24 @@ pub enum ReviewStatus {
 #[serde(deny_unknown_fields)]
 pub struct KnowledgeReview {
     pub status: ReviewStatus,
+    #[serde(deserialize_with = "deserialize_page_evidence")]
     pub evidence: Vec<Citation>,
     pub resolution: Option<String>,
+}
+
+fn deserialize_page_evidence<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<Citation>, D::Error> {
+    let citations = Vec::<Citation>::deserialize(deserializer)?;
+    if citations
+        .iter()
+        .any(|citation| citation.rss_event.is_some())
+    {
+        return Err(serde::de::Error::custom(
+            "review evidence requires authored-page citations; RSS event selectors are synthesis evidence",
+        ));
+    }
+    Ok(citations)
 }
 
 impl KnowledgeReview {
@@ -287,6 +303,23 @@ pub fn publish_document_expected(
     content: &str,
     expected: Option<&Option<String>>,
 ) -> Result<(), VaultError> {
+    publish_document_expected_with_plan(
+        session,
+        path,
+        content,
+        expected,
+        crate::MutationPlan::default(),
+    )
+}
+
+/// Extend an archive-before-edit publication with already validated immutable dependencies.
+pub fn publish_document_expected_with_plan(
+    session: &crate::MutationSession,
+    path: &Path,
+    content: &str,
+    expected: Option<&Option<String>>,
+    mut plan: crate::MutationPlan,
+) -> Result<(), VaultError> {
     let full = crate::writable_page_path(session.root(), path)?;
     crate::writer::refuse_format_change(&full, content)?;
     let current = match std::fs::read_to_string(&full) {
@@ -302,7 +335,6 @@ pub fn publish_document_expected(
         .into());
     }
     let after = parse_page(content).map_err(VaultError::Frontmatter)?;
-    let mut plan = crate::MutationPlan::default();
     match current {
         Some(before) => {
             if before == content {
@@ -323,6 +355,13 @@ pub fn publish_document_expected(
                         path.display()
                     )));
                 }
+                let revision = lk_core::concept::source_revision(&old);
+                let archived = load_archived_evidence(session.root(), &revision)?
+                    .and_then(|page| page.original)
+                    .ok_or_else(|| {
+                        VaultError::Frontmatter("archived evidence disappeared".into())
+                    })?;
+                plan.require_unchanged(archive_path(&revision)?, archived);
             }
             // MutationPlan compares the exact captured bytes again before writing.
             plan.edit(path, before, content.to_owned());

@@ -12,6 +12,7 @@ pub mod manual_original;
 pub mod markdown;
 pub mod math;
 pub mod origin;
+pub mod rss_evidence;
 pub mod rss_original;
 pub mod text;
 pub mod vault_path;
