@@ -29,6 +29,7 @@ fn base_config(vault_root: &std::path::Path) -> Config {
     );
 
     Config {
+        credentials: Default::default(),
         ingest: Default::default(),
         vault: VaultConfig {
             navigation: Default::default(),
@@ -4839,4 +4840,52 @@ async fn rss_original_reaches_daily_provenance_without_losing_pre_refinement_bod
         .unwrap();
     assert_eq!(original.authority, "page_bound_collection");
     assert_eq!(original.total_events, 1);
+}
+
+#[tokio::test]
+async fn closed_parent_requires_each_captured_child_marker_even_with_filled_prose() {
+    let temp = TempDir::new().unwrap();
+    let config = base_config(temp.path());
+    let child = std::path::PathBuf::from("personal/monthly/2026-04.md");
+    std::fs::create_dir_all(temp.path().join(child.parent().unwrap())).unwrap();
+    let kind = lk_queue::TargetKind::MonthlyReviewNarrative;
+    let key = kind.llm_inputs_key();
+    let heading = lk_core::i18n::Locale::default().strings().key_summary;
+    std::fs::write(
+        temp.path().join(&child),
+        format!(
+            "---\nllm_inputs:\n  {key}: captured\n---\n## {heading}\n\nOld filled narrative.\n"
+        ),
+    )
+    .unwrap();
+    let ctx = build_ctx(&config, Arc::new(MockLlmClient::default()));
+    let synth = Synthesizer::new(temp.path(), ctx, &config, far_future());
+    let error = synth
+        .try_closed_review_from_children(2026, Some(2), &[(child, kind)])
+        .await
+        .err()
+        .expect("pending child must fail");
+    assert!(error.to_string().contains("semantic input pending"));
+}
+
+#[tokio::test]
+async fn closed_parent_accepts_empty_but_completed_child_without_dropping_it() {
+    let temp = TempDir::new().unwrap();
+    let config = base_config(temp.path());
+    let child = std::path::PathBuf::from("personal/monthly/2026-04.md");
+    std::fs::create_dir_all(temp.path().join(child.parent().unwrap())).unwrap();
+    let kind = lk_queue::TargetKind::MonthlyReviewNarrative;
+    let key = kind.llm_inputs_key();
+    let done = kind.completion_key();
+    let heading = lk_core::i18n::Locale::default().strings().key_summary;
+    std::fs::write(temp.path().join(&child), format!("---\ntitle: April\nllm_inputs:\n  {key}: captured\n  {done}: captured\n---\n## {heading}\n")).unwrap();
+    let ctx = build_ctx(&config, Arc::new(MockLlmClient::default()));
+    let synth = Synthesizer::new(temp.path(), ctx, &config, far_future());
+    assert!(
+        synth
+            .try_closed_review_from_children(2026, Some(2), &[(child, kind)])
+            .await
+            .unwrap()
+            .is_some()
+    );
 }

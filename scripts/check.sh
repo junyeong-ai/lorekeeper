@@ -36,6 +36,7 @@ gate shell
 bash -n scripts/*.sh
 shellcheck --severity=warning scripts/*.sh scripts/tests/*.sh
 bash scripts/tests/pipeline-git.sh
+bash scripts/tests/pipeline-periods.sh
 actionlint
 zizmor .github/workflows/
 

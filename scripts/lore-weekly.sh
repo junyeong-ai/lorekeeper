@@ -1,22 +1,13 @@
 #!/bin/bash
 # Weekly Lorekeeper deepening, runnable with no interactive session.
 #
-# Never ingests — that is the daily job's business. This works on already-persisted pages,
-# so it has no hard dependency on today's ingest having succeeded.
-#
-# Personal review periods and maintenance keep their configured schedules outside this job.
-# Config is the single source of truth for cadence. Their LLM tasks land in the durable queue and are drained by the next
-# daily run, so nothing is lost by leaving them independent.
+# The trigger retains an exact closed-period obligation. Daily resumes it after
+# collection and semantic processing; clock gaps do not establish readiness.
 source "$(dirname "${BASH_SOURCE[0]}")/lore-pipeline.sh"
 
 pipeline_start
 
-# Writes the cross-source theme page (and the personal weekly review when the personal
-# module is configured), enqueueing the narrative for the LLM to fill.
-run "synthesis weekly" lore_cmd synthesis weekly --previous --wait-for-vault
-
-drain_queue
-sync_graph
+run "synthesis weekly intent" lore_cmd synthesis weekly --previous --defer --wait-for-vault
 
 # The semantic review the deterministic linter cannot do: contradiction worklist,
 # two different names for one concept, relationship gaps. Read-mostly — destructive

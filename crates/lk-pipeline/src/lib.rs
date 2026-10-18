@@ -14,7 +14,7 @@ pub use concept_draft::RefusedAlias;
 pub use context::PipelineContext;
 pub use normalize::normalize_events;
 pub use render::RenderResult;
-pub use synthesis::Synthesizer;
+pub use synthesis::{Synthesizer, completed_input, iso_week_range, month_range, quarter_range};
 
 use std::collections::BTreeMap;
 use std::path::Path;

@@ -12,6 +12,10 @@ uses validated params and context; do not add per-adapter output pipelines.
 - `require_any_observation` counts reachable usable observations before window
   filtering. A genuinely empty listing succeeds; all attempted observations failing
   is `NothingObserved`. Partial success warns, not a fabricated quality percentage.
+- `Source::observe` declares actual query reach and incomplete pagination/readings.
+  A configured query is not proof of date coverage. Optional enrichment warnings
+  do not turn a complete source listing into missing observations. Adapters without
+  an observation contract remain explicitly unverified.
 - Pagination follows the provider's continuation even after an empty page. Require
   positive caps; warn when overshoot/pending continuation proves truncation, not
   merely when the result happens to equal the cap. Keep the `MAX_PAGES` guard.

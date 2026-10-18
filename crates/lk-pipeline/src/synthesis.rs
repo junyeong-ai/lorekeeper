@@ -14,6 +14,7 @@ use crate::context::PipelineContext;
 use crate::llm_cache::{self, SectionDecision};
 use crate::render::{RenderResult, Spliced, llm_inputs_map, splice_preserved_sections};
 
+#[derive(Clone)]
 pub struct Synthesizer {
     ctx: Arc<PipelineContext>,
     reader: Arc<dyn VaultStore>,
@@ -23,6 +24,36 @@ pub struct Synthesizer {
     /// that have actually happened — a forecast schedule-preview page can never inflate a
     /// performance review or a weekly digest.
     today: jiff::civil::Date,
+    evidence_scope: Option<String>,
+}
+
+/// Completion of a captured semantic input, including a legitimate empty answer.
+pub fn completed_input(page: &VaultPage, kind: TargetKind) -> Option<&str> {
+    let inputs = page.frontmatter.get(field::LLM_INPUTS)?.as_object()?;
+    let input = inputs.get(kind.llm_inputs_key())?.as_str()?;
+    if input.is_empty() || inputs.get(&kind.completion_key())?.as_str()? != input {
+        return None;
+    }
+    let section = lk_vault::resolve_section(&page.body, move |s: &'static Strings| match kind {
+        TargetKind::DailySummary | TargetKind::DocumentSummary => s.summary,
+        TargetKind::DailyConcepts | TargetKind::DocumentConcepts => s.related_concepts,
+        TargetKind::DailyRefineEvents => s.key_events,
+        TargetKind::WeeklySynthesisThemes => s.key_themes_this_week,
+        TargetKind::WeeklyReviewNarrative
+        | TargetKind::MonthlyReviewNarrative
+        | TargetKind::QuarterlyReviewNarrative => s.key_summary,
+        TargetKind::AnnualReviewNarrative => s.overall_summary,
+        TargetKind::WorkLogSynthesis => s.topic_summary,
+        TargetKind::ConceptSynthesis => s.concept_synthesis,
+    });
+    if section.is_none()
+        && !(kind == TargetKind::DailyRefineEvents
+            && lk_vault::resolve_section(&page.body, |s: &'static Strings| s.key_messages)
+                .is_some())
+    {
+        return None;
+    }
+    Some(input)
 }
 
 /// Outcome of resolving a synthesis page's LLM-owned section.
@@ -85,6 +116,19 @@ impl Synthesizer {
             reader,
             sources,
             today,
+            evidence_scope: None,
+        }
+    }
+
+    pub fn with_evidence_scope(mut self, scope: String) -> Self {
+        self.evidence_scope = Some(scope);
+        self
+    }
+
+    fn scoped_input(&self, text: String) -> String {
+        match &self.evidence_scope {
+            Some(scope) => format!("Evidence scope and limitations:\n{scope}\n\n{text}"),
+            None => text,
         }
     }
 
@@ -112,7 +156,7 @@ impl Synthesizer {
         what: &str,
     ) -> Result<SynthesisSection, PipelineError> {
         let req = lk_queue::SummarizeRequest {
-            text,
+            text: self.scoped_input(text),
             max_sentences,
             focus: None,
             locale: self.ctx.locale,
@@ -238,7 +282,7 @@ impl Synthesizer {
         let heading = |s: &'static Strings| s.key_themes_this_week;
 
         let req = lk_queue::ThemeRequest {
-            text: combined,
+            text: self.scoped_input(combined),
             max_themes: 5,
             locale: self.ctx.locale,
             target: lk_queue::TaskTarget {
@@ -564,6 +608,94 @@ impl Synthesizer {
         Ok(spliced.map(|spliced| RenderResult::spliced(path, spliced)))
     }
 
+    /// Scheduled parents consume only the explicitly verified child inputs. The
+    /// direct preview methods retain their historical missing-child fallbacks.
+    pub async fn try_closed_review_from_children(
+        &self,
+        year: i16,
+        quarter: Option<u8>,
+        children: &[(PathBuf, TargetKind)],
+    ) -> Result<Option<RenderResult>, PipelineError> {
+        if !self.is_personal_enabled() {
+            return Ok(None);
+        }
+        let mut combined = String::new();
+        let mut summaries = Vec::new();
+        for (path, child_kind) in children {
+            let page = self.reader.read_page(path).await?.ok_or_else(|| {
+                PipelineError::Render(format!("required child missing: {}", path.display()))
+            })?;
+            if completed_input(&page, *child_kind).is_none() {
+                return Err(PipelineError::Render(format!(
+                    "required child semantic input pending: {}",
+                    path.display()
+                )));
+            }
+            let narrative = child_narrative(&page);
+            let label = page
+                .frontmatter
+                .get("title")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| path.display().to_string());
+            combined.push_str(&format!("=== {label} ===\n{narrative}\n\n"));
+            summaries
+                .push(serde_json::json!({ "month": label, "label": label, "summary": narrative }));
+        }
+        if combined.is_empty() {
+            return Ok(None);
+        }
+        let strings = self.ctx.locale.strings();
+        let (start, end, path, kind, title) = if let Some(quarter) = quarter {
+            let (start, end) = quarter_range(year, quarter)?;
+            (
+                start,
+                end,
+                VaultPath::quarterly_review(&self.ctx.dirs, year, quarter),
+                TargetKind::QuarterlyReviewNarrative,
+                self.ctx.locale.quarterly_title(year, quarter),
+            )
+        } else {
+            let (start, _) = month_range(year, 1)?;
+            let (_, end) = month_range(year, 12)?;
+            (
+                start,
+                end,
+                VaultPath::annual_review(&self.ctx.dirs, year),
+                TargetKind::AnnualReviewNarrative,
+                self.ctx.locale.annual_title(year),
+            )
+        };
+        let heading = move |s: &'static Strings| {
+            if quarter.is_some() {
+                s.key_summary
+            } else {
+                s.overall_summary
+            }
+        };
+        let section = self.summarize_section(
+            format!("Summarize this closed period's verified child reviews, preserving scope and limitations:\n\n{combined}"),
+            if quarter.is_some() { 20 } else { 25 }, &path, kind, heading, "closed-period review",
+        ).await?;
+        let Some(narrative) = section.narrative else {
+            return Ok(None);
+        };
+        let context = serde_json::json!({
+            "year": year, "quarter": quarter, "title": title, "date": end.to_string(),
+            "start_date": start.to_string(), "end_date": end.to_string(),
+            "category_stats": self.aggregate_category_stats(start, end).await?,
+            "monthly_summaries": summaries, "period_summaries": summaries,
+            "narrative": narrative, "breakdown_heading": strings.quarterly_breakdown,
+        });
+        let template = if quarter.is_some() {
+            "quarterly-review.md.jinja"
+        } else {
+            "annual-review.md.jinja"
+        };
+        let spliced = self.render_section(template, kind, heading, &section.decision, context)?;
+        Ok(spliced.map(|spliced| RenderResult::spliced(path, spliced)))
+    }
+
     /// Narrative standing in for one month of a quarterly/annual rollup: the monthly
     /// review if it exists, otherwise the month's weekly reviews concatenated. Each
     /// level reads only pre-summarized child pages — never raw work-log. An ISO week
@@ -746,7 +878,7 @@ fn iso_weeks_in_range(
     Ok(weeks)
 }
 
-fn iso_week_range(
+pub fn iso_week_range(
     year: i16,
     week: u8,
 ) -> Result<(jiff::civil::Date, jiff::civil::Date), PipelineError> {
@@ -759,7 +891,7 @@ fn iso_week_range(
     Ok((monday, sunday))
 }
 
-fn month_range(
+pub fn month_range(
     year: i16,
     month: u8,
 ) -> Result<(jiff::civil::Date, jiff::civil::Date), PipelineError> {
@@ -777,7 +909,7 @@ fn month_range(
     Ok((start, end))
 }
 
-fn quarter_range(
+pub fn quarter_range(
     year: i16,
     quarter: u8,
 ) -> Result<(jiff::civil::Date, jiff::civil::Date), PipelineError> {

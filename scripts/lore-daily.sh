@@ -41,4 +41,5 @@ if lore_cmd config board-path >/dev/null 2>&1; then
     run "task propose" lore_cmd task propose
 fi
 sync_graph
+resume_periods
 pipeline_finish

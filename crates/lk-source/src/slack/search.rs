@@ -121,6 +121,15 @@ impl Source for SlackSearchSource {
         params: &serde_json::Value,
         ctx: &ExtractContext,
     ) -> Result<Vec<RawItem>, SourceError> {
+        Ok(self.observe(params, ctx).await?.items)
+    }
+
+    async fn observe(
+        &self,
+        params: &serde_json::Value,
+        ctx: &ExtractContext,
+    ) -> Result<crate::SourceObservation, SourceError> {
+        let mut partial = false;
         let p: SlackSearchParams = crate::parse_validated(params)?;
 
         let users = resolve_users(&self.http, &self.token).await;
@@ -205,6 +214,7 @@ impl Source for SlackSearchSource {
                     crate::paging::PageStep::Stop { dropped } => {
                         matches.truncate(p.max_matches_per_query);
                         if dropped {
+                            partial = true;
                             tracing::warn!(
                                 max = p.max_matches_per_query,
                                 "slack-search: match cap hit, some matches may have been dropped; raise max_matches_per_query"
@@ -213,6 +223,7 @@ impl Source for SlackSearchSource {
                         break;
                     }
                     crate::paging::PageStep::Exhausted => {
+                        partial = true;
                         tracing::warn!(
                             pages = crate::paging::MAX_PAGES,
                             "slack-search: page budget exhausted before the search completed; results may be incomplete"
@@ -235,8 +246,10 @@ impl Source for SlackSearchSource {
                 let Some(ts) =
                     m.ts.parse::<f64>()
                         .ok()
+                        .filter(|secs| secs.is_finite())
                         .and_then(|secs| jiff::Timestamp::from_second(secs as i64).ok())
                 else {
+                    partial = true;
                     tracing::warn!(
                         ts = m.ts.as_str(),
                         "slack-search: skipping message with unparseable timestamp"
@@ -296,7 +309,15 @@ impl Source for SlackSearchSource {
             }
         }
 
-        Ok(all_items)
+        Ok(crate::SourceObservation {
+            items: all_items,
+            scope: crate::ObservationScope::ConfiguredQuery,
+            outcome: if partial {
+                crate::ObservationOutcome::Partial
+            } else {
+                crate::ObservationOutcome::Observed
+            },
+        })
     }
 }
 

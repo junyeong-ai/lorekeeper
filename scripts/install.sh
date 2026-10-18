@@ -249,10 +249,15 @@ install_binary() {
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/lorekeeper"
 build_from_source() {
     local repo_dir="$1"
-    render_step "Building from source (cargo build --release --locked)"
+    render_step "Building from source (cargo install --locked)"
     command -v cargo >/dev/null 2>&1 || die "cargo not found — install Rust from https://rustup.rs"
-    ( cd "$repo_dir" && cargo build --release --locked --quiet -p lore ) || die "cargo build failed"
-    echo "${repo_dir}/target/release/${BINARY_NAME}"
+    # Cargo owns the build-cache layout (including CARGO_TARGET_DIR). Its explicit
+    # install root owns the output location, inside this installer's private staging.
+    local source_root="${TMP_DIR}/source"
+    ( cd "$repo_dir" && cargo install --path "$repo_dir/crates/lk-cli" --locked \
+        --bin "$BINARY_NAME" --root "$source_root" --force --quiet >&2 ) \
+        || die "cargo install failed"
+    echo "${source_root}/bin/${BINARY_NAME}"
 }
 
 # ═════════════════════════════ SKILL ═══════════════════════════════════════
@@ -354,26 +359,20 @@ print_pipeline_schedule() {
     fi
 }
 
-# Legacy Claude Code scheduled-task definitions, installed by versions up to 0.10. They
-# scheduled `lore ingest` through Claude Desktop, which meant a day was silently skipped
-# whenever the app was not running; the pipelines above replace them with a system
-# scheduler. Their definitions also describe a drain contract the code no longer has, so
-# leaving them in place would keep a stale agent spec on disk.
+# Legacy names locate a possible old definition, not proof that this installer owns it.
+# Preserve user-global files even during a user-level install; retiring a running job
+# requires reviewing its actual definition and registration separately.
 LEGACY_SCHEDULED_TASKS="lore-daily-ingest lore-weekly-ingest"
 
-remove_legacy_scheduled_tasks() {
-    local name dir removed=0
+warn_legacy_scheduled_tasks() {
+    local name dir
     for name in $LEGACY_SCHEDULED_TASKS; do
         dir="$HOME/.claude/scheduled-tasks/${name}"
-        if [ -d "$dir" ]; then
-            rm -rf "$dir"
-            removed=$((removed + 1))
+        if [ -e "$dir" ] || [ -L "$dir" ]; then
+            log_warn "Possible legacy Claude scheduled task: $name (left untouched)"
+            log_info "Review its definition and registry entry; disable the old job before enabling a replacement."
         fi
     done
-    if [ "$removed" -gt 0 ]; then
-        log_ok "Removed ${removed} superseded scheduled task(s); schedule the pipelines instead"
-        log_info "Also drop their entries from ~/.claude/scheduled-tasks/registry.json if present"
-    fi
 }
 
 # ═════════════════════════════ ORCHESTRATION ═══════════════════════════════
@@ -618,7 +617,7 @@ main() {
     fi
 
     deploy_artifacts "${INSTALL_DIR}/${BINARY_NAME}" "$skill_level"
-    remove_legacy_scheduled_tasks
+    warn_legacy_scheduled_tasks
 
     printf '\n'
     check_path "$INSTALL_DIR"

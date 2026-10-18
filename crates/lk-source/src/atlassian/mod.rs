@@ -39,7 +39,7 @@ use std::sync::Mutex;
 use serde::Deserialize;
 
 use crate::SourceError;
-use crate::credentials::{AtlassianAuthMethod, AtlassianCredentials, Credentials};
+use crate::credentials::{AtlassianAuthMethod, AtlassianCredentials, CredentialStore, Credentials};
 
 /// Atlassian's OAuth token endpoint (the auth server, not the API gateway).
 const DEFAULT_TOKEN_ENDPOINT: &str = "https://auth.atlassian.com/oauth/token";
@@ -176,10 +176,8 @@ struct TokenResponse {
 
 /// Authenticated access to one Atlassian instance.
 ///
-/// Construct ONE per instance per run and share it (`Arc`) across every adapter reading
-/// that instance. Sharing is a correctness requirement for OAuth, not an optimization:
-/// rotation means the first refresh invalidates the token it used, so two providers holding
-/// the same starting token would leave the second one dead.
+/// Share one owner per instance to reuse access tokens. Separate owners and processes
+/// coordinate refresh through the canonical credential-store lock and reload disk state.
 pub struct AtlassianAuth {
     http: reqwest::Client,
     /// Instance key in `credentials.atlassian`, so a rotated token is written back to the
@@ -187,7 +185,8 @@ pub struct AtlassianAuth {
     instance: String,
     site_url: String,
     method: Method,
-    vault_root: PathBuf,
+    credential_path: PathBuf,
+    token_endpoint: String,
 }
 
 /// Runtime form of [`AtlassianAuthMethod`] — the OAuth arm carries mutable rotation state,
@@ -258,7 +257,8 @@ impl AtlassianAuth {
             instance: instance.to_string(),
             site_url: creds.site_url.trim_end_matches('/').to_string(),
             method,
-            vault_root: vault_root.to_path_buf(),
+            credential_path: Credentials::path(vault_root),
+            token_endpoint: token_endpoint(),
         }
     }
 
@@ -330,6 +330,10 @@ impl AtlassianAuth {
         }
     }
 
+    pub(crate) fn set_credential_path(&mut self, path: &Path) {
+        self.credential_path = path.to_path_buf();
+    }
+
     async fn access_token(&self) -> Result<String, SourceError> {
         let Method::Oauth {
             cache,
@@ -353,19 +357,53 @@ impl AtlassianAuth {
             }
         }
 
-        let current = lock(refresh_token, "refresh token").clone();
+        let store = CredentialStore::new(&self.credential_path)?;
+        let store_guard = store.lock_async().await?;
+        // Recheck after waiting: another call on this auth owner may have refreshed.
+        {
+            let guard = lock(cache, "token cache");
+            if let Some(cached) = guard.as_ref()
+                && cached.expires_at > jiff::Timestamp::now()
+            {
+                return Ok(cached.access_token.clone());
+            }
+        }
+        let mut on_disk = store_guard.load_file()?;
+        let entry = on_disk.atlassian.get(&self.instance).ok_or_else(|| {
+            SourceError::Auth(
+                "OAuth instance is missing from the credential store; refusing refresh".into(),
+            )
+        })?;
+        let AtlassianAuthMethod::Oauth {
+            client_id: latest_id,
+            client_secret: latest_secret,
+            cloud_id: latest_cloud,
+            refresh_token: current,
+        } = &entry.auth
+        else {
+            return Err(SourceError::Auth(
+                "OAuth instance changed authentication method; restart the command".into(),
+            ));
+        };
+        let Method::Oauth { cloud_id, .. } = &self.method else {
+            unreachable!()
+        };
+        if latest_id != client_id
+            || latest_secret != client_secret
+            || latest_cloud != cloud_id
+            || entry.site_url.trim_end_matches('/') != self.site_url
+        {
+            return Err(SourceError::Auth(
+                "OAuth instance configuration changed; restart the command".into(),
+            ));
+        }
+        let current = current.clone();
 
-        // Deliberately NOT wrapped in `retry::send_with_retry`, unlike every other request
-        // in this crate. A rotating refresh token is single-use, and a lost response leaves
-        // two indistinguishable states: the rotation was never committed, or it was and the
-        // successor is gone. Failing keeps the predecessor on disk, which is the token the
-        // next run needs in the first case and the only case either choice can recover —
-        // when the rotation did commit, the grant needs re-authorizing whatever happens
-        // here. So the asymmetry is between a missed ingest and a retry that adds nothing:
-        // failing costs one run in the recoverable case and nothing in the other.
+        // No blind retry: a lost response cannot tell us whether the provider spent
+        // the rotating predecessor. A transport failure remains an explicit auth failure.
         let resp = self
             .http
-            .post(token_endpoint())
+            .post(&self.token_endpoint)
             // Client credentials in the `Authorization: Basic` header, NOT the body —
             // RFC 6749 §2.3.1 makes Basic the required method and body params only optional,
             // and Atlassian refuses body-carried credentials on some apps (see the
@@ -382,60 +420,40 @@ impl AtlassianAuth {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
             // `invalid_grant` covers a refresh token that is spent, revoked, expired or
-            // issued to another client. Name the shared grant among them: rotation makes
-            // that case self-inflicted and recurring, and it is the one an operator hunting
-            // for an expired token will not think of.
+            // issued to another client; the status alone does not identify which cause.
             let hint = if body.contains("invalid_grant") {
                 " — the stored refresh token was not accepted: spent, revoked, expired, or \
-                 issued to a different client. Atlassian rotates refresh tokens, so a grant \
-                 shared with another tool is invalidated on every run and comes back daily; \
-                 give Lorekeeper its own OAuth app, then re-run `lore init credentials`."
+                 issued to a different client. A client outside this shared credential store can also spend the grant; re-authorize with `lore init credentials` if needed."
             } else {
                 ""
             };
             return Err(SourceError::Auth(format!(
-                "Atlassian token refresh failed ({status}) for instance `{}`: {body}{hint}",
+                "Atlassian token refresh failed ({status}) for instance `{}`{hint}",
                 self.instance
             )));
         }
 
         let tr: TokenResponse = resp.json().await?;
 
-        // Persist the successor BEFORE returning: the token just spent is dead, so a crash
-        // between here and the next run would otherwise strand the grant.
+        // Persist under the same store-wide guard BEFORE exposing the access token.
+        // Another instance's rotation cannot be overwritten by an old file snapshot.
         if let Some(rotated) = tr.refresh_token {
-            *lock(refresh_token, "refresh token") = rotated.clone();
-            match Credentials::persist_atlassian_refresh_token(
-                &self.vault_root,
-                &self.instance,
-                &rotated,
-            ) {
-                Ok(true) => {}
-                // No file entry to update: an env-supplied grant, which is a documented
-                // (if lossy) configuration. Warn and continue — the operator chose it.
-                Ok(false) => tracing::warn!(
-                    instance = %self.instance,
-                    "Atlassian rotated the refresh token, but no file entry exists to record \
-                     it (credentials came from the environment). The next run will fail with \
-                     invalid_grant — move the grant into .lorekeeper/credentials.json."
-                ),
-                // A failed WRITE is different in kind, so it fails the request rather than
-                // logging on. The token just spent is already dead, so continuing would hand
-                // back a working access token while the on-disk grant is silently broken —
-                // the run exits 0 and the damage only surfaces on some later run, detached
-                // from its cause. Failing here keeps the breakage attached to the write that
-                // caused it, and the next run still has the (unrotated) on-disk token to try.
-                Err(e) => {
-                    return Err(SourceError::Auth(format!(
-                        "Atlassian rotated the refresh token for instance `{}` but it could \
-                         not be persisted: {e}. The token just used is now dead, so the \
-                         stored grant is stale — fix the write error (disk space, \
-                         permissions on .lorekeeper/credentials.json) and re-run; \
-                         re-authorize with `lore init credentials` if it stays broken.",
-                        self.instance
-                    )));
-                }
-            }
+            let entry = on_disk
+                .atlassian
+                .get_mut(&self.instance)
+                .expect("validated instance");
+            let AtlassianAuthMethod::Oauth {
+                refresh_token: stored,
+                ..
+            } = &mut entry.auth
+            else {
+                unreachable!()
+            };
+            *stored = rotated.clone();
+            store_guard.save(&on_disk).map_err(|e| SourceError::Auth(format!(
+                "Atlassian successor could not be persisted for instance `{}`: {e}; access token will not be used. Re-authorize if the stored grant is no longer accepted.", self.instance
+            )))?;
+            *lock(refresh_token, "refresh token") = rotated;
         }
 
         // Refresh a minute early; never cache a token with a non-positive lifetime.
@@ -536,6 +554,127 @@ impl AtlassianAuth {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn refresh_server(
+        count: usize,
+        fail_save: Option<PathBuf>,
+    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{BufRead, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let thread = std::thread::spawn(move || {
+            let mut bodies = Vec::new();
+            for n in 0..count {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                bodies.push(String::from_utf8(body).unwrap());
+                if let Some(path) = &fail_save {
+                    std::fs::remove_file(path).unwrap();
+                    std::fs::create_dir(path).unwrap();
+                }
+                let body = format!(
+                    r#"{{"access_token":"access-{n}","expires_in":3600,"refresh_token":"successor-{n}"}}"#
+                );
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+            }
+            bodies
+        });
+        (endpoint, thread)
+    }
+
+    fn shared_oauth(tmp: &Path) -> (CredentialStore, AtlassianCredentials) {
+        let store = CredentialStore::new(&tmp.join("credentials.json")).unwrap();
+        let entry = AtlassianCredentials {
+            site_url: "https://acme.atlassian.net".into(),
+            auth: oauth(),
+        };
+        let mut creds = Credentials::default();
+        creds.atlassian.insert("default".into(), entry.clone());
+        creds.atlassian.insert("sibling".into(), entry.clone());
+        store.lock().unwrap().save(&creds).unwrap();
+        (store, entry)
+    }
+
+    #[tokio::test]
+    async fn separate_auth_owners_reload_successors_under_shared_store_lock() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, entry) = shared_oauth(tmp.path());
+        let (endpoint, server) = refresh_server(2, None);
+        let mut first = AtlassianAuth::new(reqwest::Client::new(), "default", &entry, tmp.path());
+        let mut second = AtlassianAuth::new(reqwest::Client::new(), "default", &entry, tmp.path());
+        first.set_credential_path(store.path());
+        second.set_credential_path(store.path());
+        first.token_endpoint = endpoint.clone();
+        second.token_endpoint = endpoint;
+        let (a, b) = tokio::join!(first.access_token(), second.access_token());
+        assert!(a.is_ok() && b.is_ok());
+        let requests = server.join().unwrap();
+        assert!(requests[0].contains("refresh_token=REFRESH"));
+        assert!(requests[1].contains("refresh_token=successor-0"));
+        let creds = store.load_file().unwrap();
+        assert!(matches!(&creds.atlassian["default"].auth,
+            AtlassianAuthMethod::Oauth { refresh_token, .. } if refresh_token == "successor-1"));
+        assert!(matches!(&creds.atlassian["sibling"].auth,
+            AtlassianAuthMethod::Oauth { refresh_token, .. } if refresh_token == "REFRESH"));
+    }
+
+    #[tokio::test]
+    async fn concurrent_instance_rotations_preserve_both_successors() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, entry) = shared_oauth(tmp.path());
+        let (endpoint, server) = refresh_server(2, None);
+        let mut first = AtlassianAuth::new(reqwest::Client::new(), "default", &entry, tmp.path());
+        let mut second = AtlassianAuth::new(reqwest::Client::new(), "sibling", &entry, tmp.path());
+        first.set_credential_path(store.path());
+        second.set_credential_path(store.path());
+        first.token_endpoint = endpoint.clone();
+        second.token_endpoint = endpoint;
+        let (a, b) = tokio::join!(first.access_token(), second.access_token());
+        let (a, b) = (a.unwrap(), b.unwrap());
+        assert_ne!(a, b);
+        server.join().unwrap();
+        let creds = store.load_file().unwrap();
+        for (name, access) in [("default", a), ("sibling", b)] {
+            let expected = access.replace("access-", "successor-");
+            assert!(matches!(&creds.atlassian[name].auth,
+                AtlassianAuthMethod::Oauth { refresh_token, .. } if refresh_token == &expected));
+        }
+    }
+
+    #[tokio::test]
+    async fn persistence_failure_never_exposes_or_caches_access_token() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, entry) = shared_oauth(tmp.path());
+        let (endpoint, server) = refresh_server(1, Some(store.path().to_path_buf()));
+        let mut auth = AtlassianAuth::new(reqwest::Client::new(), "default", &entry, tmp.path());
+        auth.set_credential_path(store.path());
+        auth.token_endpoint = endpoint;
+        let error = auth.access_token().await.unwrap_err().to_string();
+        assert!(error.contains("could not be persisted"));
+        let Method::Oauth { cache, .. } = &auth.method else {
+            unreachable!()
+        };
+        assert!(lock(cache, "test").is_none());
+        assert_eq!(server.join().unwrap().len(), 1);
+    }
 
     fn auth(site: &str, method: AtlassianAuthMethod) -> AtlassianAuth {
         AtlassianAuth::new(

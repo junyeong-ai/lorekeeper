@@ -27,6 +27,21 @@ pub fn run(
             .ok_or_else(|| miette::miette!("workflow requires a command after --"))?;
         let config_path = super::find_config(opts)?;
         let config = super::load_config(&config_path)?;
+        let executable = std::env::current_exe()
+            .map_err(|e| miette::miette!("resolve workflow executable: {e}"))?;
+        let binary_dir = executable
+            .parent()
+            .ok_or_else(|| miette::miette!("workflow executable has no parent directory"))?;
+        if !same_file::is_same_file(&executable, binary_dir.join("lore")).unwrap_or(false) {
+            return Err(miette::miette!(
+                "workflow requires this executable to be available as `lore` in its directory; \
+                 install it with the canonical name so child commands use the selected version"
+            ));
+        }
+        let path = std::env::join_paths(std::iter::once(binary_dir.to_path_buf()).chain(
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+        ))
+        .map_err(|e| miette::miette!("prepare workflow PATH: {e}"))?;
         let root = config
             .vault
             .root_path()
@@ -79,7 +94,11 @@ pub fn run(
         fcntl_setfd(&lock, flags & !FdFlags::CLOEXEC)
             .map_err(|e| miette::miette!("inherit workflow descriptor: {e}"))?;
         let mut child = std::process::Command::new(program);
-        child.args(arguments).env("LORE_CONFIG", &config_path);
+        child
+            .args(arguments)
+            .env("LORE_CONFIG", &config_path)
+            .env("LORE_BIN", &executable)
+            .env("PATH", path);
         if let Some(template) = &opts.template_dir {
             let template = template
                 .canonicalize()

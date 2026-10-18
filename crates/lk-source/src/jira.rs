@@ -242,6 +242,15 @@ impl Source for JiraSource {
         params: &serde_json::Value,
         ctx: &ExtractContext,
     ) -> Result<Vec<RawItem>, SourceError> {
+        Ok(self.observe(params, ctx).await?.items)
+    }
+
+    async fn observe(
+        &self,
+        params: &serde_json::Value,
+        ctx: &ExtractContext,
+    ) -> Result<crate::SourceObservation, SourceError> {
+        let mut partial = false;
         let p: JiraParams = crate::parse_validated(params)?;
 
         let deployment = self.auth.deployment();
@@ -326,6 +335,7 @@ impl Source for JiraSource {
             let has_next = match deployment.jira_paging() {
                 JiraPaging::Token => result.next_page_token.is_some(),
                 JiraPaging::Offset => {
+                    partial |= result.total.is_none();
                     let more_expected = result.total.is_some_and(|t| (issues.len() as u64) < t);
                     // An empty page while `total` says more remain means the offset is not
                     // advancing; continuing would spin. Stopping is right, but it IS a
@@ -333,6 +343,7 @@ impl Source for JiraSource {
                     // silent. (`total` absent entirely is the same story: nothing left to
                     // page against.)
                     if more_expected && page_len == 0 {
+                        partial = true;
                         tracing::warn!(
                             collected = issues.len(),
                             total = result.total,
@@ -349,6 +360,7 @@ impl Source for JiraSource {
                 crate::paging::PageStep::Stop { dropped } => {
                     issues.truncate(cap);
                     if dropped {
+                        partial = true;
                         tracing::warn!(
                             max = p.max_issues,
                             "jira: issue cap hit, some issues may have been dropped; raise max_issues"
@@ -357,6 +369,7 @@ impl Source for JiraSource {
                     break;
                 }
                 crate::paging::PageStep::Exhausted => {
+                    partial = true;
                     tracing::warn!(
                         pages = crate::paging::MAX_PAGES,
                         "jira: page budget exhausted before the search completed; results may be incomplete"
@@ -373,18 +386,28 @@ impl Source for JiraSource {
         let items = issues
             .into_iter()
             .filter_map(|issue| {
-                map_issue(
+                let mapped = map_issue(
                     issue,
                     my_account_id,
                     &base,
                     &ctx.identity.email,
                     p.start_date_field.as_deref(),
                     ctx.locale.strings(),
-                )
+                );
+                partial |= mapped.is_none();
+                mapped
             })
             .collect();
 
-        Ok(items)
+        Ok(crate::SourceObservation {
+            items,
+            scope: crate::ObservationScope::ConfiguredQuery,
+            outcome: if partial {
+                crate::ObservationOutcome::Partial
+            } else {
+                crate::ObservationOutcome::Observed
+            },
+        })
     }
 }
 

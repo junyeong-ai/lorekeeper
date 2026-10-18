@@ -179,6 +179,7 @@ jobs:
       - run: bash -n scripts/*.sh
       - run: shellcheck --severity=warning scripts/*.sh scripts/tests/*.sh
       - run: bash scripts/tests/pipeline-git.sh
+      - run: bash scripts/tests/pipeline-periods.sh
       # `actionlint` is a Go program, so it is not on crates.io and `install-action` has no recipe
       # for it — its cargo-binstall fallback reports "actionlint is not found". Installed through
       # Go instead, which the runner image ships and whose module proxy verifies the download

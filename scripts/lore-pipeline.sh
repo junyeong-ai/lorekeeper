@@ -100,12 +100,16 @@ so plainly with the evidence; state finished work plainly without hedging.'
 # list has to cover the protocol exactly rather than approximately.
 claude_skill() {
     local prompt="$1" skill_dir="$2"
-    if [ ! -d "$skill_dir" ]; then
+    if [ ! -f "$skill_dir/SKILL.md" ]; then
         log "✗ skill not installed at $skill_dir — re-run the installer, or point"
         log "  LORE_SKILL_DIR at where you installed the skills (\`--skill project\` puts them"
         log "  under the project's .claude/skills)"
         return 1
     fi
+    local plugin_name="${skill_dir##*/}"
+    prompt="/${plugin_name}:${prompt#/}"
+    # Load the selected SKILL.md as a single-skill plugin. --add-dir grants file
+    # access; it does not register a skill passed as an arbitrary directory.
     # `LORE_CONFIG` is passed IN, not left to be rediscovered. `lore` auto-discovers
     # `./config.yaml` before the XDG one, and this session runs with the vault as its CWD — so a
     # `config.yaml` sitting at the vault root silently drained a different vault than the one
@@ -114,6 +118,7 @@ claude_skill() {
     # Collection/period selection and short deterministic writers keep their own locks.
     # workflow passes the selected canonical config/template paths to this exec chain.
     lore_cmd workflow --wait -- env -C "$VAULT" "$CLAUDE" -p "$prompt" \
+        --plugin-dir "$skill_dir" \
         --append-system-prompt "$AUTONOMOUS_PREAMBLE" \
         --permission-mode acceptEdits \
         --allowedTools "Bash(lore:*)" "Bash(ls:*)" "Bash(cat:*)" "Bash(jq:*)" \
@@ -194,4 +199,22 @@ sync_graph() {
     run "graph lint"     lore_cmd graph lint
     run "queue completion" lore_cmd queue check
     run "knowledge reviews" lore_cmd wiki reviews --check
+}
+
+# Resume exact retained periods in dependency order. A failed semantic stage keeps
+# the obligations on disk and stops this chain until the next daily run.
+resume_periods() {
+    local stage before
+    for stage in base quarter annual; do
+        before=${#failed[@]}
+        run "period resume $stage" lore_cmd synthesis pending --stage "$stage" --wait-for-vault
+        if [ ${#failed[@]} -ne "$before" ]; then return; fi
+        drain_queue
+        run "period apply $stage" lore_cmd queue apply
+        if [ ${#failed[@]} -ne "$before" ]; then return; fi
+        run "period settle $stage" lore_cmd synthesis pending --stage "$stage" --wait-for-vault
+        if [ ${#failed[@]} -ne "$before" ]; then return; fi
+    done
+    run "period queue completion" lore_cmd queue check
+    run "period navigation" lore_cmd wiki refresh
 }

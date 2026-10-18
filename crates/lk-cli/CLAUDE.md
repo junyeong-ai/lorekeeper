@@ -19,6 +19,9 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   guarantee. No PID/TTL cleanup, env-bool bypass, or reentrancy guess. Windows is
   explicitly unsupported. Ordinary short CLI writers do not reacquire the lease;
   they retain their own locks/revision guards. Workflow does not recover journals.
+- Child PATH starts with the selected executable's directory and LORE_BIN names
+  that executable. Its canonical `lore` sibling must identify the same file; a
+  renamed binary cannot silently delegate skill commands to another installation.
 - Scheduled coordination wraps only `claude_skill` in scripts/lore-pipeline.sh,
   including its capture→LLM→apply lifetime. Do not wrap every scheduled writer:
   period intent, reminders, and maintenance retain their own short-lock contracts.
@@ -28,6 +31,10 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   PATH/LORE_BIN/LORE_CONFIG/CLAUDE_BIN and explicit LORE_SKILL_DIR. Preserve cron
   versus launchd calendar/interval meaning; reject unsupported translation instead of approximating it. Reminder
   scheduling may use a separate board/pipeline directory.
+- Launchd `--namespace` constructs labels and plist names (default `com.lorekeeper`);
+  custom namespaces use separate default logs. `--log-dir` is an explicit absolute
+  path. These options only render definitions: never register jobs or create log
+  directories here. Reject unsafe namespaces before any output.
 
 ## Ingest and originals (`commands/ingest.rs`)
 

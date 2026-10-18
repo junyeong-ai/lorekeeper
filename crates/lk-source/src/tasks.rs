@@ -66,11 +66,33 @@ impl Source for TasksSource {
         params: &serde_json::Value,
         ctx: &ExtractContext,
     ) -> Result<Vec<RawItem>, SourceError> {
+        Ok(self.observe(params, ctx).await?.items)
+    }
+
+    async fn observe(
+        &self,
+        params: &serde_json::Value,
+        ctx: &ExtractContext,
+    ) -> Result<crate::SourceObservation, SourceError> {
         let params = crate::parse_validated::<TasksParams>(params)?;
         let log = lk_task::TransitionLog::new(&ctx.vault_root);
 
         let mut items = Vec::new();
-        for date in window(ctx.target_date, params.lookback_hours) {
+        let dates = window(ctx.target_date, params.lookback_hours);
+        let start = dates
+            .first()
+            .ok_or_else(|| SourceError::Parse("empty task window".into()))?
+            .to_zoned(ctx.timezone.clone())
+            .map_err(|e| SourceError::Parse(e.to_string()))?
+            .timestamp();
+        let end = ctx
+            .target_date
+            .tomorrow()
+            .map_err(|e| SourceError::Parse(e.to_string()))?
+            .to_zoned(ctx.timezone.clone())
+            .map_err(|e| SourceError::Parse(e.to_string()))?
+            .timestamp();
+        for date in dates {
             // A day with no transitions is a quiet day, not a failure: nothing was attempted,
             // so an empty answer is hiding nothing — unlike a source that reached a network and
             // came back with none of what it asked for.
@@ -79,7 +101,11 @@ impl Source for TasksSource {
                 .map_err(|e| SourceError::Parse(format!("{e}")))?;
             items.extend(transitions.iter().filter_map(|t| t.observation()));
         }
-        Ok(items)
+        Ok(crate::SourceObservation {
+            items,
+            scope: crate::ObservationScope::Window { start, end },
+            outcome: crate::ObservationOutcome::Observed,
+        })
     }
 }
 
@@ -154,14 +180,33 @@ mod tests {
     #[tokio::test]
     async fn a_day_with_no_transitions_is_a_quiet_day() {
         let tmp = tempfile::tempdir().unwrap();
-        let items = TasksSource
-            .extract(
-                &serde_json::json!({}),
-                &context(tmp.path(), jiff::civil::date(2026, 8, 19)),
-            )
+        let mut ctx = context(tmp.path(), jiff::civil::date(2026, 11, 1));
+        ctx.timezone = jiff::tz::TimeZone::get("America/New_York").unwrap();
+        let observation = TasksSource
+            .observe(&serde_json::json!({}), &ctx)
             .await
             .unwrap();
-        assert!(items.is_empty());
+        assert!(observation.items.is_empty());
+        assert_eq!(observation.outcome, crate::ObservationOutcome::Observed);
+        let expected_start = jiff::civil::date(2026, 10, 31)
+            .to_zoned(ctx.timezone.clone())
+            .unwrap()
+            .timestamp();
+        let expected_end = jiff::civil::date(2026, 11, 2)
+            .to_zoned(ctx.timezone.clone())
+            .unwrap()
+            .timestamp();
+        assert_eq!(
+            observation.scope,
+            crate::ObservationScope::Window {
+                start: expected_start,
+                end: expected_end
+            }
+        );
+        assert_eq!(
+            expected_end.as_second() - expected_start.as_second(),
+            49 * 3600
+        );
     }
 
     #[tokio::test]

@@ -449,6 +449,10 @@ The skills, pipeline scripts, templates and `config.example.yaml` are **compiled
 ## Credentials
 
 Environment variables or `<vault>/.lorekeeper/credentials.json` (0600). Env vars take precedence over the file.
+For vaults using the same accounts, optional `credentials.file` selects one shared
+store; relative paths resolve against the config file. Cooperating processes lock
+OAuth refresh and successor persistence together. Do not copy rotating refresh
+tokens into independent files; other applications should use their own OAuth app.
 
 ```bash
 lore init credentials   # interactive wizard — Google tokens minted via browser OAuth
@@ -495,6 +499,13 @@ plist, and unload disabled or removed jobs. On Linux, edit only the Lorekeeper
 entries. `self uninstall` does not unregister OS jobs. Schedule times use the host's
 local timezone, independently of vault date calculations. Wake recovery does not
 backfill every missed collection date.
+
+Period timers retain an exact closed period with `--defer`. After collection and
+semantic publication, the daily pipeline resumes base periods, quarters and years
+in order. Inspect `lore synthesis pending --status --json` for blocked dependencies
+and scope limits. An unobserved closing day needs an explicit backfill; retained
+pages do not establish complete historical collection. Use launchd `--namespace`
+and `--log-dir` to isolate test installations.
 
 Complete onboarding distinguishes config validation, source-access dry runs, first
 real ingestion and `/lore-process`, OS registration, and actual scheduled execution.

@@ -2,12 +2,26 @@ use std::sync::Arc;
 
 use super::{build_llm_client, find_config, load_config, parse_date};
 
+pub mod pending;
+
 /// Synthesis periods. This is the SINGLE clap surface for `lore synthesis <period>` —
 /// there is no parallel CLI enum to keep in sync. `--date`/`--year` and `--previous`
 /// are mutually exclusive (a period is targeted either by an explicit date or as
 /// "the just-completed one", never both).
 #[derive(clap::Subcommand)]
 pub enum Period {
+    /// Resume durable closed-period obligations, or inspect them without writes
+    Pending {
+        /// Resume only this dependency stage (default: all stages)
+        #[arg(long)]
+        stage: Option<pending::ResumeStage>,
+        /// Print the durable intent report as JSON
+        #[arg(long)]
+        json: bool,
+        /// Inspect durable intent status without resuming or writing
+        #[arg(long)]
+        status: bool,
+    },
     /// Cross-source themes + personal weekly review
     Weekly {
         /// Any date inside the target week, `YYYY-MM-DD` (default: this week)
@@ -16,6 +30,9 @@ pub enum Period {
         /// Synthesize the just-completed period (last week)
         #[arg(long)]
         previous: bool,
+        /// Record this exact closed period for dependency-aware scheduled processing
+        #[arg(long)]
+        defer: bool,
     },
     /// Personal monthly performance review
     Monthly {
@@ -25,6 +42,9 @@ pub enum Period {
         /// Synthesize the just-completed period (last month)
         #[arg(long)]
         previous: bool,
+        /// Record this exact closed period for dependency-aware scheduled processing
+        #[arg(long)]
+        defer: bool,
     },
     /// Personal quarterly performance review
     Quarterly {
@@ -34,6 +54,9 @@ pub enum Period {
         /// Synthesize the just-completed period (last quarter)
         #[arg(long)]
         previous: bool,
+        /// Record this exact closed period for dependency-aware scheduled processing
+        #[arg(long)]
+        defer: bool,
     },
     /// Personal annual performance review
     Annual {
@@ -46,6 +69,9 @@ pub enum Period {
         /// Synthesize the just-completed period (last year)
         #[arg(long)]
         previous: bool,
+        /// Record this exact closed period for dependency-aware scheduled processing
+        #[arg(long)]
+        defer: bool,
     },
 }
 
@@ -59,6 +85,13 @@ pub async fn run(
     let tz = config.vault.timezone();
     let today = jiff::Timestamp::now().to_zoned(tz).date();
 
+    if let Period::Pending {
+        status: true, json, ..
+    } = &period
+    {
+        return pending::report(&vault_root, *json);
+    }
+
     // Hold the shared vault writer lease before reading evidence or existing pages.
     // External editors do not participate; publication still validates its own inputs.
     std::fs::create_dir_all(&vault_root).map_err(|e| miette::miette!("create vault: {e}"))?;
@@ -69,6 +102,16 @@ pub async fn run(
         lk_vault::MutationSession::acquire(&vault_root)
     }
     .map_err(|e| miette::miette!("vault mutation: {e}"))?;
+    if let Period::Pending { stage, json, .. } = period {
+        return pending::resume(&config, opts, &_mutation, stage, json, today).await;
+    }
+    if let Some(periods) = deferred_periods(&period, today, &config)? {
+        pending::defer(&config, &_mutation, periods, today)?;
+        eprintln!(
+            "Closed-period intent retained; resume after collection and semantic processing."
+        );
+        return Ok(());
+    }
     let llm = build_llm_client(&config, &vault_root)?;
 
     let ctx = Arc::new(
@@ -93,7 +136,7 @@ pub async fn run(
             eprintln!("Personal reviews need a `personal:` section in config.yaml.");
             Vec::new()
         }
-        Period::Weekly { date, previous } => {
+        Period::Weekly { date, previous, .. } => {
             let target = resolve_weekly_target(date.as_deref(), previous, today)?;
             let mut outs = Vec::new();
             if let Some(out) = synth
@@ -122,7 +165,7 @@ pub async fn run(
             }
             outs
         }
-        Period::Monthly { date, previous } => {
+        Period::Monthly { date, previous, .. } => {
             let (year, month) = resolve_monthly_target(date.as_deref(), previous, today)?;
             match synth
                 .try_monthly_review(year, month)
@@ -136,7 +179,7 @@ pub async fn run(
                 }
             }
         }
-        Period::Quarterly { date, previous } => {
+        Period::Quarterly { date, previous, .. } => {
             let (year, quarter) = resolve_quarterly_target(date.as_deref(), previous, today)?;
             match synth
                 .try_quarterly_review(year, quarter)
@@ -150,7 +193,7 @@ pub async fn run(
                 }
             }
         }
-        Period::Annual { year, previous } => {
+        Period::Annual { year, previous, .. } => {
             let target_year = if previous {
                 today.year() - 1
             } else {
@@ -168,6 +211,7 @@ pub async fn run(
                 }
             }
         }
+        Period::Pending { .. } => unreachable!("pending processing returned before direct preview"),
     };
 
     for out in &outputs {
@@ -189,6 +233,72 @@ pub async fn run(
         .map_err(|e| miette::miette!("queue flush: {e}"))?;
 
     Ok(())
+}
+
+fn deferred_periods(
+    period: &Period,
+    today: jiff::civil::Date,
+    config: &lk_core::config::Config,
+) -> miette::Result<Option<Vec<pending::ClosedPeriod>>> {
+    use pending::{ClosedPeriod, Kind};
+    let result = match period {
+        Period::Weekly {
+            date,
+            previous,
+            defer: true,
+        } => {
+            let date = resolve_weekly_target(date.as_deref(), *previous, today)?;
+            let mut periods = vec![];
+            if !config.synthesis.weekly.include_sources.is_empty() {
+                periods.push(ClosedPeriod::containing(Kind::WeeklyThemes, date)?);
+            }
+            if config.personal.is_some() {
+                periods.push(ClosedPeriod::containing(Kind::WeeklyReview, date)?);
+            }
+            periods
+        }
+        Period::Monthly {
+            date,
+            previous,
+            defer: true,
+        } => {
+            let (year, month) = resolve_monthly_target(date.as_deref(), *previous, today)?;
+            vec![ClosedPeriod::containing(
+                Kind::Monthly,
+                jiff::civil::Date::new(year, month as i8, 1)
+                    .map_err(|e| miette::miette!("month: {e}"))?,
+            )?]
+        }
+        Period::Quarterly {
+            date,
+            previous,
+            defer: true,
+        } => {
+            let (year, quarter) = resolve_quarterly_target(date.as_deref(), *previous, today)?;
+            vec![ClosedPeriod::containing(
+                Kind::Quarterly,
+                jiff::civil::Date::new(year, ((quarter - 1) * 3 + 1) as i8, 1)
+                    .map_err(|e| miette::miette!("quarter: {e}"))?,
+            )?]
+        }
+        Period::Annual {
+            year,
+            previous,
+            defer: true,
+        } => {
+            let year = if *previous {
+                today.year() - 1
+            } else {
+                year.unwrap_or_else(|| today.year())
+            };
+            vec![ClosedPeriod::containing(
+                Kind::Annual,
+                jiff::civil::Date::new(year, 1, 1).map_err(|e| miette::miette!("year: {e}"))?,
+            )?]
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(result))
 }
 
 fn resolve_weekly_target(

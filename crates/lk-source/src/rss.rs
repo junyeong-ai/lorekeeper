@@ -132,6 +132,15 @@ impl Source for RssSource {
         params: &serde_json::Value,
         ctx: &ExtractContext,
     ) -> Result<Vec<RawItem>, SourceError> {
+        Ok(self.observe(params, ctx).await?.items)
+    }
+
+    async fn observe(
+        &self,
+        params: &serde_json::Value,
+        ctx: &ExtractContext,
+    ) -> Result<crate::SourceObservation, SourceError> {
+        let mut partial = false;
         let p: RssParams = crate::parse_validated(params)?;
 
         // News is past-dated, so pad only the lower bound. The pipeline still
@@ -145,6 +154,7 @@ impl Source for RssSource {
             let feed = match self.fetch_feed(&feed_cfg.url).await {
                 Ok(f) => f,
                 Err(e) => {
+                    partial = true;
                     // One unreachable/malformed feed must not abort the source.
                     tracing::warn!(
                         feed = %feed_cfg.id,
@@ -166,6 +176,7 @@ impl Source for RssSource {
             let mut kept = 0usize;
             for entry in feed.entries {
                 if kept >= p.max_items_per_feed {
+                    partial = true;
                     // Observable truncation, like every other capped adapter: a later
                     // in-window entry may have been dropped this fetch (the streaming event
                     // log still preserves it across runs, but the operator should know).
@@ -180,6 +191,7 @@ impl Source for RssSource {
                 // above without looking at one.
                 seen += 1;
                 let Some(mut item) = map_entry(&feed_cfg.id, &feed_title, entry) else {
+                    partial = true;
                     continue;
                 };
                 if item.timestamp < min || item.timestamp >= max {
@@ -188,7 +200,8 @@ impl Source for RssSource {
                     observed += 1;
                     continue;
                 }
-                // Optionally replace the feed summary with the full article.
+                // Article enrichment is separate from feed/query reach. Failure keeps
+                // the collected summary and its warning, just like optional meeting notes.
                 if feed_cfg.fetch_full_text
                     && let Some(ref article_url) = item.url
                 {
@@ -257,13 +270,20 @@ impl Source for RssSource {
             feeds_read,
             "rss: extraction complete"
         );
-        Ok(items)
+        Ok(crate::SourceObservation {
+            items,
+            // A feed is a finite current inventory, not a historical day query.
+            // min/max only filter returned entries and cannot establish date coverage.
+            scope: crate::ObservationScope::ConfiguredQuery,
+            outcome: if partial {
+                crate::ObservationOutcome::Partial
+            } else {
+                crate::ObservationOutcome::Observed
+            },
+        })
     }
 }
 
-/// Map one feed entry to a [`RawItem`], or `None` if it can't be placed/used:
-/// undated (can't assign a day — never defaults to `now`), out of the day window,
-/// or title-less.
 /// Map one feed entry to a [`RawItem`], or `None` when it cannot become an observation at
 /// all: no usable publication date, or no title. The day window is deliberately NOT decided
 /// here — an entry outside it is a perfectly good observation belonging to another day, and
@@ -409,11 +429,78 @@ mod tests {
             "feeds": [{"id": "a", "url": format!("http://{}/f.xml", server.addr)}]
         });
         let source = RssSource::new(loopback_client());
-        let items = source
-            .extract(&params, &test_ctx())
+        let observed = source
+            .observe(&params, &test_ctx())
             .await
             .expect("a quiet feed is a success");
-        assert!(items.is_empty(), "and it yields nothing for this day");
+        assert!(
+            observed.items.is_empty(),
+            "and it yields nothing for this day"
+        );
+        assert_eq!(observed.scope, crate::ObservationScope::ConfiguredQuery);
+        assert_eq!(observed.outcome, crate::ObservationOutcome::Observed);
+    }
+
+    #[tokio::test]
+    async fn feed_reach_reports_cap_invalid_entries_and_failed_feed_without_inventing_day_coverage()
+    {
+        let server = tiny_feed_server(
+            r#"<feed xmlns="http://www.w3.org/2005/Atom">
+          <entry><title>One</title><id>a</id><updated>2026-05-23T01:00:00Z</updated></entry>
+          <entry><title>Two</title><id>b</id><updated>2026-05-23T02:00:00Z</updated></entry>
+        </feed>"#,
+        )
+        .await;
+        let source = RssSource::new(loopback_client());
+        let params = serde_json::json!({"feeds": [{"id": "a", "url": format!("http://{}/f.xml", server.addr)}], "max_items_per_feed": 1});
+        let observation = source.observe(&params, &test_ctx()).await.unwrap();
+        assert_eq!(observation.items.len(), 1);
+        assert_eq!(observation.scope, crate::ObservationScope::ConfiguredQuery);
+        assert_eq!(observation.outcome, crate::ObservationOutcome::Partial);
+        let mut full = params.clone();
+        full["max_items_per_feed"] = 2.into();
+        assert_eq!(
+            source.observe(&full, &test_ctx()).await.unwrap().outcome,
+            crate::ObservationOutcome::Observed,
+            "exactly reaching a cap without remaining entries is complete"
+        );
+        full["feeds"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"id": "broken", "url": "http://127.0.0.1:1/missing"}));
+        assert_eq!(
+            source.observe(&full, &test_ctx()).await.unwrap().outcome,
+            crate::ObservationOutcome::Partial
+        );
+        let mixed = tiny_feed_server(
+            r#"<feed xmlns="http://www.w3.org/2005/Atom">
+          <entry><title>Good</title><id>a</id><updated>2026-05-23T01:00:00Z</updated></entry>
+          <entry><title>Undated</title><id>b</id></entry>
+        </feed>"#,
+        )
+        .await;
+        let params = serde_json::json!({"feeds": [{"id": "a", "url": format!("http://{}/f.xml", mixed.addr)}]});
+        assert_eq!(
+            source.observe(&params, &test_ctx()).await.unwrap().outcome,
+            crate::ObservationOutcome::Partial
+        );
+    }
+
+    #[tokio::test]
+    async fn requested_article_failure_keeps_summary_without_changing_feed_reach() {
+        let server = tiny_feed_server(
+            r#"<feed xmlns="http://www.w3.org/2005/Atom">
+          <entry><title>Article</title><id>a</id><updated>2026-05-23T01:00:00Z</updated>
+          <summary>Preserved feed summary</summary><link href="http://127.0.0.1:1/article"/></entry>
+        </feed>"#,
+        )
+        .await;
+        let source = RssSource::new(loopback_client());
+        let params = serde_json::json!({"feeds": [{"id": "a", "url": format!("http://{}/f.xml", server.addr), "fetch_full_text": true}]});
+        let observation = source.observe(&params, &test_ctx()).await.unwrap();
+        assert_eq!(observation.items[0].body, "Preserved feed summary");
+        assert_eq!(observation.outcome, crate::ObservationOutcome::Observed);
+        assert_eq!(observation.scope, crate::ObservationScope::ConfiguredQuery);
     }
 
     /// A client for the loopback fixtures below, which differs from the production one in the

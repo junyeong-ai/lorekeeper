@@ -245,6 +245,15 @@ impl Source for ConfluenceSource {
         params: &serde_json::Value,
         ctx: &ExtractContext,
     ) -> Result<Vec<RawItem>, SourceError> {
+        Ok(self.observe(params, ctx).await?.items)
+    }
+
+    async fn observe(
+        &self,
+        params: &serde_json::Value,
+        ctx: &ExtractContext,
+    ) -> Result<crate::SourceObservation, SourceError> {
+        let mut partial = false;
         let p: ConfluenceParams = crate::parse_validated(params)?;
 
         let (min, max) = ctx.day_window(p.lookback_hours, 0)?;
@@ -337,7 +346,15 @@ impl Source for ConfluenceSource {
             items.extend(
                 page.results
                     .into_iter()
-                    .filter_map(|page| map_page(page, &my_account_id, &site, p.only_my_edits))
+                    .filter_map(|page| {
+                        map_page_observed(
+                            page,
+                            &my_account_id,
+                            &site,
+                            p.only_my_edits,
+                            &mut partial,
+                        )
+                    })
                     .filter(|item| item.timestamp >= min && item.timestamp < max),
             );
 
@@ -345,6 +362,7 @@ impl Source for ConfluenceSource {
                 crate::paging::PageStep::Continue => continue,
                 crate::paging::PageStep::Stop { dropped } => {
                     if dropped {
+                        partial = true;
                         tracing::warn!(
                             cap = p.max_pages,
                             "confluence: max_pages reached; some pages may have been dropped"
@@ -361,6 +379,7 @@ impl Source for ConfluenceSource {
                 // without progress (the case `MAX_PAGES` exists for) — so the message names
                 // the ones an operator can act on and asserts none of them.
                 crate::paging::PageStep::Exhausted if items.is_empty() => {
+                    partial = true;
                     tracing::warn!(
                         pages = crate::paging::MAX_PAGES,
                         "confluence: page budget exhausted with nothing inside the target \
@@ -372,6 +391,7 @@ impl Source for ConfluenceSource {
                     break;
                 }
                 crate::paging::PageStep::Exhausted => {
+                    partial = true;
                     tracing::warn!(
                         pages = crate::paging::MAX_PAGES,
                         kept = items.len(),
@@ -384,7 +404,18 @@ impl Source for ConfluenceSource {
         }
 
         tracing::info!(count = items.len(), "confluence: pages found");
-        Ok(items)
+        Ok(crate::SourceObservation {
+            items,
+            scope: crate::ObservationScope::Window {
+                start: min,
+                end: max,
+            },
+            outcome: if partial {
+                crate::ObservationOutcome::Partial
+            } else {
+                crate::ObservationOutcome::Observed
+            },
+        })
     }
 }
 
@@ -436,8 +467,20 @@ fn format_cql_date(ts: jiff::Timestamp) -> String {
 /// Map one Confluence page to a `RawItem`, or `None` when it can't be filed onto a day
 /// (no parseable version timestamp) or when `only_my_edits` excludes it. Pure — no I/O —
 /// so ownership, identity, and storage→Markdown conversion are testable against fixtures.
+#[cfg(test)]
 fn map_page(page: Page, my_account_id: &str, site: &str, only_my_edits: bool) -> Option<RawItem> {
+    map_page_observed(page, my_account_id, site, only_my_edits, &mut false)
+}
+
+fn map_page_observed(
+    page: Page,
+    my_account_id: &str,
+    site: &str,
+    only_my_edits: bool,
+    partial: &mut bool,
+) -> Option<RawItem> {
     let Some(version) = page.version else {
+        *partial = true;
         tracing::warn!(page = %page.id, "confluence: page has no version; skipping");
         return None;
     };
@@ -457,6 +500,7 @@ fn map_page(page: Page, my_account_id: &str, site: &str, only_my_edits: bool) ->
         .as_deref()
         .and_then(|w| w.parse::<jiff::Timestamp>().ok())
     else {
+        *partial = true;
         tracing::warn!(
             page = %page.id,
             when = ?version.when,
@@ -535,6 +579,20 @@ mod tests {
             "_links": { "webui": "/spaces/OYAISTRAT/pages/12345/Design" }
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn observation_distinguishes_invalid_page_from_ownership_filter() {
+        let mut partial = false;
+        assert!(
+            map_page_observed(page_json("other", 1), "me", "https://x", true, &mut partial)
+                .is_none()
+        );
+        assert!(!partial);
+        let mut broken = page_json("me", 1);
+        broken.version.as_mut().unwrap().when = Some("invalid".into());
+        assert!(map_page_observed(broken, "me", "https://x", true, &mut partial).is_none());
+        assert!(partial);
     }
 
     #[test]

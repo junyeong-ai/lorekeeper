@@ -185,6 +185,15 @@ impl Source for GoogleCalendarSource {
         params: &serde_json::Value,
         ctx: &ExtractContext,
     ) -> Result<Vec<RawItem>, SourceError> {
+        Ok(self.observe(params, ctx).await?.items)
+    }
+
+    async fn observe(
+        &self,
+        params: &serde_json::Value,
+        ctx: &ExtractContext,
+    ) -> Result<crate::SourceObservation, SourceError> {
+        let mut partial = false;
         let p: GoogleCalendarParams = crate::parse_validated(params)?;
 
         let token = self.auth.access_token().await?;
@@ -246,6 +255,7 @@ impl Source for GoogleCalendarSource {
                 crate::paging::PageStep::Stop { dropped } => {
                     events.truncate(p.max_events);
                     if dropped {
+                        partial = true;
                         tracing::warn!(
                             max = p.max_events,
                             "calendar: event cap hit, some events may have been dropped; raise max_events"
@@ -254,6 +264,7 @@ impl Source for GoogleCalendarSource {
                     break;
                 }
                 crate::paging::PageStep::Exhausted => {
+                    partial = true;
                     tracing::warn!(
                         pages = crate::paging::MAX_PAGES,
                         "calendar: page budget exhausted before the window completed; results may be incomplete"
@@ -270,6 +281,7 @@ impl Source for GoogleCalendarSource {
         let mut items = Vec::new();
         for ev in events {
             let Some(mut mapped) = map_event(ev, me, &ctx.timezone, s) else {
+                partial = true;
                 continue;
             };
 
@@ -318,7 +330,18 @@ impl Source for GoogleCalendarSource {
             items.push(mapped.item);
         }
 
-        Ok(items)
+        Ok(crate::SourceObservation {
+            items,
+            scope: crate::ObservationScope::Window {
+                start: time_min,
+                end: time_max,
+            },
+            outcome: if partial {
+                crate::ObservationOutcome::Partial
+            } else {
+                crate::ObservationOutcome::Observed
+            },
+        })
     }
 }
 

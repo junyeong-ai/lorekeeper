@@ -4,7 +4,8 @@ use std::path::PathBuf;
 use dialoguer::{Confirm, Input, Password};
 use lk_source::build_google_refresh_token;
 use lk_source::credentials::{
-    AtlassianAuthMethod, AtlassianCredentials, Credentials, GoogleCredentials, SlackCredentials,
+    AtlassianAuthMethod, AtlassianCredentials, CredentialStore, Credentials, GoogleCredentials,
+    SlackCredentials,
 };
 
 use super::{GlobalOptions, find_config, load_config};
@@ -24,21 +25,26 @@ pub async fn credentials(
         ));
     }
 
-    let vault_root = match vault_override {
-        Some(v) => v,
-        None => load_config(&find_config(opts)?)?.vault.root_path(),
+    let store_path = match vault_override {
+        Some(v) => Credentials::path(&v),
+        None => load_config(&find_config(opts)?)?.credentials_path(),
     };
+    let store = CredentialStore::new(&store_path).map_err(|e| miette::miette!("{e}"))?;
+    eprintln!(
+        "Waiting for exclusive credential-store access; the wizard holds it until saved or cancelled."
+    );
+    let store_guard = store
+        .lock_async()
+        .await
+        .map_err(|e| miette::miette!("{e}"))?;
     // Seed defaults from the existing file, but never let a malformed file block the
     // wizard — fixing credentials is exactly its job.
-    let mut creds = Credentials::load_file(&vault_root).unwrap_or_else(|e| {
+    let mut creds = store_guard.load_file().unwrap_or_else(|e| {
         eprintln!("! existing credentials.json couldn't be parsed ({e}); starting fresh.");
         Credentials::default()
     });
 
-    eprintln!(
-        "Configuring credentials for vault: {}",
-        vault_root.display()
-    );
+    eprintln!("Configuring credential store: {}", store.path().display());
     eprintln!("Press enter to keep an existing secret. Decline a section to leave it as-is.\n");
 
     if confirm(
@@ -92,8 +98,8 @@ pub async fn credentials(
         atlassian_instance(&mut creds).await?;
     }
 
-    let path = creds
-        .save(&vault_root)
+    let path = store_guard
+        .save(&creds)
         .map_err(|e| miette::miette!("{e}"))?;
     eprintln!("\n✓ Wrote {} (owner-only, 0600)", path.display());
     eprintln!("  Run `lore validate` then `lore ingest`.");

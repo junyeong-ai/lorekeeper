@@ -112,8 +112,8 @@ pub enum AtlassianAuthMethod {
     /// is sent and lets an org-approved app through.
     ///
     /// **Give Lorekeeper its own OAuth app.** Atlassian ROTATES refresh tokens: each
-    /// refresh mints a successor and invalidates the token just used, so two clients
-    /// sharing one grant invalidate each other on every run.
+    /// refresh can replace the predecessor with a successor. Cooperating Lorekeeper
+    /// processes must share one locked store rather than copy a grant into separate files.
     Oauth {
         client_id: String,
         client_secret: String,
@@ -219,6 +219,147 @@ impl std::fmt::Debug for AtlassianCredentials {
     }
 }
 
+/// One canonical credential address. A companion lock survives atomic file replacement.
+#[derive(Debug, Clone)]
+pub struct CredentialStore {
+    path: PathBuf,
+}
+
+pub struct CredentialGuard {
+    store: CredentialStore,
+    _lock: std::fs::File,
+}
+
+impl CredentialStore {
+    pub fn new(path: &Path) -> Result<Self, SourceError> {
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir().map_err(auth_io)?.join(path)
+        };
+        // Follow an existing final symlink so atomic replacement updates its target,
+        // rather than replacing the alias and splitting the rotation chain.
+        let path = match std::fs::symlink_metadata(&absolute) {
+            Ok(_) => {
+                let canonical = absolute.canonicalize().map_err(auth_io)?;
+                if !std::fs::metadata(&canonical).map_err(auth_io)?.is_file() {
+                    return Err(SourceError::Auth(
+                        "credential store must be a regular file".into(),
+                    ));
+                }
+                canonical
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                lk_core::fs::canonical_prefix(&absolute)
+            }
+            Err(e) => return Err(auth_io(e)),
+        };
+        if path.file_name().is_none() || path.is_dir() {
+            return Err(SourceError::Auth(
+                "credential store must name a file".into(),
+            ));
+        }
+        Ok(Self { path })
+    }
+
+    pub fn for_vault(vault_root: &Path) -> Result<Self, SourceError> {
+        Self::new(&Credentials::path(vault_root))
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn load_file(&self) -> Result<Credentials, SourceError> {
+        match std::fs::read_to_string(&self.path) {
+            Ok(content) => serde_json::from_str(&content)
+                .map_err(|e| SourceError::Auth(format!("failed to parse credentials: {e}"))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Credentials::default()),
+            Err(e) => Err(auth_io(e)),
+        }
+    }
+
+    pub fn load(&self) -> Result<Credentials, SourceError> {
+        let mut creds = self.load_file()?;
+        creds.override_from_env();
+        Ok(creds)
+    }
+
+    /// OS advisory lock; no stale-PID or age-based unlocking. All store writers cooperate.
+    pub fn lock(&self) -> Result<CredentialGuard, SourceError> {
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| SourceError::Auth("invalid credential path".into()))?;
+        std::fs::create_dir_all(parent).map_err(auth_io)?;
+        let mut name = self.path.file_name().unwrap().to_os_string();
+        name.push(".lock");
+        let lock_path = parent.join(name);
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).truncate(false).read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        if let Ok(meta) = std::fs::symlink_metadata(&lock_path)
+            && !meta.file_type().is_file()
+        {
+            return Err(SourceError::Auth(
+                "credential lock must be a regular file, not a symlink".into(),
+            ));
+        }
+        let file = options.open(&lock_path).map_err(auth_io)?;
+        let named = std::fs::symlink_metadata(&lock_path).map_err(auth_io)?;
+        let opened = file.metadata().map_err(auth_io)?;
+        if !named.file_type().is_file() || !opened.is_file() {
+            return Err(SourceError::Auth(
+                "credential lock must be a regular file".into(),
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if named.dev() != opened.dev() || named.ino() != opened.ino() {
+                return Err(SourceError::Auth(
+                    "credential lock changed while opening".into(),
+                ));
+            }
+        }
+        file.lock().map_err(auth_io)?;
+        Ok(CredentialGuard {
+            store: self.clone(),
+            _lock: file,
+        })
+    }
+
+    pub async fn lock_async(&self) -> Result<CredentialGuard, SourceError> {
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || store.lock())
+            .await
+            .map_err(|e| SourceError::Auth(format!("credential lock task failed: {e}")))?
+    }
+}
+
+impl CredentialGuard {
+    pub fn load_file(&self) -> Result<Credentials, SourceError> {
+        self.store.load_file()
+    }
+
+    /// Caller holds the store lock across read/modify/write. Do not persist env overlays.
+    pub fn save(&self, creds: &Credentials) -> Result<PathBuf, SourceError> {
+        let json = serde_json::to_string_pretty(creds)
+            .map_err(|e| SourceError::Auth(format!("serialize credentials: {e}")))?;
+        lk_core::fs::write_atomic(&self.store.path, json.as_bytes(), Some(0o600))
+            .map_err(auth_io)?;
+        Ok(self.store.path.clone())
+    }
+}
+
+fn auth_io(error: std::io::Error) -> SourceError {
+    SourceError::Auth(format!("credential store I/O failed: {error}"))
+}
+
 impl Credentials {
     /// Canonical on-disk location: `<vault>/.lorekeeper/credentials.json`.
     pub fn path(vault_root: &Path) -> PathBuf {
@@ -228,43 +369,18 @@ impl Credentials {
     /// Read the credentials file only (no env overlay). Missing file → all-None default.
     /// Used by the `lore init credentials` wizard to seed defaults from existing values.
     pub fn load_file(vault_root: &Path) -> Result<Self, SourceError> {
-        let path = Self::path(vault_root);
-        if path.exists() {
-            let content = std::fs::read_to_string(&path)
-                .map_err(|e| SourceError::Auth(format!("failed to read credentials: {e}")))?;
-            serde_json::from_str(&content)
-                .map_err(|e| SourceError::Auth(format!("failed to parse credentials: {e}")))
-        } else {
-            Ok(Self::default())
-        }
+        CredentialStore::for_vault(vault_root)?.load_file()
     }
 
-    /// File values with environment variables overlaid (env wins per service). This is
-    /// what the pipeline uses at runtime.
+    /// File values with stable environment credentials overlaid.
     pub fn load(vault_root: &Path) -> Result<Self, SourceError> {
-        let mut creds = Self::load_file(vault_root)?;
-        creds.override_from_env();
-        Ok(creds)
+        CredentialStore::for_vault(vault_root)?.load()
     }
 
-    /// Persist to `<vault>/.lorekeeper/credentials.json` atomically (temp + rename) with
-    /// owner-only permissions (`0600` on Unix). Returns the written path. Providers left
-    /// `None` are omitted from the file.
+    /// Serialized replacement of a complete snapshot. Read-modify-write callers must
+    /// hold CredentialGuard from their initial read, rather than save a stale snapshot.
     pub fn save(&self, vault_root: &Path) -> Result<PathBuf, SourceError> {
-        let path = Self::path(vault_root);
-        let dir = path
-            .parent()
-            .ok_or_else(|| SourceError::Auth("invalid credentials path".into()))?;
-        std::fs::create_dir_all(dir)
-            .map_err(|e| SourceError::Auth(format!("create .lorekeeper dir: {e}")))?;
-
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| SourceError::Auth(format!("serialize credentials: {e}")))?;
-
-        // Atomic + `0600` so the secret is owner-only and never half-written.
-        lk_core::fs::write_atomic(&path, json.as_bytes(), Some(0o600))
-            .map_err(|e| SourceError::Auth(format!("write credentials: {e}")))?;
-        Ok(path)
+        CredentialStore::for_vault(vault_root)?.lock()?.save(self)
     }
 
     /// Resolve the Atlassian instance a source asked for.
@@ -316,28 +432,15 @@ impl Credentials {
             .join(", ")
     }
 
-    /// Write a rotated Atlassian refresh token back for ONE instance, leaving every other
-    /// instance and provider untouched (read-modify-write against the file, not against the
-    /// env-overlaid values).
-    ///
-    /// Atlassian invalidates a refresh token the instant it is used, so persisting the
-    /// successor is part of completing a refresh — drop it and the next run is locked out.
-    /// Returns `false` when there is no file entry to update (credentials came from the
-    /// environment), which the caller surfaces as a warning: an env-supplied refresh token
-    /// cannot survive rotation, since only the environment's owner can update it.
-    ///
-    /// The read-modify-write is unlocked, so two `lore` processes refreshing DIFFERENT
-    /// instances at once can have one overwrite the other's rotation. That is left alone
-    /// deliberately: the losing instance's next refresh fails with `invalid_grant`, which is
-    /// already the loud, self-healing path (re-authorize once), whereas a lock file adds a
-    /// stale-lock failure mode to every unattended run to prevent a race that needs two
-    /// concurrent ingests — something the single-cron scheduling model does not produce.
+    /// Compatibility helper for a default per-vault store. Runtime refresh holds
+    /// the same store guard across loading the predecessor, POST, and successor write.
     pub fn persist_atlassian_refresh_token(
         vault_root: &Path,
         instance: &str,
         refresh_token: &str,
     ) -> Result<bool, SourceError> {
-        let mut on_disk = Self::load_file(vault_root)?;
+        let guard = CredentialStore::for_vault(vault_root)?.lock()?;
+        let mut on_disk = guard.load_file()?;
         let Some(entry) = on_disk.atlassian.get_mut(instance) else {
             return Ok(false);
         };
@@ -348,11 +451,8 @@ impl Credentials {
         else {
             return Ok(false);
         };
-        if stored == refresh_token {
-            return Ok(true);
-        }
         *stored = refresh_token.to_string();
-        on_disk.save(vault_root)?;
+        guard.save(&on_disk)?;
         Ok(true)
     }
 
@@ -442,6 +542,66 @@ mod tests {
     }
 
     #[test]
+    fn shared_store_creates_missing_parents_and_rejects_invalid_utf8() {
+        let tmp = TempDir::new().unwrap();
+        let store = CredentialStore::new(&tmp.path().join("new/한글/credentials.json")).unwrap();
+        let guard = store.lock().unwrap();
+        guard.save(&Credentials::default()).unwrap();
+        drop(guard);
+        assert!(store.load_file().is_ok());
+        std::fs::write(store.path(), [0xff, 0xfe]).unwrap();
+        assert!(store.load_file().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn aliases_share_target_and_lock_across_atomic_replacement() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("shared.json");
+        let store = CredentialStore::new(&target).unwrap();
+        store.lock().unwrap().save(&Credentials::default()).unwrap();
+        let alias = tmp.path().join("alias.json");
+        std::os::unix::fs::symlink(&target, &alias).unwrap();
+        let alias_store = CredentialStore::new(&alias).unwrap();
+        assert_eq!(alias_store.path(), store.path());
+        let guard = store.lock().unwrap();
+        guard.save(&Credentials::default()).unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmp.path().join("shared.json.lock"))
+            .unwrap();
+        assert!(
+            lock.try_lock().is_err(),
+            "replacement must not release companion lock"
+        );
+        drop(guard);
+        lock.try_lock().unwrap();
+        assert!(
+            std::fs::symlink_metadata(alias)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lock_rejects_symlinks_and_nonregular_entries() {
+        let tmp = TempDir::new().unwrap();
+        let store = CredentialStore::new(&tmp.path().join("shared.json")).unwrap();
+        let lock_path = tmp.path().join("shared.json.lock");
+        let other = tmp.path().join("other");
+        std::fs::write(&other, b"untouched").unwrap();
+        std::os::unix::fs::symlink(&other, &lock_path).unwrap();
+        assert!(store.lock().is_err());
+        assert_eq!(std::fs::read(&other).unwrap(), b"untouched");
+        std::fs::remove_file(&lock_path).unwrap();
+        std::fs::create_dir(lock_path).unwrap();
+        assert!(store.lock().is_err());
+    }
+
+    #[test]
     fn a_lone_instance_needs_no_name_whatever_its_key() {
         let mut creds = Credentials::default();
         creds
@@ -518,8 +678,8 @@ mod tests {
 
     #[test]
     fn persisting_reports_false_when_there_is_no_file_entry_to_update() {
-        // An env-supplied grant has nowhere to record rotation; the caller warns instead of
-        // silently losing the successor.
+        // Compatibility helper reports an absent file entry; runtime refresh refuses
+        // a missing OAuth entry before sending a token request.
         let dir = TempDir::new().unwrap();
         Credentials::default().save(dir.path()).unwrap();
         assert!(
@@ -583,7 +743,7 @@ mod tests {
             ..Default::default()
         };
         let path = creds.save(dir.path()).unwrap();
-        assert_eq!(path, Credentials::path(dir.path()));
+        assert_eq!(path, Credentials::path(dir.path()).canonicalize().unwrap());
 
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(raw.contains("user_token"), "configured token present");

@@ -185,6 +185,52 @@ fn child_gets_selected_canonical_config_and_template_without_cli_flags() {
 }
 
 #[test]
+fn child_uses_selected_executable_ahead_of_another_installation() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (dir, config) = fixture();
+    let other = dir.path().join("other-bin");
+    std::fs::create_dir(&other).unwrap();
+    std::fs::write(other.join("lore"), "#!/bin/sh\nprintf wrong-installation\n").unwrap();
+    std::fs::set_permissions(other.join("lore"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let output = workflow(&config)
+        .env("PATH", &other)
+        .args([
+            "/bin/sh",
+            "-c",
+            "command -v lore; printf '%s\\n' \"$LORE_BIN\"; lore --version",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output);
+    let executable = Path::new(env!("CARGO_BIN_EXE_lore"))
+        .canonicalize()
+        .unwrap();
+    let text = String::from_utf8(output.stdout).unwrap();
+    let lines: Vec<_> = text.lines().collect();
+    assert!(same_file::is_same_file(Path::new(lines[0]), &executable).unwrap());
+    assert!(same_file::is_same_file(Path::new(lines[1]), &executable).unwrap());
+    assert_eq!(lines[2], format!("lore {}", env!("CARGO_PKG_VERSION")));
+}
+
+#[test]
+fn renamed_executable_cannot_silently_delegate_to_another_lore() {
+    let (dir, config) = fixture();
+    let renamed = dir.path().join("selected-custom-name");
+    std::fs::copy(env!("CARGO_BIN_EXE_lore"), &renamed).unwrap();
+    let output = Command::new(&renamed)
+        .arg("--config")
+        .arg(&config)
+        .args(["workflow", "--", "/bin/sh", "-c", "printf must-not-start"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("canonical name"));
+    assert!(!dir.path().join("vault/.lorekeeper/workflow.lock").exists());
+}
+
+#[test]
 fn explicit_wait_runs_after_the_foreground_holder_releases() {
     let (_dir, config) = fixture();
     let (mut holder, _) = held(&config, "printf 'ready\\n'; read -r release");

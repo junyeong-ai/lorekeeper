@@ -33,6 +33,12 @@ identity:
   # (Jira needs nothing here: ownership is derived from the authenticated account.)
   slack_id: "U0123456789"
 
+# Optional shared store for multiple vaults using the same accounts. Relative paths
+# resolve against this config file. Omitted: <vault>/.lorekeeper/credentials.json.
+# Share the file rather than copying rotating OAuth refresh tokens.
+# credentials:
+#   file: ~/.config/lorekeeper/credentials.json
+
 # ─── Ingestion schedule ───────────────────────────────────
 # A single daily run over ALL enabled sources. `lore schedule` emits ONE `lore ingest`
 # crontab line from this. Ingestion is not scheduled per source: the work-log aggregates

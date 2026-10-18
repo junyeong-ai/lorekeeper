@@ -1,6 +1,6 @@
 ---
 name: lore-ingest
-version: 0.59.0
+version: 0.60.0
 description: Runs Lorekeeper collection and operations commands for configured sources, manual inboxes, period synthesis, schedules and maintenance. Collection writes structured pages and queues semantic work; lore-process completes that work.
 argument-hint: "<subcommand> [args]"
 disable-model-invocation: true

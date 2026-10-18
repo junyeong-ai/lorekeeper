@@ -67,6 +67,8 @@ const SWEEP: &[&[&str]] = &[
     &["queue", "check"],
     &["queue", "count"],
     &["queue", "prune"],
+    // Pending status is a read-only empty-state contract, not a calendar-dependent resume.
+    &["synthesis", "pending", "--status", "--json"],
     &["task", "list"],
     &["task", "remind", "list"],
     // Read against a fixed day, because the day is half of what an agenda answers: the fixture's

@@ -112,6 +112,12 @@ impl ResponseMetadata {
 /// the rule all listing adapters share (a page may arrive empty mid-listing, so
 /// only the cursor's absence ends it) — single-sourced so the collect-all call
 /// sites can never disagree on it.
+pub(crate) struct Paginated<T> {
+    pub items: Vec<T>,
+    pub complete: bool,
+}
+
+#[allow(dead_code)]
 pub(crate) async fn paginate<Page, Item, F>(
     http: &reqwest::Client,
     token: &str,
@@ -119,12 +125,39 @@ pub(crate) async fn paginate<Page, Item, F>(
     base_params: &[(&str, &str)],
     max_total: usize,
     cap_param: &str,
-    mut decode: F,
+    decode: F,
 ) -> Result<Vec<Item>, SourceError>
 where
     Page: serde::de::DeserializeOwned,
     F: FnMut(Page) -> (Vec<Item>, String),
 {
+    Ok(paginate_observed(
+        http,
+        token,
+        method,
+        base_params,
+        max_total,
+        cap_param,
+        decode,
+    )
+    .await?
+    .items)
+}
+
+pub(crate) async fn paginate_observed<Page, Item, F>(
+    http: &reqwest::Client,
+    token: &str,
+    method: &str,
+    base_params: &[(&str, &str)],
+    max_total: usize,
+    cap_param: &str,
+    mut decode: F,
+) -> Result<Paginated<Item>, SourceError>
+where
+    Page: serde::de::DeserializeOwned,
+    F: FnMut(Page) -> (Vec<Item>, String),
+{
+    let mut complete = true;
     let mut out: Vec<Item> = Vec::new();
     let mut cursor = String::new();
     let mut pages_fetched = 0usize;
@@ -144,6 +177,7 @@ where
             crate::paging::PageStep::Stop { dropped } => {
                 out.truncate(max_total);
                 if dropped {
+                    complete = false;
                     // Make the cap truncation observable so a very busy
                     // channel/thread/workspace is visible rather than quietly
                     // losing items.
@@ -156,6 +190,7 @@ where
                 break;
             }
             crate::paging::PageStep::Exhausted => {
+                complete = false;
                 tracing::warn!(
                     method,
                     pages = crate::paging::MAX_PAGES,
@@ -165,7 +200,10 @@ where
             }
         }
     }
-    Ok(out)
+    Ok(Paginated {
+        items: out,
+        complete,
+    })
 }
 
 /// Split a converted Slack body into `(title, body)`.

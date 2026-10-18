@@ -74,7 +74,10 @@ pub async fn run(
         )
     };
 
-    let creds = lk_source::credentials::Credentials::load(&vault_root)
+    let credential_store = lk_source::credentials::CredentialStore::new(&config.credentials_path())
+        .map_err(|e| miette::miette!("{e}"))?;
+    let creds = credential_store
+        .load()
         .map_err(|e| miette::miette!("{e}"))?;
 
     // Dry-run must NOT mutate filesystem. In queue mode the LLM client buffers tasks
@@ -186,9 +189,10 @@ pub async fn run(
     }
 
     let http = lk_source::build_http_client().map_err(|e| miette::miette!("{e}"))?;
-    // One auth provider per Atlassian instance for the whole run. OAuth refresh tokens
-    // rotate, so two providers over one instance would invalidate each other mid-run.
-    let atlassian = lk_source::build_atlassian_registry(&creds, &http, &vault_root);
+    // Share each instance's in-memory access-token cache. Store-wide locking also
+    // serializes refresh and successor persistence across cooperating processes.
+    let atlassian =
+        lk_source::build_atlassian_registry_with_store(&creds, &http, &credential_store);
     let extract_ctx = lk_source::ExtractContext {
         target_date: extract_target,
         timezone: tz,
@@ -212,9 +216,14 @@ pub async fn run(
     // Set on any source/extract/pipeline/write failure so the process exits non-zero —
     // a cron or CI run must be able to detect a partial failure, not see exit 0.
     let mut had_failure = false;
+    let mut observations = std::collections::BTreeMap::new();
 
     for (id, sc) in &sources {
         let started_at = std::time::Instant::now();
+        observations.insert(
+            id.clone(),
+            super::synthesis::pending::ObservedSource::failed(id),
+        );
         eprintln!("▸ {id} ({})", sc.source_type);
 
         let adapter = match lk_source::build_source(
@@ -254,15 +263,23 @@ pub async fn run(
                     ));
                 }
                 let retirement_blocked = !capture.failures.is_empty();
-                Ok((capture.items, capture.originals, retirement_blocked))
+                Ok((
+                    lk_source::SourceObservation {
+                        items: capture.items,
+                        scope: lk_source::ObservationScope::Unverified,
+                        outcome: lk_source::ObservationOutcome::Unverified,
+                    },
+                    capture.originals,
+                    retirement_blocked,
+                ))
             })
         } else {
             adapter
-                .extract(&sc.params, &extract_ctx)
+                .observe(&sc.params, &extract_ctx)
                 .await
-                .map(|items| (items, Vec::new(), false))
+                .map(|observation| (observation, Vec::new(), false))
         };
-        let (raw, manual_originals, manual_retirement_blocked) = match extracted {
+        let (observation, manual_originals, manual_retirement_blocked) = match extracted {
             Ok(capture) => capture,
             Err(e) => {
                 eprintln!("  ✗ extract: {e}");
@@ -273,6 +290,15 @@ pub async fn run(
                 continue;
             }
         };
+        let observed =
+            super::synthesis::pending::ObservedSource::from_observation(id, &observation);
+        if observation.outcome == lk_source::ObservationOutcome::Partial {
+            eprintln!(
+                "  ! partial observation: source reach is incomplete; see provider diagnostics"
+            );
+            had_failure = true;
+        }
+        let raw = observation.items;
         eprintln!("  extracted: {} items", raw.len());
 
         // Open a per-source queue transaction: if plan fails partway it may have already
@@ -304,6 +330,8 @@ pub async fn run(
                 continue;
             }
         };
+
+        observations.insert(id.clone(), observed);
 
         // Keep ALL captures for dependency/retirement guards, including entries the
         // pipeline excluded. Publication below selects only actually rendered events.
@@ -637,6 +665,15 @@ pub async fn run(
         llm.flush()
             .await
             .map_err(|e| miette::miette!("queue flush: {e}"))?;
+        super::synthesis::pending::record_collection(
+            &config,
+            _mutation
+                .as_ref()
+                .expect("writing ingest holds mutation session"),
+            extract_target,
+            source.is_none(),
+            observations.into_values().collect(),
+        )?;
     }
 
     // Phase 5: Record the per-source ingest-log entry. The run is idempotent — daily

@@ -29,6 +29,9 @@ pub struct ClassifyRule {
 pub struct Config {
     pub vault: VaultConfig,
     pub identity: Identity,
+    /// Optional shared credential file; relative to this configuration file.
+    #[serde(default)]
+    pub credentials: CredentialConfig,
     pub sources: BTreeMap<String, SourceConfig>,
     /// When ingestion runs. A single daily `lore ingest` (all sources) is the scheduling
     /// unit: the work-log aggregates personal events across every source for a day, so all
@@ -66,8 +69,18 @@ impl Config {
         config.graph.apply_vault_defaults(&config.vault.dirs);
         if let Some(parent) = path.parent() {
             config.vault.resolve_relative_to(parent);
+            if let Some(file) = config.credentials.file.as_mut() {
+                *file = resolve_vault_root(&file.to_string_lossy(), parent);
+            }
         }
         Ok(config)
+    }
+
+    pub fn credentials_path(&self) -> PathBuf {
+        self.credentials
+            .file
+            .clone()
+            .unwrap_or_else(|| self.vault.root_path().join(".lorekeeper/credentials.json"))
     }
 
     pub fn enabled_sources(&self) -> impl Iterator<Item = (&str, &SourceConfig)> {
@@ -84,6 +97,16 @@ impl Config {
             ));
         }
 
+        if self
+            .credentials
+            .file
+            .as_ref()
+            .is_some_and(|p| p.as_os_str().is_empty() || p.to_string_lossy().trim().is_empty())
+        {
+            return Err(ConfigError::Validation(
+                "credentials.file must not be blank".into(),
+            ));
+        }
         if self.sources.is_empty() {
             return Err(ConfigError::Validation("no sources defined".into()));
         }
@@ -725,6 +748,12 @@ fn normalize_vault_relative(label: &str, value: &str) -> Result<String, ConfigEr
         )));
     }
     Ok(segments.join("/"))
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CredentialConfig {
+    pub file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1451,6 +1480,30 @@ fn fold_current_dir(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod observation_unit_tests {
     use super::*;
+
+    #[test]
+    fn shared_credentials_resolve_relative_to_config_and_reject_blank() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("config.yaml");
+        let base = "vault:\n  root: vault\nidentity:\n  name: Test\n  email: test@example.invalid\nsources:\n  notes:\n    type: manual\n";
+        std::fs::write(
+            &path,
+            format!("{base}credentials:\n  file: shared/credentials.json\n"),
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        assert_eq!(
+            config.credentials_path(),
+            tmp.path().join("shared/credentials.json")
+        );
+        std::fs::write(&path, base).unwrap();
+        assert_eq!(
+            Config::load(&path).unwrap().credentials_path(),
+            tmp.path().join("vault/.lorekeeper/credentials.json")
+        );
+        std::fs::write(&path, format!("{base}credentials:\n  file: '  '\n")).unwrap();
+        assert!(Config::load(&path).is_err());
+    }
 
     /// A source whose observation is a whole document writes document pages, and the answer
     /// lives in the descriptor rather than in a condition that names one source: `nodex` was

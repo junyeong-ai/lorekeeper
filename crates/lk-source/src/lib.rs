@@ -74,8 +74,8 @@ pub enum SourceError {
 /// is alive — so a source whose every URL has moved would report fresh indefinitely, with
 /// nothing else in the system able to notice.
 ///
-/// One item reaching means the source WAS observed, however partially, and stays a success;
-/// the failures are already `tracing::warn`-ed individually. `attempted == 0` is a genuinely
+/// Reaching one item permits a partial result; `Source::observe` reports its reach
+/// separately. `attempted == 0` is a genuinely
 /// empty listing, not a failure.
 ///
 /// It takes what was OBSERVED, never what failed. A caller computing the failures itself
@@ -197,6 +197,34 @@ pub enum Selection {
     DocumentSnapshot,
 }
 
+/// Temporal reach declared by the adapter that performed the query.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ObservationScope {
+    /// The actual half-open query window in provider-independent timestamps.
+    Window {
+        start: jiff::Timestamp,
+        end: jiff::Timestamp,
+    },
+    /// The configured query owns its temporal conditions; no date coverage is inferred.
+    ConfiguredQuery,
+    Unverified,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservationOutcome {
+    Observed,
+    Partial,
+    Unverified,
+}
+
+pub struct SourceObservation {
+    pub items: Vec<RawItem>,
+    pub scope: ObservationScope,
+    pub outcome: ObservationOutcome,
+}
+
 #[async_trait]
 pub trait Source: Send + Sync {
     fn selection(&self, _params: &serde_json::Value) -> Result<Selection, SourceError> {
@@ -208,6 +236,20 @@ pub trait Source: Send + Sync {
         params: &serde_json::Value,
         ctx: &ExtractContext,
     ) -> Result<Vec<RawItem>, SourceError>;
+
+    /// An adapter opts into explicit reach reporting; legacy extraction alone does
+    /// not certify a time window or complete pagination.
+    async fn observe(
+        &self,
+        params: &serde_json::Value,
+        ctx: &ExtractContext,
+    ) -> Result<SourceObservation, SourceError> {
+        Ok(SourceObservation {
+            items: self.extract(params, ctx).await?,
+            scope: ObservationScope::Unverified,
+            outcome: ObservationOutcome::Unverified,
+        })
+    }
 }
 
 /// Deserialize a source's untyped `params` into its typed schema. Every params
@@ -308,12 +350,8 @@ pub fn build_http_client() -> Result<reqwest::Client, SourceError> {
 
 /// One shared auth provider per Atlassian instance, built once for a whole run.
 ///
-/// Sharing is a correctness requirement, not an optimization. Atlassian rotates OAuth
-/// refresh tokens: the first refresh invalidates the token it used. Two providers over one
-/// instance would each hold the same starting token, so once one refreshed, the other's copy
-/// would be dead and its next refresh would fail with `invalid_grant` — the Jira source
-/// would silently break the Confluence source in the same run. One provider per instance
-/// means one rotation chain per instance.
+/// Sharing reuses each instance's access-token cache. The credential store serializes
+/// refresh and successor persistence across cooperating providers and processes.
 pub type AtlassianRegistry = std::collections::BTreeMap<String, Arc<atlassian::AtlassianAuth>>;
 
 pub fn build_atlassian_registry(
@@ -321,19 +359,32 @@ pub fn build_atlassian_registry(
     http: &reqwest::Client,
     vault_root: &std::path::Path,
 ) -> AtlassianRegistry {
+    build_atlassian_registry_at_path(creds, http, &credentials::Credentials::path(vault_root))
+}
+
+pub fn build_atlassian_registry_with_store(
+    creds: &Credentials,
+    http: &reqwest::Client,
+    store: &credentials::CredentialStore,
+) -> AtlassianRegistry {
+    build_atlassian_registry_at_path(creds, http, store.path())
+}
+
+fn build_atlassian_registry_at_path(
+    creds: &Credentials,
+    http: &reqwest::Client,
+    path: &std::path::Path,
+) -> AtlassianRegistry {
+    // Existing constructors retain their per-vault behavior; configured callers supply
+    // one canonical store for both initial credentials and later rotation.
     creds
         .atlassian
         .iter()
         .map(|(name, ac)| {
-            (
-                name.clone(),
-                Arc::new(atlassian::AtlassianAuth::new(
-                    http.clone(),
-                    name,
-                    ac,
-                    vault_root,
-                )),
-            )
+            let mut auth =
+                atlassian::AtlassianAuth::new(http.clone(), name, ac, std::path::Path::new(""));
+            auth.set_credential_path(path);
+            (name.clone(), Arc::new(auth))
         })
         .collect()
 }

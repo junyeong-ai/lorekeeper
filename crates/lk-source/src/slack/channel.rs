@@ -5,7 +5,9 @@ use serde::Deserialize;
 
 use lk_core::event::RawItem;
 
-use super::{ResponseMetadata, paginate, resolve_channel_id, resolve_users, split_first_line};
+use super::{
+    ResponseMetadata, paginate_observed, resolve_channel_id, resolve_users, split_first_line,
+};
 use crate::markdown::slack_to_markdown;
 use crate::{ExtractContext, Source, SourceError};
 
@@ -169,8 +171,8 @@ impl SlackChannelSource {
         channel_id: &str,
         root_ts: &str,
         max_messages: usize,
-    ) -> Result<Vec<SlackMessage>, SourceError> {
-        paginate::<HistoryData, SlackMessage, _>(
+    ) -> Result<super::Paginated<SlackMessage>, SourceError> {
+        paginate_observed::<HistoryData, SlackMessage, _>(
             &self.http,
             &self.token,
             "conversations.replies",
@@ -195,6 +197,15 @@ impl Source for SlackChannelSource {
         params: &serde_json::Value,
         ctx: &ExtractContext,
     ) -> Result<Vec<RawItem>, SourceError> {
+        Ok(self.observe(params, ctx).await?.items)
+    }
+
+    async fn observe(
+        &self,
+        params: &serde_json::Value,
+        ctx: &ExtractContext,
+    ) -> Result<crate::SourceObservation, SourceError> {
+        let mut partial = false;
         let p: SlackChannelParams = crate::parse_validated(params)?;
 
         let users = resolve_users(&self.http, &self.token).await;
@@ -209,7 +220,7 @@ impl Source for SlackChannelSource {
             let channel_name = ch_ref.strip_prefix('#').unwrap_or(ch_ref);
 
             // Paginate through conversations.history, capped per the source config.
-            let messages = paginate::<HistoryData, SlackMessage, _>(
+            let messages = paginate_observed::<HistoryData, SlackMessage, _>(
                 &self.http,
                 &self.token,
                 "conversations.history",
@@ -233,7 +244,8 @@ impl Source for SlackChannelSource {
             )
             .await?;
 
-            for root in messages {
+            partial |= !messages.complete;
+            for root in messages.items {
                 let text = root.text.clone().unwrap_or_default();
                 if text.is_empty() || (p.exclude_bots && root.is_bot()) {
                     continue;
@@ -247,8 +259,12 @@ impl Source for SlackChannelSource {
                         .fetch_thread(&channel_id, &root.ts, p.max_thread_messages)
                         .await
                     {
-                        Ok(t) => t,
+                        Ok(t) => {
+                            partial |= !t.complete;
+                            t.items
+                        }
                         Err(e) => {
+                            partial = true;
                             tracing::warn!(
                                 channel = channel_name,
                                 ts = root.ts.as_str(),
@@ -286,8 +302,10 @@ impl Source for SlackChannelSource {
                     .ts
                     .parse::<f64>()
                     .ok()
+                    .filter(|secs| secs.is_finite())
                     .and_then(|secs| jiff::Timestamp::from_second(secs as i64).ok())
                 else {
+                    partial = true;
                     tracing::warn!(
                         channel = channel_name,
                         ts = root.ts.as_str(),
@@ -342,7 +360,18 @@ impl Source for SlackChannelSource {
             );
         }
 
-        Ok(items)
+        Ok(crate::SourceObservation {
+            items,
+            scope: crate::ObservationScope::Window {
+                start: oldest,
+                end: latest,
+            },
+            outcome: if partial {
+                crate::ObservationOutcome::Partial
+            } else {
+                crate::ObservationOutcome::Observed
+            },
+        })
     }
 }
 

@@ -436,6 +436,9 @@ lore self uninstall   # 설치한 것만 제거 — vault는 건드리지 않음
 ## 자격증명
 
 환경변수 또는 `<vault>/.lorekeeper/credentials.json`(0600). 환경변수가 파일보다 우선.
+여러 vault가 같은 계정을 쓰면 `credentials.file`에 하나의 공유 저장소를 지정할 수 있습니다.
+상대 경로는 설정 파일 기준이며, OAuth 갱신과 후속 토큰 저장은 같은 잠금 안에서 처리합니다.
+회전하는 refresh token을 별도 파일로 복사하지 마세요. 다른 앱은 별도 OAuth 앱을 사용해야 합니다.
 
 ```bash
 lore init credentials   # 대화형 마법사 — Google 토큰은 브라우저 OAuth로 자동 발급
@@ -480,6 +483,12 @@ lore schedule --format launchd --bin "$(command -v lore)" \
 별도로 해제하세요. Linux는 Lorekeeper 항목만 수정합니다. `self uninstall`은 OS 예약을
 해제하지 않습니다. 예약 시각은 호스트의 현지 시간이며 vault 날짜 계산과 구분됩니다.
 잠자기 후 launchd 실행은 놓친 모든 날짜의 수집을 재생하지 않습니다.
+
+기간별 예약은 정확한 종료 기간을 `--defer`로 기록합니다. 일일 파이프라인은 수집과
+지식화 후 기본 기간 → 분기 → 연간 순서로 재개합니다. 소스 실패나 미완료 의미 처리는
+`lore synthesis pending --status --json`에 이유와 함께 남습니다. 마지막 날을 수집하지
+않았다면 명시적으로 backfill해야 하며, 기존 문서만으로 과거 전체 수집을 증명하지 않습니다.
+별도 환경을 시험할 때는 launchd의 `--namespace`와 `--log-dir`로 예약과 로그를 분리하세요.
 
 초기 설정은 설정 검증 → 인증이 필요한 소스의 dry-run → 최초 실제 수집과 `/lore-process`
 → OS 등록 → 실제 예약 실행 확인 순서로 완료를 판단합니다. `validate`는 인증을

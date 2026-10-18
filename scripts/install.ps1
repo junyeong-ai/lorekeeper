@@ -154,27 +154,19 @@ function Deploy-Artifacts($bin, $level) {
     if ($exit -ne 0) { Die "Deploy failed; the binary is installed - run: $bin self deploy" }
 }
 
-# Scheduled-task definitions installed by versions up to 0.10. They drove `lore ingest`
-# through Claude Desktop, so a day was silently skipped whenever the app was not running,
-# and their drain contract no longer matches the code. The replacement is a pair of POSIX
-# pipeline scripts fired by a system scheduler (launchd or cron) — Unix only, so this
-# installer removes the superseded definitions without installing a substitute. On Windows,
-# schedule the equivalent stages yourself with Task Scheduler: `lore ingest`, then
-# `claude -p /lore-process`, then `lore queue apply` and `lore graph backlinks-sync`.
+# A legacy name locates a possible old definition, not installer ownership.
+# Preserve user-global files; review the actual definition and registration before
+# disabling an old job or enabling a replacement. Unix pipelines are not installed
+# as Windows Task Scheduler jobs by this installer.
 $LegacyScheduledTasks = @('lore-daily-ingest', 'lore-weekly-ingest')
 
-function Remove-LegacyScheduledTasks {
-    $removed = 0
+function Warn-LegacyScheduledTasks {
     foreach ($name in $LegacyScheduledTasks) {
         $dir = Join-Path $env:USERPROFILE ".claude\scheduled-tasks\$name"
-        if (Test-Path $dir) {
-            Remove-Item -Path $dir -Recurse -Force
-            $removed++
+        if (Test-Path -LiteralPath $dir) {
+            Write-Warn "Possible legacy Claude scheduled task: $name (left untouched)"
+            Write-Host "  Review its definition and registry entry; disable the old job before enabling a replacement." -ForegroundColor DarkGray
         }
-    }
-    if ($removed -gt 0) {
-        Write-Ok "Removed $removed superseded scheduled task(s)"
-        Write-Host "  Also drop their entries from .claude\scheduled-tasks\registry.json if present" -ForegroundColor DarkGray
     }
 }
 
@@ -241,25 +233,38 @@ if ($Interactive -and -not $Yes) {
 
 Write-Host ''
 
-if ($method -eq 'prebuilt') {
-    $archive = "$BinaryName-v$version-$target.zip"
-    $tmpDir = Download-Archive $version $target $archive
-    Verify-Checksum $tmpDir $archive
-    Extract-Archive $tmpDir $archive
-    $stage = Join-Path $tmpDir "$BinaryName-v$version-$target"
-    $binSrc = Join-Path $stage "$BinaryName.exe"
-} else {
-    if (-not $repoDir) { Die '--from-source requires running from a cloned repo' }
-    Write-Step 'Building from source (cargo build --release --locked)'
-    Push-Location $repoDir
-    try { cargo build --release --locked --quiet -p lore }
-    finally { Pop-Location }
-    $binSrc = Join-Path $repoDir 'target\release\lore.exe'
-}
+$sourceStage = $null
+try {
+    if ($method -eq 'prebuilt') {
+        $archive = "$BinaryName-v$version-$target.zip"
+        $tmpDir = Download-Archive $version $target $archive
+        Verify-Checksum $tmpDir $archive
+        Extract-Archive $tmpDir $archive
+        $stage = Join-Path $tmpDir "$BinaryName-v$version-$target"
+        $binSrc = Join-Path $stage "$BinaryName.exe"
+    } else {
+        if (-not $repoDir) { Die '--from-source requires running from a cloned repo' }
+        Write-Step 'Building from source (cargo install --locked)'
+        # Never guess Cargo's target directory; its cache can be selected by the
+        # caller. Only the explicitly selected install root supplies the binary.
+        $sourceStage = Join-Path ([System.IO.Path]::GetTempPath()) ("lore-install-source-" + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $sourceStage | Out-Null
+        Push-Location $repoDir
+        try {
+            & cargo install --path (Join-Path $repoDir 'crates\lk-cli') --locked --bin $BinaryName --root $sourceStage --force --quiet
+            if ($LASTEXITCODE -ne 0) { throw "cargo install failed (exit $LASTEXITCODE)" }
+        } finally { Pop-Location }
+        $binSrc = Join-Path $sourceStage "bin\$BinaryName.exe"
+    }
 
-Install-Binary $binSrc $InstallDir
-Deploy-Artifacts (Join-Path $InstallDir "$BinaryName.exe") $Skill
-Remove-LegacyScheduledTasks
+    Install-Binary $binSrc $InstallDir
+    Deploy-Artifacts (Join-Path $InstallDir "$BinaryName.exe") $Skill
+} finally {
+    if ($sourceStage -and (Test-Path -LiteralPath $sourceStage)) {
+        Remove-Item -LiteralPath $sourceStage -Recurse -Force
+    }
+}
+Warn-LegacyScheduledTasks
 
 Write-Host ''
 $pathEnv = [Environment]::GetEnvironmentVariable('Path', 'User')

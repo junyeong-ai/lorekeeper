@@ -199,6 +199,15 @@ impl Source for GmailSource {
         params: &serde_json::Value,
         ctx: &ExtractContext,
     ) -> Result<Vec<RawItem>, SourceError> {
+        Ok(self.observe(params, ctx).await?.items)
+    }
+
+    async fn observe(
+        &self,
+        params: &serde_json::Value,
+        ctx: &ExtractContext,
+    ) -> Result<crate::SourceObservation, SourceError> {
+        let mut partial = false;
         let p: GmailParams = crate::parse_validated(params)?;
 
         let token = self.auth.access_token().await?;
@@ -264,6 +273,7 @@ impl Source for GmailSource {
                 crate::paging::PageStep::Stop { dropped } => {
                     refs.truncate(p.max_messages);
                     if dropped {
+                        partial = true;
                         tracing::warn!(
                             max = p.max_messages,
                             "gmail: message cap hit, some messages may have been dropped; raise max_messages"
@@ -272,6 +282,7 @@ impl Source for GmailSource {
                     break;
                 }
                 crate::paging::PageStep::Exhausted => {
+                    partial = true;
                     tracing::warn!(
                         pages = crate::paging::MAX_PAGES,
                         "gmail: page budget exhausted before the listing completed; results may be incomplete"
@@ -284,6 +295,7 @@ impl Source for GmailSource {
         tracing::info!(count = refs.len(), "gmail: listed messages");
 
         let mut items = Vec::new();
+        let mut observed = 0;
         for r in &refs {
             let fetch = async {
                 let resp = check_response(
@@ -299,8 +311,12 @@ impl Source for GmailSource {
             };
 
             let msg = match fetch.await {
-                Ok(m) => m,
+                Ok(m) => {
+                    observed += 1;
+                    m
+                }
                 Err(e) => {
+                    partial = true;
                     tracing::warn!(
                         message_id = %r.id,
                         error = %e,
@@ -310,22 +326,35 @@ impl Source for GmailSource {
                 }
             };
 
-            if let Some(item) = map_message(
+            if let Some(item) = map_message_observed(
                 msg,
                 ctx.identity.email.trim(),
                 p.exclude.as_ref(),
                 ctx.locale.strings(),
+                &mut partial,
             ) {
                 items.push(item);
             }
         }
 
+        crate::require_any_observation("gmail message", observed, refs.len())?;
         tracing::info!(
             total = refs.len(),
             kept = items.len(),
             "gmail: extraction complete"
         );
-        Ok(items)
+        Ok(crate::SourceObservation {
+            items,
+            scope: crate::ObservationScope::Window {
+                start: min,
+                end: max,
+            },
+            outcome: if partial {
+                crate::ObservationOutcome::Partial
+            } else {
+                crate::ObservationOutcome::Observed
+            },
+        })
     }
 }
 
@@ -334,11 +363,12 @@ impl Source for GmailSource {
 /// Pure — no I/O — so the exclude logic, snippet body-fallback, ownership match
 /// (`From` vs `identity_email`), and metadata projection are unit-testable against
 /// fixtures. `identity_email` must already be trimmed.
-fn map_message(
+fn map_message_observed(
     msg: Message,
     identity_email: &str,
     exclude: Option<&ExcludeParams>,
     strings: &lk_core::i18n::Strings,
+    partial: &mut bool,
 ) -> Option<RawItem> {
     if let Some(exc) = exclude
         && GmailSource::is_excluded(&msg, exc)
@@ -382,6 +412,7 @@ fn map_message(
         .and_then(|s| s.parse::<i64>().ok())
         .and_then(|ms| jiff::Timestamp::from_millisecond(ms).ok())
     else {
+        *partial = true;
         tracing::warn!(message_id = %msg.id, "gmail: skipping message with unparseable timestamp");
         return None;
     };
@@ -501,7 +532,7 @@ fn decode_base64url(data: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Message, header_email, map_message as map_message_inner};
+    use super::{Message, header_email, map_message_observed as map_message_inner};
 
     fn msg_from(json: serde_json::Value) -> Message {
         serde_json::from_value(json).expect("message fixture parses")
@@ -517,7 +548,44 @@ mod tests {
             identity_email,
             exclude,
             lk_core::i18n::Locale::default().strings(),
+            &mut false,
         )
+    }
+
+    #[test]
+    fn observation_marks_bad_timestamp_but_not_explicit_exclusion() {
+        let bad = || {
+            msg_from(serde_json::json!({
+                "id": "bad-date", "internalDate": "not-a-date",
+                "payload": {"headers": [{"name": "Subject", "value": "skip this"}]}
+            }))
+        };
+        let mut partial = false;
+        assert!(
+            map_message_inner(
+                bad(),
+                "me@x.com",
+                None,
+                lk_core::i18n::Locale::default().strings(),
+                &mut partial
+            )
+            .is_none()
+        );
+        assert!(partial);
+        let exclude =
+            serde_json::from_value(serde_json::json!({"subjects": ["skip this"]})).unwrap();
+        let mut partial = false;
+        assert!(
+            map_message_inner(
+                bad(),
+                "me@x.com",
+                Some(&exclude),
+                lk_core::i18n::Locale::default().strings(),
+                &mut partial
+            )
+            .is_none()
+        );
+        assert!(!partial, "deliberately excluded mail is not lost reach");
     }
 
     // base64url(no-pad) of "Hello body".

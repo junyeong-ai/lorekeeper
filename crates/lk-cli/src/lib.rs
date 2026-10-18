@@ -149,6 +149,13 @@ pub enum Command {
         /// the bare subcommands and the drain must be scheduled some other way.
         #[arg(long)]
         pipeline_dir: Option<std::path::PathBuf>,
+        /// launchd label prefix; use a distinct namespace for an isolated installation
+        #[arg(long, default_value = "com.lorekeeper")]
+        namespace: String,
+        /// Absolute launchd log directory (default: ~/Library/Logs/lorekeeper,
+        /// or `~/Library/Logs/<namespace>` for a custom namespace)
+        #[arg(long)]
+        log_dir: Option<std::path::PathBuf>,
     },
     /// Generate wiki/AGENTS.md — single source of truth for page formats
     Schema {
@@ -290,7 +297,19 @@ pub async fn run() -> miette::Result<()> {
             bin,
             format,
             pipeline_dir,
-        } => commands::schedule::run(&opts, &bin, format, pipeline_dir.as_deref()).await,
+            namespace,
+            log_dir,
+        } => {
+            commands::schedule::run(
+                &opts,
+                &bin,
+                format,
+                pipeline_dir.as_deref(),
+                &namespace,
+                log_dir.as_deref(),
+            )
+            .await
+        }
         Command::Maintenance {
             dry_run,
             wait_for_vault,

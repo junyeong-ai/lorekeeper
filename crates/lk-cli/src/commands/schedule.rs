@@ -11,6 +11,23 @@ pub enum Format {
     Launchd,
 }
 
+const DEFAULT_NAMESPACE: &str = "com.lorekeeper";
+
+fn validate_namespace(namespace: &str) -> miette::Result<()> {
+    if namespace.len() > 128
+        || namespace.split('.').any(|part| {
+            part.is_empty()
+                || !part.as_bytes()[0].is_ascii_alphanumeric()
+                || !part.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+        })
+    {
+        return Err(miette::miette!(
+            "--namespace requires dot-separated ASCII alphanumeric/hyphen components, each starting with an alphanumeric character (at most 128 bytes)"
+        ));
+    }
+    Ok(())
+}
+
 /// One scheduled command, format-independent.
 /// When a job runs.
 ///
@@ -137,7 +154,24 @@ pub async fn run(
     bin: &str,
     format: Format,
     pipeline_dir: Option<&std::path::Path>,
+    namespace: &str,
+    log_dir: Option<&std::path::Path>,
 ) -> miette::Result<()> {
+    validate_namespace(namespace)?;
+    if format != Format::Launchd && (namespace != DEFAULT_NAMESPACE || log_dir.is_some()) {
+        return Err(miette::miette!(
+            "--namespace and --log-dir apply only to --format launchd"
+        ));
+    }
+    if log_dir.is_some_and(|path| {
+        !path.is_absolute()
+            || path.to_str().is_none()
+            || path.to_string_lossy().chars().any(char::is_control)
+    }) {
+        return Err(miette::miette!(
+            "--log-dir must be an absolute UTF-8 path without control characters"
+        ));
+    }
     let config_path = find_config(opts)?;
     let config = load_config(&config_path)?;
     let cwd = std::env::current_dir()
@@ -188,6 +222,17 @@ pub async fn run(
             pipeline_env(bin, &config_path, skill_dir.as_deref())
         }
         None => {
+            if jobs
+                .iter()
+                .any(|job| job.name == "ingest" || job.name.starts_with("synthesis-"))
+            {
+                eprintln!(
+                    "warning: without --pipeline-dir, scheduled collection has no semantic consumer \
+                     and period jobs only retain deferred intents. Use the installed pipelines, \
+                     or run /lore-process and `lore synthesis pending --wait-for-vault`, \
+                     processing its queued results and resuming until the requested periods settle."
+                );
+            }
             // The reminder timer is a shipped SCRIPT, so without a pipeline dir there is
             // nowhere to point it and no `com.lorekeeper.remind` is emitted. Silently: every
             // reminder added afterwards never fires, and no row of `lore status` covers a timer
@@ -217,7 +262,7 @@ pub async fn run(
     }
     match format {
         Format::Cron => print_cron(bin, &cwd, &jobs, &env)?,
-        Format::Launchd => print_launchd(bin, &cwd, &jobs, &env, pipeline_dir)?,
+        Format::Launchd => print_launchd(bin, &cwd, &jobs, &env, pipeline_dir, namespace, log_dir)?,
     }
     Ok(())
 }
@@ -285,7 +330,13 @@ fn build_jobs(
             None => lore_job(
                 "synthesis-weekly",
                 sched,
-                &["synthesis", "weekly", "--previous", "--wait-for-vault"],
+                &[
+                    "synthesis",
+                    "weekly",
+                    "--previous",
+                    "--defer",
+                    "--wait-for-vault",
+                ],
             ),
         });
     }
@@ -301,7 +352,13 @@ fn build_jobs(
                 None => lore_job(
                     &format!("synthesis-{period}"),
                     sched,
-                    &["synthesis", period, "--previous", "--wait-for-vault"],
+                    &[
+                        "synthesis",
+                        period,
+                        "--previous",
+                        "--defer",
+                        "--wait-for-vault",
+                    ],
                 ),
             });
         }
@@ -408,6 +465,8 @@ fn print_launchd(
     jobs: &[Job],
     env: &[(String, String)],
     pipeline_dir: Option<&std::path::Path>,
+    namespace: &str,
+    log_dir: Option<&std::path::Path>,
 ) -> miette::Result<()> {
     // Every path in a plist must be absolute. launchd execs the program directly and does
     // NOT search a PATH, and it expands no shell syntax — neither a bare name nor a `~` nor
@@ -442,24 +501,38 @@ fn print_launchd(
              user session."
         )
     })?;
+    let default_log_dir =
+        std::path::Path::new(&home)
+            .join("Library/Logs")
+            .join(if namespace == DEFAULT_NAMESPACE {
+                "lorekeeper"
+            } else {
+                namespace
+            });
+    let log_dir = log_dir.unwrap_or(&default_log_dir);
     println!("# lorekeeper scheduled tasks (launchd)");
     println!("#");
     println!("# launchd does not create the log directory, and a job whose StandardOutPath");
     println!("# is unwritable can fail to spawn — so make it first:");
-    println!("#   mkdir -p {home}/Library/Logs/lorekeeper");
+    println!(
+        "# Log directory (create before loading): {}",
+        log_dir.display()
+    );
     println!("#");
-    println!("# Retention includes queue pruning; remove any old com.lorekeeper.queue-prune job.");
+    println!(
+        "# Retention includes queue pruning; review any old {namespace}.queue-prune job separately."
+    );
     println!("# Write each block below to the path in its header, then load it:");
     println!("#   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<file>");
     println!("#   launchctl kickstart -p gui/$(id -u)/<label>   # run once now");
     println!("#");
     println!("# Unlike cron, launchd runs a job missed during sleep as soon as the machine");
     println!("# wakes, so a closed laptop at the scheduled hour delays the run instead of");
-    println!("# dropping it. Logs land in {home}/Library/Logs/lorekeeper/.");
+    println!("# dropping it. Logs land in {}.", log_dir.display());
     println!();
 
     for job in jobs {
-        let label = format!("com.lorekeeper.{}", job.name);
+        let label = format!("{namespace}.{}", job.name);
         let intervals = match &job.schedule {
             When::Calendar(expr) => Some(cron_to_calendar_intervals(expr).ok_or_else(|| {
                 miette::miette!(
@@ -533,14 +606,22 @@ fn print_launchd(
             (_, None) => unreachable!("a calendar job always resolves its intervals"),
         }
         println!(
-            "  <key>StandardOutPath</key><string>{}/Library/Logs/lorekeeper/{}.log</string>",
-            xml_escape(&home),
-            job.name
+            "  <key>StandardOutPath</key><string>{}</string>",
+            xml_escape(
+                &log_dir
+                    .join(format!("{}.log", job.name))
+                    .display()
+                    .to_string()
+            )
         );
         println!(
-            "  <key>StandardErrorPath</key><string>{}/Library/Logs/lorekeeper/{}.log</string>",
-            xml_escape(&home),
-            job.name
+            "  <key>StandardErrorPath</key><string>{}</string>",
+            xml_escape(
+                &log_dir
+                    .join(format!("{}.log", job.name))
+                    .display()
+                    .to_string()
+            )
         );
         println!("  <key>RunAtLoad</key><false/>");
         println!("</dict>");
@@ -769,13 +850,41 @@ mod tests {
     }
 
     #[test]
-    fn without_a_pipeline_dir_the_bare_subcommands_are_emitted() {
-        let config = config_with_schedules();
+    fn without_a_pipeline_dir_period_jobs_defer_without_changing_collection() {
+        let mut config = config_with_schedules();
+        let mut personal = lk_core::config::PersonalConfig::default();
+        personal.monthly.enabled = true;
+        personal.monthly.schedule = Some("0 8 1 * *".into());
+        personal.quarterly.enabled = true;
+        personal.quarterly.schedule = Some("0 8 1 1,4,7,10 *".into());
+        personal.annual.enabled = true;
+        personal.annual.schedule = Some("0 8 1 1 *".into());
+        config.personal = Some(personal);
         let jobs = build_jobs(&config, &[], None);
         assert!(jobs.iter().all(|j| j.program.is_none()));
         let names: Vec<&str> = jobs.iter().map(|j| j.name.as_str()).collect();
         assert!(names.contains(&"ingest"), "{names:?}");
         assert!(names.contains(&"synthesis-weekly"), "{names:?}");
+        assert_eq!(
+            jobs.iter().find(|job| job.name == "ingest").unwrap().args,
+            ["ingest"]
+        );
+        for period in ["weekly", "monthly", "quarterly", "annual"] {
+            let job = jobs
+                .iter()
+                .find(|job| job.name == format!("synthesis-{period}"))
+                .unwrap();
+            assert_eq!(
+                job.args,
+                [
+                    "synthesis",
+                    period,
+                    "--previous",
+                    "--defer",
+                    "--wait-for-vault"
+                ]
+            );
+        }
     }
 
     #[test]
@@ -792,7 +901,7 @@ mod tests {
         let cwd = std::path::Path::new("/vault");
         for bin in ["lore", "./lore", "target/release/lore", "../bin/lore"] {
             assert!(
-                print_launchd(bin, cwd, &jobs, &[], None).is_err(),
+                print_launchd(bin, cwd, &jobs, &[], None, DEFAULT_NAMESPACE, None).is_err(),
                 "`{bin}` is not something launchd can exec"
             );
         }

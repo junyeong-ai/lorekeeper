@@ -74,6 +74,13 @@ local nodex sources do not need provider credentials; nodex has its own public
 index and executable prerequisites. A config-only request ends after local
 validation and reports any outstanding authentication or runtime checks.
 
+By default credentials live at `<vault>/.lorekeeper/credentials.json`. Set optional
+`credentials.file` to share one store across vaults using the same accounts;
+relative paths resolve against the config file. Cooperating Lore processes lock
+refresh and successor persistence together. Do not copy rotating OAuth refresh
+tokens into independent stores. Other applications using the same grant do not
+participate in this lock and should use their own OAuth app.
+
 For a complete initial setup, distinguish these outcomes:
 
 1. `lore validate` accepts the config; it does not contact providers or prove access.
