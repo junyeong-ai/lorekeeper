@@ -151,7 +151,7 @@ jobs:
             [void][System.Management.Automation.Language.Parser]::ParseFile(
               $_.FullName, [ref]$parseTokens, [ref]$parseErrors)
             if ($parseErrors.Count -gt 0) {
-              throw ($parseErrors | Out-String)
+              throw ("{0}: {1}" -f $_.FullName, ($parseErrors | Out-String))
             }
           }
       - name: Read repository toolchain

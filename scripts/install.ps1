@@ -36,10 +36,10 @@ if (-not $DataDir) {
                else { Join-Path $env:LOCALAPPDATA 'lorekeeper' }
 }
 
-function Write-Step($msg)  { Write-Host "▸  $msg" -ForegroundColor Blue }
-function Write-Ok($msg)    { Write-Host "✓  $msg" -ForegroundColor Green }
+function Write-Step($msg)  { Write-Host ">  $msg" -ForegroundColor Blue }
+function Write-Ok($msg)    { Write-Host "OK $msg" -ForegroundColor Green }
 function Write-Warn($msg)  { Write-Host "!  $msg" -ForegroundColor Yellow }
-function Die($msg)         { Write-Host "✗ $msg" -ForegroundColor Red; exit 1 }
+function Die($msg)         { Write-Host "X $msg" -ForegroundColor Red; exit 1 }
 
 # The latest published release.
 #
@@ -67,7 +67,7 @@ function Get-LatestVersion {
 function Resolve-Version {
     # Every URL below is built as `v$version`, so the version here is the bare number. The tag
     # on the releases page is `v0.21.0` and that is what a user copies, which made
-    # `-Version v0.21.0` request `.../vv0.21.0/lore-vv0.21.0-…` and 404.
+    # `-Version v0.21.0` request `.../vv0.21.0/lore-vv0.21.0-...` and 404.
     if ($Version) { return ($Version -replace '^v', '') }
     if ($env:LORE_INSTALL_VERSION) { return ($env:LORE_INSTALL_VERSION -replace '^v', '') }
     $v = Get-LatestVersion
@@ -124,7 +124,7 @@ function Get-ConfigDir {
 # Everything besides the binary is written by the binary.
 #
 # The skills, the rendering templates and the config example are compiled into `lore`, so the
-# version that deploys them is the version that carries them — there is no second artifact to
+# version that deploys them is the version that carries them; there is no second artifact to
 # fetch, verify, or find a stale copy of. The pipeline scripts are POSIX shell fired by a
 # system scheduler, so `self deploy` writes them and Windows simply has no scheduler to point
 # at them. This is also what a later `lore self update` runs.
@@ -132,12 +132,12 @@ function Deploy-Artifacts($bin, $level) {
     Write-Step 'Deploying skills, templates and the config example'
     # `lore` reports progress on stderr, and under `$ErrorActionPreference = 'Stop'` Windows
     # PowerShell turns a native command's stderr into a terminating NativeCommandError the
-    # moment the stream is redirected — throwing on a SUCCESSFUL deploy, before its exit code
+    # moment the stream is redirected, throwing on a SUCCESSFUL deploy, before its exit code
     # is ever read. The exit code is what decides here, so the preference is relaxed for
     # exactly this call.
     #
     # `$exit` is seeded pessimistically because `Set-StrictMode` raises a TERMINATING error for
-    # an unset variable and the relaxed preference governs only non-terminating ones — so a
+    # an unset variable and the relaxed preference governs only non-terminating ones, so a
     # binary that never ran at all still reaches the message naming the repair, instead of
     # "$LASTEXITCODE cannot be retrieved because it has not been set".
     $previous = $ErrorActionPreference
@@ -168,7 +168,7 @@ function Warn-LegacyScheduledTasks {
     }
 }
 
-# The version a checkout declares, read from `[workspace.package]` — single-sourced there, so
+# The version a checkout declares, read from `[workspace.package]`, single-sourced there, so
 # every crate inherits it and `crates\*\Cargo.toml` no longer carries a literal. Leading
 # whitespace and either quote style are accepted because TOML allows both, and a reader that
 # required column zero and double quotes returned nothing for a manifest that is still valid.
@@ -184,7 +184,7 @@ function Get-RepoVersion($repo) {
     return 'dev'
 }
 
-# ── main ─────────────────────────────────────────────────────────────────
+# Main
 
 $repoDir = $null
 # When run via `irm ... | iex`, $PSCommandPath is empty; guard so the one-liner
@@ -205,10 +205,10 @@ if ($FromSource -or $env:LORE_INSTALL_FROM_SOURCE -eq '1') {
 }
 
 Write-Host ''
-Write-Host '╭──────────────────────────────────────────╮' -ForegroundColor Cyan
+Write-Host '+------------------------------------------+' -ForegroundColor Cyan
 Write-Host '  Lorekeeper installer' -ForegroundColor Cyan
-Write-Host "  v$version • $target" -ForegroundColor DarkGray
-Write-Host '╰──────────────────────────────────────────╯' -ForegroundColor Cyan
+Write-Host "  v$version / $target" -ForegroundColor DarkGray
+Write-Host '+------------------------------------------+' -ForegroundColor Cyan
 Write-Host ''
 Write-Host 'Review' -ForegroundColor White
 Write-Host "  binary    $(Join-Path $InstallDir "$BinaryName.exe") (v$version, $method)"
@@ -219,7 +219,7 @@ switch ($Skill) {
     'none'    { Write-Host '  skills    (skipped)' }
 }
 if ($Skill -ne 'none') {
-    Write-Host "  schedule  (Windows: register the stages with Task Scheduler)" -ForegroundColor DarkGray
+    Write-Host "  schedule  (unattended pipelines require macOS or Linux)" -ForegroundColor DarkGray
 }
 
 if ($DryRun) { Write-Host ''; Write-Warn '(dry-run) Not executing'; exit 0 }
@@ -274,7 +274,7 @@ if ($pathEnv -notlike "*$InstallDir*") {
 }
 
 Write-Host ''
-Write-Host '✅ Installation complete' -ForegroundColor Green
+Write-Host 'Installation complete' -ForegroundColor Green
 Write-Host ''
 $cfgDir = Get-ConfigDir
 $quotedConfigDir = $cfgDir.Replace("'", "''")

@@ -24,8 +24,8 @@ if (-not $DataDir) {
                else { Join-Path $env:LOCALAPPDATA 'lorekeeper' }
 }
 
-function Write-Step($msg) { Write-Host "▸  $msg" -ForegroundColor Yellow }
-function Write-Ok($msg)   { Write-Host "✓  $msg" -ForegroundColor Green }
+function Write-Step($msg) { Write-Host ">  $msg" -ForegroundColor Yellow }
+function Write-Ok($msg)   { Write-Host "OK $msg" -ForegroundColor Green }
 
 function Prompt-YesNo($q) {
     if ($Yes) { return $true }
@@ -64,7 +64,7 @@ if ((-not $KeepData) -and (Test-Path $templates)) {
 
 # What `lore self deploy` wrote into the config directory: the example, and the two records it
 # keeps beside it. config.yaml itself is user data and is never touched. Each is asked about on
-# its own presence — while the records rode on the example's, a user who tidied the example away
+# its own presence; while the records rode on the example's, a user who tidied the example away
 # after copying it kept the `data-dir` record, and a later bare deploy resurrected the directory
 # this had just removed.
 $configDir = if ($env:XDG_CONFIG_HOME) { Join-Path $env:XDG_CONFIG_HOME 'lorekeeper' }
@@ -97,7 +97,7 @@ foreach ($skillName in $SkillNames) {
     }
 
     if ((Test-Path $skillProject) -and ($skillProject -ne $skillUser)) {
-        # Don't remove project-level skills inside a git repo — those are source files.
+        # Don't remove project-level skills inside a git repo; those are source files.
         $gitCheck = git -C (Split-Path $skillProject) rev-parse --is-inside-work-tree 2>$null
         if ($gitCheck -eq 'true') {
             Write-Host "  Skipping $skillProject (inside git repo)" -ForegroundColor DarkGray
@@ -110,7 +110,7 @@ foreach ($skillName in $SkillNames) {
     }
 }
 
-# Scheduled tasks (user-level only — installed alongside the skills).
+# Scheduled tasks (user-level only, installed alongside the skills).
 # Scheduled tasks installed by versions up to 0.10, before the pipelines replaced them.
 # Still offered so an upgrade that never re-ran the installer can clean up.
 foreach ($schedName in @('lore-daily-ingest', 'lore-weekly-ingest')) {
@@ -129,6 +129,6 @@ Write-Host ''
 if ($removed -eq 0) {
     Write-Host 'Nothing to uninstall.' -ForegroundColor DarkGray
 } else {
-    Write-Host "✅ Removed $removed item(s)" -ForegroundColor Green
+    Write-Host "Removed $removed item(s)" -ForegroundColor Green
     Write-Host 'Vault data (.lorekeeper\) and config.yaml are untouched.' -ForegroundColor DarkGray
 }
