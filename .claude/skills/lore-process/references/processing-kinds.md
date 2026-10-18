@@ -49,6 +49,8 @@ borrowed from another document would survive changes to their actual evidence.
 Preserve a declared status or successor identity, but do not import the successor's
 conclusions from another task or prior reading. Compare versions in a concept
 synthesis or knowledge review that records both sources and their revisions.
+Preserve the source's modality and attribution: conditions, rules, risks and examples
+must not become observed incidents or implemented outcomes unless the input establishes them.
 
 A daily page's summary answers a different question from the events below it.
 Each refined body says what its own event is; the summary says what the day's
