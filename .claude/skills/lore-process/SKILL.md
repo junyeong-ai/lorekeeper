@@ -176,7 +176,10 @@ on the matching marker, never on whether a section looks filled.
         captured `target_revision`, and `body` (the section body without its heading).
 
       See [queue-format.md](references/queue-format.md) for the exact contracts.
-      Write each result atomically through a temporary file and rename. Run
+      Use `Write` to create the complete JSON at the result path plus `.tmp`,
+      then `mv` it to the final path using quoted literal paths. Keep drafts under
+      `.lorekeeper/`; do not serialize guard fields through shell variables or
+      intermediate Markdown. Run
       `lore queue apply` before capturing a subsequent task on the same target:
       a successful earlier publication changes its exact bytes. If another task or
       editor changes a target, reread and regenerate rather than relabeling the old result.
