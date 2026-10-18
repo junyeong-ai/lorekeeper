@@ -645,7 +645,7 @@ pub fn render_agents_md(
         Select `--section ID` for up to 4000 Unicode characters including nested sections. Follow \
         `next_offset` with `--offset`; pass the returned `file_revision` as `--revision` on every \
         subsequent read. Search hits also carry this revision. A mismatch requires fresh retrieval, \
-        not reuse of the old section id. Source provenance is returned alongside the content.").unwrap();
+        not reuse of the old section id. Source provenance is returned alongside the content. For declared RSS concept evidence, discover selected articles with `wiki original ORIGIN --evidence-concept CONCEPT`, then read `--event ID --revision PAYLOAD_REV`; the inventory revision pins pagination, not the selected article. Mixed page/event evidence requires both reads.").unwrap();
     writeln!(out, "- `lore wiki provenance <document.md>` — follow declared relations by exact \
         repository/document identity, including superseded_by. Missing and ambiguous owners stay explicit. \
         Use --direction incoming|both or --relation to narrow, then --limit/--offset with the returned \
@@ -653,7 +653,7 @@ pub fn render_agents_md(
         and relations are source declarations, not current truth or inferred support/contradiction.").unwrap();
     writeln!(
         out,
-        "- `lore graph --json neighbors <vault-relative.md>` — direct incoming/outgoing \
+        "- `lore graph --json neighbors <vault-relative.md>` — optional live graph diagnostics for direct incoming/outgoing \
         links across managed pages, including daily evidence. Narrow with `--type concept` or \
         `--direction incoming|outgoing|mutual` before paginating with `--limit` and `--offset`. \
         Types match declared metadata exactly; an empty type selects undeclared pages. \
@@ -663,7 +663,7 @@ pub fn render_agents_md(
     .unwrap();
     writeln!(
         out,
-        "- `lore wiki links <source.md> --target <target.md>` — inspect explicit link \
+        "- `lore wiki links <page.md> --snapshot ID --direction both` — follow captured incoming/outgoing links in a prepared retrieval session. Paginate with --offset in the same snapshot, then confirm selected sources with revision-checked wiki read. For a single live connection, `lore wiki links <source.md> --target <target.md>` inspects explicit link \
          occurrences as JSON with source line numbers, literal context and file_revision. \
          Omit --target to see all internal links. Supports --limit and --offset; pass \
          --revision from the previous response to reject pagination across source edits. \

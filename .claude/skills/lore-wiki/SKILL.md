@@ -1,6 +1,6 @@
 ---
 name: lore-wiki
-version: 0.56.0
+version: 0.56.1
 description: Semantic wiki operations for the Lorekeeper vault. Add sources, query with compounding, audit structural and semantic health. Reads AGENTS.md for page formats and section vocabulary — never hardcodes headings. Pairs with `lore` (the deterministic binary) for graph analysis and queue processing.
 when_to_use: |
   wiki query, knowledge search, ask wiki, search vault,
@@ -117,7 +117,8 @@ Answer a question grounded in vault content, with compounding.
    once and pass its `snapshot` to search/browse with `--snapshot`. This is a captured
    corpus, not a claim of current state. Prepare again after writes or before a new
    investigation. A single lookup can use live search without preparing a snapshot.
-   For an unfamiliar topic, start with `lore wiki browse --json`.
+   For an unfamiliar topic, start with `lore wiki browse --snapshot <id> --json`
+   in a prepared session (omit `--snapshot` for a single live lookup).
    Use its category/type counts to select a scope with `--category` and `--type`.
    Browse orders by title, without treating citation frequency as relevance.
    When time matters, use `lore wiki browse --snapshot <id> --sort created
@@ -127,7 +128,7 @@ Answer a question grounded in vault content, with compounding.
    Search and browse return `total` and `next_offset`; follow `--offset` when more
    results are needed. Counts describe the query before metadata filters. An empty
    category key denotes uncategorized pages. Do not call the first page a complete inventory.
-   Run `lore wiki search "<terms>" --json` — it answers which pages the
+   Run `lore wiki search "<terms>" --snapshot <id> --json` — it answers which pages the
    question reaches and, in `matched`, whether each ANSWERS to it (`identity`/`name`), opens
    by stating it (`summary`), or merely mentions it (`text`). Query the question's terms
    separately when it spans several. A query naming one concept matches its declared
@@ -150,7 +151,12 @@ Answer a question grounded in vault content, with compounding.
    the verified preserved bytes. Check unsupported coverage before claiming every
    dependency was captured. `available: false` means no preserved-original reference;
    a mutable `source_file` is not a substitute for the historical bytes.
-   For RSS, `lore wiki original <daily-path>` first returns a bounded event inventory.
+   For declared RSS concept evidence, use `lore wiki original <origin-path>
+   --evidence-concept <concept-path>` to discover its selected articles, then read
+   `--event EVENT_ID --revision PAYLOAD_REV`. The inventory revision pins pagination;
+   the payload revision selects the historical article even after the current manifest
+   changes. Mixed page/event evidence requires both the page and selected articles.
+   Otherwise, `lore wiki original <daily-path>` first returns a bounded event inventory.
    Pin its `revision`, select `--event EVENT_ID`, and follow `--text-offset` until
    `next_offset` is null. `page_bound_collection` verifies the referenced adapter-collected
    text; it is not provider HTTP/XML. `legacy_unbound` is retained-log discovery only,
@@ -166,7 +172,7 @@ Answer a question grounded in vault content, with compounding.
    `lore wiki concepts` is the registry for convergence decisions, not a
    lookup — reading all of it to find one page is what search exists to replace.
    For exact evidence such as a number, code symbol or quoted phrase, use
-   `lore wiki search "<literal>" --body --json`. This searches raw Markdown body lines,
+   `lore wiki search "<literal>" --body --snapshot <id> --json`. This searches raw Markdown body lines,
    including code and link destinations, with case-sensitive literal matching.
    Choose `--regex` or `--ignore-case` explicitly; `--context 0..5` bounds surrounding
    lines. Results carry physical line/column, file revision and clipping flags.
@@ -178,19 +184,15 @@ Answer a question grounded in vault content, with compounding.
    matching lines/pages, not claims or semantic-review coverage.
    For claims missing from the concept layer, search the same terms with
    `--include-sources`; daily observations and managed reviews are then searchable.
-   Use `lore graph --json neighbors <vault-relative.md>` to follow incoming and outgoing
-   links, including managed daily evidence. Follow `next_offset` for additional neighbors.
-   Narrow before paginating with `--type concept` for other concepts, `--type document`
-   for documents, or `--type exploration` for assessments. Types match declared metadata;
-   an empty type selects undeclared pages. `formats` counts all neighbors before filters.
-   `--direction incoming|outgoing|mutual` selects link direction; incoming/outgoing also
-   include mutual links. These filters do not classify support, contradiction or causality.
-   Inspect a connection with `lore wiki links <source.md> --target <target.md>`.
-   The JSON gives each occurrence's source line, literal context and file revision.
-   For an incoming neighbor, the neighbor is the source; for an outgoing neighbor,
-   the selected page is the source. Follow `next_offset` with `--offset` and the
-   returned `--revision` to avoid mixing edits. A bare link supplies no relationship
-   explanation; read the surrounding passage before asserting meaning.
+   Follow relationships with `lore wiki links <page.md> --snapshot <id> --direction both`.
+   The JSON gives explicit occurrences with source lines, bounded context and captured
+   revisions. Follow `next_offset` with `--offset` in the same snapshot; inspect selected
+   sources with revision-checked `wiki read` before asserting meaning. A bare link does
+   not establish support, contradiction or causality.
+   For live graph diagnostics, `lore graph --json neighbors <vault-relative.md>` supports
+   `--type`, `--direction incoming|outgoing|mutual` and pagination; it scans the live graph.
+   A single live connection can use `lore wiki links <source.md> --target <target.md>`;
+   pin subsequent pages with its returned `--revision`.
    Check `lore wiki reviews` for relevant open reviews or changed evidence before answering.
    A full natural-language question may match nothing: search its subjects and claim terms,
    then inspect the sources. Report the queries and scope checked when evidence remains absent;
