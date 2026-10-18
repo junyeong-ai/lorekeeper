@@ -421,11 +421,17 @@ lore task done 7k2p --note "refresh tokens rotate; retrying after a committed ro
 lore task sync                    # record what you changed in Obsidian
 ```
 
-The board is `<personal>/tasks.md` — four sections of ordinary markdown checkboxes
-(`Today / Next / Waiting / Someday`). Tick one on your phone or drag a line to another section
-and it counts: the heading a line sits under IS its state. A completed task becomes that day's
-page, and the note you closed it with flows on into concept extraction — so **what you did
-compounds the way what you read already does.**
+The board is `<personal>/tasks.md` — ordinary markdown checkboxes under
+`Today / Proposed / Next / Waiting / Someday`. Tick one on your phone or drag a line
+to another section; the next `lore task sync` or task mutation command records that change.
+The heading is its state, and `Proposed` means it has not been accepted yet.
+
+`lore task done` stores the completion and `--note` in the transition log. Ingesting
+the configured tasks source over a window containing that completion date creates
+that day's daily page; `/lore-process`
+handles the queued summary and concept extraction. Full-source ingestion also
+updates the work-log, and the scheduled daily pipeline runs ingestion and semantic
+processing together. **What you did becomes evidence alongside what you read.**
 
 ### Update, status, removal
 
