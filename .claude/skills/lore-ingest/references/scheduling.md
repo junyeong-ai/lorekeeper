@@ -74,3 +74,10 @@ Code `--plugin-dir`, and invoke its namespaced skill (for example,
 register an arbitrary skill directory. Keep the selected plugin and its references
 from the same deployed version. The workflow lease owns the whole foreground
 consumer session; never reacquire it inside the skill.
+
+An explicit `CLAUDE_CONFIG_DIR` selects the Claude Code profile for scheduled
+consumers too. With `--pipeline-dir`, schedule validates this existing directory
+and captures its canonical absolute path in cron/launchd environments. An unset
+value keeps Claude's default behavior. Only the profile path is captured; API keys
+or credential contents are not copied. Regenerate and reload definitions after
+changing the selected profile.

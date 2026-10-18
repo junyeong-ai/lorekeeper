@@ -209,6 +209,7 @@ pub async fn run(
         started_at: std::time::Instant,
         manual_originals: Vec<lk_core::manual_original::ManualBundleCapture>,
         manual_retirement_blocked: bool,
+        observation_outcome: lk_source::ObservationOutcome,
     }
     let mut planned: Vec<Planned> = Vec::new();
     let mut manual_capture_bytes = 0usize;
@@ -292,9 +293,10 @@ pub async fn run(
         };
         let observed =
             super::synthesis::pending::ObservedSource::from_observation(id, &observation);
-        if observation.outcome == lk_source::ObservationOutcome::Partial {
+        let observation_outcome = observation.outcome;
+        if observation_outcome == lk_source::ObservationOutcome::Partial {
             eprintln!(
-                "  ! partial observation: source reach is incomplete; see provider diagnostics"
+                "  ! partial observation: source reach is incomplete; rerun the same ingest command with RUST_LOG=warn and --dry-run for provider diagnostics"
             );
             had_failure = true;
         }
@@ -381,17 +383,22 @@ pub async fn run(
         // Skip only when there are no pages to write. (A manual source with an empty
         // inbox lands here too; with no events its archive step is a no-op.)
         if result.is_empty() {
-            eprintln!("  — skipped (no events)");
+            let (status, error) = source_log_outcome(observation_outcome, false, true);
+            if observation_outcome == lk_source::ObservationOutcome::Partial {
+                eprintln!("  ✗ no events retained from incomplete source reach");
+            } else {
+                eprintln!("  — skipped (no events)");
+            }
             if !dry_run {
                 record_log(
                     &log,
                     &lk_vault::LogEntry {
                         timestamp: jiff::Timestamp::now(),
                         source_id: id.clone(),
-                        status: lk_vault::LogStatus::Skipped,
+                        status,
                         event_count: 0,
                         duration_ms: started_at.elapsed().as_millis() as u64,
-                        error: None,
+                        error: error.map(str::to_owned),
                     },
                     &mut had_failure,
                 )
@@ -481,6 +488,7 @@ pub async fn run(
             .map(lk_core::manual_original::ManualBundleCapture::byte_len)
             .sum::<usize>();
         planned.push(Planned {
+            observation_outcome,
             manual_originals,
             manual_retirement_blocked,
             id: id.clone(),
@@ -681,11 +689,7 @@ pub async fn run(
     // anywhere just leaves the affected pages for the next run to reproduce; there is no
     // commit point to roll back.
     for p in &planned {
-        let status = if any_write_failed {
-            lk_vault::LogStatus::Failed
-        } else {
-            lk_vault::LogStatus::Success
-        };
+        let (status, error) = source_log_outcome(p.observation_outcome, any_write_failed, false);
         record_log(
             &log,
             &lk_vault::LogEntry {
@@ -694,11 +698,7 @@ pub async fn run(
                 status,
                 event_count: p.result.events.len(),
                 duration_ms: p.started_at.elapsed().as_millis() as u64,
-                error: if any_write_failed {
-                    Some("vault write failed".into())
-                } else {
-                    None
-                },
+                error: error.map(str::to_owned),
             },
             &mut had_failure,
         )
@@ -852,4 +852,60 @@ async fn record_failure(
         had_failure,
     )
     .await;
+}
+
+/// Health reads these persisted statuses: publication success cannot turn partial
+/// provider reach into a successful collection, including an empty partial result.
+fn source_log_outcome(
+    outcome: lk_source::ObservationOutcome,
+    write_failed: bool,
+    quiet: bool,
+) -> (lk_vault::LogStatus, Option<&'static str>) {
+    use lk_source::ObservationOutcome;
+    use lk_vault::LogStatus;
+    match (write_failed, outcome == ObservationOutcome::Partial, quiet) {
+        (true, true, _) => (
+            LogStatus::Failed,
+            Some("vault write failed; source reach is incomplete (partial observation)"),
+        ),
+        (true, false, _) => (LogStatus::Failed, Some("vault write failed")),
+        (false, true, _) => (
+            LogStatus::Failed,
+            Some(
+                "source reach is incomplete (partial observation); retained events do not represent complete collection",
+            ),
+        ),
+        (false, false, true) => (LogStatus::Skipped, None),
+        (false, false, false) => (LogStatus::Success, None),
+    }
+}
+
+#[cfg(test)]
+mod observation_log_tests {
+    use super::source_log_outcome;
+    use lk_source::ObservationOutcome;
+    use lk_vault::LogStatus;
+
+    #[test]
+    fn partial_reach_never_becomes_success_or_a_quiet_skip() {
+        for quiet in [false, true] {
+            let (status, error) = source_log_outcome(ObservationOutcome::Partial, false, quiet);
+            assert_eq!(status, LogStatus::Failed);
+            assert!(error.unwrap().contains("source reach is incomplete"));
+        }
+        assert_eq!(
+            source_log_outcome(ObservationOutcome::Observed, false, true),
+            (LogStatus::Skipped, None)
+        );
+        assert_eq!(
+            source_log_outcome(ObservationOutcome::Observed, false, false),
+            (LogStatus::Success, None)
+        );
+        let (status, error) = source_log_outcome(ObservationOutcome::Partial, true, false);
+        assert_eq!(status, LogStatus::Failed);
+        let error = error.unwrap();
+        assert!(
+            error.contains("vault write failed") && error.contains("source reach is incomplete")
+        );
+    }
 }

@@ -82,6 +82,7 @@ fn pipeline_env(
     bin: &str,
     config_path: &std::path::Path,
     skill_dir: Option<&std::path::Path>,
+    claude_config_dir: Option<&std::path::Path>,
 ) -> Vec<(String, String)> {
     let mut env = vec![
         ("LORE_BIN".to_string(), bin.to_string()),
@@ -89,6 +90,9 @@ fn pipeline_env(
     ];
     if let Some(dir) = skill_dir {
         env.push(("LORE_SKILL_DIR".into(), dir.display().to_string()));
+    }
+    if let Some(dir) = claude_config_dir {
+        env.push(("CLAUDE_CONFIG_DIR".into(), dir.display().to_string()));
     }
     if let Ok(path) = std::env::var("PATH") {
         env.insert(0, ("PATH".to_string(), path));
@@ -105,24 +109,23 @@ fn pipeline_env(
     env
 }
 
-fn resolve_skill_dir(
+fn resolve_existing_dir(
+    name: &str,
     value: Option<&std::ffi::OsStr>,
 ) -> miette::Result<Option<std::path::PathBuf>> {
     let Some(value) = value else {
         return Ok(None);
     };
     if value.is_empty() {
-        return Err(miette::miette!(
-            "LORE_SKILL_DIR must name an existing directory"
-        ));
+        return Err(miette::miette!("{name} must name an existing directory"));
     }
     let path = std::path::Path::new(value);
     let absolute = path
         .canonicalize()
-        .map_err(|e| miette::miette!("resolve LORE_SKILL_DIR {}: {e}", path.display()))?;
+        .map_err(|e| miette::miette!("resolve {name} {}: {e}", path.display()))?;
     if !absolute.is_dir() || absolute.to_str().is_none() {
         return Err(miette::miette!(
-            "LORE_SKILL_DIR must name a directory with a UTF-8 path: {}",
+            "{name} must name a directory with a UTF-8 path: {}",
             path.display()
         ));
     }
@@ -218,8 +221,10 @@ pub async fn run(
                 );
             }
             let skill_dir_value = std::env::var_os("LORE_SKILL_DIR");
-            let skill_dir = resolve_skill_dir(skill_dir_value.as_deref())?;
-            pipeline_env(bin, &config_path, skill_dir.as_deref())
+            let skill_dir = resolve_existing_dir("LORE_SKILL_DIR", skill_dir_value.as_deref())?;
+            let profile_value = std::env::var_os("CLAUDE_CONFIG_DIR");
+            let profile = resolve_existing_dir("CLAUDE_CONFIG_DIR", profile_value.as_deref())?;
+            pipeline_env(bin, &config_path, skill_dir.as_deref(), profile.as_deref())
         }
         None => {
             if jobs
