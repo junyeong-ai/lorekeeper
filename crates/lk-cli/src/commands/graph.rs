@@ -676,8 +676,7 @@ async fn enqueue_syntheses(
     // A task already waiting for the SAME INPUT is the same task. This sweep runs on every
     // pipeline pass and by hand, and re-queueing what a drain has not reached yet accumulates
     // identical jobs that all classify `current` — so `queue prune` keeps them and the drain
-    // does the work again for each. The ingest path has no such hazard: a re-render REPLACES
-    // that run's file.
+    // does the work again for each. The common queue flush also reuses exact pending requests.
     //
     // Keyed on the input AND on the task still being alive — both, because a task can stop
     // being answerable in two independent ways. Its input can move on (an ordinary page

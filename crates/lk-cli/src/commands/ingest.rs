@@ -83,9 +83,7 @@ pub async fn run(
 
     // Surface pending (undrained) queue files — never silently ignore them. The risk
     // differs by provider, so the message does too:
-    //   - queue mode: re-running just emits another file that `/lore-process` drains
-    //     alongside the existing ones; warn so the user can drain first to avoid
-    //     duplicate LLM work on the same target pages.
+    //   - queue mode: exact requests reuse pending work; changed requests still need a drain.
     //   - any non-queue provider (e.g. noop): this run writes the pages but produces no
     //     tasks to fill the empty sections, so the pending tasks are stranded — a stronger
     //     warning, since draining means switching back to queue.
@@ -96,11 +94,11 @@ pub async fn run(
             tracing::warn!(
                 pending,
                 queue_dir = %queue_dir.display(),
-                "pending queue files exist; run /lore-process first to avoid duplicate LLM work",
+                "pending queue files exist; run /lore-process to complete semantic work",
             );
             eprintln!(
                 "! {pending} pending queue file(s) under {}/.lorekeeper/queue/. Run \
-                 /lore-process first to avoid duplicate LLM work on the same target pages.",
+                 /lore-process to complete semantic work; identical pending requests are reused.",
                 vault_root.display(),
             );
         } else {

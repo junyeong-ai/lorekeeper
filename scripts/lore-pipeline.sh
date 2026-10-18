@@ -110,7 +110,10 @@ claude_skill() {
     # `./config.yaml` before the XDG one, and this session runs with the vault as its CWD — so a
     # `config.yaml` sitting at the vault root silently drained a different vault than the one
     # every other stage of this run operated on.
-    env -C "$VAULT" LORE_CONFIG="$CONFIG" "$CLAUDE" -p "$prompt" \
+    # Only the semantic consumer is serialized, from its first read through publication.
+    # Collection/period selection and short deterministic writers keep their own locks.
+    # workflow passes the selected canonical config/template paths to this exec chain.
+    lore_cmd workflow --wait -- env -C "$VAULT" "$CLAUDE" -p "$prompt" \
         --append-system-prompt "$AUTONOMOUS_PREAMBLE" \
         --permission-mode acceptEdits \
         --allowedTools "Bash(lore:*)" "Bash(ls:*)" "Bash(cat:*)" "Bash(jq:*)" \

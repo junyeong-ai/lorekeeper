@@ -126,10 +126,14 @@ knows about; provider choice is config-driven (`build_llm_client` in lk-cli).
   name — renaming or adding a kind fails the test until the skill documentation is
   updated.
 - **Providers**:
-  - `QueueLlmClient` — buffers tasks in memory; `flush` writes the whole run through
-    `write_tasks_atomic` (temp + fsync + rename, cleaning the temp on rename failure) —
-    the single queue-file writer, also used by `lore queue prune` to rewrite files, so
-    every queue file on disk has identical durability and encoding guarantees.
+  - `QueueLlmClient` — buffers tasks in memory; `flush` holds the queue claim and reuses
+    pending requests with exactly equal kind, cache hash, full input and target. Attempt IDs
+    and creation times do not participate; processed history cannot suppress fresh work.
+    Malformed pending lines remain byte-for-byte in place and are reported, never reused.
+    Actual I/O, lock or publication failures preserve the buffer for retry. New requests use
+    `write_tasks_atomic` (temp + fsync + rename, cleaning the temp on rename failure),
+    also used by `lore queue prune` to rewrite files. Journaled commands publish their
+    encoded tasks through a recoverable vault mutation plan.
     Invariant: a `.jsonl` file becomes visible only after its target pages
     were written, so it never references a page that doesn't exist.
   - `NoopLlmClient` — empty results (uses default trait impls). For dev/CI.

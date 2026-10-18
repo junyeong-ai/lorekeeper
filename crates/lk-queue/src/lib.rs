@@ -7,9 +7,10 @@ mod queue;
 pub use mock::MockLlmClient;
 pub use noop::NoopLlmClient;
 pub use queue::{
-    CORRUPT_SUBDIR, PROCESSED_SUBDIR, QueueClaim, QueueLlmClient, QueueTask, RESULTS_SUBDIR,
-    ReportedConcept, ResultBatch, SECTION_RESULT_SUFFIX, SYNTHESIS_RESULT_SUFFIX, SectionResult,
-    SynthesisResult, TaskKind, TaskResult, claim_queue, read_results, write_tasks_atomic,
+    CORRUPT_SUBDIR, PROCESSED_SUBDIR, QueueClaim, QueueFile, QueueLlmClient, QueueTask,
+    RESULTS_SUBDIR, ReportedConcept, ResultBatch, SECTION_RESULT_SUFFIX, SYNTHESIS_RESULT_SUFFIX,
+    SectionResult, SynthesisResult, TaskKind, TaskResult, claim_queue, read_results, read_tasks,
+    write_tasks_atomic,
 };
 
 use async_trait::async_trait;
@@ -47,7 +48,7 @@ fn deserialize_locale<'de, D: serde::Deserializer<'de>>(
 /// `EnumIter` exists for the skill-contract tests: the iterator is macro-generated
 /// from the variant list itself, so iterating the full kind space can never drift
 /// from the enum — no hand-maintained variant array to forget.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::EnumIter)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, strum::EnumIter)]
 #[serde(rename_all = "kebab-case")]
 pub enum TargetKind {
     /// Daily page summary body.
@@ -120,7 +121,7 @@ impl TargetKind {
 
 /// Where the result of a semantic task should land in the vault. Carried through the
 /// LlmClient trait so queue-mode tasks have full target context for skill processing.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TaskTarget {
     pub vault_path: String,
     pub kind: TargetKind,

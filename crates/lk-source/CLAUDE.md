@@ -348,7 +348,10 @@ map to `RawItem`.
   still refused by the pipeline's shared upper bound.
 - **Nodex metadata and prose come from one verified public response.** Collect the node,
   canonical body and outgoing relations together, without reparsing a separate source-file
-  read. `observation_revision` carries a scheme and digest of that observation; it never
+  read. Preserve the public node's `attrs` under `source_record.attributes`, including
+  nested values: substantive knowledge may be authored in attributes instead of the body.
+  They remain source declarations, never top-level identity or completion state.
+  `observation_revision` carries a scheme and digest of that observation; it never
   claims raw-file equality or replaces the meaning of earlier `content_revision` evidence.
   Requery selected observations and repeat link projection before returning; changed
   observations or projected links refuse the source. Inventory and config checks remain

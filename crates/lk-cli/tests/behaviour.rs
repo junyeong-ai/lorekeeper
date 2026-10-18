@@ -135,6 +135,10 @@ const SWEEP: &[&[&str]] = &[
 /// rather than an omission.
 const EXEMPT: &[(&[&str], &str)] = &[
     (
+        &["workflow"],
+        "executes an external foreground command on Unix; workflow integration tests contention, descriptor inheritance, child config, literal arguments, exit status and lease release",
+    ),
+    (
         &["wiki", "provenance"],
         "requires imported document identities absent from this corpus; wiki_provenance integration tests exact successor resolution, revision-pinned pagination and read-only publication against a configured knowledge directory",
     ),

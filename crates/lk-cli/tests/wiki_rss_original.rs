@@ -91,6 +91,7 @@ fn local_feed(body: String) -> (String, std::thread::JoinHandle<()>) {
                 other => panic!("local feed was not requested: {other:?}"),
             }
         };
+        stream.set_nonblocking(false).unwrap();
         stream
             .set_read_timeout(Some(std::time::Duration::from_secs(5)))
             .unwrap();

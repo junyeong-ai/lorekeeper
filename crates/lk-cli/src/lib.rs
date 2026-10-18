@@ -32,6 +32,15 @@ pub struct Cli {
 
 #[derive(clap::Subcommand)]
 pub enum Command {
+    /// Hold a Unix workflow lease across a foreground command and its inherited children
+    Workflow {
+        /// Wait for another workflow; by default contention refuses without starting COMMAND
+        #[arg(long)]
+        wait: bool,
+        /// Foreground command and literal arguments, after -- (no shell interpretation)
+        #[arg(required = true, last = true, num_args = 1..)]
+        command: Vec<std::ffi::OsString>,
+    },
     /// Scaffold project files interactively
     Init {
         #[command(subcommand)]
@@ -247,6 +256,7 @@ pub async fn run() -> miette::Result<()> {
     }
 
     match cli.command {
+        Command::Workflow { wait, command } => commands::workflow::run(&opts, wait, command),
         Command::Init { target } => match target {
             InitTarget::Credentials { vault } => commands::init::credentials(&opts, vault).await,
             InitTarget::Schema { root } => commands::schema::run(&opts, root).await,

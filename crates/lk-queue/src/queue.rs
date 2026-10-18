@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -12,8 +14,8 @@ use crate::{
 };
 
 /// LlmClient that defers semantic work to a Claude Code skill. Buffers task records
-/// in memory during `summarize`/`extract_concepts` calls; `flush` writes the entire
-/// queue to `<queue_dir>/{run_id}.jsonl` atomically (temp + fsync + rename).
+/// in memory during `summarize`/`extract_concepts` calls; `flush` admits requests not
+/// already pending to `<queue_dir>/{run_id}.jsonl` atomically (temp + fsync + rename).
 ///
 /// The buffer-then-rename design preserves an invariant `/lore-process` depends on:
 /// **a queue file exists only when every task in it points at a page the pipeline
@@ -71,6 +73,10 @@ pub struct QueueTask {
 const RELATED_ANCHOR: &str = "related_anchor";
 
 impl QueueTask {
+    fn request_identity(&self) -> (TaskKind, &str, &crate::Identity, &TaskTarget) {
+        (self.kind, &self.cache_hash, &self.input, &self.target)
+    }
+
     /// Required policy for the typed input shape.
     pub fn expected_generation_policy(&self) -> &'static str {
         match self.kind {
@@ -314,7 +320,7 @@ pub enum QueueClaim {
     Unavailable(std::io::Error),
 }
 
-/// Claim the queue while materializing results or pruning pending files.
+/// Claim the queue while admitting tasks, materializing results or pruning pending files.
 ///
 /// Applying a result is a read-modify-write across several files that ends in deleting the
 /// result: two runs at once each read an origin page before the other writes it, so the
@@ -400,7 +406,7 @@ pub fn read_results(queue_dir: &Path) -> std::io::Result<ResultBatch> {
 }
 
 /// `EnumIter` exists for the skill-contract tests — see [`crate::TargetKind`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::EnumIter)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, strum::EnumIter)]
 #[serde(rename_all = "kebab-case")]
 pub enum TaskKind {
     Summarize,
@@ -459,10 +465,9 @@ impl TaskKind {
     }
 }
 
-/// Serialize `tasks` to JSONL and write them to `final_path` atomically. The single
-/// writer for queue files: `QueueLlmClient::flush` creates them through it and `lore
-/// queue prune` rewrites them through it, so every queue file on disk — fresh or pruned
-/// — has identical durability and encoding. Delegates the temp + fsync + rename +
+/// Serialize `tasks` to JSONL and write them to `final_path` atomically. Used by
+/// `QueueLlmClient::flush` and `lore queue prune` for identical durability and encoding.
+/// Delegates the temp + fsync + rename +
 /// dir-fsync + per-writer-unique-temp mechanics to `lk_core::fs::write_atomic` (the one
 /// sync atomic write in the workspace); a `.jsonl` path yields a `*.jsonl.tmp` temp the
 /// ingest startup sweep still reaps.
@@ -474,6 +479,57 @@ pub fn write_tasks_atomic(final_path: &Path, tasks: &[QueueTask]) -> std::io::Re
         buf.push('\n');
     }
     lk_core::fs::write_atomic(final_path, buf.as_bytes(), None)
+}
+
+pub struct QueueFile {
+    pub tasks: Vec<QueueTask>,
+    pub unparseable: usize,
+}
+
+impl QueueFile {
+    pub fn is_rewritable(&self) -> bool {
+        self.unparseable == 0
+    }
+}
+
+/// Decode JSONL without losing malformed lines or treating decode errors as I/O failures.
+pub fn read_tasks(path: &Path) -> std::io::Result<QueueFile> {
+    let file = std::fs::File::open(path)?;
+    let mut tasks = Vec::new();
+    let mut unparseable = 0;
+    for (index, line) in BufReader::new(file).split(b'\n').enumerate() {
+        let line = line?;
+        if line.iter().all(|byte| byte.is_ascii_whitespace()) {
+            continue;
+        }
+        match serde_json::from_slice(&line) {
+            Ok(task) => tasks.push(task),
+            Err(error) => {
+                unparseable += 1;
+                tracing::warn!(file = %path.display(), line = index + 1, error = %error, "unparseable queue line preserved; not eligible for reuse");
+            }
+        }
+    }
+    Ok(QueueFile { tasks, unparseable })
+}
+
+fn read_pending_tasks(queue_dir: &Path) -> std::io::Result<Vec<QueueTask>> {
+    let mut tasks = Vec::new();
+    for entry in std::fs::read_dir(queue_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "jsonl") {
+            continue;
+        }
+        if !entry.file_type()?.is_file() {
+            return Err(std::io::Error::other(format!(
+                "pending queue entry is not a regular file: {}",
+                path.display()
+            )));
+        }
+        tasks.extend(read_tasks(&path)?.tasks);
+    }
+    Ok(tasks)
 }
 
 impl QueueLlmClient {
@@ -596,9 +652,30 @@ impl LlmClient for QueueLlmClient {
         std::fs::create_dir_all(&self.queue_dir)
             .map_err(|e| QueueError::QueueIo(format!("create dir: {e}")))?;
 
-        let final_path = self.queue_path();
-        write_tasks_atomic(&final_path, &buffer.tasks)
-            .map_err(|e| QueueError::QueueIo(format!("write {}: {e}", final_path.display())))?;
+        let _claim = match claim_queue(&self.queue_dir)
+            .map_err(|e| QueueError::QueueIo(format!("claim queue: {e}")))?
+        {
+            QueueClaim::Held(file) => file,
+            QueueClaim::Busy => return Err(QueueError::QueueIo("queue is busy".into())),
+            QueueClaim::Unavailable(e) => {
+                return Err(QueueError::QueueIo(format!("queue lock unavailable: {e}")));
+            }
+        };
+        let pending = read_pending_tasks(&self.queue_dir)
+            .map_err(|e| QueueError::QueueIo(format!("read pending requests: {e}")))?;
+        let mut identities: HashSet<_> = pending.iter().map(QueueTask::request_identity).collect();
+        let tasks: Vec<_> = buffer
+            .tasks
+            .iter()
+            .filter(|task| identities.insert(task.request_identity()))
+            .cloned()
+            .collect();
+
+        if !tasks.is_empty() {
+            let final_path = self.queue_path();
+            write_tasks_atomic(&final_path, &tasks)
+                .map_err(|e| QueueError::QueueIo(format!("write {}: {e}", final_path.display())))?;
+        }
 
         *buffer = Buffer::default();
         Ok(())
@@ -611,6 +688,135 @@ mod tests {
     use crate::TargetKind;
     use lk_core::i18n::Locale;
     use tempfile::TempDir;
+
+    fn build_summary_request(text: &str) -> SummarizeRequest {
+        SummarizeRequest {
+            text: text.into(),
+            max_sentences: 5,
+            locale: Locale::Ko,
+            source_type: None,
+            focus: None,
+            target: TaskTarget {
+                vault_path: "daily/test/2026-05-23.md".into(),
+                kind: TargetKind::DailySummary,
+                anchor: "## Summary".into(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_requests_reuse_pending_work_but_not_processed_history() {
+        let dir = TempDir::new().unwrap();
+        let first = QueueLlmClient::new(dir.path().into());
+        for _ in 0..2 {
+            first
+                .summarize(build_summary_request("same"))
+                .await
+                .unwrap();
+        }
+        first.flush().await.unwrap();
+        assert_eq!(read_pending_tasks(dir.path()).unwrap().len(), 1);
+
+        let repeated = QueueLlmClient::new(dir.path().into());
+        repeated
+            .summarize(build_summary_request("same"))
+            .await
+            .unwrap();
+        repeated.flush().await.unwrap();
+        assert!(!repeated.queue_path().exists());
+        repeated.flush().await.unwrap();
+
+        let processed = dir.path().join(PROCESSED_SUBDIR);
+        std::fs::create_dir(&processed).unwrap();
+        std::fs::rename(first.queue_path(), processed.join("retired.jsonl")).unwrap();
+        let fresh = QueueLlmClient::new(dir.path().into());
+        fresh
+            .summarize(build_summary_request("same"))
+            .await
+            .unwrap();
+        fresh.flush().await.unwrap();
+        assert_eq!(read_pending_tasks(dir.path()).unwrap().len(), 1);
+        assert!(fresh.queue_path().exists());
+    }
+
+    #[tokio::test]
+    async fn admission_preserves_payload_and_destination_differences_with_the_same_cache_hash() {
+        let dir = TempDir::new().unwrap();
+        let client = QueueLlmClient::new(dir.path().into());
+        let base = client.build_task("sum", TaskKind::Summarize, build_summary_request("same"));
+        let mut variants = vec![base.clone()];
+        let mut target = base.clone();
+        target.target.vault_path = "daily/other/2026-05-23.md".into();
+        variants.push(target);
+        let mut heading = base.clone();
+        heading.target.anchor = "## 요약".into();
+        variants.push(heading);
+        let mut routing = base.clone();
+        routing.input.insert("source_type".into(), "manual".into());
+        variants.push(routing);
+        let mut regeneration = base.clone();
+        regeneration
+            .input
+            .insert("regenerated_from".into(), base.task_id.clone().into());
+        variants.push(regeneration);
+        for task in &mut variants {
+            task.task_id = client.next_id("sum");
+        }
+        assert!(
+            variants
+                .iter()
+                .all(|task| task.cache_hash == base.cache_hash)
+        );
+        client.buffer.lock().await.tasks.extend(variants);
+        client.flush().await.unwrap();
+        assert_eq!(read_pending_tasks(dir.path()).unwrap().len(), 5);
+    }
+
+    #[tokio::test]
+    async fn failed_admission_preserves_buffer_for_retry() {
+        let dir = TempDir::new().unwrap();
+        let client = QueueLlmClient::new(dir.path().into());
+        client
+            .summarize(build_summary_request("new"))
+            .await
+            .unwrap();
+        let held = claim_queue(dir.path()).unwrap();
+        assert!(matches!(held, QueueClaim::Held(_)));
+        assert!(client.flush().await.is_err());
+        assert!(!client.queue_path().exists());
+        drop(held);
+
+        client.flush().await.unwrap();
+        assert_eq!(read_pending_tasks(dir.path()).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn malformed_pending_lines_are_preserved_without_suppressing_new_work() {
+        let dir = TempDir::new().unwrap();
+        let client = QueueLlmClient::new(dir.path().into());
+        let retained = client.build_task("sum", TaskKind::Summarize, build_summary_request("same"));
+        let mut original = serde_json::to_vec(&retained).unwrap();
+        original.extend_from_slice(b"\n{unfinished JSON\n\xff\n");
+        let path = dir.path().join("retained.jsonl");
+        std::fs::write(&path, &original).unwrap();
+        client
+            .summarize(build_summary_request("same"))
+            .await
+            .unwrap();
+        client
+            .summarize(build_summary_request("new"))
+            .await
+            .unwrap();
+        client.flush().await.unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(read_tasks(&path).unwrap().unparseable, 2);
+        assert!(!read_tasks(&path).unwrap().is_rewritable());
+        let admitted = std::fs::read_to_string(client.queue_path()).unwrap();
+        assert_eq!(admitted.lines().count(), 1);
+        let task: QueueTask = serde_json::from_str(admitted.trim()).unwrap();
+        assert_eq!(task.input["text"], "new");
+        assert_eq!(read_pending_tasks(dir.path()).unwrap().len(), 2);
+    }
 
     #[test]
     fn rss_task_policy_dispatch_is_explicit_and_malformed_v2_never_falls_back() {
@@ -829,9 +1035,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let client = QueueLlmClient::new(dir.path().to_path_buf());
 
-        for _ in 0..3 {
+        for index in 0..3 {
             let req = SummarizeRequest {
-                text: "x".into(),
+                text: format!("input {index}"),
                 max_sentences: 5,
                 locale: Locale::Ko,
                 source_type: None,
@@ -1369,10 +1575,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn flush_rename_failure_leaves_no_tmp() {
-        // Force the atomic rename to fail by occupying the final path with a directory,
-        // then assert flush errors AND the temp file is cleaned up (no partial .jsonl,
-        // no lingering .tmp).
+    async fn invalid_queue_entry_preserves_buffer_without_temporary_files() {
         let dir = TempDir::new().unwrap();
         let client = QueueLlmClient::new(dir.path().to_path_buf());
         client
@@ -1394,10 +1597,13 @@ mod tests {
         std::fs::create_dir_all(client.queue_path()).unwrap();
 
         let result = client.flush().await;
-        assert!(result.is_err(), "rename onto a directory must fail");
+        assert!(result.is_err(), "a queue entry must be a regular file");
         assert!(
             !any_tmp_in(dir.path()),
-            "temp file must be cleaned up on rename failure"
+            "rejected admission must leave no temporary file"
         );
+        std::fs::remove_dir(client.queue_path()).unwrap();
+        client.flush().await.unwrap();
+        assert_eq!(read_pending_tasks(dir.path()).unwrap().len(), 1);
     }
 }

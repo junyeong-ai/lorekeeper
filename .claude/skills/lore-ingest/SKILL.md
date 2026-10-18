@@ -1,6 +1,6 @@
 ---
 name: lore-ingest
-version: 0.56.1
+version: 0.57.0
 description: Daily knowledge ingestion pipeline — collects from Gmail, Google Drive, Google Calendar, Slack, Jira, Confluence, RSS, project repositories (nodex), and a manual inbox into an Obsidian vault. Deduplicates, classifies, extracts concepts, writes structured pages. Optionally tracks your own work into a work-log when the `personal:` module is configured. Phased ingest with atomic per-page writes and durable published queue tasks.
 argument-hint: "<subcommand> [args]"
 disable-model-invocation: true
@@ -46,6 +46,7 @@ an Obsidian vault. All commands accept `--config <path>` to override.
 | `lore maintenance [--dry-run]` | Prune operational history (ingest log, drained queue files) past `maintenance.retention_days` (default 90d). Streaming event logs are permanent, and each source's latest log entry survives any horizon — it is the state `lore health` reads, not history |
 | `lore queue prune [--dry-run]` | Leave the queue holding only work that still needs an LLM session: drop dead tasks (stale / missing-target), retire a run whose every task is already answered |
 | `lore self status` | What this installation is, and whether every deployed copy — skills, pipelines, templates, config example, `AGENTS.md` — still matches the running binary. Non-zero when any differs |
+| `lore workflow -- claude` | Start a manual Unix agent session under the semantic workflow lease before reading inputs; add `--wait` to wait for another consumer. Scheduled headless calls already acquire it |
 | `lore self deploy` | Rewrite those copies from what the binary carries. This is the repair `lore self status` reports, and what an install and an update both run |
 | `lore self update [--version V]` | Replace the binary with a published release, then redeploy. Refuses while the queue still holds work, and refuses a release older than the running one unless `--version` names it deliberately |
 | `lore self uninstall` | Remove the binary and everything it deployed. The vault is never touched |

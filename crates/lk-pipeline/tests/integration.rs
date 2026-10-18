@@ -644,7 +644,7 @@ async fn queue_mode_emits_jsonl_tasks_with_targets() {
         .extract_concepts = true;
 
     let queue_dir = vault.join(".lorekeeper").join("queue");
-    let llm: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
+    let llm = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
     let ctx = build_ctx(&config, llm.clone());
     let mut pipeline = Pipeline::new(vault, ctx);
     let sc = config.sources.get("test-source").unwrap();
@@ -680,13 +680,7 @@ async fn queue_mode_emits_jsonl_tasks_with_targets() {
     llm.flush().await.expect("flush should succeed");
 
     // After flush: a single JSONL file with both tasks.
-    let mut entries = tokio::fs::read_dir(&queue_dir).await.unwrap();
-    let entry = entries
-        .next_entry()
-        .await
-        .unwrap()
-        .expect("queue file should exist");
-    let content = tokio::fs::read_to_string(entry.path()).await.unwrap();
+    let content = tokio::fs::read_to_string(llm.queue_path()).await.unwrap();
     let tasks: Vec<serde_json::Value> = content
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
@@ -2531,7 +2525,7 @@ mod materialized_view {
         let items = vec![raw_item("Event A", "Body A", "E1", ts)];
 
         let queue_dir = vault.join(".lorekeeper").join("queue");
-        let llm: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
+        let llm = Arc::new(lk_queue::QueueLlmClient::new(queue_dir.clone()));
         {
             let mut pipeline = Pipeline::new(vault, build_ctx(&config, llm.clone()));
             let r = pipeline
@@ -2567,9 +2561,7 @@ mod materialized_view {
             }
         };
 
-        let mut entries = tokio::fs::read_dir(&queue_dir).await.unwrap();
-        let entry = entries.next_entry().await.unwrap().unwrap();
-        let content = tokio::fs::read_to_string(entry.path()).await.unwrap();
+        let content = tokio::fs::read_to_string(llm.queue_path()).await.unwrap();
         let mut checked = 0;
         for line in content.lines() {
             let task: serde_json::Value = serde_json::from_str(line).unwrap();

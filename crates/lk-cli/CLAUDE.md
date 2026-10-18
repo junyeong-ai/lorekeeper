@@ -29,6 +29,15 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   a full run still writes: the failure is loud (non-zero exit) and the next full run
   re-renders the page complete, while blocking on `had_failure` would freeze the work-log
   on any persistently failing source, news feeds included.
+- **`lore workflow -- COMMAND` is a separate Unix foreground lease.** It resolves the
+  canonical vault once, locks `.lorekeeper/workflow.lock`, clears only the descriptor's
+  CLOEXEC flag through safe rustix and execs the literal command. Default contention starts
+  no child; `--wait` explicitly blocks. The lease is not a mutation session and does not
+  recover a journal. Child CLI commands use normal short writer locks without reacquiring
+  workflow. Inherited-descriptor closure or detached work is outside the guarantee; Windows
+  is unsupported. No PID/TTL/environment ownership bypass exists. Scheduled headless
+  skill calls acquire it once around their LLM read/judge/publish session; manual agents
+  start under it before reading inputs. Existing sessions and installed schedules are not auto-adopted.
 - **`lore schedule`** emits ONE all-source entry from `ingest.schedule` — never per source —
   plus synthesis and combined maintenance/queue-prune entries from their own keys. `build_jobs` is the
   testable job list; `--pipeline-dir` swaps the ingest and weekly-synthesis entries for the
@@ -140,10 +149,9 @@ subcommand; `commands/mod.rs` holds shared helpers (`find_config`, `load_config`
   REFUSED rather than queued: the results stay staged for whichever run gets there. A
   filesystem that cannot provide the advisory lock is refused; results remain staged. Other
   vault writers do not share this lock, so bulk runs serialize those writers separately. The claim is
-  scoped to that write and never to a drain SESSION — a session spans many processes and hours,
-  and an exclusive claim held that long needs a liveness answer nothing here can give, which is
-  where timeouts and their false positives come in. `--dry-run` writes nothing and so claims
-  nothing.
+  scoped to that write and never to a drain SESSION. The separate Unix workflow lease
+  coordinates cooperating foreground sessions without holding the queue claim across
+  children. `--dry-run` writes nothing and so claims nothing.
   **Nothing one result gets wrong reaches the batch**, and the writes are where that was
   breached: a page the writer REFUSES — frontmatter a drain mangled while stamping a marker —
   aborted the run with concept pages on disk and no citations, and aborted again at the same

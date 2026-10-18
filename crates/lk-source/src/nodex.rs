@@ -856,6 +856,13 @@ fn build_document_observation(
             .unwrap_or(serde_json::Value::Null);
     }
     record["relations"] = serde_json::json!(detail.outgoing);
+    if let Some(attributes) = detail
+        .node
+        .get("attrs")
+        .filter(|v| !v.as_object().is_some_and(serde_json::Map::is_empty))
+    {
+        record["attributes"] = attributes.clone();
+    }
 
     Ok(RawItem {
         // The repository's own vocabulary, carried so a reader can ask for decision records
@@ -1232,7 +1239,13 @@ exit "$rc"
     #[test]
     fn public_observation_binds_metadata_body_and_outgoing_without_raw_claims() {
         let root = tempfile::tempdir().unwrap();
-        let detail = observation();
+        let mut detail = observation();
+        detail.node["attrs"] = serde_json::json!({
+            "prompt": "Compare the same SHA.\nKeep nonadditive missing values blank.",
+            "cadence": "monthly",
+            "thresholds": {"days": 14, "enabled": false},
+            "llm_inputs": {"summary_done": "source declaration only"}
+        });
         let mut selected = item("hub", "2026-10-17");
         selected.status = "archived".into();
         let ctx = ExtractContext {
@@ -1255,6 +1268,11 @@ exit "$rc"
         .unwrap();
         assert!(raw.body.is_empty());
         assert_eq!(raw.metadata["source_record"]["status"], "archived");
+        assert_eq!(
+            raw.metadata["source_record"]["attributes"],
+            detail.node["attrs"]
+        );
+        assert!(raw.metadata.get("llm_inputs").is_none());
         assert_eq!(raw.metadata["source_record"]["timestamp_basis"], "observed");
         assert_eq!(
             raw.metadata["source_record"]["observation_revision"]["scheme"],

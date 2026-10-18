@@ -24,6 +24,7 @@ pub mod synthesis;
 pub mod task;
 pub mod validate;
 pub mod wiki;
+pub mod workflow;
 
 pub struct GlobalOptions {
     pub config: Option<PathBuf>,

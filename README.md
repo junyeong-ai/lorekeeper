@@ -340,6 +340,8 @@ lore schema                   # wiki/AGENTS.md(페이지 포맷 스키마) 생�
 
 기본 `lore wiki refresh`는 SQLite 탐색 스냅샷과 작은 `index.md` 진입 안내를 갱신합니다. 전체 Markdown catalog/log/map 자동 내보내기는 `vault.navigation.markdown_exports: true`로 켭니다(기본 false). 명시 `wiki index/log/map`와 `graph index-sync`는 선택적 export 명령으로 유지됩니다. 기본 모드의 graph lint는 export 최신성을 요구하지 않습니다. 생성 마커가 없는 기존 파일은 자동으로 덮거나 삭제하지 않으며, 충돌은 명시적으로 보고합니다. 탐색 세션은 `wiki prepare` 한 번으로 ID를 확보한 뒤 `wiki browse/search/links --snapshot ID`를 반복하고(`links --direction incoming|both`), `wiki read --revision REV`로 현재 원문을 확인합니다. refresh도 준비한 ID를 출력합니다.
 
+프로젝트 문서의 `source_record.attributes`는 nodex 공개 응답의 원본 속성을 보존합니다. routine의 `prompt`처럼 본문 밖에 있는 지식도 요약·추출 입력에 포함하며, 속성은 현재 작업을 실행하라는 지시가 아닌 출처의 내용으로 읽습니다.
+
 새 RSS ingest는 분류 전 수집 텍스트를 `.lorekeeper/evidence/rss/`에 불변 해시 주소로 보존하고 daily의 `source_record.rss_original`로 연결합니다. 이는 공급자의 HTTP/XML 원본이 아니라 adapter가 취득한 본문이며, `event_timestamp`는 published 또는 updated에서 온 adapter 시각이며 취득 시각이 아닙니다(`captured_at: null`). `wiki original`은 목록을 먼저 반환하고, 반환된 `revision`과 정확한 `event_id`로 제목·빈 줄·본문을 문자 단위 페이지네이션합니다. 새 원문은 `page_bound_collection`, 과거 이벤트 로그의 읽기 전용 발견은 `legacy_unbound`입니다. 후자는 해당 daily의 과거 입력임을 증명하지 않습니다. 요약은 해석이며 원문의 부재를 증명하지 않습니다. 공급자 URL을 다시 읽은 내용도 당시 수집본과 같다고 볼 수 없습니다. 새 bound RSS 추출은 LLM이 명시적으로 선택한 `event_id`와 immutable payload revision을 `concept_evidence`에 저장할 수 있습니다. 이 선택만 기사 단위 합성 근거가 되어 무관한 일일 요약 변경으로 재합성되지 않습니다. 과거 페이지와 귀속 없는 링크는 기존 페이지 guard를 유지합니다. `wiki original ORIGIN --evidence-concept CONCEPT`로 선택 목록을 읽고 `--event ID --revision PAYLOAD_REV`로 당시 기사를 확인합니다. 최신 manifest와 다른 과거 선택도 읽을 수 있으며, 현재 사실이나 독립 검증을 보장하지는 않습니다. 추출의 누락은 철회가 아니고, `graph retract-citation`의 `--event`/`--event-revision`으로 명시 철회합니다. `source_count`는 계속 원문 페이지 수입니다. 원문 저장 실패 시 페이지는 그 원문을 참조하지 않으며 dry-run은 보관하지 않습니다.
 
 날짜별 탐색은 `lore wiki browse --snapshot ID --sort created --from 2026-01-01 --to 2026-12-31 --json`을 사용합니다. `created`는 수집일이 아니라 원문 작성일일 수 있습니다. 날짜가 없거나 유효하지 않으면 상태를 표시하고 날짜 필터에서는 제외합니다. 날짜순은 최신부터이며, 필터가 없으면 날짜 미상 항목을 마지막에 둡니다.
@@ -457,7 +459,17 @@ lore schedule --format launchd --bin "$(command -v lore)" \
               --pipeline-dir ~/.local/share/lorekeeper/pipelines               # macOS
 ```
 
-예약 스크립트는 `/bin/bash`로 직접 실행되어 작업별 이름이 표시됩니다. 월간·분기·연간 검토는 각 주기를 유지하며 저장소 쓰기 잠금을 기다립니다. 유지보수와 큐 정리는 한 작업으로 순차 실행됩니다. 기존 예약을 교체할 때는 `com.lorekeeper.queue-prune` LaunchAgent도 해제·제거하세요. `--template-dir` 지정은 예약 환경에도 전달됩니다.
+예약된 headless LLM 호출은 `lore workflow --wait -- COMMAND...`를 거쳐 스킬의 읽기·판단·게시 동안 별도 Unix advisory lease를 유지합니다. 스크립트는 `/bin/bash`를 사용하며 결정적 수집·기간 생성·유지보수·알림은 기존의 짧은 writer lock을 유지합니다. 월간·분기·연간 검토는 각 주기를 유지하며 저장소 쓰기 잠금을 기다립니다. 유지보수와 큐 정리는 한 작업으로 순차 실행됩니다. 기존 예약을 교체할 때는 `com.lorekeeper.queue-prune` LaunchAgent도 해제·제거하세요. `--template-dir` 지정은 예약 환경에도 전달됩니다.
+
+수동 저작·검토·게시 세션도 입력을 읽기 전에 같은 lease 안에서 시작합니다.
+
+```bash
+lore --config /absolute/config.yaml workflow -- claude
+# 다른 workflow가 끝날 때까지 명시적으로 기다리려면:
+lore --config /absolute/config.yaml workflow --wait -- claude
+```
+
+수동 실행은 `--wait`를 명시하지 않으면 경합 시 자식 명령을 시작하지 않고 실패하고, 예약 LLM 호출은 기다립니다. 수집과 기간 선택은 이 대기 전에 실행됩니다. 세션이나 pipeline 내부에서 lease를 다시 잡지 마세요. 자식 `lore` 명령은 기존의 짧은 writer lock을 사용합니다. lease는 Unix exec와 상속된 descriptor를 따르며 PID 파일이나 만료 시간이 없습니다. descriptor를 닫거나 작업을 분리 실행하는 프로그램은 보장 범위 밖이고 Windows는 지원하지 않습니다. wrapper 밖 명령과 외부 편집기는 막지 않습니다. 기존 세션·실행 중인 작업은 자동 편입되지 않으므로 옛 예약 자식의 종료를 확인하고 갱신된 pipeline 스크립트를 배포한 뒤 보호된 작업을 시작하세요. 경합을 풀려고 lock 파일을 삭제하면 안 됩니다.
 
 `ingest.schedule`은 **전체 소스를 한 번에** 수집하는 작업 하나를 발행합니다. `--pipeline-dir`가 있으면 `lore-daily.sh`, 없으면 `lore ingest`를 실행합니다. 소스를 지정한 수집은 전체 소스의 일일 집계인 work-log를 건너뜁니다. 각 합성 주기(weekly/monthly/quarterly/annual)는 독립된 일정을 유지하며, `maintenance.schedule`은 보존 기간 정리와 큐 정리를 자동화합니다.
 

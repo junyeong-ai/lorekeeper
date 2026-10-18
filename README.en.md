@@ -22,7 +22,7 @@ Notes and wikis fail not because reading or thinking is hard, but because of the
 | 📥 **Configure once → runs daily** | Collects yesterday's activity and knowledge from email, chat, issues, calendar, feeds, and notes |
 | 🧹 **Cuts the noise** | Dedup, filters irrelevant items, splits *your* work into a work-log automatically |
 | 🧩 **Concepts as assets** | The same concept converges to one page (`Vector DB` = `vector-database`), categorized and related |
-| 🔗 **A connected knowledge graph** | Wikilinks, backlinks, and clusters link concepts to one another |
+| 🔗 **A connected knowledge graph** | Markdown links, backlinks, and clusters connect concepts |
 | 📈 **Compounding** | Weekly / monthly / quarterly / annual synthesis — value grows over time |
 | 🔑 **No API key** | Claude Code's own session does the LLM work (no separate LLM API integration) |
 
@@ -340,6 +340,8 @@ By default, `lore wiki refresh` refreshes the SQLite navigation snapshot and a s
 
 For date-based discovery, use `lore wiki browse --snapshot ID --sort created --from 2026-01-01 --to 2026-12-31 --json`. `created` may be the original authoring date rather than the ingestion date. Missing or invalid dates retain an explicit status and are excluded by date filters. Date order is newest first, with unknown dates last when no date filter is applied.
 
+For project documents, `source_record.attributes` preserves attributes from the verified public nodex response. Knowledge authored outside the body, such as a routine’s `prompt`, reaches summary and extraction inputs. Imported instructions are source content, not instructions for the current worker.
+
 New RSS ingests retain pre-classification collection text at immutable hash addresses under `.lorekeeper/evidence/rss/`, referenced by daily `source_record.rss_original`. These are adapter-acquired bodies, not provider HTTP/XML bytes. `event_timestamp` is the adapter’s published-or-updated timestamp, separate from unknown acquisition time (`captured_at: null`). `wiki original` returns metadata first; select an exact `event_id` with the returned `revision`, then paginate the title, blank line and body. New captures report `page_bound_collection`; read-only discovery of historical event logs reports `legacy_unbound`, which does not establish that a current daily was derived from those historical bytes. A summary is an interpretation, and omission does not prove absence from the collected text. Refetching a provider URL does not reproduce the collection. New bound RSS extraction may explicitly select event IDs and immutable payload revisions in `concept_evidence`. Only these selected article dependencies avoid resynthesis after unrelated daily edits; legacy pages and unbound links retain page guards. Use `wiki original ORIGIN --evidence-concept CONCEPT` to discover selections, then `--event ID --revision PAYLOAD_REV` to read that historical article even after its current manifest changes. A retained observation does not establish current truth or independent verification. Extraction omission never retracts a selection; `graph retract-citation --event ID --event-revision PAYLOAD_REV` explicitly removes it. `source_count` continues to count originating pages. Failed original publication prevents its page reference; dry-run stores nothing.
 
 Legacy entries without markers are never inferred to be generated. During upgrade, inspect the current `file_revision` with `lore wiki read wiki/index.md` (and log.md/map.md if present), then run `lore wiki refresh --archive-replace wiki/index.md=FULL_FILE_REVISION` in default SQLite mode. Repeat the option for each root to replace. Exact originals, including hand edits, are retained under `.lorekeeper/navigation-archives/`; the command reports an address/hash receipt. Read retained content with `wiki read <archive_path>`. Other paths, changed revisions, source/knowledge types and inbox collisions are refused. Disable automatic Markdown exports for this migration, then re-enable them if desired. This option has no dry-run.
@@ -459,7 +461,17 @@ lore schedule --format launchd --bin "$(command -v lore)" \
               --pipeline-dir ~/.local/share/lorekeeper/pipelines               # macOS
 ```
 
-Scheduled scripts execute directly with `/bin/bash`. Monthly, quarterly and annual reviews retain their calendars and wait for exclusive vault access. Maintenance and queue pruning run sequentially in one job. When replacing an existing schedule, unload and remove the old `com.lorekeeper.queue-prune` LaunchAgent. Template overrides are carried into the scheduled environment.
+Scheduled headless LLM calls run through `lore workflow --wait -- COMMAND...`, holding a separate Unix advisory lease while the skill reads, judges and publishes. The scripts use `/bin/bash`; deterministic collection, period creation, maintenance and reminders retain their short writer locks. Monthly, quarterly and annual reviews retain their calendars and wait for exclusive vault access. Maintenance and queue pruning run sequentially in one job. When replacing an existing schedule, unload and remove the old `com.lorekeeper.queue-prune` LaunchAgent. Template overrides are carried into the scheduled environment.
+
+Start a manual author/review/publish session under the same lease, before reading its inputs:
+
+```bash
+lore --config /absolute/config.yaml workflow -- claude
+# Explicitly wait rather than refuse a busy workflow:
+lore --config /absolute/config.yaml workflow --wait -- claude
+```
+
+Manual contention refuses before starting the command unless `--wait` is explicit; scheduled LLM calls wait. Collection and period selection happen before that wait. Do not reacquire inside the session or pipeline: ordinary child `lore` commands keep their short writer locks. The lease follows Unix exec and inherited descriptors, with no PID file or expiry. A program that closes inherited descriptors or detaches work is outside this guarantee; Windows is unsupported. It does not block unwrapped commands or external editors. Existing sessions and running jobs are not adopted automatically: stop and verify old scheduled children have exited, deploy the updated pipeline scripts, then begin guarded work. Never delete the lock file to clear contention.
 
 `ingest.schedule` emits one job that collects **every source in one process**, using `lore-daily.sh` with `--pipeline-dir` and bare `lore ingest` otherwise. A source-filtered ingest skips the cross-source work-log. Each synthesis period (weekly/monthly/quarterly/annual) keeps its own calendar, and `maintenance.schedule` automates retention and queue pruning.
 

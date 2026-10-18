@@ -6,7 +6,7 @@ mod synthesis;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use lk_queue::QueueTask;
+use lk_queue::{QueueFile, QueueTask};
 
 use super::{find_config, load_config};
 
@@ -252,40 +252,8 @@ fn pending_queue_files(queue_dir: &Path) -> miette::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-/// What one queue file holds: the tasks that parsed, and how many lines did not.
-///
-/// An unparseable line is reported and COUNTED rather than failing the read. The whole queue
-/// used to fail on one bad line, which took `count`, `status` and `prune` down together — so a
-/// single malformed line stopped the nightly drain and left no janitor able to clear it.
-struct QueueFile {
-    tasks: Vec<QueueTask>,
-    unparseable: usize,
-}
-
-impl QueueFile {
-    /// Whether this file may be REWRITTEN. A line nobody could parse names work nobody can
-    /// classify, so rewriting the file would drop it silently; the file keeps every line and
-    /// only its own GC is suspended.
-    fn is_rewritable(&self) -> bool {
-        self.unparseable == 0
-    }
-}
-
 fn read_tasks(file: &Path) -> miette::Result<QueueFile> {
-    let content = std::fs::read_to_string(file)
-        .map_err(|e| miette::miette!("read {}: {e}", file.display()))?;
-    let mut tasks = Vec::new();
-    let mut unparseable = 0usize;
-    for line in content.lines().filter(|l| !l.trim().is_empty()) {
-        match serde_json::from_str(line) {
-            Ok(task) => tasks.push(task),
-            Err(e) => {
-                unparseable += 1;
-                tracing::warn!(file = %file.display(), error = %e, "unparseable queue line");
-            }
-        }
-    }
-    Ok(QueueFile { tasks, unparseable })
+    lk_queue::read_tasks(file).map_err(|e| miette::miette!("read {}: {e}", file.display()))
 }
 
 struct PendingTasks {

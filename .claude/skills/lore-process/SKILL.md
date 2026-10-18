@@ -1,6 +1,6 @@
 ---
 name: lore-process
-version: 0.56.1
+version: 0.57.0
 description: Drain the Lorekeeper LLM work queue after `lore ingest` runs in queue mode — fill the empty LLM-owned sections (summaries, refined events, concepts, themes, reviews) of freshly-written vault pages using the active agent session. Idempotent and resumable. Run after each ingest, or on a daily schedule.
 when_to_use: |
   queue process, drain queue, fill summaries,
@@ -33,6 +33,10 @@ content. This skill consumes those tasks: read the queue, perform the LLM
 work in your own session, stage typed result files, and let `lore queue apply`
 publish pages and markers. `lore queue prune` retires completed runs.
 
+Repeated ingest reuses exactly identical pending requests under the queue lock.
+It still requires a drain; older queues may contain duplicate requests, and only
+the authoritative classifier below decides which tasks remain work.
+
 The protocol below is the integrity contract — follow it exactly. The
 generation specs (what good output looks like per task kind) live in
 [references/processing-kinds.md](references/processing-kinds.md), and the
@@ -41,6 +45,10 @@ per-source-type synthesis/extraction strategy (keyed on each task's
 [references/source-types.md](references/source-types.md); read both before
 processing tasks, and re-read them if this session has been compacted since
 you last read them.
+
+## Start the session under the workflow lease
+
+For manual long-running review/publication, start the foreground agent **before reading inputs** with `lore --config /absolute/config.yaml workflow -- claude` (or the foreground agent command in use). Scheduled headless skill calls already wait for this Unix lease; collection and deterministic writer stages retain their short locks. Do not run `workflow` again inside this skill or a guarded pipeline: child CLI writes use their normal short locks. Default contention starts no child; `workflow --wait -- COMMAND` waits only when explicitly requested. Never bypass a busy lease, expire it by age, or delete its file. Existing unguarded sessions require an operator to stop scheduled writers and verify their children have exited before continuing; this skill cannot retrofit the lease. Programs that close inherited descriptors or detach work are outside its lifetime guarantee; Windows is unsupported. Typed task/source guards remain required.
 
 ## Safety rules (never violate, even mid-session)
 
