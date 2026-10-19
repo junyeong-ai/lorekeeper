@@ -568,6 +568,14 @@ Inspect registration and an actual execution. After changes, boot out existing
 jobs before registering replacements; unload disabled jobs too. `self uninstall`
 does not unregister OS jobs.
 
+If the vault is in a protected macOS folder such as Documents, Desktop or Downloads,
+the scheduled `lore` process needs permission to access that folder. Approval for a
+terminal app does not establish permission for launchd execution. Start the actual
+job, approve any macOS permission prompt, then inspect its logs and exit status.
+A binary update that changes its signing identity may require approval again.
+File mode `0600` does not replace this OS consent. See
+[Apple's folder-access documentation](https://developer.apple.com/documentation/bundleresources/information-property-list/nsdocumentsfolderusagedescription).
+
 Scheduled jobs execute native Rust commands:
 
 | Schedule | Command |
