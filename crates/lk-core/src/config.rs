@@ -49,6 +49,8 @@ pub struct Config {
     pub synthesis: SynthesisConfig,
     #[serde(default)]
     pub llm: LlmConfig,
+    #[serde(default)]
+    pub execution: crate::execution::ExecutionConfig,
     /// Concept extraction and categorization settings.
     #[serde(default)]
     pub concepts: ConceptConfig,
@@ -69,6 +71,7 @@ impl Config {
         config.graph.apply_vault_defaults(&config.vault.dirs);
         if let Some(parent) = path.parent() {
             config.vault.resolve_relative_to(parent);
+            config.execution.resolve_relative_to(parent);
             if let Some(file) = config.credentials.file.as_mut() {
                 *file = resolve_vault_root(&file.to_string_lossy(), parent);
             }
@@ -91,6 +94,7 @@ impl Config {
     }
 
     fn validate(&mut self) -> Result<(), ConfigError> {
+        self.execution.validate()?;
         if self.vault.root.trim().is_empty() {
             return Err(ConfigError::Validation(
                 "vault.root must not be empty or whitespace-only".into(),
@@ -1274,9 +1278,7 @@ impl Default for LlmConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum LlmProvider {
-    /// Emit JSONL queue tasks under `<vault>/.lorekeeper/queue/`. A Claude Code skill
-    /// (`/lore-process`) consumes the queue and edits target pages in place using
-    /// Claude Code's native LLM session (no API key, no separate billing).
+    /// Emit typed semantic tasks for an agent session; native apply validates publication.
     Queue,
     /// No LLM work. Daily pages render without summary/concepts sections. Useful for
     /// development, CI, or vault-only sources where Rust templating is sufficient.

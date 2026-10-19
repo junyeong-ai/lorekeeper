@@ -1,6 +1,6 @@
 # Copy to config.yaml, then set your vault location and identity.
 # Add selected source/module blocks from config.example.yaml when needed.
-# This local inbox needs no provider credentials. Semantic processing uses Claude Code.
+# This local inbox needs no source credentials. Choose an authenticated agent below.
 vault:
   root: ~/Documents/Obsidian Vault
   timezone: system
@@ -27,3 +27,12 @@ sources:
 
 llm:
   provider: queue
+
+# Maximum session duration is an explicit operating budget, in seconds.
+# To use Codex instead, change engine to codex and authenticate its CLI.
+execution:
+  default_profile: primary
+  profiles:
+    primary:
+      engine: claude-code
+      timeout_seconds: 3600

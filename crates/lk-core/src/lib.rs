@@ -4,6 +4,7 @@ pub mod cron;
 pub mod document;
 pub mod error;
 pub mod event;
+pub mod execution;
 pub mod frontmatter;
 pub mod fs;
 pub mod i18n;
