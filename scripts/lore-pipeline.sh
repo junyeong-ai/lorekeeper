@@ -82,6 +82,10 @@ and nobody can answer a question mid-run, so asking one blocks the work rather t
 clarifying it. Proceed on reversible actions that follow from the task; stop only if you
 need something no one but the user can supply.
 
+The caller started this session under the vault workflow lease. The lease survives exec
+as an inherited descriptor, so no separate lore workflow process is expected. Do not
+reacquire the lease or infer its ownership from process names or PIDs.
+
 Before ending your turn, read your last paragraph. If it is a plan, a question, a list of
 next steps, or a promise about work you have not done, do that work now instead of ending.
 How long the run has taken is not a reason to stop. While work remains and nothing has
@@ -90,7 +94,8 @@ failed, keep going; a report that names what is left is still a turn that ended 
 Report only what you can point to a tool result for. If a step failed or was skipped, say
 so plainly with the evidence; state finished work plainly without hedging.'
 
-# Run a Claude Code skill headlessly against the vault.
+# Run a Claude Code skill headlessly against the vault, loading explicit dependency
+# directories after the entry skill directory.
 #
 # Run from the vault so the sandbox covers the pages being edited; the skill's own reference
 # files live outside it and are added explicitly. Tool access is whitelisted rather than
@@ -102,14 +107,30 @@ so plainly with the evidence; state finished work plainly without hedging.'
 # list has to cover the protocol exactly rather than approximately.
 claude_skill() {
     local prompt="$1" skill_dir="$2"
-    if [ ! -f "$skill_dir/SKILL.md" ]; then
-        log "✗ skill not installed at $skill_dir — re-run the installer, or point"
-        log "  LORE_SKILL_DIR at where you installed the skills (\`--skill project\` puts them"
-        log "  under the project's .claude/skills)"
-        return 1
-    fi
+    shift 2
+    local skill
+    local plugin_args=()
+    for skill in "$skill_dir" "$@"; do
+        if [ ! -f "$skill/SKILL.md" ]; then
+            log "✗ skill not installed at $skill — re-run the installer, or point"
+            log "  LORE_SKILL_DIR at where you installed the skills (\`--skill project\` puts them"
+            log "  under the project's .claude/skills)"
+            return 1
+        fi
+        plugin_args+=(--plugin-dir "$skill" --add-dir "$skill")
+    done
     local plugin_name="${skill_dir##*/}"
     prompt="/${plugin_name}:${prompt#/}"
+    local allowed_tools=(
+        "Bash(lore:*)" "Bash(ls:*)" "Bash(cat:*)" "Bash(jq:*)"
+        "Bash(mkdir:*)" "Bash(mv:*)" "Bash(basename:*)" "Bash(test:*)" "Bash([:*)"
+        "Bash(find:*)" "Bash(wc:*)" "Bash(head:*)" "Bash(date:*)" "Bash(grep:*)"
+        "Read" "Edit" "Write" "Glob" "Grep"
+    )
+    for skill in "$@"; do
+        local dependency="${skill##*/}"
+        allowed_tools+=("Skill(${dependency}:${dependency})" "Skill(${dependency}:${dependency} *)")
+    done
     # The carried SKILL.md declares this qualified name for both ordinary skill
     # discovery and explicit plugin loading. --add-dir grants file access only.
     # `LORE_CONFIG` is passed IN, not left to be rediscovered. `lore` auto-discovers
@@ -120,14 +141,10 @@ claude_skill() {
     # Collection/period selection and short deterministic writers keep their own locks.
     # workflow passes the selected canonical config/template paths to this exec chain.
     lore_cmd workflow --wait -- env -C "$VAULT" "$CLAUDE" -p "$prompt" \
-        --plugin-dir "$skill_dir" \
+        "${plugin_args[@]}" \
         --append-system-prompt "$AUTONOMOUS_PREAMBLE" \
         --permission-mode acceptEdits \
-        --allowedTools "Bash(lore:*)" "Bash(ls:*)" "Bash(cat:*)" "Bash(jq:*)" \
-        "Bash(mkdir:*)" "Bash(mv:*)" "Bash(basename:*)" "Bash(test:*)" "Bash([:*)" \
-        "Bash(find:*)" "Bash(wc:*)" "Bash(head:*)" "Bash(date:*)" "Bash(grep:*)" \
-        "Read" "Edit" "Write" "Glob" "Grep" \
-        --add-dir "$skill_dir" \
+        --allowedTools "${allowed_tools[@]}" \
         --output-format text
 }
 

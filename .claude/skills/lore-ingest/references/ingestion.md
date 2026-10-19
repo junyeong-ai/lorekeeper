@@ -13,8 +13,8 @@ Review and commit vault changes separately; existing staging remains untouched.
 
 1. **Plan each source** — fetch, normalize, intra-batch dedup, classify. A source
    that fails is recorded and skipped; the run continues with the rest.
-2. **Write pages** — atomic per file (tmp + rename). Document-unit sources (`manual`
-   and `nodex`) write individual pages under `<wiki>/documents/`; day-unit sources
+2. **Write pages** — atomic per file (tmp + rename). Document-unit sources (`manual`,
+   `nodex` and `google-drive`) write individual pages under `<wiki>/documents/`; day-unit sources
    write `<daily>/{source-id}/DATE.md`. Imported repository documents keep their
    identity and vault address across source renames. Concept pages are a cross-source aggregate, rendered once
    after all sources plan.

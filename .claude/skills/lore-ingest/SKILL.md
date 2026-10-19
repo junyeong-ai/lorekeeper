@@ -1,6 +1,6 @@
 ---
 name: lore-ingest:lore-ingest
-version: 0.66.0
+version: 0.66.1
 description: Runs Lorekeeper collection and operations commands for configured sources, manual inboxes, period synthesis, schedules and maintenance. Collection writes structured pages and queues semantic work; lore-process completes that work.
 argument-hint: "<subcommand> [args]"
 disable-model-invocation: true
@@ -30,7 +30,7 @@ resolves against the config file's directory. Templates are embedded unless
 ## Collection is not semantic completion
 
 `lore ingest` collects and normalizes observations, writes pages atomically per
-file, then publishes queue tasks. Document-unit sources (`manual`, `nodex`) write
+file, then publishes queue tasks. Document-unit sources (`manual`, `nodex`, `google-drive`) write
 documents; day-unit sources write daily aggregates. Follow the source descriptor,
 not a hardcoded source-name rule. Concept pages aggregate evidence across sources.
 

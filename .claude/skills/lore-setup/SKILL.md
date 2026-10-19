@@ -1,10 +1,7 @@
 ---
 name: lore-setup:lore-setup
-version: 0.66.0
+version: 0.66.1
 description: Guides initial Lorekeeper setup or edits source configuration using workspace metadata. Discovers requested source IDs, preserves existing selections, and distinguishes config validation, native authentication, first processing and optional scheduling.
-when_to_use: |
-  Lorekeeper setup, configure Lorekeeper sources, add a Lorekeeper source,
-  로어키퍼 초기 설정, 로어키퍼 수집 소스 추가
 argument-hint: "[source-type]"
 allowed-tools: |
   Bash(slack-cli *)
@@ -39,11 +36,11 @@ reconfigure the rest of an existing vault.
 2. **Discovery** — read the reference file for each selected source
    and use available discovery CLIs to find IDs/conditions. Helper CLI login and
    Lore adapter credentials are separate; report missing prerequisites:
-   - Slack → `references/slack.md`
-   - Jira → `references/jira.md`
-   - Google (Calendar/Gmail) → `references/google.md`
-   - Confluence → `references/config.md`, Initial setup, and the Confluence example
-   - Project repositories (`nodex`) → `references/config.md`, Nodex binary selection
+   - Slack → [Slack discovery](references/slack.md)
+   - Jira → [Jira discovery](references/jira.md)
+   - Google (Calendar/Gmail) → [Google discovery](references/google.md)
+   - Confluence → [Initial setup](references/config.md#initial-setup) and the Confluence example
+   - Project repositories (`nodex`) → [Nodex binary selection](references/config.md#nodex-binary-selection)
    - Other supported sources → `config.example.yaml` for their parameters
 3. **Write config** — start a new config from `config.starter.yaml` and add only the
    requested blocks from `config.example.yaml`. The catalog's sources are disabled;

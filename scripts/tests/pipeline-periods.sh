@@ -80,6 +80,7 @@ lore_cmd() {
 }
 claude_skill() {
     if [ "$1" = '/lore-wiki maintain' ]; then
+        [ "$2" = "$SKILL_DIR/lore-wiki" ] && [ "$3" = "$SKILL_DIR/lore-process" ] || return 1
         touch "$TEST_ROOT/audited" "$TEST_ROOT/pending"
         [ "$scenario" != audit-failure ]
     else
@@ -100,3 +101,49 @@ KNOWLEDGE
     fi
 done
 printf 'knowledge finalization: 4 scenarios passed\n'
+
+for scenario in single dependent missing; do
+    export scenario
+    bash <<'PLUGINS' > "$TEST_ROOT/plugin-output"
+source "$PIPELINE_SOURCE"
+set -e
+VAULT="$TEST_ROOT"
+skills="$TEST_ROOT/project skills"
+mkdir -p "$skills/lore-wiki" "$skills/lore-process"
+touch "$skills/lore-wiki/SKILL.md" "$skills/lore-process/SKILL.md"
+lore_cmd() {
+    [ "$1" = workflow ] && [ "$2" = --wait ] && [ "$3" = -- ] || return 1
+    shift 3
+    printf '%s\n' "$@" > "$TEST_ROOT/consumer-args"
+}
+rm -f "$TEST_ROOT/consumer-args"
+case "$scenario" in
+    single) claude_skill /lore-process "$skills/lore-process" ;;
+    dependent) claude_skill '/lore-wiki maintain' "$skills/lore-wiki" "$skills/lore-process" ;;
+    missing)
+        rm "$skills/lore-process/SKILL.md"
+        if claude_skill '/lore-wiki maintain' "$skills/lore-wiki" "$skills/lore-process"; then
+            echo 'consumer accepted a missing required skill' >&2
+            exit 1
+        fi
+        [ ! -e "$TEST_ROOT/consumer-args" ]
+        exit ;;
+esac
+awk '/^--plugin-dir$/ { getline; print }' "$TEST_ROOT/consumer-args" > "$TEST_ROOT/plugins"
+awk '/^--add-dir$/ { getline; print }' "$TEST_ROOT/consumer-args" > "$TEST_ROOT/access"
+if [ "$scenario" = single ]; then
+    printf '%s\n' "$skills/lore-process" > "$TEST_ROOT/expected-plugins"
+    grep -Fxq '/lore-process:lore-process' "$TEST_ROOT/consumer-args"
+    if grep -q '^Skill(' "$TEST_ROOT/consumer-args"; then exit 1; fi
+else
+    printf '%s\n' "$skills/lore-wiki" "$skills/lore-process" > "$TEST_ROOT/expected-plugins"
+    grep -Fxq '/lore-wiki:lore-wiki maintain' "$TEST_ROOT/consumer-args"
+    grep -Fxq 'Skill(lore-process:lore-process)' "$TEST_ROOT/consumer-args"
+    grep -Fxq 'Skill(lore-process:lore-process *)' "$TEST_ROOT/consumer-args"
+    [ "$(grep -c '^Skill(' "$TEST_ROOT/consumer-args")" -eq 2 ]
+fi
+cmp "$TEST_ROOT/expected-plugins" "$TEST_ROOT/plugins"
+cmp "$TEST_ROOT/expected-plugins" "$TEST_ROOT/access"
+PLUGINS
+done
+printf 'consumer plugin dependencies: 3 scenarios passed\n'

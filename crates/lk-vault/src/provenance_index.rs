@@ -313,6 +313,66 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn document_root_alias_supports_live_and_prepared_provenance_without_following_nested_aliases()
+    {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let backing = root.path().join("wiki/pages");
+        std::fs::create_dir_all(&backing).unwrap();
+        std::fs::write(backing.join("old.md"), "---\ntype: document\ntitle: Old\nsource_identity: {repository: r, document: old}\nsource_record: {superseded_by: new}\n---\nOld scope.\n").unwrap();
+        std::fs::write(backing.join("new.md"), "---\ntype: document\ntitle: New\nsource_identity: {repository: r, document: new}\n---\nNew scope.\n").unwrap();
+        let documents = root.path().join("wiki/documents");
+        std::os::unix::fs::symlink("pages", &documents).unwrap();
+        let path = Path::new("wiki/documents/old.md");
+        let mut options = ProvenanceOptions {
+            direction: ProvenanceDirection::Outgoing,
+            relation: None,
+            limit: 100,
+            offset: 0,
+            revision: None,
+            snapshot: None,
+        };
+        let live = crate::inspect_provenance(root.path(), &dirs, path, &options).unwrap();
+        assert_eq!(live.path, "wiki/documents/old.md");
+        assert_eq!(live.total, 2);
+        assert_eq!(live.entries[0]["resolution"], "resolved");
+        assert_eq!(live.entries[0]["candidate_total"], 1);
+        assert_eq!(live.entries[1]["target"]["path"], "wiki/documents/new.md");
+        assert_eq!(live.coverage["documents"], 2);
+        let session = crate::MutationSession::acquire(root.path()).unwrap();
+        let prepared = crate::prepare_search(&session, &dirs).unwrap();
+        options.snapshot = Some(&prepared.snapshot);
+        let indexed = crate::inspect_provenance(root.path(), &dirs, path, &options).unwrap();
+        assert_eq!(indexed.path, live.path);
+        assert_eq!(indexed.origin, live.origin);
+        assert_eq!(indexed.entries, live.entries);
+        assert_eq!(indexed.total, live.total);
+        assert_eq!(indexed.coverage["documents"], 2);
+
+        let other = root.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        std::os::unix::fs::symlink(&other, backing.join("linked")).unwrap();
+        let live_options = ProvenanceOptions {
+            snapshot: None,
+            ..options
+        };
+        assert!(crate::inspect_provenance(root.path(), &dirs, path, &live_options).is_err());
+        assert!(crate::prepare_search(&session, &dirs).is_err());
+        let retained = crate::inspect_provenance(root.path(), &dirs, path, &options).unwrap();
+        assert_eq!(retained.entries, indexed.entries);
+        std::fs::remove_file(backing.join("linked")).unwrap();
+
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::remove_file(&documents).unwrap();
+        std::os::unix::fs::symlink(outside.path(), &documents).unwrap();
+        assert!(crate::inspect_provenance(root.path(), &dirs, path, &live_options).is_err());
+        assert!(crate::prepare_search(&session, &dirs).is_err());
+        let retained = crate::inspect_provenance(root.path(), &dirs, path, &options).unwrap();
+        assert_eq!(retained.entries, indexed.entries);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn untraversed_document_directory_aliases_refuse_capture_and_preserve_the_snapshot() {
         let root = tempfile::tempdir().unwrap();
         let dirs = VaultDirs::default();

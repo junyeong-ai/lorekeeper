@@ -72,7 +72,11 @@ Headless pipelines load the selected directory containing `SKILL.md` with Claude
 Code `--plugin-dir`, and invoke its namespaced skill (for example,
 `/lore-process:lore-process`). `--add-dir` grants filesystem access; it does not
 register an arbitrary skill directory. Keep the selected plugin and its references
-from the same deployed version. The workflow lease owns the whole foreground
+from the same deployed version. Knowledge maintenance also registers the required
+lore-process plugin so the audit can complete typed semantic repairs in its session.
+A dependency is callable only through its explicitly permitted qualified skill name,
+with or without arguments. A missing required skill refuses the consumer before launch.
+The workflow lease owns the whole foreground
 consumer session; never reacquire it inside the skill.
 
 An explicit `CLAUDE_CONFIG_DIR` selects the Claude Code profile for scheduled

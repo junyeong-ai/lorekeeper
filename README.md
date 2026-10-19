@@ -399,6 +399,8 @@ lore schema                   # wiki/AGENTS.md(페이지 포맷 스키마) 생�
 Claude Code 2.1.246 이상을 사용하세요. 각 스킬은 `/lore-process:lore-process`처럼
 플러그인 접두어를 포함한 이름을 선언하며, 아래 짧은 명령도 사용할 수 있습니다.
 스케줄러는 `LORE_SKILL_DIR`에서 선택한 스킬을 명시적으로 불러와 전체 이름으로 호출합니다.
+지식 점검은 `lore-wiki`와 수선 작업을 처리하는 `lore-process`를 함께 불러옵니다.
+필수 스킬이 없으면 LLM 세션을 시작하기 전에 실패합니다.
 
 기존 개념은 `wiki/concepts/group/stored.md`처럼 하위 폴더에 둘 수 있습니다.
 `resolve`와 개념 목록의 `slug`는 `group/stored`이며, 재수집에서도 이 주소를 유지합니다.

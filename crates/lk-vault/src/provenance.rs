@@ -202,7 +202,11 @@ pub(super) fn collect_documents(
     let mut revisions = Vec::new();
     for entry in walkdir::WalkDir::new(full).follow_links(false) {
         let entry = entry.map_err(|error| VaultError::Io(std::io::Error::other(error)))?;
-        if entry.file_type().is_symlink() && std::fs::metadata(entry.path())?.is_dir() {
+        // WalkDir traverses a validated collection-root alias, but not nested aliases.
+        if entry.depth() > 0
+            && entry.file_type().is_symlink()
+            && std::fs::metadata(entry.path())?.is_dir()
+        {
             return Err(invalid(
                 "document collection contains an untraversed directory alias",
             ));
