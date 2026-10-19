@@ -65,8 +65,8 @@ lives in `lk-vault`/`lk-pipeline`.
 ## RSS evidence policy
 
 A provided bound manifest selects `concept-extraction-rss-v3` and enters cache
-identity; selectors select `concept-synthesis-rss-v2`. Page-only v1 inputs retain
-wire/hash/policy. Typed validation refuses malformed/downgraded v2 requests.
+identity; selectors select `concept-synthesis-rss-v2`. Page-only extraction uses
+`concept-extraction-v2`. Typed validation refuses malformed or downgraded requests.
 Every extraction explicitly carries concept_policy through its request, hash and result.
 Disabled extraction requests are invalid; existing-only cannot create a new owner.
 Selections may name only provided immutable event/payload pairs; omission does not
