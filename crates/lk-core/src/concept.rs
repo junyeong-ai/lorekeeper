@@ -29,6 +29,8 @@ pub struct ExtractedConcept {
 /// citation resolving.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ConceptIdentity {
+    /// Address relative to the concepts collection, without `.md`; nested owners
+    /// retain directory components rather than flattening to their file stem.
     pub slug: String,
     pub title: String,
 }

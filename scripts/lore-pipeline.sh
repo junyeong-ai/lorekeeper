@@ -110,8 +110,8 @@ claude_skill() {
     fi
     local plugin_name="${skill_dir##*/}"
     prompt="/${plugin_name}:${prompt#/}"
-    # Load the selected SKILL.md as a single-skill plugin. --add-dir grants file
-    # access; it does not register a skill passed as an arbitrary directory.
+    # The carried SKILL.md declares this qualified name for both ordinary skill
+    # discovery and explicit plugin loading. --add-dir grants file access only.
     # `LORE_CONFIG` is passed IN, not left to be rediscovered. `lore` auto-discovers
     # `./config.yaml` before the XDG one, and this session runs with the vault as its CWD — so a
     # `config.yaml` sitting at the vault root silently drained a different vault than the one

@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use lk_core::config::VaultDirs;
+use lk_core::frontmatter::KnowledgeStatus;
 use lk_core::i18n::Locale;
 use lk_core::link;
 use lk_core::vault_path::{concepts_dir, documents_dir, explorations_dir, work_log_dir};
@@ -119,7 +120,7 @@ pub fn build_catalog(
         )];
         for entry in &review_entries {
             let report = &reviews[&entry.rel_path];
-            let mut row = catalog_row(entry, &headings, |body| {
+            let mut row = catalog_row(entry, locale, &headings, |body| {
                 extract_across_locales(body, |s| s.exploration_question, first_line_under_heading)
             });
             let state = review_state_label(locale, report.effective_state);
@@ -134,6 +135,7 @@ pub fn build_catalog(
     if !concepts.is_empty() {
         render_grouped_section(
             &mut out,
+            locale,
             &index_rel,
             &concepts,
             |body| extract_across_locales(body, |s| s.concept_synthesis, first_line_under_heading),
@@ -145,6 +147,7 @@ pub fn build_catalog(
     if !documents.is_empty() {
         render_grouped_section(
             &mut out,
+            locale,
             &index_rel,
             &documents,
             |body| extract_across_locales(body, |s| s.summary, first_line_under_heading),
@@ -156,6 +159,7 @@ pub fn build_catalog(
     if !explorations.is_empty() {
         render_group(
             &mut out,
+            locale,
             &index_rel,
             strings.index_explorations,
             explorations.len(),
@@ -170,6 +174,7 @@ pub fn build_catalog(
         let title = format!("{} — {}", strings.index_daily, source_id);
         render_group(
             &mut out,
+            locale,
             &index_rel,
             &title,
             entries.len(),
@@ -189,6 +194,7 @@ pub fn build_catalog(
     if !work_log.is_empty() {
         render_group(
             &mut out,
+            locale,
             &index_rel,
             strings.index_work_log,
             work_log.len(),
@@ -205,6 +211,7 @@ pub fn build_catalog(
         // on a review page is a `## 기간` date or a category-table row, not a summary.
         render_group(
             &mut out,
+            locale,
             &index_rel,
             strings.index_synthesis,
             synthesis.len(),
@@ -291,6 +298,7 @@ struct IndexEntry {
     title: String,
     body: String,
     category: Option<String>,
+    knowledge_status: KnowledgeStatus,
 }
 
 fn directory_exists(path: &Path) -> Result<bool, VaultError> {
@@ -405,11 +413,16 @@ fn collect_files(
             .filter(|s| !s.is_empty())
             .map(String::from);
 
+        let knowledge_status = page
+            .frontmatter
+            .knowledge_status()
+            .map_err(VaultError::Frontmatter)?;
         entries.push(IndexEntry {
             rel_path,
             title,
             body: page.body,
             category,
+            knowledge_status,
         });
     }
     entries.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
@@ -418,6 +431,7 @@ fn collect_files(
 
 fn render_group(
     rows: &mut Vec<CatalogRow>,
+    locale: Locale,
     _index_rel: &Path,
     title: &str,
     count: usize,
@@ -428,12 +442,13 @@ fn render_group(
     rows.extend(
         entries
             .iter()
-            .map(|entry| catalog_row(entry, &headings, &extract)),
+            .map(|entry| catalog_row(entry, locale, &headings, &extract)),
     );
 }
 
 fn render_grouped_section(
     rows: &mut Vec<CatalogRow>,
+    locale: Locale,
     _index_rel: &Path,
     entries: &[IndexEntry],
     extract: impl Fn(&str) -> Option<String>,
@@ -462,13 +477,14 @@ fn render_grouped_section(
         rows.extend(
             entries_in_group
                 .into_iter()
-                .map(|entry| catalog_row(entry, &headings, &extract)),
+                .map(|entry| catalog_row(entry, locale, &headings, &extract)),
         );
     }
 }
 
 fn catalog_row(
     entry: &IndexEntry,
+    locale: Locale,
     headings: &[crate::navigation::NavigationHeading],
     extract: impl Fn(&str) -> Option<String>,
 ) -> CatalogRow {
@@ -476,9 +492,15 @@ fn catalog_row(
         headings: headings.to_vec(),
         title: entry.title.clone(),
         path: PathBuf::from(&entry.rel_path),
-        summary: extract(&entry.body)
-            .map(|s| truncate_summary(&link::strip_links(&s)))
-            .filter(|s| !s.is_empty()),
+        summary: match entry.knowledge_status {
+            KnowledgeStatus::Retired => Some(match locale {
+                Locale::Ko => "[지식 사용 중단]".into(),
+                Locale::En => "[retired knowledge]".into(),
+            }),
+            KnowledgeStatus::Active => extract(&entry.body)
+                .map(|s| truncate_summary(&link::strip_links(&s)))
+                .filter(|s| !s.is_empty()),
+        },
     }
 }
 
@@ -651,6 +673,79 @@ fn first_subheading_under_heading(body: &str, heading: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn retired_catalog_entries_keep_membership_without_republishing_prose() {
+        for count in [2, PAGE_ENTRIES + 1] {
+            let root = TempDir::new().unwrap();
+            let dirs = VaultDirs::default();
+            for number in 0..count {
+                let retired = number == count - 1;
+                write_file(
+                    root.path(),
+                    &format!("wiki/concepts/{number}.md"),
+                    &format!(
+                        "---\ntype: concept\ntitle: Topic {number}\nknowledge_status: {}\n---\n## Synthesis\n{}\n",
+                        if retired { "retired" } else { "active" },
+                        if retired {
+                            "Unsupported historical assertion."
+                        } else {
+                            "Active supported statement."
+                        },
+                    ),
+                );
+            }
+            for (locale, label) in [
+                (Locale::En, "[retired knowledge]"),
+                (Locale::Ko, "[지식 사용 중단]"),
+            ] {
+                let catalog = build_catalog(root.path(), locale, &dirs).unwrap();
+                let text = catalog
+                    .pages
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(
+                    catalog.pages[Path::new("wiki/index.md")].contains(&format!("{count} pages"))
+                );
+                assert_eq!(catalog.pages.len() == 1, count <= PAGE_ENTRIES);
+                assert!(text.contains("Active supported statement."));
+                assert!(!text.contains("Unsupported historical assertion."));
+                assert_eq!(text.matches(label).count(), 1);
+                let targets: Vec<_> = catalog
+                    .pages
+                    .iter()
+                    .flat_map(|(path, content)| {
+                        link::extract_dests(content)
+                            .into_iter()
+                            .filter_map(move |dest| link::resolve_dest(path, &dest))
+                    })
+                    .filter(|path| path.starts_with("wiki/concepts"))
+                    .collect();
+                assert_eq!(targets.len(), count);
+                assert_eq!(targets.iter().collect::<HashSet<_>>().len(), count);
+                for number in 0..count {
+                    assert!(targets.contains(&PathBuf::from(format!("wiki/concepts/{number}.md"))));
+                }
+                assert!(catalog.pages.values().all(|content| {
+                    content
+                        .lines()
+                        .filter(|line| line.starts_with("- "))
+                        .count()
+                        <= PAGE_ENTRIES
+                }));
+            }
+            write_file(
+                root.path(),
+                "wiki/concepts/0.md",
+                "---\ntype: concept\nknowledge_status: [retired]\n---\n## Synthesis\nMalformed lifecycle must not become active.\n",
+            );
+            for locale in [Locale::En, Locale::Ko] {
+                assert!(build_catalog(root.path(), locale, &dirs).is_err());
+            }
+        }
+    }
+
     #[test]
     fn reserved_navigation_uses_configured_addresses_not_source_basenames() {
         let tmp = tempfile::tempdir().unwrap();

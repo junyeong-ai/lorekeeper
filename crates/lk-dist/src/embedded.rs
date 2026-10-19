@@ -118,6 +118,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn every_skill_declares_its_qualified_invocation_name() {
+        for name in skill_names() {
+            let files = skill_files(name);
+            let instructions = files
+                .iter()
+                .find(|file| file.relative == "SKILL.md")
+                .unwrap();
+            let page = lk_core::frontmatter::parse_page(instructions.contents).unwrap();
+            let expected = format!("{name}:{name}");
+            assert_eq!(
+                page.frontmatter
+                    .get("name")
+                    .and_then(|value| value.as_str()),
+                Some(expected.as_str()),
+                "{name} must expose the same invocation through skill and plugin loading"
+            );
+        }
+    }
+
     /// The generated manifest addresses a skill's files by a path whose first segment is the
     /// skill. A file directly under `.claude/skills` would have no such segment and would be
     /// silently deployed as a skill named after itself.

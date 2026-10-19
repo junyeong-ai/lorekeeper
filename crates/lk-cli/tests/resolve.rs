@@ -198,3 +198,51 @@ fn batch_resolution_preserves_input_order_and_each_verdict() {
     assert_eq!(answers[2]["answer"]["verdict"], "ambiguous");
     assert_eq!(answers[2]["name"], "Shared");
 }
+
+#[test]
+fn nested_owners_are_resolved_and_listed_at_their_existing_addresses() {
+    let root = TempDir::new().unwrap();
+    let nested = root.path().join("wiki/concepts/group");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(nested.join("stored.md"), "---\ntype: concept\ntitle: Established\naliases: [Synonym]\nknowledge_status: retired\n---\nHistorical judgment.").unwrap();
+    let output = lore()
+        .args(["resolve", "--root"])
+        .arg(root.path())
+        .args(["--json", "Synonym"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let answer: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(answer["slug"], "group/stored");
+    assert_eq!(answer["path"], "wiki/concepts/group/stored.md");
+    let config = root.path().join("config.yaml");
+    std::fs::write(&config, format!("vault:\n  root: {}\nidentity:\n  name: Test\n  email: test@example.com\nsources:\n  notes:\n    type: manual\n    params:\n      inbox_dir: inbox\n", root.path().display())).unwrap();
+    let output = lore()
+        .arg("--config")
+        .arg(&config)
+        .args(["wiki", "concepts", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let inventory: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(inventory.as_array().unwrap().len(), 1);
+    assert_eq!(inventory[0]["slug"], "group/stored");
+    assert_eq!(inventory[0]["aliases"][0], "Synonym");
+    std::fs::write(nested.join("broken.md"), "---\ntitle: [unclosed\n---\n").unwrap();
+    assert_eq!(run(root.path(), "Missing").status.code(), Some(3));
+    let output = lore()
+        .arg("--config")
+        .arg(&config)
+        .args(["wiki", "concepts", "--json"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        output.stdout.is_empty(),
+        "an incomplete inventory must not look successful"
+    );
+}

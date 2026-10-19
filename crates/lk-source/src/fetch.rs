@@ -155,7 +155,7 @@ fn remote_markdown(text: &str, base: &url::Url) -> Result<ReadableArticle, Sourc
     })
 }
 
-fn literal_markdown(text: &str) -> Result<String, SourceError> {
+pub(crate) fn literal_markdown(text: &str) -> Result<String, SourceError> {
     let normalized = text.replace("\r\n", "\n");
     let events = normalized.split("\n\n").flat_map(|paragraph| {
         let lines = paragraph.lines().enumerate().flat_map(|(index, line)| {

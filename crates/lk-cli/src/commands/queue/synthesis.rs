@@ -217,10 +217,7 @@ pub(super) fn apply(
                     .transpose()
                     .map_err(|e| miette::miette!("{e}"))?
                     .unwrap_or_default();
-                for citation in citations.iter().filter(|c| c.rss_event.is_some()) {
-                    lk_vault::guard_rss_citation(&mut plan, root, &target, citation)
-                        .map_err(|e| miette::miette!("{e}"))?;
-                }
+                guard_citations(&mut plan, root, &target, &citations)?;
                 plan.edit(&target, original, content);
                 session
                     .ok_or_else(|| miette::miette!("publication requires mutation session"))?
@@ -242,6 +239,35 @@ pub(super) fn apply(
         }
     }
     Ok(report)
+}
+
+fn guard_citations(
+    plan: &mut lk_vault::MutationPlan,
+    root: &Path,
+    target: &Path,
+    citations: &[lk_core::concept::Citation],
+) -> miette::Result<()> {
+    for citation in citations {
+        if citation.rss_event.is_some() {
+            lk_vault::guard_rss_citation(plan, root, target, citation)
+                .map_err(|error| miette::miette!("{error}"))?;
+        } else {
+            let path = resolve_target_path(&citation.path)
+                .ok_or_else(|| miette::miette!("invalid citation path: {}", citation.path))?;
+            let content = super::read_page(root, &path)
+                .map_err(|error| miette::miette!("read {}: {error}", path.display()))?;
+            let page = lk_core::frontmatter::parse_page(&content)
+                .map_err(|error| miette::miette!("parse {}: {error}", path.display()))?;
+            if lk_core::concept::source_revision(&page) != citation.revision {
+                return Err(miette::miette!(
+                    "synthesis citation changed before publication: {}",
+                    path.display()
+                ));
+            }
+            plan.require_unchanged(path, content);
+        }
+    }
+    Ok(())
 }
 
 /// Preserve the rejected answer and a durable reason outside the retry path.
@@ -291,4 +317,71 @@ fn event_headings(body: &str) -> Vec<&str> {
         .filter(|line| !fence.apply(line) && fence.is_closed() && line.starts_with("### "))
         .map(str::trim_end)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ordinary_citation_guards_refuse_changes_before_publication_and_recovery() {
+        const ORIGINAL: &str = "---\ntype: document\ntitle: Evidence\n---\nOriginal evidence.\n";
+        const CHANGED: &str = "---\ntype: document\ntitle: Evidence\n---\nChanged evidence.\n";
+        let source = Path::new("source.md");
+        let target = Path::new("concept.md");
+        let citation = lk_core::concept::Citation::new(
+            source,
+            &lk_core::frontmatter::parse_page(ORIGINAL).unwrap(),
+        );
+        for replacement in [Some(ORIGINAL), Some(CHANGED), None] {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::write(root.path().join(source), ORIGINAL).unwrap();
+            std::fs::write(root.path().join(target), "before").unwrap();
+            let mut plan = lk_vault::MutationPlan::default();
+            guard_citations(
+                &mut plan,
+                root.path(),
+                target,
+                std::slice::from_ref(&citation),
+            )
+            .unwrap();
+            plan.edit(target, "before".into(), "synthesis and completion".into());
+            let state = root.path().join(".lorekeeper/mutation");
+            std::fs::create_dir_all(&state).unwrap();
+            let journal = serde_json::json!({"version": 1, "plan": plan}).to_string();
+            std::fs::write(state.join("pending.json"), &journal).unwrap();
+            match replacement {
+                Some(content) => std::fs::write(root.path().join(source), content).unwrap(),
+                None => std::fs::remove_file(root.path().join(source)).unwrap(),
+            }
+            let recovered = lk_vault::MutationSession::acquire(root.path());
+            if replacement == Some(ORIGINAL) {
+                assert!(recovered.is_ok());
+                assert_eq!(
+                    std::fs::read_to_string(root.path().join(target)).unwrap(),
+                    "synthesis and completion"
+                );
+                assert!(!state.join("pending.json").exists());
+            } else {
+                assert!(recovered.is_err());
+                assert_eq!(
+                    std::fs::read_to_string(root.path().join(target)).unwrap(),
+                    "before"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(state.join("pending.json")).unwrap(),
+                    journal
+                );
+                assert!(
+                    guard_citations(
+                        &mut lk_vault::MutationPlan::default(),
+                        root.path(),
+                        target,
+                        std::slice::from_ref(&citation)
+                    )
+                    .is_err()
+                );
+            }
+        }
+    }
 }

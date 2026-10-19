@@ -13,6 +13,16 @@ fn schedule_profile(
     skill_dir: Option<&Path>,
     profile: Option<&Path>,
 ) -> Output {
+    schedule_profile_on_path(root, format, skill_dir, profile, None)
+}
+
+fn schedule_profile_on_path(
+    root: &Path,
+    format: &str,
+    skill_dir: Option<&Path>,
+    profile: Option<&Path>,
+    path: Option<&std::ffi::OsStr>,
+) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_lore"));
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("LORE_") {
@@ -20,6 +30,9 @@ fn schedule_profile(
         }
     }
     command.env_remove("CLAUDE_CONFIG_DIR");
+    if let Some(path) = path {
+        command.env("PATH", path);
+    }
     for key in [
         "HTTP_PROXY",
         "HTTPS_PROXY",
@@ -47,6 +60,71 @@ fn schedule_profile(
         .arg(root.join("pipelines"))
         .output()
         .unwrap()
+}
+
+#[cfg(unix)]
+#[test]
+fn captured_claude_runs_after_chdir_without_pinning_a_symlink_target() {
+    use std::os::unix::{fs::PermissionsExt, fs::symlink};
+
+    let root = workspace();
+    let cwd = root.path().canonicalize().unwrap();
+    let tools = cwd.join("tools");
+    let elsewhere = cwd.join("vault");
+    std::fs::create_dir(&tools).unwrap();
+    std::fs::create_dir(&elsewhere).unwrap();
+    let versions: Vec<_> = ["first", "second"]
+        .into_iter()
+        .map(|version| {
+            let file = root.path().join(format!("claude-{version}"));
+            std::fs::write(&file, format!("#!/bin/sh\nprintf '{version}\\n'\n")).unwrap();
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+            file
+        })
+        .collect();
+    for (path_entry, captured) in [
+        (std::path::PathBuf::from("tools"), tools.join("claude")),
+        (std::path::PathBuf::new(), cwd.join("claude")),
+        (tools.clone(), tools.join("claude")),
+    ] {
+        let path = std::env::join_paths([path_entry]).unwrap();
+        for format in ["cron", "launchd"] {
+            let _ = std::fs::remove_file(&captured);
+            symlink(&versions[0], &captured).unwrap();
+            let output =
+                schedule_profile_on_path(root.path(), format, None, None, Some(path.as_os_str()));
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let text = String::from_utf8(output.stdout).unwrap();
+            let expected = if format == "cron" {
+                format!("CLAUDE_BIN={}\n", captured.display())
+            } else {
+                format!(
+                    "<key>CLAUDE_BIN</key><string>{}</string>",
+                    captured.display()
+                )
+            };
+            assert!(text.contains(&expected), "{text}");
+            let run = || {
+                Command::new(&captured)
+                    .current_dir(&elsewhere)
+                    .output()
+                    .unwrap()
+            };
+            let first = run();
+            assert!(first.status.success());
+            assert_eq!(first.stdout, b"first\n");
+            // A normal CLI update moves the symlink; schedules must follow it.
+            std::fs::remove_file(&captured).unwrap();
+            symlink(&versions[1], &captured).unwrap();
+            let second = run();
+            assert!(second.status.success());
+            assert_eq!(second.stdout, b"second\n");
+        }
+    }
 }
 
 fn workspace() -> tempfile::TempDir {

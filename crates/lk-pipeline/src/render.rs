@@ -193,13 +193,9 @@ pub(crate) fn concept_links(
 /// true, and the alternative — letting a later extraction retract it — is the loss above.
 ///
 /// A link is carried only when it addresses a concept page at the address
-/// [`concept_links`] writes — resolved relative to the citing page, `.md`, a DIRECT child
-/// of the concepts directory. That is narrower than the prefix match `lore graph
-/// backlinks-sync` counts an edge by, and deliberately: this set is re-RENDERED through
-/// `concept_links`, which flattens any slug to one path segment, so carrying a nested
-/// destination would rewrite it into a link that resolves nowhere. Nothing the pipeline
-/// writes is ever nested (`slugify` maps `/` to `-`), so the two agree on every link this
-/// system produces.
+/// [`concept_links`] writes — resolved relative to the citing page, `.md`, anywhere
+/// inside the concepts collection. Existing nested addresses are retained even though
+/// newly allocated filenames are flat. Addresses are not name-normalization keys.
 ///
 /// The section is rebuilt from the returned set, so anything else living in it does not
 /// survive — as was already true when each extraction replaced the section outright. It is
@@ -215,43 +211,35 @@ pub(crate) fn accumulate_concepts(
     let mut seen = std::collections::HashSet::new();
     let mut concepts = Vec::new();
 
-    // Two citations are the same citation when they address the same PAGE, and the vault
-    // decides that at the id level — the graph resolves a destination to `slugify` of its
-    // stem, so `Bad_Name.md` and `bad-name.md` are one page to every consumer that counts
-    // edges. Deduping on the raw stem instead would let a non-canonical spelling ride
-    // alongside the canonical one, and since these links only ever accumulate, the double
-    // citation would be permanent.
-    let mut claim = |stem: &str| match lk_core::concept::slugify(stem) {
-        Some(id) => seen.insert(id),
-        // Not a name this vault can address, so it cannot be reconciled with anything —
-        // said out loud rather than folded into the dedup, where a dropped citation would
-        // be indistinguishable from a deduplicated one. Only a carried destination can
-        // reach this: an extracted concept's slug is already `slugify` output.
-        None => {
-            tracing::warn!(stem, "carried citation has no addressable id; dropping it");
-            false
-        }
-    };
+    // Preserve exact collection-relative addresses. Slugifying these would conflate
+    // distinct established files (including folders, case and punctuation); this pure
+    // renderer has no filesystem evidence authorizing such a repoint.
+    let mut claim = |address: &str| seen.insert(address.to_owned());
 
     let carried = cited.map(link::extract_page_links).unwrap_or_default();
     for cite in carried {
         let Some(resolved) = link::resolve_dest(page, &cite.dest) else {
             continue;
         };
-        if resolved.parent() != Some(concepts_dir.as_path())
+        if !resolved.starts_with(&concepts_dir)
             || resolved.extension() != Some(std::ffi::OsStr::new("md"))
         {
             continue;
         }
-        let Some(slug) = resolved.file_stem().and_then(|s| s.to_str()) else {
+        let Ok(relative) = resolved.strip_prefix(&concepts_dir) else {
             continue;
         };
+        let address = relative.with_extension("");
+        let Some(slug) = address.to_str() else {
+            continue;
+        };
+        let slug = slug.replace(std::path::MAIN_SEPARATOR, "/");
         // The destination is kept exactly as written. Rewriting it to the canonical
         // spelling here would repoint a citation on the strength of a name, which is
         // `lore graph normalize`'s job — it renames the page in the same pass.
-        if claim(slug) {
+        if claim(&slug) {
             concepts.push(ConceptIdentity {
-                slug: slug.to_string(),
+                slug,
                 title: cite.text,
             });
         }
@@ -784,32 +772,35 @@ mod tests {
         );
     }
 
-    /// A citation whose destination is not the canonical spelling still addresses the same
-    /// PAGE — that is how the graph counts it — so re-reporting it must not add a second
-    /// link beside it. Accumulation makes any such double permanent.
+    /// Similar filenames are distinct addresses unless filesystem resolution establishes
+    /// otherwise. A pure citation accumulator cannot infer that identity from spelling.
     #[test]
-    fn a_non_canonical_destination_is_the_same_citation_as_its_canonical_form() {
+    fn distinct_address_spellings_do_not_lose_a_citation() {
         let cited = "- [Bad Name](../../wiki/concepts/Bad_Name.md)\n";
         assert_eq!(
             accumulated(Some(cited), vec![identity("Bad Name", "bad-name")]),
-            vec![("Bad Name".to_string(), "Bad_Name".to_string())],
-            "one citation, kept at the address the page already carries"
+            vec![
+                ("Bad Name".to_string(), "Bad_Name".to_string()),
+                ("Bad Name".to_string(), "bad-name".to_string())
+            ],
+            "both established addresses survive without a spelling-based merge"
         );
     }
 
-    /// A destination whose stem has no addressable id cannot be reconciled with anything, so
-    /// it is dropped — and said out loud, because a silently dropped citation and a
-    /// deduplicated one are the same absence in the result and would be the same silence in
-    /// the log.
+    /// Existing addresses are not newly allocated slugs. A punctuation-only stem is
+    /// still a valid exact Markdown destination and must not be silently retracted.
     #[test]
-    fn a_citation_with_no_addressable_id_is_dropped_and_the_rest_survive() {
+    fn punctuation_only_existing_addresses_survive() {
         let cited = "\
 - [Punctuation](../../wiki/concepts/---.md)
 - [Real](../../wiki/concepts/real.md)
 ";
         assert_eq!(
             accumulated(Some(cited), vec![]),
-            vec![("Real".to_string(), "real".to_string())]
+            vec![
+                ("Punctuation".to_string(), "---".to_string()),
+                ("Real".to_string(), "real".to_string())
+            ]
         );
     }
 
@@ -865,6 +856,7 @@ and [a real one](../../wiki/concepts/nl2sql.md)
             ("에이전트 하니스", "에이전트-하니스"),
             ("RAG [retrieval]", "rag-retrieval"),
             ("Claude 3.5", "claude-3-5"),
+            ("Nested owner", "group/stored"),
         ] {
             let extracted = vec![identity(name, slug)];
             let cited = concept_links(
@@ -879,6 +871,18 @@ and [a real one](../../wiki/concepts/nl2sql.md)
                 "reading back {cited}"
             );
         }
+    }
+
+    #[test]
+    fn nested_citations_survive_later_extractions_without_flattening_same_leaf_names() {
+        let cited = "- [First](../../wiki/concepts/first/stored.md)\n- [Second](../../wiki/concepts/second/stored.md)\n";
+        assert_eq!(
+            accumulated(Some(cited), vec![identity("First", "first/stored")]),
+            vec![
+                ("First".to_string(), "first/stored".to_string()),
+                ("Second".to_string(), "second/stored".to_string())
+            ]
+        );
     }
 
     /// A citation is a finished LINE, bullet included, because two writers put it on a page:

@@ -27,6 +27,7 @@ use crate::VaultError;
 /// One concept the day named.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct BriefEntry {
+    /// Extensionless address relative to the concepts collection, including folders.
     pub id: String,
     pub path: String,
     pub title: String,
@@ -61,16 +62,28 @@ pub fn build_brief(
     let mut revisited = Vec::new();
 
     for rel in named_on(vault_root, dirs, date)? {
-        let id = rel
-            .file_stem()
-            .and_then(|s| s.to_str())
+        let stem = rel.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+        let address = rel
+            .strip_prefix(concepts_dir(dirs))
+            .map_err(std::io::Error::other)?
+            .with_extension("");
+        let id = address
+            .to_str()
             .unwrap_or_default()
-            .to_string();
+            .replace(std::path::MAIN_SEPARATOR, "/");
         let page = match crate::store::read_page(vault_root, &vault_root.join(&rel)) {
             Ok(page) => page,
             Err(VaultError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error),
         };
+        if page
+            .frontmatter
+            .knowledge_status()
+            .map_err(VaultError::Frontmatter)?
+            == lk_core::frontmatter::KnowledgeStatus::Retired
+        {
+            continue;
+        }
         let introduced = page
             .frontmatter
             .get("created")
@@ -82,7 +95,7 @@ pub fn build_brief(
                 .frontmatter
                 .get("title")
                 .and_then(|v| v.as_str())
-                .unwrap_or(&id)
+                .unwrap_or(stem)
                 .to_string(),
             path: rel.to_string_lossy().into_owned(),
             category: page
@@ -151,7 +164,7 @@ fn named_on(
             };
             if resolved.extension().is_some_and(|e| e == "md")
                 && let Some(actual) = resolver.resolve(&resolved)?
-                && actual.parent() == Some(concepts_rel.as_path())
+                && actual.starts_with(&concepts_rel)
             {
                 named.insert(actual);
             }
@@ -223,6 +236,43 @@ fn pages_of(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn brief_keeps_nested_active_knowledge_and_excludes_both_retired_groups() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let concepts = root.path().join(concepts_dir(&dirs));
+        concept(&concepts, "group/active", "2026-09-10", 1);
+        write(
+            &concepts.join("other/active.md"),
+            "---\ntype: concept\ncreated: 2026-01-01\n---\nAnother active concept.\n",
+        );
+        for (name, created) in [("retired-new", "2026-09-10"), ("retired-old", "2026-01-01")] {
+            write(
+                &concepts.join(format!("{name}.md")),
+                &format!(
+                    "---\ntype: concept\ntitle: {name}\ncreated: {created}\nknowledge_status: retired\n---\n## Synthesis\nHistorical unsupported claim.\n"
+                ),
+            );
+        }
+        write(
+            &root.path().join("daily/news/2026-09-10.md"),
+            "---\ntype: daily\n---\n[Active](../../wiki/concepts/group/active.md)\n[Other](../../wiki/concepts/other/active.md)\n[New](../../wiki/concepts/retired-new.md)\n[Old](../../wiki/concepts/retired-old.md)\n",
+        );
+        let brief = build_brief(root.path(), &dirs, jiff::civil::date(2026, 9, 10)).unwrap();
+        assert_eq!(brief.learned.len(), 1);
+        assert_eq!(brief.learned[0].id, "group/active");
+        assert_eq!(brief.learned[0].path, "wiki/concepts/group/active.md");
+        assert_eq!(brief.revisited.len(), 1);
+        assert_eq!(brief.revisited[0].id, "other/active");
+        assert_eq!(brief.revisited[0].path, "wiki/concepts/other/active.md");
+        assert_eq!(brief.revisited[0].title, "active");
+        write(
+            &concepts.join("retired-new.md"),
+            "---\ntype: concept\nknowledge_status: [retired]\n---\nBody.",
+        );
+        assert!(build_brief(root.path(), &dirs, jiff::civil::date(2026, 9, 10)).is_err());
+    }
 
     fn write(path: &Path, content: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();

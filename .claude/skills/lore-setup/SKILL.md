@@ -1,6 +1,6 @@
 ---
-name: lore-setup
-version: 0.64.0
+name: lore-setup:lore-setup
+version: 0.65.0
 description: Guides initial Lorekeeper setup or edits source configuration using workspace metadata. Discovers requested source IDs, preserves existing selections, and distinguishes config validation, native authentication, first processing and optional scheduling.
 when_to_use: |
   Lorekeeper setup, configure Lorekeeper sources, add a Lorekeeper source,
