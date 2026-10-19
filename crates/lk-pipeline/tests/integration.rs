@@ -46,6 +46,7 @@ fn base_config(vault_root: &std::path::Path) -> Config {
         personal: Some(PersonalConfig::default()),
         synthesis: SynthesisConfig::default(),
         llm: Default::default(),
+        execution: Default::default(),
         concepts: Default::default(),
         graph: Default::default(),
         maintenance: Default::default(),

@@ -254,7 +254,13 @@ mod native {
             let command = lk_dist::Installation::detect()
                 .map_err(|e| miette::miette!("{e}"))
                 .and_then(|installation| {
-                    execution::agent_command(profile, skill, operation, &installation)
+                    execution::agent_command(
+                        profile,
+                        skill,
+                        operation,
+                        &installation,
+                        self.opts.config.as_ref().expect("resolved config"),
+                    )
                 });
             match command {
                 Ok(mut command) => {

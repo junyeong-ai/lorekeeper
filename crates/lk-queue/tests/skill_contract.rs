@@ -14,7 +14,7 @@ use strum::IntoEnumIterator;
 
 fn read_skill_file(rel: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../.claude/skills/lore-process")
+        .join("../../skills/lore-process")
         .join(rel);
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }

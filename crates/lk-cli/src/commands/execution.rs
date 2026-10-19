@@ -162,6 +162,7 @@ pub(super) fn agent_command(
     skill: &str,
     operation: &str,
     installation: &lk_dist::Installation,
+    config: &Path,
 ) -> miette::Result<tokio::process::Command> {
     let engine = profile.engine();
     let root = installation.for_engine(engine).runtime_skills_dir();
@@ -183,6 +184,16 @@ pub(super) fn agent_command(
         }
     }
     let mut command = tokio::process::Command::new(profile.executable());
+    let binary = installation
+        .binary()
+        .to_str()
+        .ok_or_else(|| miette::miette!("agent binary path is not UTF-8"))?;
+    let config =
+        serde_json::to_string(config).map_err(|e| miette::miette!("agent config path: {e}"))?;
+    let prefix = format!("'{}'", binary.replace('\'', "'\\''"));
+    let instruction = format!(
+        "{UNATTENDED}\n\nThe selected configuration is {config}. In every skill command, replace the leading `lore` with this exact literal command prefix: {prefix}. LORE_CONFIG is already set to the selected configuration. Run that prefix directly: do not assign shell variables, use $LORE_BIN, aliases, functions or shell wrappers, inspect environment variables, or substitute another installation. The unattended permission rule authorizes the literal executable command, not variable expansion."
+    );
     match profile {
         ExecutionProfile::ClaudeCode {
             config_directory, ..
@@ -205,7 +216,7 @@ pub(super) fn agent_command(
                 "-p",
                 &prompt,
                 "--append-system-prompt",
-                UNATTENDED,
+                &instruction,
                 "--permission-mode",
                 "acceptEdits",
                 "--permission-prompts",
@@ -224,7 +235,8 @@ pub(super) fn agent_command(
             }
             command
                 .arg("--allowedTools")
-                .args(claude_tools(skill, dependencies)?);
+                .args(claude_tools(skill, dependencies)?)
+                .arg(claude_binary_permission(binary)?);
         }
         ExecutionProfile::Codex { profile, .. } => {
             command.args([
@@ -245,13 +257,23 @@ pub(super) fn agent_command(
                 .map(|name| serde_json::to_string(&root.join(name).join("SKILL.md")))
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e| miette::miette!("{e}"))?;
-            command.arg(format!("{UNATTENDED}\n\nUse the exact packaged skill at {entry}. Read that SKILL.md and follow its requested operation: {operation}. Its dependency skills are at: {}. Resolve dependency names to these exact files. Read only the references needed for this operation.", dependencies.join(", ")));
+            command.arg(format!("{instruction}\n\nUse the exact packaged skill at {entry}. Read that SKILL.md and follow its requested operation: {operation}. Its dependency skills are at: {}. Resolve dependency names to these exact files. Read only the references needed for this operation.", dependencies.join(", ")));
         }
     }
     if let Some(model) = profile.model() {
         command.arg(format!("--model={model}"));
     }
     Ok(command)
+}
+
+fn claude_binary_permission(binary: &str) -> miette::Result<String> {
+    if binary.contains('*') || binary.chars().any(char::is_control) {
+        return Err(miette::miette!(
+            "Claude permissions cannot represent this executable path literally; install lore at a path without wildcards or control characters"
+        ));
+    }
+    let quoted = format!("'{}'", binary.replace('\'', "'\\''"));
+    Ok(format!("Bash({quoted} *)"))
 }
 
 pub(super) fn claude_tools(skill: &str, dependencies: &[&str]) -> miette::Result<Vec<String>> {
@@ -378,5 +400,19 @@ mod tests {
         let tools = claude_tools("lore-wiki", &["lore-process"]).unwrap();
         assert!(tools.contains(&"Skill(lore-process:lore-process)".into()));
         assert!(tools.contains(&"Skill(lore-process:lore-process *)".into()));
+    }
+
+    #[test]
+    fn binary_permissions_preserve_literal_paths() {
+        assert_eq!(
+            claude_binary_permission("/opt/tools/my lore").unwrap(),
+            "Bash('/opt/tools/my lore' *)"
+        );
+        assert_eq!(
+            claude_binary_permission("/opt/it's/lore").unwrap(),
+            "Bash('/opt/it'\\''s/lore' *)"
+        );
+        assert!(claude_binary_permission("/opt/*/lore").is_err());
+        assert!(claude_binary_permission("/opt/tools\nlore").is_err());
     }
 }
