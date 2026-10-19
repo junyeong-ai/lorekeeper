@@ -478,7 +478,7 @@ lore self deploy      # redeploy only — the repair `self status` reports
 lore self uninstall   # remove what was installed; the vault is never touched
 ```
 
-The skills, pipeline scripts, templates and both config examples are **compiled into the binary**, and deployed copies can drift; `lore self status` checks them, while `lore self deploy` writes the copies. `lore self update` refuses while the queue still holds work, and refuses a release older than the running one — pass `--version` to go back deliberately.
+The skills, pipeline scripts, templates and both config examples are **compiled into the binary**, and deployed copies can drift; `lore self status` checks them, while `lore self deploy` writes the copies. `lore self update` uses the same settlement check as `lore queue check`: pending work, unreadable or unparseable input, staged results and interrupted publication all block replacement. `--force` permits inspectable unfinished work but never bypasses configuration or storage inspection errors. Older releases are refused unless explicitly selected with `--version`.
 
 ---
 

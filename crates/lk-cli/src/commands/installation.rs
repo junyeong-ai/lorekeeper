@@ -45,7 +45,8 @@ pub enum SelfCommand {
         /// Install this version instead of the latest. Named explicitly, so it may go back.
         #[arg(long)]
         version: Option<String>,
-        /// Replace the binary even when it already reports the target version
+        /// Replace even at the target version or with outstanding queue work.
+        /// Invalid configuration still fails.
         #[arg(long)]
         force: bool,
         /// Additionally hold the archive to the build provenance the release attested
@@ -446,20 +447,27 @@ fn verify_attestation_of(archive: &[u8], archive_name: &str) -> miette::Result<(
 ///
 /// A task carries a request from one build and is answered under whichever build's skills are
 /// deployed when the drain runs. Replacing both between those two moments is the one genuinely
-/// lossy point in an upgrade, and `lore queue count` already exists as the machine contract for
-/// the question.
+/// lossy point in an upgrade. Use the same read-only settlement check as `lore queue check`,
+/// including unpublished results and interrupted publication journals.
 fn refuse_while_work_is_queued(opts: &GlobalOptions, force: bool) -> miette::Result<()> {
-    let Ok(config) = find_config(opts).and_then(|path| load_config(&path)) else {
+    let Some(path) = super::find_optional_config(opts)? else {
         return Ok(());
     };
-    let load = super::queue::queue_load(&config.vault.root_path())?;
-    if load.work == 0 || force {
+    let config = load_config(&path)?;
+    let state = super::queue::check::inspect(&config.vault.root_path())?;
+    if state.is_settled() || force {
         return Ok(());
     }
     Err(miette::miette!(
-        "{} queued task(s) are still waiting to be answered — drain them with `/lore-process` \
-         first, or pass `--force` to update anyway",
-        load.work
+        "queue is not settled: {} current task(s), {} unreadable task(s), {} unparseable line(s), \
+         {} staged result(s), pending mutation: {} \
+         — inspect with `lore queue check` and drain with `/lore-process` first, \
+         or pass `--force` to update anyway",
+        state.current,
+        state.unreadable,
+        state.unparseable_lines,
+        state.staged_results.len(),
+        state.pending_mutation
     ))
 }
 
@@ -576,4 +584,135 @@ fn confirm(question: &str, yes: bool) -> miette::Result<bool> {
         .default(false)
         .interact()
         .map_err(|e| miette::miette!("{e}"))
+}
+
+#[cfg(test)]
+mod update_boundary_tests {
+    use super::*;
+
+    fn fixture() -> (tempfile::TempDir, GlobalOptions) {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.yaml");
+        std::fs::write(&config, "vault:\n  root: vault\nidentity:\n  name: Test\n  email: test@example.com\nsources:\n  notes:\n    type: manual\n    params:\n      inbox_dir: inbox\n").unwrap();
+        (
+            dir,
+            GlobalOptions {
+                config: Some(config),
+                template_dir: None,
+            },
+        )
+    }
+
+    #[test]
+    fn update_never_swallows_an_explicit_missing_or_invalid_config() {
+        let (dir, opts) = fixture();
+        for body in [Some("not: [valid"), None] {
+            match body {
+                Some(body) => std::fs::write(opts.config.as_ref().unwrap(), body).unwrap(),
+                None => std::fs::remove_file(opts.config.as_ref().unwrap()).unwrap(),
+            }
+            for force in [false, true] {
+                assert!(
+                    refuse_while_work_is_queued(&opts, force).is_err(),
+                    "force={force}, body={body:?}, fixture={}",
+                    dir.path().display()
+                );
+            }
+        }
+        // A selected path that resolves but cannot be read as a file is not absence.
+        std::fs::create_dir(opts.config.as_ref().unwrap()).unwrap();
+        for force in [false, true] {
+            assert!(refuse_while_work_is_queued(&opts, force).is_err());
+        }
+    }
+
+    #[test]
+    fn update_requires_force_for_unparseable_and_unreadable_work() {
+        let (dir, opts) = fixture();
+        let queue = dir.path().join("vault/.lorekeeper/queue");
+        std::fs::create_dir_all(&queue).unwrap();
+        // The second record parses but cannot reconstruct its retained typed input.
+        let unreadable = serde_json::json!({
+            "task_id": "blocked", "kind": "summarize", "created_at": "2026-10-19T00:00:00Z",
+            "cache_hash": "invalid", "input": {},
+            "target": {"vault_path": "wiki/documents/test.md", "kind": "document-summary", "anchor": "## Summary"}
+        }).to_string();
+        for body in ["{not-json}".to_string(), unreadable] {
+            std::fs::write(queue.join("pending.jsonl"), format!("{body}\n")).unwrap();
+            let load = super::super::queue::queue_load(&dir.path().join("vault")).unwrap();
+            assert_eq!(load.work, 0);
+            assert_eq!(load.unreadable + load.unparseable, 1);
+            assert!(refuse_while_work_is_queued(&opts, false).is_err());
+            assert!(refuse_while_work_is_queued(&opts, true).is_ok());
+        }
+    }
+
+    #[test]
+    fn update_requires_force_for_results_and_journals_without_changing_them() {
+        let (dir, opts) = fixture();
+        for force in [false, true] {
+            assert!(refuse_while_work_is_queued(&opts, force).is_ok());
+        }
+        for relative in ["queue/results/unpublished.json", "mutation/pending.json"] {
+            let path = dir.path().join("vault/.lorekeeper").join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(
+                &path,
+                "retained bytes, not interpreted by the settlement check",
+            )
+            .unwrap();
+            assert!(refuse_while_work_is_queued(&opts, false).is_err());
+            assert!(refuse_while_work_is_queued(&opts, true).is_ok());
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                "retained bytes, not interpreted by the settlement check"
+            );
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn force_does_not_hide_uninspectable_queue_storage() {
+        for relative in ["queue", "queue/results"] {
+            let (dir, opts) = fixture();
+            let path = dir.path().join("vault/.lorekeeper").join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "not a directory").unwrap();
+            for force in [false, true] {
+                assert!(refuse_while_work_is_queued(&opts, force).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn update_distinguishes_current_from_completed_retained_tasks() {
+        let (dir, opts) = fixture();
+        let vault = dir.path().join("vault");
+        let queue = vault.join(".lorekeeper/queue");
+        std::fs::create_dir_all(&queue).unwrap();
+        let target = vault.join("wiki/documents/test.md");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        let input = serde_json::json!({"text": "source", "max_sentences": 5, "locale": "en"});
+        let hash = lk_queue::cache_hash(input.as_object().unwrap());
+        let task = serde_json::json!({
+            "task_id": "current", "kind": "summarize", "created_at": "2026-10-19T00:00:00Z",
+            "cache_hash": hash, "input": input,
+            "target": {"vault_path": "wiki/documents/test.md", "kind": "document-summary", "anchor": "## Summary"}
+        });
+        std::fs::write(queue.join("pending.jsonl"), format!("{task}\n")).unwrap();
+        for completed in [false, true] {
+            let done = if completed {
+                format!("  summary_done: {hash}\n")
+            } else {
+                String::new()
+            };
+            std::fs::write(
+                &target,
+                format!("---\nllm_inputs:\n  summary: {hash}\n{done}---\n## Summary\n\n"),
+            )
+            .unwrap();
+            assert_eq!(refuse_while_work_is_queued(&opts, false).is_ok(), completed);
+            assert!(refuse_while_work_is_queued(&opts, true).is_ok());
+        }
+    }
 }

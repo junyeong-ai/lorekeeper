@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
@@ -160,7 +160,7 @@ impl Resolution {
 #[derive(Debug, Default)]
 pub struct ConceptRegistry {
     entries: BTreeMap<String, BTreeMap<String, ConceptIdentity>>,
-    addresses: BTreeMap<String, ConceptIdentity>,
+    addresses: BTreeSet<String>,
 }
 
 impl ConceptRegistry {
@@ -169,10 +169,7 @@ impl ConceptRegistry {
     }
 
     pub fn register(&mut self, identity: ConceptIdentity, aliases: &[String]) {
-        self.addresses.insert(
-            identity.slug.nfkc().flat_map(char::to_lowercase).collect(),
-            identity.clone(),
-        );
+        self.reserve_address(&identity.slug);
         for name in std::iter::once(&identity.title).chain(aliases) {
             if let Some(key) = identity_key(name) {
                 self.entries
@@ -181,6 +178,12 @@ impl ConceptRegistry {
                     .insert(identity.slug.clone(), identity.clone());
             }
         }
+    }
+
+    /// Reserve an occupied filename without making it a declared name or another owner.
+    pub fn reserve_address(&mut self, address: &str) {
+        self.addresses
+            .insert(address.nfkc().flat_map(char::to_lowercase).collect());
     }
 
     pub fn resolve(&self, name: &str) -> Resolution {
@@ -200,7 +203,7 @@ impl ConceptRegistry {
     /// their addresses; an occupied disambiguated address is refused rather than overwritten.
     pub fn available_slug(&self, name: &str) -> Option<String> {
         let base = slugify(name)?;
-        if base.len() <= 220 && !self.addresses.contains_key(&base) {
+        if base.len() <= 220 && !self.addresses.contains(&base) {
             return Some(base);
         }
         let key = identity_key(name)?;
@@ -210,7 +213,7 @@ impl ConceptRegistry {
             end -= 1;
         }
         let slug = format!("{}-{}", base[..end].trim_end_matches('-'), &digest[..16]);
-        (!self.addresses.contains_key(&slug)).then_some(slug)
+        (!self.addresses.contains(&slug)).then_some(slug)
     }
 
     pub fn names(&self) -> impl Iterator<Item = (&str, Resolution)> {

@@ -32,41 +32,53 @@ pub struct GlobalOptions {
 }
 
 pub fn find_config(opts: &GlobalOptions) -> miette::Result<PathBuf> {
-    let path = locate_config(opts)?;
+    find_optional_config(opts)?.ok_or_else(|| {
+        miette::miette!(
+            "No config found. Create ./config.yaml or ~/.config/lorekeeper/config.yaml \
+             (copy config.starter.yaml; config.example.yaml lists optional sources), \
+             or pass --config / set LORE_CONFIG."
+        )
+    })
+}
+
+/// `None` means neither an explicit selection nor a discovered config exists. Errors
+/// finding/reading a selected path are never absence, including dangling symlinks.
+pub(crate) fn find_optional_config(opts: &GlobalOptions) -> miette::Result<Option<PathBuf>> {
+    let Some(path) = locate_config(opts)? else {
+        return Ok(None);
+    };
     // Canonicalize at this single I/O boundary so the returned path is always absolute
     // (and symlink-resolved). `Config::load` resolves a relative `vault.root` against the
     // config file's parent dir; an absolute parent makes the vault root — and every path
     // derived from it, in every crate — independent of the process CWD by construction,
     // so no downstream consumer has to reason about CWD. lk-core stays pure (no `current_dir`).
     path.canonicalize()
+        .map(Some)
         .map_err(|e| miette::miette!("resolve config path {}: {e}", path.display()))
 }
 
 /// Locate the config file (possibly as a relative path); `find_config` absolutizes it.
-fn locate_config(opts: &GlobalOptions) -> miette::Result<PathBuf> {
+fn locate_config(opts: &GlobalOptions) -> miette::Result<Option<PathBuf>> {
     if let Some(p) = opts.config.as_ref() {
-        if !p.exists() {
-            return Err(miette::miette!("Config file not found: {}", p.display()));
-        }
-        return Ok(p.clone());
+        // Explicit selection remains selection even when the path cannot be resolved.
+        return Ok(Some(p.clone()));
     }
     // Project/dev checkout: config next to the working directory.
-    let cwd = PathBuf::from("config.yaml");
-    if cwd.exists() {
-        return Ok(cwd);
-    }
     // Binary-only install (no repo): the standard XDG config location. A vault-relative
     // path can't be auto-discovered — the vault path itself lives inside the config.
-    if let Some(p) = xdg_config_path()
-        && p.exists()
-    {
-        return Ok(p);
+    for path in std::iter::once(PathBuf::from("config.yaml")).chain(xdg_config_path()) {
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) => return Ok(Some(path)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(miette::miette!(
+                    "inspect config path {}: {error}",
+                    path.display()
+                ));
+            }
+        }
     }
-    Err(miette::miette!(
-        "No config found. Create ./config.yaml or ~/.config/lorekeeper/config.yaml \
-         (copy config.starter.yaml; config.example.yaml lists optional sources), \
-         or pass --config / set LORE_CONFIG."
-    ))
+    Ok(None)
 }
 
 /// `$XDG_CONFIG_HOME/lorekeeper/config.yaml`, falling back to `~/.config/lorekeeper/...`.
@@ -108,13 +120,12 @@ pub(crate) fn resolve_root_config(
     root_override: Option<PathBuf>,
 ) -> miette::Result<RootConfig> {
     match root_override.map(resolve_root_override).transpose()? {
-        Some(root) => match find_config(opts) {
-            Ok(path) => Ok(RootConfig {
-                root,
-                config: Some(load_config(&path)?),
-            }),
-            Err(_) => Ok(RootConfig { root, config: None }),
-        },
+        Some(root) => Ok(RootConfig {
+            root,
+            config: find_optional_config(opts)?
+                .map(|path| load_config(&path))
+                .transpose()?,
+        }),
         None => {
             let path = find_config(opts)?;
             let config = load_config(&path)?;
@@ -345,13 +356,11 @@ sources:
     }
 
     #[test]
-    fn root_override_without_any_config_yields_none() {
-        // No config file at all → None, so the caller fills in defaults (binary-only use).
+    fn root_override_with_an_explicit_missing_config_fails_loudly() {
         let tmp = TempDir::new().unwrap();
         let missing = tmp.path().join("nope.yaml");
-        let rc =
-            resolve_root_config(&opts(Some(missing)), Some(PathBuf::from("/override"))).unwrap();
-        assert_eq!(rc.root, PathBuf::from("/override"));
-        assert!(rc.config.is_none());
+        assert!(
+            resolve_root_config(&opts(Some(missing)), Some(PathBuf::from("/override"))).is_err()
+        );
     }
 }
