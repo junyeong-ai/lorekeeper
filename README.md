@@ -48,7 +48,7 @@ flowchart LR
     L --> P["수집 · 정규화 · 중복제거<br/>분류 · 렌더 · 그래프"]
     P --> V[("🗂️ Obsidian Vault<br/>daily · concepts · documents")]
     L -. "LLM 작업 큐" .-> CC["🤖 Claude Code · Codex<br/>공통 lore-process 스킬"]
-    CC -. "요약 · 개념 · 합성" .-> V
+    CC -. "타입이 있는 의미 결과" .-> L
 ```
 
 `lore`가 수집·실행 순서·게시 검증을 맡고, 공통 `lore-process` 스킬을 실행하는 Claude Code 또는 Codex가 요약·개념·관계를 판단합니다. Markdown이 지식 원본이며 SQLite는 다시 만들 수 있는 검색·탐색 인덱스입니다.
@@ -63,7 +63,7 @@ flowchart LR
 > - 🔑 **쓰려는 소스의 자격증명만** — 예: Gmail/Drive/Calendar는 Google 로그인, Slack은 토큰
 > - 🗂️ **(선택) Obsidian** — 그래프를 예쁘게 탐색용. 없어도 결과물은 평범한 마크다운입니다
 >
-> 💡 기본 시작 설정은 **인증이 필요 없는 메모 inbox 하나**입니다. RSS·업무 소스·개인 활동 추적은 필요할 때 추가합니다. 요약·개념 생성에는 선택한 CLI의 로그인이 필요합니다. `config.starter.yaml`의 `execution.profiles.primary.engine`을 `claude-code` 또는 `codex`로 설정하세요.
+> 💡 기본 시작 설정은 **인증이 필요 없는 메모 inbox 하나**입니다. RSS·업무 소스·개인 활동 추적은 필요할 때 추가합니다. 요약·개념 생성에는 선택한 CLI의 로그인이 필요합니다. 복사한 `config.yaml`의 `execution.profiles.primary.engine`을 `claude-code` 또는 `codex`로 설정하세요.
 
 ```bash
 # 1) 설치 — 바이너리 + 템플릿 + 두 호스트의 스킬을 한 번에
@@ -459,7 +459,7 @@ irm https://raw.githubusercontent.com/junyeong-ai/lorekeeper/main/scripts/instal
 cargo build --release && ./target/release/lore --help
 ```
 
-설치 플래그: `--version`, `--install-dir`, `--data-dir`, `--skill {user,project,none}`, `--from-source`, `--force`, `--yes`, `--dry-run` (`--help`로 전체 확인).
+설치 플래그: `--version`, `--install-dir`, `--data-dir`, `--skill {user,project,none}`, `--agent {claude-code,codex,both}`, `--from-source`, `--force`, `--yes`, `--dry-run` (`--help`로 전체 확인).
 
 설치기는 설정 디렉터리에 `config.starter.yaml`과 `config.example.yaml`을 배포하며
 사용자의 `config.yaml`은 보존합니다. 같은 디렉터리의 `data-dir`은 설치 경로를,
@@ -484,12 +484,12 @@ lore task sync                    # Obsidian에서 직접 고친 것을 기록�
 
 ```bash
 lore self status      # 배포된 사본이 지금 바이너리와 같은지 (다르면 non-zero)
-lore self update      # 새 릴리스로 교체하고, 스킬·파이프라인·템플릿·AGENTS.md 재배포
+lore self update      # 새 릴리스로 교체하고, 대화형·실행용 스킬과 템플릿·AGENTS.md 재배포
 lore self deploy      # 재배포만 (self status가 보고한 차이를 고침)
 lore self uninstall   # 설치한 것만 제거 — vault는 건드리지 않음
 ```
 
-스킬·파이프라인·템플릿·시작 설정·전체 옵션 예제는 **바이너리에 내장**되어 있습니다. 배포된 사본은 변경되거나 뒤처질 수 있으며 `lore self status`로 확인합니다. `lore self deploy`가 사본을 씁니다. `lore self update`는 `lore queue check`와 같은 기준으로 대기 작업·해석 불가 입력·미반영 결과·중단된 저장 기록이 있으면 거부합니다. 확인 가능한 미완료 작업은 `--force`로 허용할 수 있지만, 설정이나 저장소를 읽을 수 없는 오류는 생략하지 않습니다. 실행 중인 버전보다 오래된 릴리스도 거부합니다(`--version`으로 명시하면 되돌릴 수 있음).
+대화형·실행용 스킬과 템플릿·시작 설정·전체 옵션 예제는 **바이너리에 내장**되어 있습니다. 배포된 사본은 변경되거나 뒤처질 수 있으며 `lore self status`로 확인합니다. `lore self deploy`가 사본을 씁니다. `lore self update`는 `lore queue check`와 같은 기준으로 대기 작업·해석 불가 입력·미반영 결과·중단된 저장 기록이 있으면 거부합니다. 확인 가능한 미완료 작업은 `--force`로 허용할 수 있지만, 설정이나 저장소를 읽을 수 없는 오류는 생략하지 않습니다. 실행 중인 버전보다 오래된 릴리스도 거부합니다(`--version`으로 명시하면 되돌릴 수 있음).
 
 ---
 

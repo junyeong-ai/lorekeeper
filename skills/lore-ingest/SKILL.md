@@ -4,7 +4,7 @@ description: Runs Lorekeeper collection and operations commands for configured s
   manual inboxes, period synthesis, schedules and maintenance. Collection writes structured
   pages and queues semantic work; lore-process completes that work.
 metadata:
-  version: 0.67.0
+  version: 0.67.1
 ---
 
 # Lorekeeper collection and operations
